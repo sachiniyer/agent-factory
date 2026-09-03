@@ -169,7 +169,7 @@ func (m *Manager) noteRemoteProbeFailureAtGeneration(
 	if now.Sub(st.firstFailureAt) < remoteLostGracePeriod {
 		return false, true
 	}
-	log.WarningLog.Printf("remote session %q has failed %d consecutive agent-server probes over %s; confirming before marking it Lost", title, st.consecutiveFailures, now.Sub(st.firstFailureAt).Round(time.Second))
+	m.warn().Printf("remote session %q has failed %d consecutive agent-server probes over %s; confirming before marking it Lost", title, st.consecutiveFailures, now.Sub(st.firstFailureAt).Round(time.Second))
 	return true, true
 }
 
@@ -362,12 +362,12 @@ func (m *Manager) settleRemoteProbeFailure(
 		}
 		// The server answered: reachable, agent gone. The snapshots were failing
 		// for some other reason. An answer of any kind ends the transport episode.
-		log.WarningLog.Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
+		m.warn().Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
 	case probeUnknown:
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
 			return
 		}
-		log.WarningLog.Printf("remote session %q: agent-server unreachable and still unanswerable after %s — leaving its last-known status unchanged; unreachable is not evidence that this sandbox is gone", instance.Title, remoteLostGracePeriod)
+		m.warn().Printf("remote session %q: agent-server unreachable and still unanswerable after %s — leaving its last-known status unchanged; unreachable is not evidence that this sandbox is gone", instance.Title, remoteLostGracePeriod)
 		return
 	}
 	_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))

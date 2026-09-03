@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -278,17 +276,17 @@ func TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry(t *tes
 	repoPath := setupControlRepo(t)
 	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, newestConversationID)
 
-	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
-	require.NoError(t, err)
+	// This Manager's own warning log (#3787 part 2), so the assertions below
+	// cannot be satisfied by a warning another Manager emitted. Reset stands in
+	// for the old "install the capture here" — it drops the first ensure pass's
+	// output, which is what installing late used to accomplish.
+	manager, warning := newManagerCapturingWarnings(t, rootTestConfig(repoPath, config.RootAgentConfig{}))
 	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 
-	var warning bytes.Buffer
-	previousWarning := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warning)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
+	warning.Reset()
 
 	first.SetStatusForTest(session.Lost)
 	manager.ensureRootAgentsAndWait()
@@ -464,8 +462,12 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 		Program: "CLAUDE_CONFIG_DIR=$HOME/.claude claude",
 	})
 
-	manager, err := NewManager(cfg)
-	require.NoError(t, err)
+	// This Manager's own warning log (#3787 part 2). The assertion below COUNTS
+	// occurrences, so contamination breaks it in both directions: a second
+	// Manager warning the same thing inflates the count, and the dedup this test
+	// exists to pin would look broken — or, worse, a dedup that stopped working
+	// could be masked by which Manager happened to emit what.
+	manager, warning := newManagerCapturingWarnings(t, cfg)
 	manager.ensureRootAgentsAndWait()
 	require.Len(t, *seen, 1)
 	root := findRootInstance(t, manager, repoPath)
@@ -473,10 +475,7 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 	seedRootConversation(t, root)
 	root.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle, cfg.RootAgents[repoPath].Program))
 
-	var warning bytes.Buffer
-	previousWarning := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warning)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
+	warning.Reset()
 
 	manager.ensureRootAgentsAndWait()
 	advance(time.Hour)
@@ -548,14 +547,7 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var info, warning bytes.Buffer
-			prevInfo, prevWarning := log.InfoLog.Writer(), log.WarningLog.Writer()
-			log.InfoLog.SetOutput(&info)
-			log.WarningLog.SetOutput(&warning)
-			t.Cleanup(func() {
-				log.InfoLog.SetOutput(prevInfo)
-				log.WarningLog.SetOutput(prevWarning)
-			})
+			info, warning := captureInfo(t), captureWarnings(t)
 
 			reportRootConversationCarry("/repo", tc.carried, tc.created, tc.launched)
 

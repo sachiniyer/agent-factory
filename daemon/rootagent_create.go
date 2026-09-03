@@ -235,7 +235,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// (#2628): a fresh create comes up with only its agent tab, so everything
 		// else the user had open — a terminal, a process tab, a dev-server web
 		// tab, an editor — would vanish with the record that listed it.
-		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
+		m.warn().Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
 		var err error
 		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst)
 		if err != nil {
@@ -257,14 +257,14 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		}
 		switch {
 		case inspectErr != nil:
-			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
+			m.warn().Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
 				workspace, carried.conversation.ID, inspectErr)
 		case !state.RecordedExists && state.Resume.HasID():
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
+			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
 				workspace, carried.conversation.ID, state.Resume.ID)
 			carried.conversation = state.Resume
 		case !state.RecordedExists:
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
+			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
 				workspace, carried.conversation.ID)
 			skipRecordedResume = true
 		}
@@ -322,10 +322,10 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)
 			}
 			if inspectErr != nil {
-				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
+				m.warn().Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
 					workspace, req.resumeConversation.ID, inspectErr)
 			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
-				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
+				m.warn().Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
 					workspace, req.resumeConversation.ID, err, state.Resume.ID)
 				req.resumeConversation = state.Resume
 				carried.conversation = state.Resume
@@ -334,7 +334,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		}
 	}
 	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
-		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
+		m.warn().Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
 		data, err = m.createVerifiedRoot(repo.ID, identity, req)

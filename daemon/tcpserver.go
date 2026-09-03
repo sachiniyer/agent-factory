@@ -360,7 +360,8 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 // server — and its connections, and the port — indefinitely.
 //
 // A var, not a const, so the deadline test can shorten it; nothing in production
-// writes it.
+// writes it. retire() reads it on the CALLER's goroutine and hands the value to
+// the drain — see the capture there for why the drain must not read it itself.
 var listenerRetireGrace = 2 * time.Second
 
 // tcpListenerHandle owns the teardown of one bound TCP listener. It offers two
@@ -448,12 +449,22 @@ func (h *tcpListenerHandle) retire() {
 		expired, cancel := context.WithDeadline(context.Background(), time.Now())
 		_ = h.srv.Shutdown(expired)
 		cancel()
-		go h.drain()
+		// The grace is captured BEFORE the goroutine starts — the rule
+		// boundedRecordRootAbsent already states in deleteproject_target.go.
+		// Reading the package var inside the goroutine races a test that swaps it,
+		// because the goroutine outlives the call it was spawned for, which is the
+		// whole point of the asynchronous half. #3772 is exactly that: a drain
+		// leaked by one test read the var while the next test's withRetireGrace
+		// wrote it, and -race failed a PR that touched neither.
+		grace := listenerRetireGrace
+		go h.drain(grace)
 	})
 }
 
 // drain waits for the requests already in flight on a retired listener, then
-// closes it.
+// closes it. grace is the deadline retire() captured for it; it is a parameter
+// rather than a read of listenerRetireGrace because this runs on a goroutine that
+// outlives its caller (#3772).
 //
 // The deadline is the ONLY thing that justifies the force close, so it is what
 // the branch tests for rather than err != nil. Shutdown has a second way to
@@ -461,14 +472,16 @@ func (h *tcpListenerHandle) retire() {
 // synchronous half already closed — and while that particular one arrives only
 // once everything is idle anyway, "any error means the client stalled" is the
 // wrong rule to leave lying next to a srv.Close().
-func (h *tcpListenerHandle) drain() {
-	ctx, cancel := context.WithTimeout(context.Background(), listenerRetireGrace)
+func (h *tcpListenerHandle) drain(grace time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 	if err := h.srv.Shutdown(ctx); errors.Is(err, context.DeadlineExceeded) {
 		// A client that never drains its reply must not keep the retired server —
 		// and the connections it holds — alive for as long as it likes. Say so:
-		// this is the one outcome where a reply was genuinely lost.
-		log.WarningLog.Printf("retired listener on %s still had connections in flight after %s: closing them", h.addr, listenerRetireGrace)
+		// this is the one outcome where a reply was genuinely lost. It names the
+		// CAPTURED grace, because that is the deadline that actually fired — a
+		// re-read of the package var could name one this drain never used.
+		log.WarningLog.Printf("retired listener on %s still had connections in flight after %s: closing them", h.addr, grace)
 		_ = h.srv.Close()
 	}
 }

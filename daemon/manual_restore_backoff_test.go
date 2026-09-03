@@ -1,9 +1,7 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -151,14 +148,7 @@ func TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff(t *testin
 	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 2}
 	manager.mu.Unlock()
 
-	var warnings, diagnostics bytes.Buffer
-	previousWarning, previousError := aflog.WarningLog, aflog.ErrorLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	aflog.ErrorLog = stdlog.New(&diagnostics, "ERROR: ", 0)
-	t.Cleanup(func() {
-		aflog.WarningLog = previousWarning
-		aflog.ErrorLog = previousError
-	})
+	warnings, diagnostics := captureWarnings(t), captureErrors(t)
 
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual-failure", RepoID: repoID}); !errors.Is(err, os.ErrNotExist) {

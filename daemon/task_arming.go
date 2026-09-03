@@ -137,7 +137,7 @@ func (m *Manager) recordArmingStatus(t task.Task, status string) {
 	}
 	updated, err := task.UpdateTaskStatus(t.ID, nil, status)
 	if err != nil {
-		log.WarningLog.Printf("could not record the arming status for task %q: %v", t.ID, err)
+		m.warn().Printf("could not record the arming status for task %q: %v", t.ID, err)
 		return
 	}
 	// The record the WRITE produced, not the copy this walked in with. That copy

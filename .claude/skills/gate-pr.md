@@ -282,10 +282,19 @@ Trigger a review with a `@codex review` comment and wait. If none arrives, read
 Codex sometimes puts a finding in the verdict body without a live inline comment.
 An inline count of zero does not mean clean.
 
-Scan **only the exact-head verdict** from step 2. Scanning every Codex body
-instead is its own bug in the other direction: bodies are immutable, so a
-P1 in a review of an older commit would block the PR forever even after the
-current head reviews clean.
+Two checks, and they are not interchangeable.
+
+**3a — the exact-head verdict's own body.** Scan *only* the verdict from step 2.
+Scanning every Codex body instead is its own bug in the other direction: bodies
+are immutable, so a P1 in a review of an older commit would block the PR forever
+even after the current head reviews clean.
+
+**3b — finding artifacts that bind to no head at all.** A Codex *issue* comment
+carrying `P` badges with no `Reviewed commit:` line and no `commit_id` is not the
+verdict, so 3a never reads it — and that is the shape that merged #3656. Auto
+Gate has blocked it since #3676. This step CALLS that same code rather than
+restating it, because the jq restatement drifted: #3689 and #3728 updated it,
+#3670 did not, and nothing noticed for months (#3773).
 
 ```bash
 set -euo pipefail
@@ -305,13 +314,63 @@ fi
 echo "verdict body clean"
 ```
 
+Then 3b, over the artifacts already fetched in Set up. This is not a mirror of
+`auto-gate.js`; it is a call into it, so the two gates cannot answer differently.
+A test fails if this recipe and the script disagree.
+
+```bash
+set -euo pipefail
+PR=<n>; G="${TMPDIR:-/tmp}/gate-pr-$PR"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+HEAD=$(jq -r '.head.sha' "$G/pr.json")
+HD=$(cat "$G/head-date.txt")
+
+node -e '
+const [gate, dir, head, headDate] = process.argv.slice(1);
+const { __test } = require(gate);
+const load = (name) => {
+  const parsed = JSON.parse(require("fs").readFileSync(`${dir}/${name}`, "utf8"));
+  if (!Array.isArray(parsed)) throw new Error(`${name} is not a JSON array — rerun Set up`);
+  return parsed;
+};
+const all = [...load("issue-comments.json"), ...load("reviews.json")];
+const unanswered = __test.unansweredFindingArtifacts({
+  artifacts: all.filter((a) => a.user && a.user.login === "chatgpt-codex-connector[bot]"),
+  acknowledgementCandidates: all,
+  headSha: head,
+  headCommitTime: Date.parse(headDate),
+});
+for (const a of unanswered) {
+  console.log(`  ${a.id}  ${__test.artifactReferences(a)[0] || "(no reference)"}`);
+}
+if (unanswered.length > 0) {
+  console.log(`${unanswered.length} Codex artifact(s) carry a P0-P3 finding and name no commit`);
+  console.log("answer each in a PR comment that LINKS it and carries RESOLVED, ACCEPTED or [gate-ack]");
+  process.exit(1);
+}
+console.log("no unbound finding artifacts");
+' "$REPO_ROOT/.github/scripts/auto-gate.js" "$G" "$HEAD" "$HD"
+```
+
+**Do not replace that with jq.** The rule it applies is three interacting tests —
+does the body carry a finding, is it Codex's summary comment, does it bind to
+this head by any of three spellings — and the last of those has changed twice.
+Restating it is how the hand gate came to be months behind the real one.
+
 **Do not** write this as `grep … || echo "clean"`. A failed read and a
 no-match grep both exit non-zero, so that form reports clean when the check did
 not run. An unrun check is not a passed check.
 
 ### 4. Zero unresolved inline findings
 
-This mirrors `.github/scripts/auto-gate.js`. A reply only resolves a finding when
+This one is still a restatement of `.github/scripts/auto-gate.js`, not a call:
+the inline-finding classification is not exported as a pure function the way
+step 3b's is, so it cannot be called from here yet. Treat the claim narrowly —
+what follows mirrors the script's *inline* rule, and only that. Step 3b covers
+the artifacts this cannot see, and #3773 is where the general problem with
+restating rules is recorded.
+
+A reply only resolves a finding when
 it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
@@ -601,6 +660,45 @@ Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
 fresh usage-limit reply degrades it to a manual-only pass that still does not
 merge — `Codex has not reviewed head <sha> yet` either way, so it will not
 merge for you. What to do:
+
+### Approving in Codex's place, so the gate can land it
+
+When Codex is usage-limited the gate degrades to `PASS: reviewer usage-limited;
+maintainer review and manual merge required` and declines to merge — correct, no
+review arrived. But it also skips the update-and-merge loop, and landing by hand
+under a strict up-to-date rule means winning a race against the fleet: master
+merges every 18-22 minutes and one landing cycle is about 20, so the green head is
+behind by exactly one when the gate flips. #3767 lost six consecutive green heads
+that way.
+
+So a **maintainer approval bound to the head** carries the degraded pass onto the
+ordinary path (#3790). Write it as a PR comment whose FIRST line is exactly:
+
+```
+## Review — approve
+```
+
+or leave an APPROVED review — but the maintainer account cannot approve its own
+PR, which is why the comment marker exists.
+
+Two things the gate insists on, and both matter:
+
+- **The entire first line, exactly.** Not a prefix. `## Review — approve, one fix
+  owed before landing` is the commonest heading here and it is **not** an
+  approval — a qualifier on the heading withholds it, on purpose, and that is how
+  a reviewer says "not yet" without inventing a second form. A prefix match would
+  read it as a sign-off and merge with the fix unlanded, which is worse than
+  having no marker at all, since the heading says in words that something is
+  owed. "Looks good to me, approving" is not an approval either, and neither is a
+  body that quotes the marker mid-text — which a Codex review of `auto-gate.js`
+  produces.
+- **The approval is bound to the head** by `headCurrentSince`, the same rule
+  Codex artifacts are held to (#3702). Push after approving and the PR returns to
+  the manual pass; a sign-off is about the code it was written against.
+
+It waives the REVIEW requirement and nothing else. A live finding, a missing
+`play-tested` label or a red required check still blocks — those do not depend on
+who reviewed, and this path auto-merges.
 
 1. **Re-trigger** with a `@codex review` comment and wait. Limits reset.
 2. **If it still does not post, get a real review from something that is not

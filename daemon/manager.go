@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	stdlog "log"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -477,6 +478,53 @@ type Manager struct {
 	// spawn-or-reuse singleton, its bare-session broker, and the last-detach grace
 	// reaper. Its stop() is wired into daemon teardown alongside configAgents.Stop().
 	configAssistants *configAssistantHub
+
+	// warnLog is where THIS Manager's warnings go (#3787 part 2). Nil in
+	// production, which means the process-global log.WarningLog — see warn().
+	//
+	// It exists because "this Manager warned X" was not a checkable claim. Every
+	// warning went to a process-global logger, so a test asserting it read a sink
+	// that every OTHER Manager in the test binary — and every goroutine they had
+	// left running — wrote into too. Part 1 stopped that racing the reader; it
+	// could not stop a foreign Manager's warning from LANDING in the buffer and
+	// satisfying the assertion. A test that pins one to a Manager of its own is
+	// asserting about that Manager.
+	//
+	// Set once at construction and never mutated, so it is read lock-free from
+	// any goroutine — including the ones a Manager leaves running past the test
+	// that made it, which is the case that started #3787.
+	warnLog *stdlog.Logger
+}
+
+// warn returns the logger this Manager's warnings go to. Nil-safe on both the
+// receiver and the field, so a Manager built by any path — including the shells
+// that predate managerOptions — logs to the process-global sink exactly as
+// before.
+func (m *Manager) warn() *stdlog.Logger {
+	if m == nil {
+		return log.WarningLog
+	}
+	return warnLoggerOr(m.warnLog)
+}
+
+// warnLoggerOr resolves an optional per-Manager warning logger. It exists
+// separately from warn() for the one caller that needs it before a Manager
+// exists: the root-agent snapshot is built inside the constructor, and its
+// warnings are the ones #3787's race report actually names.
+func warnLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+	if logger == nil {
+		return log.WarningLog
+	}
+	return logger
+}
+
+// managerOptions carries construction-time seams. Everything here has a
+// production default, and production passes the zero value: these exist so a
+// test can scope to one Manager what the daemon keeps process-global.
+type managerOptions struct {
+	// warnLog routes this Manager's warnings away from log.WarningLog. Only
+	// tests set it; see newManagerCapturingWarnings.
+	warnLog *stdlog.Logger
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -485,7 +533,19 @@ type Manager struct {
 // binds the control socket, and only then runs RestoreInstances so rehydrating
 // persisted state cannot delay the bind (#829).
 func NewManager(cfg *config.Config) (*Manager, error) {
-	manager, err := newManagerShell(cfg)
+	return newManagerWithOptions(cfg, managerOptions{})
+}
+
+// newManagerWithOptions is NewManager with the construction seams exposed. It is
+// unexported because every option is a test seam: an external caller gets the
+// production defaults and nothing else.
+//
+// The options have to be applied by the CONSTRUCTOR rather than assigned to the
+// returned Manager, because warnings fire from the root-agent snapshot inside
+// this call — the fail-closed warning the singleton tests assert on is emitted
+// before NewManager returns, so a logger installed afterwards would miss it.
+func newManagerWithOptions(cfg *config.Config, opts managerOptions) (*Manager, error) {
+	manager, err := newManagerShellWithOptions(cfg, "", opts)
 	if err != nil {
 		return nil, err
 	}
@@ -511,6 +571,12 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 // an ordinary caller can construct only a normal shell, while runDaemon owns
 // the probation selection.
 func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manager, error) {
+	return newManagerShellWithOptions(cfg, transactionID, managerOptions{})
+}
+
+// newManagerShellWithOptions is the one place a Manager is actually built. The
+// two wrappers above pass the zero options, which is production.
+func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts managerOptions) (*Manager, error) {
 	lifecycle, err := newDaemonLifecycle(transactionID, cfg.ListenAddr, cfg.PreviewListenAddr)
 	if err != nil {
 		return nil, err
@@ -540,9 +606,10 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
-	rootAgentLayers := buildRootAgentSnapshot(cfg)
+	rootAgentLayers := buildRootAgentSnapshot(warnLoggerOr(opts.warnLog), cfg)
 	mgr := &Manager{
 		cfg:                       cfg,
+		warnLog:                   opts.warnLog,
 		previewSecret:             previewSecret,
 		previewOrigins:            newPreviewOriginRegistry(),
 		editorOriginSecret:        editorSecret,

@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +181,122 @@ func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
 	}
 }
 
+// The storage-only cleanup fixtures' sentinels (#3783).
+//
+// NUMERIC BECAUSE THEY MUST BE. RemotePID looks like free-form string state,
+// but restoreRuntimeCleanup validates it with positivePID
+// (runtime_cleanup.go:164), which is strconv.Atoi plus a positivity check, so a
+// word here fails the restore half of every round-trip below.
+//
+// LONG BECAUSE OF WHAT THEY SIT NEXT TO. The old values were "4242" and "991",
+// short enough to appear inside another field's digits: a marshalled record
+// carries RFC3339 timestamps, and 08:16:41.424242007Z contains "4242". These
+// are longer than any digit run such a record can produce — nanoseconds are
+// nine digits, a year four, a port five — so they cannot be confused with a
+// clock, an id or an address even by a reader that looks at raw bytes.
+const (
+	cleanupFixturePID    = "4242424242424242"
+	cleanupFixtureAltPID = "9919919919919919"
+)
+
+// cleanupLeaksIn reports every place a marshalled record carries storage-only
+// cleanup state, as JSON paths. Empty means the record is clean.
+//
+// IT ASSERTS THE CLAIM, WHICH IS ABOUT FIELDS (#3783). The assertion this
+// replaced searched the marshalled bytes for the fixtures' values, so any field
+// that happened to contain those characters read as a leak — which is exactly
+// how a timestamp's nanoseconds were reported as a leaked remote PID. Comparing
+// whole decoded values instead cannot make that mistake: a timestamp is not
+// equal to a PID, however many of its digits it shares.
+//
+// It deliberately keeps the one thing the byte search was good at. A key-only
+// check ("is runtime_cleanup absent?") answers a narrower question than the
+// claim, because a leak that lands under an unexpected key would pass it. So
+// this walks the whole decoded document and reports BOTH the cleanup key at any
+// depth AND any string value equal to a private one wherever it appears — the
+// substring search's reach, without its false positives.
+func cleanupLeaksIn(t *testing.T, raw []byte, private []string) []string {
+	t.Helper()
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal record for leak inspection: %v", err)
+	}
+	values := make(map[string]struct{}, len(private))
+	for _, v := range private {
+		if v != "" {
+			values[v] = struct{}{}
+		}
+	}
+	var leaks []string
+	var walk func(path string, node any)
+	walk = func(path string, node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			for _, key := range slices.Sorted(maps.Keys(n)) {
+				child := path + "." + key
+				if key == "runtime_cleanup" {
+					leaks = append(leaks, child+" (storage-only key present)")
+				}
+				walk(child, n[key])
+			}
+		case []any:
+			for i, item := range n {
+				walk(fmt.Sprintf("%s[%d]", path, i), item)
+			}
+		case string:
+			if _, private := values[n]; private {
+				leaks = append(leaks, fmt.Sprintf("%s = %q", path, n))
+			}
+		}
+	}
+	walk("", decoded)
+	return leaks
+}
+
+// TestCleanupLeakOracleCatchesALeak is the mutation that proves the oracle
+// above has teeth. An assertion that reports "clean" is only worth something if
+// it reports "dirty" when the thing it guards actually happens, so this feeds it
+// a record that DOES carry the cleanup handle and requires it to name both the
+// key and the values — including a value moved to an unexpected key, which a
+// key-only check would miss.
+func TestCleanupLeakOracleCatchesALeak(t *testing.T) {
+	const host = "leak.example.test"
+	leaked, err := json.Marshal(InstanceData{
+		ID:        "leak-id",
+		Title:     "leak",
+		UpdatedAt: time.Date(2026, 9, 3, 8, 16, 41, 424242007, time.UTC),
+		RuntimeCleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{Host: host, User: "remote"},
+			SessionDir: "/srv/af/leaked",
+			RemotePID:  cleanupFixturePID,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal leaked record: %v", err)
+	}
+
+	leaks := cleanupLeaksIn(t, leaked, []string{host, "/srv/af/leaked", cleanupFixturePID})
+	joined := strings.Join(leaks, "\n")
+	for _, want := range []string{
+		".runtime_cleanup (storage-only key present)",
+		".runtime_cleanup.ssh.config.host = " + strconv.Quote(host),
+		".runtime_cleanup.ssh.session_dir = \"/srv/af/leaked\"",
+		".runtime_cleanup.ssh.remote_pid = " + strconv.Quote(cleanupFixturePID),
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("the leak oracle missed %s; it reported:\n%s", want, joined)
+		}
+	}
+
+	// And the timestamp that started #3783 is NOT reported, though its digits
+	// contain the PID's. This is the false positive the oracle exists to not have.
+	for _, leak := range leaks {
+		if strings.Contains(leak, "updated_at") {
+			t.Fatalf("the leak oracle reported a clock reading as cleanup state: %s", leak)
+		}
+	}
+}
+
 // TestSSHCleanupHandleSurvivesTombstoneRoundTrip covers the restart half of
 // #2198's cleanup retry contract. A kill tombstone can survive only if the exact
 // off-box teardown handle survives with it; an inert no-op backend would delete
@@ -184,7 +304,7 @@ func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
 func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	p := newSSHSandboxProvisioner(ProvisionSpec{Title: "restart-reap"}, "ssh cleanup.example.test", "", "")
 	p.sessionDir = "/home/remote/.af-sessions/restart-reap.1234"
-	p.remotePID = "4242"
+	p.remotePID = cleanupFixturePID
 	teardown := p.reap
 	inst := &Instance{
 		ID:    "restart-reap-id",
@@ -206,14 +326,18 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	// The private staging handle must survive that exact ordering without leaking
 	// into the ordinary daemon snapshot.
 	precommit := inst.ToInstanceData()
+	// #3783: pin the clock reading CI actually drew. ToInstanceData stamps
+	// UpdatedAt from time.Now(), and on 2026-09-03T08:16:41.424242007Z the
+	// nanosecond digits contained this fixture's "4242" remote PID, so the
+	// substring assertion below reported a leak that had not happened. Pinning it
+	// turns a rare collision into a deterministic one.
+	precommit.UpdatedAt = time.Date(2026, 9, 3, 8, 16, 41, 424242007, time.UTC)
 	snapshotRaw, err := json.Marshal(precommit)
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
-	for _, private := range []string{"cleanup.example.test", p.sessionDir, p.remotePID, "runtime_cleanup"} {
-		if strings.Contains(string(snapshotRaw), private) {
-			t.Fatalf("daemon snapshot leaked storage-only cleanup value %q: %s", private, snapshotRaw)
-		}
+	if leaks := cleanupLeaksIn(t, snapshotRaw, []string{"cleanup.example.test", p.sessionDir, p.remotePID}); len(leaks) > 0 {
+		t.Fatalf("daemon snapshot leaked storage-only cleanup state at %v: %s", leaks, snapshotRaw)
 	}
 
 	precommit.UserKilled = true
@@ -341,12 +465,12 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 				provisioner: &sandboxProvisioner{
 					sshCmd:     "ssh -o User='ci' builder.internal",
 					sessionDir: "/srv/af/session.123",
-					remotePID:  "991",
+					remotePID:  cleanupFixtureAltPID,
 				},
 				cleanup: &SSHRuntimeCleanupData{
 					Config:     config.SSHConfig{Host: "builder.internal", User: "ci"},
 					SessionDir: "/srv/af/session.123",
-					RemotePID:  "991",
+					RemotePID:  cleanupFixtureAltPID,
 				},
 			},
 		},
@@ -527,7 +651,7 @@ func TestArchivedKillTombstoneDoesNotPersistRuntimeCleanup(t *testing.T) {
 	cleanup := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
 		Config:     config.SSHConfig{Host: secretHost, User: "remote"},
 		SessionDir: "/srv/af/already-archived",
-		RemotePID:  "4242",
+		RemotePID:  cleanupFixturePID,
 	}}
 	stored := (InstanceData{
 		ID:             "archived-id",
@@ -545,8 +669,8 @@ func TestArchivedKillTombstoneDoesNotPersistRuntimeCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal archived tombstone: %v", err)
 	}
-	if strings.Contains(string(raw), secretHost) {
-		t.Fatalf("archived tombstone leaked cleanup identity: %s", raw)
+	if leaks := cleanupLeaksIn(t, raw, []string{secretHost, "/srv/af/already-archived", cleanupFixturePID}); len(leaks) > 0 {
+		t.Fatalf("archived tombstone leaked cleanup identity at %v: %s", leaks, raw)
 	}
 }
 

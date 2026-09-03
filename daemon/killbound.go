@@ -116,7 +116,7 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 	opLock := m.opLockFor(key)
 	acquired, waited := lockWithin(opLock, opLockTimeout)
 	if !acquired {
-		log.WarningLog.Printf("%s of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", operation, title, opLockTimeout)
+		m.warn().Printf("%s of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", operation, title, opLockTimeout)
 		return nil, waited, fmt.Errorf("%s of session %q timed out after %s waiting for another operation on it to finish; the requested %s did not start and made no changes — retry", operation, title, opLockTimeout, operation)
 	}
 	return opLock, waited, nil

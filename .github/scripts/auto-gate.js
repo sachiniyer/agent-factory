@@ -229,6 +229,20 @@ function codexReportsReviewUsageLimit(body) {
 // reviewed were the ones carrying the trap.
 const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits for cod[e] reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
+// A maintainer's sign-off, in the two forms this repository actually produces.
+//
+// The ENTIRE first line must equal this, not merely begin with it. A prefix test
+// looks equivalent and is not: the commonest review heading here is
+// "## Review — approve, one fix owed before landing" (#3769, #3789, #3796), and
+// a prefix match reads that as an approval and merges with the fix unlanded —
+// worse than having no marker at all, because the heading says in words that
+// something is owed. A qualifier on the heading withholds the approval, on
+// purpose: it is how a reviewer says "not yet" without inventing a second form.
+//
+// Exactness also covers the looser mistakes. "Looks good to me, approving" is
+// not a merge authorisation, and neither is a body that quotes the marker
+// mid-text — which reviewing this very file produces.
+const MAINTAINER_APPROVAL_MARKER = "## Review — approve";
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is
 // REQUESTED; when it reviews automatically on a push it only edits its summary
@@ -769,8 +783,44 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     : reasons;
   const degradedForUnavailableReviewer =
     Boolean(codex.reviewerUnavailable) && otherBlockers.length === 0;
-  if (degradedForUnavailableReviewer) {
+  // …unless a maintainer has already done the review the reviewer cannot (#3790).
+  //
+  // The degraded pass declines to merge, which is right on its own — no review
+  // arrived. But it also skips the #3752 update-and-merge loop, so landing it by
+  // hand under a strict up-to-date rule means winning a race against the fleet:
+  // master merges every 18-22 minutes and one landing cycle is about 20, so the
+  // green head is behind by exactly one when the gate flips. #3767 lost six
+  // consecutive green heads that way.
+  //
+  // A maintainer approval bound to this head satisfies the review requirement —
+  // it does not waive it. What is left is the mechanical part the gate already
+  // performs for every other passing PR, so it performs it here too.
+  const approval = degradedForUnavailableReviewer ? codex.maintainerApproval : null;
+  if (degradedForUnavailableReviewer && !approval) {
     manualMergeReasons.push(MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON);
+  }
+  if (approval) {
+    // The approval SATISFIES the one requirement the degradation was about, so
+    // that reason leaves the unmet list.
+    //
+    // Emptying `reasons` is safe here for a reason that lives ABOVE, not on this
+    // line: `approval` is only ever set when `degradedForUnavailableReviewer` is,
+    // and that requires `otherBlockers.length === 0` — so at this point `reasons`
+    // holds exactly the one reason the approval answers and nothing else. A live
+    // finding, a missing play-tested label or a red required check makes
+    // `otherBlockers` non-empty, which means this branch is never entered and the
+    // PR stays on the manual pass. That is the invariant worth knowing; an
+    // earlier draft re-pushed `otherBlockers` here as if THAT were the
+    // protection, which was dead code and a misleading comment on top of it.
+    reasons.length = 0;
+    // Named, so a reader can tell an approved landing from an ordinary one
+    // without opening the PR.
+    notes.push(
+      `Maintainer approval from ${approval.user?.login || "an allowed author"} covers this head` +
+        `${approval.html_url ? ` (${approval.html_url})` : ""}; Codex is usage-limited, so the ` +
+        "review requirement is satisfied by that approval and the gate lands this on the " +
+        "ordinary path",
+    );
   }
   const manualMergeRequired = manualMergeReasons.length > 0;
   // The manual path exists so branch protection does not sit red on a PR this
@@ -3008,6 +3058,126 @@ function headCurrentSinceTime({ lastCommitDate, prCreatedAt, headForcePushes = [
   return Math.max(...bounds);
 }
 
+// The maintainer approval that lets a degraded pass ride the ordinary merge path
+// (#3790), or null.
+//
+// Two forms. A review with state APPROVED is the obvious one; the comment marker
+// exists because GitHub does not let an account approve its own pull request,
+// and on this repository the maintainer opens most of them — so a hand review of
+// record is a comment, and it already uses this exact heading.
+//
+// Bound to the head the same way a Codex artifact is (#3702): an approval is
+// about the code it was written against, so `headCurrentSince` decides. A push
+// after the sign-off returns the PR to the manual pass rather than carrying a
+// stale approval onto new code — the same reason a verdict does not survive its
+// head.
+//
+// Fails closed on an unknown order, like every other timestamp comparison here.
+function maintainerApproval({ comments, reviews, headCurrentSince }) {
+  if (headCurrentSince == null) {
+    return null;
+  }
+  const approvals = [
+    ...reviews.filter((review) => String(review.state || "").toUpperCase() === "APPROVED"),
+    ...comments.filter(
+      (comment) =>
+        // The first line, whole and exact — see the marker's own comment for why
+        // a prefix test is the wrong shape here.
+        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER,
+    ),
+  ].filter(
+    (artifact) =>
+      ALLOWED_AUTHORS.has(artifact.user?.login || "") &&
+      reviewArtifactTime(artifact) > headCurrentSince,
+  );
+  return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
+}
+
+// The Codex finding artifacts a gate must not merge past: those carrying a
+// P0-P3 that bind to NO head, and that no acknowledgement has answered.
+//
+// Pure, and exported, because two gates need this answer and only one of them
+// can call GitHub. `.claude/skills/gate-pr.md` runs the hand gate exactly where
+// Auto Gate cannot — on a PR that changes auto-gate.js (the gate runs master's
+// copy, so a gate fix cannot gate its own PR) and during a Codex outage — and it
+// used to restate this rule in jq. It restated an OLDER version of it: #3689 and
+// #3728 updated the mirror, #3670 did not, so the hand gate could not see the
+// artifact shape that merged #3656 while this file had blocked it since #3676
+// (#3773). A mirror that can drift silently is worse than no mirror, because it
+// reports a clean hand gate on a PR the real gate would hold.
+//
+// So there is one implementation and the skill calls it. What follows is the
+// reasoning that was already here; it did not change.
+function unansweredFindingArtifacts({
+  artifacts,
+  acknowledgementCandidates,
+  headSha,
+  headCommitTime,
+}) {
+  const acknowledgements = acknowledgementCandidates.filter(
+    (artifact) =>
+      ALLOWED_AUTHORS.has(artifact.user?.login || "") && hasResolutionMarker(artifact.body || ""),
+  );
+  //
+  // An artifact is CLASSIFIED when something says which revision it is about.
+  // Only two things ever say that: Codex's own `Reviewed commit:` line and
+  // GitHub's commit_id on a review — assertions, not prose. Everything else is
+  // unclassifiable, and unclassifiable is not clean.
+  //
+  // A body permalink is deliberately NOT a third. It binds an artifact to the
+  // head under gate — that direction only ever blocks, so a wrong guess is safe
+  // — but it can never make an artifact STALE, because nothing in a body
+  // distinguishes the link that is the finding's own location from a link cited
+  // as supporting context (Codex P1 on #3676, twice). Placing by "any commit
+  // this PR had" closed the foreign-commit half and left the other half open: a
+  // finding with branch-based location links that cites an earlier commit of
+  // this same PR was still placed, still bound to no head, and still dropped —
+  // the very shape #3656 merged past.
+  //
+  // What that costs is one acknowledgement per unbindable finding, once its head
+  // moves on. That is the discipline INLINE findings already have: pushing a fix
+  // does not clear one, someone has to answer it. It is also what deleted three
+  // findings' worth of machinery — a commit-list read, its 250-commit cap, and a
+  // force-push trade-off — all of which existed only to support a placement rule
+  // that could not be made sound.
+  const findingCandidates = artifacts.filter(
+    (artifact) =>
+      CODEX_BODY_FINDING_RE.test(artifact.body || "") &&
+      !isCodexSummaryArtifact(artifact) &&
+      !codexArtifactStatesItsCommit(artifact) &&
+      // Bound to this head is classified, not unclassifiable: the rule above
+      // already inspected it, and blocking twice for one artifact would report a
+      // finding that "names no commit" about one that names this very head.
+      !codexArtifactBindsToHead(artifact, headSha),
+  );
+  const unboundFindingArtifacts = findingCandidates.filter((artifact) => {
+    // Fails closed on an unknown order, like every other timestamp comparison in
+    // this file: an artifact whose own time will not parse is never acknowledged.
+    // An edit that adds the reference moves the acknowledging comment's own time
+    // with it, so this stays satisfiable; an edit to the FINDING moves the
+    // artifact past its answer, which is right — the answer was to other text.
+    const artifactTime = reviewArtifactTime(artifact);
+    if (artifactTime === 0) {
+      return true;
+    }
+    const references = artifactReferences(artifact);
+    return !acknowledgements.some(
+      (ack) =>
+        // Equal seconds count (Codex P2 on #3676). GitHub serialises two events
+        // into the same whole second often enough that a bot answering
+        // immediately was rejected, leaving the finding stuck until someone
+        // reposted the answer a second later. Equality cannot smuggle in an
+        // ordinary earlier comment here, because an answer has to name the
+        // artifact's server-generated id — which does not exist until the
+        // artifact does.
+        reviewArtifactTime(ack) >= artifactTime &&
+        references.some((reference) => bodyNamesReference(ack.body || "", reference)) &&
+        acknowledgementIsAnswerable(ack, artifactTime, headCommitTime),
+    );
+  });
+  return unboundFindingArtifacts;
+}
+
 async function evaluateCodex({
   github,
   context,
@@ -3237,66 +3407,16 @@ async function evaluateCodex({
   // Requiring the reference makes an acknowledgement per-artifact and impossible
   // to trip in passing: it can only be written by someone who went and looked at
   // the thing the gate could not classify.
-  const acknowledgements = [...comments, ...reviews].filter(
-    (artifact) =>
-      ALLOWED_AUTHORS.has(artifact.user?.login || "") && hasResolutionMarker(artifact.body || ""),
-  );
-  //
-  // An artifact is CLASSIFIED when something says which revision it is about.
-  // Only two things ever say that: Codex's own `Reviewed commit:` line and
-  // GitHub's commit_id on a review — assertions, not prose. Everything else is
-  // unclassifiable, and unclassifiable is not clean.
-  //
-  // A body permalink is deliberately NOT a third. It binds an artifact to the
-  // head under gate — that direction only ever blocks, so a wrong guess is safe
-  // — but it can never make an artifact STALE, because nothing in a body
-  // distinguishes the link that is the finding's own location from a link cited
-  // as supporting context (Codex P1 on #3676, twice). Placing by "any commit
-  // this PR had" closed the foreign-commit half and left the other half open: a
-  // finding with branch-based location links that cites an earlier commit of
-  // this same PR was still placed, still bound to no head, and still dropped —
-  // the very shape #3656 merged past.
-  //
-  // What that costs is one acknowledgement per unbindable finding, once its head
-  // moves on. That is the discipline INLINE findings already have: pushing a fix
-  // does not clear one, someone has to answer it. It is also what deleted three
-  // findings' worth of machinery — a commit-list read, its 250-commit cap, and a
-  // force-push trade-off — all of which existed only to support a placement rule
-  // that could not be made sound.
-  const findingCandidates = codexReviewArtifacts.filter(
-    (artifact) =>
-      CODEX_BODY_FINDING_RE.test(artifact.body || "") &&
-      !isCodexSummaryArtifact(artifact) &&
-      !codexArtifactStatesItsCommit(artifact) &&
-      // Bound to this head is classified, not unclassifiable: the rule above
-      // already inspected it, and blocking twice for one artifact would report a
-      // finding that "names no commit" about one that names this very head.
-      !codexArtifactBindsToHead(artifact, sha),
-  );
-  const unboundFindingArtifacts = findingCandidates.filter((artifact) => {
-    // Fails closed on an unknown order, like every other timestamp comparison in
-    // this file: an artifact whose own time will not parse is never acknowledged.
-    // An edit that adds the reference moves the acknowledging comment's own time
-    // with it, so this stays satisfiable; an edit to the FINDING moves the
-    // artifact past its answer, which is right — the answer was to other text.
-    const artifactTime = reviewArtifactTime(artifact);
-    if (artifactTime === 0) {
-      return true;
-    }
-    const references = artifactReferences(artifact);
-    return !acknowledgements.some(
-      (ack) =>
-        // Equal seconds count (Codex P2 on #3676). GitHub serialises two events
-        // into the same whole second often enough that a bot answering
-        // immediately was rejected, leaving the finding stuck until someone
-        // reposted the answer a second later. Equality cannot smuggle in an
-        // ordinary earlier comment here, because an answer has to name the
-        // artifact's server-generated id — which does not exist until the
-        // artifact does.
-        reviewArtifactTime(ack) >= artifactTime &&
-        references.some((reference) => bodyNamesReference(ack.body || "", reference)) &&
-        acknowledgementIsAnswerable(ack, artifactTime, headCommitTime),
-    );
+  // The classification that decides this, extracted so the hand gate in
+  // `.claude/skills/gate-pr.md` CALLS it rather than restating it in jq. Two
+  // implementations of one rule is what let the #3656 shape through the hand
+  // gate for as long as it did: #3689 and #3728 updated the jq mirror, #3670 did
+  // not, and nothing detected the difference (#3773).
+  const unboundFindingArtifacts = unansweredFindingArtifacts({
+    artifacts: codexReviewArtifacts,
+    acknowledgementCandidates: [...comments, ...reviews],
+    headSha: sha,
+    headCommitTime,
   });
   if (unboundFindingArtifacts.length > 0) {
     // Named, not just counted. The remedy tells the reader to answer the artifact
@@ -3448,6 +3568,9 @@ async function evaluateCodex({
     reviewerUnavailable,
     reviewerUnavailableReason,
     findingBlockers,
+    // Read here because this is where the comments and reviews already are; the
+    // caller decides what it means.
+    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
   };
 }
 
@@ -3792,6 +3915,9 @@ module.exports = {
     CODEX_REVIEW_RE,
     bodyNamesReference,
     codexArtifactBindsToHead,
+    maintainerApproval,
+    MAINTAINER_APPROVAL_MARKER,
+    unansweredFindingArtifacts,
     codexArtifactStatesItsCommit,
     isCodexSummaryArtifact,
     reviewedCommitMatchesHead,

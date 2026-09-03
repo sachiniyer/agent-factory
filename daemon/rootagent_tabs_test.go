@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 
@@ -9,7 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -141,14 +139,7 @@ func TestReportRootTabCarryReportsWhatCameBack(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var info, warning bytes.Buffer
-			prevInfo, prevWarning := log.InfoLog.Writer(), log.WarningLog.Writer()
-			log.InfoLog.SetOutput(&info)
-			log.WarningLog.SetOutput(&warning)
-			t.Cleanup(func() {
-				log.InfoLog.SetOutput(prevInfo)
-				log.WarningLog.SetOutput(prevWarning)
-			})
+			info, warning := captureInfo(t), captureWarnings(t)
 
 			reportRootTabCarry("/repo", tc.carried, tc.created)
 

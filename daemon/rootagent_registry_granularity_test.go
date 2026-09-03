@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // These tests pin the #3297 granularity rule: a registry failure's blast
@@ -111,10 +109,7 @@ func TestEnsureRootAgentsSuppressesOnlyTheCorruptRecord(t *testing.T) {
 	writePersonalRootAgent(t, healthyProject.ID, "enabled = true\nprogram = \"/opt/healthy\"")
 	corruptRegistryRecord(t, corruptProject.ID)
 
-	var warnings bytes.Buffer
-	prevWarning := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
+	warnings := captureWarnings(t)
 
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,17 +56,9 @@ func installUnanswerableGit(t *testing.T) (letGitAnswer func()) {
 }
 
 // captureRootEnsureLogs redirects the warning and error loggers for one test.
-func captureRootEnsureLogs(t *testing.T) (warnings, errors *bytes.Buffer) {
+func captureRootEnsureLogs(t *testing.T) (warnings, errors *logCapture) {
 	t.Helper()
-	warnings, errors = &bytes.Buffer{}, &bytes.Buffer{}
-	prevWarning, prevError := log.WarningLog.Writer(), log.ErrorLog.Writer()
-	log.WarningLog.SetOutput(warnings)
-	log.ErrorLog.SetOutput(errors)
-	t.Cleanup(func() {
-		log.WarningLog.SetOutput(prevWarning)
-		log.ErrorLog.SetOutput(prevError)
-	})
-	return warnings, errors
+	return captureWarnings(t), captureErrors(t)
 }
 
 // TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository is the #3500
@@ -206,7 +197,7 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 
 	_ = installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
-	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers([]config.Project{project}, nil)
+	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers(log.WarningLog, []config.Project{project}, nil)
 
 	got := warnings.String()
 	if strings.Contains(got, "does not resolve to a git repository") {

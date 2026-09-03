@@ -1,25 +1,19 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 // captureInfoLog routes log.InfoLog into a buffer for the test's lifetime, so a
 // test can assert what the daemon claims in its own success log (#3240).
-func captureInfoLog(t *testing.T) *bytes.Buffer {
+func captureInfoLog(t *testing.T) *logCapture {
 	t.Helper()
-	var buf bytes.Buffer
-	prev := aflog.InfoLog.Writer()
-	aflog.InfoLog.SetOutput(&buf)
-	t.Cleanup(func() { aflog.InfoLog.SetOutput(prev) })
-	return &buf
+	return captureInfo(t)
 }
 
 // The usage-limit auto-resume scheduler tests (#1146 PR3). Every test drives the

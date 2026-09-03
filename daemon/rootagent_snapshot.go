@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	stdlog "log"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -56,8 +57,16 @@ type rootAgentSnapshot struct {
 	// Two shapes, and the difference decides what the retry may skip: the WRITE
 	// failed after the proof was established, or the PROOF itself could not be
 	// established (a marker read that timed out or was unreadable).
-	reconcileOwed      map[string]reconcileOwedEntry
-	legacyRepoIDs      map[string]bool
+	reconcileOwed map[string]reconcileOwedEntry
+	legacyRepoIDs map[string]bool
+	// legacyRepoIDByPath is the per-root_agents-path provenance of
+	// legacyRepoIDs: the repo ID each configured path last RESOLVED to. It
+	// exists so a later recompute can tell an UNKNOWN resolution from an
+	// ABSENT one (#3782 item 1) — the set alone cannot, because a path whose
+	// probe never answered has no repo ID to look itself up by. Rebuilt in
+	// the same statement as legacyRepoIDs, by the one function that derives
+	// both, so the two cannot drift.
+	legacyRepoIDByPath map[string]string
 	registryUnreadable bool
 }
 
@@ -80,7 +89,11 @@ type reconcileOwedEntry struct {
 	proven bool
 }
 
-func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
+// warn is where this snapshot's warnings go: the constructing Manager's logger,
+// or the process-global one (#3787 part 2). The snapshot is built INSIDE
+// newManagerShellWithOptions, before a Manager exists, so it takes the logger as
+// a parameter rather than reaching for a receiver it does not have.
+func buildRootAgentSnapshot(warn *stdlog.Logger, cfg *config.Config) rootAgentSnapshot {
 	snap := rootAgentSnapshot{
 		global:             config.GlobalRootAgentLayer(cfg),
 		personal:           map[string]*config.RootAgentLayer{},
@@ -90,7 +103,13 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		legacyRepoIDs:      map[string]bool{},
 	}
 
-	snap.legacyRepoIDs = legacyRepoIDSet(cfg)
+	// The UNBOUNDED entry point, deliberately, and only here. Bounding a
+	// boot-time probe is a decision about what a daemon START owes an operator
+	// whose configured checkout sits on a dead mount — refusing to start takes
+	// every other session on the box with it — and that is #3782 item 2, not
+	// this change. The heal recompute below it is on the poll goroutine and
+	// takes the bounded one.
+	snap.legacyRepoIDs, snap.legacyRepoIDByPath = legacyRepoIDSet(cfg, unboundedLegacyRootRepo, nil)
 
 	projects, failures, strays, _, err := config.ListProjectsDetailed()
 	if err != nil {
@@ -110,10 +129,10 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		snap.registryUnreadable = true
 		return snap
 	}
-	logRegistryRecordProblems(failures, strays)
+	logRegistryRecordProblems(warn, failures, strays)
 	snap.recordFailureIDs = recordFailureDirectoryIDs(failures)
 	// Boot: nothing is serving yet, so no delete can hold an identity.
-	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots, snap.reconcileOwed = projectRootAgentLayers(projects, nil)
+	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots, snap.reconcileOwed = projectRootAgentLayers(warn, projects, nil)
 	return snap
 }
 
@@ -130,25 +149,66 @@ func recordFailureDirectoryIDs(failures []config.ProjectRecordFailure) []string 
 	return ids
 }
 
+// legacyRepoResolver resolves one root_agents key to its repository. The two
+// callers of legacyRepoIDSet sit on different lifecycles — daemon start and the
+// instance poll goroutine — so the entry point is the caller's to choose rather
+// than the function's to assume.
+type legacyRepoResolver func(path string) (*config.RepoContext, error)
+
+// unboundedLegacyRootRepo is config.RepoFromPath behind the legacy sweep's tilde
+// expansion: context.Background(), which is literally what config.RepoFromPath
+// passes its context-taking twin. Routed through the same legacyRootRepoFromPath
+// seam as the bounded resolver so a test can stall one configured path at either
+// call site without a process-global `git` shim on PATH.
+func unboundedLegacyRootRepo(path string) (*config.RepoContext, error) {
+	return legacyRootRepoFromPath(context.Background(), config.ExpandTilde(path))
+}
+
 // legacyRepoIDSet resolves each root_agents path to its repo ID for the
-// singleton sweep's dedup set. A not-yet-cloned legacy path is normal
-// (#1122): the per-path ensure sweep retries it, and it is simply not part of
-// the dedup set until it resolves — while it does not resolve it cannot
-// collide with a registered project that did. Shared by the start-of-day
-// builder and the registry heal, which must RECOMPUTE it (#3315 review): a
-// legacy path that resolved only after boot would otherwise be missing from
-// the healed snapshot's dedup set, letting the singleton sweep double-visit
-// its repo behind a failing legacy attempt.
-func legacyRepoIDSet(cfg *config.Config) map[string]bool {
+// singleton sweep's dedup set, returning that set and the per-path resolutions
+// it was derived from. A not-yet-cloned legacy path is normal (#1122): the
+// per-path ensure sweep retries it, and it is simply not part of the dedup set
+// until it resolves — while it does not resolve it cannot collide with a
+// registered project that did. Shared by the start-of-day builder and the
+// registry heal, which must RECOMPUTE it (#3315 review): a legacy path that
+// resolved only after boot would otherwise be missing from the healed
+// snapshot's dedup set, letting the singleton sweep double-visit its repo
+// behind a failing legacy attempt.
+//
+// previous is the last recompute's per-path resolutions, and it is what keeps
+// the bound from re-entering that same #3315 double-visit through a timeout. An
+// unanswered probe is UNKNOWN, and AN UNKNOWN MUST NEVER READ AS ABSENT: git
+// answering "not a repository" is a verdict about the path and may drop the
+// entry, but a probe that never answered establishes nothing, so the repo ID the
+// path last resolved to stands until a probe answers. Dropping it instead would
+// mean one stalled mount silently un-dedups a repo whose root_agents opt-in has
+// been sitting there all along — #3500's rule (never convert "could not
+// establish" into a verdict), applied to a set membership rather than a log
+// line.
+func legacyRepoIDSet(cfg *config.Config, resolve legacyRepoResolver, previous map[string]string) (map[string]bool, map[string]string) {
 	ids := map[string]bool{}
+	byPath := map[string]string{}
 	for path := range cfg.RootAgents {
-		repo, err := config.RepoFromPath(config.ExpandTilde(path))
-		if err != nil {
-			continue
+		repo, err := resolve(path)
+		switch {
+		case err == nil:
+			ids[repo.ID] = true
+			byPath[path] = repo.ID
+		case !config.RepoProbeUnanswered(err):
+			// A VERDICT. git ran and answered that the path is not a
+			// repository right now — #1122's not-yet-cloned entry, or a
+			// checkout that went away — and a verdict about the path may drop
+			// the entry, exactly as it always has.
+		case previous[path] != "":
+			// UNKNOWN. Nothing was established, so the last resolution stands.
+			ids[previous[path]] = true
+			byPath[path] = previous[path]
+		default:
+			// UNKNOWN, and nothing to stand: this path has never resolved, so
+			// it was never in the set to begin with.
 		}
-		ids[repo.ID] = true
 	}
-	return ids
+	return ids, byPath
 }
 
 // logRegistryRecordProblems names each registry record the snapshot had to
@@ -161,12 +221,12 @@ func legacyRepoIDSet(cfg *config.Config) map[string]bool {
 // succeeded and every real record was read. Only a failed enumeration fails
 // the machine closed — one bad record must not become a machine-wide
 // root-agent outage.
-func logRegistryRecordProblems(failures []config.ProjectRecordFailure, strays []string) {
+func logRegistryRecordProblems(warn *stdlog.Logger, failures []config.ProjectRecordFailure, strays []string) {
 	for _, failure := range failures {
-		log.WarningLog.Printf("root agent snapshot: project registry record %s cannot be read; only that project is affected — its personal [root_agent] layer is unreachable and the singleton sweep cannot ensure it, though a legacy root_agents entry for the same repo still applies as its own opt-in — until the record is repaired (or removed) and the daemon restarts: %v", failure.DirectoryID, failure.Err)
+		warn.Printf("root agent snapshot: project registry record %s cannot be read; only that project is affected — its personal [root_agent] layer is unreachable and the singleton sweep cannot ensure it, though a legacy root_agents entry for the same repo still applies as its own opt-in — until the record is repaired (or removed) and the daemon restarts: %v", failure.DirectoryID, failure.Err)
 	}
 	if len(strays) > 0 {
-		log.WarningLog.Printf("root agent snapshot: project registry contains %d non-record file(s) (%s); they affect nothing and can be removed", len(strays), strings.Join(strays, ", "))
+		warn.Printf("root agent snapshot: project registry contains %d non-record file(s) (%s); they affect nothing and can be removed", len(strays), strings.Join(strays, ", "))
 	}
 }
 
@@ -263,7 +323,7 @@ type unresolvedProjectRecord struct {
 // manager's, or a write can land while a delete holds the identity.
 type identityWriteFence func(from, to string) func() bool
 
-func projectRootAgentLayers(projects []config.Project, fence identityWriteFence) (personal map[string]*config.RootAgentLayer, personalUnreadable map[string]string, projectRoots map[string]resolvedProjectRoot, unresolvedRoots map[string]unresolvedProjectRecord, reconcileOwed map[string]reconcileOwedEntry) {
+func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fence identityWriteFence) (personal map[string]*config.RootAgentLayer, personalUnreadable map[string]string, projectRoots map[string]resolvedProjectRoot, unresolvedRoots map[string]unresolvedProjectRecord, reconcileOwed map[string]reconcileOwedEntry) {
 	personal = map[string]*config.RootAgentLayer{}
 	personalUnreadable = map[string]string{}
 	projectRoots = map[string]resolvedProjectRoot{}
@@ -315,7 +375,7 @@ func projectRootAgentLayers(projects []config.Project, fence identityWriteFence)
 						// identity it established, and the retry only re-does
 						// the WRITE.
 						reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID, proven: true}
-						log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; retrying on the ensure cadence — until it succeeds, a path that goes away falls back to a provisional identity: %v", p.ID, repoID, err)
+						warn.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; retrying on the ensure cadence — until it succeeds, a path that goes away falls back to a provisional identity: %v", p.ID, repoID, err)
 					}
 				case ok:
 					// The proof named a DIFFERENT identity than the resolution
@@ -331,7 +391,7 @@ func projectRootAgentLayers(projects []config.Project, fence identityWriteFence)
 					repoID, repoRoot = proven, p.Root
 					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, identityWriteWanted(fence, repoID)); err != nil {
 						reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID, proven: true}
-						log.WarningLog.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the identity its path resolved to, but that could not be recorded; retrying on the ensure cadence: %v", p.ID, repoID, err)
+						warn.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the identity its path resolved to, but that could not be recorded; retrying on the ensure cadence: %v", p.ID, repoID, err)
 					}
 				case !ok:
 					// The PROOF is what failed — a marker read that timed out
@@ -340,7 +400,7 @@ func projectRootAgentLayers(projects []config.Project, fence identityWriteFence)
 					// UNPROVEN, so the retry re-establishes it rather than
 					// inheriting a claim about a checkout it never verified.
 					reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID}
-					log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its checkout could not be verified as that project's own, so its identity is not recorded yet; re-checking on the ensure cadence", p.ID, repoID)
+					warn.Printf("root agent snapshot: project %s resolves to repo %s but its checkout could not be verified as that project's own, so its identity is not recorded yet; re-checking on the ensure cadence", p.ID, repoID)
 				}
 			}
 			//
@@ -383,7 +443,7 @@ func projectRootAgentLayers(projects []config.Project, fence identityWriteFence)
 			// unusable for this pass whichever it was — and what settles it is
 			// the ensure-cadence re-check below (#3299), so only the wording
 			// comes from the classifier.
-			log.WarningLog.Printf("root agent snapshot: %s; its personal layer still applies to that path, a legacy root_agents entry for the same repo keeps its per-tick retry, and the daemon re-checks the recorded path on its ensure cadence — the project resumes fully, under its real repo identity, once the path resolves: %v", repoResolveClaim(fmt.Sprintf("project %s root", p.ID), p.Root, repoErr), repoErr)
+			warn.Printf("root agent snapshot: %s; its personal layer still applies to that path, a legacy root_agents entry for the same repo keeps its per-tick retry, and the daemon re-checks the recorded path on its ensure cadence — the project resumes fully, under its real repo identity, once the path resolves: %v", repoResolveClaim(fmt.Sprintf("project %s root", p.ID), p.Root, repoErr), repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
@@ -399,7 +459,7 @@ func projectRootAgentLayers(projects []config.Project, fence identityWriteFence)
 			// already-live root is left alone (adopt-first); only creation and
 			// healing stop, until the config loads again (the ensure cadence
 			// re-attempts the read, #3264 — a still-failing read stays closed).
-			log.WarningLog.Printf("root agent snapshot: project %s (%s) personal config cannot be loaded; failing closed — no root agent will be started or healed for this repo until its config loads again (re-checked on the ensure cadence): %v", p.ID, repoRoot, err)
+			warn.Printf("root agent snapshot: project %s (%s) personal config cannot be loaded; failing closed — no root agent will be started or healed for this repo until its config loads again (re-checked on the ensure cadence): %v", p.ID, repoRoot, err)
 			personalUnreadable[repoID] = p.ID
 			continue
 		}

@@ -1289,3 +1289,63 @@ func TestBuildProjectListKeepsAnOccupantWhenGitFailsOperationally(t *testing.T) 
 	assert.True(t, found,
 		"an operational git failure is not a verdict that the path is free, so its root_agents key must keep the identity the daemon will resolve for it: got %+v", projects)
 }
+
+// TestBuildProjectListRecordsANotARepositoryAnswer covers the fourth ledger
+// outcome, and the only one no test reached when the seam landed (#3785): git
+// ran, completed, and ANSWERED that the path is outside any repository.
+//
+// It is deliberately not the same fact as the resolution's answeredNotARepo,
+// which a provably absent directory satisfies through os.Stat with git having
+// said nothing at all. That one is a verdict about the PATH; this is a fact
+// about the PROBE, and the seam exists to keep them apart — so the git-answered
+// half needs an assertion of its own rather than borrowing the path verdict's.
+//
+// The sibling occupant tests drive the other two failure branches: a stand-in
+// that sleeps past the budget (unanswered) and one that exits 128 with a
+// message that is not the not-a-repository diagnostic (ran and failed). Neither
+// uses a path git answers about, which is why this branch went unasserted.
+func TestBuildProjectListRecordsANotARepositoryAnswer(t *testing.T) {
+	h := newTestHome(t)
+
+	// The fixture is the whole difficulty, so it is ASSERTED rather than
+	// assumed — the mirror of the nesting check
+	// TestBuildProjectListRetainsMismatchedRecordedIdentity makes for the
+	// opposite property. config.gitMetadataMayExist walks EVERY ancestor for a
+	// .git before git's diagnostic is read as a verdict, so a temp dir that
+	// happens to sit inside a checkout resolves to that enclosing repository
+	// and the probe comes back resolved — an outcome no retry below could ever
+	// turn into the one under test. On such a host this fails here, naming the
+	// path, instead of looking like a broken classifier.
+	outsider := t.TempDir()
+	_, err := config.RepoFromPath(outsider)
+	require.ErrorIs(t, err, config.ErrNotGitRepository,
+		"fixture must be a path git ANSWERS is outside any repository, and %s is not: "+
+			"an ancestor holds .git, or GIT_DIR is set", outsider)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{outsider: {}}
+
+	// Retry-shaped for the same reason the operational-failure test is: git has
+	// to run AND answer inside the path's own budget for the verdict to exist,
+	// and a probe cancelled before that comes back unanswered. An unanswered
+	// probe is a poll that did not exercise the case, not a failure of it.
+	// Asserting the answer without this is the shape #3710 → #3720 and
+	// #3761 → #3764 removed — a positive that depends on winning a 150ms fork.
+	// Nothing caches an answered negative (resolveProjectPaths keeps it out of
+	// projectPathResolutions on purpose), so each poll genuinely re-probes.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		_, degraded, budgets := h.buildProjectListFromCounted(nil)
+		require.False(t, degraded)
+		outcome := probeOutcomeFor(t, budgets, outsider)
+		if outcome == probeOutcomeUnanswered {
+			require.True(t, time.Now().Before(deadline),
+				"git never answered inside the %s budget, so the not-a-repository verdict "+
+					"this test is about was never produced", projectPathScanTimeout)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		require.Equal(t, probeOutcomeNotARepository, outcome,
+			"git answered that %s is outside any repository, so the probe must be recorded "+
+				"as that ANSWER rather than as an operational failure: got %s", outsider, outcome)
+		break
+	}
+}

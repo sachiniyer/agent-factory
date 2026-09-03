@@ -82,11 +82,11 @@ func (m *Manager) healRootAgentLayers() {
 		if projects, failures, strays, present, err := config.ListProjectsDetailed(); err == nil && present {
 			streak := m.observeRootHealRegistrySnapshot(projects)
 			if streak >= 2 {
-				logRegistryRecordProblems(failures, strays)
+				logRegistryRecordProblems(m.warn(), failures, strays)
 				// The RUNTIME rebuild, so it carries the fence (#3530 review id
 				// 3920258554): this path proves legacy rows while the daemon is
 				// serving, and a delete can hold the identity it would write.
-				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(projects, m.identityTransitionUnfenced)
+				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(m.warn(), projects, m.identityTransitionUnfenced)
 				verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
 				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
@@ -156,7 +156,20 @@ func (m *Manager) healRootAgentLayers() {
 		// the heal was the registry or a personal config — or a failing
 		// legacy attempt lets the singleton create the root without the
 		// legacy layer.
-		healed.legacyRepoIDs = legacyRepoIDSet(m.cfg)
+		//
+		// It runs on the POLL goroutine, so it takes the BOUNDED resolver
+		// (#3782 item 1): the recompute is a scan, it admits nothing, and one
+		// configured path on a stalled mount must not stop every pass below
+		// EnsureRootAgents for every session on the box. Per path rather than
+		// one shared budget across the loop, matching the sweep that follows
+		// it, so a stalled path cannot starve the resolution of a path that
+		// answers.
+		//
+		// The previous snapshot's per-path resolutions carry forward for
+		// exactly the same reason this recompute exists: a probe that never
+		// answered is UNKNOWN, and an unknown that dropped out of the set
+		// would be #3315's double-visit re-entered through a deadline.
+		healed.legacyRepoIDs, healed.legacyRepoIDByPath = legacyRepoIDSet(m.cfg, resolveLegacyRootRepo, healed.legacyRepoIDByPath)
 		if rootHealPrePublishHookForTest != nil {
 			rootHealPrePublishHookForTest()
 		}
@@ -749,7 +762,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				// start would put it back under the invented id with its
 				// layers left behind. Leave everything where it is and let the
 				// next pass retry (#3530 review id 3914971915).
-				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; leaving the project under its provisional identity and retrying on the ensure cadence: %v", record.root, repo.ID, record.projectID, err)
+				m.warn().Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; leaving the project under its provisional identity and retrying on the ensure cadence: %v", record.root, repo.ID, record.projectID, err)
 				continue
 			case wrote:
 				log.InfoLog.Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)

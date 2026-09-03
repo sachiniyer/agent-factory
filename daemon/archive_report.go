@@ -146,7 +146,7 @@ func (m *Manager) keepIncompleteArchiveCommitted(
 	committedErr := archiveCommittedWarning(instance, hookErr, fmt.Errorf(
 		"archive was kept committed because rolling its incomplete copy back would omit retained files; %w", cause,
 	))
-	log.WarningLog.Printf("%v", committedErr)
+	m.warn().Printf("%v", committedErr)
 	return archivedPath, archived, committedErr
 }
 
@@ -197,7 +197,7 @@ func (m *Manager) keepUnrollableArchiveCommitted(
 	archived := instance.ToInstanceData()
 	m.publishEvent(agentproto.EventSessionArchived, archived)
 	committedErr := archiveCommittedWarning(instance, hookErr, cause)
-	log.WarningLog.Printf("%v", committedErr)
+	m.warn().Printf("%v", committedErr)
 	return archivedPath, archived, committedErr
 }
 
