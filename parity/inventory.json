@@ -1270,7 +1270,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> daemonUpdateTask"
+        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> routedUpdateTask (local socket, or the targeted daemon's UpdateTask when --daemon-url names one, #3730)"
       },
       "verdict": "parity",
       "notes": "The web half was subsumed by #1935: its seeded project picker sends update.project_path. The CLI now sends the same TaskUpdate.ProjectPath patch with `af tasks update --project-path`; `--repo` remains the authorization scope for the task's current project, so `--repo old --project-path new` is unambiguous. This also supplies a repair path for the wrong-project automation incident in #1891 without duplicating the daemon's rebind and RepoID logic."
@@ -2280,6 +2280,14 @@
         }
       },
       "RestartTaskRequest": {
+        "tui": {
+          "expect.enforce": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+          },
+          "expect.project_path": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+          }
+        },
         "cli": {
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."

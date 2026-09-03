@@ -45,7 +45,7 @@ func TestTasksShow_ReportsTheSilenceAndWhoCausedIt(t *testing.T) {
 	var out bytes.Buffer
 	// Two and a half hours after the re-enable, so the task is late again on its
 	// own terms rather than on the strength of the pause it was deliberately in.
-	renderTaskShow(&out, showFixture(), time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	renderTaskShow(&out, showFixture(), time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 	got := out.String()
 
 	assert.Contains(t, got, "Master Health Watch · 4ab7ba4f")
@@ -68,7 +68,7 @@ func TestTasksShow_UnknownArmingIsNotReportedAsUnarmed(t *testing.T) {
 	tsk.Arming = task.ArmingUnknown
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 
 	assert.Contains(t, out.String(), "unknown — nothing has reported on it yet")
 	assert.NotContains(t, out.String(), "not armed")
@@ -84,7 +84,7 @@ func TestTasksShow_HealthyTaskSaysSo(t *testing.T) {
 	tsk.Arming, tsk.NextRunAt = task.ArmingArmed, &next
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 30, 0, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 30, 0, 0, time.Local), "")
 	got := out.String()
 
 	assert.Contains(t, got, "Arming         armed")
@@ -101,7 +101,7 @@ func TestTasksShow_EmptyTrailSaysWhichSilenceItIs(t *testing.T) {
 	tsk.Audit = nil
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local), "")
 
 	assert.Contains(t, out.String(), "no recorded changes")
 }
@@ -114,7 +114,7 @@ func TestTasksShow_WatchTaskHasNoScheduleVerdict(t *testing.T) {
 	tsk.Overdue, tsk.MissedOccurrences = false, 0
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local), "")
 	got := out.String()
 
 	assert.Contains(t, got, "watch · tail -f ci.log")
@@ -166,7 +166,7 @@ func TestTasksShow_InvalidExpressionIsNotOnSchedule(t *testing.T) {
 	tsk.Overdue, tsk.MissedOccurrences = false, 0
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local), "")
 	got := out.String()
 
 	assert.Contains(t, got, "cron expression is invalid, so nothing is scheduled")
@@ -184,7 +184,7 @@ func TestTasksShow_UnschedulableExpressionSaysSo(t *testing.T) {
 	tsk.Overdue, tsk.MissedOccurrences = false, 0
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local), "")
 	got := out.String()
 
 	assert.Contains(t, got, "the scheduler cannot derive a next run from this expression")
@@ -205,7 +205,7 @@ func TestTasksShow_UnassessableRecordSaysSo(t *testing.T) {
 	tsk.Overdue, tsk.MissedOccurrences = false, 0
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 	got := out.String()
 
 	assert.Contains(t, got, "cannot be assessed — no lateness could be measured")
@@ -226,7 +226,7 @@ func TestTasksShow_DisabledTaskHasNoScheduleVerdict(t *testing.T) {
 		tsk.Overdue, tsk.MissedOccurrences = false, 0
 
 		var out bytes.Buffer
-		renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+		renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 		got := out.String()
 
 		assert.NotContains(t, got, "Schedule", "%q: no schedule verdict for a disabled task:\n%s", expr, got)
@@ -247,7 +247,7 @@ func TestTasksShow_NoCountWhenNoneWasTaken(t *testing.T) {
 	var out bytes.Buffer
 	// Derived fresh here, so the fixture's own numbers are irrelevant; what
 	// matters is that a zero count never renders as a bound.
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 	got := out.String()
 
 	assert.NotContains(t, got, "missed 0", "no count is not a count of zero:\n%s", got)
@@ -265,7 +265,7 @@ func TestTasksShow_EnabledWithNoTriggerSaysSo(t *testing.T) {
 	tsk.Overdue, tsk.MissedOccurrences = false, 0
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 	got := out.String()
 
 	assert.Contains(t, got, "no trigger, so nothing will ever run it")
@@ -283,7 +283,7 @@ func TestTasksShow_DisabledWithNoTriggerIsSilent(t *testing.T) {
 	tsk.Enabled = false
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 	assert.NotContains(t, out.String(), "Schedule")
 }
 
@@ -300,7 +300,7 @@ func TestTasksShow_WordsEveryUnschedulableShape(t *testing.T) {
 		tsk.Overdue, tsk.MissedOccurrences = false, 0
 
 		var out bytes.Buffer
-		renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+		renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local), "")
 		got := out.String()
 		assert.Contains(t, got, tc.want, "%q:\n%s", tc.expr, got)
 		assert.NotContains(t, got, "on schedule", "%q is not healthy", tc.expr)

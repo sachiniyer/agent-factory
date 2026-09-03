@@ -221,6 +221,22 @@ func (c *Client) TriggerTask(id string, expect task.ProjectExpectation) error {
 	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id, Expect: expect}, &daemon.TriggerTaskResponse{})
 }
 
+// RestartTask asks the daemon to stop one enabled watch command and start a
+// single replacement, waiting until the old process tree is gone so an edited
+// script is re-read without double-emitting events. expect is the same required
+// project compare-and-swap as UpdateTask's (#3230).
+//
+// It completes the task set on this client. The other five twins predate it
+// because the TUI has no restart affordance, so `af tasks restart` was the one
+// verb with no HTTP path to a route the daemon has served since #2359. Routing
+// the CLI's task group at a remote daemon (#3730) is what needed it — and
+// RestartTask is the NEWEST of the six task routes, so it is the one a daemon
+// old enough to be missing any of them is missing first. That caller refuses on
+// RouteNotServedError rather than falling back to this machine.
+func (c *Client) RestartTask(id string, expect task.ProjectExpectation) error {
+	return c.call("RestartTask", daemon.RestartTaskRequest{ID: id, Expect: expect}, &daemon.RestartTaskResponse{})
+}
+
 // SnapshotWithAlarms is Snapshot plus the persistent delivery-failure alarms
 // carried on the same authoritative response (#1238). It is the TUI's read
 // path: the session list and the alarm projection arrive from one call, so the
