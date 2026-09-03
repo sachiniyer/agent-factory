@@ -3416,6 +3416,31 @@ test("an approved degraded pass survives the gate's own update-branch", async ()
 
   assert.equal(reset.shouldMerge, false, "a merge of something that is not base still resets");
   assert.equal(reset.manualMergeRequired, false, "and the stale usage-limit reply is not evidence");
+
+  // …and an OCTOPUS head resets too, end to end through the query rather than by
+  // calling the helper directly. This is the case `parents(first: 2)` hid: the
+  // third parent was truncated away, the count guard saw exactly two, and the
+  // merge was treated as content-preserving (#3805).
+  const octopus = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+      { oid: "deadbeef00000000000000000000000000000000", committedDate: "2026-07-09T10:50:00Z" },
+    ],
+    secondParentInBase: true,
+    issueComments: [
+      codexRateLimit("2026-07-09T10:35:00Z"),
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T10:40:31Z"),
+    ],
+  });
+
+  assert.equal(octopus.shouldMerge, false, "three parents is not an update-branch");
+  assert.doesNotMatch(
+    octopus.notes.join("\n"),
+    /content head/,
+    "and the decision must not claim a content head for it",
+  );
 });
 
 // Exactly two parents, and the count is load-bearing on its own. An octopus
@@ -3424,6 +3449,22 @@ test("an approved degraded pass survives the gate's own update-branch", async ()
 // `[first, second]` off the front would silently treat it as content-preserving.
 // The sha checks below the count reject 0 and 1 parents by themselves, so this is
 // the case only the count catches.
+// The query has to FETCH a third parent, or the count guard below can never fire
+// end to end: `parents(first: 2)` truncates an octopus head to exactly two nodes,
+// so `headParents.length === 2` passes and the merge is treated as an
+// update-branch. The unit test below feeds three parents directly and therefore
+// cannot see that — this pins the one thing it cannot.
+test("the head-commit query fetches enough parents to see a third", () => {
+  const helper = fs.readFileSync(path.join(__dirname, "auto-gate.js"), "utf8");
+  const fetched = helper.match(/parents\(first:\s*(\d+)\)/);
+  assert.ok(fetched, "the head commit query no longer fetches parents at all (#3803)");
+  assert.ok(
+    Number(fetched[1]) > 2,
+    `parents(first: ${fetched[1]}) truncates an octopus head to two nodes, which makes the ` +
+      "two-parent guard unreachable — fetch more than two so a third parent is visible (#3805)",
+  );
+});
+
 test("a merge with more than two parents is not an update-branch", async () => {
   const { updateBranchContentHead } = __test;
   // Containment always answers YES here, deliberately: otherwise the compare stub
@@ -6572,6 +6613,14 @@ async function runApplyGateStep({
 // `{ filename, previous_filename, status: "renamed" }` to get it, rather than
 // echoing back whatever the caller asked for: the old path is exactly the field
 // the gate used to drop, so a fake that could not express it could not fail.
+// How many parents a GraphQL document asks for, so the fake can truncate like the
+// server. Defaults high when the document does not ask at all, so an unrelated
+// query is never silently starved.
+function requestedParents(query) {
+  const asked = String(query || "").match(/parents\(first:\s*(\d+)\)/);
+  return asked ? Number(asked[1]) : 100;
+}
+
 function pullRequestFile(file) {
   return typeof file === "string" ? { filename: file, status: "modified" } : { ...file };
 }
@@ -6821,7 +6870,11 @@ function fakeGateGithub({
           // `updateBranchContentHead` asks whether a parent is contained in the
           // base branch, and only the second is answered with behind/identical.
           const target = String(options.basehead || "").split("...")[1] || "";
-          if (headParents.length === 2 && target === headParents[1]?.oid) {
+          // Keyed on the SHA alone, never on how many parents the fixture
+          // declares: keying on `length === 2` meant an octopus fixture fell
+          // through to the default "ahead" answer, so a truncating query looked
+          // safe for a reason that had nothing to do with the guard under test.
+          if (target && target === headParents[1]?.oid) {
             return { data: { behind_by: 0, ahead_by: 0, status: secondParentInBase ? "behind" : "diverged" } };
           }
           return {
@@ -6863,8 +6916,8 @@ function fakeGateGithub({
         },
       },
     },
-    graphql: async (_query, variables) => {
-      if (_query.includes("mutation DisablePullRequestAutoMerge")) {
+    graphql: async (query, variables) => {
+      if (query.includes("mutation DisablePullRequestAutoMerge")) {
         github.nativeAutoMergeDisableAttempts += 1;
         if (nativeAutoMergeDisableError) {
           throw nativeAutoMergeDisableError;
@@ -6875,7 +6928,7 @@ function fakeGateGithub({
         github.nativeAutoMergeArmed = nativeAutoMergeStaysArmed;
         return { disablePullRequestAutoMerge: { pullRequest: { number: 1465 } } };
       }
-      if (_query.includes("query AutoMergeState")) {
+      if (query.includes("query AutoMergeState")) {
         github.autoMergeStateReads += 1;
         if (autoMergeStateError && github.autoMergeStateReads > autoMergeStateErrorAfterRead) {
           throw autoMergeStateError;
@@ -6947,7 +7000,12 @@ function fakeGateGithub({
                 {
                   commit: {
                     committedDate: headCommittedDate,
-                    parents: { nodes: headParents },
+                    // Truncated to what the QUERY asked for, the way GitHub does.
+                    // A fake that always returns every parent cannot see a
+                    // `parents(first: 2)` that hides an octopus head's third —
+                    // which is exactly the defect #3805 reported, and an
+                    // end-to-end test against such a fake proves nothing.
+                    parents: { nodes: headParents.slice(0, requestedParents(query)) },
                   },
                 },
               ],

@@ -2531,9 +2531,13 @@ async function getPullRequest({ github, context, number }) {
             nodes {
               commit {
                 committedDate
-                # Two is enough: an update-branch merge has exactly two, and any
-                # commit with more than two is not one (#3803).
-                parents(first: 2) {
+                # THREE, not two. An update-branch merge has exactly two parents
+                # and anything with more is not one — but fetching only two
+                # truncates an octopus head to two nodes, so the count guard in
+                # updateBranchContentHead could never fire and a three-parent
+                # merge would be read as content-preserving (#3805). The third is
+                # fetched solely so the guard can see it.
+                parents(first: 3) {
                   nodes {
                     oid
                     committedDate
