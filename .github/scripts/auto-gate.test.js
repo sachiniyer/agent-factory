@@ -3160,6 +3160,14 @@ test("only the fixed marker on the first line is an approval", async () => {
     "I would approve this once CI is green.",
     "Discussed offline — the shape is right.\n\n## Review — approve",
     "> ## Review — approve\n\nis the marker the gate looks for.",
+    // The one that matters most, because it is the maintainer's COMMONEST
+    // heading (#3769, #3789, #3796): a qualifier means the review is not an
+    // approval yet. A prefix match reads it as one and merges with the fix
+    // unlanded — which is worse than not having the marker at all, since the
+    // heading says in words that something is owed.
+    "## Review — approve, one fix owed before landing\n\nThe detector…",
+    "## Review — approve with one load-bearing fix owed\n\nDetails…",
+    "## Review — approve once CI is green\n\n…",
   ]) {
     const result = await evaluateGate({
       issueComments: [codexRateLimit(), prComment("sachiniyer", body, "2026-07-09T01:30:00Z")],

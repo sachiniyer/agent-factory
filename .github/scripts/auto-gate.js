@@ -231,10 +231,17 @@ const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits for cod[e] revie
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 // A maintainer's sign-off, in the two forms this repository actually produces.
 //
-// The marker is anchored to the FIRST line and is a fixed string, because a
-// looser test would read an ordinary sentence as a merge authorisation. "Looks
-// good to me, approving" must not be one, and neither must a body that quotes
-// the marker mid-text — reviewing this very file produces exactly that.
+// The ENTIRE first line must equal this, not merely begin with it. A prefix test
+// looks equivalent and is not: the commonest review heading here is
+// "## Review — approve, one fix owed before landing" (#3769, #3789, #3796), and
+// a prefix match reads that as an approval and merges with the fix unlanded —
+// worse than having no marker at all, because the heading says in words that
+// something is owed. A qualifier on the heading withholds the approval, on
+// purpose: it is how a reviewer says "not yet" without inventing a second form.
+//
+// Exactness also covers the looser mistakes. "Looks good to me, approving" is
+// not a merge authorisation, and neither is a body that quotes the marker
+// mid-text — which reviewing this very file produces.
 const MAINTAINER_APPROVAL_MARKER = "## Review — approve";
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is
@@ -3072,10 +3079,11 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
   }
   const approvals = [
     ...reviews.filter((review) => String(review.state || "").toUpperCase() === "APPROVED"),
-    ...comments.filter((comment) =>
-      String(comment.body || "")
-        .trimStart()
-        .startsWith(MAINTAINER_APPROVAL_MARKER),
+    ...comments.filter(
+      (comment) =>
+        // The first line, whole and exact — see the marker's own comment for why
+        // a prefix test is the wrong shape here.
+        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER,
     ),
   ].filter(
     (artifact) =>

@@ -52,6 +52,9 @@ satisfied by the maintainer rather than skipped, so what is left is the mechanic
 part the gate already performs for every other passing PR. The approval is an
 APPROVED review from an allowed author, or a comment from one whose first line is
 exactly `## Review — approve` — the maintainer account cannot approve its own PR.
+That is the ENTIRE first line, exactly, not a prefix: a qualifier on the heading
+(`## Review — approve, one fix owed before landing`) withholds the approval on
+purpose, so a review that owes a fix cannot land on its own heading.
 It is bound by `headCurrentSince` like a Codex artifact, so a push after the
 sign-off returns the PR to the manual pass. It waives the review requirement and
 nothing else.

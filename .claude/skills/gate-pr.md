@@ -683,9 +683,15 @@ PR, which is why the comment marker exists.
 
 Two things the gate insists on, and both matter:
 
-- **The marker anchors the first line.** "Looks good to me, approving" is not an
-  approval, and neither is a body that quotes the marker mid-text — which a Codex
-  review of `auto-gate.js` produces.
+- **The entire first line, exactly.** Not a prefix. `## Review — approve, one fix
+  owed before landing` is the commonest heading here and it is **not** an
+  approval — a qualifier on the heading withholds it, on purpose, and that is how
+  a reviewer says "not yet" without inventing a second form. A prefix match would
+  read it as a sign-off and merge with the fix unlanded, which is worse than
+  having no marker at all, since the heading says in words that something is
+  owed. "Looks good to me, approving" is not an approval either, and neither is a
+  body that quotes the marker mid-text — which a Codex review of `auto-gate.js`
+  produces.
 - **The approval is bound to the head** by `headCurrentSince`, the same rule
   Codex artifacts are held to (#3702). Push after approving and the PR returns to
   the manual pass; a sign-off is about the code it was written against.
