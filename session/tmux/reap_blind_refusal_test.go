@@ -51,6 +51,10 @@ func TestBlindVanishedSessionRefusalTellsOperatorHowToTell(t *testing.T) {
 		"the refusal must say what to do with a generation no live session claims")
 	require.Contains(t, message, "leave that pid alone",
 		"the refusal must say what to do with a generation the live session claims")
+	// Logged so a play-test run (scripts/tmux-3706-scenario.sh) shows the actual
+	// operator-facing text a real vanished-session sweep produced, not just that
+	// assertions passed.
+	t.Logf("operator-facing refusal:\n%s", message)
 }
 
 // The synthetic half of the pin above: the message is built from a refusal this
