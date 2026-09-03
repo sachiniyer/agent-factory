@@ -153,6 +153,12 @@ func diffFixture(t *testing.T, report *marshalerReport, typ reflect.Type, entry 
 			if normalizedEmpty(entry, name, got, want) {
 				continue
 			}
+			if declared, ok := entry.normalizesEmpty[name]; ok && string(want) == "null" {
+				note(&report.changed, "%s: %s renders the absent member as %s, and the entry "+
+					"declares it normalizes to %s — a different public JSON type",
+					where, name, got, declared)
+				continue
+			}
 			note(&report.changed, "%s: %s emits %s, the field holds %s", where, name, got, want)
 		}
 	}
@@ -838,6 +844,11 @@ func fillUnwalked(filler *sentinelFiller, value reflect.Value, path string) {
 // fixtures of the same shape stay comparable, and unmistakably non-zero.
 var guardHiddenInstant = time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 
+// guardContextInterface is the one interface type the fixture has a
+// representative for — see populateOpaque's Interface arm for why it is an
+// exact type match rather than an Implements check.
+var guardContextInterface = reflect.TypeOf((*context.Context)(nil)).Elem()
+
 // populateOpaque gives a hidden channel or function a non-nil value.
 //
 // encoding/json cannot serialize either, so the main walk rightly ignores them —
@@ -889,19 +900,27 @@ func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, cl
 		// A hidden interface can be a pure GATE — GitWorktree's constructors
 		// assign a non-nil hooksCtx, and a marshaler can branch on its presence
 		// without ever reading it, which the register's old rationale did not
-		// cover (#3592 review). A context satisfies context.Context and any, so
-		// it opens both shapes; anything narrower is recorded rather than
-		// guessed at.
+		// cover (#3592 review).
+		//
+		// The CONTEXT SHAPE and nothing else gets the representative (#3655
+		// item 1). The test used to be "does a context satisfy this interface",
+		// which `any` answers yes to along with every other type in the
+		// language — and a context is no representative of `any`: a marshaler
+		// that asserts the field to a string and emits it finds a context in
+		// every fixture, emits nothing, and passes while the fixture records the
+		// gate as OPEN. Populated and reported are the only two answers, so a
+		// broader interface is written down by name and unclassifiedFixtureGaps
+		// then demands the reason the contract holds without it.
 		if !value.CanSet() || !value.IsNil() {
 			return
 		}
-		ctx := reflect.ValueOf(context.Background())
-		if ctx.Type().Implements(value.Type()) {
-			value.Set(ctx)
+		if value.Type() == guardContextInterface {
+			value.Set(reflect.ValueOf(context.Background()))
 			return
 		}
 		filler.unsupported = append(filler.unsupported,
-			path+" ("+value.Type().String()+" has no representative value to populate)")
+			path+" ("+value.Type().String()+" is not the context shape, and no representative "+
+				"value opens a gate that reads a concrete payload)")
 	case reflect.UnsafePointer:
 		filler.unsupported = append(filler.unsupported,
 			path+" (hidden unsafe.Pointer cannot be populated)")
@@ -909,18 +928,20 @@ func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, cl
 }
 
 // normalizedEmpty reports the one difference an entry may declare: a member the
-// marshaler renders as an empty collection where the default encoder renders the
-// absent one as null. Anything else — including the reverse — still fails.
+// marshaler renders as the empty collection IT DECLARES where the default
+// encoder renders the absent one as null. Anything else — including the reverse,
+// and including the other empty collection — still fails.
+//
+// The declared FORM is what is compared, not just the member name (#3655 item
+// 6). Accepting `[]` or `{}` for any named member retained nothing about which
+// the member is, so a regression rendering a nil SLICE as an object read as the
+// normalization the entry describes while changing the member's public JSON
+// type — and the marshaler picks that form itself, so it is a one-character edit
+// away. TestGuardNormalizedEmptyFormsMatchTheirFields ties each declared form to
+// the member's Go kind, so the declaration cannot drift from the type either.
 func normalizedEmpty(entry reviewedMarshaler, name string, got, want json.RawMessage) bool {
-	if string(want) != "null" || (string(got) != "[]" && string(got) != "{}") {
-		return false
-	}
-	for _, declared := range entry.normalizesEmpty {
-		if declared == name {
-			return true
-		}
-	}
-	return false
+	declared, ok := entry.normalizesEmpty[name]
+	return ok && string(want) == "null" && string(got) == declared
 }
 
 // jsonMemberName is the member name encoding/json gives a field: the tag's name
