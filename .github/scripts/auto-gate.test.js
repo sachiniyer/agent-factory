@@ -37,6 +37,14 @@ const CODEX_ARTIFACT_AT = "2026-07-09T01:20:00Z";
 const CODEX_LIMIT_ACCOUNT =
   "You have reached your Codex usage limits. You can see your limits in the " +
   "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).";
+// NOT captured in the wild — unlike the two above, this string is CONSTRUCTED
+// from the one scope clause Codex is known to use, to pin a structural guard
+// (#3743). The same bot login serves the dev-task path, so a limit message about
+// a non-review scope is reachable; what it will actually say is unknown. Treat
+// it as "some other scope", not as evidence about Codex's copy.
+const CODEX_LIMIT_OTHER_SCOPE =
+  "You have reached your Codex usage limits for cloud tasks. You can see your limits in the " +
+  "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).";
 
 test("Auto Gate can be recovered manually by PR number", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
@@ -3126,6 +3134,15 @@ test("both observed Codex usage-limit wordings are recognised", () => {
     assert.equal(CODEX_RATE_LIMIT_RE.test(body), true, `unrecognised wording: ${label}`);
   }
 
+  // …but the stem's job was never "any Codex limit" (#3743). A scope clause
+  // naming something OTHER than code review is evidence about a different job,
+  // and this detector publishes a PASS that says the REVIEWER is unavailable.
+  assert.equal(
+    CODEX_RATE_LIMIT_RE.test(CODEX_LIMIT_OTHER_SCOPE),
+    false,
+    "a limit about another Codex scope is not evidence about review capacity",
+  );
+
   // …and the stem stays a stem. It must not swallow an ordinary sentence that
   // happens to talk about limits, or the guard below is the only thing left
   // between a review and a false degradation.
@@ -3155,6 +3172,53 @@ test("the account-wide usage-limit wording degrades to maintainer review too", a
   assert.equal(result.manualMergeRequired, true, "the worse outage must not withdraw the exemption");
   assert.equal(result.shouldMerge, false, "degrading never merges");
   assert.match(result.summary, /usage-limited/);
+});
+
+// The end of that mechanism, and the direction that matters: degrading publishes
+// `PASS: The Codex reviewer is usage-limited` — copy a human acts on. A limit
+// message about another Codex scope is not evidence about review capacity, so it
+// must land on the silence case and keep blocking (#3743).
+test("a usage-limit message about another Codex scope keeps blocking", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit(CODEX_ARTIFACT_AT, CODEX_LIMIT_OTHER_SCOPE)],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "review capacity was never claimed to be out");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.doesNotMatch(
+    result.reasons.join("\n"),
+    /usage-limited/,
+    "the gate must not tell a human the reviewer is unavailable on this evidence",
+  );
+});
+
+// The same scope rule at the verdict site: a limit message about another scope
+// is not the thing that exclusion exists to catch, so it must not disqualify a
+// body from being a verdict either.
+test("the verdict exclusion is scoped to code review too", () => {
+  const { parseReviewedCommit, CODEX_VERDICT_LIMIT_RE } = __test;
+  const short = HEAD_SHA.slice(0, 10);
+
+  assert.equal(CODEX_VERDICT_LIMIT_RE.test(CODEX_LIMIT_CODE_REVIEWS), true);
+  assert.equal(
+    CODEX_VERDICT_LIMIT_RE.test(CODEX_LIMIT_OTHER_SCOPE),
+    false,
+    "another scope, not this rule's business",
+  );
+  assert.equal(
+    CODEX_VERDICT_LIMIT_RE.test(CODEX_LIMIT_ACCOUNT),
+    false,
+    "the bare wording carries no scope clause",
+  );
+
+  assert.equal(
+    parseReviewedCommit(
+      `### Codex Review\n\n${CODEX_LIMIT_OTHER_SCOPE}\n\n**Reviewed commit:** \`${short}\``,
+    ),
+    short,
+    "an other-scope limit does not disqualify a body that is otherwise a verdict",
+  );
 });
 
 // A bare limit message is never a verdict, in either wording — but it gets there

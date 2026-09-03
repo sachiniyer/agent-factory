@@ -81,7 +81,18 @@ const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 //
 // This is the OUTAGE detector, and it is deliberately NOT the pattern that
 // decides what counts as a verdict — see CODEX_VERDICT_LIMIT_RE below.
-const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits?\b/i;
+//
+// The trailing lookahead keeps the stem from meaning "any Codex limit" (#3743).
+// Dropping the scope clause is what fixes #3728, but the same bot login serves
+// the dev-task path, so a limit about a DIFFERENT job is reachable — and this
+// detector does not merely block, it publishes `PASS: The Codex reviewer is
+// usage-limited`, copy a human acts on before merging by hand. Review capacity
+// may be fine and the verdict simply not have arrived, which is the silence case
+// that must keep blocking. So: match the stem, and reject only when a scope
+// clause FOLLOWS that names something other than code review. A bare
+// "usage limits." has no scope clause and still matches, which is the whole of
+// #3728.
+const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits?\b(?!\s+for\s+(?!code\s+reviews?\b))/i;
 // The narrow pattern, kept narrow ON PURPOSE, for the one question the wide stem
 // must not answer: "is this body disqualified from being a verdict?"
 //
@@ -99,7 +110,13 @@ const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits?\b/i;
 // remedy is "wait for a review", and every re-review reproduces it. That is the
 // #3728 defect re-created one function over, so the exclusion keeps the wording
 // that a real limit message actually uses.
-const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
+// Scoped the same way, and for the same reason: a limit about another job is not
+// what this exclusion exists to catch either, so it must not take verdict status
+// away from a body that is otherwise a review. Here the scope clause is REQUIRED
+// rather than merely permitted — which is also what keeps the no-exit regression
+// fixed, since a review quoting either pattern's source carries the escape text
+// `\s+for\s+`, not real whitespace, and so does not match.
+const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits?\s+for\s+code\s+reviews?\b/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is

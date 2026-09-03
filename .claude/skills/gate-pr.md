@@ -229,7 +229,7 @@ jq -s --arg head "$HEAD" '
   add
   | map(select(.user.login == "chatgpt-codex-connector[bot]"))
   | map(select((.body // "") | test("\\bCodex Review\\b"; "i")))
-  | map(select((.body // "") | test("reached your Codex usage limits for code reviews"; "i") | not))
+  | map(select((.body // "") | test("reached your Codex usage limits?\\s+for\\s+code\\s+reviews?\\b"; "i") | not))
   | map(select((.body // "")
       | capture("(?:\\*\\*Reviewed commit:\\*\\*|Reviewed commit:)\\s*`(?<sha>[0-9a-f]{7,40})`"; "i")
       | .sha | ascii_downcase as $rc
@@ -560,17 +560,25 @@ is a pass**:
   opposite of a clean verdict, and it is the one most likely to be misread as
   "Codex responded".
 
-  **Two patterns, on purpose** (#3728). Detecting the OUTAGE uses the stem
+  **Two patterns, on purpose** (#3728). Detecting the OUTAGE matches the stem
   `reached your Codex usage limits?\b`, because matching only the long form
-  withdrew the reviewer-unavailable exemption during the more severe outage.
+  withdrew the reviewer-unavailable exemption during the more severe outage —
+  but it then REJECTS a message whose scope clause names something other than
+  code review (#3743). The same bot login serves the dev-task path, and
+  degrading publishes `PASS: The Codex reviewer is usage-limited`, so a limit
+  about a different job would put a claim in front of a human that the gate
+  cannot support. A bare `usage limits.` carries no scope clause and still
+  counts.
+
   Deciding a body is DISQUALIFIED from being a verdict — step 2's filter above,
-  and `parseReviewedCommit` in `auto-gate.js` — keeps the long wording. Both
-  reach that test only on a body already carrying the `Codex Review` marker,
-  which a real limit message never has, so the stem would buy nothing there and
-  would cost something real: a review that merely QUOTES the stem (every review
-  of `auto-gate.js` does) would stop counting as a verdict while also not
-  degrading — `Codex has not reviewed head <sha>` about a head it just reviewed,
-  with no exit.
+  and `parseReviewedCommit` in `auto-gate.js` — REQUIRES the code-review scope
+  clause instead, so it is narrower than the outage detector in the one direction
+  that matters. Both reach that test only on a body already carrying the
+  `Codex Review` marker, which a real limit message never has, so the stem would
+  buy nothing there and would cost something real: a review that merely QUOTES
+  the stem (every review of `auto-gate.js` does) would stop counting as a verdict
+  while also not degrading — `Codex has not reviewed head <sha>` about a head it
+  just reviewed, with no exit.
 
 Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
 fresh usage-limit reply degrades it to a manual-only pass that still does not
