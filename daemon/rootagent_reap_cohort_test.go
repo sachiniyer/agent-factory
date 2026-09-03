@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The #3699 regression suite: a root agent whose tmux vanished leaving ANY
@@ -40,6 +42,11 @@ const (
 	vanishedRootTmuxName    = "af_0f8fc14c_root"
 	vanishedRootGeneration  = "8d6d4cf664efb073354d5f41b3e5f207"
 	vanishedRootSurvivorPID = 1091038
+
+	// collidingRootTitle is NOT reserved (IsReservedTitle only TrimSpaces) yet
+	// derives the root's exact tmux name (toTmuxName deletes interior
+	// whitespace). It is the shape that makes the archived-rename hole reachable.
+	collidingRootTitle = "ro ot"
 )
 
 // markedSurvivorBackend models, at the daemon's teardown boundary, the one thing
@@ -69,9 +76,15 @@ type markedSurvivorBackend struct {
 	reapableWhenTrusted bool
 	// strictRefusals counts empty-cohort refusals, for the red run's message.
 	strictRefusals int
+	// duringKill runs INSIDE the teardown, which is the only place a test can
+	// observe the window reapDeadRoot is supposed to be holding exclusively.
+	duringKill func()
 }
 
 func (b *markedSurvivorBackend) Kill(instance *session.Instance, trustLiveGeneration bool) error {
+	if b.duringKill != nil {
+		b.duringKill()
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.survivorAlive {
@@ -231,4 +244,89 @@ func TestReapDeadRootRetainsTheRecordWhenTrustCannotSettleTheTeardown(t *testing
 	require.True(t, (*backends)[0].survivorIsAlive(),
 		"nothing settled the teardown, so the survivor must still be there")
 	requireSessionRecordRetained(t, manager, repo.ID, key, first)
+}
+
+// TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown closes the hole Codex
+// found in the first cut of the #3699 exclusivity argument.
+//
+// That argument leaned on the instance keeping its (repo, title) map slot for the
+// whole teardown, so no create could take the name. One path breaks it: an
+// ARCHIVED root reaches reapDeadRoot deliberately (ensureResolvedRoot routes
+// Archived to reap-and-recreate, because an archived root is inert and must not be
+// adopted as live), and for a LiveArchived instance findArchivedOnlyCollisionLocked
+// does not refuse — it SELECTS it, and renameArchivedForReuseLocked re-keys it so a
+// colliding create can have the name.
+//
+// And the colliding title need not be "root". IsReservedTitle only TrimSpaces,
+// while toTmuxName DELETES interior whitespace, so "ro ot" is creatable and derives
+// the identical tmux session name. Its create could therefore start a replacement
+// under the exact name the trusted blind sweep is sweeping, and the sweep would
+// adopt that replacement's generation and reap it — #3309 reopened, which is worse
+// than the bug #3700 fixes.
+//
+// The fence is the killsInFlight claim reapDeadRoot now registers for its whole
+// call. This drives the real window: the create is attempted from INSIDE the
+// teardown, which is where the race would land.
+func TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen, backends := installMarkedSurvivorRootBackend(t, true)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	require.Len(t, *seen, 1, "precondition: the first ensure must create the root")
+
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+
+	// The precondition that makes the rename path reachable at all.
+	first.SetStatusForTest(session.Archived)
+	require.Equal(t, session.LiveArchived, first.GetLiveness(),
+		"precondition: the rename path only selects a LiveArchived instance")
+	require.Equal(t,
+		tmux.SanitizedNameForRepo(session.RootSessionTitle, repoPath),
+		tmux.SanitizedNameForRepo(collidingRootTitle, repoPath),
+		"precondition: %q must derive the root's tmux name, or this proves nothing", collidingRootTitle)
+
+	var createErr error
+	var createAttempted bool
+	(*backends)[0].duringKill = func() {
+		createAttempted = true
+		_, createErr = manager.CreateSession(context.Background(), CreateSessionRequest{
+			Title:    collidingRootTitle,
+			RepoPath: repoPath,
+			Program:  "bash",
+		})
+	}
+
+	_, _, err = manager.reapDeadRoot(repo.ID, first)
+	require.NoError(t, err)
+	require.True(t, createAttempted, "the colliding create never ran, so the window was never exercised")
+	// The SPECIFIC refusal, not merely "an error". `require.Error` alone would be
+	// satisfied by the create failing for any unrelated reason — a bad program, a
+	// git hiccup — and would then pass with the fence removed. This message comes
+	// only from findArchivedOnlyCollisionLocked's killsInFlight fence.
+	require.ErrorContains(t, createErr, "an operation is already in progress",
+		"a create colliding on the root's tmux name was admitted while its teardown was in flight; "+
+			"the sweep can now adopt the replacement's generation and reap it (#3309)")
+
+	// And the rename must not have happened: the archived root still owns its own
+	// key. This is the property the fence protects, asserted directly rather than
+	// inferred from the error text.
+	manager.mu.Lock()
+	stillAtOriginalKey := manager.instances[key] == first
+	manager.mu.Unlock()
+	require.True(t, stillAtOriginalKey,
+		"the archived root was re-keyed out of its (repo, title) slot during its own teardown")
+
+	// And the claim must not leak: a heal that ends leaves the title operable.
+	manager.mu.Lock()
+	_, stillClaimed := manager.killsInFlight[key]
+	manager.mu.Unlock()
+	require.False(t, stillClaimed,
+		"reapDeadRoot leaked its killsInFlight claim; every later operation on the title would be refused")
 }
