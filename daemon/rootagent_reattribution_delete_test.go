@@ -342,3 +342,140 @@ func TestInventedIDReachesNothing(t *testing.T) {
 		t.Fatalf("nor may it deregister the project's record: %v", statErr)
 	}
 }
+
+// TestStaleMismatchDoesNotReleaseTombstoneAfterTheOriginalReturns is #3611's
+// headline regression. `deletedClaimDisproven` released a deletion tombstone on
+// the record's identityMismatch, which is the LAST OBSERVATION rather than a
+// current fact. For a main-root recording the recorded identity is also any
+// occupant's real ID, so the whole sequence lands at one repo id: the project
+// is deleted while its path is absent (claimant = itself), an unrelated clone
+// takes the path and proves the mismatch (round 15 releases the tombstone,
+// correctly), and then the occupant leaves and the deleted project's ORIGINAL
+// checkout comes back. During the settled probe's backoff nothing re-proves
+// anything, so the record still says identityMismatch and the tombstone keeps
+// being released — for a checkout that IS the deleted project's.
+func TestStaleMismatchDoesNotReleaseTombstoneAfterTheOriginalReturns(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	// No legacy root_agents entry: this test inspects the tombstone predicate
+	// itself, and a legacy opt-in would have the ensure pass create a root
+	// through the recording backend for reasons unrelated to the release rule.
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Deleted while the path is absent, so the record claims its own tombstone
+	// (claimantForRecord's determinate-absence arm) — the shape a later
+	// occupant's proven mismatch is allowed to release.
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject while absent: %v", err)
+	}
+	// An unrelated clone occupies the path and the probe proves the mismatch.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+	manager.ensureRootAgentsAndWait()
+
+	sharedID := repoID(t, repoPath)
+	manager.mu.Lock()
+	claimant, tombstoned := manager.deletedRootRepos[sharedID]
+	releasedOnFreshProof := !manager.rootDeletionTombstoneApplies(manager.rootAgentLayers.Load(), sharedID)
+	manager.mu.Unlock()
+	if !tombstoned || claimant != project.ID {
+		t.Fatalf("fixture must tombstone %s claimed by %s, got %q (present=%v)", sharedID, project.ID, claimant, tombstoned)
+	}
+	record, ok := manager.rootAgentLayers.Load().unresolvedRoots[sharedID]
+	if !ok || !record.identityMismatch || record.projectID != project.ID {
+		t.Fatalf("fixture must publish a PROVEN mismatch at %s owned by %s, got %+v (present=%v)", sharedID, project.ID, record, ok)
+	}
+	if !releasedOnFreshProof {
+		t.Fatalf("fixture must first reach round 15's release on a FRESH mismatch, or the assertion below proves nothing")
+	}
+
+	// The occupant leaves; the deleted project's ORIGINAL checkout returns to
+	// its own path. The probe settled onto its backoff one pass ago, so no
+	// probe re-checks the path in the passes below — the record's mismatch is
+	// now evidence about a checkout that is no longer there.
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove occupant: %v", err)
+	}
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore the original checkout: %v", err)
+	}
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
+
+	manager.mu.Lock()
+	stillReleased := !manager.rootDeletionTombstoneApplies(manager.rootAgentLayers.Load(), sharedID)
+	manager.mu.Unlock()
+	if stillReleased {
+		t.Fatalf("a mismatch nothing has re-proved since the checkout changed released the tombstone; the deleted project's own root can be recreated at its own path (#3611)")
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(sharedID).reason; got != rootAgentProjectDeleted {
+		t.Fatalf("the verdict must still report the deletion once the release evidence is stale, got %v", got)
+	}
+}
+
+// TestRefreshedMismatchKeepsReleasingTheTombstone is #3611's over-correction
+// guard, and it is the reason the freshness mark has to be REWRITTEN by a probe
+// result that confirms what the record already said. The negative-outcome arm
+// of the consume phase used to write only when a FLAG changed, so a mismatch
+// re-proved pass after pass would keep its original mark, go stale, and hold
+// the tombstone for the daemon's life — suppressing the live occupant's own
+// root, which is exactly what #3299 review round 15 exists to prevent.
+func TestRefreshedMismatchKeepsReleasingTheTombstone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	// Zero backoff so every pass re-probes and re-proves the same mismatch;
+	// with the default curve the entry would rest instead, which is the
+	// staleness the test above is about.
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject while absent: %v", err)
+	}
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+
+	sharedID := repoID(t, repoPath)
+	// The occupant STAYS. Every pass re-establishes the same mismatch, so the
+	// release must survive every one of them.
+	for pass := 1; pass <= 5; pass++ {
+		manager.ensureRootAgentsAndWait()
+		manager.mu.Lock()
+		applies := manager.rootDeletionTombstoneApplies(manager.rootAgentLayers.Load(), sharedID)
+		manager.mu.Unlock()
+		if pass == 1 {
+			record, ok := manager.rootAgentLayers.Load().unresolvedRoots[sharedID]
+			if !ok || !record.identityMismatch {
+				t.Fatalf("fixture must prove the mismatch on the first pass, got %+v (present=%v)", record, ok)
+			}
+		}
+		if applies {
+			t.Fatalf("pass %d: a mismatch the probe keeps re-proving must keep releasing the dead claimant's tombstone, or the live occupant's own root stays suppressed (#3299 review round 15)", pass)
+		}
+	}
+}
