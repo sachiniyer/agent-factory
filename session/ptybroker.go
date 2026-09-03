@@ -293,16 +293,31 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// A subscriber that registered while recovery was blocked in stop() computed
 	// needRepaint against the PRE-recovery base; by the time captureMu is released
 	// and we get here, recovery has advanced base past this subscriber's cursor,
-	// making the decision stale. Re-check against the post-recovery base, and when a
-	// repaint is now owed, move the cursor to the live tail: the repaint reconstructs
-	// the whole screen, so the retained ring must not be replayed on top of it (see
-	// the needRepaint comment above). base is monotonic, so the decision can only
+	// making the decision stale.
+	//
+	// The re-check PRESERVES the earlier decision and can only strengthen it, and it
+	// asks about the subscriber's CURSOR rather than the raw `since` (#3731). Both
+	// halves are load-bearing:
+	//
+	//   - `since` is not the cursor. A `since` past head clamped DOWN to the tail (see
+	//     above), so a discard that advances base past that clamped cursor while
+	//     staying below the large `since` leaves bytes provably missing that
+	//     `since < b.base` cannot see. That subscriber would get a bare cursor jump
+	//     for a pane whose whole screen was replaced — the frozen-stale-screen symptom
+	//     this block exists to prevent.
+	//   - Re-deriving from the cursor ALONE regresses the other direction: a reconnect
+	//     whose `since` was below the pre-recovery base is owed a repaint and already
+	//     had its cursor moved to the tail, so `sub.cursor < b.base` answers "no
+	//     repaint" and leaves it rendering its pre-death screen.
+	//
+	// base is monotonic and the cursor only moves forward, so the decision can only
 	// flip false→true here, never back.
 	b.mu.Lock()
-	needRepaint = since == 0 || since < b.base
-	if needRepaint {
-		sub.cursor = b.headLocked()
-	}
+	needRepaint = needRepaint || sub.cursor < b.base
+	// Where a repainted subscriber resumes — read HERE, before the snapshot below, so
+	// bytes the pane produces during the capture-pane exec land above it and are
+	// replayed rather than dropped. Committed only if a repaint is actually built.
+	repaintTail := b.headLocked()
 	b.mu.Unlock()
 
 	// Paint the current screen for a subscriber the replay stream can't reconstruct
@@ -313,10 +328,21 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// Captured AFTER registration (register-first) so no output can slip in between
 	// the snapshot and the cursor: bytes in that tiny window are simply in both the
 	// snapshot and the replayed tail (a harmless double-render), never dropped.
+	//
+	// The cursor moves to the live tail HERE, with the repaint, and not a moment
+	// earlier (#3731). The two are ONE decision: the repaint reconstructs the whole
+	// screen, so the retained ring must not be replayed on top of it (#1872) — but
+	// this snapshot is best-effort, and one that fails or carries no repaint state
+	// delivers no screen at all, leaving the ring as the only thing that can render
+	// the pane. Advancing regardless discarded those bytes in precisely the case they
+	// were needed: everything the capture emitted while ensureCaptureStarted was in
+	// flight, skipped for a repaint that never arrived, so the new terminal renders
+	// blank or truncated until unrelated output happens along.
 	if needRepaint {
 		if snap, err := b.ch.Snapshot(); err == nil && snapshotHasRepaintState(snap) {
 			rp := buildRepaintSnapshot(snap)
 			b.mu.Lock()
+			sub.cursor = repaintTail
 			sub.pendingRepaint = &rp
 			b.mu.Unlock()
 			sub.wake()

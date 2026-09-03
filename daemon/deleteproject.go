@@ -47,6 +47,13 @@ func (m *Manager) repoSessionTitlesLocked(repoID string, inFlightOnly bool) []st
 	// row has not yet transitioned to Lost+OpRestoring; the matching restore
 	// admission checks projectDeletes under this same lock. Other lifecycle ops
 	// retain DeleteProject's established per-session partial-failure behavior.
+	//
+	// A restore still WAITING for its session's operation lock is deliberately not
+	// here (#3600): it claims only once it holds that lock, so a delete raised
+	// during the wait is admitted, and the restore then reads projectDeletes under
+	// this same m.mu and refuses itself. Both orders end with exactly one of the
+	// two acting; which one is decided by whichever reaches m.mu first, and the
+	// loser's refusal names the fence it lost to.
 	for key := range m.restoresInFlight {
 		if rid, title := splitDaemonInstanceKey(key); rid == repoID {
 			titleSet[title] = struct{}{}
