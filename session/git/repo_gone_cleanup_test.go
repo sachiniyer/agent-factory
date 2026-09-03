@@ -397,10 +397,8 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 	previousTimeout := repoGoneCleanupTimeout
 	blocked := make(chan struct{})
 	started := make(chan struct{})
-	workerFinished := make(chan struct{})
 	repoGoneCleanupTimeout = 25 * time.Millisecond
 	repoGoneRemoveDirectory = func(string, pathIdentity, string, func(string) error) error {
-		defer close(workerFinished)
 		close(started)
 		<-blocked
 		return nil
@@ -413,11 +411,19 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 	type result struct {
 		state CleanupState
 		err   error
+		late  <-chan error
 	}
 	done := make(chan result, 1)
 	go func() {
-		state, err := gw.CleanupClaimedRepoGone(claim)
-		done <- result{state: state, err: err}
+		// The LATE-RESULT form, because the last assertion below is about state
+		// the worker writes AFTER the delete returns (#3775). Its channel is sent
+		// on past completeRemovedRelocationClaim, so waiting on it is a
+		// happens-before edge; a signal raised inside the stub is not — that fires
+		// one call earlier, and the assertion then races the clear it checks for.
+		// Sibling TestCleanupClaimedRepoGone_RetainedTreeDeletionSharesDeadline
+		// takes the same seam for the same reason.
+		state, err, late := gw.CleanupClaimedRepoGoneWithLateResult(claim)
+		done <- result{state: state, err: err, late: late}
 	}()
 	// Wait for the deletion worker to be blocked before timing the deadline, so
 	// the ceiling below bounds only the deadline firing and not the goroutine
@@ -433,27 +439,38 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 		t.Fatal("repo-gone recursive deletion ignored its hard caller deadline")
 	}
 	if got.state != CleanupStateUnknown || !errors.Is(got.err, context.DeadlineExceeded) {
+		close(blocked)
 		t.Fatalf("deadline must report unknown cleanup state; state=%v err=%v", got.state, got.err)
+	}
+	if got.late == nil {
+		close(blocked)
+		t.Fatal("a deadline that leaves the descriptor worker running must hand back its late result")
 	}
 	recovery, retained := gw.GetRelocationRecovery()
 	if !retained || recovery.State != RelocationRecoveryCleanupStalled || !recovery.IdentityKnown {
+		close(blocked)
 		t.Fatalf("deadline must retain the identity-qualified cleanup claim; retained=%v recovery=%+v", retained, recovery)
 	}
 	reloaded, err := NewGitWorktreeFromStorage(
 		gw.GetRepoPath(), worktree, "repo-gone", "af/repo-gone", "", false, true,
 	)
 	if err != nil {
+		close(blocked)
 		t.Fatalf("recreate worktree handle after restart: %v", err)
 	}
 	if err := reloaded.RestoreRelocationRecovery(recovery); err != nil {
+		close(blocked)
 		t.Fatalf("reload identity-qualified cleanup stall: %v", err)
 	}
 	_, restored, ok := reloaded.RelocationSnapshot()
 	if !ok || restored.State != RelocationRecoveryCleanupReady {
+		close(blocked)
 		t.Fatalf("a fresh daemon must re-arm the exact cleanup obligation; ok=%v recovery=%+v", ok, restored)
 	}
 	close(blocked)
-	<-workerFinished
+	if lateErr := <-got.late; lateErr != nil {
+		t.Fatalf("late descriptor cleanup reported a failure: %v", lateErr)
+	}
 	if recovery, retained := gw.GetRelocationRecovery(); retained {
 		t.Fatalf("late successful descriptor cleanup left a permanent stalled record: %+v", recovery)
 	}
