@@ -32,5 +32,8 @@ func NewTUIStateSchemaMigrationPlan(path string, validate SchemaValidator) Schem
 		Migrators:      NewSchemaMigrationRegistry(),
 		Validate:       validate,
 		Perm:           0644,
+		// The probe is written against DetectJSONSchemaVersion, which is this
+		// plan's detector verbatim.
+		ProveCurrentVersion: ProveJSONSchemaVersion,
 	}
 }

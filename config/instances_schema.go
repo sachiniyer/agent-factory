@@ -30,6 +30,10 @@ func NewInstancesSchemaMigrationPlan(path string) SchemaMigrationPlan {
 		Migrators:      registry,
 		Validate:       validateInstancesEnvelope,
 		Perm:           0644,
+		// detectInstancesSchemaVersion is DetectJSONSchemaVersion plus a
+		// "null" -> legacy pre-case, and the probe refuses "null" (it is not a
+		// JSON object), so the two agree wherever the probe answers true.
+		ProveCurrentVersion: ProveJSONSchemaVersion,
 	}
 }
 
