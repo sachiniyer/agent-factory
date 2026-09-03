@@ -13,6 +13,12 @@ on:
   # an easy way to silently stop the checks from running.
   merge_group:
 
+  # Auto Gate dispatches this when its own update-branch produced no
+  # pull_request run at all for the new head, so the update-and-merge loop cannot
+  # stall waiting for a run that will never exist (#3807). A dispatch takes a
+  # REF, never a sha, so it runs at the branch tip — which is the new head.
+  workflow_dispatch:
+
 concurrency:
   # pull_request keys the group on the PR number so a new push cancels the stale
   # run (pr-123). merge_group carries no pull_request payload, so that expression
