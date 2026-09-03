@@ -172,25 +172,43 @@ func TestProveJSONSchemaVersionRefusesNegativeTarget(t *testing.T) {
 }
 
 // The fast path exists to stop allocating, so assert that rather than trusting a
-// benchmark nobody runs. The full plan decodes a 1 MB instances.json into
-// map[string]any to read one integer — 92,035 allocations on this repo's largest
-// one — where the probe steadily makes none.
+// benchmark nobody runs.
 //
-// "Steadily" is the honest word, and AllocsPerRun measures exactly that: it
-// reports the mean over repeated runs and rounds, so the sync.Pool refill
-// json.Valid takes after a GC drains the pool is amortized away rather than
-// absent. A daemon profile still attributes a little to the probe; what it must
-// not do is scale with the size of the document.
-func TestFastPathProbeAllocatesNothingInSteadyState(t *testing.T) {
+// The claim under test is specifically that the probe does not scale with the
+// document — that is what made the old path expensive, and it is what a lazier
+// probe would give back. So the assertion is a comparison against the very thing
+// the probe replaced, on the same bytes, rather than an absolute count.
+//
+// An absolute count is the wrong assertion here, and was measured to be: the
+// probe allocates nothing per run in a warm loop, but json.Valid takes its
+// scanner from a sync.Pool, so once a GC drains that pool the refill lands on
+// whichever run comes next. AllocsPerRun reports a rounded mean, so under CI's
+// GC pressure a genuinely-free probe reads as 1 and `assert.Zero` fails. The
+// ratio below survives that with four orders of magnitude to spare, and still
+// fails loudly for any probe that decodes.
+func TestFastPathProbeDoesNotScaleWithTheDocument(t *testing.T) {
 	raw := syntheticInstancesEnvelope(400)
 	require.True(t, ProveJSONSchemaVersion(raw, InstancesSchemaVersion))
 
-	allocs := testing.AllocsPerRun(50, func() {
+	probeAllocs := testing.AllocsPerRun(20, func() {
 		if !ProveJSONSchemaVersion(raw, InstancesSchemaVersion) {
 			t.Fatal("probe stopped proving the fixture")
 		}
 	})
-	assert.Zero(t, allocs, "the fast-path probe must scan the bytes without allocating per run")
+	detectAllocs := testing.AllocsPerRun(20, func() {
+		if _, err := DetectJSONSchemaVersion(raw); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// Guard the guard: if the detector ever stopped decoding the whole document,
+	// the ratio below would pass for a reason that has nothing to do with the
+	// probe.
+	require.Greater(t, detectAllocs, float64(1000),
+		"the detector is supposed to decode the whole document; this comparison is meaningless if it does not")
+	assert.Less(t, probeAllocs, detectAllocs/100,
+		"the fast-path probe must read the version by scanning, not by decoding: "+
+			"%.0f allocations against the detector's %.0f on the same bytes", probeAllocs, detectAllocs)
 }
 
 func BenchmarkMigrateInstancesSchemaBytesAlreadyCurrent(b *testing.B) {
