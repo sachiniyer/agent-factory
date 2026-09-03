@@ -322,6 +322,13 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 		// Read the LOCKED file: reopening the link would resolve it again, and a
 		// link that moved since acquisition would answer this question about a
 		// file the lock does not cover (#3688).
+		//
+		// Unlike the writers, this branch deliberately does NOT re-confirm and
+		// refuse. It is a LOAD — the value it produces is the config af starts
+		// on — and the rest of the load path reads through the link outside any
+		// lock, so refusing here would make a moved link the one arrangement
+		// that stops af from starting at all, over a window that opens once per
+		// install (#3696 review).
 		if td, err := os.ReadFile(locked.file); err == nil {
 			if !isEffectivelyEmptyToml(td) {
 				cfg, perr := parseLoadedConfigTOML(td, prettyTomlPath, tomlPath)

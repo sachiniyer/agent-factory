@@ -168,6 +168,15 @@ func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alia
 	updated, groupedRemoved := deleteTOMLScalar(string(current), alias.section, alias.leaf)
 	updated, legacyRemoved := deleteTOMLScalar(updated, "", alias.legacy)
 	if !groupedRemoved && !legacyRemoved {
+		// "Nothing to remove" is a claim about a file, so it has to be a claim
+		// about the RIGHT file. Only the write path confirms otherwise, and a
+		// no-op takes it: a link retargeted to a config that does have the key
+		// would leave the user told it was already absent, which is the same
+		// silent wrong answer in the shape of a report rather than a lost
+		// update (#3696 review).
+		if err := locked.confirm(); err != nil {
+			return nil, err
+		}
 		return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: false}, nil
 	}
 	// Read after the no-op return above, for the same reason as its personal

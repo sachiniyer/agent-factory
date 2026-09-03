@@ -436,6 +436,97 @@ func TestFollowedLockPinsTheTargetItLocked(t *testing.T) {
 	})
 }
 
+// TestFollowedLockGuardsTheOutcomesThatNeverWrite covers the paths #3696's
+// review found on the way past the writers: a body can report an outcome
+// without ever reaching the guarded write, and a report about the wrong file is
+// the same silent wrong answer as a lost update, just in a different shape.
+func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
+	// movedLink stages a link that has ALREADY been retargeted away from the
+	// file the lock pinned — the state a body finds itself in when stow or a
+	// dotfiles checkout runs mid-operation.
+	movedLink := func(t *testing.T, lockedContent string) (target lockedTarget, locked, moved string) {
+		t.Helper()
+		// Parsing a config probes the user's shell for a claude alias; a plain
+		// sh takes the fast `which` path instead of an interactive bash.
+		t.Setenv("SHELL", "/bin/sh")
+		dotfiles := t.TempDir()
+		locked = filepath.Join(dotfiles, "af-config.toml")
+		moved = filepath.Join(dotfiles, "af-config.other.toml")
+		require.NoError(t, os.WriteFile(locked, []byte(lockedContent), 0644))
+		require.NoError(t, os.WriteFile(moved, []byte("schema_version = 1\n"), 0644))
+		link := filepath.Join(t.TempDir(), TomlConfigFileName)
+		require.NoError(t, os.Symlink(moved, link))
+		return lockedTarget{link: link, file: locked}, locked, moved
+	}
+
+	t.Run("unset refuses instead of reporting nothing to remove", func(t *testing.T) {
+		// The locked file does not carry the key, so the delete is a no-op and
+		// the write — the only thing that confirmed — never runs. Reporting
+		// "not set" here describes a file the link no longer names.
+		target, locked, moved := movedLink(t, "schema_version = 1\n")
+		alias, ok := configAliasForCanonical("network.listen_addr")
+		require.True(t, ok, "premise: the key under test is a migrated alias")
+
+		result, err := applyGlobalUnset(target, prettyHomePath(target.link), "network.listen_addr", alias)
+
+		require.Error(t, err, "a no-op report must not be made about a file the link stopped naming")
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked))
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+	})
+
+	t.Run("migrate refuses instead of reporting nothing to migrate", func(t *testing.T) {
+		target, locked, moved := movedLink(t, "schema_version = 1\nbranch_prefix = 'me/'\n")
+
+		result, err := migrateConfigFile(target)
+
+		require.Error(t, err, "a nothing-to-migrate report must not be made about a file the link stopped naming")
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked))
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+	})
+
+	t.Run("a refused migration leaves no backup behind", func(t *testing.T) {
+		// Here the link still names the locked file when the migration starts,
+		// so the backup gets written; the retarget lands in the window between
+		// that and the guarded write. The error says nothing was written, and a
+		// .bak left on disk would make that false — and would consume a slot
+		// availableBackupPath keeps for the ORIGINAL pre-migration copy.
+		t.Setenv("SHELL", "/bin/sh")
+		dotfiles := t.TempDir()
+		locked := filepath.Join(dotfiles, "af-config.toml")
+		moved := filepath.Join(dotfiles, "af-config.other.toml")
+		require.NoError(t, os.WriteFile(locked, []byte("schema_version = 1\nlisten_addr = '0.0.0.0:8443'\n"), 0644))
+		require.NoError(t, os.WriteFile(moved, []byte("schema_version = 1\n"), 0644))
+		link := filepath.Join(t.TempDir(), TomlConfigFileName)
+		require.NoError(t, os.Symlink(locked, link))
+
+		migrateWriteRaceHookForTest = func() {
+			require.NoError(t, os.Remove(link))
+			require.NoError(t, os.Symlink(moved, link))
+		}
+		t.Cleanup(func() { migrateWriteRaceHookForTest = nil })
+
+		before, err := os.ReadFile(locked)
+		require.NoError(t, err)
+
+		_, err = migrateConfigFile(lockedTarget{link: link, file: locked})
+
+		require.Error(t, err, "the guarded write must refuse once the link has moved")
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+
+		entries, rerr := os.ReadDir(dotfiles)
+		require.NoError(t, rerr)
+		for _, entry := range entries {
+			assert.NotContains(t, entry.Name(), ".bak",
+				"a refused migration says nothing was written, so it must leave no backup behind")
+		}
+		after, rerr := os.ReadFile(locked)
+		require.NoError(t, rerr)
+		assert.Equal(t, string(before), string(after), "and the locked file is untouched")
+	})
+}
+
 // TestAtomicWriteFileDoesNotFollowLinksByDefault is the counterpart guarantee,
 // and the reason following is a separate function rather than a flag.
 //

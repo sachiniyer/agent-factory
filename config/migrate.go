@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/aymanbagabas/go-udiff"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // MigrateGlobalConfig rewrites the deprecated spellings in the global config
@@ -131,6 +133,12 @@ type UnmigratedKey struct {
 	Detail []string `json:"detail,omitempty"`
 }
 
+// migrateWriteRaceHookForTest, when non-nil, runs once the backup is on disk
+// and before the migrated config is written — the window in which a link
+// retarget makes the guarded write refuse with a backup already created. Tests
+// use it to drive that window deterministically.
+var migrateWriteRaceHookForTest func()
+
 // migrateConfigFile is MigrateGlobalConfig's body, minus the lock and the
 // load precondition, so tests can drive it against a file directly.
 func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
@@ -232,6 +240,12 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		result.Migrated = append(result.Migrated, MigratedKey{From: alias.legacy, To: alias.canonical, Value: effective})
 	}
 	if len(result.Migrated) == 0 {
+		// "Nothing to migrate" is a claim about a file, so it has to be about
+		// the right one. Only the write confirms otherwise, and this path never
+		// reaches it (#3696 review).
+		if err := locked.confirm(); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
@@ -266,13 +280,32 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	if info, statErr := os.Stat(locked.file); statErr == nil {
 		mode = info.Mode().Perm()
 	}
+	// Confirm BEFORE putting the backup on disk, not only inside the guarded
+	// write below. A refusal after the backup exists contradicts its own error
+	// — which says nothing was written — and burns a backup slot, and
+	// availableBackupPath keeps those so the OLDEST copy, the one most likely
+	// to hold real settings, survives (#3696 review).
+	if err := locked.confirm(); err != nil {
+		return nil, err
+	}
 	// The backup path is already derived from the RESOLVED config, and
 	// availableBackupPath only returns a path that does not exist — so there is
 	// no link to follow here and the plain writer says so.
 	if err := AtomicWriteFile(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
+	if migrateWriteRaceHookForTest != nil {
+		migrateWriteRaceHookForTest()
+	}
 	if err := locked.write([]byte(bom+content), mode); err != nil {
+		// Confirming above narrows that window; it cannot close it, and the
+		// write can fail for its own reasons besides. The rename is the only
+		// step in it that mutates anything, so an error means the config is
+		// untouched and this backup copies a file nobody rewrote. Take it back
+		// out rather than leave a .bak the error says does not exist.
+		if rmErr := os.Remove(backup); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.WarningLog.Printf("migrate: could not remove the backup %s after the migration write failed: %v", prettyHomePath(backup), rmErr)
+		}
 		return nil, err
 	}
 	result.Backup = backup
