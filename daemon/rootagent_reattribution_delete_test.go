@@ -251,7 +251,7 @@ func TestDeleteByUnresolvablePathAddressesTheRecordedProject(t *testing.T) {
 	project := registerTestProject(t, repoPath)
 	realID := repoID(t, repoPath)
 	rewriteRecordRootForDeferral(t, project.ID, worktree)
-	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
 		t.Fatalf("record the resolved identity: %v", err)
 	}
 

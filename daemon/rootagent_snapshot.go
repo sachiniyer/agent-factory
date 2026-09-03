@@ -246,7 +246,7 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 				proven, ok := config.ResolveRegisteredProjectRepoID(context.Background(), p)
 				switch {
 				case ok && proven == repoID:
-					if _, err := config.ReconcileProjectRepoID(p.ID, repoID); err != nil {
+					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, nil); err != nil {
 						// Keep the work, or there is none left to retry: this
 						// project resolves, so it never joins unresolvedRoots
 						// and the heal pass would return before reaching
@@ -269,7 +269,7 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 					// start without the project's disable. The proof wins,
 					// because it is the evidence about which checkout this is.
 					repoID, repoRoot = proven, p.Root
-					if _, err := config.ReconcileProjectRepoID(p.ID, repoID); err != nil {
+					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, nil); err != nil {
 						reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID, proven: true}
 						log.WarningLog.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the identity its path resolved to, but that could not be recorded; retrying on the ensure cadence: %v", p.ID, repoID, err)
 					}

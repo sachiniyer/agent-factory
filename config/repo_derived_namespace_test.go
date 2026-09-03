@@ -111,14 +111,14 @@ func TestReconciliationIsOneWay(t *testing.T) {
 		t.Fatalf("a record with no recorded identity must fall back to an INVENTED id, got %s", got)
 	}
 	// ...until the first successful resolution writes the real one down, once.
-	wrote, err := ReconcileProjectRepoID(project.ID, resolved.ID)
+	wrote, err := ReconcileProjectRepoID(project.ID, resolved.ID, nil)
 	if err != nil {
 		t.Fatalf("ReconcileProjectRepoID: %v", err)
 	}
 	if wrote {
 		t.Fatalf("reconciliation must not rewrite an identity that is already recorded — that is what one-way means")
 	}
-	if _, err := ReconcileProjectRepoID(project.ID, DerivedRepoIDForUnresolvedRoot(repo)); err != nil {
+	if _, err := ReconcileProjectRepoID(project.ID, DerivedRepoIDForUnresolvedRoot(repo), nil); err != nil {
 		t.Fatalf("ReconcileProjectRepoID with an invented id: %v", err)
 	}
 	all, err := ListProjects()

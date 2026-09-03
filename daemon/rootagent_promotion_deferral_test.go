@@ -442,7 +442,7 @@ func TestUnresolvedProjectStillSeesItsPathKeyedOptIn(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	worktree, project, realID := worktreeRecordedProject(t)
-	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
 		t.Fatalf("record the resolved identity: %v", err)
 	}
 	if realID == config.RepoIDFromRoot(filepath.Clean(worktree)) {
@@ -486,7 +486,7 @@ func TestOccupiedRecordedRootDoesNotBorrowItsOptIn(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	worktree, project, realID := worktreeRecordedProject(t)
-	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
 		t.Fatalf("record the resolved identity: %v", err)
 	}
 	if err := os.RemoveAll(worktree); err != nil {

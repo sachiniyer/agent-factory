@@ -223,7 +223,7 @@ func TestReconciledDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
 		t.Fatalf("fixture must use a recorded root that is not the repository's identity root, both %s", realID)
 	}
 	// The identity is RECORDED — this record has nothing provisional about it.
-	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
 		t.Fatalf("record the resolved identity: %v", err)
 	}
 
@@ -270,7 +270,7 @@ func TestOccupiedRecordedRootIsNotSweptByItsHash(t *testing.T) {
 	installOptionsRecordingBackend(t)
 	worktree, project, realID := worktreeRecordedProject(t)
 	pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
-	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
 		t.Fatalf("record the resolved identity: %v", err)
 	}
 	if err := os.RemoveAll(worktree); err != nil {
@@ -684,7 +684,7 @@ func TestSweepRequiresADeterminateVerdictAboutTheRecordedPath(t *testing.T) {
 			installOptionsRecordingBackend(t)
 			worktree, project, realID := worktreeRecordedProject(t)
 			pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
-			if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+			if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
 				t.Fatalf("record the resolved identity: %v", err)
 			}
 			if err := os.RemoveAll(worktree); err != nil {
@@ -877,7 +877,7 @@ func TestReconciliationDuringADeleteStillDeregisters(t *testing.T) {
 			return
 		}
 		reconciled = true
-		if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+		if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
 			t.Fatalf("reconcile mid-delete: %v", err)
 		}
 	}

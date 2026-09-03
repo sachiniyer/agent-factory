@@ -320,7 +320,12 @@ func ReconciledRepoIDForProject(p Project) string {
 // left alone, so this can run on every successful resolution without racing
 // itself, and it never overwrites what a rebind deliberately set. Reports
 // whether it wrote.
-func ReconcileProjectRepoID(projectID, repoID string) (bool, error) {
+//
+// stillWanted, when non-nil, is re-asked under the registry lock, immediately
+// before the write. It is how a caller whose answer can change — a daemon
+// whose delete fences an identity — gets a decision that is ordered against
+// this write rather than merely earlier than it.
+func ReconcileProjectRepoID(projectID, repoID string, stillWanted func() bool) (bool, error) {
 	if projectID == "" || repoID == "" || IsDerivedRepoID(repoID) {
 		return false, nil
 	}
@@ -333,6 +338,17 @@ func ReconcileProjectRepoID(projectID, repoID string) (bool, error) {
 		records, err := loadProjectRecords(dir)
 		if err != nil {
 			return err
+		}
+		// Asked HERE, under the registry lock, and not only by the caller before
+		// it (#3530 review id 3920131413). A delete for this identity that took
+		// the lock first found a row with nothing recorded and could not match
+		// it — it has no evidence connecting the two — so the write must be the
+		// side that yields: landing it afterwards leaves a durable row the
+		// delete has already reported removing nothing about, and the project
+		// returns. Nil means "no reason not to", which is what a startup
+		// backfill passes.
+		if stillWanted != nil && !stillWanted() {
+			return nil
 		}
 		for _, record := range records {
 			if record.ID != projectID || record.RepoID != "" {

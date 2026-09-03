@@ -185,21 +185,32 @@ func DeregisterProjectByRecordedIdentity(repoID string, rootAbsent func(root str
 				matches = append(matches, record)
 			}
 		}
+		// Uniqueness is not established while ANY record is unreadable (#3530
+		// review id 3920131407): an unreadable record's repo_id is exactly what
+		// could not be read, so it may carry this identity too. Refuse before
+		// counting readable rows at all, or a delete reports success while a
+		// second row survives to restore the project once the first is
+		// repaired.
+		if len(failures) > 0 {
+			return fmt.Errorf("%d project registry record(s) could not be read (%s), so it cannot be established that only one record carries repository identity %s; repair or remove those directories under %s, then retry", len(failures), projectRecordFailureIDs(failures), repoID, dir)
+		}
 		if len(matches) == 0 {
-			if len(failures) > 0 {
-				// A record that could not be read may be the one carrying this
-				// identity — its repo_id is exactly what could not be read — so
-				// "no match" is unprovable here (#3297's rule, #3530 review id
-				// 3919996266).
-				return fmt.Errorf("no readable project record carries repository identity %s, and %d record(s) could not be read (%s); repair or remove those directories under %s, then retry", repoID, len(failures), projectRecordFailureIDs(failures), dir)
-			}
 			return nil
 		}
 		if len(matches) > 1 {
 			return nil
 		}
 		absent, err := rootAbsent(matches[0].Root)
-		if err != nil || !absent {
+		if err != nil {
+			// An operational failure observing the root is not "the root is
+			// there" (#3530 review id 3920131418). By the time the caller runs
+			// this, its sessions are archived and its opt-in is gone, so
+			// swallowing the error reports success over a row that survives.
+			// A caller's deliberate bound reports (false, nil) instead, which
+			// declines without failing.
+			return fmt.Errorf("could not observe the recorded root of the project carrying repository identity %s: %w", repoID, err)
+		}
+		if !absent {
 			return nil
 		}
 		if err := os.RemoveAll(filepath.Join(dir, matches[0].ID)); err != nil {

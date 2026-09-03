@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -440,6 +441,50 @@ func TestDeregisterByRecordedIdentityRefusesWhatItCannotEstablish(t *testing.T) 
 		}
 	})
 
+	t.Run("an unreadable record makes uniqueness unprovable", func(t *testing.T) {
+		// Even with one readable, absent, matching row: the unreadable
+		// record's repo_id is exactly what could not be read, so it may carry
+		// this identity too (#3530 review id 3920131407).
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+		initRepoWithCommit(t, repo)
+		project, err := RegisterProject(repo)
+		if err != nil {
+			t.Fatalf("RegisterProject: %v", err)
+		}
+		if err := os.RemoveAll(repo); err != nil {
+			t.Fatalf("remove checkout: %v", err)
+		}
+		unreadable := filepath.Join(mustRegistryDir(t), "prj_ffffffffffffffffffffffffffffffff")
+		if err := os.MkdirAll(unreadable, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(unreadable, projectMetadataFileName), []byte("{ not json"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, _, err := DeregisterProjectByRecordedIdentity(project.RepoID, absent); err == nil {
+			t.Fatalf("uniqueness is unprovable while a record cannot be read; removing the readable row can leave a second one behind")
+		}
+	})
+
+	t.Run("an observation failure is not a present root", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+		initRepoWithCommit(t, repo)
+		project, err := RegisterProject(repo)
+		if err != nil {
+			t.Fatalf("RegisterProject: %v", err)
+		}
+		if err := os.RemoveAll(repo); err != nil {
+			t.Fatalf("remove checkout: %v", err)
+		}
+		failing := func(string) (bool, error) { return false, fmt.Errorf("EIO") }
+		if _, _, err := DeregisterProjectByRecordedIdentity(project.RepoID, failing); err == nil {
+			t.Fatalf("an operational failure observing the root must surface: by this point the caller has archived its sessions, so a silent no-op reports success over a surviving row")
+		}
+	})
+
 	t.Run("a read failure is not an empty result", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", home)
@@ -491,5 +536,38 @@ func setRecordedRepoIDForTest(t *testing.T, projectID, repoID string) {
 	}
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		t.Fatalf("write record: %v", err)
+	}
+}
+
+// TestReconcileYieldsToADeleteHoldingTheIdentity pins #3530 review id
+// 3920131413. A delete that took the registry lock FIRST finds a row with
+// nothing recorded and cannot match it — it has no evidence connecting the two
+// — so the write is the side that must yield. Asking before the lock only
+// orders the calls; the predicate is re-asked under it.
+func TestReconcileYieldsToADeleteHoldingTheIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	initRepoWithCommit(t, repo)
+	project, err := RegisterProject(repo)
+	if err != nil {
+		t.Fatalf("RegisterProject: %v", err)
+	}
+	identity := project.RepoID
+	makeRecordLegacy(t, project.ID)
+
+	wrote, err := ReconcileProjectRepoID(project.ID, identity, func() bool { return false })
+	if err != nil {
+		t.Fatalf("a declined write is not a failure: %v", err)
+	}
+	if wrote {
+		t.Fatalf("the write must yield while its caller says the identity is spoken for")
+	}
+	if raw := rawProjectRecord(t, project.ID); raw["repo_id"] != nil {
+		t.Fatalf("and nothing may reach the record, got %v", raw["repo_id"])
+	}
+
+	// And it writes once nothing holds it.
+	if wrote, err := ReconcileProjectRepoID(project.ID, identity, func() bool { return true }); err != nil || !wrote {
+		t.Fatalf("expected the write once the identity is free: wrote=%v err=%v", wrote, err)
 	}
 }
