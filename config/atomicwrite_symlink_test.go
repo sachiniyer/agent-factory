@@ -486,6 +486,22 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
 	})
 
+	t.Run("root-agent deregistration refuses instead of reporting nothing removed", func(t *testing.T) {
+		// The costliest of the three. DeleteProject reads a nil error here as
+		// "the durable cleanup succeeded" and deletes the project, so an opt-in
+		// surviving in the config the link now names respawns that project on
+		// the next daemon start — which is precisely what its own error message
+		// promises cannot happen.
+		target, locked, moved := movedLink(t, "schema_version = 1\n")
+
+		removed, err := deregisterRootAgentsLocked(target, []string{RepoIDFromRoot("/repos/gone")})
+
+		require.Error(t, err, "a nothing-removed answer must not be made about a file the link stopped naming")
+		assert.Nil(t, removed)
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked))
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+	})
+
 	t.Run("a refused migration leaves no backup behind", func(t *testing.T) {
 		// Here the link still names the locked file when the migration starts,
 		// so the backup gets written; the retarget lands in the window between

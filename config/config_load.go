@@ -359,6 +359,11 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			// asks — is something already at config.toml, is that something a
 			// link — are questions about the link itself, which the pinned
 			// target cannot answer.
+			//
+			// It does not confirm-and-refuse either, for the same reason as the
+			// winner branch above: what it returns is the config af STARTS on,
+			// not a report about what af changed. Every command outcome under
+			// this lock confirms; these two loads deliberately do not.
 			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
 			if mErr != nil {
 				return mErr
