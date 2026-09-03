@@ -83,7 +83,7 @@ func TestGuardFixtureGapRegisterIsCurrent(t *testing.T) {
 		}
 		filler := &sentinelFiller{}
 		value := reflect.New(typ).Elem()
-		filler.fill(value, "", 0, false)
+		filler.fill(value, "", 0, guardAddressable)
 		filler.unsupported, filler.tooDeep = nil, nil
 		plantUnwalkedState(filler, value, guardChanOpen)
 		for _, gap := range append(dedupeSorted(filler.unsupported), dedupeSorted(filler.tooDeep)...) {
@@ -171,7 +171,7 @@ func plantedRecord(t *testing.T, typ reflect.Type, spec fixtureSpec) (reflect.Va
 	t.Helper()
 	filler := &sentinelFiller{seq: spec.seq}
 	value := reflect.New(typ).Elem()
-	filler.fill(value, "", 0, false)
+	filler.fill(value, "", 0, guardAddressable)
 	var unwalked []string
 	if spec.withUnwalked {
 		unwalked = plantUnwalkedState(filler, value, spec.chans)
@@ -549,7 +549,7 @@ func fillUnwalked(filler *sentinelFiller, value reflect.Value, path string) {
 	case reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer:
 		return
 	}
-	filler.fill(value, path, 0, false)
+	filler.fill(value, path, 0, guardAddressable)
 }
 
 // guardHiddenInstant is the value a hidden timestamp is set to: fixed, so two

@@ -218,7 +218,7 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				return
 			}
 			probe := &sentinelFiller{}
-			probe.fill(reflect.New(typ).Elem(), "", 0, false)
+			probe.fill(reflect.New(typ).Elem(), "", 0, guardAddressable)
 			if len(probe.unsupported) > 0 || len(probe.tooDeep) > 0 {
 				t.Fatalf("the walk could not plant %s: unsupported=%v tooDeep=%v",
 					typ, probe.unsupported, probe.tooDeep)
