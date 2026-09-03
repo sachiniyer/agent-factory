@@ -2,6 +2,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const os = require("node:os");
+const { spawnSync } = require("node:child_process");
 const autoGate = require("./auto-gate.js");
 const { __test } = autoGate;
 
@@ -145,6 +147,94 @@ test("a review quoting the vendor phrase across a line wrap keeps its verdict", 
     true,
     "a wrapped real outage message must still count",
   );
+});
+
+// The hand gate must SEE what the real gate blocks (#3773).
+//
+// `.claude/skills/gate-pr.md` runs exactly where Auto Gate cannot — on a PR that
+// changes auto-gate.js, since the gate runs master's copy, and during a Codex
+// outage — so the weaker of the two gates is the one in force at those moments.
+// It restated this classification in jq and restated an OLD version: #3689 and
+// #3728 updated the mirror, #3670 did not, and the #3656 artifact shape passed
+// the hand gate for months while this file blocked it.
+//
+// So the skill CALLS unansweredFindingArtifacts, and this test runs the recipe
+// the skill actually ships — extracted from the markdown, not retyped — against
+// a fixture of that shape. A recipe is code; a recipe nobody executes is a
+// claim.
+test("the hand gate's step 3b recipe blocks the artifact shape that merged #3656", () => {
+  const skill = fs.readFileSync(GATE_PR_SKILL, "utf8");
+  const recipe = skill.match(/```bash\n([\s\S]*?unansweredFindingArtifacts[\s\S]*?)```/);
+  assert.ok(recipe, "gate-pr.md no longer carries a step 3b recipe calling the script (#3773)");
+
+  // The node program the recipe runs, lifted out of the shell wrapper exactly as
+  // pasted — single-quoted, so the shell passes it through unchanged.
+  const program = recipe[1].match(/node -e '\n([\s\S]*?)' "\$REPO_ROOT/);
+  assert.ok(program, "step 3b no longer runs a node program against auto-gate.js");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-pr-3773-"));
+  // The #3656 shape: a Codex ISSUE comment carrying P badges, no `Reviewed
+  // commit:` line, no commit_id, and a branch-relative link rather than a SHA —
+  // so it binds to no head at all.
+  const finding = {
+    id: 5514996957,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-5514996957",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    created_at: "2026-07-09T01:20:00Z",
+    updated_at: "2026-07-09T01:20:00Z",
+    body:
+      "### 💡 Codex Review\n\nhttps://github.com/sachiniyer/agent-factory/blob/master/docs/x.md#L1\n" +
+      "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Finding**\n",
+  };
+  const cleanVerdict = {
+    id: 5514996958,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-5514996958",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    created_at: "2026-07-09T01:25:00Z",
+    updated_at: "2026-07-09T01:25:00Z",
+    body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${HEAD_SHA.slice(0, 10)}\``,
+  };
+  fs.writeFileSync(path.join(dir, "issue-comments.json"), JSON.stringify([finding, cleanVerdict]));
+  fs.writeFileSync(path.join(dir, "reviews.json"), "[]");
+
+  const run = (comments) => {
+    fs.writeFileSync(path.join(dir, "issue-comments.json"), JSON.stringify(comments));
+    return spawnSync(
+      process.execPath,
+      ["-e", program[1], path.join(__dirname, "auto-gate.js"), dir, HEAD_SHA, "2026-07-09T01:00:00Z"],
+      { encoding: "utf8" },
+    );
+  };
+
+  const blocked = run([finding, cleanVerdict]);
+  assert.equal(blocked.status, 1, `the recipe must block the #3656 shape: ${blocked.stdout}${blocked.stderr}`);
+  assert.match(blocked.stdout, /name no commit/);
+  assert.match(blocked.stdout, /issuecomment-5514996957/, "it must name WHICH artifact");
+
+  // …and the same recipe must agree with the script it calls, on the same input.
+  // That is the whole point: not a mirror, a call.
+  const direct = __test.unansweredFindingArtifacts({
+    artifacts: [finding, cleanVerdict],
+    acknowledgementCandidates: [finding, cleanVerdict],
+    headSha: HEAD_SHA,
+    headCommitTime: Date.parse("2026-07-09T01:00:00Z"),
+  });
+  assert.equal(direct.length, 1, "the script blocks it too");
+
+  // Answered, by a comment that LINKS the artifact and carries a marker: both
+  // the recipe and the script clear it.
+  const answer = {
+    id: 5514996959,
+    user: { login: "sachiniyer" },
+    created_at: "2026-07-09T01:30:00Z",
+    updated_at: "2026-07-09T01:30:00Z",
+    body: "Read it — ACCEPTED https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-5514996957",
+  };
+  const cleared = run([finding, cleanVerdict, answer]);
+  assert.equal(cleared.status, 0, `an answered artifact must clear: ${cleared.stdout}${cleared.stderr}`);
+  assert.match(cleared.stdout, /no unbound finding artifacts/);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 // One rule, one wording, everywhere it is stated (#3744).
