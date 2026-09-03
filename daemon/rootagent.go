@@ -420,7 +420,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		// reap below does blocking work, so createVerifiedRoot re-proves after
 		// it (#3366 review). The full rationale is verifyRootCreateCheckout's,
 		// next to what it gates.
-		if err := verifyRootCreateCheckout(identity); err != nil {
+		if err := m.proveRootCreateCheckout(repo.ID, identity); err != nil {
 			m.rootEnsureFailed(stateKey, st, err)
 			return
 		}
@@ -518,7 +518,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
 	}
-	data, err := m.createVerifiedRoot(identity, req)
+	data, err := m.createVerifiedRoot(repo.ID, identity, req)
 	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
 		// can no longer resume (cleared history, a transcript store the agent no
@@ -541,7 +541,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 					workspace, req.resumeConversation.ID, err, state.Resume.ID)
 				req.resumeConversation = state.Resume
 				carried.conversation = state.Resume
-				data, err = m.createVerifiedRoot(identity, req)
+				data, err = m.createVerifiedRoot(repo.ID, identity, req)
 			}
 		}
 	}
@@ -549,7 +549,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
-		data, err = m.createVerifiedRoot(identity, req)
+		data, err = m.createVerifiedRoot(repo.ID, identity, req)
 	}
 	if err != nil {
 		if isRootCheckoutRefusal(err) {
