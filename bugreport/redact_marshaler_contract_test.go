@@ -338,13 +338,23 @@ func guardSettableField(value reflect.Value, i int) reflect.Value {
 	return reflect.NewAt(held.Type(), held.Addr().UnsafePointer()).Elem()
 }
 
-// nilOptionalPointers clears every pointer the walk allocated, so the record
-// reads the way an ordinary one with nothing optional set does.
+// nilOptionalPointers clears every pointer the walk allocated on the WALKED side
+// of a record, so it reads the way an ordinary one with nothing optional set
+// does.
 //
 // fill allocates unconditionally — it has to, or it could not plant inside an
 // optional subtree — which means the absent case was never read at all, and a
 // marshaler that exposes hidden state only while a pointer is nil would keep
 // that branch shut in every fixture (#3592 review).
+//
+// Which side a field is on is guardHidesSubtree's answer, and this traversal
+// used to give its own (#3655 item 3). It skipped every unexported field, so an
+// optional pointer PROMOTED out of an anonymous unexported embedding — a member
+// json publishes, and fill allocates — was never cleared, and the absent branch
+// stayed shut for exactly the members mustVisit and sparseWalkedState both make
+// the exception for. The same answer also keeps it off `json:"-"` pointers,
+// which are hidden state: clearing those emptied, in this mode, the very state
+// the with/without comparison is there to compare.
 func nilOptionalPointers(value reflect.Value, depth int) {
 	if depth > guardMaxDepth {
 		return
@@ -359,10 +369,29 @@ func nilOptionalPointers(value reflect.Value, depth int) {
 			return
 		}
 		for i := 0; i < value.NumField(); i++ {
-			if value.Type().Field(i).PkgPath != "" {
+			field := value.Type().Field(i)
+			if guardHidesSubtree(field) {
 				continue
 			}
-			nilOptionalPointers(value.Field(i), depth+1)
+			held := guardSettableField(value, i)
+			if field.PkgPath != "" {
+				// Everything unexported still here is an anonymous struct
+				// embedding, and the twin FLATTENS one — so a nil pointer at
+				// this position is a shape the baseline cannot express at all
+				// (see twinValues), rather than one member going absent.
+				// Descended through, so the optionals INSIDE are still cleared,
+				// which is the whole of item 3. An EXPORTED anonymous embedding
+				// is left to the ordinary pointer arm: the twin keeps it
+				// anonymous and json applies the same promotion rules to both
+				// sides, so clearing it reads a real state and blames nobody.
+				for held.Kind() == reflect.Pointer && !held.IsNil() {
+					held = held.Elem()
+				}
+				if held.Kind() != reflect.Struct {
+					continue
+				}
+			}
+			nilOptionalPointers(held, depth+1)
 		}
 	case reflect.Slice, reflect.Array:
 		if elem := value.Type().Elem().Kind(); elem == reflect.Uint8 || elem == reflect.Int32 {
@@ -623,38 +652,68 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 	}
 }
 
-// plainTwinOf returns the same value in a generated struct type with the same
-// exported fields and tags and NO methods, so encoding/json renders it by its
-// own field rules instead of through the type's MarshalJSON.
+// twinField is one member of a plain twin: the field encoding/json will see,
+// where to read its value from, and whether it was PROMOTED out of an anonymous
+// embedding — which is what makes a name collision unrepresentable.
+type twinField struct {
+	field reflect.StructField
+	// source reads the member out of the original record, and reports false when
+	// a nil POINTER embedding broke the chain to it — see twinValues.
+	source   func(reflect.Value) (reflect.Value, bool)
+	promoted bool
+}
+
+// twinFieldsOf collects the fields encoding/json emits for typ, lifting the
+// exported members of an anonymously embedded unexported STRUCT out of it.
 //
-// Ordinary unexported fields are left out: json never emits them, so their
-// absence cannot change the baseline — which is exactly what makes an unexported
-// field's text show up as an undeclared member in the diff rather than as a
-// matching one.
+// Skipping such an embedding was a false positive waiting to happen: json
+// PROMOTES its exported members, so a twin without them makes a faithful alias
+// marshaler look like it adds every one of them (#3592 review). They are lifted
+// instead, carrying their own tags — which is what json does with them, and the
+// same shape mustVisit already handles in the main walk.
 //
-// An anonymously embedded unexported STRUCT is the exception, and skipping it
-// was a false positive waiting to happen: json PROMOTES its exported members, so
-// a twin without them makes a faithful alias marshaler look like it adds every
-// one of those members (#3592 review). They are promoted into the twin instead,
-// carrying their own tags — which is what json does with them, and the same
-// shape mustVisit already handles in the main walk.
-func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
+// RECURSIVELY, which is #3655 item 8. Lifting one level and stopping loses the
+// members json promotes out of an embedding INSIDE an embedding — measured:
+// `struct{ inner1; Top string }` where inner1 holds `inner2` and a Mid renders
+// as {"deep":…,"mid":…,"top":…}, all three at the top level. A twin that stopped
+// at the first level was missing "deep" and blamed the marshaler for adding it.
+// Same class as the collision refusal: a twin that answers differently from
+// encoding/json is no baseline.
+//
+// holder reaches the struct value these fields live in, and reports false when a
+// nil POINTER embedding broke the chain. That is not a value the twin can carry:
+// see twinValues.
+func twinFieldsOf(t *testing.T, typ reflect.Type, holder func(reflect.Value) (reflect.Value, bool), promoted bool, depth int) []twinField {
 	t.Helper()
-	typ := value.Type()
-	var fields []reflect.StructField
-	var sources []func(reflect.Value) reflect.Value
-	// promoted marks the twin fields lifted out of an anonymous embedding, which
-	// is what makes a name collision unrepresentable.
-	var promoted []bool
+	if depth > guardMaxDepth {
+		// Only a POINTER embedding can nest this far — a value one would be an
+		// infinitely sized type — and stopping early silently drops members.
+		t.Fatalf("the plain twin of %s cannot represent it: its anonymous embeddings nest deeper "+
+			"than %d levels.\n\nA twin that stops early is missing members json promotes, which "+
+			"makes a faithful marshaler look like it added them.", typ, guardMaxDepth)
+	}
+	var out []twinField
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
-		at := i
+		at, ftype := i, typ.Field(i).Type
 		if field.PkgPath == "" {
-			fields = append(fields, reflect.StructField{
-				Name: field.Name, Type: field.Type, Tag: field.Tag, Anonymous: field.Anonymous,
+			// Anonymity is carried through. A lifted field that is ITSELF an
+			// exported anonymous embedding is promoted by json in the original,
+			// so a twin that made it an ordinary named member would nest what
+			// json flattens.
+			out = append(out, twinField{
+				field: reflect.StructField{
+					Name: field.Name, Type: ftype, Tag: field.Tag, Anonymous: field.Anonymous,
+				},
+				source: func(root reflect.Value) (reflect.Value, bool) {
+					held, ok := holder(root)
+					if !ok {
+						return reflect.Value{}, false
+					}
+					return held.Field(at), true
+				},
+				promoted: promoted,
 			})
-			sources = append(sources, func(v reflect.Value) reflect.Value { return v.Field(at) })
-			promoted = append(promoted, false)
 			continue
 		}
 		embedded := baseType(field.Type)
@@ -671,76 +730,147 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 		if name, _, _ := strings.Cut(field.Tag.Get("json"), ","); name != "" {
 			t.Fatalf("the plain twin of %s cannot represent it: %s is an anonymous unexported "+
 				"embedding tagged %q, which json NESTS under that member rather than promoting "+
-				"its children.\n\nTeach plainTwinOf to keep the nesting, or drop the exemption "+
+				"its children.\n\nTeach twinFieldsOf to keep the nesting, or drop the exemption "+
 				"for this type — a twin that answers differently from encoding/json is no "+
 				"baseline.", typ, field.Name, name)
 		}
-		for j := 0; j < embedded.NumField(); j++ {
-			lifted := embedded.Field(j)
-			if lifted.PkgPath != "" {
-				continue
+		inner := func(root reflect.Value) (reflect.Value, bool) {
+			held, ok := holder(root)
+			if !ok {
+				return reflect.Value{}, false
 			}
-			member := j
-			fields = append(fields, reflect.StructField{
-				Name: lifted.Name, Type: lifted.Type, Tag: lifted.Tag,
-			})
-			sources = append(sources, func(v reflect.Value) reflect.Value {
-				held := v.Field(at)
-				held = reflect.NewAt(held.Type(), held.Addr().UnsafePointer()).Elem()
-				for held.Kind() == reflect.Pointer {
-					if held.IsNil() {
-						return reflect.Zero(lifted.Type)
-					}
-					held = held.Elem()
+			held = held.Field(at)
+			held = reflect.NewAt(held.Type(), held.Addr().UnsafePointer()).Elem()
+			for held.Kind() == reflect.Pointer {
+				if held.IsNil() {
+					return reflect.Value{}, false
 				}
-				return held.Field(member)
-			})
-			promoted = append(promoted, true)
+				held = held.Elem()
+			}
+			return held, true
 		}
+		out = append(out, twinFieldsOf(t, embedded, inner, true, depth+1)...)
 	}
-	// Promotion is flattened into the twin, which is faithful only while the
-	// promoted names do not collide with anything else. json resolves a
-	// collision by DEPTH — a direct field at depth zero dominates a promoted one,
-	// and two at the same depth cancel — and a flattened twin has no depths left
-	// to resolve by, so it would answer differently and blame the marshaler.
-	// reflect.StructOf would panic on the duplicate Go name before it got the
-	// chance (#3592 review).
-	//
-	// No reviewed type has that shape, and the guard refuses it rather than
-	// guessing: a twin that cannot represent the type is no baseline for it.
-	// Only a collision INVOLVING a promoted field is unrepresentable. Two direct
-	// fields sharing a name sit at the same depth in the original type and in
-	// the twin alike, and json suppresses both in each — so the twin answers
-	// identically and is a perfectly good baseline. Refusing that shape too was
-	// a false failure on something the contract can handle (#3592 review).
-	//
-	// A duplicate Go name would still panic reflect.StructOf, so it is refused
-	// whatever its provenance.
+	return out
+}
+
+// twinCollision returns the reason a FLATTENED twin cannot represent this field
+// set, or "" when it can.
+//
+// Promotion is flattened into the twin, which is faithful only while the
+// promoted names do not collide with anything else. json resolves a collision by
+// DEPTH — a direct field at depth zero dominates a promoted one, and two at the
+// same depth cancel — and a flattened twin has no depths left to resolve by, so
+// it would answer differently and blame the marshaler. reflect.StructOf would
+// panic on the duplicate Go name before it got the chance (#3592 review).
+//
+// No reviewed type has that shape, and the guard refuses it rather than
+// guessing: a twin that cannot represent the type is no baseline for it. Only a
+// collision INVOLVING a promoted field is unrepresentable. Two direct fields
+// sharing a name sit at the same depth in the original type and in the twin
+// alike, and json suppresses both in each — so the twin answers identically and
+// is a perfectly good baseline. Refusing that shape too was a false failure on
+// something the contract can handle (#3592 review).
+//
+// A duplicate Go name would still panic reflect.StructOf, so it is refused
+// whatever its provenance.
+//
+// A field json emits NO member for contributes no json name (#3655 item 14): the
+// exact tag `json:"-"` drops it from the document, so it cannot collide with
+// anything, and naming it by its Go field name invented a collision json would
+// never have.
+//
+// Returned rather than reported, so the rule can be read directly by a probe
+// against a shape no reviewed type has.
+func twinCollision(fields []twinField) string {
 	seen := map[string]int{}
-	for i, field := range fields {
-		for kind, name := range map[string]string{
-			"Go name":   field.Name,
-			"json name": jsonMemberName(field),
-		} {
-			previous, dup := seen[kind+" "+name]
+	for i, twin := range fields {
+		names := []struct{ kind, name string }{{"Go name", twin.field.Name}}
+		if member, emits := jsonMemberName(twin.field); emits {
+			names = append(names, struct{ kind, name string }{"json name", member})
+		}
+		for _, at := range names {
+			previous, dup := seen[at.kind+" "+at.name]
 			if !dup {
-				seen[kind+" "+name] = i
+				seen[at.kind+" "+at.name] = i
 				continue
 			}
-			if kind == "json name" && !promoted[i] && !promoted[previous] {
+			if at.kind == "json name" && !twin.promoted && !fields[previous].promoted {
 				continue
 			}
-			t.Fatalf("the plain twin of %s cannot represent it: %s and %s share the %s %q, and "+
-				"json resolves a PROMOTED collision by embedding DEPTH, which a flattened twin "+
-				"has thrown away.\n\nTeach plainTwinOf to keep the hierarchy, or drop the "+
-				"exemption for this type — a twin that answers differently from encoding/json "+
-				"is no baseline.",
-				typ, fields[previous].Name, field.Name, kind, name)
+			return fmt.Sprintf("%s and %s share the %s %q",
+				fields[previous].field.Name, twin.field.Name, at.kind, at.name)
 		}
 	}
-	twin := reflect.New(reflect.StructOf(fields)).Elem()
-	for i, source := range sources {
-		twin.Field(i).Set(source(value))
+	return ""
+}
+
+// plainTwinOf returns the same value in a generated struct type with the same
+// exported fields and tags and NO methods, so encoding/json renders it by its
+// own field rules instead of through the type's MarshalJSON.
+//
+// Ordinary unexported fields are left out: json never emits them, so their
+// absence cannot change the baseline — which is exactly what makes an unexported
+// field's text show up as an undeclared member in the diff rather than as a
+// matching one.
+// twinValues reads each twin member's value out of the original record, or
+// returns the reason this VALUE cannot be represented.
+//
+// A nil anonymous POINTER embedding is that reason, and it is a defect the
+// differential oracle found rather than one #3655 named: json OMITS every member
+// promoted through a nil embedded pointer, where a flattened twin — which always
+// emits its fields — renders each of them as a zero value. Measured on
+// `struct{ *middle; Top string }` with the embedding nil: json renders
+// {"top":"t"}, the twin rendered {"deep":"","mid":"","top":"t"}, so a faithful
+// marshaler looked like it had ADDED deep and mid.
+//
+// The earlier one-level promotion substituted a zero value for exactly this case
+// and said nothing. Refused instead, for the same reason a named tag and a
+// promoted collision are: a twin that answers differently from encoding/json is
+// no baseline. Nothing reaches it today — fill allocates every pointer, and
+// nilOptionalPointers descends THROUGH an embedding rather than clearing it,
+// precisely so this stays unreachable.
+//
+// Returned rather than reported, so a probe can read the rule directly.
+func twinValues(fields []twinField, value reflect.Value) ([]reflect.Value, string) {
+	out := make([]reflect.Value, len(fields))
+	for i, from := range fields {
+		held, ok := from.source(value)
+		if !ok {
+			return nil, fmt.Sprintf("%s is promoted through an anonymous POINTER embedding that "+
+				"is nil, and json omits every member behind one rather than rendering it as a "+
+				"zero value", from.field.Name)
+		}
+		out[i] = held
+	}
+	return out, ""
+}
+
+func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
+	t.Helper()
+	typ := value.Type()
+	fields := twinFieldsOf(t, typ, func(root reflect.Value) (reflect.Value, bool) {
+		return root, true
+	}, false, 0)
+	if reason := twinCollision(fields); reason != "" {
+		t.Fatalf("the plain twin of %s cannot represent it: %s, and json resolves a PROMOTED "+
+			"collision by embedding DEPTH, which a flattened twin has thrown away.\n\nTeach "+
+			"twinFieldsOf to keep the hierarchy, or drop the exemption for this type — a twin "+
+			"that answers differently from encoding/json is no baseline.", typ, reason)
+	}
+	held, reason := twinValues(fields, value)
+	if reason != "" {
+		t.Fatalf("the plain twin of %s cannot represent this record: %s.\n\nA flattened twin "+
+			"always emits its fields, so it cannot express the absence — teach twinFieldsOf to "+
+			"keep the hierarchy, or stop the fixture from building this shape.", typ, reason)
+	}
+	shape := make([]reflect.StructField, len(fields))
+	for i, twin := range fields {
+		shape[i] = twin.field
+	}
+	twin := reflect.New(reflect.StructOf(shape)).Elem()
+	for i, from := range held {
+		twin.Field(i).Set(from)
 	}
 	if rendersItself(twin.Type()) {
 		t.Fatalf("the plain twin of %s still renders itself, so it is no baseline", typ)
@@ -1000,15 +1130,34 @@ func normalizedEmptyFinding(declared, name string, got json.RawMessage) string {
 		"to %s — a different public JSON type", name, got, declared)
 }
 
-// jsonMemberName is the member name encoding/json gives a field: the tag's name
-// when it has a usable one, the Go field name otherwise. Only the name — the
-// options after the comma decide nothing here.
-func jsonMemberName(field reflect.StructField) string {
-	name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-	if name == "" || name == "-" {
-		return field.Name
+// jsonMemberName is the member name encoding/json gives a field, and whether it
+// emits a member for the field at all.
+//
+// The dash is THREE cases, not one (#3655 item 14). Only the exact tag `json:"-"`
+// removes the field from the document; `json:"-,"` and `json:"-,omitempty"`
+// serialize it under the literal key "-" — measured, in isolation:
+//
+//	struct{ F string `json:"-"` ; N string }           -> {"N":"n"}
+//	struct{ F string `json:"-,"` ; N string }          -> {"-":"SECRET","N":"n"}
+//	struct{ F string `json:"-,omitempty"`; N string }  -> {"-":"SECRET","N":"n"}
+//
+// The same three-way reading mustVisit already had written into its comment, and
+// this function disagreed with it: it parsed the name before the comma and
+// handed back the GO field name for all three, so a member json really does emit
+// as "-" was named something else. That is not only a lookup — twinCollision
+// reads it, so the twin decided a duplicate on a name json would not use, and
+// missed the one it would. Nothing in the tree carries the tag today.
+//
+// Only the name — the options after the comma decide nothing here.
+func jsonMemberName(field reflect.StructField) (string, bool) {
+	tag := field.Tag.Get("json")
+	if tag == "-" {
+		return "", false
 	}
-	return name
+	if name, _, _ := strings.Cut(tag, ","); name != "" {
+		return name, true
+	}
+	return field.Name, true
 }
 
 func marshalReviewed(t *testing.T, typ reflect.Type, value reflect.Value) []byte {
