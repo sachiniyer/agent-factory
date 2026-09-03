@@ -134,7 +134,7 @@ func (m *Manager) refuseIfIdentityInTransition(repoID string, rowFound bool) err
 	return fmt.Errorf("delete project: af is still establishing which project %s names — a registered project's recorded checkout is present but its identity is not yet verified — so nothing was changed; delete again once that check settles, or, if that checkout is not the project's and is not coming back, remove the path and delete again", repoID)
 }
 
-// registeredProjectRootForRepoID resolves the path needed by// registeredProjectRootForRepoID resolves the path needed by
+// registeredProjectRootForRepoID resolves the path needed by
 // config.DeregisterProject when a direct client supplies only the daemon's
 // repo identity. Registry read failure is an unknown outcome, not evidence that
 // no matching registration exists, so callers must treat an error as fatal
@@ -354,6 +354,28 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	if deleteProjectPostClaimantHookForTest != nil {
 		deleteProjectPostClaimantHookForTest()
 	}
+	// Only when no row was selected, and only for a REAL identity. A request
+	// that reached a record has its project in hand, and an invented id names
+	// the record itself — both sides of the question #3638 answered. What is
+	// left is the identity arriving alone, which is where a record predating
+	// the write-down can neither be matched nor ruled out.
+	//
+	// HERE rather than inside registeredProjectRootForRepoID, which already
+	// walked the registry: rowFound is not settled until the claimant scan
+	// above has run, and it can be CLEARED there (an abandoned row drops the
+	// path and the claim with it). Asking earlier would answer a different
+	// question — "did a path match" rather than "was a project selected" —
+	// which is the distinction #3530 review id 3919195012 drew.
+	unattributed := config.Project{}
+	if !rowFound && !config.IsDerivedRepoID(repoID) {
+		record, found, err := unattributableLegacyRecord(repoID)
+		if err != nil {
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not read the durable project registry to check whether a record predating repository identities may be this project; nothing was changed: %w", repoID, err)
+		}
+		if found {
+			unattributed = record
+		}
+	}
 	// LAST — after every registry lookup, after the two selectors have been
 	// checked against each other, and after the claimant scan, because all of
 	// those establish whether this request selected a project at all, which is
@@ -372,9 +394,11 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		return deleteProjectTarget{repoID: repoID}, err
 	}
 	return deleteProjectTarget{
-		repoID:            repoID,
-		repoPath:          repoPath,
-		claimantProjectID: claimantProjectID,
+		repoID:                    repoID,
+		repoPath:                  repoPath,
+		claimantProjectID:         claimantProjectID,
+		unattributedRecordRoot:    unattributed.Root,
+		unattributedRecordProject: unattributed.ID,
 	}, nil
 }
 
@@ -402,4 +426,69 @@ func boundedRecordRootAbsent(root string) (bool, error) {
 		log.WarningLog.Printf("delete project: could not observe recorded root %s within %s; treating it as present, which declines the identity-matched deregistration this pass", root, boundedRecordRootAbsentTimeout)
 		return false, nil
 	}
+}
+
+// unattributableLegacyRecord names the registry record a delete BY IDENTITY may
+// be the project of and cannot prove it is not (#3363's third window).
+//
+// #3638 writes down the identity a project resolved to, so an absent recorded
+// path is addressed through what the record says rather than through a hash of
+// the path — which would reach whatever repository occupies it now. A record
+// written BEFORE that field has nothing to say, so it is addressed by an
+// invented id that reaches nothing at all, deliberately.
+//
+// That answers the question asked from the PATH side and leaves the IDENTITY
+// side of it open: a delete naming the real id its sessions were keyed under at
+// creation finds no record, and the removal it then performs is a silent
+// partial success — the sessions go, the durable registration stays, and the
+// project returns on the next start. So the ambiguity is REPORTED. Nothing here
+// resolves it: the two identities cannot be connected without the write-down
+// that is missing, and guessing is what #3530 removed.
+//
+// The record has to be one this identity could plausibly have come from, or
+// every stale row in the registry becomes a delete blocker. Three conditions,
+// all of them properties of the record:
+//
+//   - it wrote down no identity, so nothing rules it in or out;
+//   - its recorded root is determinately absent, so no checkout there can be
+//     asked (a root that IS there resolves, or provably is not this record's,
+//     and either way the ambiguity does not arise). The registry's own
+//     PathExists, deliberately, and not recordRootAbsent: the two disagree
+//     about a REGULAR FILE at the recorded root, and this predicate wants the
+//     answer PathExists gives. The question here is "can a checkout be there",
+//     not "is anything there" — a file proves no repository owns that hash, so
+//     the record's claim to it stands unopposed and the ambiguity is real. The
+//     other callers ask the other question, about a path they are deciding
+//     whether to DEREGISTER;
+//   - that root hashes to exactly this identity, which is what a repository
+//     rooted there was keyed under. Every other legacy record is provably about
+//     somewhere else.
+//
+// Records are enumerated in registry order, which is by project id, so the one
+// reported is stable across calls; two records can only match by recording the
+// same root.
+//
+// The absence observation is the registry's own, taken when it read the record,
+// so a checkout arriving at that root a moment later is not seen here. Both ways
+// that lands are the conservative one: a root that came back makes this report a
+// record it no longer needs to, and the caller REFUSES, having changed nothing —
+// the next delete finds the reconciled row by the ordinary path.
+func unattributableLegacyRecord(repoID string) (config.Project, bool, error) {
+	projects, err := config.ListProjects()
+	if err != nil {
+		// Unknown, not "no such record" — the registry's own rule. Falling
+		// through would let the silent partial success this exists to stop
+		// happen on a transient read failure.
+		return config.Project{}, false, fmt.Errorf("read durable project registry: %w", err)
+	}
+	for _, project := range projects {
+		if project.RepoID != "" || project.PathExists {
+			continue
+		}
+		if config.RepoIDFromRoot(filepath.Clean(project.Root)) != repoID {
+			continue
+		}
+		return project, true, nil
+	}
+	return config.Project{}, false, nil
 }
