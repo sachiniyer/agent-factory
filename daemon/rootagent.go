@@ -293,9 +293,12 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 	m.ensureResolvedRoot(path, st, repo, resolution, nil)
 }
 
-// rootLegacyRepoProbeTimeout bounds the repository resolution the legacy
-// root_agents sweep performs on the instance poll goroutine every
-// non-backed-off tick (#3757).
+// rootLegacyRepoProbeTimeout bounds every repository resolution the legacy
+// root_agents machinery performs on the instance poll goroutine: the sweep's
+// own, on every non-backed-off tick (#3757), and the dedup-set recompute the
+// heal pass runs on every published heal (#3782 item 1). One budget rather
+// than two, because it is one goroutine, one purpose, and one asymmetry — and
+// a second knob would be a second thing to get wrong.
 //
 // 2s, matching rootHealProbeGrace — its sibling on the same goroutine for the
 // same purpose — and the value repoGitWaitDelay documents as "what every other

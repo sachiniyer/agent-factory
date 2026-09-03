@@ -156,7 +156,20 @@ func (m *Manager) healRootAgentLayers() {
 		// the heal was the registry or a personal config — or a failing
 		// legacy attempt lets the singleton create the root without the
 		// legacy layer.
-		healed.legacyRepoIDs = legacyRepoIDSet(m.cfg)
+		//
+		// It runs on the POLL goroutine, so it takes the BOUNDED resolver
+		// (#3782 item 1): the recompute is a scan, it admits nothing, and one
+		// configured path on a stalled mount must not stop every pass below
+		// EnsureRootAgents for every session on the box. Per path rather than
+		// one shared budget across the loop, matching the sweep that follows
+		// it, so a stalled path cannot starve the resolution of a path that
+		// answers.
+		//
+		// The previous snapshot's per-path resolutions carry forward for
+		// exactly the same reason this recompute exists: a probe that never
+		// answered is UNKNOWN, and an unknown that dropped out of the set
+		// would be #3315's double-visit re-entered through a deadline.
+		healed.legacyRepoIDs, healed.legacyRepoIDByPath = legacyRepoIDSet(m.cfg, resolveLegacyRootRepo, healed.legacyRepoIDByPath)
 		if rootHealPrePublishHookForTest != nil {
 			rootHealPrePublishHookForTest()
 		}
