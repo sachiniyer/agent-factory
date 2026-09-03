@@ -4392,6 +4392,75 @@ test("a required check whose run is parked says so instead of reporting it missi
   );
 });
 
+// #3814. #3812 approved parked runs immediately after its own update-branch and
+// then waited for a run to EXIST. GitHub creates them a few seconds later, so the
+// order left a gap: the approve pass found nothing, the existence poll found them
+// and returned — checking existence only, never conclusion — and nothing later
+// approved them. On #3811's `31720d97` the runs appeared 4 seconds after the
+// update and stayed parked for 33 minutes until a maintainer pressed the button.
+//
+// So the approve pass runs after the wait too.
+test("runs that appear only on a later poll are approved, not merely found", async () => {
+  const NEW_HEAD = "31720d97000000000000000000000000000000aa";
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: NEW_HEAD,
+    // Nothing exists on the first list; the runs appear parked on the second.
+    runsAppearAfterReads: 1,
+    runsByHeadSha: {
+      [NEW_HEAD]: [
+        { id: 33762676883, name: "PR Validation", event: "pull_request", status: "completed", conclusion: "action_required" },
+        { id: 33762676618, name: "Docs", event: "pull_request", status: "completed", conclusion: "action_required" },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge/,
+  );
+
+  assert.deepEqual(
+    github.approvedRuns.map((run) => run.run_id).sort(),
+    [33762676618, 33762676883],
+    "a run that appeared after the first approve pass must still be approved",
+  );
+  assert.equal(
+    github.dispatchedWorkflows.filter((d) => d.workflow_id === "pr.yml").length,
+    0,
+    "runs exist, so nothing is dispatched",
+  );
+});
+
+// The second half: an evaluation that finds a required check's run parked on the
+// CURRENT head presses the button rather than only describing it. The gate holds
+// actions: write at evaluation time too, and "a button nobody pressed" is not a
+// state the loop should sit in waiting for a later evaluation to narrate.
+test("an evaluation approves a parked run on the current head instead of only naming it", async () => {
+  const github = fakeGateGithub({
+    checkRuns: happyCheckRuns().filter((run) => run.name !== "Lint"),
+    runsByHeadSha: {
+      [HEAD_SHA]: [
+        { id: 33762676883, name: "PR Validation", event: "pull_request", status: "completed", conclusion: "action_required" },
+      ],
+    },
+  });
+
+  await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.deepEqual(
+    github.approvedRuns.map((run) => run.run_id),
+    [33762676883],
+    "the evaluation must press the button, not just report it",
+  );
+});
+
 test("a run already in progress on the updated head is left alone", async () => {
   const NEW_HEAD = "e5ab353f7d8deaa999cb1b4225d64e465e731e86";
   const github = fakeGateGithub({
@@ -6878,6 +6947,10 @@ function fakeGateGithub({
   runsByHeadSha = {},
   headAfterUpdate = null,
   approveRunError = null,
+  // GitHub creates the runs for a pushed head a few seconds AFTER the push, so a
+  // fake that has them from the first list cannot reproduce #3814 — the first
+  // approve pass would catch them and the gap would be invisible.
+  runsAppearAfterReads = 0,
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -7070,7 +7143,15 @@ function fakeGateGithub({
       actions: {
         listWorkflowRunsForRepo: async (options) => {
           github.runListReads.push(options);
-          const runs = runsByHeadSha[options.head_sha] || [];
+          // Per HEAD, not globally: evaluateRequiredChecks lists runs for the
+          // ORIGINAL head before the update, and a global counter would be spent
+          // by those reads — making the runs "appear" before the first approve
+          // pass and hiding the very gap #3814 is about.
+          const readsForThisHead = github.runListReads.filter(
+            (read) => read.head_sha === options.head_sha,
+          ).length;
+          const runs =
+            readsForThisHead > runsAppearAfterReads ? runsByHeadSha[options.head_sha] || [] : [];
           return {
             data: {
               total_count: runs.length,
@@ -7085,6 +7166,18 @@ function fakeGateGithub({
             throw approveRunError;
           }
           github.approvedRuns.push(options);
+          // Approving a run takes it OUT of action_required — a later pass finds
+          // it running, not parked. A fake that leaves the conclusion alone makes
+          // a second approve pass look like a double-approval bug when the real
+          // API would simply find nothing to do.
+          for (const runs of Object.values(runsByHeadSha)) {
+            for (const run of runs) {
+              if (run.id === options.run_id && run.conclusion === "action_required") {
+                run.conclusion = null;
+                run.status = "in_progress";
+              }
+            }
+          }
         },
         createWorkflowDispatch: async (options) => {
           github.workflowDispatchAttempts += 1;

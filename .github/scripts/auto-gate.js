@@ -2073,6 +2073,13 @@ async function ensureValidationRun({
       }),
     );
     if ((listed?.data?.workflow_runs || []).length > 0) {
+      // Found, which is NOT the same as running. GitHub creates these a few
+      // seconds after the push, so the approve pass before this wait routinely
+      // ran too early and found nothing — and this poll then confirmed existence
+      // and returned, leaving them parked. On #3811's `31720d97` they appeared 4
+      // seconds late and sat for 33 minutes (#3814). So the approve pass runs
+      // again here, on what the wait actually found.
+      await approveParkedRuns({ github, context, headSha, core });
       return { dispatched: false };
     }
     if (attempt < attempts - 1) {
@@ -3041,6 +3048,18 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
   // is either a run it failed to approve or one parked by something else, and
   // either way the actionable fact is the button, not an absent workflow.
   const parkedRuns = await listParkedRuns({ github, context, headSha: sha, subject });
+  // …and press the button rather than only describing it (#3814). The gate holds
+  // `actions: write` at evaluation time too, so a required check whose run is
+  // parked on the CURRENT head is something this evaluation can fix. Leaving it
+  // for a later evaluation to narrate is how #3811 sat for 33 minutes with the
+  // decision correctly saying "waiting for approval" and nobody approving.
+  //
+  // Approving is idempotent enough for this: a run that has already started
+  // rejects the call, which is warned and ignored, and the reasons below still
+  // describe whatever is genuinely still parked.
+  if (parkedRuns.length > 0) {
+    await approveParkedRuns({ github, context, headSha: sha, core });
+  }
 
   for (const spec of specs) {
     const state = latestRequiredState(spec, checkRuns, statuses);
