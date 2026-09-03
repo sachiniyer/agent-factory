@@ -704,7 +704,7 @@ func (m *Manager) completeLateGhostKill(repoID, title, stableID string) {
 		m.mu.Lock()
 		m.rootKilledAt[repoID] = nowFunc()
 		m.mu.Unlock()
-		log.InfoLog.Printf("root agent for repo %s: finished a late ghost kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+		m.info().Printf("root agent for repo %s: finished a late ghost kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: stableID, Title: title})
 }
@@ -741,9 +741,9 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 					m.clearGhostCleanupStall(key, stableID)
 					if deleted {
 						m.completeLateGhostKill(repoID, title, stableID)
-						log.InfoLog.Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
+						m.info().Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
 					} else {
-						log.InfoLog.Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)
+						m.info().Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)
 					}
 					return
 				}

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
@@ -301,7 +300,7 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 	if err != nil {
 		return "", err
 	}
-	log.InfoLog.Printf("CloseTab requested for tab %q (id %s) in session %q (id %s, repo %s) by %s", name, targetID, title, instance.ID, repoID, requester)
+	m.info().Printf("CloseTab requested for tab %q (id %s) in session %q (id %s, repo %s) by %s", name, targetID, title, instance.ID, repoID, requester)
 	var vscodeKey string
 	if lastVSCode {
 		// Stop before removing the last durable UI retry handle. An unknown result

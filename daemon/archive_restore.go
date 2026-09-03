@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -43,7 +42,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// site knows it happened.
 	m.noteRuntimeReplaced(repoID, instance)
 	m.persistRuntimeReplacement(repoID, title, instance)
-	log.InfoLog.Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
+	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return title, nil
 }
 
@@ -315,6 +314,6 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
 	}
-	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
+	m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return restoredArchiveResult(instance, worktreePath)
 }

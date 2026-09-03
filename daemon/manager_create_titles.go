@@ -7,7 +7,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -396,7 +395,7 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 			break
 		}
 	}
-	log.InfoLog.Printf("renamed archived session %q -> %q (repo %s) to free the name for a new session", oldTitle, newTitle, repoID)
+	m.info().Printf("renamed archived session %q -> %q (repo %s) to free the name for a new session", oldTitle, newTitle, repoID)
 	return &renamed, nil
 }
 
@@ -582,7 +581,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 		}
 		branch := m.branchForTitle(candidate)
 		if holder, held := heldBranches[branch]; held {
-			log.InfoLog.Printf("title %q derives branch %q, which the worktree at %s still has checked out; trying the next suffix",
+			m.info().Printf("title %q derives branch %q, which the worktree at %s still has checked out; trying the next suffix",
 				candidate, branch, holder)
 			continue
 		}

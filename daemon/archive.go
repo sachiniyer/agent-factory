@@ -9,7 +9,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
@@ -437,7 +436,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 				fmt.Errorf("final VS Code editor teardown was not confirmed: %w", stopErr),
 			)
 		}
-		log.ErrorLog.Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
+		m.err().Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
 			// The worktree cannot be returned home. Keep the committed archive
 			// rather than claiming a live Lost session at a path that no longer
@@ -464,7 +463,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 				fmt.Errorf("its durable state write failed: %w", perr),
 			)
 		}
-		log.ErrorLog.Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
+		m.err().Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
 			// Could not move the worktree home: the committed archive is the
 			// safest remaining state. Keep it and report it as committed — with
@@ -480,7 +479,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			"failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w",
 			req.Title, perr), hookErr)
 	}
-	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
+	m.info().Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
 	archived := instance.ToInstanceData()
 	// Still inside opLock: lifecycle event order must match committed operation
 	// order. Publishing after this method returns lets an immediate restore finish
@@ -560,7 +559,7 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// way. Persist best-effort and surface the durability failure; even a lost
 		// best-effort write leaves the on-disk record naming the pushed branch, so a
 		// restart loads the session Lost and an explicit restore re-provisions it.
-		log.ErrorLog.Printf("archive of remote session %q: failed to durably record the Archived state (%v); branch %q is on origin, so the session stays restorable", title, perr, branch)
+		m.err().Printf("archive of remote session %q: failed to durably record the Archived state (%v); branch %q is on origin, so the session stays restorable", title, perr, branch)
 		// The committed claim must itself be durable before it is made (#3335
 		// review), exactly as keepUnrollableArchiveCommitted enforces for the
 		// local body: ArchiveSandbox records the pushed branch only in memory, so
@@ -576,7 +575,7 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		}
 		return branch, &mutationCommittedError{err: fmt.Errorf("archived remote session %q (branch %q pushed to origin) but its durable record initially failed to write: %w", title, branch, perr)}
 	}
-	log.InfoLog.Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
+	m.info().Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
 	return branch, nil
 }
 

@@ -146,6 +146,38 @@ func newManagerCapturingWarnings(t *testing.T, cfg *config.Config) (*Manager, *l
 	return manager, capture
 }
 
+// managerLogs is one Manager's own three sinks (#3797). Kept as a struct rather
+// than three returns because most tests that assert on one level end up
+// asserting on another, and three positional *logCapture values at a call site
+// read as interchangeable when they are not.
+type managerLogs struct {
+	warnings *logCapture
+	info     *logCapture
+	errors   *logCapture
+}
+
+// newManagerCapturingLogs builds a Manager whose WARNING, INFO and ERROR all go
+// to captures of its own (#3797). newManagerCapturingWarnings is the same thing
+// for the warning level alone; this is the helper to reach for when a test
+// asserts on more than one.
+//
+// Same reason the options go through the CONSTRUCTOR as at the warning level:
+// the root-agent snapshot logs from inside NewManager, so a logger installed on
+// the returned Manager would miss it.
+func newManagerCapturingLogs(t *testing.T, cfg *config.Config) (*Manager, managerLogs) {
+	t.Helper()
+	logs := managerLogs{warnings: &logCapture{}, info: &logCapture{}, errors: &logCapture{}}
+	manager, err := newManagerWithOptions(cfg, managerOptions{
+		warnLog:  stdlog.New(logs.warnings, aflog.WarningLog.Prefix(), aflog.WarningLog.Flags()),
+		infoLog:  stdlog.New(logs.info, aflog.InfoLog.Prefix(), aflog.InfoLog.Flags()),
+		errorLog: stdlog.New(logs.errors, aflog.ErrorLog.Prefix(), aflog.ErrorLog.Flags()),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return manager, logs
+}
+
 // newBareManagerCapturingWarnings returns a zero-value Manager whose warnings go
 // to a capture of its own. For tests that drive ONE Manager method and need no
 // constructed state — building the struct literally is legitimate there, and

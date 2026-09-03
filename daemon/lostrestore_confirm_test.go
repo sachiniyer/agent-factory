@@ -68,12 +68,14 @@ func (b *diesOnSpawnBackend) recoverCount() int {
 func (b *diesOnSpawnBackend) Type() string { return "local" }
 
 func TestRestoreLostSessions_ImmediateExitLogsTerminalGiveUp(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	backend := &diesOnSpawnBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "always-exits", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	errors := captureErrors(t)
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	errors := ownLogs.errors
 
 	for i := 0; i < 2*lostRestoreMaxAttempts+4; i++ {
 		manager.RestoreLostSessions()
@@ -104,11 +106,13 @@ func TestRestoreLostSessions_ImmediateExitLogsTerminalGiveUp(t *testing.T) {
 }
 
 func TestRestoreLostSessions_ConfirmedAliveLogsTerminalSuccess(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "healed", backend, true, session.Lost)
 
-	info := captureInfo(t)
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	info := ownLogs.info
 
 	manager.RestoreLostSessions()
 	if strings.Contains(info.String(), "restored after") {
@@ -124,13 +128,15 @@ func TestRestoreLostSessions_ConfirmedAliveLogsTerminalSuccess(t *testing.T) {
 }
 
 func TestRestoreSession_FailureAfterPersistedGiveUpStaysTerminal(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	newFailure := errors.New("agent still exits at startup")
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: newFailure}
 	inst := registerStarted(t, manager, repoID, repoPath, "still-broken", backend, true, session.Lost)
 	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("previous startup failure"))
 
-	terminal := captureErrors(t)
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	terminal := ownLogs.errors
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{ID: inst.ID, RepoID: repoID}); !errors.Is(err, newFailure) {
 		t.Fatalf("RestoreSession error = %v, want %v", err, newFailure)
