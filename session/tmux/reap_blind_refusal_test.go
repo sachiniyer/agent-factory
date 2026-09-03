@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"strconv"
 	"testing"
 
@@ -93,4 +95,53 @@ func TestBlindGenerationRefusalKeepsPercentInSessionName(t *testing.T) {
 
 	require.Contains(t, message, name, "the session name must survive verbatim")
 	require.NotContains(t, message, "%!", "a spliced name would leave fmt's bad-verb markers behind")
+}
+
+// The guidance must never aim an operator at the sweep's OWN process or an
+// ancestor of it. markedOrphanProcesses already refuses those via selfChain, but
+// that check sits AFTER the generation switch — so an unplaceable generation
+// reached the collector first and the message would have named the running af
+// process as "safe to kill". A blind marker scan really can reach it:
+// refreshOrphanCandidates walks the whole process table for AF_SESSION matches
+// with no self-exclusion, so an af invoked from inside a pane of the session that
+// then vanished is a candidate carrying that session's markers.
+//
+// Re-exec'd because the markers must be in the process's OWN /proc/<pid>/environ,
+// which records the INITIAL environment and cannot be reached with t.Setenv (same
+// shape as session/git's TestReapWorktreeWriters_DoesNotSelectScannerProcessTree).
+func TestBlindRefusalDoesNotOfferTheSweepsOwnProcessAsSafeToKill(t *testing.T) {
+	const (
+		helperEnv = "AF_TEST_BLIND_REFUSAL_SELF"
+		name      = "af_blind_refusal_self"
+	)
+	if os.Getenv(helperEnv) == "1" {
+		// NOT os.Getenv(EnvMarkerHome): TestMain's home sandbox rewrites that in
+		// this process's environment, while /proc/self/environ still carries the
+		// value exec'd with — the very split these markers exist for.
+		home := os.Getenv(helperEnv + "_HOME")
+		self, err := proctree.Lookup(os.Getpid())
+		require.NoError(t, err)
+
+		_, inspectErr := markedOrphanProcesses([]proctree.Process{self}, name, home,
+			orphanGenerationSet{values: map[string]bool{}})
+
+		require.Error(t, inspectErr, "an unplaceable marked process must still refuse")
+		require.Contains(t, inspectErr.Error(), strconv.Itoa(os.Getpid()),
+			"the refusal must still name the pid it could not place")
+		require.NotContains(t, inspectErr.Error(), "safe to kill",
+			"the sweep must never offer its own process or an ancestor as safe to kill")
+		return
+	}
+
+	home := t.TempDir()
+	helper := exec.Command(os.Args[0],
+		"-test.run=^TestBlindRefusalDoesNotOfferTheSweepsOwnProcessAsSafeToKill$")
+	helper.Env = append(os.Environ(),
+		helperEnv+"=1",
+		helperEnv+"_HOME="+home,
+		EnvMarkerSession+"="+name,
+		EnvMarkerGeneration+"=selfgen",
+		EnvMarkerHome+"="+home)
+	out, err := helper.CombinedOutput()
+	require.NoError(t, err, "marked-self helper subprocess failed:\n%s", out)
 }

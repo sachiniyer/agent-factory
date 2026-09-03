@@ -255,7 +255,7 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		}
 		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
 		switch {
-		case hasGeneration && generations.empty():
+		case hasGeneration && generations.empty() && !selfChain[process.PID]:
 			// An EMPTY cohort is the blind vanished-session sweep (cleanup.go): it
 			// captured no predecessor, so it has nothing to place this generation
 			// against — a different statement from "outside a cohort I know", which
@@ -264,6 +264,16 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			// pid and the generation it carries: on this path that comparison is
 			// the operator's entire decision procedure, and it does not fit in a
 			// per-pid line (#3706). See blindGenerationRefusal.
+			//
+			// selfChain is excluded HERE rather than relied on below, because the
+			// check below runs AFTER this switch and would never be reached. A
+			// blind scan really can reach our own process: refreshOrphanCandidates
+			// walks the whole table for AF_SESSION matches with no self-exclusion,
+			// so an af invoked inside a pane of the session that then vanished
+			// carries that session's markers. Collecting it would print "safe to
+			// kill" at the running af — the exact footgun this message exists to
+			// avoid. It falls through to the case below instead, which refuses it
+			// with no advice attached, as it did before this message existed.
 			unplaceable = append(unplaceable, markedGeneration{pid: process.PID, generation: processGeneration})
 			continue
 		case hasGeneration && !generations.values[processGeneration]:
