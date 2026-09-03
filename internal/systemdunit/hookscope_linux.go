@@ -141,7 +141,15 @@ func StopHookScopes(prefixes ...string) error {
 	if len(present) == 0 {
 		return nil
 	}
-	deadline := time.Now().Add(hookLauncherSettleTimeout)
+	// The settle budget measures WAITING FOR REGISTRATION, so time spent
+	// stopping scopes the sweep could already name is subtracted from it. That
+	// work is progress, and it is bounded by hookScopeStopTimeout — 30s, an
+	// order of magnitude above the budget — so charging it here would let a
+	// single slow `systemctl stop` exhaust the budget before the first re-sweep:
+	// the sweep would give up without ever having waited for the launcher, and
+	// say it had waited the budget while doing it.
+	start := time.Now()
+	var stopping time.Duration
 	for {
 		// The LAUNCHER oracle is read first, and the order is load-bearing. A
 		// launcher that registers between the two reads turns into a unit the
@@ -156,11 +164,14 @@ func StopHookScopes(prefixes ...string) error {
 			return err
 		}
 		if len(units) > 0 {
-			if err := StopScopeUnits(units...); err != nil {
-				return err
+			stopStart := time.Now()
+			stopErr := StopScopeUnits(units...)
+			if stopErr == nil {
+				units, stopErr = RunningHookScopes(present...)
 			}
-			if units, err = RunningHookScopes(present...); err != nil {
-				return err
+			stopping += time.Since(stopStart)
+			if stopErr != nil {
+				return stopErr
 			}
 		}
 		if len(launchers) == 0 {
@@ -177,13 +188,31 @@ func StopHookScopes(prefixes ...string) error {
 		// Waiting rather than killing also keeps this inside the authority the
 		// sweep already had. What it ends is the SCOPE, through the manager, once
 		// the manager admits the scope exists.
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf(
-				"hook launcher%s %s did not register within %s, so a hook is still about to start in this worktree",
-				plural(len(launchers)), describeHookLaunchers(launchers), hookLauncherSettleTimeout)
+		waited := time.Since(start) - stopping
+		if waited >= hookLauncherSettleTimeout {
+			return &HookLauncherUnregisteredError{Launchers: launchers, Waited: waited}
 		}
 		time.Sleep(hookLauncherPollInterval)
 	}
+}
+
+// HookLauncherUnregisteredError reports launchers that were still alive and
+// still unregistered when the sweep gave up, and how long it actually spent
+// WAITING for them.
+//
+// Waited is carried rather than only formatted into the message because it is a
+// claim the sweep has to get right: the settle budget is for a launcher that
+// will not register, and time spent stopping a scope the sweep could already
+// name is progress rather than waiting.
+type HookLauncherUnregisteredError struct {
+	Launchers []HookLauncher
+	Waited    time.Duration
+}
+
+func (e *HookLauncherUnregisteredError) Error() string {
+	return fmt.Sprintf(
+		"hook launcher%s %s did not register within %s of waiting, so a hook is still about to start in this worktree",
+		plural(len(e.Launchers)), describeHookLaunchers(e.Launchers), e.Waited.Round(time.Millisecond))
 }
 
 func plural(n int) string {

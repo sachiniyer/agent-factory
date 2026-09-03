@@ -3,6 +3,7 @@
 package systemdunit
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -213,7 +214,7 @@ func TestHookLauncherUnitReadsSystemdRunsOwnOptions(t *testing.T) {
 // still on its way into it is the one thing this ordering exists to prevent.
 func TestStopHookScopesRefusesWhenALauncherNeverRegisters(t *testing.T) {
 	installSystemctlShim(t, "exit 0\n")
-	shortenLauncherSettle(t)
+	shortenLauncherSettle(t, 300*time.Millisecond, 20*time.Millisecond)
 	prefix := HookScopeUnitPrefix("s1")
 	unit := HookScopeUnit(prefix, "g0", 0)
 	pid := startStubHookLauncher(t, "systemd-run", unit, "while :; do sleep 1; done")
@@ -311,12 +312,64 @@ func waitForSweep(t *testing.T, done <-chan error) error {
 
 // shortenLauncherSettle collapses the wait for a launcher that will never
 // register, so the refusal is observable without a 15-second test.
-func shortenLauncherSettle(t *testing.T) {
+func shortenLauncherSettle(t *testing.T, timeout, poll time.Duration) {
 	t.Helper()
 	previousTimeout, previousInterval := hookLauncherSettleTimeout, hookLauncherPollInterval
 	t.Cleanup(func() {
 		hookLauncherSettleTimeout, hookLauncherPollInterval = previousTimeout, previousInterval
 	})
-	hookLauncherSettleTimeout = 300 * time.Millisecond
-	hookLauncherPollInterval = 20 * time.Millisecond
+	hookLauncherSettleTimeout = timeout
+	hookLauncherPollInterval = poll
+}
+
+// The refusal has to state a duration it actually spent WAITING.
+//
+// The settle budget exists for a launcher that will not register. Stopping a
+// scope the sweep could already NAME is progress, not waiting — and it is
+// bounded at 30s, an order of magnitude above the budget. Charging it to the
+// budget does two wrong things at once: the sweep gives up without having waited
+// for registration at all, and the refusal reports a duration it did not spend.
+func TestTheSettleBudgetExcludesTimeSpentStoppingScopes(t *testing.T) {
+	const (
+		stopDelay = 2 * time.Second
+		budget    = 500 * time.Millisecond
+	)
+	prefix := HookScopeUnitPrefix("s1")
+	unit := HookScopeUnit(prefix, "g0", 0)
+	stopped := filepath.Join(t.TempDir(), "stopped")
+	installSystemctlShim(t, `case "$*" in
+  *" stop "*) sleep 2; : > '`+stopped+`'; exit 0 ;;
+esac
+if [ -f '`+stopped+`' ]; then exit 0; fi
+printf '%s\n' '`+unit+` loaded active running Hook'
+exit 0
+`)
+	shortenLauncherSettle(t, budget, 50*time.Millisecond)
+	startStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g1", 0), "while :; do sleep 1; done")
+
+	start := time.Now()
+	err := StopHookScopes(prefix)
+	elapsed := time.Since(start)
+
+	var unregistered *HookLauncherUnregisteredError
+	if !errors.As(err, &unregistered) {
+		t.Fatalf("want a launcher-did-not-register refusal, got %v", err)
+	}
+	if elapsed < stopDelay {
+		t.Fatalf("this test proves nothing unless the stop actually took time; elapsed %s", elapsed)
+	}
+	// The reported duration is the claim: it must be the waiting, not the stop.
+	if unregistered.Waited >= stopDelay {
+		t.Fatalf("the refusal reports %s of waiting, which swallows the %s the sweep spent stopping a scope: %v",
+			unregistered.Waited, stopDelay, err)
+	}
+	// And the budget must still have been SPENT on registration, not consumed by
+	// the stop before the first re-sweep.
+	if elapsed < stopDelay+budget {
+		t.Fatalf("the sweep gave up after %s; the %s stop consumed the %s settle budget, so it never waited for the launcher to register at all",
+			elapsed, stopDelay, budget)
+	}
+	if !strings.Contains(err.Error(), unregistered.Waited.Round(time.Millisecond).String()) {
+		t.Fatalf("the message does not state the duration actually waited (%s): %v", unregistered.Waited, err)
+	}
 }
