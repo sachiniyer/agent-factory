@@ -176,15 +176,30 @@ var repoGoneOriginProbeFlights = struct {
 }{byPath: make(map[string]*repoGoneOriginProbeFlight)}
 
 func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
+	flight, err := startRepoGoneOriginProbe(worktree)
+	if err != nil {
+		return err
+	}
+	return waitForRepoGoneOriginProbe(worktree.repoPath, flight)
+}
+
+// startRepoGoneOriginProbe publishes the per-path probe flight — or joins the
+// healthy one already running — and returns it without waiting on it. Starting
+// and waiting were always two concerns (waitForRepoGoneOriginProbe has been its
+// own function since the fence landed); naming the first half lets a caller
+// observe a probe that is genuinely in flight before the deadline that must
+// cancel it is armed, which is what the process-cancellation test needs to stop
+// racing its own setup (#3759).
+func startRepoGoneOriginProbe(worktree *GitWorktree) (*repoGoneOriginProbeFlight, error) {
 	repoGoneOriginProbeFlights.Lock()
 	if active := repoGoneOriginProbeFlights.byPath[worktree.repoPath]; active != nil {
 		if !active.timedOut {
 			active.waiters++
 			repoGoneOriginProbeFlights.Unlock()
-			return waitForRepoGoneOriginProbe(worktree.repoPath, active)
+			return active, nil
 		}
 		repoGoneOriginProbeFlights.Unlock()
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"origin repository check for %s is still running after an earlier deadline: %w",
 			worktree.repoPath, context.DeadlineExceeded,
 		)
@@ -207,7 +222,7 @@ func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 		repoGoneOriginProbeFlights.Unlock()
 		flight.afterUnpublish()
 	}()
-	return waitForRepoGoneOriginProbe(worktree.repoPath, flight)
+	return flight, nil
 }
 
 func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlight) error {
