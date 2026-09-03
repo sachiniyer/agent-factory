@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 )
@@ -134,13 +135,24 @@ const bodySnippetLimit = 200
 // bodySnippet renders an unparseable response body for a human-readable error:
 // whitespace-collapsed and truncated, so an nginx error page becomes a
 // recognizable fragment rather than a wall of markup.
+//
+// The limit is a BYTE count (it is a cap on message size), but the cut is made
+// on a rune boundary. A localized proxy error page is not ASCII, and slicing a
+// Go string at an arbitrary byte index happily splits a multi-byte rune, so the
+// naive form ends the message in an invalid fragment that renders as U+FFFD.
 func bodySnippet(raw []byte) string {
 	s := strings.Join(strings.Fields(string(raw)), " ")
 	if s == "" {
 		return "empty response body"
 	}
-	if len(s) > bodySnippetLimit {
-		return s[:bodySnippetLimit] + "…"
+	if len(s) <= bodySnippetLimit {
+		return s
 	}
-	return s
+	// Walk back to the start of the rune the limit lands inside. A rune is at
+	// most 4 bytes, so this steps back 3 times at worst.
+	cut := bodySnippetLimit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

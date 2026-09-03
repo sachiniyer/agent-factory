@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
@@ -205,4 +206,52 @@ func TestHealthReportsTheDaemonVersion(t *testing.T) {
 			t.Fatalf("Health = %+v, %v; want a successful read with an empty version", resp, err)
 		}
 	})
+}
+
+// TestBodySnippetCutsOnARuneBoundary covers the non-ASCII proxy error page. The
+// limit is a byte cap, so a naive slice splits whatever rune it lands inside and
+// ends the operator's error message in a U+FFFD fragment.
+//
+// It runs every multi-byte width on purpose, and that is not thoroughness for
+// its own sake: whether the byte limit lands mid-rune depends on the limit
+// MODULO the rune width, so a single width can pass while the bug is fully
+// present. At today's limit of 200 the 2- and 4-byte cases land exactly on a
+// boundary by luck and prove nothing; the 3-byte case is the one that bites.
+// Fixing the width to whichever one happens to bite today would silently stop
+// testing anything the moment the limit changed.
+func TestBodySnippetCutsOnARuneBoundary(t *testing.T) {
+	for _, r := range []struct {
+		name string
+		char string
+	}{
+		{"2-byte", "\u00e9"},     // é
+		{"3-byte", "\u3042"},     // あ
+		{"4-byte", "\U0001f600"}, // 😀
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			// Long enough that the limit falls well inside the body whatever the width.
+			body := []byte(strings.Repeat(r.char, bodySnippetLimit))
+			got := bodySnippet(body)
+			if !utf8.ValidString(got) {
+				t.Fatalf("the snippet must stay valid UTF-8, got %q", got)
+			}
+			if strings.ContainsRune(got, utf8.RuneError) {
+				t.Errorf("a rune-split snippet renders as U+FFFD, got %q", got)
+			}
+			if !strings.HasSuffix(got, "\u2026") {
+				t.Errorf("a truncated snippet must be marked as truncated, got %q", got)
+			}
+			if len(got) > bodySnippetLimit+len("\u2026") {
+				t.Errorf("the byte cap must still hold, got %d bytes", len(got))
+			}
+		})
+	}
+
+	// Short bodies pass through whole, whitespace-collapsed.
+	if snippet := bodySnippet([]byte("  404   Not Found\n")); snippet != "404 Not Found" {
+		t.Errorf("a short body must be whitespace-collapsed and kept whole, got %q", snippet)
+	}
+	if snippet := bodySnippet(nil); snippet != "empty response body" {
+		t.Errorf("an empty body must say so, got %q", snippet)
+	}
 }
