@@ -1,15 +1,18 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -38,24 +41,39 @@ import (
 
 // stallLegacyRootResolution makes the legacy sweep's repository resolution hang
 // for one path until the caller's own context ends it — which is precisely the
-// property under test, so the stall must never end on its own. A fake that
+// property under test, so the stall must never end on its own TIMER. A fake that
 // returned after a fixed sleep would pass whether or not production bounded
 // anything.
+//
+// The returned release exists only for teardown, and the fail-first run is what
+// proved it necessary. An unbounded sweep can never end this stall, so the
+// wedged poll goroutine held the test's wg.Wait() until the package's 20-minute
+// timeout fired and every daemon test after it never ran. Release is closed in
+// cleanup, strictly after the assertion has reached its verdict, so it cannot
+// help the assertion pass — it only lets a wedged goroutine out so the package
+// can finish reporting.
 //
 // The seam is the package var rather than a `git` shim on PATH because PATH is
 // process-global and would reach every other test in this package; this stalls
 // exactly one path in one test.
-func stallLegacyRootResolution(t *testing.T, repoPath string) {
+func stallLegacyRootResolution(t *testing.T, repoPath string) (release func()) {
 	t.Helper()
 	prev := legacyRootRepoFromPath
+	released := make(chan struct{})
+	var once sync.Once
 	legacyRootRepoFromPath = func(ctx context.Context, path string) (*config.RepoContext, error) {
 		if filepath.Clean(path) != filepath.Clean(repoPath) {
 			return prev(ctx, path)
 		}
-		<-ctx.Done()
-		return nil, ctx.Err()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-released:
+			return prev(ctx, path)
+		}
 	}
 	t.Cleanup(func() { legacyRootRepoFromPath = prev })
+	return func() { once.Do(func() { close(released) }) }
 }
 
 // TestStalledLegacyRootPathDoesNotWedgeTheInstancePoll drives the REAL poll
@@ -85,7 +103,7 @@ func TestStalledLegacyRootPathDoesNotWedgeTheInstancePoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	stallLegacyRootResolution(t, rootRepo)
+	release := stallLegacyRootResolution(t, rootRepo)
 
 	backend := &deadButRecoverableBackend{FakeBackend: session.NewFakeBackend()}
 	// Registered Running so the pass has to TRANSITION it to Lost rather than
@@ -95,7 +113,12 @@ func TestStalledLegacyRootPathDoesNotWedgeTheInstancePoll(t *testing.T) {
 	stopCh := make(chan struct{})
 	wg := &sync.WaitGroup{}
 	startInstancePollLoop(manager, 50*time.Millisecond, stopCh, wg)
+	// Release BEFORE stopping. On an unbounded sweep the poll goroutine is
+	// inside the stall and can only observe stopCh once the resolution returns,
+	// so without this wg.Wait() blocks until the package timeout — measured, in
+	// the fail-first run. It runs after the verdict either way.
 	t.Cleanup(func() {
+		release()
 		close(stopCh)
 		wg.Wait()
 		manager.waitRootAgentCreates()
@@ -170,5 +193,99 @@ func TestHealthyLegacyRootPathResolvesIdentically(t *testing.T) {
 	manager.mu.Unlock()
 	if failures != 0 || !nextAttempt.IsZero() {
 		t.Fatalf("a healthy legacy entry must charge no retry state, got failures=%d nextAttempt=%v", failures, nextAttempt)
+	}
+}
+
+// TestTimedOutLegacyRootProbeIsUnknownNotARefusal pins the contract half of the
+// bound, and it uses NO seam: a 1ns budget against a real repository, resolved
+// through the real config.RepoFromPathContext, so the classification under test
+// is production's rather than a double's.
+//
+// The distinction it exists for is #3500's. "git answered, and the answer is no"
+// and "we could not ask git" are different states, and only the first entitles
+// anyone to say anything about the user's path. A bound that reported its own
+// impatience as a verdict would be the #3500 defect re-entered through a
+// timeout — so the timeout must record a failure that ESTABLISHED NOTHING,
+// leave everything it might otherwise have acted on alone, and keep retrying.
+func TestTimedOutLegacyRootProbeIsUnknownNotARefusal(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	rid := repoID(t, repoPath)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// A live, adopted root for that repo: what a refusal would be able to damage.
+	live := registerStarted(t, manager, rid, repoPath, session.RootSessionTitle,
+		session.NewFakeBackend(), true, session.Running)
+
+	var warnings bytes.Buffer
+	prevWarning := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
+
+	prevTimeout := rootLegacyRepoProbeTimeout
+	rootLegacyRepoProbeTimeout = time.Nanosecond
+	t.Cleanup(func() { rootLegacyRepoProbeTimeout = prevTimeout })
+
+	manager.ensureRootAgentsAndWait()
+
+	// Nothing was acted on. The sweep returns before ensureResolvedRoot, so the
+	// live root is neither adopted nor reaped nor replaced.
+	if got := live.GetStatus(); got != session.Running {
+		t.Fatalf("the live root's status = %v, want Running: an unanswered probe must not touch it", got)
+	}
+	if findRootInstance(t, manager, repoPath) != live {
+		t.Fatal("the live root's record was replaced by a pass whose probe never answered")
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("an unanswered probe must create nothing, got %d creates", len(*seen))
+	}
+
+	// It was recorded as UNKNOWN, not as a verdict, and it backed off.
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatalf("no ensure state recorded for %s", repoPath)
+	}
+	manager.mu.Lock()
+	failures, unanswered, nextAttempt := st.consecutiveFailures, st.unansweredFailures, st.nextAttempt
+	manager.mu.Unlock()
+	if failures != 1 || unanswered != 1 {
+		t.Fatalf("a timed-out probe must count as one failure that established nothing, got failures=%d unanswered=%d", failures, unanswered)
+	}
+	if !nextAttempt.After(time.Now()) {
+		t.Fatalf("a timed-out probe must settle onto the ensure backoff, got nextAttempt=%v", nextAttempt)
+	}
+
+	// And it said so in #3500's words, without claiming anything about the path.
+	got := warnings.String()
+	if !strings.Contains(got, "git never answered the probe") {
+		t.Fatalf("the log must use the unanswered-probe wording (#3500); warnings were:\n%s", got)
+	}
+	if strings.Contains(got, "does not resolve to a git repository") {
+		t.Fatalf("a probe that never answered must not be reported as a verdict about the path; warnings were:\n%s", got)
+	}
+
+	// #1122: retry-forever. With the budget restored and the backoff elapsed,
+	// the very next pass heals the candidate rather than staying refused.
+	rootLegacyRepoProbeTimeout = prevTimeout
+	manager.mu.Lock()
+	st.nextAttempt = time.Time{}
+	manager.mu.Unlock()
+
+	manager.ensureRootAgentsAndWait()
+
+	manager.mu.Lock()
+	failures, unanswered = st.consecutiveFailures, st.unansweredFailures
+	manager.mu.Unlock()
+	if failures != 0 || unanswered != 0 {
+		t.Fatalf("the candidate must heal once the probe answers again, got failures=%d unanswered=%d", failures, unanswered)
+	}
+	if got := live.GetStatus(); got != session.Running {
+		t.Fatalf("the healed pass must adopt the live root, not replace it; status = %v", got)
 	}
 }
