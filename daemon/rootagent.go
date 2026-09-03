@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -281,7 +280,12 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 		return
 	}
 	resolution := m.resolvedRootAgentFor(repo.ID, &rc)
-	m.ensureResolvedRoot(path, st, repo, resolution)
+	// No identity to re-prove: a root_agents entry is an opt-in the user wrote
+	// against a PATH, not a registry record, so there is no recorded checkout id
+	// a checkout there must match. #3334 already settled that shape — a proven
+	// mismatch releases the repo so its legacy opt-in still applies — and #3366
+	// deliberately does not change it (see verifyRootCreateCheckout).
+	m.ensureResolvedRoot(path, st, repo, resolution, nil)
 }
 
 // ensureSingletonRootAgent ensures the root for a registered project enabled by
@@ -289,17 +293,22 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 // identity and root come from the snapshot the caller enumerated (no per-tick
 // git resolution — a registered project resolved when its snapshot was read),
 // and the state is keyed by that resolved root path.
-func (m *Manager) ensureSingletonRootAgent(repoID, root string) {
+//
+// The binding's identity evidence rides down to ensureResolvedRoot, which
+// re-proves it at the create boundary only (#3366): a binding made once, at
+// boot or at re-attribution, is not evidence about the checkout that is at the
+// path now.
+func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjectRoot) {
 	m.mu.Lock()
-	st := m.rootEnsureStateForLocked(root)
+	st := m.rootEnsureStateForLocked(binding.root)
 	skip := time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if skip {
 		return
 	}
-	repo := &config.RepoContext{Root: root, ID: repoID}
+	repo := &config.RepoContext{Root: binding.root, ID: repoID}
 	resolution := m.resolvedRootAgentFor(repoID, nil)
-	m.ensureResolvedRoot(root, st, repo, resolution)
+	m.ensureResolvedRoot(binding.root, st, repo, resolution, &binding)
 }
 
 // rootEnsureStateForLocked returns the retry state for a candidate key, creating
@@ -321,8 +330,10 @@ func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
 // the retry state and leaves any existing root alone — removing an opt-in never
 // tears a live root down, it just stops re-ensuring it. All outcomes are logged;
 // failures back off exponentially and settle at rootEnsureBackoffMax, so the
-// loop always heals once the cause clears.
-func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution) {
+// loop always heals once the cause clears. identity is the registry binding a
+// registry-backed candidate was enumerated from, re-proven at the create
+// boundary (#3366), and nil for a legacy root_agents path.
+func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution, identity *resolvedProjectRoot) {
 	if !resolution.Enabled {
 		m.rootEnsureSucceeded(st)
 		return
@@ -399,6 +410,18 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
+			return
+		}
+		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
+		// adopt-first, so a live root costs no marker read on the one-second
+		// poll cadence; above the reap, so a refusal cannot delete the record
+		// that holds the conversation (#2616) and tab roster (#2628) the heal
+		// carries. It is deliberately NOT the proof the create runs on — the
+		// reap below does blocking work, so createVerifiedRoot re-proves after
+		// it (#3366 review). The full rationale is verifyRootCreateCheckout's,
+		// next to what it gates.
+		if err := verifyRootCreateCheckout(identity); err != nil {
+			m.rootEnsureFailed(stateKey, st, err)
 			return
 		}
 		// An Archived root (#1028) is inert — no tmux — so it must NOT be
@@ -495,8 +518,8 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
 	}
-	data, err := m.CreateSession(context.Background(), req)
-	if err != nil && req.resumeConversation.HasID() {
+	data, err := m.createVerifiedRoot(identity, req)
+	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
 		// can no longer resume (cleared history, a transcript store the agent no
 		// longer has) makes the resumed command exit at startup — and since the
@@ -518,17 +541,26 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 					workspace, req.resumeConversation.ID, err, state.Resume.ID)
 				req.resumeConversation = state.Resume
 				carried.conversation = state.Resume
-				data, err = m.CreateSession(context.Background(), req)
+				data, err = m.createVerifiedRoot(identity, req)
 			}
 		}
 	}
-	if err != nil && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
 		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
-		data, err = m.CreateSession(context.Background(), req)
+		data, err = m.createVerifiedRoot(identity, req)
 	}
 	if err != nil {
+		if isRootCheckoutRefusal(err) {
+			// Report the refusal as itself. createVerifiedRoot returns before
+			// CreateSession, so no create was attempted and none may be reported
+			// as having failed — and the identical refusal on the pre-reap arm
+			// above carries no such prefix, so wrapping it here would make one
+			// cause read as two.
+			m.rootEnsureFailed(stateKey, st, err)
+			return
+		}
 		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
 		return
 	}
