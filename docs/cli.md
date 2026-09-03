@@ -37,7 +37,22 @@ af tasks list --repo /repos/beta
 
 For the **session reads** that follow `--daemon-url`/`AF_DAEMON_URL` (`sessions list`, `get`, `watch`, `preview`, and `attach`), rule 2 does not apply: your current directory names a repository on *this* machine, which says nothing about the daemon's projects, so only an explicit `--repo` scopes a remote lookup.
 
-**`af tasks` is not remote-targeted at all.** Every task command talks to the local daemon over its control socket, whatever `--daemon-url`/`AF_DAEMON_URL` is set to — so `af tasks list` scopes by your local current directory and lists *local* tasks, and `af tasks remove` removes a local one. There is no way to manage a remote daemon's tasks from here today.
+**Every `af tasks` verb follows the target too** (`list`, `add`, `get`, `show`, `update`, `remove`, `trigger`, `restart`). A remote target reaches that daemon's task routes and never falls back to this machine: a daemon that cannot be reached is an error rather than a local answer, a remote-targeted verb never starts a local daemon, and a daemon too old to serve one of the routes is refused by name and version rather than written around.
+
+Two things work differently against a remote daemon, both because a path means something different on each host:
+
+- **`--repo` no longer *scopes*** — `list`, `get`, `show`, `update`, `remove`, `trigger` and `restart` refuse it. A project's identity is derived by hashing its path on *this* machine, so filtering the daemon's tasks by it would silently match nothing whenever the two hosts hold the project at different paths: an empty list for a project that has tasks. Drop it — task ids are unique, so the id resolves across the daemon's projects, exactly as it does from outside a git repository locally.
+- **`--repo` still *binds*, and `tasks add` requires it.** There it names a path on the daemon's host, sent as typed and resolved there: `~` is not expanded and no local git probe runs. `tasks update --project-path` works the same way. The success line names the daemon URL beside the path, unabbreviated — `~/…` would read as your own file whenever the two hosts share a home layout. An omitted `--program` is left to the daemon's own `default_program` rather than resolved from your config.
+
+```console
+$ af tasks add --daemon-url http://box:8443 --repo /srv/projects/alpha \
+    --name nightly --prompt "sweep" --cron "0 3 * * *"
+{
+  "daemon_url": "http://box:8443",
+  "id": "a1b2c3d4",
+  "project_path": "/srv/projects/alpha"
+}
+```
 
 ## `af` — the TUI
 
@@ -111,7 +126,7 @@ Flags:
 
 ## `af tasks`
 
-Tasks deliver a prompt to an agent automatically — on a cron schedule or whenever a long-running watch script emits a stdout line. Full semantics (trigger × delivery matrix, watch-script contract, status model) live in [tasks.md](tasks.md). All subcommands honor `--repo <path>` and `--json`, and follow the shared [project scoping](#project-scoping) rules.
+Tasks deliver a prompt to an agent automatically — on a cron schedule or whenever a long-running watch script emits a stdout line. Full semantics (trigger × delivery matrix, watch-script contract, status model) live in [tasks.md](tasks.md). All subcommands honor `--repo <path>` and `--json`, follow the shared [project scoping](#project-scoping) rules, and honor `--daemon-url`/`AF_DAEMON_URL` — see [remote daemons](#remote-daemons).
 
 ```bash
 af tasks list [--all]

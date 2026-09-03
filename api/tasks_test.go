@@ -1102,7 +1102,7 @@ func TestTasksList_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 	stubDaemon(t) // daemonListTasksNoSpawn defaults to ErrDaemonUnavailable
 	seedTask(t, task.Task{ID: "d1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
-	tasks, err := listTasks()
+	tasks, err := listTasks("af tasks list")
 	require.NoError(t, err)
 	require.Len(t, tasks, 1, "list must fall back to the on-disk task")
 	assert.Equal(t, "d1", tasks[0].ID)
@@ -1120,7 +1120,7 @@ func TestTasksList_PrefersDaemonSnapshot(t *testing.T) {
 		return []task.Task{{ID: "live", Prompt: "p", CronExpr: "0 1 * * *", Enabled: true}}, nil
 	}
 
-	tasks, err := listTasks()
+	tasks, err := listTasks("af tasks list")
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, "live", tasks[0].ID, "a reachable daemon's snapshot is authoritative")
@@ -1133,11 +1133,11 @@ func TestTasksGet_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 	stubDaemon(t)
 	seedTask(t, task.Task{ID: "g1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
-	got, err := getTaskByID("g1")
+	got, err := getTaskByID("af tasks get", "g1")
 	require.NoError(t, err)
 	assert.Equal(t, "g1", got.ID)
 
-	_, err = getTaskByID("missing1")
+	_, err = getTaskByID("af tasks get", "missing1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -1154,13 +1154,13 @@ func TestTasksGet_PrefersDaemonSnapshot(t *testing.T) {
 		return []task.Task{{ID: "live", Prompt: "p", CronExpr: "0 1 * * *", Enabled: true}}, nil
 	}
 
-	got, err := getTaskByID("live")
+	got, err := getTaskByID("af tasks get", "live")
 	require.NoError(t, err)
 	assert.Equal(t, "live", got.ID)
 
 	// A daemon miss is authoritative — no disk fallback even though "shadow"
 	// exists on disk.
-	_, err = getTaskByID("shadow")
+	_, err = getTaskByID("af tasks get", "shadow")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found",
 		"a reachable daemon's miss is authoritative; get must not re-read disk")
