@@ -160,7 +160,7 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 	// this loopback socket (#1696).
 	closeTCP, info, err := startTCPListener(hs.newMux(), cfg.ListenAddr, cfg, tokenGatePolicy{}, withoutWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 	require.NotEmpty(t, info.Token)
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -323,7 +323,7 @@ func TestAgentServerServesNoWebShell(t *testing.T) {
 
 	closeTCP, info, err := startTCPListener(hs.newMux(), cfg.ListenAddr, cfg, tokenGatePolicy{}, withoutWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("http://" + info.Addr + "/")

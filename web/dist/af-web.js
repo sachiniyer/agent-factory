@@ -6550,6 +6550,17 @@ function controlKind(e) {
 function canCommit(shown, current) {
   return shown !== current;
 }
+function saveNotice(resp) {
+  const parts = [];
+  if (resp.result.requires_restart && resp.restart_notice !== "") {
+    parts.push(resp.restart_notice);
+  }
+  const addr = resp.listener_addr ?? "";
+  if (addr !== "") {
+    parts.push(`Daemon now listening at ${addr}`);
+  }
+  return parts.join(" \xB7 ");
+}
 function createKeyedQueue() {
   const tails = /* @__PURE__ */ new Map();
   return (key, run) => {
@@ -15710,7 +15721,7 @@ function applyConfigValueNow(key, value, tok) {
         key: resp.result.key,
         // Echo the CANONICAL value the writer reported, not the one sent.
         value: resp.result.value,
-        notice: resp.result.requires_restart ? resp.restart_notice : "",
+        notice: saveNotice(resp),
         error: ""
       }
     });

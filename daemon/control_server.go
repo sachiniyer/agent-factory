@@ -243,6 +243,13 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	// (#3397); passing the whole outcome moves the decision into config.EffectNotice,
 	// which is the only place it is now made.
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
+	// Where the daemon is accepting NOW for a listener key (#3722) — read after the
+	// apply, so it reports the rebind's actual outcome rather than the request's
+	// intent. For a listener key this is the reply's most actionable field: the
+	// caller may well have been talking over the listener it just moved.
+	if s.manager != nil {
+		resp.ListenerAddr = s.manager.ListenerAddress(result.Key)
+	}
 	return nil
 }
 

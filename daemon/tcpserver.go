@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -207,8 +211,9 @@ type livePosture struct {
 }
 
 // startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
-// wrapped in a token-enforcing gate + the CORS allow-list. It returns a cleanup
-// function that shuts the server down and the banner payload the caller logs.
+// wrapped in a token-enforcing gate + the CORS allow-list. It returns the
+// listener's teardown handle (tcpListenerHandle: close now, or retire and drain)
+// and the banner payload the caller logs.
 // policy selects how the gate treats peers (loopback exemption / token disable);
 // its zero value is the strict "token mandatory for everyone" posture. shell
 // selects whether the browser SPA rides along.
@@ -225,15 +230,15 @@ type livePosture struct {
 // to present) and reads that token FRESH per auth event through the gate so `af
 // token rotate` takes effect for new connections without a daemon restart. An
 // override supplies its own already-minted credential and is compared as-is.
-func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture) (func() error, tcpListenerInfo, error) {
+func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture) (*tcpListenerHandle, tcpListenerInfo, error) {
 	return startTCPListenerWithListen(mux, addr, cfg, policy, shell, auth, live, net.Listen)
 }
 
 // startTCPListenerWithListen is startTCPListener with the socket constructor
 // supplied by the restartable-listener owner. Production uses net.Listen; the
 // seam lets lifecycle tests fail the listener underneath http.Server without
-// conflating that path with calling the returned server closer.
-func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, listen func(network, address string) (net.Listener, error)) (func() error, tcpListenerInfo, error) {
+// conflating that path with tearing the server down through the returned handle.
+func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, listen func(network, address string) (net.Listener, error)) (*tcpListenerHandle, tcpListenerInfo, error) {
 	var token string
 	var expectedToken func() (string, error)
 	var expectedForRequest func(*http.Request) (string, error)
@@ -331,7 +336,7 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	done := make(chan struct{})
-	var closeRequested atomic.Bool
+	h := &tcpListenerHandle{srv: srv, addr: listener.Addr().String()}
 	go func() {
 		defer close(done)
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -340,16 +345,130 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 	}()
 
 	info := tcpListenerInfo{
-		Addr:           listener.Addr().String(),
+		Addr:           h.addr,
 		Token:          token,
 		done:           done,
-		closeRequested: closeRequested.Load,
+		closeRequested: h.closeRequested.Load,
 	}
-	closeServer := func() error {
-		// Set before Close so the Serve watcher can distinguish our teardown from
-		// an underlying listener failure even when Serve returns immediately.
-		closeRequested.Store(true)
-		return srv.Close()
+	return h, info, nil
+}
+
+// listenerRetireGrace bounds how long a RETIRED listener may spend draining the
+// requests already in flight on it before those connections are force-closed
+// (#3722). Two seconds is generous for a control-plane reply that is already
+// written and short enough that a client which never drains cannot pin the old
+// server — and its connections, and the port — indefinitely.
+//
+// A var, not a const, so the deadline test can shorten it; nothing in production
+// writes it.
+var listenerRetireGrace = 2 * time.Second
+
+// tcpListenerHandle owns the teardown of one bound TCP listener. It offers two
+// ways out, and choosing between them is the whole of #3722:
+//
+//   - close() cuts everything immediately, including a request mid-handler. That
+//     is right at DAEMON SHUTDOWN, where the process is going away and there is
+//     nothing left to flush a reply into.
+//   - retire() is right for a listener the daemon is REPLACING while it keeps
+//     running. A config write that moves network.listen_addr arrives ON the
+//     listener it moves, so closing that listener from inside the handler
+//     destroys the connection the 200 was about to be written to: the operator is
+//     told a committed, applied write failed, and retries against an address the
+//     daemon has already left.
+//
+// retire() splits along the one line that matters — which half of a shutdown can
+// afford to wait:
+//
+//   - Everything that does NOT wait happens synchronously: the listener stops
+//     accepting and every connection that is idle right now is dropped. So a
+//     retired address refuses new connections, and serves nothing further on a
+//     pooled keep-alive one, before the caller returns — the property this path
+//     has had since #2480 PR2. It is a BOUND, not a speedup: a variant that
+//     spawned this half as a goroutine too still passed every listener test here,
+//     because the goroutine wins that race in practice. What it cannot promise is
+//     winning it on a box under load, and "the old address answered a new client
+//     after the daemon moved off it" is not a window worth leaving open for the
+//     sake of one less line.
+//   - WAITING for the requests still in flight is asynchronous, because it must
+//     be: Shutdown waits for in-flight handlers to return, and the handler that
+//     triggered the rebind is one of them, so waiting on the caller's goroutine
+//     would deadlock it against itself.
+type tcpListenerHandle struct {
+	srv *http.Server
+	// addr is the resolved bound address, snapshotted at bind: it is read for the
+	// deadline warning after the listener has been closed.
+	addr string
+	// closeRequested records that a teardown was ASKED FOR, so the Serve watcher
+	// can tell one from an underlying listener failure. Set before either teardown
+	// touches the socket, so it is already true when Serve returns.
+	closeRequested atomic.Bool
+	// retired records that the teardown was a RETIREMENT rather than a close.
+	// Both set closeRequested, and once a drain has finished the two are
+	// indistinguishable from outside — the server is down either way — so this is
+	// what lets a test pin WHICH teardown a call site chose. That question has to
+	// be answerable directly: the observable difference (a connection surviving
+	// the swap) is only observable while http.Server still counts that connection
+	// as in flight, which for a half-written request means the first five seconds
+	// of its life, and a test that raced that window failed on a loaded runner
+	// for a reason that had nothing to do with the code under test.
+	retired    atomic.Bool
+	retireOnce sync.Once
+}
+
+// close tears the listener down immediately: every accepted connection is cut,
+// in-flight handlers included. Daemon shutdown only — for a listener being
+// replaced while the daemon keeps running, see retire.
+func (h *tcpListenerHandle) close() error {
+	// Set before Close so the Serve watcher can distinguish our teardown from
+	// an underlying listener failure even when Serve returns immediately.
+	h.closeRequested.Store(true)
+	return h.srv.Close()
+}
+
+// retire stops accepting now and drains what is already in flight off the
+// caller's goroutine (#3722), so the reply to the very request that retired this
+// listener still reaches its client. Idempotent.
+func (h *tcpListenerHandle) retire() {
+	h.retireOnce.Do(func() {
+		h.closeRequested.Store(true)
+		h.retired.Store(true)
+		// The synchronous half, and Shutdown itself is what performs it: an
+		// ALREADY-EXPIRED deadline runs its close-listeners + close-idle-connections
+		// prologue and then returns instead of waiting — measured on go1.25, and the
+		// order is the documented one ("first closing all open listeners, then
+		// closing all idle connections, and then waiting"). Two things follow that a
+		// bare listener.Close() would not give: idle keep-alive connections to the
+		// retired address stop serving here rather than whenever the goroutine below
+		// is scheduled, and Serve returns ErrServerClosed rather than a raw accept
+		// error, so a deliberate retirement logs no "listener stopped" warning.
+		//
+		// Promptness is all that rides on the prologue order: if a future runtime
+		// returned before closing idle connections, drain() closes them a moment
+		// later anyway.
+		expired, cancel := context.WithDeadline(context.Background(), time.Now())
+		_ = h.srv.Shutdown(expired)
+		cancel()
+		go h.drain()
+	})
+}
+
+// drain waits for the requests already in flight on a retired listener, then
+// closes it.
+//
+// The deadline is the ONLY thing that justifies the force close, so it is what
+// the branch tests for rather than err != nil. Shutdown has a second way to
+// return non-nil here — it reports the error from closing the listener retire's
+// synchronous half already closed — and while that particular one arrives only
+// once everything is idle anyway, "any error means the client stalled" is the
+// wrong rule to leave lying next to a srv.Close().
+func (h *tcpListenerHandle) drain() {
+	ctx, cancel := context.WithTimeout(context.Background(), listenerRetireGrace)
+	defer cancel()
+	if err := h.srv.Shutdown(ctx); errors.Is(err, context.DeadlineExceeded) {
+		// A client that never drains its reply must not keep the retired server —
+		// and the connections it holds — alive for as long as it likes. Say so:
+		// this is the one outcome where a reply was genuinely lost.
+		log.WarningLog.Printf("retired listener on %s still had connections in flight after %s: closing them", h.addr, listenerRetireGrace)
+		_ = h.srv.Close()
 	}
-	return closeServer, info, nil
 }

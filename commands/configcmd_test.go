@@ -803,3 +803,39 @@ func TestConfigListJSONEnvelope(t *testing.T) {
 		t.Fatalf("config list --json changed typed empty values: %s", out.String())
 	}
 }
+
+// TestPrintListenerAddrNamesWhereTheDaemonIsListening pins the one line #3722
+// adds to `af config set` / `af config unset`: after a write that moved a
+// listener, the operator is told where the daemon is now serving instead of being
+// left to rediscover it — most sharply when that write cost them the connection
+// they were talking over.
+//
+// The address is the daemon's, verbatim. This surface computes nothing: a client
+// that inferred "the connection dropped on a listener key, so it probably moved
+// to what I typed" would be asserting a daemon state it cannot observe, which is
+// exactly why the address rides on the reply.
+func TestPrintListenerAddrNamesWhereTheDaemonIsListening(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	printListenerAddr(cmd, "127.0.0.1:9443")
+	if got := out.String(); got != "daemon now listening at 127.0.0.1:9443\n" {
+		t.Fatalf("unexpected line: %q", got)
+	}
+}
+
+// TestPrintListenerAddrSaysNothingWithoutAnAddress: every non-listener key, and a
+// listener that is not accepting at all (network.listen_addr = ""), report no
+// address — there is none to name, and the effect notice has already said what
+// happened. An older daemon that does not send the field lands here too.
+func TestPrintListenerAddrSaysNothingWithoutAnAddress(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	printListenerAddr(cmd, "")
+	if got := out.String(); got != "" {
+		t.Fatalf("expected no output, got %q", got)
+	}
+}

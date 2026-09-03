@@ -492,4 +492,11 @@ export interface ConfigSetResult {
 export interface ConfigSetResponse {
   result: ConfigSetResult;
   restart_notice: string;
+  /** Where the daemon is ACCEPTING now, when the written key moved one of its
+   *  listeners (#3722) — absent for every other key. Saving network.listen_addr
+   *  from this form moves the very listener the form is talking over, so the
+   *  daemon names the new address in the reply it flushes on the old connection;
+   *  without it the operator is told where they are NOT and left to guess where
+   *  they are. Optional: an older daemon does not send it. */
+  listener_addr?: string;
 }

@@ -848,6 +848,15 @@ type SetConfigValueResponse struct {
 	// rebind failure at save time (#2480 PR2). The web form shows them after the
 	// echo so a user learns when a socket key did not apply or a posture is exposed.
 	Warnings []string `json:"warnings,omitempty"`
+	// ListenerAddr is where the daemon is ACCEPTING right now for a listener key
+	// (network.listen_addr / network.preview_listen_addr) — "" for every other key,
+	// and for a listener that is not bound. It exists because moving a listener is
+	// the one config write that can cost the caller the connection it is talking
+	// over (#3722): the reply has to name the address the operator must re-target
+	// to, or they are left rediscovering it by hand — and, after a rebind that
+	// FAILED, it names the address still serving rather than the one config now
+	// asks for, which is what the deferred notice beside it is about.
+	ListenerAddr string `json:"listener_addr,omitempty"`
 }
 
 // UnsetConfigValueRequest clears one globally unsettable migrated setting.
@@ -863,6 +872,11 @@ type UnsetConfigValueResponse struct {
 	Applied       []string            `json:"applied"`
 	Pending       []string            `json:"pending"`
 	Warnings      []string            `json:"warnings,omitempty"`
+	// ListenerAddr as in SetConfigValueResponse. Unsetting a listener key restores
+	// its DEFAULT address, which rebinds the socket exactly as a set does — so the
+	// two verbs report it identically or one of them is the surface that quietly
+	// does not (#3397 is that lesson, on this same pair of handlers).
+	ListenerAddr string `json:"listener_addr,omitempty"`
 }
 
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config

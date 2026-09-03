@@ -59,6 +59,25 @@ type stubDaemon struct {
 
 const stubDaemonConfigPath = "/home/boxoperator/.agent-factory/config.toml"
 
+// stubDaemonListenerAddr is what this "daemon" reports it is accepting on after a
+// listener key is written (#3722). Deliberately DIFFERENT from any value a test
+// sends: the CLI must print the address the DAEMON named, and a surface that
+// echoed the request instead would name a dead address exactly when a rebind
+// failed and the daemon stayed put.
+const stubDaemonListenerAddr = "10.0.0.7:9443"
+
+// listenerAddrFor mirrors the real handler: an address for a listener key,
+// nothing for every other key. The wire spelling may be the legacy flat alias,
+// so it canonicalizes first, as the daemon does.
+func (d *stubDaemon) listenerAddrFor(key string) string {
+	switch config.CanonicalConfigKey(key) {
+	case "network.listen_addr", "network.preview_listen_addr":
+		return stubDaemonListenerAddr
+	default:
+		return ""
+	}
+}
+
 func newStubDaemon(t *testing.T, version string, unserved ...string) *stubDaemon {
 	t.Helper()
 	d := &stubDaemon{
@@ -105,6 +124,7 @@ func (d *stubDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			// one proves the remote answer is what reaches stdout.
 			RestartNotice: "applied to the running daemon",
 			Applied:       []string{req.Key},
+			ListenerAddr:  d.listenerAddrFor(req.Key),
 		}))
 	case "/v1/UnsetConfigValue":
 		var req daemon.UnsetConfigValueRequest
@@ -230,6 +250,50 @@ func TestConfigUnsetRoutesTheGlobalClearToTheTargetedDaemon(t *testing.T) {
 // version answered. An older daemon's allowlist predates the grouped TOML name,
 // so the WIRE key is the permanent flat alias; a newer one canonicalizes it
 // before writing, so the ECHO is normalized back before it reaches stdout.
+// TestConfigSetOfListenAddrNamesWhereTheRemoteDaemonIsListening is #3722 on the
+// surface it was reported from: `af config set network.listen_addr --daemon-url`
+// moves the listener the reply is travelling over, so the operator has to be told
+// the address to re-target to — otherwise a successful write reads as a failure
+// and they go looking for a daemon that has already moved.
+//
+// The stub reports an address unrelated to the one sent, so this fails if the CLI
+// ever starts echoing the request. It cannot know where the daemon ended up: a
+// rebind can fail, leaving it on its previous address.
+func TestConfigSetOfListenAddrNamesWhereTheRemoteDaemonIsListening(t *testing.T) {
+	newConfigHome(t)
+	stub := newStubDaemon(t, "1.9.0")
+	t.Setenv("AF_DAEMON_URL", "")
+
+	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(),
+		"set", "network.listen_addr", "127.0.0.1:8443")
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	want := "daemon now listening at " + stubDaemonListenerAddr
+	if !strings.Contains(out, want) {
+		t.Errorf("a listener write must name where the daemon is now accepting; want %q in stdout: %q", want, out)
+	}
+}
+
+// TestConfigSetOfAnOrdinaryKeyNamesNoListener: the line belongs to the keys that
+// move a listener and to no others. A daemon that reports no address — an older
+// one, or any non-listener key — must produce no line at all rather than an
+// empty or invented one.
+func TestConfigSetOfAnOrdinaryKeyNamesNoListener(t *testing.T) {
+	newConfigHome(t)
+	stub := newStubDaemon(t, "1.9.0")
+	t.Setenv("AF_DAEMON_URL", "")
+
+	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "default_program", "codex")
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if strings.Contains(out, "daemon now listening") {
+		t.Errorf("no listener moved; stdout must not claim one did: %q", out)
+	}
+}
+
 func TestConfigSetSendsTheLegacyAliasAndEchoesTheCanonicalKey(t *testing.T) {
 	newConfigHome(t)
 	stub := newStubDaemon(t, "1.9.0")

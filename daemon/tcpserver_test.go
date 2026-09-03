@@ -42,7 +42,7 @@ func TestTCPListener_HTTP_TokenRoundTrip(t *testing.T) {
 	// TestTCPListener_LoopbackExempt and the handler-level matrix in httpauth_test).
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, tokenGatePolicy{}, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	require.NotEmpty(t, info.Token)
 
@@ -146,7 +146,7 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 	// UNAUTHENTICATED static shell, which is policy-independent.
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, tokenGatePolicy{}, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	baseURL := "http://" + info.Addr
@@ -199,7 +199,7 @@ func TestTCPListener_LoopbackExempt(t *testing.T) {
 	// (here unreachable) network peers.
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, tokenGatePolicy{loopbackExempt: true}, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	baseURL := "http://" + info.Addr
@@ -245,7 +245,7 @@ func TestTCPListener_RequireLoopbackToken(t *testing.T) {
 	// loopback shortcut.
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, tokenGatePolicy{loopbackExempt: false}, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 	require.NotEmpty(t, info.Token)
 
 	client := &http.Client{Timeout: 5 * time.Second}
