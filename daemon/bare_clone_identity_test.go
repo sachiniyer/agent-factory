@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -76,10 +74,7 @@ func TestCreateSessionPreservesAndNamesLegacyBareCloneRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title: "new-identity", RepoPath: worktree, Program: "claude", InPlace: true,
 	}); err != nil {
@@ -299,10 +294,7 @@ func TestWarnLegacyBareCloneTasksNamesStrandedAutomation(t *testing.T) {
 		t.Fatalf("fixture: the corrected identity must differ from the legacy parent identity %s", legacyID)
 	}
 
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	warnLegacyBareCloneTasks(repo)
 
@@ -340,10 +332,7 @@ func TestWarnLegacyBareCloneTasksSilentWithoutStrandedTasks(t *testing.T) {
 		t.Fatalf("seed current task: %v", err)
 	}
 
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	warnLegacyBareCloneTasks(repo)
 

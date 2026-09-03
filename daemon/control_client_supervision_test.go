@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // These tests exercise the ordinary EnsureDaemon production gate with a real
@@ -120,10 +118,7 @@ func TestEnsureDaemonManagerHangFallsBackToReachableDaemon(t *testing.T) {
 	marker, _ := installEnsureTestUnitAndManager(t, true)
 	startServer, serverErr := ensureTestServerStarter(t)
 
-	var warnBuf bytes.Buffer
-	prevOut := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnBuf)
-	defer log.WarningLog.SetOutput(prevOut)
+	warnBuf := captureWarnings(t)
 
 	adHocLaunched := false
 	started := time.Now()

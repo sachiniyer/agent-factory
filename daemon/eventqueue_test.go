@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -953,10 +951,7 @@ func TestWatcherDrainLogsExpiryCountWhenStoppedMidBackoff(t *testing.T) {
 		t.Fatalf("seed enqueue fresh: %v", err)
 	}
 
-	var info bytes.Buffer
-	prevInfo := aflog.InfoLog.Writer()
-	aflog.InfoLog.SetOutput(&info)
-	t.Cleanup(func() { aflog.InfoLog.SetOutput(prevInfo) })
+	info := captureInfo(t)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)

@@ -1,10 +1,8 @@
 package daemon
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -505,10 +503,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 	// Capture warning output so we can assert the corrupted repo was named
 	// in the log line — silent skipping would re-introduce a different bug
 	// (invisible data drop).
-	var warnBuf bytes.Buffer
-	prevOut := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(io.MultiWriter(prevOut, &warnBuf))
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+	warnBuf := teeWarnings(t)
 
 	// Stub the session restore so we don't need a live tmux/PTY backend.
 	prevFromInstance := fromInstanceDataForRefresh
@@ -655,9 +650,7 @@ func TestRefreshDaemonInstances_DoesNotMaterializeUnpersistedLegacyID(t *testing
 func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
-	prevOut := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(io.Discard)
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+	silenceWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
 	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
@@ -692,10 +685,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
-	var warnBuf bytes.Buffer
-	prevOut := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(io.MultiWriter(prevOut, &warnBuf))
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+	warnBuf := teeWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
 	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
@@ -765,9 +755,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 // preserve, so a missing repo must contribute nothing and not panic.
 func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	prevOut := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(io.Discard)
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+	silenceWarnings(t)
 
 	got, _, err := refreshDaemonInstances(nil)
 	if err != nil {
@@ -785,10 +773,7 @@ func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
 func TestFindInstanceDataByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
-	var warnBuf bytes.Buffer
-	prevOut := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(io.MultiWriter(prevOut, &warnBuf))
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+	warnBuf := teeWarnings(t)
 
 	corruptedRepoID := "corrupted-repo"
 	if err := config.SaveRepoInstances(corruptedRepoID, json.RawMessage("{not valid json")); err != nil {

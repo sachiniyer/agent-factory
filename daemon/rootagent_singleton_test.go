@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -283,10 +281,7 @@ func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
 
 			// The fail-closed WARNING fires from the snapshot inside NewManager,
 			// so the capture goes in first (httpserver_test.go idiom).
-			var warnings bytes.Buffer
-			prevWarning := log.WarningLog.Writer()
-			log.WarningLog.SetOutput(&warnings)
-			t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
+			warnings := captureWarnings(t)
 
 			manager, err := NewManager(tc.managerConfig(t, repoPath))
 			if err != nil {
@@ -397,10 +392,7 @@ func TestEnsureRootAgentsUnlistableRegistryFailsClosed(t *testing.T) {
 
 			// The fail-closed ERROR fires from the snapshot inside NewManager,
 			// so the capture goes in first (httpserver_test.go idiom).
-			var errorLog bytes.Buffer
-			prevError := log.ErrorLog.Writer()
-			log.ErrorLog.SetOutput(&errorLog)
-			t.Cleanup(func() { log.ErrorLog.SetOutput(prevError) })
+			errorLog := captureErrors(t)
 
 			manager, err := NewManager(cfg)
 			if err != nil {

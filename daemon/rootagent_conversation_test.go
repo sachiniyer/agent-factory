@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -285,10 +283,7 @@ func TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry(t *tes
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 
-	var warning bytes.Buffer
-	previousWarning := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warning)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
+	warning := captureWarnings(t)
 
 	first.SetStatusForTest(session.Lost)
 	manager.ensureRootAgentsAndWait()
@@ -473,10 +468,7 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 	seedRootConversation(t, root)
 	root.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle, cfg.RootAgents[repoPath].Program))
 
-	var warning bytes.Buffer
-	previousWarning := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warning)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
+	warning := captureWarnings(t)
 
 	manager.ensureRootAgentsAndWait()
 	advance(time.Hour)
@@ -548,14 +540,7 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var info, warning bytes.Buffer
-			prevInfo, prevWarning := log.InfoLog.Writer(), log.WarningLog.Writer()
-			log.InfoLog.SetOutput(&info)
-			log.WarningLog.SetOutput(&warning)
-			t.Cleanup(func() {
-				log.InfoLog.SetOutput(prevInfo)
-				log.WarningLog.SetOutput(prevWarning)
-			})
+			info, warning := captureInfo(t), captureWarnings(t)
 
 			reportRootConversationCarry("/repo", tc.carried, tc.created, tc.launched)
 

@@ -181,6 +181,23 @@ jobs:
       - name: Test container-harness disk hygiene
         run: make testbox-selftest
 
+      # Twenty-six daemon test files pointed a PROCESS-GLOBAL logger
+      # (log.WarningLog / InfoLog / ErrorLog) at a local, unsynchronized
+      # bytes.Buffer and then read it. Every goroutine in the test binary writes
+      # into whichever sink is installed, so the read races any of them —
+      # `Test (macOS)` went red with a background goroutine from a Manager the
+      # failing test never created writing into that test's assertion buffer
+      # (#3787). They now share one mutex-guarded sink in
+      # daemon/logcapture_test.go, and this is the check that keeps a
+      # twenty-seventh from being written the old way; twenty-six copies is how
+      # the shape spread in the first place. It lives in the required Lint job,
+      # which runs on every PR regardless of what the PR touched, and it needs
+      # nothing but the Go already set up above — it reads the daemon test files
+      # as text and never builds or runs them, so it spawns no daemon and
+      # touches no tmux.
+      - name: Lint daemon log capture
+        run: go test ./scripts/ -run DaemonLogCapture -count=1
+
   test:
     name: Test
     runs-on: ubuntu-latest

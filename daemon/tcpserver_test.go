@@ -1,11 +1,9 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
-	stdlog "log"
 	"net"
 	"net/http"
 	"os"
@@ -20,7 +18,6 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // TestTCPListener_HTTP_TokenRoundTrip is the PR3 payoff, now HTTP-only: a real
@@ -373,19 +370,6 @@ func freeNetworkPort(t *testing.T) string {
 	return addr
 }
 
-// captureWarnings redirects log.WarningLog into a buffer for the duration of a
-// test and returns a reader for what was written. The logger vars are package
-// globals, so it restores the previous one — a leaked writer would send every
-// later test's warnings into a dead buffer.
-func captureWarnings(t *testing.T) func() string {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := log.WarningLog
-	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
-	t.Cleanup(func() { log.WarningLog = prev })
-	return buf.String
-}
-
 // TestStartHTTPServer_BindsUnauthenticatedNetworkListener is the #2168 Phase 0
 // lock, and it REVERSES the #2090 assertion that stood here before: the port must
 // be OPEN and serving.
@@ -438,7 +422,7 @@ func TestStartHTTPServer_BindsUnauthenticatedNetworkListener(t *testing.T) {
 
 	// Said once, and worth reading: the address, what a peer can do with it, and
 	// how to turn auth on. The three requests above must not have added copies.
-	got := warnings()
+	got := warnings.String()
 	require.Equal(t, 1, strings.Count(got, "reachable from the network"),
 		"the exposure warning must be emitted exactly once per daemon start, not per request:\n%s", got)
 	require.Contains(t, got, addr)

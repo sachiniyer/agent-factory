@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // #3500: the root-agent sweeps narrated EVERY config.RepoFromPath failure as a
@@ -57,17 +55,9 @@ func installUnanswerableGit(t *testing.T) (letGitAnswer func()) {
 }
 
 // captureRootEnsureLogs redirects the warning and error loggers for one test.
-func captureRootEnsureLogs(t *testing.T) (warnings, errors *bytes.Buffer) {
+func captureRootEnsureLogs(t *testing.T) (warnings, errors *logCapture) {
 	t.Helper()
-	warnings, errors = &bytes.Buffer{}, &bytes.Buffer{}
-	prevWarning, prevError := log.WarningLog.Writer(), log.ErrorLog.Writer()
-	log.WarningLog.SetOutput(warnings)
-	log.ErrorLog.SetOutput(errors)
-	t.Cleanup(func() {
-		log.WarningLog.SetOutput(prevWarning)
-		log.ErrorLog.SetOutput(prevError)
-	})
-	return warnings, errors
+	return captureWarnings(t), captureErrors(t)
 }
 
 // TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository is the #3500

@@ -18,7 +18,6 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
@@ -537,10 +536,7 @@ func (w responseWriteError) Write(p []byte) (int, error) {
 // TestWriteHTTPEnvelope_LogsLiveBrokenPipe proves a raw socket error still
 // warns while its request is live: only a canceled request may suppress it.
 func TestWriteHTTPEnvelope_LogsLiveBrokenPipe(t *testing.T) {
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	writeHTTPEnvelope(responseWriteError{ResponseRecorder: httptest.NewRecorder(), err: syscall.EPIPE},
 		httptest.NewRequest(http.MethodGet, "/", nil), http.StatusOK, apiproto.Success("ok"))
@@ -551,10 +547,7 @@ func TestWriteHTTPEnvelope_LogsLiveBrokenPipe(t *testing.T) {
 // TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe proves the same raw socket
 // error is quiet once the request context confirms the client disconnected.
 func TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe(t *testing.T) {
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
