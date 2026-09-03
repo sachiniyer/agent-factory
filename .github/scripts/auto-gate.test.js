@@ -2761,6 +2761,206 @@ test("an unknown head timestamp never degrades the gate", async () => {
   assert.match(result.summary, /^BLOCKED:/);
 });
 
+// #3380. `committedDate` is a property of the COMMIT OBJECT, not of when that
+// SHA became this PR's head. A rebase, an amend, or a reset to an older commit
+// sets it arbitrarily, and a rewind moves it BACKWARDS — so artifacts that
+// predate the head transition start looking newer than the head. The two rules
+// below ask a TRANSITION question ("was this produced for the current head
+// state?"), so they anchor on when the head became current, not on when its
+// commit was written.
+test("a verdict that predates the force-push that made this head current is stale", async () => {
+  const result = await evaluateGate({
+    // The rewind: head is an OLD commit, put back in place at 02:00.
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.shouldMerge, false, "a verdict from before the rewind is not about this head");
+  assert.match(
+    result.reasons.join("\n"),
+    /Codex verdict for the head commit is older than the head/,
+  );
+});
+
+test("a usage-limit response that predates the force-push to this head is stale evidence", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexRateLimit("2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "evidence from before the rewind is not evidence");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /predates this head/);
+});
+
+// The sibling case the force-push framing misses: a PR opened from a branch
+// whose head commit was written long before, where there is no force-push event
+// at all. No real verdict can predate the PR itself, so the floor cannot cause a
+// false block — and without it the same stale-verdict hole stays open.
+test("the PR's own creation time floors the anchor when nothing was force-pushed", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    prCreatedAt: "2026-07-09T02:00:00Z",
+    headForcePushes: [],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.shouldMerge, false, "no artifact can predate the PR and still be about it");
+});
+
+// Latest matching wins, and only matching counts. A branch pushed to X, moved
+// away to Y, then rewound back to X carries two events for X; the anchor is the
+// one that made X current NOW, not the one that first put it there.
+test("the anchor is the latest force-push that landed on this head, not the first", async () => {
+  const rewound = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [
+      { createdAt: "2026-07-09T01:10:00Z", afterCommit: { oid: HEAD_SHA } },
+      { createdAt: "2026-07-09T01:30:00Z", afterCommit: { oid: OTHER_SHA } },
+      { createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } },
+    ],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(rewound.shouldMerge, false, "the first arrival of this head is not when it became current");
+
+  // …and a push that landed on some OTHER sha says nothing about this head, so
+  // it must not be folded into the anchor: taking the max over every event
+  // regardless of target would block this verdict too.
+  const otherHead = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [
+      { createdAt: "2026-07-09T01:10:00Z", afterCommit: { oid: HEAD_SHA } },
+      { createdAt: "2026-07-09T03:00:00Z", afterCommit: { oid: OTHER_SHA } },
+    ],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(otherHead.shouldMerge, true, `blocked on: ${otherHead.reasons.join("; ")}`);
+});
+
+// Fails closed on an unknown order, like every other timestamp comparison in
+// this file: an anchor that cannot be computed is not a permissive one.
+test("an unparseable force-push timestamp on this head blocks rather than being skipped", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "not a date", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.shouldMerge, false, "an unknown transition time is not a proven one");
+  assert.match(result.reasons.join("\n"), /freshness cannot be verified/);
+});
+
+test("headCurrentSinceTime takes the max of the commit, the PR and the matching pushes", () => {
+  const { headCurrentSinceTime } = __test;
+  const at = (value) => Date.parse(value);
+
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+      headSha: HEAD_SHA,
+    }),
+    at("2026-07-09T02:00:00Z"),
+  );
+
+  // The commit is the latest of the three — the ordinary case, where this
+  // returns exactly what the old anchor did.
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T03:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+      headSha: HEAD_SHA,
+    }),
+    at("2026-07-09T03:00:00Z"),
+  );
+
+  // An event whose commit is gone (GitHub nulls `afterCommit` once it is
+  // garbage-collected) cannot be the event that set a head that still exists,
+  // so it is skipped rather than treated as unparseable.
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: null }],
+      headSha: HEAD_SHA,
+    }),
+    at("2026-07-09T01:00:00Z"),
+  );
+
+  for (const broken of [
+    { lastCommitDate: null, prCreatedAt: "2026-07-09T00:00:00Z", headForcePushes: [] },
+    { lastCommitDate: "2026-07-09T01:00:00Z", prCreatedAt: undefined, headForcePushes: [] },
+    {
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "", afterCommit: { oid: HEAD_SHA } }],
+    },
+  ]) {
+    assert.equal(headCurrentSinceTime({ ...broken, headSha: HEAD_SHA }), null);
+  }
+
+  // No usable head sha means no event can be matched to it, and "matched
+  // nothing" would silently read as "never force-pushed".
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [],
+      headSha: "not-a-sha",
+    }),
+    null,
+  );
+});
+
+// The #2878 rule asks a CONTENT question — "could this commit contain the
+// claimed fix?" — and its answer is a property of when the commit was MADE, not
+// of when it became head. Anchoring it on the transition would re-open #2878:
+// a force-push at 01:30 back to a commit written at 01:00 would read as "a
+// commit landed after the finding" and clear a claim the head provably cannot
+// contain.
+test("a rewind does not clear an inline RESOLVED claim the head cannot contain", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T01:30:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T02:00:00Z")],
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — fixed." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /marked RESOLVED with no commit pushed/);
+});
+
+test("a rewind does not clear an unbound artifact's RESOLVED claim either", async () => {
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:15:00Z",
+  });
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T01:30:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T02:00:00Z",
+        commentTime: "2026-07-09T02:00:00Z",
+      }),
+      prComment("sachiniyer", `Fixed — RESOLVED #issuecomment-${stripped.id}.`, "2026-07-09T01:20:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "the head still cannot contain the claimed fix");
+});
+
 // Degrading waives exactly one requirement: the verdict that cannot arrive.
 // Every other gate is independent of the reviewer, and manualMergeRequired
 // makes the decision pass, so waiving them together would let "the reviewer is
@@ -5339,6 +5539,12 @@ function pullRequestFile(file) {
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
+  // When this PR was opened, and the HeadRefForcePushedEvent timeline. Together
+  // with the commit's own date these are what the head-transition anchor is
+  // built from (#3380); the defaults sit before every artifact time the suite
+  // uses, which is the real ordering — a PR exists before anything reviews it.
+  prCreatedAt = "2026-07-09T00:00:00Z",
+  headForcePushes = [],
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -5653,8 +5859,12 @@ function fakeGateGithub({
                 ? { enabledAt: "2026-07-09T01:05:00Z" }
                 : null,
             labels: { nodes: [] },
+            createdAt: pullRequestOverride.prCreatedAt ?? prCreatedAt,
             commits: {
               nodes: [{ commit: { committedDate: headCommittedDate } }],
+            },
+            timelineItems: {
+              nodes: pullRequestOverride.headForcePushes ?? headForcePushes,
             },
           },
         },

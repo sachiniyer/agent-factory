@@ -578,6 +578,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     number: pr.number,
     sha: pr.headRefOid,
     lastCommitDate: pr.lastCommitDate,
+    prCreatedAt: pr.prCreatedAt,
+    headForcePushes: pr.headForcePushes,
     subject,
   });
   if (!codex.ok) {
@@ -2186,10 +2188,21 @@ async function getPullRequest({ github, context, number }) {
               name
             }
           }
+          createdAt
           commits(last: 1) {
             nodes {
               commit {
                 committedDate
+              }
+            }
+          }
+          timelineItems(last: 100, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {
+            nodes {
+              ... on HeadRefForcePushedEvent {
+                createdAt
+                afterCommit {
+                  oid
+                }
               }
             }
           }
@@ -2223,6 +2236,11 @@ async function getPullRequest({ github, context, number }) {
     author: pr.author?.login || "",
     labels: pr.labels.nodes.map((label) => label.name),
     lastCommitDate: pr.commits.nodes[0]?.commit?.committedDate,
+    prCreatedAt: pr.createdAt,
+    // Every force-push recorded on this PR, oldest first, as GitHub returns
+    // them. `last: 100` keeps the newest window rather than the oldest, which is
+    // the half that can carry the event that made the CURRENT head current.
+    headForcePushes: (pr.timelineItems?.nodes || []).filter(Boolean),
   };
 }
 
@@ -2658,7 +2676,78 @@ function formatRunSource(run) {
   return `${name} (${run.app.id || "unknown app id"})`;
 }
 
-async function evaluateCodex({ github, context, number, sha, lastCommitDate, subject = null }) {
+// When this head became the PR's head, as distinct from when its commit object
+// was written (#3380).
+//
+// `committedDate` is a property of the COMMIT, not of the head transition: a
+// rebase, an amend, or a `--date` override sets it to anything, and a force-push
+// that REWINDS the branch to a pre-existing commit moves it BACKWARDS. Every
+// artifact filed between that commit and the rewind then looks newer than the
+// head, so a freshness rule reading `committedDate` reads them as evidence about
+// a head state they were never produced for.
+//
+// The anchor is therefore the max of three lower bounds on "this head has been
+// current since":
+//
+//   - the commit's own date, because a head cannot be current before it exists —
+//     and in the ordinary push-a-new-commit case this is the whole answer, so
+//     the anchor stays exactly what it was;
+//   - the PR's creation time, which covers the case the force-push framing
+//     misses entirely: a PR opened from a branch whose head was written long
+//     before, with no force-push event to find. Nothing Codex says about a PR
+//     can predate the PR, so this floor cannot cause a false block;
+//   - the latest force-push that landed ON this head. Latest, because a branch
+//     rewound to a sha it held before carries an older event for the same sha,
+//     and it is the recent one that made it current. Matching only, because a
+//     push that landed on some other sha says nothing about when this one did.
+//
+// max() is the conservative direction for both callers: a larger anchor makes
+// MORE artifacts stale, so this can only block more than `committedDate` did.
+//
+// It is a lower bound, not the exact transition time, and the residual gap is
+// worth naming: an ORDINARY push that appends a commit with a backdated
+// `GIT_COMMITTER_DATE` emits no force-push event, and GitHub's timeline carries
+// no timestamp for a plain `PullRequestCommit` (`Commit.pushedDate` was
+// retired), so the anchor there falls back to the PR's creation time. That is
+// still strictly better than the commit's own date, and strictly conservative;
+// closing it entirely would need a per-head signal this API does not offer.
+//
+// Fails closed, like every other timestamp comparison in this file: null when
+// any component that must be counted will not parse. A force-push whose
+// `afterCommit` is null is skipped rather than counted — GitHub nulls it once
+// the commit is garbage-collected, and a commit that no longer exists cannot be
+// the head that does.
+function headCurrentSinceTime({ lastCommitDate, prCreatedAt, headForcePushes = [], headSha }) {
+  const head = normalizeHeadSha(headSha);
+  if (!head) {
+    // No usable head sha means no event can be matched against it, and "matched
+    // nothing" is indistinguishable from "was never force-pushed" — which is the
+    // permissive answer, so it must not be reached by accident.
+    return null;
+  }
+  const bounds = [parseTimestamp(lastCommitDate), parseTimestamp(prCreatedAt)];
+  for (const event of headForcePushes) {
+    if (normalizeHeadSha(event?.afterCommit?.oid) !== head) {
+      continue;
+    }
+    bounds.push(parseTimestamp(event?.createdAt));
+  }
+  if (bounds.some((bound) => bound == null)) {
+    return null;
+  }
+  return Math.max(...bounds);
+}
+
+async function evaluateCodex({
+  github,
+  context,
+  number,
+  sha,
+  lastCommitDate,
+  prCreatedAt,
+  headForcePushes = [],
+  subject = null,
+}) {
   const notes = [];
   const reasons = [];
   // Set only where it is proven: no exact-head verdict AND the reviewer's own
@@ -2668,10 +2757,33 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   let reviewerUnavailable = false;
   let reviewerUnavailableReason = "";
   const { owner, repo } = context.repo;
-  const lastPushTime = parseTimestamp(lastCommitDate);
+  // Two anchors, because the rules below ask two different questions and one
+  // value cannot answer both (#3380).
+  //
+  // headCommitTime — when the head commit was WRITTEN. A content question: a fix
+  // for a finding filed at T cannot exist in a commit made before T (#2878). A
+  // rewind lowers it, which makes that rule block MORE, so it is already sound
+  // against the rewind and must not be moved to the transition anchor: a
+  // force-push at T2 back to a commit written before the finding would then read
+  // as "a commit landed after the claim" and clear a fix the head provably does
+  // not contain.
+  //
+  // headCurrentSince — when the head became CURRENT. A transition question: was
+  // this artifact produced for the head state the gate is about to merge?
+  const headCommitTime = parseTimestamp(lastCommitDate);
+  const headCurrentSince = headCurrentSinceTime({
+    lastCommitDate,
+    prCreatedAt,
+    headForcePushes,
+    headSha: sha,
+  });
 
-  if (lastPushTime == null) {
+  if (headCommitTime == null) {
     reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
+  } else if (headCurrentSince == null) {
+    reasons.push(
+      "the time this head became current was unavailable, so Codex freshness cannot be verified",
+    );
   }
 
   const comments = await retryRead(
@@ -2741,7 +2853,8 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     // manual-merge mode for every later push, forever. Fails closed on an unknown
     // order, like every other timestamp comparison in this file.
     const rateLimitTime = rateLimited ? reviewArtifactTime(latestCodexArtifact) : 0;
-    reviewerUnavailable = rateLimited && lastPushTime != null && rateLimitTime > lastPushTime;
+    reviewerUnavailable =
+      rateLimited && headCurrentSince != null && rateLimitTime > headCurrentSince;
     const suffix = !rateLimited
       ? ""
       : reviewerUnavailable
@@ -2762,7 +2875,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     // The artifact's own time: the comment's for a prose line, the row's for a
     // summary row.
     const verdictTime = verdict.time;
-    if (lastPushTime == null || verdictTime === 0 || verdictTime <= lastPushTime) {
+    if (headCurrentSince == null || verdictTime === 0 || verdictTime <= headCurrentSince) {
       reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
     } else {
       notes.push(`Codex verdict matches head ${sha}`);
@@ -2912,7 +3025,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
         // artifact does.
         reviewArtifactTime(ack) >= artifactTime &&
         references.some((reference) => bodyNamesReference(ack.body || "", reference)) &&
-        acknowledgementIsAnswerable(ack, artifactTime, lastPushTime),
+        acknowledgementIsAnswerable(ack, artifactTime, headCommitTime),
     );
   });
   if (unboundFindingArtifacts.length > 0) {
@@ -3033,7 +3146,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     }
     const filedAt = parseTimestamp(comment.created_at);
     // Unparseable timestamps fail closed — an unknown order is not a proven one.
-    return filedAt == null || lastPushTime == null || lastPushTime <= filedAt;
+    return filedAt == null || headCommitTime == null || headCommitTime <= filedAt;
   });
 
   if (unpushedFixClaims.length > 0) {
@@ -3045,7 +3158,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     // live finding, so it belongs in the same list as the unanswered kind.
     //
     // Its remedy is NOT "reply RESOLVED". The predicate above already requires a
-    // RESOLVED reply to exist, and then turns on lastPushTime — which another
+    // RESOLVED reply to exist, and then turns on headCommitTime — which another
     // reply does not move. Only a commit newer than the finding clears it, or
     // withdrawing the claim with ACCEPTED / [gate-ack], which short-circuits the
     // filter. Advertising RESOLVED here would send the maintainer round a loop
@@ -3242,12 +3355,12 @@ function artifactReferences(artifact) {
 // Strict `>` on the push, unlike the acknowledgement's own comparison above: a
 // commit made in the same second as the finding cannot contain its fix, while an
 // answer written in the same second can name it.
-function acknowledgementIsAnswerable(ack, artifactTime, lastPushTime) {
+function acknowledgementIsAnswerable(ack, artifactTime, headCommitTime) {
   const body = ack.body || "";
   if (NO_CHANGE_CLAIM_RE.test(body) || body.includes("[gate-ack]")) {
     return true;
   }
-  return lastPushTime != null && lastPushTime > artifactTime;
+  return headCommitTime != null && headCommitTime > artifactTime;
 }
 
 // Whether an acknowledgement's body names this reference. Both reference forms
@@ -3402,6 +3515,7 @@ module.exports = {
     parseBodyCommits,
     artifactReferences,
     acknowledgementIsAnswerable,
+    headCurrentSinceTime,
     bodyNamesReference,
     codexArtifactBindsToHead,
     codexArtifactStatesItsCommit,
