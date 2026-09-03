@@ -302,27 +302,6 @@ func (m *Manager) rootAttributionPendingFor(repoID string) bool {
 	return m.pendingReattributionDerivedID(repoID) != ""
 }
 
-// pendingReattributionRealID returns the REAL identity an unconsumed probe has
-// already resolved for derivedID, or "" when none has. It is
-// pendingReattributionDerivedID's other direction, and DeleteProject needs both
-// (#3299 review id 3910107330): a delete arriving by PATH or by derived ID
-// while a probe is stalled mid-marker-read finds no published alias, so without
-// this it would proceed under the derived ID, archive nothing under the
-// candidate real identity, and still deregister the project — leaving live
-// sessions as orphans with no registry record.
-func (m *Manager) pendingReattributionRealID(derivedID string) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	probe := m.rootHealProbes[derivedID]
-	if probe == nil || (probe.settled && !probe.inconclusive()) {
-		return ""
-	}
-	if c := probe.candidate.Load(); c != nil && c.ID != derivedID {
-		return c.ID
-	}
-	return ""
-}
-
 // probeProvedItsCheckout reports what a probe has ESTABLISHED about whether the
 // checkout at the recorded path is the record's own, without blocking:
 // verified when the marker matched, disproven when the marker read succeeded

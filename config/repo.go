@@ -603,14 +603,6 @@ func IsDerivedRepoID(id string) bool {
 	return strings.HasPrefix(id, derivedRepoIDPrefix)
 }
 
-func repoContextFromRoot(root string) *RepoContext {
-	return &RepoContext{
-		Root:         root,
-		IdentityRoot: root,
-		ID:           RepoIDFromRoot(root),
-	}
-}
-
 func repoContextFromResolution(resolved repoRootResolution) *RepoContext {
 	root := resolved.identityRoot
 	if resolved.legacyIdentityRoot != "" {

@@ -183,6 +183,21 @@ live panes, full-screen attach — is byte-identical to the local path. Only the
 transport differs, so once connected the client behaves exactly like a local
 one.
 
+**The TUI's config editor follows the target too.** Pressing `,` in a
+remote-targeted session shows the *daemon host's* config values, and its header
+reads `<daemon URL> · <that host's config.toml path>` — the daemon first, because
+the header is clipped to the overlay's width and which *machine* you are editing
+outranks which file; and never abbreviated to `~`, since two of your own boxes
+usually share a home layout and `~/.agent-factory/config.toml` would read as the
+file on your laptop. Saving a
+row writes it on the daemon, through the same admission-gated handler `af config
+set --daemon-url` and the web form use; a daemon too old to serve those routes is
+refused by name and version, and af never falls back to reading or writing your
+own machine's config for a remote target. The config *assistant* (`C`) is
+local-only and says so: it hand-edits the config file next to it, which is your
+machine's, so it refuses a remote target instead of quietly editing the wrong
+host.
+
 An invalid or missing token is rejected with a **401** on every request and on
 the WebSocket handshake; a remote read surfaces that error rather than silently
 falling back to a local disk scan (there is no local disk on the other end).

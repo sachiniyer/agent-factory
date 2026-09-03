@@ -37,6 +37,15 @@
 : "${AF_DRIVER_REPO:=$HOME/sandbox/mock-repo}"   # cwd the TUI launches in
 : "${AGENT_FACTORY_HOME:=$HOME/sandbox/home}"    # sandbox AF home
 : "${AF_DRIVER_BIN:=}"                            # af path ("" → auto-resolve)
+# Environment assignments prefixed to the af launch, e.g.
+# AF_DRIVER_LAUNCH_ENV="AF_DAEMON_URL=http://127.0.0.1:8899". Empty by default,
+# so every existing scenario launches exactly the command it did before. It is a
+# PREFIX on the launch line rather than an export here because af_boot starts a
+# fresh tmux session, whose shell inherits the tmux SERVER's environment (set
+# when the server first started) and not this script's — so exporting would work
+# or not depending on whether some earlier session had already started the
+# server. Scenarios that need the TUI itself pointed somewhere use this.
+: "${AF_DRIVER_LAUNCH_ENV:=}"                    # env prefix for the af launch line
 : "${AF_DRIVER_TIMEOUT:=25}"                      # default wait timeout (s)
 : "${AF_DRIVER_POLL:=0.25}"                       # capture-pane poll interval
 : "${AF_DRIVER_DETACH_KEY:=C-w}"                 # tmux key that detaches attach
@@ -548,7 +557,7 @@ af_boot() {
     # af_resize verifies the geometry took, so a bad size fails the boot loudly.
     af_resize "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" || return 1
 
-    af_send_literal "cd $AF_DRIVER_REPO && $bin"
+    af_send_literal "cd $AF_DRIVER_REPO && ${AF_DRIVER_LAUNCH_ENV:+$AF_DRIVER_LAUNCH_ENV }$bin"
     af_send Enter
     af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'af first frame' || return 1
     af_wait_for "$_AF_RAIL_MARKER" "$AF_DRIVER_TIMEOUT" \

@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/configagent"
 	"github.com/sachiniyer/agent-factory/log"
@@ -102,6 +103,25 @@ func (m *home) handleConfigAgent() (tea.Model, tea.Cmd) {
 	// path guards the identical hazard with attachTransitioning (#1530).
 	if m.configAgentSpawning {
 		return m, nil
+	}
+	// Local-only, and refused rather than ignored (#3708). The assistant hand-edits
+	// THIS machine's config.toml and runs `af config validate` here — both local
+	// paths, neither of which the daemon serves a route for — so under a remote
+	// target it would administer the operator's own laptop. That was merely
+	// consistent while the `,` pane was local too; now that the pane follows
+	// --daemon-url, a C that silently edited the other machine would reproduce the
+	// exact defect #3708 closed, one keystroke away from the pane that fixed it.
+	// Routing the assistant itself is #2467's question, not this refusal's.
+	if apiclient.IsRemoteTarget() {
+		// The daemon URL comes FIRST on purpose. The transient error bar renders one
+		// line and truncates the rest (ui.ErrBox.statusLine), so the two facts a
+		// reader needs — which daemon af declined to administer, and that the refusal
+		// is a local-only rule rather than a failure — have to be at the front.
+		return m, m.handleError(fmt.Errorf(
+			"the config assistant cannot administer the daemon at %s: it is local-only — it edits "+
+				"this machine's config.toml — so it refuses a remote target rather than editing the "+
+				"wrong host. Use the config editor (,) to change that daemon's config, or run the "+
+				"assistant on the daemon host", apiclient.RemoteTargetURL()))
 	}
 	// The ACTIVE project's repo root, not the process cwd: after an in-place
 	// project switch (#1461) the active repo is m.repoRoot, which may no longer be

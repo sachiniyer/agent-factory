@@ -342,10 +342,61 @@ func baseType(t reflect.Type) reflect.Type {
 	return t
 }
 
-// rendersItself reports whether a type supplies its own JSON or text encoding.
-func rendersItself(t reflect.Type) bool {
-	return t.Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(jsonMarshalerType) ||
-		t.Implements(textMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)
+// walkFlags describe the POSITION a value sits at, as encoding/json will see it
+// — not what reflect can do with the walk's own copy of it.
+type walkFlags uint8
+
+const (
+	// guardRepeated says the value sits inside a repeated aggregate, where a
+	// scalar leaf's bounded-capacity exemption no longer holds.
+	guardRepeated walkFlags = 1 << iota
+	// guardAddressable says encoding/json can take the address of the value
+	// where it encodes it, which is the whole of whether a POINTER-receiver
+	// marshaler runs there — see rendersItselfAt.
+	guardAddressable
+)
+
+func (f walkFlags) has(flag walkFlags) bool { return f&flag != 0 }
+
+// rendersItself reports whether a type supplies its own JSON or text encoding
+// AT AN ADDRESSABLE POSITION, which is the answer for every position but a map's
+// and an interface's. Kept as the plain question for callers that hold a value
+// they allocated themselves.
+func rendersItself(t reflect.Type) bool { return rendersItselfAt(t, guardAddressable) }
+
+// rendersItselfAt reports whether encoding/json will invoke a custom marshaler
+// for this type at a position with these flags.
+//
+// A VALUE-receiver marshaler runs everywhere. A POINTER-receiver one runs only
+// where json can take the address, and asking without that qualification was
+// wrong in both directions (#3703, split from #3655 item 10): it refused a
+// `map[K]V` whose fields the walk could plant into perfectly well, because json
+// never calls V's pointer marshaler there at all. Measured, with MarshalJSON
+// declared only on *V:
+//
+//	map[string]V value:            {"k":{"Text":"planted"}}
+//	[]V element:                   ["FROM-POINTER-MARSHALER"]
+//	addressable struct field:      {"F":"FROM-POINTER-MARSHALER"}
+//	non-addressable struct field:  {"F":{"Text":"planted"}}
+//	map[string][]V element:        {"k":["FROM-POINTER-MARSHALER"]}
+//	map[string][1]V element:       {"k":[{"Text":"planted"}]}
+//
+// The last two rows are why this cannot be "is it somewhere under a map". A
+// SLICE is addressable wherever it sits — json copies the header and the
+// elements stay in the backing array — while an ARRAY inherits its parent's
+// addressability, because its elements are inside the parent's storage.
+//
+// A pointer TYPE needs no such qualification: `*V` implements the interface
+// itself, so the first clause already answers yes.
+func rendersItselfAt(t reflect.Type, flags walkFlags) bool {
+	if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
+		return true
+	}
+	if !flags.has(guardAddressable) {
+		return false
+	}
+	return reflect.PointerTo(t).Implements(jsonMarshalerType) ||
+		reflect.PointerTo(t).Implements(textMarshalerType)
 }
 
 // reviewedMarshaler records what a self-rendering type's MarshalJSON was read to
@@ -422,8 +473,8 @@ var reviewedMarshalerTypes = map[reflect.Type]reviewedMarshaler{
 	},
 }
 
-// isUnplantableScalar reports an element kind that json serializes but fill has
-// no way to plant readable text in. Refusing is the point: a numeric container
+// isScalarNumeric reports an element kind that json serializes but fill has no
+// way to plant readable text in. Refusing is the point: a numeric container
 // holding user text would otherwise sit in a zero-valued fixture no detection
 // pass can see.
 func isScalarNumeric(k reflect.Kind) bool {
@@ -435,16 +486,6 @@ func isScalarNumeric(k reflect.Kind) bool {
 		return true
 	}
 	return false
-}
-
-// isUnplantableScalar reports a SEQUENCE element kind that json serializes but
-// fill has no way to plant readable text in. uint8 and int32 are excluded
-// because a sequence of them is a text container this guard does plant —
-// []byte and []rune. Every other numeric kind, Uintptr included, must be
-// refused: `[]uintptr` marshals to plain integers that reconstruct code points
-// or packed bytes just as well (#3592 review).
-func isUnplantableScalar(k reflect.Kind) bool {
-	return isScalarNumeric(k) && k != reflect.Uint8 && k != reflect.Int32
 }
 
 // sentinelFiller plants a unique marker in every plantable field and records the
@@ -654,7 +695,7 @@ func encodedWindows(form string) []string {
 // Unexported non-anonymous fields are skipped: reflect cannot set them, and they
 // reach a bundle only through a custom marshaler, which is refused above.
 // time.Time is skipped as opaque and text-free.
-func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated bool) {
+func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, flags walkFlags) {
 	if depth > guardMaxDepth {
 		f.tooDeep = append(f.tooDeep, path)
 		return
@@ -663,7 +704,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated 
 	// implements json.Marshaler via the promoted value method, so keying on the
 	// POINTER type missed the exemption and failed the suite on an ordinary
 	// optional timestamp (#3592 review).
-	if ty := v.Type(); rendersItself(ty) {
+	if ty := v.Type(); rendersItselfAt(ty, flags) {
 		base := baseType(ty)
 		if _, reviewed := reviewedMarshalerTypes[base]; !reviewed {
 			f.unsupported = append(f.unsupported, path+" ("+ty.String()+" renders itself)")
@@ -690,7 +731,10 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated 
 		if v.IsNil() {
 			v.Set(reflect.New(v.Type().Elem()))
 		}
-		f.fill(v.Elem(), path, depth+1, repeated)
+		// A pointer's target is addressable to json wherever the pointer sits:
+		// json follows the pointer, and what it points at is not inside the
+		// parent's storage.
+		f.fill(v.Elem(), path, depth+1, flags|guardAddressable)
 	case reflect.Struct:
 		if v.Type() == reflect.TypeOf(time.Time{}) {
 			return
@@ -718,14 +762,16 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated 
 						join(path, field.Name), field.Type.String()))
 				continue
 			}
-			f.fill(v.Field(i), join(path, field.Name), depth+1, repeated)
+			// A struct field INHERITS the struct's addressability, which is why
+			// the flags pass through unchanged.
+			f.fill(v.Field(i), join(path, field.Name), depth+1, flags)
 		}
 	case reflect.Slice:
-		f.fillSequence(v, path, depth, true)
+		f.fillSequence(v, path, depth, flags, true)
 	case reflect.Array:
-		f.fillSequence(v, path, depth, false)
+		f.fillSequence(v, path, depth, flags, false)
 	case reflect.Map:
-		f.fillMap(v, path, depth)
+		f.fillMap(v, path, depth, flags)
 	case reflect.Interface:
 		// encoding/json serializes whatever concrete string, map or slice an
 		// interface field holds, so an unhandled interface is a hole in the
@@ -768,7 +814,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated 
 				fmt.Sprintf("%s (unhandled kind %s)", path, v.Kind()))
 			return
 		}
-		if repeated {
+		if flags.has(guardRepeated) {
 			f.unplantable = append(f.unplantable, path)
 		}
 	}
@@ -776,8 +822,16 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated 
 
 // fillSequence handles slices and arrays, including the byte and rune forms
 // whose JSON encodings differ from each other and from a plain list.
-func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, isSlice bool) {
+func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, flags walkFlags, isSlice bool) {
 	elem := v.Type().Elem().Kind()
+	// A SLICE's elements are addressable wherever the slice sits — json copies
+	// the header and the elements stay in the backing array. An ARRAY's are
+	// inside the parent's storage, so they inherit its addressability. Measured
+	// both, see rendersItselfAt (#3703).
+	elemFlags := flags | guardRepeated
+	if isSlice {
+		elemFlags |= guardAddressable
+	}
 	// The scalar rejection reads through pointers. `[]*int32` presents as
 	// reflect.Ptr, slipped past the check, and recursed to an int32 leaf fill
 	// has no case for — planting nothing while json still emits [83,69],
@@ -793,7 +847,7 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 	// document finally shows is not the value the markers were taken from
 	// (#3592 review). Applied before the switch, so it covers the recursive
 	// branch too — where fill would reject it one level down anyway.
-	if et := v.Type().Elem(); rendersItself(et) {
+	if et := v.Type().Elem(); rendersItselfAt(et, elemFlags) {
 		if _, reviewed := reviewedMarshalerTypes[baseType(et)]; !reviewed {
 			f.unsupported = append(f.unsupported,
 				fmt.Sprintf("%s (element %s renders itself)", path, et.String()))
@@ -866,11 +920,13 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 		}
 		f.recordContainer(v, path, marker)
 	// Reached only after the byte/rune PLANTING branches above declined, so the
-	// full scalar predicate applies here — not isUnplantableScalar, which
-	// deliberately exempts uint8/int32 because sequences of them ARE the text
-	// containers this guard plants. `[]*int32` is not one of those: it presents
-	// as Ptr, so it never took the rune branch, and exempting int32 here let it
-	// fall through to a silent recursion (#3592 review).
+	// FULL scalar predicate applies here. It must not be narrowed to exempt
+	// uint8/int32 on the grounds that sequences of them ARE the text containers
+	// this guard plants: `[]*int32` is not one of those — it presents as Ptr, so
+	// it never took the rune branch, and exempting int32 here let it fall
+	// through to a silent recursion (#3592 review). #3592 shipped that narrowed
+	// predicate as a separate isUnplantableScalar helper which this arm
+	// deliberately did not use; it was never called at all and #3734 removed it.
 	case isScalarNumeric(baseElem):
 		f.unsupported = append(f.unsupported,
 			fmt.Sprintf("%s (%s of %s cannot carry a text marker)", path, v.Kind(), v.Type().Elem()))
@@ -879,7 +935,7 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 			v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
 		}
 		for i := 0; i < v.Len(); i++ {
-			f.fill(v.Index(i), path+"[]", depth+1, true)
+			f.fill(v.Index(i), path+"[]", depth+1, elemFlags)
 		}
 	}
 }
@@ -887,7 +943,11 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 // fillMap seeds guardSliceSeed entries under distinct keys, for the slice
 // reason: a redaction that processes one arbitrary entry and returns would
 // scrub every marker from a single-entry fixture and pass.
-func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
+func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int, flags walkFlags) {
+	// A map's keys and values are NEVER addressable to encoding/json, whatever
+	// the map itself sits inside, so a pointer-receiver marshaler on either is
+	// not invoked there and must not be refused as if it were (#3703).
+	insideMap := (flags | guardRepeated) &^ guardAddressable
 	// A SCALAR map value cannot hold a marker — unlike a sequence, there is one
 	// number per key, not a container of them — while json still emits the whole
 	// map, so `map[int]int32` of code points would reconstruct text with nothing
@@ -908,7 +968,7 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 	// So rejecting every self-rendering key type — as an earlier revision of
 	// this file did — needlessly failed on `map[NamedString]T`, which this walk
 	// can plant and search perfectly well (#3592 review).
-	if kt := v.Type().Key(); kt.Kind() != reflect.String && rendersItself(kt) {
+	if kt := v.Type().Key(); kt.Kind() != reflect.String && rendersItselfAt(kt, insideMap) {
 		if _, reviewed := reviewedMarshalerTypes[baseType(kt)]; !reviewed {
 			f.unsupported = append(f.unsupported,
 				fmt.Sprintf("%s (map key %s renders itself)", path, kt.String()))
@@ -957,7 +1017,10 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 		}
 		val := reflect.New(v.Type().Elem()).Elem()
 		if !valueScalar {
-			f.fill(val, path+"[]", depth+1, true)
+			// Settable HERE, because the walk allocated it — and not
+			// addressable to json, which sees it only after SetMapIndex copies
+			// it in. The flags describe json's view, not reflect's (#3703).
+			f.fill(val, path+"[]", depth+1, insideMap)
 		}
 		m.SetMapIndex(key, val)
 	}
@@ -1111,7 +1174,12 @@ func join(path, field string) string {
 func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	var data session.InstanceData
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&data).Elem(), "", 0, false)
+	// guardAddressable, because the bundle's record IS addressable to json:
+	// redactInstancesJSON marshals a []session.InstanceData, whose elements live
+	// in the backing array. The walk models the document, so the root's
+	// addressability is the caller's fact rather than the type's, and the leak
+	// search below marshals the same shape (#3703).
+	filler.fill(reflect.ValueOf(&data).Elem(), "", 0, guardAddressable)
 
 	// A subtree the walk could not reach is a subtree this guard cannot speak
 	// for. Fail rather than quietly cover less than the name promises.
@@ -1181,7 +1249,15 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	// encoding/json decides what reaches a bundle. Marshalling the redacted
 	// record and looking for each marker's own JSON fragment means this test
 	// never has to model json's field-selection rules — see the note above.
-	doc, err := json.Marshal(data)
+	//
+	// Marshalled as a SLICE, which is what redactInstancesJSON does, so the
+	// record sits where the bundle puts it. A bare json.Marshal(data) hands json
+	// a non-addressable copy, and a pointer-receiver MarshalJSON added to
+	// InstanceData or anything under it would then run in the bundle and not
+	// here — the guard would be reading a document the bundle never produces
+	// (#3703). Both of today's reviewed marshalers are on value receivers, so
+	// this changes no verdict; it stops the model diverging from the code.
+	doc, err := json.Marshal([]session.InstanceData{data})
 	if err != nil {
 		t.Fatalf("marshalling the redacted record failed: %v", err)
 	}

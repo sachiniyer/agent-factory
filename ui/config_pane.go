@@ -9,34 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/daemon"
 )
-
-// applyingConfigSet writes a global config key through a running daemon's
-// admission-gated SetConfigValue (#3231) — the same handler the web form posts —
-// so a daemon that is quiescing or validating an upgrade refuses BEFORE the
-// file changes, instead of the pane writing first and live-applying through an
-// ungated poke. The daemon applies an accepted write to itself in place
-// (#2480), so a TUI config edit still takes effect without a restart; with no
-// daemon reachable the write lands locally, as before. Never spawns a daemon.
-//
-// It returns the per-key effect notice so the pane shows the honest outcome —
-// live now, deferred rebind, next daemon start, or next af launch — computed by
-// the write path itself rather than one canned sentence. Any warnings (the
-// exposure notice, or a rebind's actionable reason) are folded into the one
-// line the pane shows so a TUI edit that exposes the API or could not rebind
-// still tells the user.
-func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
-	resp, err := daemon.SetGlobalConfigValue(key, value)
-	if err != nil {
-		return nil, "", err
-	}
-	notice := resp.RestartNotice
-	if len(resp.Warnings) > 0 {
-		notice = notice + " " + strings.Join(resp.Warnings, " ")
-	}
-	return resp.Result, notice, nil
-}
 
 // ConfigPane is the direct config editor: a form over the config manifest,
 // hosted as a full-screen overlay (stateConfigEditor, opened with ",").
@@ -46,24 +19,15 @@ func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
 // description of config — config.ManifestWithValues — so neither can drift from
 // config_types.go or from each other. This pane holds NO key list, no per-key
 // type switch, and no copy of the defaults or validation rules: every row it
-// renders comes from the manifest, and every write goes through
-// daemon.SetGlobalConfigValue — the daemon's admission-gated SetConfigValue
-// when one is running, the same validated/locked/atomic
-// config.SetGlobalConfigValue write otherwise. Adding a key to config_types.go
-// surfaces it here with no edit to this file, which is what
-// TestConfigPaneRendersEveryManifestKey pins.
+// renders comes from the manifest, and every write goes through the pane's one
+// save seam. Adding a key to config_types.go surfaces it here with no edit to
+// this file, which is what TestConfigPaneRendersEveryManifestKey pins.
 //
-// That sentence used to end "exactly as `af config set` does", and since #3679
-// it would only be true with no remote target: `af config set --daemon-url`
-// routes its global write to THAT daemon, while this pane is local on BOTH
-// halves — its rows come from an in-process config.ManifestWithValues read of
-// this machine (app/handle_overlay.go), and this write dials the LOCAL control
-// socket. Both halves are why routing the write alone would be worse than not
-// routing it: it would send values read from machine A to machine B. Making the
-// pane follow a remote target means making its READ follow one too (the daemon
-// already serves GetConfig for exactly that, which is what the web form uses),
-// which is a design question of its own rather than something to settle inside
-// a CLI change. Tracked on #3708.
+// Both the rows and the save follow --daemon-url/AF_DAEMON_URL since #3708, so
+// `,` administers whichever daemon the session is attached to — the same one
+// thing the flag means for `af config set` (#3679). The target decision, and the
+// reason both halves have to move together, live in config_target.go; this file
+// is the form over whatever they hand it.
 //
 // What this pane must never do is misstate WHEN an edit takes effect. Since #2480
 // most keys reach a running daemon in place, but not all do, so the pane shows the
@@ -72,7 +36,11 @@ func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
 // command to run (#2479).
 type ConfigPane struct {
 	entries []config.ConfigEntry
-	path    string
+	// location is what the header says these rows came from: a config.toml path
+	// locally, and the daemon's URL followed by ITS path under a remote target
+	// (#3708). Not a path, therefore, and neither the order nor the absence of a
+	// `~` abbreviation is incidental — see remoteConfigLocation for both.
+	location string
 
 	// rows is the flattened, currently-visible list: tier headings interleaved
 	// with entries, rebuilt whenever the advanced toggle or the entries change.
@@ -169,13 +137,14 @@ func NewConfigPane() *ConfigPane {
 	}
 }
 
-// SetEntries loads the manifest rows and the path they were read from. The
-// caller supplies them (rather than the pane calling LoadConfig itself) so the
-// app decides when to re-read from disk — reopening the editor shows the file as
-// it is now, including a hand-edit made since.
-func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, path string) {
+// SetEntries loads the manifest rows and the location they were read from. The
+// caller supplies them (rather than the pane reading config itself) so the app
+// decides when to re-read — reopening the editor shows config as it is now,
+// including a hand-edit made since — and so the pane stays a form regardless of
+// which daemon answered (ReadConfigForEditor).
+func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string) {
 	c.entries = entries
-	c.path = path
+	c.location = location
 	c.rebuildRows()
 }
 
@@ -494,17 +463,21 @@ func (c *ConfigPane) String() string {
 	return b.String()
 }
 
-// renderHeader renders the title and the file being edited.
+// renderHeader renders the title and where the rows came from — a path locally,
+// the daemon URL and then its path under a remote target.
 func (c *ConfigPane) renderHeader() string {
 	var b strings.Builder
 	b.WriteString(configTitleStyle.Render("Config"))
-	if c.path != "" {
-		b.WriteString(configPurposeStyle.Render("  " + c.path))
+	if c.location != "" {
+		b.WriteString(configPurposeStyle.Render("  " + c.location))
 	}
-	// The path is the one part of this line the pane does not control the length
-	// of, so it is clipped rather than allowed to wrap (#3430). "Config" plus a
-	// clipped path still says which file is open; a wrapped header costs a list
-	// row at exactly the width where rows are scarcest, and makes countLines lie.
+	// The location is the one part of this line the pane does not control the
+	// length of, so it is clipped rather than allowed to wrap (#3430): a wrapped
+	// header costs a list row at exactly the width where rows are scarcest, and
+	// makes countLines lie. What survives the clip is therefore load-bearing, and
+	// it is why remoteConfigLocation leads with the daemon — "Config" plus a
+	// clipped path still says which file is open, but only once you know which
+	// MACHINE it is on.
 	return c.fitPaneLine(b.String()) + "\n\n"
 }
 
