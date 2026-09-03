@@ -27,7 +27,7 @@ type rootAgentSnapshot struct {
 	// personalUnreadable maps a fail-closed repo ID to its project ID, so
 	// consumer-facing refusals can name the config file to fix (#3264).
 	personalUnreadable map[string]string
-	projectRoots       map[string]string
+	projectRoots       map[string]resolvedProjectRoot
 	// recordFailureIDs names the registry record directories the snapshot
 	// could not read (#3297). Their repos are unattributable — the root path
 	// lives inside the unreadable record — so no per-repo latch can carry
@@ -60,7 +60,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		global:             config.GlobalRootAgentLayer(cfg),
 		personal:           map[string]*config.RootAgentLayer{},
 		personalUnreadable: map[string]string{},
-		projectRoots:       map[string]string{},
+		projectRoots:       map[string]resolvedProjectRoot{},
 		unresolvedRoots:    map[string]unresolvedProjectRecord{},
 		legacyRepoIDs:      map[string]bool{},
 	}
@@ -155,6 +155,34 @@ func logRegistryRecordProblems(failures []config.ProjectRecordFailure, strays []
 // evidence (#3299 review) — the project ID and the checkout marker id that
 // proves a returning path holds the SAME clone, not a different checkout
 // reusing it.
+// resolvedProjectRoot is the singleton sweep's binding for one registered
+// project whose recorded root RESOLVED: the path an in-place root agent runs
+// at, plus the identity evidence that path was accepted on. Both halves are
+// kept because the sweep needs them at different moments — the root at every
+// visit, the identity only at a create (#3366).
+//
+// A path alone was the defect. The snapshot binds a repo ID to a create path
+// once (at boot, or on re-attribution) and every later create, heal and
+// kill-grace expiry trusted that binding for the rest of the daemon run: the
+// checkout could be removed and a different clone put at the path, and the
+// autonomous root would start there — under the registered project's personal
+// layer — having never been re-proven to be the project's own checkout.
+// Carrying the marker id here is what lets the create boundary re-prove it.
+type resolvedProjectRoot struct {
+	// root is the RECORDED root, exactly as projectRootAgentLayers and the
+	// re-attribution acceptance publish it: identity comes from the repo ID,
+	// but an in-place root agent runs at the checkout the user registered
+	// (#3361's identity/workspace boundary).
+	root string
+	// projectID names the registry record, so a refusal can tell the user
+	// which project to rebind.
+	projectID string
+	// checkoutID is the registry's identity proof for that record — the marker
+	// a checkout at root must carry to be the SAME clone the project was
+	// registered from (#3299/#3334).
+	checkoutID string
+}
+
 type unresolvedProjectRecord struct {
 	root       string
 	projectID  string
@@ -178,10 +206,10 @@ type unresolvedProjectRecord struct {
 	pathVanished bool
 }
 
-func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {
+func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable map[string]string, projectRoots map[string]resolvedProjectRoot, unresolvedRoots map[string]unresolvedProjectRecord) {
 	personal = map[string]*config.RootAgentLayer{}
 	personalUnreadable = map[string]string{}
-	projectRoots = map[string]string{}
+	projectRoots = map[string]resolvedProjectRoot{}
 	unresolvedRoots = map[string]unresolvedProjectRecord{}
 	for _, p := range projects {
 		var repoID, repoRoot string
@@ -194,7 +222,11 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// path publishes the same recorded root on acceptance, so a project
 			// that resolves mid-run gets the create a boot resolution would
 			// have (#3299) — reattributeUnresolvedRoots states that parity.
-			projectRoots[repoID] = p.Root
+			//
+			// The record's checkout id rides along so the create boundary can
+			// re-prove the checkout at that path is still this project's own,
+			// rather than trusting a binding made once at boot (#3366).
+			projectRoots[repoID] = resolvedProjectRoot{root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID}
 		} else {
 			// The recorded root does not resolve right now — an absent mount, a
 			// checkout deleted or no longer a git repository. The singleton sweep

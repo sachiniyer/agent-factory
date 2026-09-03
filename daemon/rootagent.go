@@ -281,7 +281,12 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 		return
 	}
 	resolution := m.resolvedRootAgentFor(repo.ID, &rc)
-	m.ensureResolvedRoot(path, st, repo, resolution)
+	// No identity to re-prove: a root_agents entry is an opt-in the user wrote
+	// against a PATH, not a registry record, so there is no recorded checkout id
+	// a checkout there must match. #3334 already settled that shape — a proven
+	// mismatch releases the repo so its legacy opt-in still applies — and #3366
+	// deliberately does not change it (see verifyRootCreateCheckout).
+	m.ensureResolvedRoot(path, st, repo, resolution, nil)
 }
 
 // ensureSingletonRootAgent ensures the root for a registered project enabled by
@@ -289,17 +294,22 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 // identity and root come from the snapshot the caller enumerated (no per-tick
 // git resolution — a registered project resolved when its snapshot was read),
 // and the state is keyed by that resolved root path.
-func (m *Manager) ensureSingletonRootAgent(repoID, root string) {
+//
+// The binding's identity evidence rides down to ensureResolvedRoot, which
+// re-proves it at the create boundary only (#3366): a binding made once, at
+// boot or at re-attribution, is not evidence about the checkout that is at the
+// path now.
+func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjectRoot) {
 	m.mu.Lock()
-	st := m.rootEnsureStateForLocked(root)
+	st := m.rootEnsureStateForLocked(binding.root)
 	skip := time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if skip {
 		return
 	}
-	repo := &config.RepoContext{Root: root, ID: repoID}
+	repo := &config.RepoContext{Root: binding.root, ID: repoID}
 	resolution := m.resolvedRootAgentFor(repoID, nil)
-	m.ensureResolvedRoot(root, st, repo, resolution)
+	m.ensureResolvedRoot(binding.root, st, repo, resolution, &binding)
 }
 
 // rootEnsureStateForLocked returns the retry state for a candidate key, creating
@@ -321,8 +331,10 @@ func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
 // the retry state and leaves any existing root alone — removing an opt-in never
 // tears a live root down, it just stops re-ensuring it. All outcomes are logged;
 // failures back off exponentially and settle at rootEnsureBackoffMax, so the
-// loop always heals once the cause clears.
-func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution) {
+// loop always heals once the cause clears. identity is the registry binding a
+// registry-backed candidate was enumerated from, re-proven at the create
+// boundary (#3366), and nil for a legacy root_agents path.
+func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution, identity *resolvedProjectRoot) {
 	if !resolution.Enabled {
 		m.rootEnsureSucceeded(st)
 		return
@@ -401,6 +413,21 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			m.rootEnsureSucceeded(st)
 			return
 		}
+	}
+
+	// THE CREATE BOUNDARY (#3366). Everything below either destroys daemon-owned
+	// state or starts an autonomous agent in a checkout, so this is where a
+	// registry-backed candidate re-proves that the checkout at its bound path is
+	// still the project's own — below adopt-first, so a live root costs no
+	// marker read on the one-second poll cadence, and above the reap, so a
+	// refusal cannot cost the dead record the heal carries state from. The full
+	// placement rationale is verifyRootCreateCheckout's, next to what it gates.
+	if err := verifyRootCreateCheckout(identity); err != nil {
+		m.rootEnsureFailed(stateKey, st, err)
+		return
+	}
+
+	if inst != nil {
 		// An Archived root (#1028) is inert — no tmux — so it must NOT be
 		// adopted as live; fall through to reap-and-recreate like Dead/Lost so
 		// the always-ensured root comes back. In practice ArchiveSession

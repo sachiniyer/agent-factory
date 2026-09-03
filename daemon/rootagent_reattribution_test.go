@@ -811,8 +811,8 @@ func TestForeignIdentityRootStaysDeferred(t *testing.T) {
 	if _, stillUnresolved := layers.unresolvedRoots[derivedID]; !stillUnresolved {
 		t.Fatalf("a foreign-identity recorded root must stay unresolved until #3530, but %s left unresolvedRoots", derivedID)
 	}
-	if root, attributed := layers.projectRoots[realID]; attributed {
-		t.Fatalf("it must not be attributed to the repo's real identity %s (got root %q) — that is the second identity #3530 has to make safe first", realID, root)
+	if binding, attributed := layers.projectRoots[realID]; attributed {
+		t.Fatalf("it must not be attributed to the repo's real identity %s (got root %q) — that is the second identity #3530 has to make safe first", realID, binding.root)
 	}
 	if len(*seen) != 0 {
 		t.Fatalf("nothing may be created for a deferred record, got %d creates", len(*seen))

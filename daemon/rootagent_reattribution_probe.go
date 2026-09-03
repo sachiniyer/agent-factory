@@ -332,6 +332,14 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+func cloneResolvedRootMap(in map[string]resolvedProjectRoot) map[string]resolvedProjectRoot {
+	out := make(map[string]resolvedProjectRoot, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func cloneUnresolvedMap(in map[string]unresolvedProjectRecord) map[string]unresolvedProjectRecord {
 	out := make(map[string]unresolvedProjectRecord, len(in))
 	for k, v := range in {

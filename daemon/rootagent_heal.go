@@ -441,7 +441,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// with the published value until replaced.
 		healed.personal = cloneLayerMap(healed.personal)
 		healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
-		healed.projectRoots = cloneStringMap(healed.projectRoots)
+		healed.projectRoots = cloneResolvedRootMap(healed.projectRoots)
 		healed.unresolvedRoots = cloneUnresolvedMap(healed.unresolvedRoots)
 		changed = true
 	}
@@ -671,7 +671,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// boot: identity comes from repo.ID, but an in-place root agent runs
 		// at the checkout the user registered (#3361's identity/workspace
 		// boundary). Parity between the two paths is the contract.
-		healed.projectRoots[repo.ID] = record.root
+		healed.projectRoots[repo.ID] = resolvedProjectRoot{root: record.root, projectID: record.projectID, checkoutID: record.checkoutID}
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}
