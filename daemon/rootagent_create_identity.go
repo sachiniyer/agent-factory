@@ -67,6 +67,16 @@ import (
 // The kill-grace re-create (#1223) passes through the same boundary, so it is
 // covered without a second call site.
 //
+// The one cost of sitting above the reap, named rather than left to be found:
+// when reapDeadRoot declines without an error — a user kill holding the title's
+// op lock, an async conversation capture still in flight — ensureResolvedRoot
+// returns without arming its backoff, so this read (which forks a git rev-parse
+// through resolveProjectBinding) repeats on the next tick. Those windows are
+// operation-length, not failure-length; a reap that fails PERSISTENTLY returns
+// an error and takes the backoff. Paying a fork per tick for a couple of seconds
+// is the right side of the trade against reaping a record we are about to
+// refuse to replace.
+//
 // The refusal is a retryable ensure failure, not a latch: the sweep keeps
 // re-checking on its backoff curve, so an original checkout that comes back —
 // or a marker that becomes readable again — heals with no restart. That is the
