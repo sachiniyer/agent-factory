@@ -3466,34 +3466,86 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
 // or the bot did it deliberately — and closing it needs the gate to record the
 // sha it created, which `PUT update-branch` does not return. Named here so the
 // next reader does not have to rediscover it.
-async function updateBranchContentHead({ github, context, baseRefName, headParents, subject }) {
-  if (!Array.isArray(headParents) || headParents.length !== 2) {
-    return null;
-  }
-  const [first, second] = headParents;
-  if (!normalizeHeadSha(first?.oid) || !normalizeHeadSha(second?.oid)) {
-    return null;
-  }
+async function updateBranchContentHead({
+  github,
+  context,
+  baseRefName,
+  headParents,
+  subject,
+  // Bounded because this walks one API read per link. Four laps was ordinary on
+  // #3809; twenty is far past anything observed and stops a malformed chain from
+  // becoming an unbounded read loop.
+  maxDepth = 20,
+}) {
   const { owner, repo } = context.repo;
-  const comparison = await retryRead(
-    `could not compare ${baseRefName} with ${second.oid}`,
-    () =>
-      github.rest.repos.compareCommitsWithBasehead({
-        owner,
-        repo,
-        basehead: `${baseRefName}...${second.oid}`,
-        per_page: 1,
-      }),
-    subject,
-  );
-  // "identical" is the base tip itself; "behind" is an ancestor of it. Anything
-  // else means that parent is not base history, so this is not an update-branch
-  // and the head resets its anchors.
-  const status = comparison?.data?.status;
-  if (status !== "identical" && status !== "behind") {
+
+  // Whether these parents are the shape `PUT update-branch` produces: exactly
+  // two, the second contained in the base branch.
+  const isUpdateBranchMerge = async (parents) => {
+    if (!Array.isArray(parents) || parents.length !== 2) {
+      return false;
+    }
+    const [first, second] = parents;
+    if (!normalizeHeadSha(first?.oid) || !normalizeHeadSha(second?.oid)) {
+      return false;
+    }
+    const comparison = await retryRead(
+      `could not compare ${baseRefName} with ${second.oid}`,
+      () =>
+        github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${baseRefName}...${second.oid}`,
+          per_page: 1,
+        }),
+      subject,
+    );
+    // "identical" is the base tip itself; "behind" is an ancestor of it.
+    const status = comparison?.data?.status;
+    return status === "identical" || status === "behind";
+  };
+
+  // One read per link, giving both the link's own date and its parents. The
+  // GraphQL query that produced `headParents` carries dates for the head's
+  // parents, so those are preferred and the read is only for what it does not
+  // have — but the date must come from somewhere for every link, because the
+  // anchor IS that date.
+  const readCommit = async (oid, knownDate) => {
+    const commit = await retryRead(`could not read commit ${oid}`, () =>
+      github.rest.repos.getCommit({ owner, repo, ref: oid }),
+    );
+    return {
+      oid,
+      committedDate: knownDate || commit?.data?.commit?.committer?.date,
+      parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
+    };
+  };
+
+  // Walk the FIRST-PARENT chain while every link is one of the gate's own merges
+  // (#3815). #3803 walked exactly one, which closed the single-lap case and
+  // reopened it a level down: when the gate update-branches a head that is itself
+  // a gate-made merge, that head's first parent is the PREVIOUS lap's merge,
+  // dated when that lap ran — so evidence written before it goes stale again.
+  // #3809 needed a fresh approval and a fresh Codex reply on each of four
+  // consecutive laps, which at fleet rate is ordinary rather than unlucky.
+  //
+  // The walk stops at the first link that is NOT such a merge: a real push, or a
+  // merge of something that is not the base branch. That commit is the content
+  // head, and anchoring there is what makes an approval survive a chain of laps
+  // while still resetting the moment someone pushes code.
+  let parents = headParents;
+  let contentHead = null;
+  let chainLength = 0;
+  while (chainLength < maxDepth && (await isUpdateBranchMerge(parents))) {
+    const first = parents[0];
+    chainLength += 1;
+    contentHead = await readCommit(first.oid, first.committedDate);
+    parents = contentHead.parents;
+  }
+  if (!contentHead) {
     return null;
   }
-  return { oid: first.oid, committedDate: first.committedDate };
+  return { oid: contentHead.oid, committedDate: contentHead.committedDate, chainLength };
 }
 
 // The Codex finding artifacts a gate must not merge past: those carrying a

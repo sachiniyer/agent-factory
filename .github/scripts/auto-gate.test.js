@@ -3597,6 +3597,115 @@ test("the head-commit query fetches enough parents to see a third", () => {
   );
 });
 
+// #3815. #3805 walks ONE parent, which closes the single-lap case and reopens it
+// one level down: when the gate update-branches a head that is ITSELF a gate-made
+// merge, the first parent is the PREVIOUS lap's merge, dated when that lap ran —
+// so every approval and Codex reply written before it goes stale again.
+//
+// #3809 needed a fresh approve and a fresh @codex on each of four consecutive
+// laps. Four happened because three other PRs landed while it waited for CI,
+// which at fleet rate is normal, not unlucky.
+test("the content head is found through a chain of the gate's own merges", async () => {
+  const { updateBranchContentHead } = __test;
+  const CONTENT = "1255aa4300000000000000000000000000000000";
+  const LAP1 = "9e27c60100000000000000000000000000000000";
+  const LAP2 = "f5d8d38500000000000000000000000000000000";
+  const BASE = "9ac0ffee00000000000000000000000000000000";
+
+  const github = chainGithub({
+    // head (lap 3) -> LAP2 -> LAP1 -> CONTENT, each an update-branch merge.
+    [LAP2]: [
+      { oid: LAP1, committedDate: "2026-07-09T13:11:00Z" },
+      { oid: BASE, committedDate: "2026-07-09T14:00:00Z" },
+    ],
+    [LAP1]: [
+      { oid: CONTENT, committedDate: "2026-07-09T13:07:00Z" },
+      { oid: BASE, committedDate: "2026-07-09T13:10:00Z" },
+    ],
+    // The real content commit: an ordinary one-parent commit.
+    [CONTENT]: [{ oid: "aaaa000000000000000000000000000000000000", committedDate: "2026-07-09T13:00:00Z" }],
+  }, {
+    [LAP1]: "2026-07-09T13:11:00Z",
+    [CONTENT]: "2026-07-09T13:07:00Z",
+  });
+
+  const found = await updateBranchContentHead({
+    github,
+    context: fakeContext(),
+    baseRefName: "master",
+    headParents: [
+      { oid: LAP2, committedDate: "2026-07-09T14:17:00Z" },
+      { oid: BASE, committedDate: "2026-07-09T14:16:00Z" },
+    ],
+  });
+
+  assert.equal(found?.oid, CONTENT, "the anchor must reach the real content commit, not lap 2");
+  assert.equal(
+    found?.committedDate,
+    "2026-07-09T13:07:00Z",
+    "…and carry its date, so evidence written at 13:09 still binds",
+  );
+  assert.equal(found?.chainLength, 3, "the decision names how many gate merges were walked");
+});
+
+// The bound is load-bearing, not decoration: this walks one API read per link, and
+// a malformed or cyclic chain would otherwise read forever. A cycle is the sharp
+// case — nothing in the shape check can notice it, so only the depth can.
+test("the content-head walk is bounded, even on a cycle", async () => {
+  const { updateBranchContentHead } = __test;
+  const A = "aaaa000000000000000000000000000000000000";
+  const B = "bbbb000000000000000000000000000000000000";
+  const BASE = "9ac0ffee00000000000000000000000000000000";
+
+  // A -> B -> A -> …, every link the shape of an update-branch merge.
+  const github = chainGithub(
+    {
+      [A]: [{ oid: B }, { oid: BASE }],
+      [B]: [{ oid: A }, { oid: BASE }],
+    },
+    { [A]: "2026-07-09T13:00:00Z", [B]: "2026-07-09T13:01:00Z" },
+  );
+
+  const found = await updateBranchContentHead({
+    github,
+    context: fakeContext(),
+    baseRefName: "master",
+    headParents: [{ oid: A, committedDate: "2026-07-09T13:02:00Z" }, { oid: BASE }],
+    maxDepth: 5,
+  });
+
+  assert.equal(found?.chainLength, 5, "the walk must stop at the bound rather than cycle forever");
+});
+
+// The negative: a real push anywhere in the chain stops the walk. Only merges the
+// gate itself could have made are content-preserving; a commit someone pushed is
+// new code, and the anchor must land on it.
+test("a push inside the chain stops the walk and anchors on it", async () => {
+  const { updateBranchContentHead } = __test;
+  const PUSHED = "beefbeef00000000000000000000000000000000";
+  const LAP1 = "9e27c60100000000000000000000000000000000";
+  const BASE = "9ac0ffee00000000000000000000000000000000";
+
+  const github = chainGithub({
+    // lap1's first parent is an ordinary PUSHED commit, not another gate merge.
+    [LAP1]: [{ oid: PUSHED, committedDate: "2026-07-09T13:30:00Z" }],
+    [PUSHED]: [{ oid: "cccc000000000000000000000000000000000000", committedDate: "2026-07-09T13:20:00Z" }],
+  }, { [LAP1]: "2026-07-09T13:35:00Z" });
+
+  const found = await updateBranchContentHead({
+    github,
+    context: fakeContext(),
+    baseRefName: "master",
+    headParents: [
+      { oid: LAP1, committedDate: "2026-07-09T13:35:00Z" },
+      { oid: BASE, committedDate: "2026-07-09T13:34:00Z" },
+    ],
+  });
+
+  assert.equal(found?.oid, LAP1, "the walk stops at the first non-merge link");
+  assert.equal(found?.chainLength, 1, "one gate merge walked, then a push");
+});
+
 test("a merge with more than two parents is not an update-branch", async () => {
   const { updateBranchContentHead } = __test;
   // Containment always answers YES here, deliberately: otherwise the compare stub
@@ -7052,6 +7161,31 @@ async function runApplyGateStep({
 // How many parents a GraphQL document asks for, so the fake can truncate like the
 // server. Defaults high when the document does not ask at all, so an unrelated
 // query is never silently starved.
+// A github stub for chain walks: `parentsByOid` answers each commit's parents,
+// and containment always answers YES so only the SHAPE decides where the walk
+// stops — otherwise the compare stub would end it for an unrelated reason.
+function chainGithub(parentsByOid, datesByOid) {
+  return {
+    rest: {
+      repos: {
+        compareCommitsWithBasehead: async () => ({ data: { status: "behind" } }),
+        getCommit: async ({ ref }) => ({
+          data: {
+            // The commit's own date, which is what the anchor becomes.
+            commit: { committer: { date: (datesByOid || {})[ref] } },
+            parents: (parentsByOid[ref] || []).map((p) => ({ sha: p.oid })),
+          },
+        }),
+      },
+    },
+    graphql: async (_query, variables) => ({
+      repository: {
+        object: { parents: { nodes: parentsByOid[variables.oid] || [] } },
+      },
+    }),
+  };
+}
+
 function requestedParents(query) {
   const asked = String(query || "").match(/parents\(first:\s*(\d+)\)/);
   return asked ? Number(asked[1]) : 100;
@@ -7083,6 +7217,10 @@ function fakeGateGithub({
   // fake that has them from the first list cannot reproduce #3814 — the first
   // approve pass would catch them and the gap would be invisible.
   runsAppearAfterReads = 0,
+  // Commit graph for the content-head walk (#3815): parents per sha, and each
+  // commit's own date.
+  parentsByOid = {},
+  commitDatesByOid = {},
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -7347,6 +7485,14 @@ function fakeGateGithub({
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
+        getCommit: async ({ ref }) => ({
+          data: {
+            commit: { committer: { date: (commitDatesByOid || {})[ref] } },
+            // Default: an ordinary one-parent commit, so the first-parent walk
+            // stops at the first link unless a fixture describes a chain.
+            parents: (parentsByOid[ref] || [{ oid: "0".repeat(40) }]).map((p) => ({ sha: p.oid })),
+          },
+        }),
         compareCommitsWithBasehead: async (options) => {
           github.compareRequests.push(options);
           if (compareError) {
