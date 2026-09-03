@@ -177,7 +177,7 @@ func TestEnsureRootAgentsHealsARootWhoseVanishedSessionLeftAMarkedSurvivor(t *te
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	require.Len(t, *seen, 1, "precondition: the first ensure must create the root")
 
 	first := findRootInstance(t, manager, repoPath)
@@ -194,7 +194,7 @@ func TestEnsureRootAgentsHealsARootWhoseVanishedSessionLeftAMarkedSurvivor(t *te
 	// daemon, and a process carrying that session's own markers outlived it.
 	first.SetStatusForTest(session.Lost)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, *seen, 2,
 		"the vanished root was never reaped, so the always-ensure loop could not re-create it "+
@@ -226,7 +226,7 @@ func TestReapDeadRootRetainsTheRecordWhenTrustCannotSettleTheTeardown(t *testing
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	require.Len(t, *seen, 1, "precondition: the first ensure must create the root")
 
 	first := findRootInstance(t, manager, repoPath)
@@ -274,7 +274,7 @@ func TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown(t *testing.T) {
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	require.Len(t, *seen, 1, "precondition: the first ensure must create the root")
 
 	first := findRootInstance(t, manager, repoPath)

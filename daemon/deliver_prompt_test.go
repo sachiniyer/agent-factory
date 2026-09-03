@@ -1187,7 +1187,7 @@ func TestDeliverPrompt_DeletedProjectRootStillRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	root := findRootInstance(t, manager, repoPath)
 	if root == nil {
 		t.Fatal("root should materialize before the project is deleted")

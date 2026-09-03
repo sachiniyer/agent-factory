@@ -18,8 +18,10 @@ import (
 // "root" attached in-place at the repo root (the `af sessions create --here`
 // shape from #1107 — worktree_path == repo_path, current branch, cleanup
 // never touches the user's tree). The poll loop calls EnsureRootAgents right
-// after RefreshStatuses, so a root whose tmux died is marked Dead and healed
-// in the same tick.
+// after RefreshStatuses, so a root whose tmux died is marked Dead and its heal
+// begins in the same tick — begins, not completes: since #3721 the reap and
+// (re-)create run on their own goroutine (rootagent_create.go), because their
+// unbounded filesystem work must never own the poll goroutine.
 //
 // The loop is adopt-first: an existing root instance in any state other than
 // Dead — whatever program it runs and however it was created — is left
@@ -82,8 +84,10 @@ func rootEnsureBackoffFor(consecutiveFailures int) time.Duration {
 var rootKillHealDelay = 2 * time.Minute
 
 // rootEnsureState is the per-configured-repo retry state for the ensure
-// loop. Guarded by Manager.mu (the loop runs on the daemon poll goroutine,
-// but tests drive EnsureRootAgents directly).
+// loop. Guarded by Manager.mu, and since #3721 written from two goroutines
+// rather than one: the sweep on the poll goroutine records what it decides
+// without a create, and each create goroutine records its own outcome
+// (rootEnsureSucceeded/rootEnsureFailed). Tests drive EnsureRootAgents directly.
 type rootEnsureState struct {
 	consecutiveFailures int
 	// unansweredFailures counts how many of those consecutive failures never
@@ -392,16 +396,6 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		log.InfoLog.Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", workspace)
 	}
 
-	// What the vanished root was, snapshotted before the reap deletes the record
-	// that holds it: the conversation it was in (#2616) and the tabs it had open
-	// (#2628). reapedRoot distinguishes "the reaped root had none of these" from
-	// "there was no prior root at all" — only the first is worth reporting, and
-	// they are different answers to the question an operator asks after an outage.
-	var (
-		carried    reapedRootState
-		reapedRoot bool
-	)
-
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
@@ -412,164 +406,24 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			m.rootEnsureSucceeded(st)
 			return
 		}
-		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
-		// adopt-first, so a live root costs no marker read on the one-second
-		// poll cadence; above the reap, so a refusal cannot delete the record
-		// that holds the conversation (#2616) and tab roster (#2628) the heal
-		// carries. It is deliberately NOT the proof the create runs on — the
-		// reap below does blocking work, so createVerifiedRoot re-proves after
-		// it (#3366 review). The full rationale is verifyRootCreateCheckout's,
-		// next to what it gates.
-		if err := m.proveRootCreateCheckout(repo.ID, identity); err != nil {
-			m.rootEnsureFailed(stateKey, st, err)
-			return
-		}
-		// An Archived root (#1028) is inert — no tmux — so it must NOT be
-		// adopted as live; fall through to reap-and-recreate like Dead/Lost so
-		// the always-ensured root comes back. In practice ArchiveSession
-		// rejects archiving the reserved root title, so this is defensive; the
-		// in-place root worktree is external, so reapDeadRoot's Cleanup is a
-		// no-op that only removes daemon-owned state.
-		// The root's tmux vanished (crash, tmux server death — the #1104
-		// outage class; recorded as Lost since #1108, Dead by older builds).
-		// Reap the dead record and fall through to re-create in place — the
-		// root keeps its stronger always-ensure semantics rather than waiting
-		// for the general Lost-restore loop. Kill is best-effort teardown of
-		// already-dead tmux, and an in-place worktree's Cleanup never touches
-		// the user's tree (#1107), so this can only remove daemon-owned state.
-		//
-		// Carrying agent_conversation across that reap is what keeps the two
-		// halves of the heal from disagreeing (#2616): the record about to be
-		// deleted holds the only pointer to the conversation the root was in, and
-		// CreateSession would otherwise mint a fresh id — leaving the one session
-		// every watch/monitor delivery targets healthy, Ready, and amnesiac. The
-		// tab roster rides across for the same reason and from the same record
-		// (#2628): a fresh create comes up with only its agent tab, so everything
-		// else the user had open — a terminal, a process tab, a dev-server web
-		// tab, an editor — would vanish with the record that listed it.
-		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
-		var err error
-		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst)
-		if err != nil {
-			m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to remove dead root record: %w", err))
-			return
-		}
-		if !reapedRoot {
-			return
-		}
 	}
 
-	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
-	skipRecordedResume := false
-	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
-		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-		if inspectErr == nil {
-			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
-		}
-		switch {
-		case inspectErr != nil:
-			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
-				workspace, carried.conversation.ID, inspectErr)
-		case !state.RecordedExists && state.Resume.HasID():
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
-				workspace, carried.conversation.ID, state.Resume.ID)
-			carried.conversation = state.Resume
-		case !state.RecordedExists:
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
-				workspace, carried.conversation.ID)
-			skipRecordedResume = true
-		}
-	}
-	req := CreateSessionRequest{
-		Title:    session.RootSessionTitle,
-		RepoPath: workspace,
-		Program:  program,
-		InPlace:  true,
-		// Say local out loud, because InPlace already decided it. A root agent is
-		// documented as the `af sessions create --here` shape — in-place at the
-		// repo root, no worktree, no branch (configuration.md § root_agents) — and
-		// an in-place session has no meaning on a runtime that works in a sandbox
-		// clone it cannot see.
-		//
-		// Left empty, the create resolves the repo's `backend` key, so a project
-		// that opted into docker/ssh/hook silently got a root whose agent ran in a
-		// clone while its record claimed the working tree — the #2778 contradiction,
-		// on the one session the daemon guarantees. Once #2778 refuses that
-		// contradiction, the same repos would instead lose their always-on root
-		// entirely. Neither is what `root_agents` asks for.
-		//
-		// This does not override the repo's choice for anything else: `backend`
-		// still governs every ordinary session there. It only stops the reserved,
-		// daemon-owned, hardcoded-in-place session from being read as a sandbox
-		// create it can never be.
-		Backend:       string(session.BackendLocal),
-		allowReserved: true,
-		// Both zero on every path that did not just reap a root — a first-ever
-		// create, or a kill whose grace window elapsed (KillSession already deleted
-		// that record, so there is nothing to continue or rebuild).
-		resumeConversation: carried.conversation,
-		restoreTabs:        carried.tabs,
-		// True only for a heal, including one whose reaped root had nothing to
-		// carry — that is the heal whose replacement most needs the marker.
-		replacesReapedRecord:  reapedRoot,
-		pendingRecreateNotice: carried.notice,
-	}
-	if skipRecordedResume {
-		req.resumeConversation = session.AgentConversationData{}
-	}
-	data, err := m.createVerifiedRoot(repo.ID, identity, req)
-	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
-		// The always-on guarantee outranks continuity. A conversation the provider
-		// can no longer resume (cleared history, a transcript store the agent no
-		// longer has) makes the resumed command exit at startup — and since the
-		// reaped record is already gone, retrying it here rather than next tick is
-		// what keeps an unresumable id from costing the root a backoff interval of
-		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
-		// would be worse than the bug.
-		if req.resumeConversation.Agent == tmux.ProgramClaude {
-			transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
-			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-			if inspectErr == nil {
-				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)
-			}
-			if inspectErr != nil {
-				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
-					workspace, req.resumeConversation.ID, inspectErr)
-			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
-				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
-					workspace, req.resumeConversation.ID, err, state.Resume.ID)
-				req.resumeConversation = state.Resume
-				carried.conversation = state.Resume
-				data, err = m.createVerifiedRoot(repo.ID, identity, req)
-			}
-		}
-	}
-	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
-		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
-			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
-		req.resumeConversation = session.AgentConversationData{}
-		data, err = m.createVerifiedRoot(repo.ID, identity, req)
-	}
-	if err != nil {
-		if isRootCheckoutRefusal(err) {
-			// Report the refusal as itself. createVerifiedRoot returns before
-			// CreateSession, so no create was attempted and none may be reported
-			// as having failed — and the identical refusal on the pre-reap arm
-			// above carries no such prefix, so wrapping it here would make one
-			// cause read as two.
-			m.rootEnsureFailed(stateKey, st, err)
-			return
-		}
-		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
-		return
-	}
-	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
-	if reapedRoot {
-		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
-		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
-	}
-	m.rootEnsureSucceeded(st)
+	// THE CREATE BOUNDARY (#3721). Everything above this line reads state; nothing
+	// below it can be relied on to return. A (re-)create is an admission path whose
+	// first act is an unbounded `git rev-parse`, so running it here made one
+	// unreachable checkout stop the poll goroutine — and with it RefreshStatuses,
+	// RestoreLostSessions and the settlement retries — for every session on the box.
+	// It gets its own goroutine instead; see rootagent_create.go for why the create
+	// is moved rather than bounded, and for what keeps the next tick from starting a
+	// second one.
+	m.launchRootCreate(rootCreateJob{
+		stateKey:   stateKey,
+		st:         st,
+		repo:       repo,
+		resolution: resolution,
+		identity:   identity,
+		inst:       inst,
+	})
 }
 
 // reportRootTabCarry records what became of the reaped root's non-agent tabs

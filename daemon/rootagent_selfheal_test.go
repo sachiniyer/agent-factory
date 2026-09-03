@@ -68,7 +68,7 @@ func TestEnsureRootAgentsHealsUnloadablePersonalConfig(t *testing.T) {
 
 			// The config becomes readable again before the next ensure pass.
 			writePersonalRootAgent(t, project.ID, tc.healedBody)
-			manager.EnsureRootAgents()
+			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != tc.wantCreates {
 				t.Fatalf("want %d creates after the personal config heals, got %d — a read that starts succeeding must replace the fail-closed latch with the config's true answer, without a daemon restart", tc.wantCreates, len(*seen))
@@ -95,7 +95,7 @@ func TestEnsureRootAgentsStillClosedWhileRepairIsIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("a still-unloadable personal config must keep failing closed, got %d creates", len(*seen))
@@ -159,8 +159,8 @@ func TestEnsureRootAgentsHealsUnlistableRegistry(t *testing.T) {
 			repair()
 			// Registry recovery publishes on the SECOND consecutive good pass
 			// (the applyHomeCheck two-strike rule), so two ensure ticks.
-			manager.EnsureRootAgents()
-			manager.EnsureRootAgents()
+			manager.ensureRootAgentsAndWait()
+			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != tc.wantCreates {
 				t.Fatalf("want %d creates after the registry heals, got %d — the ensure pass must re-read the registry it could not list at boot, without a daemon restart", tc.wantCreates, len(*seen))
@@ -208,14 +208,14 @@ func TestRootAgentHealLeavesLiveRootAlone(t *testing.T) {
 		t.Fatalf("fixture: root instance missing after direct create")
 	}
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("a live root must be left alone while the registry fails closed, got %d creates", len(*seen))
 	}
 
 	repair()
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("a live root must be adopted, not re-created, by the passes that heal the registry, got %d creates", len(*seen))
 	}
@@ -257,7 +257,7 @@ func TestRootAgentHealTreatsAbsentRegistryAsTransition(t *testing.T) {
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("remove registry: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("an absent registry during recovery must keep the latch, got %d creates — absence is not an empty registry", len(*seen))
 	}
@@ -269,8 +269,8 @@ func TestRootAgentHealTreatsAbsentRegistryAsTransition(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("restore registry dir: %v", err)
 	}
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("a present registry must heal the latch and let the legacy root start, got %d creates", len(*seen))
 	}
@@ -306,7 +306,7 @@ func TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots(t *testing.T)
 		t.Fatalf("ProjectRegistryDir: %v", err)
 	}
 	repair()
-	manager.EnsureRootAgents() // first successful observation includes the disable
+	manager.ensureRootAgentsAndWait() // first successful observation includes the disable
 
 	// The mounted registry disappears and exposes a present, empty mountpoint.
 	// That is another successful read, but not confirmation of the first one.
@@ -317,7 +317,7 @@ func TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots(t *testing.T)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("create empty underlying registry: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("different consecutive registry snapshots must keep the latch closed, got %d creates", len(*seen))
 	}
@@ -333,8 +333,8 @@ func TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots(t *testing.T)
 	if err := os.Rename(aside, dir); err != nil {
 		t.Fatalf("restore registry: %v", err)
 	}
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("the matching recovered snapshot contains a personal disable, got %d creates", len(*seen))
 	}
@@ -364,13 +364,13 @@ func TestRootAgentHealSnapshotAgreementIgnoresPathAvailability(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	repair()
-	manager.EnsureRootAgents() // first observation: recorded checkout is available
+	manager.ensureRootAgentsAndWait() // first observation: recorded checkout is available
 
 	hidden := repoPath + ".hidden"
 	if err := os.Rename(repoPath, hidden); err != nil {
 		t.Fatalf("hide recorded checkout: %v", err)
 	}
-	manager.EnsureRootAgents() // same durable record, PathExists now false
+	manager.ensureRootAgentsAndWait() // same durable record, PathExists now false
 
 	if manager.rootAgentLayers.Load().registryUnreadable {
 		t.Fatalf("transient checkout availability must not reset agreement for an unchanged registry record")
@@ -410,8 +410,8 @@ func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
 		t.Fatalf("restore repo dir: %v", err)
 	}
 	repair()
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
 		t.Fatalf("the healed snapshot must recompute the legacy dedup set for a path that resolved after boot")
@@ -457,7 +457,7 @@ func TestRootAgentHealKeepsPersonalLatchWhileRegistryAbsent(t *testing.T) {
 	if err := os.Rename(dir, aside); err != nil {
 		t.Fatalf("set registry aside: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("an absent registry must keep the personal latch, got %d creates — a vanished directory is not a deliberate config removal", len(*seen))
 	}
@@ -471,7 +471,7 @@ func TestRootAgentHealKeepsPersonalLatchWhileRegistryAbsent(t *testing.T) {
 		t.Fatalf("restore registry: %v", err)
 	}
 	writePersonalRootAgent(t, project.ID, "enabled = false")
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("the healed disable must keep the root down, got %d creates", len(*seen))
 	}
@@ -509,7 +509,7 @@ func TestRootAgentPersonalHealRecomputesLegacyDedup(t *testing.T) {
 		t.Fatalf("restore repo dir: %v", err)
 	}
 	writePersonalRootAgent(t, project.ID, "enabled = true")
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
 		t.Fatalf("a personal-config heal must also recompute the legacy dedup set for a path that resolved after boot")
@@ -551,7 +551,7 @@ func TestRootAgentHealAbsentPersonalConfigNeedsTwoStrikes(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove personal config: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("one absence observation must not release the latch, got %d creates", len(*seen))
 	}
@@ -561,7 +561,7 @@ func TestRootAgentHealAbsentPersonalConfigNeedsTwoStrikes(t *testing.T) {
 
 	// The second consecutive observation proves the removal was deliberate:
 	// the latch releases and the legacy opt-in proceeds.
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("the second absence strike must heal the latch and let the legacy root start, got %d creates", len(*seen))
 	}
@@ -602,8 +602,8 @@ func TestRootAgentHealKeepsPersonalLatchForDanglingConfigSymlink(t *testing.T) {
 		t.Fatalf("install dangling personal-config symlink: %v", err)
 	}
 
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("a dangling personal-config symlink must keep the latch, got %d creates — an unreadable config is not a removal", len(*seen))
 	}
@@ -614,7 +614,7 @@ func TestRootAgentHealKeepsPersonalLatchForDanglingConfigSymlink(t *testing.T) {
 	if err := os.WriteFile(target, []byte("[root_agent]\nenabled = false\n"), 0o644); err != nil {
 		t.Fatalf("restore personal-config symlink target: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("the restored personal disable must keep the root down, got %d creates", len(*seen))
 	}

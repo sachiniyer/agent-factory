@@ -136,7 +136,7 @@ func TestFencedVerifiedProbeSurvivesFreshnessTTL(t *testing.T) {
 	manager.projectDeletes[derivedID] = struct{}{}
 	manager.mu.Unlock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	manager.mu.Lock()
 	held := manager.rootHealProbes[derivedID]
@@ -154,7 +154,7 @@ func TestFencedVerifiedProbeSurvivesFreshnessTTL(t *testing.T) {
 	delete(manager.projectDeletes, derivedID)
 	manager.mu.Unlock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	manager.mu.Lock()
 	after := manager.rootHealProbes[derivedID]

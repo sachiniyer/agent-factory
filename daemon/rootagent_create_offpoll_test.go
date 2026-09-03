@@ -87,11 +87,23 @@ func (s *repoResolutionStall) awaitEntries(t *testing.T, n int64, why string) {
 // EnsureRootAgents.
 type deadButRecoverableBackend struct {
 	*session.FakeBackend
-	mu       sync.Mutex
-	recovers int
+	mu sync.Mutex
+	// aliveProbes counts the liveness probes RefreshStatuses makes, and recovers
+	// counts the recoveries RestoreLostSessions makes. Both are MONOTONE, which
+	// is why the assertions read them instead of reading the session's status:
+	// this backend is permanently dead, so a recovered session is legitimately
+	// marked Lost again by the very next tick, and any status the test sampled
+	// would be a snapshot of a value the loop keeps flipping.
+	aliveProbes int
+	recovers    int
 }
 
-func (*deadButRecoverableBackend) IsAlive(*session.Instance) (bool, error) { return false, nil }
+func (b *deadButRecoverableBackend) IsAlive(*session.Instance) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.aliveProbes++
+	return false, nil
+}
 
 func (b *deadButRecoverableBackend) Recover(inst *session.Instance) error {
 	b.mu.Lock()
@@ -101,27 +113,19 @@ func (b *deadButRecoverableBackend) Recover(inst *session.Instance) error {
 	return nil
 }
 
-func (b *deadButRecoverableBackend) recoverCalls() int {
+func (b *deadButRecoverableBackend) counts() (aliveProbes, recovers int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.recovers
+	return b.aliveProbes, b.recovers
 }
 
-// awaitRootInstance waits for the root session to be registered, which is the
-// happens-before edge for reading anything the create produced: the instance is
-// published under m.mu, so a read that observes it under the same lock is
-// ordered after every write the create made before it.
-func awaitRootInstance(t *testing.T, manager *Manager, repoPath, why string) *session.Instance {
+// requireRootCreated asserts the released create actually produced its session.
+// It needs no polling because every caller has already joined the create, and
+// that join is also the happens-before edge for reading what the create wrote.
+func requireRootCreated(t *testing.T, manager *Manager, repoPath, why string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if inst := findRootInstance(t, manager, repoPath); inst != nil {
-			return inst
-		}
-		if time.Now().After(deadline) {
-			t.Fatal(why)
-		}
-		time.Sleep(5 * time.Millisecond)
+	if findRootInstance(t, manager, repoPath) == nil {
+		t.Error(why)
 	}
 }
 
@@ -157,33 +161,48 @@ func TestStalledRootCreateDoesNotWedgeTheInstancePoll(t *testing.T) {
 	backend := &deadButRecoverableBackend{FakeBackend: session.NewFakeBackend()}
 	// Registered Running so the pass has to TRANSITION it to Lost, rather than
 	// merely leaving a pre-set status alone.
-	stranded := registerStarted(t, manager, strandedID, strandedRepo, "stranded", backend, true, session.Running)
+	registerStarted(t, manager, strandedID, strandedRepo, "stranded", backend, true, session.Running)
 
 	stopCh := make(chan struct{})
 	wg := &sync.WaitGroup{}
 	startInstancePollLoop(manager, 50*time.Millisecond, stopCh, wg)
+	// Teardown JOINS everything this test started, and the order is the whole
+	// point. stallRepoResolutionFor registered its restore of the
+	// repoFromPathForCreate package var BEFORE this cleanup, so LIFO runs that
+	// restore after this one — and a restore that lands while a create is still
+	// reading the var is a data race, which is exactly what the fail-first run
+	// reported. It also leaked goroutines into the NEXT test in the package,
+	// where the race surfaced under an unrelated test's name.
 	t.Cleanup(func() {
 		// Release before stopping: on master the loop is INSIDE the stalled
 		// create, so it can only observe stopCh once the create returns.
 		stall.unblock()
 		close(stopCh)
-		wg.Wait()
-		awaitRootInstance(t, manager, rootRepo, "the released root create never registered its session")
+		wg.Wait()                      // the poll loop is out, so nothing else launches
+		manager.waitRootAgentCreates() // and so is the create it launched
+		requireRootCreated(t, manager, rootRepo, "the released root create never registered its session")
 	})
 
 	stall.awaitEntries(t, 1, "the poll loop never attempted the configured root's create")
 
+	// TWO probes, not one, is what discriminates. The wedge happens mid-tick:
+	// RefreshStatuses runs before EnsureRootAgents, so even a poll goroutine that
+	// never returns from the create has already probed this session ONCE. A second
+	// probe can only come from a tick that got all the way round — which is the
+	// claim. And the recovery can only come from RestoreLostSessions, which runs
+	// after the ensure pass and never runs at all on master.
 	deadline := time.Now().Add(30 * time.Second)
-	for backend.recoverCalls() == 0 {
+	for {
+		aliveProbes, recovers := backend.counts()
+		if aliveProbes >= 2 && recovers >= 1 {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("the instance poll goroutine is wedged inside a root create: with the create's repo resolution stalled, " +
-				"RefreshStatuses and RestoreLostSessions never ran again, so a session in an unrelated repository was " +
-				"never marked Lost and never recovered (#3721)")
+			t.Fatalf("the instance poll goroutine is wedged inside a root create: with the create's repo resolution "+
+				"stalled, the passes after EnsureRootAgents never ran for a session in an unrelated repository "+
+				"(liveness probes=%d want >=2, recoveries=%d want >=1) (#3721)", aliveProbes, recovers)
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-	if got := stranded.GetStatus(); got != session.Running {
-		t.Fatalf("the recovered session's status = %v, want Running", got)
 	}
 }
 
@@ -209,14 +228,26 @@ func TestSecondEnsureTickDuringInFlightRootCreateStartsNoSecondCreate(t *testing
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	t.Cleanup(stall.unblock)
+	// Same teardown discipline as the test above, for the same reason: the ticks
+	// below are still wedged when an assertion fails, and the stall's restore of
+	// the repoFromPathForCreate package var must not land while they are running.
+	// ticks counts only the ones actually started, so a failure before the second
+	// launch does not hang the wait.
+	var ticks sync.WaitGroup
+	t.Cleanup(func() {
+		stall.unblock()
+		ticks.Wait()
+		manager.waitRootAgentCreates()
+	})
 
 	firstTick := make(chan struct{})
-	go func() { defer close(firstTick); manager.EnsureRootAgents() }()
+	ticks.Add(1)
+	go func() { defer ticks.Done(); defer close(firstTick); manager.EnsureRootAgents() }()
 	stall.awaitEntries(t, 1, "the first ensure tick never reached the create's repo resolution")
 
 	secondTick := make(chan struct{})
-	go func() { defer close(secondTick); manager.EnsureRootAgents() }()
+	ticks.Add(1)
+	go func() { defer ticks.Done(); defer close(secondTick); manager.EnsureRootAgents() }()
 	select {
 	case <-secondTick:
 	case <-time.After(30 * time.Second):
@@ -257,7 +288,8 @@ func TestSecondEnsureTickDuringInFlightRootCreateStartsNoSecondCreate(t *testing
 	}
 
 	stall.unblock()
-	awaitRootInstance(t, manager, rootRepo, "the released root create never registered its session")
+	manager.waitRootAgentCreates()
+	requireRootCreated(t, manager, rootRepo, "the released root create never registered its session")
 	if len(*seen) != 1 {
 		t.Fatalf("session.NewInstance was called %d times for one root, want 1", len(*seen))
 	}

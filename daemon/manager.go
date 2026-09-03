@@ -231,6 +231,21 @@ type Manager struct {
 	// create boundary rather than from the poll goroutine as such, so #3721's
 	// off-poll create writes it unchanged.
 	rootCreateRefusals map[string]rootCreateRefusal
+	// rootCreatesInFlight marks the repos (by repo ID) whose root-agent create is
+	// running on its own goroutine right now (#3721), so the next ensure tick
+	// neither waits for it nor starts a second one. Keyed by REPO rather than by
+	// the state key above, because two root_agents spellings of one repository are
+	// two states and one repo — see launchRootCreate. Guarded by mu; set with the
+	// launch and cleared by the create's own deferred exit, whatever ends it.
+	rootCreatesInFlight map[string]struct{}
+	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
+	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is
+	// internally synchronized and needs no lock of its own; the Add nonetheless
+	// happens under mu beside the mark above, so a launch and its accounting are
+	// one decision rather than two. Every Add therefore precedes its Wait, which
+	// is the ordering a reused WaitGroup requires: the poll loop is the only
+	// launcher, and shutdown waits only once that loop has exited.
+	rootCreateWG sync.WaitGroup
 	// rootAgentLayers is the root-agent configuration snapshot every resolution
 	// reads (#2216 Phase 6): the global [root_agent] layer, each registered
 	// project's personal layer and resolved root, the fail-closed unknowns
@@ -540,6 +555,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
+		rootCreatesInFlight:       make(map[string]struct{}),
 		rootKilledAt:              make(map[string]time.Time),
 		deletedRootRepos:          make(map[string]string),
 		killsInFlight:             make(map[string]struct{}),
