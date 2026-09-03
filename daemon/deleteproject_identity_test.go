@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // DeleteProject against the identity boundaries #3530 draws: which identity a
@@ -937,5 +938,204 @@ func TestBoundedRecordRootAbsentDeclinesRatherThanWedge(t *testing.T) {
 	recordRootAbsentProbe = func(string) (bool, error) { return true, nil }
 	if absent, err := boundedRecordRootAbsent("/any/recorded/root"); err != nil || !absent {
 		t.Fatalf("an answered observation must pass through: absent=%v err=%v", absent, err)
+	}
+}
+
+// TestDeleteByIdentityRefusesAnUnattributableLegacyRecord pins #3363's third
+// window — the one #3638 left open because the linkage it added is not
+// retroactive.
+//
+// #3638 writes the identity a project resolved to onto its record, so an absent
+// recorded path is addressed through what the record wrote down. A record from
+// BEFORE that field has nothing written down: it is addressed by an invented
+// id, which by construction matches nothing — including a delete arriving from
+// the other side, naming the REAL identity that project's sessions were keyed
+// under when they were created. That delete located no record, archived the
+// sessions, swept the opt-in and reported success, while the durable
+// registration survived to bring the project back on the next start.
+//
+// Silent partial success is the failure mode in every window of this issue, so
+// this one becomes a refusal that names the path and what is live under the
+// identity.
+func TestDeleteByIdentityRefusesAnUnattributableLegacyRecord(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	realID := repoID(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+
+	// A SECOND record of the same vintage, somewhere else entirely. A legacy
+	// record is ambiguous only about the identity its own recorded path would
+	// have been keyed under; this one must not be named, or every unrelated
+	// stale record in the registry becomes a delete blocker.
+	otherPath := filepath.Join(parent, "other")
+	if err := exec.Command("git", "init", otherPath).Run(); err != nil {
+		t.Fatalf("git init other: %v", err)
+	}
+	other := registerTestProject(t, otherPath)
+	clearRecordedRepoID(t, other.ID)
+
+	// Both checkouts go away before the daemon starts, so nothing backfills
+	// either record: this is the shape of every project registered before
+	// #3638 whose path stopped resolving, seen after the next restart.
+	for _, gone := range []string{repoPath, otherPath} {
+		if err := os.RemoveAll(gone); err != nil {
+			t.Fatalf("remove the checkout %s: %v", gone, err)
+		}
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if root, err := registeredProjectRootForRepoID(realID); err != nil || root != "" {
+		t.Fatalf("fixture must leave the real identity with no record answering to it, got %q (%v)", root, err)
+	}
+
+	// A session still keyed under the identity it was created with: the restart
+	// that emptied the in-memory alias did not re-key it. In place, like the
+	// always-on root this window is usually about, so the delete TEARS IT DOWN
+	// rather than archiving — the teardown succeeds, and success is exactly what
+	// makes the surviving registration silent.
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "left-behind", Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, repoPath, "left-behind", "af/left-behind", "", true, false)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	seedDiskInstanceWithID(t, realID, inst.ID, "left-behind", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(realID, "left-behind")] = inst
+	manager.mu.Unlock()
+
+	swept := false
+	previousSweep := deregisterRootAgents
+	deregisterRootAgents = func(...string) ([]string, error) {
+		swept = true
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = previousSweep })
+
+	_, err = manager.DeleteProject(DeleteProjectRequest{RepoID: realID})
+	if err == nil {
+		t.Fatalf("a delete that removes live sessions while it can locate no record for them must refuse, not report success")
+	}
+	for _, want := range []string{"nothing was changed", repoPath, "left-behind", project.ID} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), otherPath) || strings.Contains(err.Error(), other.ID) {
+		t.Fatalf("and must name only the record whose recorded path this identity would have come from: %v", err)
+	}
+	if swept {
+		t.Fatalf("the refusal must precede the durable root_agents sweep — it claims nothing was changed")
+	}
+	manager.mu.Lock()
+	_, suppressed := manager.deletedRootRepos[realID]
+	live := manager.instances[daemonInstanceKey(realID, "left-behind")]
+	manager.mu.Unlock()
+	if suppressed {
+		t.Fatalf("nor may it suppress the identity it refused to delete")
+	}
+	if live == nil || live.GetStatus() != session.Running {
+		t.Fatalf("nor tear down the session it named")
+	}
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("and the record it could not attribute must survive: %v", statErr)
+	}
+}
+
+// TestAnUnattributableRecordWithoutLiveSessionsStillDeletes is the other half
+// of the boundary above: the ambiguity is only worth refusing over when
+// something would be destroyed by acting on it.
+//
+// With no session under the identity, the delete removes nothing that the
+// surviving record could strand, so it stays the idempotent no-op #3638 made
+// it. Refusing here instead would make an upgraded, sessionless project
+// undeletable by identity for no gain — and it is the state
+// TestReconciliationDuringADeleteStillDeregisters drives through, where a
+// reconciliation landing mid-delete is what lets the row be taken after all.
+func TestAnUnattributableRecordWithoutLiveSessionsStillDeletes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	realID := repoID(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID}); err != nil {
+		t.Fatalf("with nothing live under the identity there is nothing to strand, so the delete must stay a no-op: %v", err)
+	}
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("the unattributable record is still not this delete's to take: %v", statErr)
+	}
+}
+
+// TestARecordedIdentityAnswersADeleteByIdentity is the remedy the refusal
+// names, and the reason it is a refusal rather than a permanent block: a record
+// that HAS been seen to resolve carries the identity, so the same delete finds
+// it and takes it.
+func TestARecordedIdentityAnswersADeleteByIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	realID := repoID(t, repoPath)
+	if recorded := onlyIdentityFor(t, project.ID); recorded != realID {
+		t.Fatalf("registration must record the identity it resolved, got %q want %s", recorded, realID)
+	}
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID})
+	if err != nil {
+		t.Fatalf("a record carrying this identity answers the delete: %v", err)
+	}
+	if !result.Deregistered {
+		t.Fatalf("and its durable registration must go with it")
+	}
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
+		t.Fatalf("the record survived a delete that reported removing it")
 	}
 }
