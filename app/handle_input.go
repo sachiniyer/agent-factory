@@ -78,8 +78,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// daemon's reserveCreate is the authoritative gate; rejecting here
 		// keeps the user in the naming overlay instead of surfacing the
 		// error after submit, mirroring the #936 collision pre-check below.
-		if session.IsReservedTitle(title) {
-			return m, m.handleNotice(fmt.Errorf("title %q is reserved for the daemon-managed root agent; pick another name", title))
+		//
+		// Ask the ADMISSION question, and ask it by RAISING the daemon's own
+		// refusal rather than wording a second one (#3756). What is reserved is
+		// the derived tmux name, not the spelling (#3732), so "ro ot" belongs
+		// here too — and a hand-copied message is exactly what let this check
+		// and the daemon drift into refusing different sets in the first place.
+		if err := session.ReservedTitleRefusal(title); err != nil {
+			return m, m.handleNotice(err)
 		}
 		for _, other := range m.store.GetInstances() {
 			if other == instance {
@@ -487,7 +493,12 @@ func (m *home) suggestSessionName(naming *session.Instance) string {
 		prefix = m.appConfig.BranchPrefix
 	}
 	return namegen.Suggest(func(name string) bool {
-		if session.IsReservedTitle(name) {
+		// The same admission question the submit gate asks, for the same reason:
+		// a suggestion the create would refuse is not a suggestion. namegen emits
+		// no whitespace, so the two predicates cannot differ on anything it can
+		// produce today — but one file holding two answers to one question is the
+		// drift #3756 is about.
+		if session.ReservedTitleCollision(name) != "" {
 			return true
 		}
 		for _, other := range m.store.GetInstances() {
