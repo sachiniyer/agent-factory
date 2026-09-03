@@ -229,7 +229,7 @@ jq -s --arg head "$HEAD" '
   add
   | map(select(.user.login == "chatgpt-codex-connector[bot]"))
   | map(select((.body // "") | test("\\bCodex Review\\b"; "i")))
-  | map(select((.body // "") | test("reached your Codex usage limits for code reviews"; "i") | not))
+  | map(select((.body // "") | test("reached your Codex usage limits for cod[e] reviews"; "i") | not))
   | map(select((.body // "")
       | capture("(?:\\*\\*Reviewed commit:\\*\\*|Reviewed commit:)\\s*`(?<sha>[0-9a-f]{7,40})`"; "i")
       | .sha | ascii_downcase as $rc
@@ -552,10 +552,41 @@ is a pass**:
 
 - **No artifact.** Step 2 writes an empty `verdict.json`. That means the review
   step *did not run*, not that it ran and found nothing.
-- **A usage-limit comment** (`reached your Codex usage limits for code reviews`).
-  Step 2 filters it out, and so does `parseReviewedCommit` in `auto-gate.js`.
-  A message saying the reviewer declined to look is the opposite of a clean
-  verdict, and it is the one most likely to be misread as "Codex responded".
+- **A usage-limit comment.** Codex sends at least two wordings for this and they
+  mean the same thing: `…usage limits for code reviews.` and a bare
+  `…usage limits.` — the second reads as the account-wide limit, i.e. the WORSE
+  outage. Treat BOTH as "no review happened". A message saying the reviewer
+  declined to look is the opposite of a clean verdict, and it is the one most
+  likely to be misread as "Codex responded".
+
+  **Two questions, two rules** (#3728, #3743). They are not the same test, and
+  `auto-gate.js` keeps them apart on purpose.
+
+  *Is the reviewer out of quota?* — `codexReportsReviewUsageLimit()`. It matches
+  the stem `reached your Codex usage limits?` and then counts the message,
+  **unless** the clause after `for` contains a phrase on a short list of
+  other-job scopes actually OBSERVED in the wild. That list is empty today.
+
+  The asymmetry is the point, and it is why the list holds no inference: a false
+  BLOCK during a real outage has no exit — it is the #3728 defect — while a false
+  DEGRADE is a maintainer-review PASS a human still reads. Four attempts to
+  classify the clause by grammar each leaked one way or the other. So an
+  unobserved wording degrades, and that residual is documented on #3743.
+  Practically: if the latest Codex artifact is a usage-limit message of any
+  phrasing, treat the reviewer as unavailable — the same answer the gate gives.
+
+  *Is this body disqualified from being a verdict?* — step 2's jq filter above,
+  and `parseReviewedCommit`. This one REQUIRES the literal code-review scope
+  clause, and must stay that way. Both reach it only on a body already carrying
+  the `Codex Review` marker, which a real limit message never has, so widening it
+  buys nothing and costs something real: a review that merely QUOTES the detector
+  — every review of `auto-gate.js` does — would stop counting as a verdict while
+  `!looksLikeReviewArtifact` also denies it the degradation. `Codex has not
+  reviewed head <sha>` about a head it just reviewed, with no exit.
+
+  For the same reason, do not write the literal phrase out in these files.
+  `auto-gate.js` elides it, `auto-gate.test.js` splits it across a
+  concatenation, and a test fails if any of the three regains it.
 
 Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
 fresh usage-limit reply degrades it to a manual-only pass that still does not
