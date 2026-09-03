@@ -444,26 +444,43 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 	// movedLink stages a link that has ALREADY been retargeted away from the
 	// file the lock pinned — the state a body finds itself in when stow or a
 	// dotfiles checkout runs mid-operation.
-	movedLink := func(t *testing.T, lockedContent string) (target lockedTarget, locked, moved string) {
+	//
+	// The pin is taken the way withFollowedFileLock takes it — resolveWriteTarget
+	// through the link, WHILE it still points at the locked file — and only then
+	// is the link moved. Handing the fixture a raw path instead builds a handle
+	// production cannot produce: on macOS t.TempDir() is under /var, which
+	// EvalSymlinks resolves to /private/var, so `file` would have been a
+	// spelling the real code never stores. It returns the pinned strings so the
+	// assertions match the error exactly rather than a re-resolution of them.
+	movedLink := func(t *testing.T, lockedContent string) (target lockedTarget, pinned, movedTo string) {
 		t.Helper()
 		// Parsing a config probes the user's shell for a claude alias; a plain
 		// sh takes the fast `which` path instead of an interactive bash.
 		t.Setenv("SHELL", "/bin/sh")
 		dotfiles := t.TempDir()
-		locked = filepath.Join(dotfiles, "af-config.toml")
-		moved = filepath.Join(dotfiles, "af-config.other.toml")
+		locked := filepath.Join(dotfiles, "af-config.toml")
+		moved := filepath.Join(dotfiles, "af-config.other.toml")
 		require.NoError(t, os.WriteFile(locked, []byte(lockedContent), 0644))
 		require.NoError(t, os.WriteFile(moved, []byte("schema_version = 1\n"), 0644))
 		link := filepath.Join(t.TempDir(), TomlConfigFileName)
+		require.NoError(t, os.Symlink(locked, link))
+
+		pinned, err := resolveWriteTarget(link)
+		require.NoError(t, err)
+
+		require.NoError(t, os.Remove(link))
 		require.NoError(t, os.Symlink(moved, link))
-		return lockedTarget{link: link, file: locked}, locked, moved
+		movedTo, err = resolveWriteTarget(link)
+		require.NoError(t, err)
+
+		return lockedTarget{link: link, file: pinned}, pinned, movedTo
 	}
 
 	t.Run("unset refuses instead of reporting nothing to remove", func(t *testing.T) {
 		// The locked file does not carry the key, so the delete is a no-op and
 		// the write — the only thing that confirmed — never runs. Reporting
 		// "not set" here describes a file the link no longer names.
-		target, locked, moved := movedLink(t, "schema_version = 1\n")
+		target, pinned, movedTo := movedLink(t, "schema_version = 1\n")
 		alias, ok := configAliasForCanonical("network.listen_addr")
 		require.True(t, ok, "premise: the key under test is a migrated alias")
 
@@ -471,19 +488,19 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 
 		require.Error(t, err, "a no-op report must not be made about a file the link stopped naming")
 		assert.Nil(t, result)
-		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked))
-		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+		assert.Contains(t, err.Error(), pinned, "the refusal names the file the lock covers")
+		assert.Contains(t, err.Error(), movedTo, "and the file the link now points at")
 	})
 
 	t.Run("migrate refuses instead of reporting nothing to migrate", func(t *testing.T) {
-		target, locked, moved := movedLink(t, "schema_version = 1\nbranch_prefix = 'me/'\n")
+		target, pinned, movedTo := movedLink(t, "schema_version = 1\nbranch_prefix = 'me/'\n")
 
 		result, err := migrateConfigFile(target)
 
 		require.Error(t, err, "a nothing-to-migrate report must not be made about a file the link stopped naming")
 		assert.Nil(t, result)
-		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked))
-		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+		assert.Contains(t, err.Error(), pinned, "the refusal names the file the lock covers")
+		assert.Contains(t, err.Error(), movedTo, "and the file the link now points at")
 	})
 
 	t.Run("root-agent deregistration refuses instead of reporting nothing removed", func(t *testing.T) {
@@ -492,14 +509,14 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		// surviving in the config the link now names respawns that project on
 		// the next daemon start — which is precisely what its own error message
 		// promises cannot happen.
-		target, locked, moved := movedLink(t, "schema_version = 1\n")
+		target, pinned, movedTo := movedLink(t, "schema_version = 1\n")
 
 		removed, err := deregisterRootAgentsLocked(target, []string{RepoIDFromRoot("/repos/gone")})
 
 		require.Error(t, err, "a nothing-removed answer must not be made about a file the link stopped naming")
 		assert.Nil(t, removed)
-		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked))
-		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+		assert.Contains(t, err.Error(), pinned, "the refusal names the file the lock covers")
+		assert.Contains(t, err.Error(), movedTo, "and the file the link now points at")
 	})
 
 	t.Run("a refused migration leaves no backup behind", func(t *testing.T) {
@@ -517,19 +534,30 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		link := filepath.Join(t.TempDir(), TomlConfigFileName)
 		require.NoError(t, os.Symlink(locked, link))
 
+		// Pinned the way withFollowedFileLock pins, so the entry confirm passes
+		// and the retarget lands in the window this test is about.
+		pinned, err := resolveWriteTarget(link)
+		require.NoError(t, err)
+
+		var movedTo string
 		migrateWriteRaceHookForTest = func() {
 			require.NoError(t, os.Remove(link))
 			require.NoError(t, os.Symlink(moved, link))
+			resolved, hookErr := resolveWriteTarget(link)
+			require.NoError(t, hookErr)
+			movedTo = resolved
 		}
 		t.Cleanup(func() { migrateWriteRaceHookForTest = nil })
 
 		before, err := os.ReadFile(locked)
 		require.NoError(t, err)
 
-		_, err = migrateConfigFile(lockedTarget{link: link, file: locked})
+		_, err = migrateConfigFile(lockedTarget{link: link, file: pinned})
 
 		require.Error(t, err, "the guarded write must refuse once the link has moved")
-		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved))
+		require.NotEmpty(t, movedTo, "premise: the hook must have run, or the refusal came from the wrong place")
+		assert.Contains(t, err.Error(), pinned, "the refusal names the file the lock covers")
+		assert.Contains(t, err.Error(), movedTo, "and the file the link now points at")
 
 		entries, rerr := os.ReadDir(dotfiles)
 		require.NoError(t, rerr)
