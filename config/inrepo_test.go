@@ -455,6 +455,40 @@ func TestSaveInRepoRefusesSymlinkDirSwappedOutsideBeforeWrite(t *testing.T) {
 	}
 }
 
+// TestSaveInRepoRefusesSymlinkedConfigFileOutsideRepo pins the refusing half of
+// the in-repo link rule docs/configuration.md states (#3687). The following
+// half — a link whose target stays inside the repository is resolved, the
+// target rewritten and the link left in place (#1092) — is pinned by
+// TestSaveInRepoPostWorktreeCommandsTOML's "writes through a symlinked
+// config.toml" subtest, and the two are only meaningful together: without this
+// one, "followed" would read as unconditional. Here the target leaves the
+// repository, so the save must refuse naming both ends and touch neither the
+// outside file nor the link, because a file checked into a repository must not
+// be able to aim af's write at a path the clone never chose.
+func TestSaveInRepoRefusesSymlinkedConfigFileOutsideRepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.toml")
+	outsideContent := `default_program = "codex"` + "\n"
+	require.NoError(t, os.WriteFile(outside, []byte(outsideContent), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, InRepoConfigDirName), 0755))
+	linkPath := InRepoTomlConfigPath(repoRoot)
+	require.NoError(t, os.Symlink(outside, linkPath))
+
+	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"echo hi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the repository")
+	assert.Contains(t, err.Error(), filepath.Base(outside), "the refusal must name the target it declined, not only the link")
+
+	data, readErr := os.ReadFile(outside)
+	require.NoError(t, readErr)
+	assert.Equal(t, outsideContent, string(data), "the escaping target must be byte-for-byte untouched by the refused save")
+
+	info, lstatErr := os.Lstat(linkPath)
+	require.NoError(t, lstatErr)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink, "a refused save must not replace the link with a regular file either")
+}
+
 func TestSaveInRepoPostWorktreeCommands(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
