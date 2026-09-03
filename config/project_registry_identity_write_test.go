@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -556,8 +557,8 @@ func TestReconcileYieldsToADeleteHoldingTheIdentity(t *testing.T) {
 	makeRecordLegacy(t, project.ID)
 
 	wrote, err := ReconcileProjectRepoID(project.ID, identity, func() bool { return false })
-	if err != nil {
-		t.Fatalf("a declined write is not a failure: %v", err)
+	if !errors.Is(err, ErrIdentityWriteDeclined) {
+		t.Fatalf("a decline must be distinguishable from an already-recorded identity — both return wrote=false, and a caller that cannot tell them apart publishes a transition whose durable half never happened: %v", err)
 	}
 	if wrote {
 		t.Fatalf("the write must yield while its caller says the identity is spoken for")

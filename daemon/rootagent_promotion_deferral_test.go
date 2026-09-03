@@ -1103,3 +1103,125 @@ func TestSuccessfulProofSurvivesAFailedWrite(t *testing.T) {
 		t.Fatalf("and must carry the proof it established, so a checkout that disappears afterwards cannot make it unwritable: got %+v", entry)
 	}
 }
+
+// TestDeclinedWriteLeavesTheRecordUnresolved pins #3530 review id 3920258558.
+//
+// A write DECLINED under the registry lock and an identity that was already
+// recorded both report "did not write". Treating them alike published the
+// transition whose durable half never happened — and if the delete cleared its
+// fence in between, the promotion succeeded too, retiring the probe and leaving
+// the record to revert to its provisional identity on the next start.
+func TestDeclinedWriteLeavesTheRecordUnresolved(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	realID := repoID(t, repoPath)
+	derivedID := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+
+	// A delete holds the identity the write would record, and clears its fence
+	// the moment the write has been declined — the interleaving that made a
+	// decline indistinguishable from a completed write.
+	manager.mu.Lock()
+	if manager.projectDeletes == nil {
+		manager.projectDeletes = make(map[string]struct{})
+	}
+	manager.projectDeletes[realID] = struct{}{}
+	manager.mu.Unlock()
+	config.SetIdentityWriteDeclinedHookForTest(t, func() {
+		manager.mu.Lock()
+		delete(manager.projectDeletes, realID)
+		manager.mu.Unlock()
+	})
+
+	manager.EnsureRootAgents()
+
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("the write was declined, so nothing may reach the record, got %q", recorded)
+	}
+	layers := manager.rootAgentLayers.Load()
+	if _, still := layers.unresolvedRoots[derivedID]; !still {
+		t.Fatalf("and the record must stay unresolved: publishing %s without the durable half reverts on the next start", realID)
+	}
+	if _, published := layers.projectRoots[realID]; published {
+		t.Fatalf("nothing may be published under %s on the strength of a write that did not happen", realID)
+	}
+}
+
+// TestRegistryRecoveryReconciliationRespectsTheFence pins #3530 review id
+// 3920258554.
+//
+// projectRootAgentLayers is the BOOT builder and also the registry-recovery
+// rebuild, and only the first is safe with no fence: at boot nothing is serving,
+// so no delete can hold an identity. Recovery runs while the daemon serves, and
+// passing nil there let a proof land a durable write into an identity a delete
+// was holding.
+func TestRegistryRecoveryReconciliationRespectsTheFence(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	realID := repoID(t, repoPath)
+
+	// The registry is unreadable at boot, which is the state whose recovery
+	// re-enters the builder at runtime.
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod registry: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			_ = os.Chmod(dir, 0o755)
+		}
+	})
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if !manager.rootAgentLayers.Load().registryUnreadable {
+		t.Skip("this test needs an unreadable registry to be unreadable; running as a user that ignores it")
+	}
+
+	// A delete holds the identity the recovery would record.
+	manager.mu.Lock()
+	if manager.projectDeletes == nil {
+		manager.projectDeletes = make(map[string]struct{})
+	}
+	manager.projectDeletes[realID] = struct{}{}
+	manager.mu.Unlock()
+
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("repair registry: %v", err)
+	}
+	restored = true
+	// Recovery publishes only on a second consecutive matching read, so the
+	// cadence is driven twice.
+	for range 4 {
+		manager.mu.Lock()
+		manager.rootHealNextAttempt = nowFunc()
+		manager.mu.Unlock()
+		manager.EnsureRootAgents()
+	}
+
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("the recovery rebuild must respect the delete fence: it recorded %q into an identity a delete is holding", recorded)
+	}
+}

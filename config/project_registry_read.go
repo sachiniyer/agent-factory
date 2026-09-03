@@ -312,6 +312,13 @@ func ReconciledRepoIDForProject(p Project) string {
 	return DerivedRepoIDForUnresolvedRoot(p.Root)
 }
 
+// ErrIdentityWriteDeclined reports that a caller's own stillWanted predicate
+// refused the write under the registry lock — the identity is spoken for right
+// now, typically by a delete. It is deliberately NOT an error about the
+// registry: nothing failed, and nothing was written, so a caller keeps its work
+// and tries again rather than reporting a failure to a user.
+var ErrIdentityWriteDeclined = errors.New("recording this identity was declined by the caller's own check")
+
 // ReconcileProjectRepoID writes down the repository identity a project has been
 // seen to resolve to, once. It is the ONE-WAY move #3530 requires: a record
 // keyed by an invented id learns its real one and never goes back.
@@ -334,6 +341,7 @@ func ReconcileProjectRepoID(projectID, repoID string, stillWanted func() bool) (
 		return false, err
 	}
 	wrote := false
+	declined := false
 	err = WithFileLock(projectRegistryLockPath(dir), func() error {
 		records, err := loadProjectRecords(dir)
 		if err != nil {
@@ -348,6 +356,10 @@ func ReconcileProjectRepoID(projectID, repoID string, stillWanted func() bool) (
 		// returns. Nil means "no reason not to", which is what a startup
 		// backfill passes.
 		if stillWanted != nil && !stillWanted() {
+			declined = true
+			if identityWriteDeclinedHookForTest != nil {
+				identityWriteDeclinedHookForTest()
+			}
 			return nil
 		}
 		for _, record := range records {
@@ -367,5 +379,27 @@ func ReconcileProjectRepoID(projectID, repoID string, stillWanted func() bool) (
 		}
 		return nil
 	})
+	if err == nil && declined {
+		// A DECLINE is not "already recorded" (#3530 review id 3920258558).
+		// Both return wrote=false, and a caller that cannot tell them apart
+		// goes on to publish an identity transition whose durable half never
+		// happened. The sentinel makes the difference testable with errors.Is
+		// while staying out of the success path.
+		return false, ErrIdentityWriteDeclined
+	}
 	return wrote, err
+}
+
+// identityWriteDeclinedHookForTest, when non-nil, runs the moment a write is
+// declined under the registry lock. It exists for one interleaving: a caller
+// whose predicate said no can have its reason disappear before the caller acts
+// on the decline (#3530 review id 3920258558), and that window is a few
+// instructions wide in a real daemon.
+var identityWriteDeclinedHookForTest func()
+
+// SetIdentityWriteDeclinedHookForTest installs hook for the duration of a test
+// in another package, and clears it afterwards.
+func SetIdentityWriteDeclinedHookForTest(t interface{ Cleanup(func()) }, hook func()) {
+	identityWriteDeclinedHookForTest = hook
+	t.Cleanup(func() { identityWriteDeclinedHookForTest = nil })
 }

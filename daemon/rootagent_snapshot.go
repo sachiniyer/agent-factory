@@ -112,7 +112,8 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 	}
 	logRegistryRecordProblems(failures, strays)
 	snap.recordFailureIDs = recordFailureDirectoryIDs(failures)
-	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots, snap.reconcileOwed = projectRootAgentLayers(projects)
+	// Boot: nothing is serving yet, so no delete can hold an identity.
+	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots, snap.reconcileOwed = projectRootAgentLayers(projects, nil)
 	return snap
 }
 
@@ -203,7 +204,15 @@ type unresolvedProjectRecord struct {
 	pathVanished bool
 }
 
-func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord, reconcileOwed map[string]reconcileOwedEntry) {
+// identityWriteFence supplies the predicate ReconcileProjectRepoID re-asks
+// under the registry lock. Nil means "nothing can be holding an identity",
+// which is true only of the boot snapshot: the daemon is not serving yet, so no
+// delete exists to fence one (#3530 review id 3920258554). Every RUNTIME caller
+// — the registry-recovery rebuild in healRootAgentLayers is one — must pass the
+// manager's, or a write can land while a delete holds the identity.
+type identityWriteFence func(from, to string) func() bool
+
+func projectRootAgentLayers(projects []config.Project, fence identityWriteFence) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord, reconcileOwed map[string]reconcileOwedEntry) {
 	personal = map[string]*config.RootAgentLayer{}
 	personalUnreadable = map[string]string{}
 	projectRoots = map[string]string{}
@@ -246,7 +255,7 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 				proven, ok := config.ResolveRegisteredProjectRepoID(context.Background(), p)
 				switch {
 				case ok && proven == repoID:
-					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, nil); err != nil {
+					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, identityWriteWanted(fence, repoID)); err != nil {
 						// Keep the work, or there is none left to retry: this
 						// project resolves, so it never joins unresolvedRoots
 						// and the heal pass would return before reaching
@@ -269,7 +278,7 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 					// start without the project's disable. The proof wins,
 					// because it is the evidence about which checkout this is.
 					repoID, repoRoot = proven, p.Root
-					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, nil); err != nil {
+					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, identityWriteWanted(fence, repoID)); err != nil {
 						reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID, proven: true}
 						log.WarningLog.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the identity its path resolved to, but that could not be recorded; retrying on the ensure cadence: %v", p.ID, repoID, err)
 					}
@@ -344,4 +353,13 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 		}
 	}
 	return personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed
+}
+
+// identityWriteWanted adapts an identityWriteFence for one identity, and treats
+// a nil fence as "wanted" — the boot case, where nothing can hold one.
+func identityWriteWanted(fence identityWriteFence, repoID string) func() bool {
+	if fence == nil {
+		return nil
+	}
+	return fence(repoID, repoID)
 }

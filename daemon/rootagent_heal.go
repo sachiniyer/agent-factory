@@ -83,7 +83,10 @@ func (m *Manager) healRootAgentLayers() {
 			streak := m.observeRootHealRegistrySnapshot(projects)
 			if streak >= 2 {
 				logRegistryRecordProblems(failures, strays)
-				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(projects)
+				// The RUNTIME rebuild, so it carries the fence (#3530 review id
+				// 3920258554): this path proves legacy rows while the daemon is
+				// serving, and a delete can hold the identity it would write.
+				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(projects, m.identityTransitionUnfenced)
 				verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
 				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
@@ -679,24 +682,29 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// recomputed — it is what lets a delete-by-recorded-path or the TUI
 		// reach the project's real state after the path is gone. One-way: the
 		// writer never overwrites an identity already recorded.
-		// BOTH fences, before the durable write and not only before the
-		// in-memory move (#3530 review id 3919824579). ReconcileProjectRepoID
-		// is permanent — the one-way writer never replaces what it wrote — and
-		// a delete holding the destination identity resolved no registry row,
-		// so it cannot deregister a row that gains that identity here: its
-		// sessions are archived and its identity suppressed, and the project
-		// comes back on the next start. The next pass writes it once the
-		// delete settles.
-		if m.identityTransitionFenced(derivedID, repo.ID) {
-			log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but a delete holds one of the two identities; leaving both the record and the snapshot untouched for now", record.root, repo.ID)
-			continue
-		}
+		// The fences are read by the WRITE itself, under the registry lock
+		// (#3530 review ids 3919824579, 3920131413): a check out here could
+		// only be earlier than the write, never ordered against it, and having
+		// both was what let a DECLINE look like an already-recorded identity
+		// (#3530 review id 3920258558). The promotion below keeps its own
+		// check, because it moves in-memory state rather than durable state.
 		if config.IsDerivedRepoID(derivedID) {
 			// The fence is re-asked under the registry lock, so a delete that
 			// took that lock first — finding a row with nothing recorded, and
 			// no evidence to match it by — is not overtaken by this write
 			// (#3530 review id 3920131413).
-			if wrote, err := config.ReconcileProjectRepoID(record.projectID, repo.ID, m.identityTransitionUnfenced(derivedID, repo.ID)); err != nil {
+			wrote, err := config.ReconcileProjectRepoID(record.projectID, repo.ID, m.identityTransitionUnfenced(derivedID, repo.ID))
+			switch {
+			case errors.Is(err, config.ErrIdentityWriteDeclined):
+				// A DECLINE is not a completed write (#3530 review id
+				// 3920258558). Falling through would publish the transition
+				// whose durable half never happened — and if the delete clears
+				// its fence in between, the promotion would even succeed,
+				// retiring the probe and leaving the record to revert to its
+				// provisional identity on the next start.
+				log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but a delete holds that identity, so it was not recorded; leaving the record unresolved for a later pass", record.root, repo.ID)
+				continue
+			case err != nil:
 				// The durable write is what makes the promotion survive a
 				// restart, so a failure must NOT be followed by an in-memory
 				// promotion: the snapshot would move the project to repo.ID
@@ -706,7 +714,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				// next pass retry (#3530 review id 3914971915).
 				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; leaving the project under its provisional identity and retrying on the ensure cadence: %v", record.root, repo.ID, record.projectID, err)
 				continue
-			} else if wrote {
+			case wrote:
 				log.InfoLog.Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)
 			}
 		}
