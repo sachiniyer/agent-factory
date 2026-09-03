@@ -198,13 +198,26 @@ func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
 	return false
 }
 
+// legacyRootAgentForRepoContext is the verdict path's entry into the legacy
+// lookup. A package var so a test can drive the unanswered case this bound
+// exists for; production assigns it once.
+var legacyRootAgentForRepoContext = config.LegacyRootAgentForRepoContext
+
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
 // resolves to repoID, or nil if none does. Resolved per call (not from the
 // snapshot dedup set) to preserve the legacy contract that a path pointing at a
 // not-yet-cloned repo starts applying the moment the repo appears.
-func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig {
-	entry, _ := config.LegacyRootAgentForRepo(m.cfg, repoID)
-	return entry
+//
+// The error is the UNKNOWN answer, and callers must not collapse it into nil:
+// nil means "no entry names this repo", which the verdict turns into "add a
+// root_agents entry" — advice that is wrong, and unfixable by the user, when
+// the entry is already there and a probe simply did not answer.
+func (m *Manager) legacyRootAgentForRepo(repoID string) (*config.RootAgentConfig, error) {
+	// RED (#3782 item 4): unbounded. This runs on the RPC goroutine, under
+	// taskTargetMu for two of its three callers, so one stalled mount hangs
+	// DeliverPrompt, DeleteProject and every task write on the box.
+	entry, _, err := legacyRootAgentForRepoContext(context.Background(), m.cfg, repoID)
+	return entry, err
 }
 
 // EnsureRootAgents runs one ensure pass over every repo that resolves to an

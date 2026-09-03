@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -57,6 +58,18 @@ const (
 	// rootAgentPersonalUnreadable: this repo's personal config exists but
 	// could not be loaded at daemon start (#3241).
 	rootAgentPersonalUnreadable
+	// rootAgentLegacyProbeUnanswered: whether a root_agents entry names this
+	// repo could not be established, because a key's repository probe never
+	// answered (#3782 item 4). It is the ONLY reason here that is about the
+	// daemon rather than about the configuration, and it is deliberately not
+	// collapsed into rootAgentNotConfigured: "no root agent is configured for
+	// this repo — add a root_agents entry" is advice a user cannot act on when
+	// the entry is already there, and #3500's rule is that a subprocess that
+	// did not answer establishes nothing about the user's config.
+	//
+	// Unlike every other refusing reason it is TRANSIENT: nothing about the
+	// config has to change, and the next request re-probes.
+	rootAgentLegacyProbeUnanswered
 )
 
 // rootAgentMaterializeVerdict pairs the reason with what a message needs to
@@ -159,7 +172,9 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	if record, ok := layers.unresolvedRoots[repoID]; ok && record.markerUnreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, rootUnresolved: true, rootMarkerUnreadable: true, rootPathVanished: record.pathVanished, projectID: record.projectID}
 	}
-	legacy := m.legacyRootAgentForRepo(repoID)
+	// RED (#3782 item 4): the unknown answer is dropped, so an unanswered
+	// probe still reports the repo as unconfigured.
+	legacy, _ := m.legacyRootAgentForRepo(repoID)
 	_, isProject := layers.projectRoots[repoID]
 	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
 	if legacy == nil && isUnresolved && unresolved.root != "" {
@@ -171,7 +186,8 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 		// opt-in sits in root_agents the whole time resolves to "disabled"
 		// instead of "enabled, but its recorded path did not resolve" — the
 		// misreport #3264 exists to prevent.
-		legacy = m.legacyRootAgentForRecordedRoot(unresolved.root)
+		// RED (#3782 item 4): same, for the recorded-root fallback.
+		legacy, _ = m.legacyRootAgentForRecordedRoot(unresolved.root)
 	}
 	if legacy == nil && !isProject && !isUnresolved {
 		if len(layers.recordFailureIDs) > 0 {
@@ -238,10 +254,16 @@ func rootAgentCreateRefusalVerdict(refusal rootCreateRefusal, enabledSource conf
 // legacyRootAgentForRecordedRoot is config's shared recorded-root lookup, which
 // states the rule and its two limits; the daemon reads it from its start-of-day
 // config exactly as every other legacy lookup here does.
-func (m *Manager) legacyRootAgentForRecordedRoot(root string) *config.RootAgentConfig {
-	entry, _ := config.LegacyRootAgentForRecordedRoot(m.cfg, root)
-	return entry
+func (m *Manager) legacyRootAgentForRecordedRoot(root string) (*config.RootAgentConfig, error) {
+	// RED (#3782 item 4): unbounded, on the same goroutine and under the same
+	// lock as the lookup above it.
+	entry, _, err := legacyRootAgentForRecordedRootContext(context.Background(), m.cfg, root)
+	return entry, err
 }
+
+// legacyRootAgentForRecordedRootContext is the recorded-root half of the same
+// seam. A package var for the same reason; production assigns it once.
+var legacyRootAgentForRecordedRootContext = config.LegacyRootAgentForRecordedRootContext
 
 // rootAgentUnavailableDetail renders a refusing verdict as the clause a
 // consumer appends to its message: what stops the root, and what fixes it.
@@ -296,6 +318,8 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 			registry = dir
 		}
 		return fmt.Sprintf("the project registry %s could not be listed at daemon start, so af fails every root agent closed rather than start one a personal config may disable; repair the registry — the daemon re-checks it on its ensure cadence", registry)
+	case rootAgentLegacyProbeUnanswered:
+		return "could not establish whether a legacy root agent is configured for this repository: git never answered the probe (the subprocess was killed, could not be started, or was abandoned mid-read), so af refuses rather than report a repo whose root_agents entry it could not read as unconfigured; retry — the next request re-probes"
 	case rootAgentPersonalUnreadable:
 		path := "its personal project config"
 		if v.projectID != "" {
