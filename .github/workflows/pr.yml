@@ -160,7 +160,7 @@ jobs:
       # PR touched, and it needs nothing but the Go already set up above. The
       # same tests also pin the script's two halves — a failed update is
       # survived, a failed install is not.
-      - name: Lint CI apt usage and test the installer wrapper
+      - name: Lint CI package installs and test the installer wrapper
         run: go test ./scripts/ -run Apt -count=1
 
       # The auto-gate helper decides what auto-merges, but nothing ran its tests

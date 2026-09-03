@@ -270,9 +270,45 @@ func TestCIAptInstallScriptIsExecutable(t *testing.T) {
 // of which cut releases. One script fixes it once; this lint is what stops a
 // seventh call site from being written as a bare `apt-get update && …` again.
 
+// aptCommands are the front-ends that all share the defect: their `update`
+// subcommand fails when ANY configured source fails. `apt` is here because
+// `sudo apt update && sudo apt install …` is the same bug with three fewer
+// characters, and is the likeliest way a future call site drifts back.
+var aptCommands = map[string]bool{"apt-get": true, "apt": true, "aptitude": true}
+
+// commandTokens splits a line the way a reader looking for "what command runs
+// here" would: on whitespace and on the shell's command separators, with
+// surrounding quotes trimmed.
+//
+// It matches TOKENS rather than substrings on purpose. A substring test for
+// "apt" flags `scripts/ci-apt-install.sh` — the wrapper's own call sites — and
+// a \bapt\b word-boundary test flags it too, because `-` is not a word
+// character. `scripts/ci-apt-install.sh` is a single token and is not equal to
+// any name above, so the token test tells the wrapper apart from the thing it
+// wraps without an exception list.
+func commandTokens(line string) []string {
+	fields := strings.FieldsFunc(line, func(r rune) bool {
+		switch r {
+		case ' ', '\t', ';', '&', '|', '(', ')', '`':
+			return true
+		}
+		return false
+	})
+	tokens := make([]string, 0, len(fields))
+	for _, f := range fields {
+		tokens = append(tokens, strings.Trim(f, `"'`))
+	}
+	return tokens
+}
+
 // lintAptUsage reports problems in CI definition files, keyed name -> content.
 // Comment lines are stripped first: a `#` line is inert in both YAML and in a
 // `run:` shell block, and the call sites deliberately explain the fix in prose.
+//
+// This is a drift lint, not a sandbox. A line contrived to hide the command
+// from it — split across a backslash continuation, say — will get through; what
+// it stops is the realistic path, someone copying one of the six steps that
+// used to be here.
 func lintAptUsage(files map[string]string) []string {
 	var findings []string
 	for name, content := range files {
@@ -281,12 +317,19 @@ func lintAptUsage(files map[string]string) []string {
 			if strings.HasPrefix(trimmed, "#") {
 				continue
 			}
-			if strings.Contains(line, "apt-get") {
+			callsApt := false
+			for _, tok := range commandTokens(line) {
+				if aptCommands[tok] {
+					callsApt = true
+					break
+				}
+			}
+			if callsApt {
 				findings = append(findings, name+":"+strconv.Itoa(i+1)+
-					": calls apt-get directly; use `scripts/ci-apt-install.sh <pkg>...` instead."+
-					" A bare `apt-get update` fails the whole step when any configured source"+
-					" fails, including third-party ones the runner image ships and we never"+
-					" install from (#3774).")
+					": calls apt/apt-get directly; use `scripts/ci-apt-install.sh <pkg>...`"+
+					" instead. A bare `apt-get update` fails the whole step when any configured"+
+					" source fails, including third-party ones the runner image ships and we"+
+					" never install from (#3774).")
 			}
 			if strings.Contains(line, "ci-apt-install.sh") && strings.Contains(line, "${{") {
 				findings = append(findings, name+":"+strconv.Itoa(i+1)+
@@ -334,6 +377,36 @@ func TestAptLintRejectsAReintroducedBareAptGetUpdate(t *testing.T) {
 			name:    "a workflow expression on the wrapper's command line",
 			content: "        run: scripts/ci-apt-install.sh ${{ inputs.packages }}\n",
 			want:    true,
+		},
+		{
+			// The same bug with three fewer characters. A lint that only knew
+			// about apt-get would wave this through.
+			name:    "`apt` instead of `apt-get`",
+			content: "        run: sudo apt update && sudo apt install -y zsh\n",
+			want:    true,
+		},
+		{
+			name:    "aptitude, same defect again",
+			content: "        run: sudo aptitude update\n",
+			want:    true,
+		},
+		{
+			// The token test has to tell the wrapper apart from what it wraps:
+			// both a substring match on "apt" and a \bapt\b word-boundary match
+			// would flag this line, because `-` is not a word character.
+			name:    "the wrapper's own path is not an apt invocation",
+			content: "        run: scripts/ci-apt-install.sh zsh\n",
+			want:    false,
+		},
+		{
+			name:    "apt hiding behind a separator rather than a space",
+			content: "        run: cd /tmp;sudo apt-get update\n",
+			want:    true,
+		},
+		{
+			name:    "an unrelated word that merely contains apt",
+			content: "        run: node web/src/adapters/build.js --chapter 3\n",
+			want:    false,
 		},
 	}
 	for _, tc := range cases {
