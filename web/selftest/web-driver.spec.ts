@@ -8460,8 +8460,12 @@ interface MeasuredIcon {
 }
 
 /** One reading of every icon, taken inside a single animation frame, plus how many
- *  times the shell rebuilt itself between arming the watch and that frame. */
+ *  times the shell rebuilt itself between arming the watch and that frame — and which
+ *  of the audit's bounded attempts it came from, so a reading that cost four voided
+ *  windows carries that fact itself rather than only in the caller's message (#3690).
+ */
 interface IconReading {
+  attempt: number;
   icons: MeasuredIcon[];
   rebuilds: number;
   quiesced: boolean;
@@ -8522,8 +8526,8 @@ async function armIconRebuildWatch(p: Page): Promise<void> {
  *
  *  A rail that never goes quiet is reported through `quiesced` rather than waited on
  *  forever: silence about it would be the same unfalsifiable reading again. */
-async function readIconGeometry(p: Page): Promise<IconReading> {
-  return p.evaluate(async () => {
+async function readIconGeometry(p: Page, attempt: number): Promise<IconReading> {
+  return p.evaluate(async (attemptNumber) => {
     const w = window as unknown as { __afIconWatch?: { observer: MutationObserver; rebuilds: number } };
     const watch = w.__afIconWatch;
     const drain = (): void => {
@@ -8591,6 +8595,7 @@ async function readIconGeometry(p: Page): Promise<IconReading> {
       }
     }).length;
     return {
+      attempt: attemptNumber,
       icons,
       rebuilds: watch?.rebuilds ?? -1,
       quiesced,
@@ -8605,27 +8610,49 @@ async function readIconGeometry(p: Page): Promise<IconReading> {
         .map((entry) => entry.name)
         .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
     };
-  });
+  }, attempt);
 }
 
-/** The reading the assertions consume: the one taken since the watch was armed, and —
- *  if the shell rebuilt itself anywhere inside that window — one fresh reading in its
- *  place. Exactly one retry: a second dirty window is itself worth reporting, and a
- *  retry loop would only bury it.
+/** How many windows the audit will buy before it stops asking. Five, because the shell
+ *  it measures rebuilds on ordinary roster churn: one voided window is routine, two in
+ *  a row is a slow runner (#3690), and five consecutive dirty windows is not timing —
+ *  it is a shell that never goes quiet, which is a finding of its own and is reported
+ *  as one, with the count. */
+const ICON_AUDIT_ATTEMPTS = 5;
+
+/** The reading the assertions consume: windows are bought until one of them is clean,
+ *  bounded at ICON_AUDIT_ATTEMPTS.
  *
- *  Reporting it is the CALLER's job, and not optional. The returned reading can still
- *  be dirty (both attempts straddled a rebuild) or unquiesced, and its geometry is
- *  then void — so a caller that consumes it without checking `rebuilds` and
- *  `quiesced` silently accepts exactly the sustained race this exists to surface
- *  (#3683 Codex). */
+ *  #3683 bought exactly one retry, reasoning that a second dirty window is itself
+ *  worth reporting. It is — but reporting is not the same as failing, and failing on
+ *  it made the audit's own recovery path the flake (#3690): the test that injects ONE
+ *  rebuild went red on a runner where ordinary churn happened to land in the
+ *  replacement window too, which is a property of the runner rather than of the code
+ *  under test. So the count is DATA now — every attempt is kept and the winning
+ *  reading carries its own `attempt` — and the failure is reserved for the shell that
+ *  yields no quiet window at all inside the bound.
+ *
+ *  Reporting is still the CALLER's job, and still not optional. The returned reading
+ *  can be dirty (all ICON_AUDIT_ATTEMPTS windows straddled a rebuild) or unquiesced,
+ *  and its geometry is then void — so a caller that consumes it without checking
+ *  `rebuilds` and `quiesced` silently accepts exactly the sustained race this exists
+ *  to surface (#3683 Codex). */
 async function settledIconAudit(p: Page): Promise<{ reading: IconReading; attempts: IconReading[] }> {
-  const first = await readIconGeometry(p);
-  if (first.rebuilds === 0) {
-    return { reading: first, attempts: [first] };
+  const attempts: IconReading[] = [];
+  for (let attempt = 1; attempt <= ICON_AUDIT_ATTEMPTS; attempt += 1) {
+    // Attempt 1 measures the window the CALLER armed, which spans the audit's
+    // preconditions — the 43 ms of round trips #3681's rebuild landed in. Every retry
+    // arms a window of its own.
+    if (attempt > 1) {
+      await armIconRebuildWatch(p);
+    }
+    const reading = await readIconGeometry(p, attempt);
+    attempts.push(reading);
+    if (reading.rebuilds === 0) {
+      break;
+    }
   }
-  await armIconRebuildWatch(p);
-  const second = await readIconGeometry(p);
-  return { reading: second, attempts: [first, second] };
+  return { reading: attempts[attempts.length - 1], attempts };
 }
 
 /** Whether an icon presented a real box to the user. */
@@ -8653,17 +8680,21 @@ function describeRejectedIcons(icons: MeasuredIcon[]): string {
 }
 
 /** The one-line diagnosis a failing audit leaves behind: whether the shell moved under
- *  the reading, what each attempt saw, and — named — the icons that had no box. */
+ *  the reading, how many windows it cost, what each attempt saw, and — named — the
+ *  icons that had no box. */
 function iconAuditMessage(reading: IconReading, attempts: IconReading[]): string {
   const verdict =
     reading.rebuilds === 0
-      ? "no rebuild in the window, so a zero box is a real collapse and these icons are the defect"
-      : `the shell rebuilt ${reading.rebuilds}x inside the window, so this reading is void, not evidence`;
+      ? `no rebuild in the window this reading was taken over (attempt ${reading.attempt} of ` +
+        `${ICON_AUDIT_ATTEMPTS}), so a zero box is a real collapse and these icons are the defect`
+      : `the shell rebuilt inside all ${attempts.length} windows the audit bought — the last one ` +
+        `${reading.rebuilds}x — so a shell that never yields a quiet window is the finding here, ` +
+        `not the icons; this reading is void, not evidence`;
   const seen = attempts
     .map(
       (attempt) =>
-        `${attempt.icons.filter(iconIsVisible).length}/${attempt.icons.length}@${attempt.rebuilds}rebuilds` +
-        `${attempt.quiesced ? "" : ",never quiesced"}`,
+        `#${attempt.attempt} ${attempt.icons.filter(iconIsVisible).length}/${attempt.icons.length}` +
+        `@${attempt.rebuilds}rebuilds${attempt.quiesced ? "" : ",never quiesced"}`,
     )
     .join(" then ");
   return (
@@ -8721,11 +8752,14 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
 
           const { reading, attempts } = await settledIconAudit(p);
           // A SUSTAINED race is the one condition this instrumentation exists to name,
-          // and it has to be asserted rather than merely described: a second dirty
-          // reading that happens to look healthy would otherwise pass silently, and the
-          // "void, not evidence" verdict in the message would never be read by anyone
-          // (#3683 Codex). Checked before the geometry so a void reading fails as a
-          // void reading, never as an icon defect.
+          // and it has to be asserted rather than merely described: a dirty reading
+          // that happens to look healthy would otherwise pass silently, and the "void,
+          // not evidence" verdict in the message would never be read by anyone (#3683
+          // Codex). Since #3690 "sustained" means all ICON_AUDIT_ATTEMPTS windows came
+          // back dirty, not two — a second dirty window is ordinary churn on a slow
+          // runner, and the audit buys another rather than failing on its own recovery
+          // path. Checked before the geometry so a void reading fails as a void
+          // reading, never as an icon defect.
           expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
           expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
           const visible = reading.icons.filter(iconIsVisible);
@@ -8790,14 +8824,163 @@ test("#3681 a rebuild scheduled mid-audit voids the reading and buys another, ra
     });
 
     const { reading, attempts } = await settledIconAudit(p);
-    expect(attempts.length, "a rebuild inside the window must void the reading and buy exactly one more").toBe(2);
+    // What this pins is the VOID-AND-RETRY, not how many windows it took. Asserting
+    // "exactly two, and the second was quiet" made ordinary churn landing in the
+    // REPLACEMENT window a red — the audit's own recovery path failing as if it were
+    // the behaviour under test, which is #3690.
+    expect(attempts.length, "a rebuild inside the window must void the reading and buy another").toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(attempts.length, "…without exceeding the bound").toBeLessThanOrEqual(ICON_AUDIT_ATTEMPTS);
     expect(attempts[0]?.rebuilds ?? 0, "the watch must see the rebuild the DOM snapshots cannot").toBeGreaterThan(0);
-    expect(reading, "the replacement reading is the one the assertions consume").toBe(attempts[1]);
-    expect(reading.rebuilds, "and it is taken over a window of its own, which must be clean").toBe(0);
+    expect(reading, "the LAST attempt is the one the assertions consume").toBe(attempts[attempts.length - 1]);
+    expect(reading.attempt, "and it says which window it was finally taken over").toBe(attempts.length);
+    expect(reading.rebuilds, "windows are bought until one of them is clean").toBe(0);
     expect(reading.quiesced, "the shell must go quiet for two consecutive frames before it is measured").toBe(true);
     // And the recovered reading is a real one: the icons were never the problem here,
     // so the audit must not report them as collapsed.
     expect(reading.icons.filter(iconIsVisible).length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
+  } finally {
+    await ctx.close();
+  }
+});
+
+/** Dirties the icon audit's window from inside the page — once per armed watch, up to
+ *  `windows` times — so a test can FORCE the condition #3690 is about instead of
+ *  waiting for a slow runner to produce it.
+ *
+ *  It has to be driven by the ARMING rather than by a timer, because the audit's
+ *  windows have no fixed length: each one runs until the watched containers go quiet
+ *  for two consecutive frames. Hooking `window.__afIconWatch` — the handle
+ *  `armIconRebuildWatch` installs, and the last thing it does — puts exactly one
+ *  rebuild inside each window by construction, whatever the runner's timing. The first
+ *  window is already armed by the caller when this runs, so it is dirtied directly.
+ *
+ *  The rebuild is the shell's own: a self-`replaceChildren`, byte-identical markup
+ *  afterwards, visible only to the watch. */
+async function injectIconRebuildChurn(p: Page, windows: number): Promise<void> {
+  await p.evaluate((limit) => {
+    const w = window as unknown as { __afIconWatch?: unknown; __afIconChurn?: { performed: number } };
+    const churn = { scheduled: 0, performed: 0 };
+    w.__afIconChurn = churn;
+    const dirty = (): void => {
+      if (churn.scheduled >= limit) return;
+      churn.scheduled += 1;
+      // Next frame, not this task: the arming evaluate has to return first, so the
+      // rebuild lands inside the window the reading is taken over. Re-queried rather
+      // than captured, because a real render can replace the list element itself and
+      // the fresh watch observes whichever one is in the document by then.
+      requestAnimationFrame(() => {
+        const list = document.querySelector(".af-rail-list");
+        if (!list) return;
+        list.replaceChildren(...Array.from(list.childNodes));
+        churn.performed += 1;
+      });
+    };
+    let armed = w.__afIconWatch;
+    Object.defineProperty(window, "__afIconWatch", {
+      configurable: true,
+      get: () => armed,
+      set: (next: unknown) => {
+        armed = next;
+        dirty();
+      },
+    });
+    dirty();
+  }, windows);
+}
+
+/** How many injected rebuilds actually reached the DOM, so a green test cannot be one
+ *  whose injection quietly did nothing. */
+async function injectedIconChurn(p: Page): Promise<number> {
+  return p.evaluate(
+    () => (window as unknown as { __afIconChurn?: { performed: number } }).__afIconChurn?.performed ?? -1,
+  );
+}
+
+test("#3690 two rebuilds in consecutive windows still yield a clean reading, inside the bound", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The flake, forced. #3683 bought exactly ONE retry, so a rebuild in the first
+  // window and another in the replacement window left the audit handing back a void
+  // reading and the caller failing on it — a red about the runner's timing, never
+  // about the icons. Two consecutive dirty windows must now cost more windows, not a
+  // failure.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    // The injected rebuild is a self-replaceChildren, so it only records a mutation if
+    // the list has children to replace. Pinned, rather than left to make an empty rail
+    // look like a quiet one.
+    await expect(p.locator(".af-rail-list .af-row").first()).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await injectIconRebuildChurn(p, 2);
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(await injectedIconChurn(p), "both injected rebuilds must actually have landed").toBe(2);
+    expect(attempts[0]?.rebuilds ?? 0, "the first window is dirtied").toBeGreaterThan(0);
+    expect(
+      attempts[1]?.rebuilds ?? 0,
+      "and so is the replacement — the case #3683's single retry could not survive",
+    ).toBeGreaterThan(0);
+    expect(attempts.length, "so a third window is bought rather than the second being consumed").toBeGreaterThanOrEqual(
+      3,
+    );
+    expect(attempts.length, "and the buying stays inside the bound").toBeLessThanOrEqual(ICON_AUDIT_ATTEMPTS);
+    expect(reading, "the reading consumed is the last attempt").toBe(attempts[attempts.length - 1]);
+    expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
+    expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
+    // #3683's point survives as DATA: what the recovery cost is recorded in the
+    // reading, and is not the reason for a failure.
+    expect(reading.attempt, "what it cost is recorded, not failed on").toBeGreaterThanOrEqual(3);
+    expect(reading.icons.filter(iconIsVisible).length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("#3690 a shell that rebuilds in EVERY window is refused at the bound, and named with the count", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The other end of the bound. Buying windows until one is clean has to TERMINATE,
+  // and what it terminates with has to be the finding rather than silence: a shell
+  // that never goes quiet is not an icon defect and must not be reported as one.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    await expect(p.locator(".af-rail-list .af-row").first()).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await injectIconRebuildChurn(p, ICON_AUDIT_ATTEMPTS);
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(await injectedIconChurn(p), "every window the audit armed must have been dirtied").toBe(
+      ICON_AUDIT_ATTEMPTS,
+    );
+    expect(attempts.length, "the loop stops at the bound rather than spinning on a shell that never settles").toBe(
+      ICON_AUDIT_ATTEMPTS,
+    );
+    expect(
+      attempts.every((attempt) => attempt.rebuilds > 0),
+      "…having found no quiet window anywhere inside it",
+    ).toBe(true);
+    expect(reading, "the reading handed back is still the last attempt").toBe(attempts[ICON_AUDIT_ATTEMPTS - 1]);
+    expect(reading.attempt, "which names itself as the last one").toBe(ICON_AUDIT_ATTEMPTS);
+    expect(reading.rebuilds, "and is void — the caller's rebuilds===0 assertion is what refuses it").toBeGreaterThan(0);
+
+    const message = iconAuditMessage(reading, attempts);
+    expect(message, "the refusal names the shell, not the icons").toContain("void, not evidence");
+    expect(message, "and says how many windows it bought before giving up").toContain(
+      `all ${ICON_AUDIT_ATTEMPTS} windows`,
+    );
+    expect(message, "with every attempt numbered beside its own count").toContain(`#${ICON_AUDIT_ATTEMPTS} `);
   } finally {
     await ctx.close();
   }
