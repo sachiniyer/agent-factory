@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -246,15 +247,15 @@ func TestGuardNormalizedEmptyFormsMatchTheirFields(t *testing.T) {
 //
 // Direct fields only: no reviewed type promotes a normalized member out of an
 // embedding, and a lookup that guessed at the promotion rules would be a second
-// implementation of what plainTwinOf already has to get right. A name it cannot
+// implementation of what twinFieldsOf already has to get right. A name it cannot
 // find is reported rather than skipped.
 func jsonMemberField(typ reflect.Type, name string) (reflect.StructField, bool) {
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
-		if field.PkgPath != "" || field.Tag.Get("json") == "-" {
+		if field.PkgPath != "" {
 			continue
 		}
-		if jsonMemberName(field) == name {
+		if member, emits := jsonMemberName(field); emits && member == name {
 			return field, true
 		}
 	}
@@ -629,4 +630,315 @@ func containsAny(found []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// guardPromotedOptionalInner is an anonymous unexported embedding holding an
+// exported OPTIONAL pointer. json promotes it, fill allocates it, and every
+// walked-side transform has to agree that it is on the walked side.
+type guardPromotedOptionalInner struct {
+	Promoted *string `json:"promoted"`
+}
+
+// guardPromotedOptionalRecord reaches for hidden state only while that promoted
+// optional is ABSENT — the branch the nil-pointers mode exists to read.
+//
+// Embedded by VALUE, which is the only shape the fixture can build: fill refuses
+// an unexported anonymous POINTER embedding as "ptr is not settable" before any
+// of this is reached, so such a type fails the walk outright rather than
+// reaching the contract. Measured while writing this probe.
+type guardPromotedOptionalRecord struct {
+	guardPromotedOptionalInner
+	Name   string `json:"name"`
+	hidden string
+}
+
+func (r guardPromotedOptionalRecord) MarshalJSON() ([]byte, error) {
+	tag := "constant"
+	if r.Promoted == nil {
+		tag = fmt.Sprintf("hidden:%d", len(r.hidden))
+	}
+	type wire guardPromotedOptionalRecord
+	return appendGuardTag(json.Marshal(wire(r)))(tag)
+}
+
+// TestGuardNilPointersModeClearsPromotedOptionals holds nilOptionalPointers to
+// the same visibility rule its siblings use.
+//
+// It skipped every unexported field, embeddings included, so an optional pointer
+// json PROMOTES out of one was allocated by fill and never cleared again — and
+// the absent branch stayed shut for exactly the members mustVisit and
+// sparseWalkedState both make the exception for (#3655 item 3).
+//
+// The two sparse modes are the control: they clear the string BEHIND the
+// pointer, not the pointer, so the gate stays shut there and a probe that
+// reported everywhere would be passing for the wrong reason.
+func TestGuardNilPointersModeClearsPromotedOptionals(t *testing.T) {
+	typ := reflect.TypeOf(guardPromotedOptionalRecord{})
+	reviewAs(t, typ, guardTagEntry)
+	report := &marshalerReport{}
+	readStructuralModes(t, report, typ, guardTagEntry, "probe",
+		fixtureSpec{seq: 1100, pattern: guardScalarPatterns[1], state: 5, withUnwalked: true})
+	assertModesReported(t, report, []string{" (nil pointers)"}, []string{" (sparse)", " (empty, not nil)"})
+}
+
+// TestGuardTwinRefusesANilPointerEmbedding pins the one value a flattened twin
+// cannot carry.
+//
+// json OMITS every member promoted through a nil embedded pointer; a flattened
+// twin always emits its fields, so it renders each of them as a zero value and a
+// faithful marshaler looks like it ADDED them. The one-level promotion
+// substituted that zero value silently. Found by the differential oracle above
+// rather than named by #3655, and refused for the same reason a named tag and a
+// promoted collision are.
+func TestGuardTwinRefusesANilPointerEmbedding(t *testing.T) {
+	value := addressableGuard(guardTwinPointerChain{nil, "t"})
+
+	// The premise, executed: json omits the promoted members entirely.
+	doc, err := json.Marshal(value.Interface())
+	if err != nil {
+		t.Fatalf("marshalling the shape failed: %v", err)
+	}
+	if want := `{"top":"t"}`; string(doc) != want {
+		t.Fatalf("the probe no longer exhibits the shape: encoding/json renders %s, want %s",
+			doc, want)
+	}
+
+	fields := twinFieldsOf(t, value.Type(), func(root reflect.Value) (reflect.Value, bool) {
+		return root, true
+	}, false, 0)
+	if _, reason := twinValues(fields, value); reason == "" {
+		t.Errorf("twinValues accepted a nil anonymous POINTER embedding.\n\nencoding/json "+
+			"renders %s for it; a flattened twin renders every promoted member as a zero value, "+
+			"so a faithful marshaler reads as having added them.", doc)
+	}
+	// With the embedding SET the same twin is representable — the refusal is
+	// about this value, not about the type.
+	set := addressableGuard(guardTwinPointerChain{&guardTwinMiddle{guardTwinDeep{"d"}, "m"}, "t"})
+	if _, reason := twinValues(fields, set); reason != "" {
+		t.Errorf("twinValues refused a pointer embedding that is SET: %s", reason)
+	}
+}
+
+// addressableGuard puts a value somewhere reflect can take its address, which
+// the twin's promotion needs to reach an unexported embedding.
+func addressableGuard(v any) reflect.Value {
+	held := reflect.New(reflect.TypeOf(v)).Elem()
+	held.Set(reflect.ValueOf(v))
+	return held
+}
+
+// The twin shapes below carry NO MarshalJSON, which is what makes them a
+// differential oracle: encoding/json renders the original by its own field
+// rules, the twin is supposed to render identically, and any disagreement is the
+// twin's.
+type (
+	guardTwinDeep struct {
+		Deep string `json:"deep"`
+	}
+	guardTwinMiddle struct {
+		guardTwinDeep
+		Mid string `json:"mid"`
+	}
+	// guardTwinChain is #3655 item 8: json promotes `deep` through TWO
+	// anonymous unexported embeddings, and a twin that lifted one level and
+	// stopped had no such member.
+	guardTwinChain struct {
+		guardTwinMiddle
+		Top string `json:"top"`
+	}
+
+	// guardTwinExportedEmbed is an EXPORTED anonymous embedding lifted out of an
+	// unexported one. json promotes it again, so the twin must keep it
+	// anonymous rather than nesting it under its type name.
+	GuardTwinExported struct {
+		Lifted string `json:"lifted"`
+	}
+	guardTwinInnerHolder   struct{ GuardTwinExported }
+	guardTwinExportedEmbed struct {
+		guardTwinInnerHolder
+		Top string `json:"top"`
+	}
+
+	// guardTwinPointerChain embeds through a POINTER, which json follows when it
+	// is set and renders as absent members when it is not.
+	guardTwinPointerChain struct {
+		*guardTwinMiddle
+		Top string `json:"top"`
+	}
+
+	// guardTwinIgnoredEmbed is the shape the promotion must NOT reach: the tag
+	// takes the embedding out of the document entirely.
+	guardTwinIgnoredEmbed struct {
+		guardTwinMiddle `json:"-"`
+		Top             string `json:"top"`
+	}
+)
+
+// guardTwinDirectCollisionShape is the shape the collision rule deliberately
+// ACCEPTS: two direct fields at the same depth, which json suppresses in the
+// original and in the twin alike.
+//
+// Built at run time because `go vet`'s structtag pass refuses a declared struct
+// with a repeated json tag — rightly, for production code, and the point here is
+// precisely that the twin must answer the way json does for a shape someone
+// could still write.
+func guardTwinDirectCollisionShape() reflect.Value {
+	shape := reflect.StructOf([]reflect.StructField{
+		{Name: "A", Type: reflect.TypeOf(""), Tag: `json:"same"`},
+		{Name: "B", Type: reflect.TypeOf(""), Tag: `json:"same"`},
+	})
+	held := reflect.New(shape).Elem()
+	held.Field(0).SetString("a")
+	held.Field(1).SetString("b")
+	return held
+}
+
+// TestGuardPlainTwinRendersWhatTheEncoderDoes is the differential oracle for the
+// twin's promotion rules.
+//
+// The baseline the whole contract rests on is "what encoding/json would emit for
+// these fields with no method set to intercept". These shapes have no method
+// set, so json's own answer is available directly — and the twin has to match it
+// byte for byte. Anything the twin decides differently is a false failure
+// waiting for a reviewed type to grow that shape.
+func TestGuardPlainTwinRendersWhatTheEncoderDoes(t *testing.T) {
+	addressable := addressableGuard
+	for _, tc := range []struct {
+		name  string
+		value reflect.Value
+	}{
+		{"a chain of two unexported embeddings", addressable(guardTwinChain{
+			guardTwinMiddle{guardTwinDeep{"d"}, "m"}, "t"})},
+		{"an exported embedding lifted out of an unexported one", addressable(guardTwinExportedEmbed{
+			guardTwinInnerHolder{GuardTwinExported{"l"}}, "t"})},
+		{"a pointer embedding that is set", addressable(guardTwinPointerChain{
+			&guardTwinMiddle{guardTwinDeep{"d"}, "m"}, "t"})},
+		{"an embedding tagged json:\"-\"", addressable(guardTwinIgnoredEmbed{
+			guardTwinMiddle{guardTwinDeep{"d"}, "m"}, "t"})},
+		{"two direct fields sharing a json name", guardTwinDirectCollisionShape()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := tc.value
+			want, err := json.Marshal(value.Interface())
+			if err != nil {
+				t.Fatalf("marshalling the shape itself failed: %v", err)
+			}
+			got := marshalOrFail(t, "the plain twin of "+value.Type().String(), plainTwinOf(t, value))
+			if !bytes.Equal(got, want) {
+				t.Errorf("the twin renders %s, encoding/json renders %s for the same value.\n\n"+
+					"The twin IS the baseline every reading is diffed against, so a member it "+
+					"misses reads as one the marshaler added, and one it invents reads as one "+
+					"the marshaler dropped.", got, want)
+			}
+		})
+	}
+}
+
+// guardDashPromoted is an anonymous unexported embedding whose member really is
+// emitted, under the literal key "-".
+type guardDashPromoted struct {
+	Promoted string `json:"-,"`
+}
+
+// guardDashCollision is the shape #3655 item 14 names: a promoted member and a
+// direct one that json BOTH emits as "-", resolved by embedding DEPTH.
+type guardDashCollision struct {
+	guardDashPromoted
+	Direct string `json:"-,omitempty"`
+}
+
+// TestGuardMemberNameMatchesTheEncoder is the differential oracle for
+// jsonMemberName: for every form of the dash tag, the name it reports must be
+// the name encoding/json actually uses.
+//
+// It parsed the name before the comma and handed back the GO field name for all
+// three forms, so a member json emits as "-" was named something else
+// (#3655 item 14).
+func TestGuardMemberNameMatchesTheEncoder(t *testing.T) {
+	for _, tc := range []struct {
+		tag   string
+		emits bool
+		name  string
+	}{
+		{tag: `json:"-"`, emits: false},
+		{tag: `json:"-,"`, emits: true, name: "-"},
+		{tag: `json:"-,omitempty"`, emits: true, name: "-"},
+		{tag: `json:"named"`, emits: true, name: "named"},
+		{tag: `json:",omitempty"`, emits: true, name: "Field"},
+		{tag: "", emits: true, name: "Field"},
+	} {
+		t.Run(tc.tag, func(t *testing.T) {
+			shape := reflect.StructOf([]reflect.StructField{{
+				Name: "Field", Type: reflect.TypeOf(""), Tag: reflect.StructTag(tc.tag),
+			}})
+			held := reflect.New(shape).Elem()
+			held.Field(0).SetString("value")
+			doc, err := json.Marshal(held.Interface())
+			if err != nil {
+				t.Fatalf("marshalling the shape failed: %v", err)
+			}
+			emitted := decodeMembers(t, "the shape tagged "+tc.tag, doc)
+
+			name, emits := jsonMemberName(shape.Field(0))
+			if emits != tc.emits {
+				t.Fatalf("jsonMemberName says the field is emitted: %t, want %t — encoding/json "+
+					"rendered %s", emits, tc.emits, doc)
+			}
+			if !emits {
+				if len(emitted) != 0 {
+					t.Errorf("jsonMemberName says the field is dropped, and encoding/json rendered %s", doc)
+				}
+				return
+			}
+			if _, found := emitted[name]; !found || name != tc.name {
+				t.Errorf("jsonMemberName = %q, encoding/json emitted %v (%s), want %q",
+					name, keysOf(emitted), doc, tc.name)
+			}
+		})
+	}
+}
+
+// TestGuardTwinRefusesAPromotedDashCollision is what that name is FOR.
+//
+// json gives the direct field's value to the member "-", because it sits at
+// depth zero and the promoted one does not. A flattened twin holds both at depth
+// zero, where json's tie rule drops the pair — so the twin renders no "-" at all
+// and the marshaler is blamed for dropping a member it faithfully emitted. The
+// old naming saw two distinct GO names, found no collision, and built that twin.
+func TestGuardTwinRefusesAPromotedDashCollision(t *testing.T) {
+	value := reflect.ValueOf(&guardDashCollision{guardDashPromoted{"PROMOTED"}, "DIRECT"}).Elem()
+
+	// The premise, executed: json really does emit the direct field under "-".
+	doc, err := json.Marshal(value.Interface())
+	if err != nil {
+		t.Fatalf("marshalling the shape failed: %v", err)
+	}
+	if want := `{"-":"DIRECT"}`; string(doc) != want {
+		t.Fatalf("the probe no longer exhibits the shape: encoding/json renders %s, want %s",
+			doc, want)
+	}
+
+	fields := twinFieldsOf(t, value.Type(), func(root reflect.Value) (reflect.Value, bool) {
+		return root, true
+	}, false, 0)
+	reason := twinCollision(fields)
+	if reason == "" {
+		t.Fatalf("twinCollision accepted a promoted member and a direct one that json BOTH emits "+
+			"as \"-\".\n\nA flattened twin has no depths left to resolve them by, so it renders "+
+			"neither while encoding/json renders %s — the marshaler is then blamed for dropping "+
+			"a member it emitted.", doc)
+	}
+	if !strings.Contains(reason, `"-"`) {
+		t.Errorf("twinCollision reported %q, which does not name the member json actually "+
+			"collides on", reason)
+	}
+}
+
+func keysOf(members map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(members))
+	for name := range members {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
