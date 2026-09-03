@@ -46,6 +46,20 @@ after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
 path, because a finding is the only unmet requirement an external PR's reviewer
 can answer per item.
 
+A degraded pass plus a **maintainer approval bound to the head** rides the
+ordinary update-and-merge loop instead (#3790): the review requirement is
+satisfied by the maintainer rather than skipped, so what is left is the mechanical
+part the gate already performs for every other passing PR. The approval is an
+APPROVED review from an allowed author, or a comment from one whose first line is
+exactly `## Review — approve` — the maintainer account cannot approve its own PR.
+It is bound by `headCurrentSince` like a Codex artifact, so a push after the
+sign-off returns the PR to the manual pass. It waives the review requirement and
+nothing else.
+
+Because that loop brings a behind head up to date itself, the ruleset's strict
+required-status-checks policy can stay on: a hand merge no longer has to win a
+race against the fleet's merge rate.
+
 The hand gate in `.claude/skills/gate-pr.md` runs precisely where this one
 cannot — on a PR that changes `auto-gate.js`, since Auto Gate runs master's copy
 of the helper, and during a Codex outage. For finding artifacts that bind to no

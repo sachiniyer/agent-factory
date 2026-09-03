@@ -661,6 +661,39 @@ fresh usage-limit reply degrades it to a manual-only pass that still does not
 merge — `Codex has not reviewed head <sha> yet` either way, so it will not
 merge for you. What to do:
 
+### Approving in Codex's place, so the gate can land it
+
+When Codex is usage-limited the gate degrades to `PASS: reviewer usage-limited;
+maintainer review and manual merge required` and declines to merge — correct, no
+review arrived. But it also skips the update-and-merge loop, and landing by hand
+under a strict up-to-date rule means winning a race against the fleet: master
+merges every 18-22 minutes and one landing cycle is about 20, so the green head is
+behind by exactly one when the gate flips. #3767 lost six consecutive green heads
+that way.
+
+So a **maintainer approval bound to the head** carries the degraded pass onto the
+ordinary path (#3790). Write it as a PR comment whose FIRST line is exactly:
+
+```
+## Review — approve
+```
+
+or leave an APPROVED review — but the maintainer account cannot approve its own
+PR, which is why the comment marker exists.
+
+Two things the gate insists on, and both matter:
+
+- **The marker anchors the first line.** "Looks good to me, approving" is not an
+  approval, and neither is a body that quotes the marker mid-text — which a Codex
+  review of `auto-gate.js` produces.
+- **The approval is bound to the head** by `headCurrentSince`, the same rule
+  Codex artifacts are held to (#3702). Push after approving and the PR returns to
+  the manual pass; a sign-off is about the code it was written against.
+
+It waives the REVIEW requirement and nothing else. A live finding, a missing
+`play-tested` label or a red required check still blocks — those do not depend on
+who reviewed, and this path auto-merges.
+
 1. **Re-trigger** with a `@codex review` comment and wait. Limits reset.
 2. **If it still does not post, get a real review from something that is not
    you.** Dispatch a reviewer af session, or run `/code-review`. Self-review is

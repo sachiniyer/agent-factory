@@ -229,6 +229,13 @@ function codexReportsReviewUsageLimit(body) {
 // reviewed were the ones carrying the trap.
 const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits for cod[e] reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
+// A maintainer's sign-off, in the two forms this repository actually produces.
+//
+// The marker is anchored to the FIRST line and is a fixed string, because a
+// looser test would read an ordinary sentence as a merge authorisation. "Looks
+// good to me, approving" must not be one, and neither must a body that quotes
+// the marker mid-text — reviewing this very file produces exactly that.
+const MAINTAINER_APPROVAL_MARKER = "## Review — approve";
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is
 // REQUESTED; when it reviews automatically on a push it only edits its summary
@@ -769,8 +776,44 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     : reasons;
   const degradedForUnavailableReviewer =
     Boolean(codex.reviewerUnavailable) && otherBlockers.length === 0;
-  if (degradedForUnavailableReviewer) {
+  // …unless a maintainer has already done the review the reviewer cannot (#3790).
+  //
+  // The degraded pass declines to merge, which is right on its own — no review
+  // arrived. But it also skips the #3752 update-and-merge loop, so landing it by
+  // hand under a strict up-to-date rule means winning a race against the fleet:
+  // master merges every 18-22 minutes and one landing cycle is about 20, so the
+  // green head is behind by exactly one when the gate flips. #3767 lost six
+  // consecutive green heads that way.
+  //
+  // A maintainer approval bound to this head satisfies the review requirement —
+  // it does not waive it. What is left is the mechanical part the gate already
+  // performs for every other passing PR, so it performs it here too.
+  const approval = degradedForUnavailableReviewer ? codex.maintainerApproval : null;
+  if (degradedForUnavailableReviewer && !approval) {
     manualMergeReasons.push(MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON);
+  }
+  if (approval) {
+    // The approval SATISFIES the one requirement the degradation was about, so
+    // that reason leaves the unmet list.
+    //
+    // Emptying `reasons` is safe here for a reason that lives ABOVE, not on this
+    // line: `approval` is only ever set when `degradedForUnavailableReviewer` is,
+    // and that requires `otherBlockers.length === 0` — so at this point `reasons`
+    // holds exactly the one reason the approval answers and nothing else. A live
+    // finding, a missing play-tested label or a red required check makes
+    // `otherBlockers` non-empty, which means this branch is never entered and the
+    // PR stays on the manual pass. That is the invariant worth knowing; an
+    // earlier draft re-pushed `otherBlockers` here as if THAT were the
+    // protection, which was dead code and a misleading comment on top of it.
+    reasons.length = 0;
+    // Named, so a reader can tell an approved landing from an ordinary one
+    // without opening the PR.
+    notes.push(
+      `Maintainer approval from ${approval.user?.login || "an allowed author"} covers this head` +
+        `${approval.html_url ? ` (${approval.html_url})` : ""}; Codex is usage-limited, so the ` +
+        "review requirement is satisfied by that approval and the gate lands this on the " +
+        "ordinary path",
+    );
   }
   const manualMergeRequired = manualMergeReasons.length > 0;
   // The manual path exists so branch protection does not sit red on a PR this
@@ -3008,6 +3051,40 @@ function headCurrentSinceTime({ lastCommitDate, prCreatedAt, headForcePushes = [
   return Math.max(...bounds);
 }
 
+// The maintainer approval that lets a degraded pass ride the ordinary merge path
+// (#3790), or null.
+//
+// Two forms. A review with state APPROVED is the obvious one; the comment marker
+// exists because GitHub does not let an account approve its own pull request,
+// and on this repository the maintainer opens most of them — so a hand review of
+// record is a comment, and it already uses this exact heading.
+//
+// Bound to the head the same way a Codex artifact is (#3702): an approval is
+// about the code it was written against, so `headCurrentSince` decides. A push
+// after the sign-off returns the PR to the manual pass rather than carrying a
+// stale approval onto new code — the same reason a verdict does not survive its
+// head.
+//
+// Fails closed on an unknown order, like every other timestamp comparison here.
+function maintainerApproval({ comments, reviews, headCurrentSince }) {
+  if (headCurrentSince == null) {
+    return null;
+  }
+  const approvals = [
+    ...reviews.filter((review) => String(review.state || "").toUpperCase() === "APPROVED"),
+    ...comments.filter((comment) =>
+      String(comment.body || "")
+        .trimStart()
+        .startsWith(MAINTAINER_APPROVAL_MARKER),
+    ),
+  ].filter(
+    (artifact) =>
+      ALLOWED_AUTHORS.has(artifact.user?.login || "") &&
+      reviewArtifactTime(artifact) > headCurrentSince,
+  );
+  return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
+}
+
 // The Codex finding artifacts a gate must not merge past: those carrying a
 // P0-P3 that bind to NO head, and that no acknowledgement has answered.
 //
@@ -3483,6 +3560,9 @@ async function evaluateCodex({
     reviewerUnavailable,
     reviewerUnavailableReason,
     findingBlockers,
+    // Read here because this is where the comments and reviews already are; the
+    // caller decides what it means.
+    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
   };
 }
 
@@ -3827,6 +3907,8 @@ module.exports = {
     CODEX_REVIEW_RE,
     bodyNamesReference,
     codexArtifactBindsToHead,
+    maintainerApproval,
+    MAINTAINER_APPROVAL_MARKER,
     unansweredFindingArtifacts,
     codexArtifactStatesItsCommit,
     isCodexSummaryArtifact,

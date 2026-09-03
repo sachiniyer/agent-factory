@@ -237,6 +237,25 @@ test("the hand gate's step 3b recipe blocks the artifact shape that merged #3656
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// The approval marker is a fixed string a human types, so the documents that
+// tell them what to type must carry the SAME string the gate matches (#3790).
+// A marker that drifts is worse than no marker: the maintainer writes the
+// documented form, the gate does not recognise it, and the PR sits on the manual
+// pass with no indication why.
+test("every document states the approval marker the gate actually matches", () => {
+  const { MAINTAINER_APPROVAL_MARKER } = __test;
+  assert.ok(MAINTAINER_APPROVAL_MARKER.length > 8, "the marker should be specific, not a word");
+
+  for (const file of [GATE_PR_SKILL, AUTO_GATE_DOC]) {
+    assert.ok(
+      fs.readFileSync(file, "utf8").includes(MAINTAINER_APPROVAL_MARKER),
+      `${path.basename(file)} does not carry the exact approval marker the gate matches ` +
+        `(${JSON.stringify(MAINTAINER_APPROVAL_MARKER)}). A maintainer types what these documents ` +
+        "say; if they disagree with the script the approval is silently not one (#3790).",
+    );
+  }
+});
+
 // One rule, one wording, everywhere it is stated (#3744).
 //
 // The usage-limit rule was written out in four places — twice in auto-gate.js
@@ -3025,6 +3044,144 @@ test("an observed usage-limited reviewer degrades to maintainer review instead o
   assert.equal(report.state, "manual");
   assert.equal(github.createdChecks[0].conclusion, "success");
   assert.match(github.createdChecks[0].output.title, /usage-limited/);
+});
+
+// #3790. Under the degraded pass a maintainer already reviews by hand and merges
+// by hand; the only thing the gate refuses is the mechanical part it performs on
+// every other passing PR — bring the head up to date and merge when green.
+//
+// At fleet rate that refusal cannot be satisfied. master merges every 18-22
+// minutes, one landing cycle is ~20, so a hand merge under a strict up-to-date
+// rule is behind by exactly one when the gate flips. #3767 lost six consecutive
+// green heads to it, each costing a full CI run.
+//
+// So a degraded PASS plus a head-bound maintainer approval rides the ordinary
+// path. The review requirement is satisfied by the maintainer, not skipped.
+test("a maintainer approval carries the degraded pass onto the ordinary merge path", async () => {
+  const result = await evaluateGate({
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff; the extraction is faithful.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "an approved degraded pass is not manual");
+  assert.equal(result.shouldMerge, true, `it must merge on the ordinary path: ${result.reasons.join("; ")}`);
+  assert.match(result.summary, /^PASS:/);
+  // The decision has to say what it acted on: a reader must be able to tell an
+  // approved landing from an ordinary one without opening the PR.
+  assert.match(result.notes.join("\n"), /maintainer approval/i);
+});
+
+// An APPROVED review counts too — but the maintainer account cannot approve its
+// own PRs, which is why the comment marker exists at all.
+// The dangerous direction, and the one worth the most: an approval satisfies the
+// REVIEW requirement and nothing else. It must not become a merge authorisation
+// that waives a live finding, a missing label, or a red check — those are
+// independent of who reviewed, and this path AUTO-MERGES, so a mistake here
+// ships rather than waiting for a human.
+test("a maintainer approval waives the review requirement and nothing else", async () => {
+  const approval = prComment(
+    "sachiniyer",
+    "## Review — approve\n\nApproved.",
+    "2026-07-09T01:30:00Z",
+  );
+
+  // A live inline finding.
+  const withFinding = await evaluateGate({
+    issueComments: [codexRateLimit(), approval],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+  assert.equal(withFinding.shouldMerge, false, "an approval must not merge past a live finding");
+  assert.match(withFinding.reasons.join("\n"), /unresolved live Codex inline finding/);
+
+  // A requirement that has nothing to do with review at all.
+  const withoutLabel = await evaluateGate({
+    issueComments: [codexRateLimit(), approval],
+    files: ["app/termpane.go"],
+  });
+  assert.equal(withoutLabel.shouldMerge, false, "an approval is not a play-tested label");
+  assert.match(withoutLabel.reasons.join("\n"), /missing the play-tested label/);
+
+  // A red required check.
+  const redCheck = await evaluateGate({
+    issueComments: [codexRateLimit(), approval],
+    checkRuns: [
+      ...happyCheckRuns().filter((run) => run.name !== "Lint"),
+      checkRun({ name: "Lint", conclusion: "failure" }),
+    ],
+  });
+  assert.equal(redCheck.shouldMerge, false, "an approval is not a green build");
+  assert.match(redCheck.reasons.join("\n"), /Lint/);
+});
+
+test("an APPROVED review from an allowed author counts as the approval", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit()],
+    reviews: [
+      {
+        user: { login: "app-detail-app" },
+        state: "APPROVED",
+        submitted_at: "2026-07-09T01:30:00Z",
+        body: "Looks right.",
+      },
+    ],
+  });
+
+  assert.equal(result.manualMergeRequired, false);
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+// The negative, and it is the load-bearing one: an approval is about the head it
+// was written against. Binding it with headCurrentSince is the same rule Codex
+// artifacts are held to (#3702), so a push after the approval reverts the PR to
+// the manual pass rather than carrying a stale sign-off onto new code.
+test("an approval that predates this head leaves the degraded pass manual", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T02:00:00Z",
+    issueComments: [
+      codexRateLimit("2026-07-09T02:20:00Z"),
+      prComment("sachiniyer", "## Review — approve\n\nApproved the previous head.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.manualMergeRequired, true, "a stale approval must not carry a new head");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^PASS:/);
+  assert.match(result.summary, /has NOT been reviewed/);
+});
+
+// The marker is FIXED and it anchors the first line. A comment that merely
+// mentions approving — or quotes the marker mid-text, which a review of this
+// very file does — is not a sign-off.
+test("only the fixed marker on the first line is an approval", async () => {
+  for (const body of [
+    "Looks good to me, approving.",
+    "I would approve this once CI is green.",
+    "Discussed offline — the shape is right.\n\n## Review — approve",
+    "> ## Review — approve\n\nis the marker the gate looks for.",
+  ]) {
+    const result = await evaluateGate({
+      issueComments: [codexRateLimit(), prComment("sachiniyer", body, "2026-07-09T01:30:00Z")],
+    });
+    assert.equal(
+      result.manualMergeRequired,
+      true,
+      `must not read as an approval: ${JSON.stringify(body.slice(0, 40))}`,
+    );
+  }
+});
+
+// …and an approval from someone who is not an allowed author is not one.
+test("an approval marker from an unrelated author is not an approval", async () => {
+  const result = await evaluateGate({
+    issueComments: [
+      codexRateLimit(),
+      prComment("someone-else", "## Review — approve\n\nlgtm", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
 });
 
 test("reviewer silence with no usage-limit evidence keeps blocking exactly as before", async () => {
