@@ -169,7 +169,7 @@ func (m *Manager) healRootAgentLayers() {
 		// exactly the same reason this recompute exists: a probe that never
 		// answered is UNKNOWN, and an unknown that dropped out of the set
 		// would be #3315's double-visit re-entered through a deadline.
-		healed.legacyRepoIDs, healed.legacyRepoIDByPath = legacyRepoIDSet(m.cfg, resolveLegacyRootRepo, healed.legacyRepoIDByPath)
+		healed.legacy = legacyRepoIDSet(m.cfg, resolveLegacyRootRepo, healed.legacy)
 		if rootHealPrePublishHookForTest != nil {
 			rootHealPrePublishHookForTest()
 		}
