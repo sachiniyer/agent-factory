@@ -72,6 +72,11 @@ func TestAbruptDaemonFailureReapsOwnedChildrenAndPreservesTmux(t *testing.T) {
 	writeFile(t, watchScript, fmt.Sprintf(`#!/bin/sh
 set -eu
 trap '' TERM
+# PROBE ONLY (#3820): force the slow path this test's budget has to survive.
+# Every watcher generation delays its first PID-log write by 20s, which is what
+# a loaded runner does to the unit-activation -> daemon-start -> arm -> spawn
+# chain that the old single wall clock covered.
+sleep 20
 printf '%%s\n' "$$" >> %s
 sh -c 'trap "" TERM; while :; do sleep 600; done' &
 child=$!
