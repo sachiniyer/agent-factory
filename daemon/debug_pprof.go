@@ -113,12 +113,27 @@ func withDebugPprof(next http.Handler, enabled bool) http.Handler {
 	// Registered on the stdlib's own paths, then mounted under /v1 by stripping
 	// that segment: pprof.Index cuts stdlibPprofPrefix off the path to pick the
 	// profile, so it only resolves a named profile when it sees its own layout.
+	//
+	// METHOD-QUALIFIED, because net/http/pprof's own init is. Go 1.25 registers
+	// these as "GET /debug/pprof/…" unless the httpmuxgo121 godebug opts back into
+	// the pre-1.22 patterns, so bare registrations here would silently widen the
+	// contract: POST /v1/debug/pprof/profile?seconds=30 would START a 30-second CPU
+	// profile where the stdlib mount answers 405. Every other route on this mux
+	// enforces its method too (rpcHandler 405s a non-POST, healthHandler a non-GET),
+	// so bare patterns would have been the odd surface out twice over.
+	//
+	// That inherits one stdlib quirk deliberately: pprof.Symbol still branches on
+	// r.Method == "POST" internally, but stdlib registers it GET-only, so a POST
+	// symbolization request 405s here exactly as it does on DefaultServeMux. Nothing
+	// reaches this endpoint remotely — go tool pprof cannot dial a unix socket, so
+	// symbolization happens locally from the binary — and reproducing net/http/pprof
+	// is worth more than inventing a slightly different contract.
 	debug := http.NewServeMux()
-	debug.HandleFunc(stdlibPprofPrefix, pprof.Index)
-	debug.HandleFunc(stdlibPprofPrefix+"cmdline", pprof.Cmdline)
-	debug.HandleFunc(stdlibPprofPrefix+"profile", pprof.Profile)
-	debug.HandleFunc(stdlibPprofPrefix+"symbol", pprof.Symbol)
-	debug.HandleFunc(stdlibPprofPrefix+"trace", pprof.Trace)
+	debug.HandleFunc(http.MethodGet+" "+stdlibPprofPrefix, pprof.Index)
+	debug.HandleFunc(http.MethodGet+" "+stdlibPprofPrefix+"cmdline", pprof.Cmdline)
+	debug.HandleFunc(http.MethodGet+" "+stdlibPprofPrefix+"profile", pprof.Profile)
+	debug.HandleFunc(http.MethodGet+" "+stdlibPprofPrefix+"symbol", pprof.Symbol)
+	debug.HandleFunc(http.MethodGet+" "+stdlibPprofPrefix+"trace", pprof.Trace)
 	mounted := http.StripPrefix(debugPprofMount, debug)
 
 	// Prefix match, so the bare /v1/debug/pprof (no trailing slash) falls through

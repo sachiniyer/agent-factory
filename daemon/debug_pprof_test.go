@@ -199,11 +199,21 @@ func TestDebugPprof_EnvOverridesConfig(t *testing.T) {
 		{env: "maybe", set: true, cfgOn: false, want: false, comment: "…nor silently enable"},
 	}
 	for _, tc := range cases {
-		name := "unset"
+		// The name carries BOTH inputs. Naming it by the env alone collided on the
+		// two unset rows and on the two "maybe" rows, and Go disambiguated them as
+		// a bare "#01" suffix — so a failure named a case the table does not.
+		env := "env-unset"
 		if tc.set {
-			name = "env=" + tc.env
+			env = "env=" + strings.ReplaceAll(tc.env, " ", "_")
+			if tc.env == "" {
+				env = "env-empty"
+			}
 		}
-		t.Run(name+"/cfg", func(t *testing.T) {
+		cfgState := "cfg-off"
+		if tc.cfgOn {
+			cfgState = "cfg-on"
+		}
+		t.Run(env+"/"+cfgState, func(t *testing.T) {
 			if tc.set {
 				t.Setenv(debugPprofEnv, tc.env)
 			} else {
@@ -269,6 +279,17 @@ func TestWithDebugPprof_ServesNamedProfilesNotTheIndex(t *testing.T) {
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, debugPprofPrefix+"not-a-profile", nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// Method-qualified, like net/http/pprof's own init: a non-GET must NOT start a
+	// profile. Without the qualification POST …/profile?seconds=30 runs a 30-second
+	// CPU profile, which is both a wider contract than the docs state and wider than
+	// the stdlib mount this reproduces (Codex review on #3709).
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(method, debugPprofPrefix+"profile?seconds=30", nil))
+		assert.Equalf(t, http.StatusMethodNotAllowed, rec.Code,
+			"%s to a profile path must be 405, not a started profile", method)
+	}
 
 	// Everything outside the prefix still reaches the wrapped mux untouched.
 	rec = httptest.NewRecorder()
