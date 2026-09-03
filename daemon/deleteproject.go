@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -667,55 +668,6 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if deleteProjectPreSweepHookForTest != nil {
 		deleteProjectPreSweepHookForTest()
 	}
-	// One more look for a row carrying this exact identity, now that the fence
-	// is installed (#3530 review id 3919900658).
-	//
-	// The selectors were resolved BEFORE the fence — they run Git probes, and
-	// #3361 forbids holding taskTargetMu while one waits on a stalled mount —
-	// so a reconciliation that lands in between writes an identity onto a row
-	// this delete had already failed to find. That write is permanent, and the
-	// delete would otherwise archive and suppress the identity while leaving
-	// the row to bring the project back on the next start.
-	//
-	// A registry read plus a stat, and nothing else: no Git probe, so nothing
-	// here can stall under taskTargetMu. Three conditions, each load-bearing:
-	//
-	//   - the row carries this exact identity, which is the record's own
-	//     written-down evidence and the strongest this change has;
-	//   - exactly one row carries it, because two rows at one real identity is
-	//     #3611's case and choosing between them is what this change refuses;
-	//   - the row's recorded root is DETERMINATELY ABSENT. That is
-	//     claimantForRecord's first rule, and it is what separates a row this
-	//     delete may take from one it may not: an unproven OCCUPANT at a stale
-	//     row's path shares that row's identity, and deregistering on identity
-	//     alone would destroy the original project's record on the occupant's
-	//     behalf (#3299 review id 3910519845, pinned by
-	//     TestUnprovenOccupantDeleteKeepsTheStaleRecord). The marker half of
-	//     claimantForRecord is deliberately NOT used here: it probes Git, and
-	//     this runs under the lock.
-	if repoPath == "" && !config.IsDerivedRepoID(repoID) {
-		if projects, listErr := config.ListProjects(); listErr == nil {
-			matched := ""
-			unique := true
-			for _, p := range projects {
-				if p.RepoID != repoID {
-					continue
-				}
-				if absent, err := recordRootAbsent(p.Root); err != nil || !absent {
-					continue
-				}
-				if matched != "" {
-					unique = false
-					break
-				}
-				matched = p.Root
-			}
-			if unique && matched != "" {
-				log.InfoLog.Printf("delete project %s: a registry row recorded this identity while the delete was in flight; deregistering it too, or it would bring the project back on the next start", repoID)
-				repoPath = matched
-			}
-		}
-	}
 	optInIDs := []string{repoID}
 	if repoPath != "" {
 		if pathID := config.RepoIDFromRoot(filepath.Clean(repoPath)); pathID != repoID {
@@ -899,6 +851,34 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// means no matching registration existed at resolution time, so there is nothing to
 	// deregister. Recorded so the projects-changed publish fires even when no session was
 	// archived (a registered, sessionless project).
+	if repoPath == "" && !config.IsDerivedRepoID(repoID) {
+		// A reconciliation can write this identity onto a row AFTER the
+		// selectors resolved and found nothing — that write is permanent, and
+		// leaving the row would bring the project back on the next start
+		// (#3530 review id 3919900658). The lookup lives in the registry, under
+		// the lock the reconciliation itself takes, because a check out here
+		// could only race it (#3530 review id 3919996245); its other refusals
+		// — a read failure is not "no row", two rows sharing an identity are
+		// #3611's ambiguity, and the row's root must be determinately absent —
+		// are stated there.
+		//
+		// The absence observation is passed in BOUNDED (#3530 review id
+		// 3919996261): this runs under taskTargetMu, and a recorded root on an
+		// unresponsive mount would otherwise wedge every task-target update and
+		// archive behind a stat. A bound that expires reports "not absent",
+		// which declines the removal — the conservative direction, and the row
+		// is taken by the next delete, which now finds it by the ordinary path.
+		deregistered, root, regErr := config.DeregisterProjectByRecordedIdentity(repoID, boundedRecordRootAbsent)
+		if regErr != nil {
+			return result, deleteProjectFailure(result, fmt.Errorf(
+				"delete project %s: archived %d session(s) but could not check whether a registry record recorded this identity meanwhile — the project may still list; retry to finish, a retry re-archives nothing: %w",
+				repoID, len(result.Archived), regErr))
+		}
+		if deregistered {
+			result.Deregistered = true
+			log.InfoLog.Printf("delete project %s: a registry record recorded this identity while the delete was in flight; removed it too (recorded root %s)", repoID, root)
+		}
+	}
 	if repoPath != "" {
 		deregistered, regErr := config.DeregisterProject(repoPath)
 		if regErr != nil {
@@ -981,4 +961,38 @@ func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
 	defer m.mu.Unlock()
 	m.deletedRootRepos[repoID] = claimantProjectID
 	delete(m.rootKilledAt, repoID)
+}
+
+// boundedRecordRootAbsentTimeout bounds one recorded-root stat taken while
+// DeleteProject holds taskTargetMu. A stat cannot be cancelled, so what is
+// bounded is the WAIT: an unresponsive mount leaves a goroutine parked on the
+// syscall rather than the lifecycle lock parked on the mount (#3361's rule,
+// #3530 review id 3919996261).
+var boundedRecordRootAbsentTimeout = 250 * time.Millisecond
+
+// recordRootAbsentProbe is the observation boundedRecordRootAbsent bounds. A
+// package var only so a test can supply one that STALLS: an unresponsive mount
+// is what this bound exists for, and nothing else reproduces it.
+var recordRootAbsentProbe = recordRootAbsent
+
+// boundedRecordRootAbsent is recordRootAbsent with that bound. A timeout
+// reports NOT absent, which declines whatever the caller would have done on
+// absence — the conservative direction every reader of this signal takes.
+func boundedRecordRootAbsent(root string) (bool, error) {
+	type answer struct {
+		absent bool
+		err    error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		absent, err := recordRootAbsentProbe(root)
+		done <- answer{absent: absent, err: err}
+	}()
+	select {
+	case a := <-done:
+		return a.absent, a.err
+	case <-time.After(boundedRecordRootAbsentTimeout):
+		log.WarningLog.Printf("delete project: could not observe recorded root %s within %s; treating it as present, which declines the identity-matched deregistration this pass", root, boundedRecordRootAbsentTimeout)
+		return false, nil
+	}
 }

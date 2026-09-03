@@ -362,3 +362,134 @@ func TestRegistrationRefusesAReplacedCheckoutAtCommitTime(t *testing.T) {
 		t.Fatalf("registration committed checkout id %s against a checkout that does not carry it: the record fails its own marker proof from the moment it is written", project.CheckoutID)
 	}
 }
+
+// TestDeregisterByRecordedIdentityRefusesWhatItCannotEstablish pins the three
+// refusals of #3530's identity-matched removal (review ids 3919996255,
+// 3919996266, and claimantForRecord's absence rule).
+func TestDeregisterByRecordedIdentityRefusesWhatItCannotEstablish(t *testing.T) {
+	absent := func(root string) (bool, error) {
+		_, err := os.Stat(root)
+		return err != nil && PathDeterminatelyAbsent(err), nil
+	}
+
+	t.Run("removes the one absent row that recorded the identity", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+		initRepoWithCommit(t, repo)
+		project, err := RegisterProject(repo)
+		if err != nil {
+			t.Fatalf("RegisterProject: %v", err)
+		}
+		if err := os.RemoveAll(repo); err != nil {
+			t.Fatalf("remove checkout: %v", err)
+		}
+		removed, root, err := DeregisterProjectByRecordedIdentity(project.RepoID, absent)
+		if err != nil {
+			t.Fatalf("DeregisterProjectByRecordedIdentity: %v", err)
+		}
+		if !removed || filepath.Clean(root) != filepath.Clean(project.Root) {
+			t.Fatalf("expected the row to be removed by its recorded identity, got removed=%v root=%q", removed, root)
+		}
+	})
+
+	t.Run("refuses while the recorded root is present", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+		initRepoWithCommit(t, repo)
+		project, err := RegisterProject(repo)
+		if err != nil {
+			t.Fatalf("RegisterProject: %v", err)
+		}
+		removed, _, err := DeregisterProjectByRecordedIdentity(project.RepoID, absent)
+		if err != nil {
+			t.Fatalf("DeregisterProjectByRecordedIdentity: %v", err)
+		}
+		if removed {
+			t.Fatalf("a present recorded root may be an unproven occupant sharing the identity; removing the row destroys the original project's record on its behalf")
+		}
+	})
+
+	t.Run("refuses when two rows carry the identity", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		base := testguard.CanonicalTempDir(t)
+		first := filepath.Join(base, "first")
+		second := filepath.Join(base, "second")
+		initRepoWithCommit(t, first)
+		initRepoWithCommit(t, second)
+		a, err := RegisterProject(first)
+		if err != nil {
+			t.Fatalf("RegisterProject: %v", err)
+		}
+		b, err := RegisterProject(second)
+		if err != nil {
+			t.Fatalf("RegisterProject: %v", err)
+		}
+		// Two rows recording ONE identity, which is #3611's ambiguity — and
+		// the ABSENT one must not be picked just because the other is filtered
+		// out first.
+		setRecordedRepoIDForTest(t, b.ID, a.RepoID)
+		if err := os.RemoveAll(second); err != nil {
+			t.Fatalf("remove second checkout: %v", err)
+		}
+		removed, _, err := DeregisterProjectByRecordedIdentity(a.RepoID, absent)
+		if err != nil {
+			t.Fatalf("DeregisterProjectByRecordedIdentity: %v", err)
+		}
+		if removed {
+			t.Fatalf("two rows carry this identity, so which one it names is ambiguous: the removal must refuse rather than pick the absent one")
+		}
+	})
+
+	t.Run("a read failure is not an empty result", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+		initRepoWithCommit(t, repo)
+		project, err := RegisterProject(repo)
+		if err != nil {
+			t.Fatalf("RegisterProject: %v", err)
+		}
+		if err := os.RemoveAll(repo); err != nil {
+			t.Fatalf("remove checkout: %v", err)
+		}
+		// The row that carries the identity is exactly the one that cannot be
+		// read, so "no match" is unprovable.
+		if err := os.WriteFile(projectRecordPath(mustRegistryDir(t), project.ID), []byte("{ not json"), 0o644); err != nil {
+			t.Fatalf("corrupt record: %v", err)
+		}
+		if _, _, err := DeregisterProjectByRecordedIdentity(project.RepoID, absent); err == nil {
+			t.Fatalf("an unreadable registry must be an error, not a silent no-op that leaves the row behind")
+		}
+	})
+}
+
+func mustRegistryDir(t *testing.T) string {
+	t.Helper()
+	dir, err := projectRegistryDir()
+	if err != nil {
+		t.Fatalf("projectRegistryDir: %v", err)
+	}
+	return dir
+}
+
+// setRecordedRepoIDForTest writes a specific identity into a record.
+func setRecordedRepoIDForTest(t *testing.T, projectID, repoID string) {
+	t.Helper()
+	path := projectRecordPath(mustRegistryDir(t), projectID)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatalf("parse record: %v", err)
+	}
+	record["repo_id"] = repoID
+	out, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+}

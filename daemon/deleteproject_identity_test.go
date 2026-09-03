@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -894,5 +895,47 @@ func TestReconciliationDuringADeleteStillDeregisters(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
 		t.Fatalf("the row gained this delete's identity while it ran, so the delete must take it too — otherwise the project returns on the next start with its sessions archived")
+	}
+}
+
+// TestBoundedRecordRootAbsentDeclinesRatherThanWedge pins #3530 review id
+// 3919996261. The observation runs while DeleteProject holds taskTargetMu, so a
+// recorded root on an unresponsive mount must cost a bounded wait rather than
+// every task-target update and archive queueing behind a stat.
+func TestBoundedRecordRootAbsentDeclinesRatherThanWedge(t *testing.T) {
+	previousTimeout := boundedRecordRootAbsentTimeout
+	boundedRecordRootAbsentTimeout = 20 * time.Millisecond
+	previousProbe := recordRootAbsentProbe
+	t.Cleanup(func() {
+		boundedRecordRootAbsentTimeout = previousTimeout
+		recordRootAbsentProbe = previousProbe
+	})
+
+	// An observation that never returns, which is what an unresponsive mount
+	// gives: the syscall cannot be cancelled, so only the WAIT can be bounded.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	recordRootAbsentProbe = func(string) (bool, error) {
+		<-release
+		return true, nil
+	}
+
+	start := time.Now()
+	absent, err := boundedRecordRootAbsent("/any/recorded/root")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("a bounded observation reports, it does not fail: %v", err)
+	}
+	if absent {
+		t.Fatalf("an observation that did not answer must report NOT absent, which declines the removal")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("the wait must be bounded, took %s — that is taskTargetMu held behind a mount", elapsed)
+	}
+
+	// And when it answers, the answer is used.
+	recordRootAbsentProbe = func(string) (bool, error) { return true, nil }
+	if absent, err := boundedRecordRootAbsent("/any/recorded/root"); err != nil || !absent {
+		t.Fatalf("an answered observation must pass through: absent=%v err=%v", absent, err)
 	}
 }
