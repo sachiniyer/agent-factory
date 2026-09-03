@@ -599,7 +599,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// config becomes readable again — the exact hazard this preflight refuses.
 	if !hasRoot {
 		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
-		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending, rootAgentLegacyProbeUnanswered:
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending, rootAgentLegacyProbeUnanswered, rootAgentProjectRootProbeUnanswered:
 			titles = append(titles, session.RootSessionTitle)
 		}
 	}

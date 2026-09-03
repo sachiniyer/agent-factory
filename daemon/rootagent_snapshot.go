@@ -161,6 +161,27 @@ func recordFailureDirectoryIDs(failures []config.ProjectRecordFailure) []string 
 // reachable during an outage is one nothing ever checks.
 type legacyRepoResolver func(path string) (*config.RepoContext, error)
 
+// projectRootRepoFromPath resolves one registered project's recorded root under
+// the caller's context. A package var so a test can drive the stalled-path case
+// this bound exists for; production assigns it once.
+var projectRootRepoFromPath = config.RepoFromPathContext
+
+// resolveProjectRoot resolves one registered project's recorded root under a
+// bound, owning the context's lifetime so it cannot outlive the resolution it
+// bounds — and returning that context so the IDENTITY PROOF can share it
+// (#3793).
+//
+// Sharing is the point of returning it. ResolveRegisteredProjectRepoID already
+// bounds itself at registeredProjectProbeTimeout, so it was never a hang; what
+// it lacked was the CALLER's context, which made a per-project step cost this
+// budget PLUS its own instead of one budget covering both, and left the step
+// uncancellable halfway through. One context, one deadline, one cancellation.
+func resolveProjectRoot(root string) (*config.RepoContext, context.Context, context.CancelFunc, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
+	repo, err := projectRootRepoFromPath(ctx, root)
+	return repo, ctx, cancel, err
+}
+
 // legacyRepoDedup is what the singleton sweep needs to know about the legacy
 // root_agents map: which repos it already covers, and — because a probe can
 // fail to answer at all — which of those answers are proven and which are
@@ -330,6 +351,20 @@ type unresolvedProjectRecord struct {
 	root       string
 	projectID  string
 	checkoutID string
+	// rootProbeUnanswered records that the recorded root's RESOLUTION never
+	// answered — the git child was killed, could not be started, or was
+	// abandoned mid-read — rather than answering that the path is not a
+	// repository (#3793).
+	//
+	// It is the one distinction this struct did not carry, and the handling
+	// really is the same: the path is unusable for this pass either way, and
+	// the ensure-cadence re-check covers both. What is NOT the same is what a
+	// consumer may SAY. "Its recorded project root does not currently resolve
+	// to a git repository, so bring that path back" is a claim about the
+	// user's checkout, and #3500's rule is that a subprocess which did not
+	// answer entitles nobody to make one. So the flag exists for the verdict,
+	// not for the gating.
+	rootProbeUnanswered bool
 	// identityMismatch records that the recorded path RESOLVES, the marker
 	// READ SUCCEEDED, and the checkout there does not carry the project's
 	// marker — a different clone occupying the path. Consumers word the
@@ -388,7 +423,8 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 	reconcileOwed = map[string]reconcileOwedEntry{}
 	for _, p := range projects {
 		var repoID, repoRoot string
-		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
+		repo, probeCtx, cancelProbe, repoErr := resolveProjectRoot(p.Root)
+		if repoErr == nil {
 			repoID, repoRoot = repo.ID, repo.Root
 			// Repo identity comes from repo.ID, but an in-place root agent runs
 			// at the registered checkout. Keep that recorded root explicit: the
@@ -420,7 +456,7 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 				// this: exact-workspace match plus the record's own checkout
 				// marker. Unproven simply means not yet — the project stays
 				// provisional and the next pass tries again.
-				proven, ok := config.ResolveRegisteredProjectRepoID(context.Background(), p)
+				proven, ok := config.ResolveRegisteredProjectRepoID(probeCtx, p)
 				switch {
 				case ok && proven == repoID:
 					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, identityWriteWanted(fence, repoID)); err != nil {
@@ -493,7 +529,10 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 			// identity down.
 			repoID = config.ReconciledRepoIDForProject(p)
 			repoRoot = p.Root
-			unresolvedRoots[repoID] = unresolvedProjectRecord{root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID}
+			unresolvedRoots[repoID] = unresolvedProjectRecord{
+				root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID,
+				rootProbeUnanswered: config.RepoProbeUnanswered(repoErr),
+			}
 			// The claim is split at the resolution boundary (#3500): a probe
 			// git never answered is a subprocess outcome, not a verdict on the
 			// recorded root. The HANDLING is the same either way — the path is
@@ -502,6 +541,11 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 			// comes from the classifier.
 			warn.Printf("root agent snapshot: %s; its personal layer still applies to that path, a legacy root_agents entry for the same repo keeps its per-tick retry, and the daemon re-checks the recorded path on its ensure cadence — the project resumes fully, under its real repo identity, once the path resolves: %v", repoResolveClaim(fmt.Sprintf("project %s root", p.ID), p.Root, repoErr), repoErr)
 		}
+		// The probe context has done its work for this project — both the
+		// resolution and the identity proof rode it — and nothing below reads
+		// it, so release it here rather than deferring N of them to the end of
+		// the loop.
+		cancelProbe()
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
 			// Fail CLOSED (#3241): this file may hold the highest-precedence
