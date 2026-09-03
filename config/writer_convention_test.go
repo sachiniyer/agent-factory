@@ -41,13 +41,19 @@ var writerConventionExemptions = map[string]writerExemption{
 	"project_registry.go:writeNewProjectRecord:os.Rename": {calls: 1, reason: "publishes a staged project DIRECTORY into place; the metadata FILE inside it was already written with AtomicWriteFile, and a directory rename has no content to follow a link with"},
 	// The in-repo writer is the deliberate ASYMMETRY, not an oversight. A global
 	// config.toml is the user's own file and a link there is their arrangement,
-	// so AtomicWriteFile follows it (#3660). An in-repo .agent-factory/config is
-	// checked into a repository someone else may control, so a link there could
-	// aim af's write at any path the cloner never chose — which is why
-	// atomicWriteFileInDirNoFollow resolves the destination and then pins the
-	// directory with O_NOFOLLOW, rejecting a parent-dir link swapped in after the
-	// guard rather than following it. Do not "fix" it to use AtomicWriteFile.
-	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Renameat": {calls: 1, reason: "in-repo writer's O_NOFOLLOW rename; following a link from a checked-in config is the thing it exists to prevent"},
+	// so AtomicWriteFileFollowingLink follows it (#3660). An in-repo
+	// .agent-factory/config is checked into a repository someone else may
+	// control, so its link is followed only as far as the repository goes:
+	// inRepoConfigWriteTarget resolves the link and returns the TARGET's
+	// directory when the target is still strictly inside the repo (#1092 — the
+	// link is preserved and its target rewritten), and refuses the save naming
+	// both ends when it is not. The O_NOFOLLOW pin is what makes that check hold
+	// at the moment of the write rather than merely at the moment of the check:
+	// the rename goes through a directory fd opened on the RESOLVED directory
+	// without following links, so a parent-dir link swapped in afterwards is
+	// rejected instead of followed. AtomicWriteFile can express neither half —
+	// do not "fix" it to use that.
+	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Renameat": {calls: 1, reason: "in-repo writer's rename through a directory fd opened O_NOFOLLOW; a config-file link IS followed when its target stays inside the repo (#1092) — what the pin refuses is a parent-dir link swapped in after the containment check"},
 	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "the same writer's temp-file cleanup"},
 }
 
