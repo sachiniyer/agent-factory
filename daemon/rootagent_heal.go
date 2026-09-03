@@ -448,8 +448,13 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 	if len(healed.unresolvedRoots) == 0 {
 		return false, nil
 	}
+	// Under the lock since #3611: the counter is still written only by the poll
+	// goroutine, but the tombstone-release rule now READS it from whatever
+	// goroutine is asking, to date the identity verdict it is about to trust.
+	m.mu.Lock()
 	m.rootHealPassSeq++
 	pass := m.rootHealPassSeq
+	m.mu.Unlock()
 	cloneForWrite := func() {
 		if changed {
 			return
@@ -608,15 +613,30 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			// re-checking. Record the failure shape for verdict consumers — a
 			// proven mismatch prescribes a rebind, an unreadable marker does
 			// not. No layer moves: the checkout stays unverified.
-			if record.identityMismatch != probe.mismatch ||
-				record.markerUnreadable != probe.markerUnreadable ||
-				record.pathVanished != probe.vanished {
-				cloneForWrite()
-				record.identityMismatch = probe.mismatch
-				record.markerUnreadable = probe.markerUnreadable
-				record.pathVanished = probe.vanished
-				healed.unresolvedRoots[derivedID] = record
-			}
+			//
+			// Written on EVERY concrete outcome, including one that agrees with
+			// the flags already there (#3611). The old condition wrote only
+			// when a flag changed, which is right for the flags and wrong for
+			// the freshness mark beside them: a mismatch the probe re-proves
+			// pass after pass would keep the mark of its FIRST proof, go stale
+			// while the evidence for it is being renewed, and hold the dead
+			// claimant's tombstone against the live occupant it disproves —
+			// #3299 review round 15 reversed by an accounting bug rather than a
+			// decision.
+			//
+			// The extra publishes it costs are paced by the probe cadence, not
+			// the poll cadence: a settled entry rests on its own backoff, so
+			// this arm runs once per probe result, not once per tick, and that
+			// backoff decays to rootEnsureBackoffMax. What a publish is not
+			// free of is legacyRepoIDSet, which forks git once per root_agents
+			// path — bounded by the same curve, and smaller than the probe fork
+			// that produced the result being consumed.
+			cloneForWrite()
+			record.identityMismatch = probe.mismatch
+			record.markerUnreadable = probe.markerUnreadable
+			record.pathVanished = probe.vanished
+			record.identityPass = pass
+			healed.unresolvedRoots[derivedID] = record
 			// A COMPLETED negative outcome is a normal failed read: it feeds
 			// the failure backoff rather than the hot pending cadence, or an
 			// unavailable root would fork git on every poll tick forever
