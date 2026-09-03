@@ -129,7 +129,7 @@ func localConfigSet(key, value string) (*config.SetResult, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	return resp.Result, noticeWithWarnings(resp.RestartNotice, resp.Warnings), nil
+	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, resp.Warnings), nil
 }
 
 // remoteConfigSet writes the key on the targeted daemon over HTTP, through the
@@ -173,13 +173,32 @@ func remoteConfigSet(key, value string) (*config.SetResult, string, error) {
 			"check that the URL names an af daemon", apiclient.RemoteTargetURL())
 	}
 	resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
-	return resp.Result, noticeWithWarnings(resp.RestartNotice, resp.Warnings), nil
+	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, resp.Warnings), nil
 }
 
-// noticeWithWarnings folds any warnings — the tokenless-network exposure notice,
-// or a listener rebind's actionable reason — into the one line the pane shows,
-// so a TUI edit that exposes the API or could not rebind still tells the user.
-func noticeWithWarnings(notice string, warnings []string) string {
+// paneNotice builds the one line the pane shows after a write: the daemon's
+// per-key effect notice, then where that daemon is accepting if the key moved a
+// listener (#3722), then any warnings — the tokenless-network exposure notice, or
+// a listener rebind's actionable reason — so a TUI edit that exposes the API or
+// could not rebind still tells the user.
+//
+// The address is folded in HERE, in the one place both write paths already meet,
+// rather than at each of them. That is not tidiness: the local and remote save
+// paths having to remember the same thing separately is exactly how the four
+// config surfaces came to disagree about deferred rebinds (#3397).
+//
+// It matters most on the path this file added. Since the editor routes to the
+// targeted daemon (#3741), a `,` edit of network.listen_addr against a
+// --daemon-url session moves the very listener that session is talking over — so
+// the pane is no longer merely informing the operator where the daemon went, it
+// is telling them where their own next request has to go. The address is the
+// daemon's own answer; nothing here derives it from the value that was typed,
+// which would name a dead address whenever the rebind failed and the daemon
+// stayed put.
+func paneNotice(notice, listenerAddr string, warnings []string) string {
+	if listenerAddr != "" {
+		notice = notice + " Daemon now listening at " + listenerAddr + "."
+	}
 	if len(warnings) > 0 {
 		notice = notice + " " + strings.Join(warnings, " ")
 	}

@@ -27,7 +27,7 @@
 // addEventListener via the shared h() helper, no innerHTML with markup).
 
 import { h } from "./dom.js";
-import type { ConfigEntry } from "./types.js";
+import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 import { rebuildKeepingScroll } from "./scrollkeep.js";
 
 /** The config list is ONE global manifest, so every rebuild shows the same list and
@@ -120,6 +120,35 @@ export function controlKind(e: ConfigEntry): ControlKind {
  */
 export function canCommit(shown: string, current: string): boolean {
   return shown !== current;
+}
+
+/**
+ * The one line the form shows under a saved field: the daemon's own account of
+ * when the edit takes effect, plus — when the edit moved a listener — where the
+ * daemon is accepting now (#3722).
+ *
+ * Both halves come from the daemon and neither is computed here. The address in
+ * particular MUST NOT be inferred from the value that was sent: a rebind can
+ * fail, in which case the daemon is still serving on the previous address and
+ * says so, and a form that echoed what it typed would name an address nothing
+ * answers precisely when the user most needs the real one.
+ *
+ * The restart notice keeps its existing gate — shown only for a key that
+ * requires a restart, since "Applied" under every field is noise. The address
+ * does not: a listener that moved is worth saying whether or not a restart is
+ * owed, and for this form it is the address the browser must be re-pointed at.
+ * Exported so config.test.ts locks the real rule rather than a copy.
+ */
+export function saveNotice(resp: ConfigSetResponse): string {
+  const parts: string[] = [];
+  if (resp.result.requires_restart && resp.restart_notice !== "") {
+    parts.push(resp.restart_notice);
+  }
+  const addr = resp.listener_addr ?? "";
+  if (addr !== "") {
+    parts.push(`Daemon now listening at ${addr}`);
+  }
+  return parts.join(" · ");
 }
 
 /**

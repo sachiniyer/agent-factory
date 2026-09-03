@@ -590,11 +590,28 @@ owns.`, tmux.SupportedProgramsString()),
 		// The per-key effect notice (#2480), computed by the write path itself:
 		// live now, deferred rebind, or next daemon start.
 		fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
+		printListenerAddr(cmd, resp.ListenerAddr)
 		for _, w := range resp.Warnings {
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
 		return nil
 	},
+}
+
+// printListenerAddr names where the daemon is accepting after a write that moved
+// one of its listeners (#3722). The daemon reports the address; this prints it
+// and computes nothing — a client that inferred "the connection dropped, so the
+// listener probably moved to what I asked for" would be claiming a daemon state
+// it cannot observe, which is the whole reason the address rides on the reply.
+//
+// Empty for every non-listener key, and for a listener that is not accepting at
+// all (network.listen_addr = ""), where there is no address to name and the
+// effect notice above has already said the change applied.
+func printListenerAddr(cmd *cobra.Command, addr string) {
+	if addr == "" {
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "daemon now listening at %s\n", addr)
 }
 
 // configValidateResult is the machine-readable answer of `af config validate`:
@@ -694,6 +711,7 @@ override file it clears is this machine's.`,
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "cleared %s in %s\n", res.Key, configWriteLocation(res.Path))
 			fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
+			printListenerAddr(cmd, resp.ListenerAddr)
 			for _, warning := range resp.Warnings {
 				fmt.Fprintln(cmd.ErrOrStderr(), warning)
 			}

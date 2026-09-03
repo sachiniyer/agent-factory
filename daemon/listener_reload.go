@@ -51,13 +51,21 @@ type webListeners struct {
 	listenTCP func(network, address string) (net.Listener, error)
 
 	mu sync.Mutex
-	// webClose owns all accepted connections for the latest generation, so an
+	// webHandle owns all accepted connections for the latest generation, so an
 	// unexpected Serve exit does not make it stale. webConfigAddr describes only
 	// the live binding: it is the CONFIG value that produced the listener (not the
 	// resolved bound address), so reconcile compares like-for-like. "" means not
 	// accepting (or the network.listen_addr="" opt-out).
-	webClose      func() error
+	webHandle     *tcpListenerHandle
 	webConfigAddr string
+	// webBoundAddr is the RESOLVED address that binding is accepting on — what
+	// ":0" or ":8443" actually became. It is what a save surface must report back
+	// to an operator who just moved the listener (#3722): the config value alone
+	// does not name a port the kernel chose, and it is the wrong thing to echo
+	// after a rebind FAILED, where config has already moved on and the daemon is
+	// still answering on the previous address. Kept beside webConfigAddr so both
+	// are cleared by the same paths.
+	webBoundAddr string
 	// webGen distinguishes listener generations so a superseded listener's Serve
 	// returning cannot clear the lifecycle bound-state the NEW listener just set. A
 	// done-watcher clears health and binding state only while its own generation is
@@ -66,8 +74,9 @@ type webListeners struct {
 	// failure the closer remains the handle to accepted connections.
 	webGen uint64
 
-	previewClose      func() error
+	previewHandle     *tcpListenerHandle
 	previewConfigAddr string
+	previewBoundAddr  string
 	previewGen        uint64
 }
 
@@ -91,14 +100,14 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	// binding sentinel. Disabling that listener must still enter bindWebLocked's
 	// teardown path so accepted connections do not survive reconciliation.
 	if newCfg.ListenAddr != wl.webConfigAddr ||
-		(newCfg.ListenAddr == "" && wl.webClose != nil) {
+		(newCfg.ListenAddr == "" && wl.webHandle != nil) {
 		if e := wl.bindWebLocked(newCfg.ListenAddr); e != nil {
 			errs = append(errs, e)
 			failed = append(failed, "network.listen_addr")
 		}
 	}
 	if newCfg.PreviewListenAddr != wl.previewConfigAddr ||
-		(newCfg.PreviewListenAddr == "" && wl.previewClose != nil) {
+		(newCfg.PreviewListenAddr == "" && wl.previewHandle != nil) {
 		if e := wl.bindPreviewLocked(newCfg.PreviewListenAddr); e != nil {
 			errs = append(errs, e)
 			failed = append(failed, "network.preview_listen_addr")
@@ -118,14 +127,19 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 // operator would use to fix the address. Caller holds wl.mu.
 func (wl *webListeners) bindWebLocked(addr string) error {
 	if addr == "" {
-		if wl.webClose != nil {
-			_ = wl.webClose()
-			wl.webClose = nil
+		if wl.webHandle != nil {
+			// RETIRED, not closed: the network.listen_addr="" opt-out is a config
+			// write like any other, and it arrives on the very listener it turns
+			// off, so a synchronous close here severs its own reply exactly as a
+			// rebind did (#3722). Accept stops synchronously either way.
+			wl.webHandle.retire()
+			wl.webHandle = nil
 			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearTCPBound()
 			}
 		}
 		wl.webConfigAddr = ""
+		wl.webBoundAddr = ""
 		// Tearing the listener DOWN is a listener change like any other, and this
 		// early return used to skip both consequences of that (#3012 review): no
 		// sweep ran, so credentials outlived the listener entirely, and the
@@ -149,7 +163,7 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// network.require_loopback_token live per request, so this value never enforces auth.
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
-	closer, info, err := startTCPListenerWithListen(wl.webMux, addr, cfg, policy, withWebShell, nil,
+	handle, info, err := startTCPListenerWithListen(wl.webMux, addr, cfg, policy, withWebShell, nil,
 		&livePosture{
 			snapshot:         wl.manager.Config,
 			policyFromConfig: true,
@@ -160,9 +174,10 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	}
 	// New listener is live. Swap it in, update lifecycle to the new address, THEN
 	// close the old — never before, or a same-host client races an unreachable gap.
-	old := wl.webClose
-	wl.webClose = closer
+	old := wl.webHandle
+	wl.webHandle = handle
 	wl.webConfigAddr = addr
+	wl.webBoundAddr = info.Addr
 	wl.webGen++
 	gen := wl.webGen
 	if wl.manager.lifecycle != nil {
@@ -177,9 +192,10 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 				wl.manager.lifecycle.clearTCPBound()
 			}
 			if info.closeRequested() {
-				wl.webClose = nil
+				wl.webHandle = nil
 			}
 			wl.webConfigAddr = ""
+			wl.webBoundAddr = ""
 			// The listener is gone whether or not anyone asked for it to be, so an
 			// UNEXPECTED death has to advance the same state a rebind or a teardown
 			// does (#3012 review). Without this, a listener that dies under
@@ -201,7 +217,16 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		}
 	}()
 	if old != nil {
-		_ = old()
+		// The OLD listener is RETIRED, never closed (#3722). A remote config write
+		// that moves network.listen_addr arrives ON the old listener, so closing it
+		// from inside that handler destroys the connection its own 200 is about to
+		// be written to — the operator is told a committed, applied write failed and
+		// retries against an address the daemon has already left. retire() stops the
+		// old address accepting right here (so nothing below or after it sees two
+		// live control listeners) and drains the in-flight replies on its own
+		// goroutine, under a deadline. Never Shutdown on THIS goroutine: it waits
+		// for the very handler that is calling us.
+		old.retire()
 	}
 	// The listener moved, so every sandbox callback credential minted against the
 	// old one now points at a closed address (#3012 review). Each sandbox has the
@@ -247,28 +272,30 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 // denials. Caller holds wl.mu.
 func (wl *webListeners) bindPreviewLocked(addr string) error {
 	if addr == "" {
-		if wl.previewClose != nil {
-			_ = wl.previewClose()
-			wl.previewClose = nil
+		if wl.previewHandle != nil {
+			wl.previewHandle.retire()
+			wl.previewHandle = nil
 			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearPreviewBound()
 			}
 		}
 		wl.previewConfigAddr = ""
+		wl.previewBoundAddr = ""
 		return nil
 	}
 	cfg := wl.manager.Config()
 	policy := previewListenerPolicy(cfg)
 	notice := config.PreviewListenerExposureNotice(cfg)
-	closer, info, err := startTCPListenerWithListen(wl.previewMux, addr, cfg, policy, previewShell, previewOriginAuth(wl.manager),
+	handle, info, err := startTCPListenerWithListen(wl.previewMux, addr, cfg, policy, previewShell, previewOriginAuth(wl.manager),
 		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false, previewOrigin: true,
 			previewWarmingUp: func() bool { return !wl.manager.Ready() }}, wl.listenTCP)
 	if err != nil {
 		return fmt.Errorf("apply network.preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))
 	}
-	old := wl.previewClose
-	wl.previewClose = closer
+	old := wl.previewHandle
+	wl.previewHandle = handle
 	wl.previewConfigAddr = addr
+	wl.previewBoundAddr = info.Addr
 	wl.previewGen++
 	gen := wl.previewGen
 	if wl.manager.lifecycle != nil {
@@ -282,14 +309,21 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 				wl.manager.lifecycle.clearPreviewBound()
 			}
 			if info.closeRequested() {
-				wl.previewClose = nil
+				wl.previewHandle = nil
 			}
 			wl.previewConfigAddr = ""
+			wl.previewBoundAddr = ""
 		}
 		wl.mu.Unlock()
 	}()
 	if old != nil {
-		_ = old()
+		// Retired, not closed, for the same reason and by the same rule as the
+		// control listener above (#3722). The preview listener is not the one a
+		// config write arrives on, so nothing here severs its own reply — the two
+		// paths are kept identical because a listener-lifetime rule that holds on
+		// one of a pair and not the other is how this file got its scars (#3012):
+		// whichever path is the exception is the one a later change reasons from.
+		old.retire()
 	}
 	log.InfoLog.Printf("%s", previewOriginBanner(info.Addr))
 	if notice != "" {
@@ -320,19 +354,62 @@ func (wl *webListeners) webConfigAddress() string {
 	return wl.webConfigAddr
 }
 
+// listenerAddress reports the address the daemon is ACCEPTING on right now for
+// one listener config key — the resolved one, so a ":0" or ":8443" config value
+// answers with the port a client can actually dial. "" for any other key, and for
+// a listener that is not bound (the ""-opt-out, or a first bind that failed).
+//
+// It reads the bound address rather than re-deriving one from config because the
+// two diverge exactly when it matters most (#3722): after a rebind FAILS, config
+// already holds the address the operator asked for while the daemon is still
+// answering on the previous one. A save surface that echoed config there would
+// name an address nothing is listening on, in the one case where the operator is
+// most likely to act on it.
+//
+// The key is canonicalized first: the flat alias ("listen_addr") rides the wire
+// for version skew, so a caller can reach this with either spelling.
+func (wl *webListeners) listenerAddress(key string) string {
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	switch config.CanonicalConfigKey(key) {
+	case "network.listen_addr":
+		return wl.webBoundAddr
+	case "network.preview_listen_addr":
+		return wl.previewBoundAddr
+	default:
+		return ""
+	}
+}
+
+// ListenerAddress is listenerAddress for callers outside the listener owner (the
+// SetConfigValue/UnsetConfigValue handlers). Safe on a manager with no listeners
+// — a unix-socket-only daemon answers "" for every key, which is the truth.
+func (m *Manager) ListenerAddress(key string) string {
+	if m == nil || m.webListeners == nil {
+		return ""
+	}
+	return m.webListeners.listenerAddress(key)
+}
+
 // close tears down both listeners (daemon shutdown). Errors are joined so one
 // listener's close failure does not hide the other's.
+//
+// This is the one caller that still closes IMMEDIATELY rather than retiring
+// (#3722). Retirement exists so a listener the daemon is replacing can still
+// flush the reply that replaced it; at shutdown the process itself is going away,
+// there is no successor to flush into, and an asynchronous drain would only be a
+// deadline the exit races.
 func (wl *webListeners) close() error {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
 	var errs []error
-	if wl.webClose != nil {
-		errs = append(errs, wl.webClose())
-		wl.webClose = nil
+	if wl.webHandle != nil {
+		errs = append(errs, wl.webHandle.close())
+		wl.webHandle = nil
 	}
-	if wl.previewClose != nil {
-		errs = append(errs, wl.previewClose())
-		wl.previewClose = nil
+	if wl.previewHandle != nil {
+		errs = append(errs, wl.previewHandle.close())
+		wl.previewHandle = nil
 	}
 	return errors.Join(errs...)
 }

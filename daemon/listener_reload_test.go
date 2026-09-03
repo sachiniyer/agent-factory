@@ -164,26 +164,24 @@ func TestWebListenersRebindSameAddressAfterListenerDeath(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		getCloser func() func() error
+		getHandle func() *tcpListenerHandle
 		isBound   func() bool
 	}{
 		{
 			name: "control",
-			getCloser: func() func() error {
+			getHandle: func() *tcpListenerHandle {
 				wl.mu.Lock()
 				defer wl.mu.Unlock()
-				closer := wl.webClose
-				return closer
+				return wl.webHandle
 			},
 			isBound: func() bool { return m.lifecycle.snapshot().listeners.TCPBound },
 		},
 		{
 			name: "preview",
-			getCloser: func() func() error {
+			getHandle: func() *tcpListenerHandle {
 				wl.mu.Lock()
 				defer wl.mu.Unlock()
-				closer := wl.previewClose
-				return closer
+				return wl.previewHandle
 			},
 			isBound: func() bool { return m.lifecycle.snapshot().listeners.PreviewBound },
 		},
@@ -191,9 +189,9 @@ func TestWebListenersRebindSameAddressAfterListenerDeath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			closer := tt.getCloser()
-			require.NotNil(t, closer)
-			require.NoError(t, closer())
+			handle := tt.getHandle()
+			require.NotNil(t, handle)
+			require.NoError(t, handle.close())
 			require.Eventually(t, func() bool { return !tt.isBound() }, time.Second, 10*time.Millisecond,
 				"the done watcher must observe listener death")
 
@@ -312,6 +310,7 @@ func TestWebListenersRetainCloserAfterUnexpectedListenerDeath(t *testing.T) {
 func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *testing.T) {
 	for _, kind := range []string{"control", "preview"} {
 		t.Run(kind, func(t *testing.T) {
+			withRetireGrace(t, 200*time.Millisecond)
 			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 			cfg := config.DefaultConfig()
 			cfg.ListenAddr = ""
@@ -365,9 +364,9 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 				wl.mu.Lock()
 				defer wl.mu.Unlock()
 				if kind == "control" {
-					return wl.webConfigAddr == "" && wl.webClose != nil
+					return wl.webConfigAddr == "" && wl.webHandle != nil
 				}
-				return wl.previewConfigAddr == "" && wl.previewClose != nil
+				return wl.previewConfigAddr == "" && wl.previewHandle != nil
 			}, time.Second, 10*time.Millisecond, "listener death must leave only the accepted-connection closer")
 
 			disabled := *m.Config()
@@ -381,6 +380,14 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 			require.NoError(t, err)
 			require.Empty(t, failed)
 
+			// The connection now dies at the RETIREMENT DEADLINE rather than the
+			// instant reconcile runs (#3722): a config-driven teardown retires its
+			// listener so an in-flight reply can flush, and this connection is
+			// holding a half-written request that will never finish, so it is
+			// exactly the stalled client the deadline exists to evict. The property
+			// under test is unchanged — the retained connection must not survive —
+			// and shortening the grace keeps the assertion tight rather than
+			// widening the read deadline until anything passes.
 			require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
 			_, err = conn.Read(make([]byte, 1))
 			var netErr net.Error
