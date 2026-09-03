@@ -227,12 +227,21 @@ func pathOccupied(path string) bool {
 // error only if an absurd number of backups already exist, in which case the
 // caller leaves config.json in place with a warning rather than clobbering.
 func availableBackupPath(base string) (string, error) {
-	if !pathOccupied(base) {
+	return availableBackupPathWith(base, pathOccupied)
+}
+
+// availableBackupPathWith is availableBackupPath with the occupancy question
+// injected, so a caller holding a directory open can ask IT rather than ask a
+// path that something else can repoint between the question and the write
+// (#3697). The naming rule, the ordering rule and the error are one
+// implementation either way; only who answers "is this name taken" differs.
+func availableBackupPathWith(base string, occupied func(string) bool) (string, error) {
+	if !occupied(base) {
 		return base, nil
 	}
 	for i := 1; i < 1000; i++ {
 		candidate := fmt.Sprintf("%s.%d", base, i)
-		if !pathOccupied(candidate) {
+		if !occupied(candidate) {
 			return candidate, nil
 		}
 	}
@@ -329,7 +338,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 		// lock, so refusing here would make a moved link the one arrangement
 		// that stops af from starting at all, over a window that opens once per
 		// install (#3696 review).
-		if td, err := os.ReadFile(locked.file); err == nil {
+		if td, err := locked.read(); err == nil {
 			if !isEffectivelyEmptyToml(td) {
 				cfg, perr := parseLoadedConfigTOML(td, prettyTomlPath, tomlPath)
 				if perr != nil {

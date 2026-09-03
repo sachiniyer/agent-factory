@@ -567,11 +567,12 @@ type scalarWrite struct {
 // produced the exact config this write lands on. Whichever racer writes second
 // now sees the full pairing and warns.
 func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, error) {
-	// Every byte read and written here is the file the caller's lock covers.
-	// Reading through the link instead would let a retarget between acquisition
-	// and write compute the edit against one file and land it on another
-	// (#3688); locked.link is only what the user is shown.
-	current, err := os.ReadFile(locked.file)
+	// Every byte read and written here is the file the caller's lock covers,
+	// reached through the directory it holds open. Reading by path instead would
+	// let a retarget between acquisition and write compute the edit against one
+	// file and land it on another (#3688, #3697); locked.link is only what the
+	// user is shown.
+	current, err := locked.read()
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
