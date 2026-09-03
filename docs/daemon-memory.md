@@ -54,10 +54,11 @@ your behalf — see [what drives the cgroup number](#what-actually-drives-the-cg
 Two daemons were measured, and they are not the same binary. The **live** daemon
 is the release build: it carried 20 live sessions · 720 session records · 20
 tasks and was sampled 60 times over 20 minutes through `/proc`. The **sandbox**
-daemon is the same source revision **built with profiling instrumentation**
-(`-tags afpprof`, plus an HTTP pprof listener — see
-[profiling](#profiling-the-daemon)), run under a throwaway home with its own
-sessions. It is the only one that could be profiled at all:
+daemon is the same source revision **built with profiling instrumentation** — a
+scratch `-tags afpprof` file and an HTTP pprof listener, which is what profiling
+took before `debug_pprof` shipped (see [profiling](#profiling-the-daemon)) — run
+under a throwaway home with its own sessions. It is the only one of the two that
+could be profiled at all:
 
 | measure | value | source |
 |---|---|---|
@@ -419,45 +420,63 @@ process and a hook building `node_modules` in the wrong cgroup.
 
 ## Profiling the daemon
 
-**af exposes no pprof or expvar endpoint today**, and no `runtime.ReadMemStats`
-output. There is nothing to curl, and nothing at `/debug/pprof` — if you go
-looking for one, you will not find it. There are two routes, and only the first
-of them exists.
+af serves the stdlib `net/http/pprof` profiles from the daemon, **off by
+default**, on the **unix control socket only** (#3651). Turn it on, profile,
+turn it off:
 
-### Route 1 — a build-tag probe against a sandbox daemon
+```bash
+af config set debug_pprof true      # or AF_DEBUG_PPROF=1 in the daemon's environment
+af daemon restart                   # the route table is built when the listeners bind
 
-This is what #3625 actually used, and it is the route available today:
+# Fetch to a file, then read the file. go tool pprof cannot dial a unix socket
+# itself — it has no http+unix scheme, and hands the whole thing to the DNS
+# resolver ("lookup http+unix: no such host") — so curl is the fetch step.
+sock=~/.agent-factory/daemon-http.sock
+curl --unix-socket "$sock" http://af/v1/debug/pprof/heap -o heap.pb.gz
+go tool pprof heap.pb.gz
 
-1. Add a scratch file guarded by a build tag — `//go:build afpprof` — that
-   starts `net/http/pprof` on a loopback listener when an env var is set.
-   `net/http/pprof` is stdlib, so no dependency is added.
-2. Build `af` with `-tags afpprof`.
-3. Run that binary as a **sandbox daemon** under a throwaway
-   `AGENT_FACTORY_HOME` and `TMUX_TMPDIR`, with its own sessions.
-4. Profile the sandbox with `go tool pprof`, then delete the scratch file. It is
-   scratch — it belongs in no commit.
+# The timed profiles take the same shape; the daemon holds the connection open
+# for the requested duration.
+curl --unix-socket "$sock" "http://af/v1/debug/pprof/profile?seconds=30" -o cpu.pb.gz
+go tool pprof cpu.pb.gz
 
-Profile the sandbox, never the live daemon. The live daemon owns real state and
-real sessions; answering a memory question is not worth rebuilding, restarting,
-or signalling it. And it is usually unnecessary — `VmHWM` plus `memory.stat`
-settled #3625 on their own, and the heap profile only confirmed what they
-already said. Reach for a profile when you need to name a *retainer*, not to
-answer "how big is it".
+af config set debug_pprof false && af daemon restart
+```
 
-### Route 2 — a control-socket endpoint, filed and unbuilt
+The endpoint set is whatever `net/http/pprof` exposes — `heap`, `goroutine`,
+`allocs`, `profile`, `block`, `mutex`, `trace`, `threadcreate`, plus `cmdline`
+and `symbol`. `GET /v1/debug/pprof/` returns the index page listing them, and
+`?debug=1` renders the sampled profiles as text instead of a protobuf. The
+`block` and `mutex` sampling rates stay at Go's default of `0`, so those two read
+empty until a rate is set separately; enabling the endpoint on its own collects
+nothing and costs nothing.
 
-A pprof endpoint behind the existing control socket — `GET
-/v1/debug/pprof/{profile}`, off by default, enabled by config key or env var,
-served only on the unix control socket and **never** bound to a network
-listener, stdlib only — is filed as
-[#3651](https://github.com/sachiniyer/agent-factory/issues/3651) and
-**deliberately left unbuilt**: queued, not urgent. It is in no release, it
-answers no request today, and nothing in af will grow it by accident. Do not go
-looking for it, and do not write a runbook that assumes it.
+Three properties are worth knowing before you reach for it, and all three are
+enforced by tests rather than convention:
 
-It is recorded here so the next investigation knows both routes exist: one you
-can use now at the cost of a rebuild and a sandbox, and one that would remove
-that cost if it is ever worth building.
+- **Unix socket only.** The routes are mounted on the control socket's handler
+  and on nothing else. They are not on `network.listen_addr` or
+  `network.preview_listen_addr` — not behind the bearer token, not on loopback,
+  not on any interface. The socket's `0600` permissions are the whole
+  authentication.
+- **Off by default, and invisibly so.** Without the opt-in the path returns the
+  ordinary 404 unknown-route envelope, identical to any path that was never a
+  route. A daemon that did not opt in tells a prober nothing.
+- **A profile is live process memory.** A heap or goroutine dump from this daemon
+  carries session titles, worktree paths, and prompt text. That is the reason for
+  the two properties above, and the reason to turn the key back off — and to treat
+  the `.pb.gz` you just wrote as sensitive.
+
+You can still profile the **live** daemon this way, since nothing is rebuilt and
+no session is disturbed by the restart the key needs. But prefer a **sandbox**
+daemon under a throwaway `AGENT_FACTORY_HOME` and `TMUX_TMPDIR` when the question
+allows it, and reach for a profile only when you need to name a *retainer*:
+`VmHWM` plus `memory.stat` settled #3625 on their own, and the heap profile
+merely confirmed what they had already said.
+
+Before this existed, the route was a scratch `//go:build afpprof` file plus a
+rebuild — that is how the sandbox figures below were produced, and it is why the
+sandbox rows carry the probe's own overhead.
 
 ## Where these numbers come from
 
@@ -470,7 +489,7 @@ shorter pre-warm-up ones quoted separately), and a **second, sandbox daemon** �
 the same source revision built `-tags afpprof` with
 a pprof listener, under a throwaway `AGENT_FACTORY_HOME` and `TMUX_TMPDIR` —
 which supplied every heap, goroutine and 0-session figure, because the live
-daemon exposes no profiling endpoint and was never observed idle.
+daemon exposed no profiling endpoint at the time and was never observed idle.
 
 Three limits worth carrying away. Rows say which daemon they came from, and the
 two are not one series. The sandbox figures include the probe that made them

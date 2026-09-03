@@ -261,6 +261,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "debug_pprof",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Serve Go runtime profiles from the background service, for diagnosing a memory or goroutine problem · off by default, reachable only over the local control socket, and never on the web address · a profile contains live process memory, so turn it off again afterwards.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "log_max_size_mb",
 		Type:       "int",
 		Default:    "50",

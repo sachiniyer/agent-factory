@@ -93,6 +93,7 @@ var globalConfigReadOrder = []string{
 	"network.preview_listen_addr",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
+	"debug_pprof",
 	"log_max_size_mb",
 	"log_max_backups",
 	"branch_prefix",
@@ -476,6 +477,10 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
+                             unix control socket only, never on the web address. A profile dumps live daemon
+                             memory — session titles, worktree paths, prompt text — so turn it off again.
+                             AF_DEBUG_PPROF=1 overrides it for one daemon process. Next daemon start.)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string

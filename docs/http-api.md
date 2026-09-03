@@ -177,6 +177,24 @@ fields accepts an empty body (`-d '{}'` or no `-d` at all).
 internal `Ping` RPC) that answers even while the daemon is restoring sessions,
 with response `data` of `{ "ok": true }`.
 
+**Not in the catalog.** The generated table is `af api`'s discovery surface — the
+client-facing session and task RPCs — so the daemon serves several routes it does
+not list. They fall into three groups:
+
+- **Internal JSON-envelope RPCs**, same shape as the cataloged ones but deliberately
+  unadvertised as public API: `POST /v1/Preview` (the TUI's render path),
+  `POST /v1/PauseStatusPoll` and `POST /v1/ResumeStatusPoll` (attach coordination).
+- **Non-RPC surfaces**, which speak something other than the envelope: the WebSocket
+  planes `GET /v1/sessions/{id}/stream`, `GET /v1/sessions/{id}/stream-info` and
+  `GET /v1/events`; the config-assistant trio on `/v1/config-assistant`;
+  `GET /v1/preview-auth`; and the web-tab reverse proxy under `/v1/webtab/`.
+- **The profiling endpoint**, `GET /v1/debug/pprof/{profile}`, when it is switched
+  on. It is **off by default**, is served on **this socket only** and never on
+  `network.listen_addr`, and returns the ordinary 404 unknown-route envelope while
+  it is off. Its handlers are `net/http/pprof`'s, mounted with the same `GET`-only
+  method qualification the stdlib uses. See
+  [Profiling the daemon](daemon-memory.md#profiling-the-daemon).
+
 **Response shapes.** These are not part of the generated request-field catalog,
 so they are documented here. `CreateSession` returns `{ "instance": <session> }`;
 `Snapshot` and `ImportRemoteHookSessions` return `{ "instances": [<session>…] }`;
