@@ -667,6 +667,55 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if deleteProjectPreSweepHookForTest != nil {
 		deleteProjectPreSweepHookForTest()
 	}
+	// One more look for a row carrying this exact identity, now that the fence
+	// is installed (#3530 review id 3919900658).
+	//
+	// The selectors were resolved BEFORE the fence — they run Git probes, and
+	// #3361 forbids holding taskTargetMu while one waits on a stalled mount —
+	// so a reconciliation that lands in between writes an identity onto a row
+	// this delete had already failed to find. That write is permanent, and the
+	// delete would otherwise archive and suppress the identity while leaving
+	// the row to bring the project back on the next start.
+	//
+	// A registry read plus a stat, and nothing else: no Git probe, so nothing
+	// here can stall under taskTargetMu. Three conditions, each load-bearing:
+	//
+	//   - the row carries this exact identity, which is the record's own
+	//     written-down evidence and the strongest this change has;
+	//   - exactly one row carries it, because two rows at one real identity is
+	//     #3611's case and choosing between them is what this change refuses;
+	//   - the row's recorded root is DETERMINATELY ABSENT. That is
+	//     claimantForRecord's first rule, and it is what separates a row this
+	//     delete may take from one it may not: an unproven OCCUPANT at a stale
+	//     row's path shares that row's identity, and deregistering on identity
+	//     alone would destroy the original project's record on the occupant's
+	//     behalf (#3299 review id 3910519845, pinned by
+	//     TestUnprovenOccupantDeleteKeepsTheStaleRecord). The marker half of
+	//     claimantForRecord is deliberately NOT used here: it probes Git, and
+	//     this runs under the lock.
+	if repoPath == "" && !config.IsDerivedRepoID(repoID) {
+		if projects, listErr := config.ListProjects(); listErr == nil {
+			matched := ""
+			unique := true
+			for _, p := range projects {
+				if p.RepoID != repoID {
+					continue
+				}
+				if absent, err := recordRootAbsent(p.Root); err != nil || !absent {
+					continue
+				}
+				if matched != "" {
+					unique = false
+					break
+				}
+				matched = p.Root
+			}
+			if unique && matched != "" {
+				log.InfoLog.Printf("delete project %s: a registry row recorded this identity while the delete was in flight; deregistering it too, or it would bring the project back on the next start", repoID)
+				repoPath = matched
+			}
+		}
+	}
 	optInIDs := []string{repoID}
 	if repoPath != "" {
 		if pathID := config.RepoIDFromRoot(filepath.Clean(repoPath)); pathID != repoID {

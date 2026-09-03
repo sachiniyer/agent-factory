@@ -836,3 +836,63 @@ func TestAbsentPathDeletesEvenWhenGitCannotRun(t *testing.T) {
 		t.Fatalf("and the durable record must be removed")
 	}
 }
+
+// TestReconciliationDuringADeleteStillDeregisters pins #3530 review id
+// 3919900658.
+//
+// The selectors are resolved BEFORE the delete's fence, because they run Git
+// probes and #3361 forbids holding taskTargetMu while one waits on a stalled
+// mount. A reconciliation landing in that window writes an identity onto a row
+// this delete had already failed to find — permanently — so without a second
+// look the delete archives and suppresses the identity while the row brings the
+// project back on the next start.
+func TestReconciliationDuringADeleteStillDeregisters(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	realID := repoID(t, repoPath)
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// With the row still filed under its provisional identity, a delete by the
+	// REAL one finds no root.
+	if root, err := registeredProjectRootForRepoID(realID); err != nil || root != "" {
+		t.Fatalf("fixture must start with no row answering to %s, got %q (%v)", realID, root, err)
+	}
+
+	// The healer reconciles the row while the delete is in flight — after its
+	// selectors resolved, after its fence went in.
+	reconciled := false
+	deleteProjectPreSweepHookForTest = func() {
+		if reconciled {
+			return
+		}
+		reconciled = true
+		if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+			t.Fatalf("reconcile mid-delete: %v", err)
+		}
+	}
+	t.Cleanup(func() { deleteProjectPreSweepHookForTest = nil })
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID}); err != nil {
+		t.Fatalf("DeleteProject by the real identity: %v", err)
+	}
+	if !reconciled {
+		t.Fatalf("fixture never reached the window, so it pins nothing")
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
+		t.Fatalf("the row gained this delete's identity while it ran, so the delete must take it too — otherwise the project returns on the next start with its sessions archived")
+	}
+}
