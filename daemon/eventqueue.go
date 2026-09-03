@@ -541,6 +541,15 @@ func (q *eventQueue) resetCursorBeforeFreshAppendLocked() error {
 	if q.pending != 0 || q.offset != 0 || q.size != 0 {
 		return nil
 	}
+	// Refuse a symlinked cursor BEFORE the removal seam, not inside the write
+	// fallback below (#3672 review). This path runs with no prior cursor write,
+	// so the remove SUCCEEDS on a link — unlinking the very arrangement
+	// persistCursorValueLocked refuses to write through, and never reaching the
+	// refusing writer at all. The check cannot live in q.remove: production
+	// wires that to os.Remove and tests replace it wholesale.
+	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return err
+	}
 	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
 		// Refuses a link, like persistCursorValueLocked (#3672).
 		if resetErr := config.AtomicWriteFileRefusingLink(q.curPath, []byte("0"), 0644); resetErr != nil {
@@ -687,6 +696,14 @@ func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 // jsonl file is gone; otherwise a later append can make already-delivered bytes
 // look pending and silently lose the appended event (#1433).
 func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
+	// Same refusal as the fresh-append reset, and checked before ANY removal so
+	// a refused teardown does not drop the jsonl and then stop (#3672 review).
+	// Draining the last event reaches here whether or not a cursor write
+	// happened first, so the removal seam would otherwise unlink a link the
+	// cursor's writer refuses to write through.
+	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return false, err
+	}
 	if err := q.remove(q.path); err != nil && !os.IsNotExist(err) {
 		return false, err
 	}

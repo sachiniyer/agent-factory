@@ -265,6 +265,16 @@ func InstallAutostart() (string, error) {
 			return "", fmt.Errorf("failed to create LaunchAgents directory: %w", err)
 		}
 		plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
+		// Refuse a symlinked plist HERE, before the bootout below (#3672
+		// review). The write refuses one too, but bootout runs first and
+		// unloads the RUNNING launch agent, so discovering the link at the
+		// write would leave the machine with no agent loaded and nothing
+		// bootstrapped — a refusal that changed the system it promised to leave
+		// alone. The systemd branch needs no equivalent: it writes before it
+		// reloads or enables anything.
+		if err := config.RefuseManagedFileSymlink(plistPath); err != nil {
+			return "", err
+		}
 		configDir, err := config.GetConfigDir()
 		if err != nil {
 			return "", fmt.Errorf("failed to get config directory: %w", err)

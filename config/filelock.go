@@ -354,7 +354,7 @@ func AtomicWriteFileRefusingLink(path string, data []byte, perm os.FileMode) err
 	// The refusal is FIRST, before atomicWrite's ensureStorageParent, so a
 	// refused write leaves the filesystem exactly as it found it: no created
 	// parent, no AF-home chmod on a path af just declined to touch.
-	if err := refuseManagedSymlink(path); err != nil {
+	if err := RefuseManagedFileSymlink(path); err != nil {
 		return err
 	}
 	// Its own path is its target, as for the plain writer: nothing here follows
@@ -378,19 +378,28 @@ var ErrManagedFileSymlink = errors.New("af-managed file is a symlink")
 // A missing path returns the usual ENOENT, so callers keep their os.IsNotExist
 // checks unchanged.
 func RemoveFileRefusingLink(path string) error {
-	if err := refuseManagedSymlink(path); err != nil {
+	if err := RefuseManagedFileSymlink(path); err != nil {
 		return err
 	}
 	return os.Remove(path)
 }
 
-// refuseManagedSymlink returns the both-ends error when path is a symlink, and
-// nil for anything else — including an absent path, which is an ordinary create
-// or an already-done delete.
+// RefuseManagedFileSymlink returns the both-ends error when path is a symlink,
+// and nil for anything else — including an absent path, which is an ordinary
+// create or an already-done delete.
 //
 // A DANGLING link is refused too, and by the same rule rather than a special
 // case: the policy is about the link's presence, not about what it resolves to.
-func refuseManagedSymlink(path string) error {
+//
+// It is the check AtomicWriteFileRefusingLink and RemoveFileRefusingLink make,
+// exported for callers that must take it before an action NEITHER of those
+// performs, and where discovering the link later would already have done damage
+// (#3672 review). Two such callers exist: InstallAutostart runs `launchctl
+// bootout` before writing the plist, so a link found at the write would leave
+// the running agent unloaded and nothing bootstrapped; and the event queue drops
+// its cursor through an injectable removal seam, which a check inside
+// RemoveFileRefusingLink cannot reach.
+func RefuseManagedFileSymlink(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {

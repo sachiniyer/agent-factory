@@ -124,6 +124,41 @@ func TestDaemonPIDFileRefusesASymlinkedPath(t *testing.T) {
 	assert.FileExists(t, target)
 }
 
+// The cursor's REMOVAL paths, which the refusing writer alone does not cover
+// (#3672 review). Both reach q.remove — the production os.Remove — with no
+// prior cursor write, so before the fix they unlinked the link and the refusing
+// writer was never consulted.
+func TestEventQueueCursorRemovalRefusesASymlinkedCursor(t *testing.T) {
+	const cursorContent = "999\n"
+
+	t.Run("the fresh-append reset", func(t *testing.T) {
+		dir := t.TempDir()
+		q := newEventQueue(dir, "task-1")
+		link, target := linkedManagedFile(t, dir, "task-1.cursor", cursorContent)
+
+		q.mu.Lock()
+		err := q.resetCursorBeforeFreshAppendLocked()
+		q.mu.Unlock()
+
+		assertRefusedSymlink(t, err, link, target, cursorContent)
+	})
+
+	t.Run("the drained-file cleanup", func(t *testing.T) {
+		dir := t.TempDir()
+		q := newEventQueue(dir, "task-2")
+		link, target := linkedManagedFile(t, dir, "task-2.cursor", cursorContent)
+		require.NoError(t, os.WriteFile(q.path, []byte("{}\n"), 0644))
+
+		q.mu.Lock()
+		_, err := q.removeDrainedFilesLocked()
+		q.mu.Unlock()
+
+		assertRefusedSymlink(t, err, link, target, cursorContent)
+		assert.FileExists(t, q.path,
+			"and it refuses before dropping the jsonl, so a refused teardown is not half-done")
+	})
+}
+
 // The unit file is what #3672 is titled after. ~/.config/systemd/user/ is a
 // directory where links are ordinary — that is how `systemctl enable` works — so
 // this is the one place a link is genuinely likely.
@@ -158,6 +193,25 @@ func TestRemoveAutostartUnitFileRefusesToUnlinkALink(t *testing.T) {
 	content, err := os.ReadFile(target)
 	require.NoError(t, err)
 	assert.Equal(t, "[Unit]\nDescription=not af\n", string(content))
+}
+
+// The launchd branch has to refuse BEFORE it boots the running agent out
+// (#3672 review). Discovering the link at the write would leave the machine
+// with no launch agent loaded and nothing bootstrapped — a refusal that changed
+// the system it promised to leave alone.
+func TestInstallAutostartRefusesASymlinkedPlistBeforeBootingOut(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	calls := stubAutostartUnitCommand(t, nil)
+	stubAutostartStopDaemon(t, true, nil)
+
+	link, target := linkedManagedFile(t, dir,
+		autostartLaunchdLabel+".plist", "<plist>not af</plist>\n")
+
+	_, err := InstallAutostart()
+
+	assertRefusedSymlink(t, err, link, target, "<plist>not af</plist>\n")
+	assert.Empty(t, *calls,
+		"nothing was booted out: a refused install must not unload the agent that was running")
 }
 
 // Uninstall is the other remove, and it SURFACES the refusal rather than logging
