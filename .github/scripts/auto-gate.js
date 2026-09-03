@@ -64,7 +64,151 @@ const CONCEDED_MERGE_REFUSALS = [
 ];
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
-const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
+// Codex usage-limit detection, in three named pieces rather than one regex.
+//
+// Codex emits at least two wordings for the same condition — "…usage limits for
+// code reviews." and a bare "…usage limits." — and both appeared on #3712 within
+// six minutes, from the same bot, about the same head. Matching only the first
+// withdrew the reviewer-unavailable degradation exactly when the outage got
+// WORSE (#3728): the bare wording reads as the account-wide limit, and the
+// withdrawn state has no reachable exit, because the review it waits for cannot
+// arrive while the account is limited.
+//
+// #3743 then asked for the other direction: the same bot login serves the
+// dev-task path, so a limit about a DIFFERENT job must not degrade — this branch
+// publishes `PASS: The Codex reviewer is usage-limited`, copy a maintainer acts
+// on before merging by hand.
+//
+// THREE PREDICATES, NOT A NESTED LOOKAHEAD. Expressing "stem, unless a scope
+// clause names another job" as `stem(?!\s+for\s+(?!code\s+reviews))` is wrong
+// in a way that reads correct: the `\s+` backtracks, hands a space back to the
+// inner negation, and a genuine "…limits for  code reviews." (two spaces, or a
+// markdown hard wrap) stops matching. That is the fatal combination — the
+// verdict exclusion below still disqualifies such a body, so the gate blocks
+// with no exit. Measured, and pinned by
+// "no wording is disqualified as a verdict while also failing to count as an
+// outage".
+// One spelling of the vendor phrase, composed into the three patterns that need
+// it. Re-spelling it per regex meant a copy change took three edits and nothing
+// failed if only two landed. `\s+` throughout, because a GitHub-rendered body
+// wraps: the separator is not the only place a hard break can fall.
+const CODEX_LIMIT_STEM = String.raw`reached\s+your\s+Codex\s+usage\s+limits?`;
+const CODEX_LIMIT_STEM_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\b`, "i");
+// The clause after the stem, CAPTURED rather than matched-around, so no negation
+// has to backtrack across a variable separator. At least one character: a
+// degenerate "…limits for ." names no scope, and is treated as the bare wording
+// rather than as an unrecognised one.
+// The clause may WRAP. Excluding `\n` from the capture truncated
+// "for code\nreviews." to "code", which matched neither the review test nor a
+// qualifier, so a real outage message wrapped by GitHub's renderer was
+// classified as another job and blocked. Bounded by the sentence end and 60
+// characters instead.
+const CODEX_LIMIT_CLAUSE_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\s+for\s+([^.]{1,60})`, "i");
+// Other-job scopes, as OBSERVED LITERAL PHRASES — never a grammar.
+//
+// THE RULE, because it is what makes this list safe: the two failure directions
+// are NOT symmetric. A false BLOCK during a real outage has no exit — that is
+// the #3728 defect itself, and no review can arrive to clear it. A false DEGRADE
+// produces a maintainer-review PASS that a human still reads before merging,
+// which is bounded. So this guard must never be able to false-block: it rejects
+// ONLY phrasings actually observed in the wild, and every unobserved phrasing
+// degrades.
+//
+// Four consecutive attempts to CLASSIFY the clause — a nested lookahead, a
+// review-word test, a closed qualifier list — each leaked in one direction or
+// the other, and each looked complete when written. "for the rest of the day"
+// and "for this billing period" blocked unrecoverably for want of a list entry;
+// "for cloud tasks that you review" degraded because a substring test won.
+// Inference is what failed, so this list holds none.
+//
+// Empty today: no non-review Codex usage-limit wording has been captured. Add
+// one only when it is SEEN, as the exact lowercased phrase, with its provenance
+// — the PR and comment id — the way CODEX_LIMIT_CODE_REVIEWS and
+// CODEX_LIMIT_ACCOUNT were pinned from #3712. A constructed string is not
+// evidence and does not belong here.
+const CODEX_LIMIT_OTHER_JOB_PHRASES = [];
+
+// Whether a body is Codex saying REVIEW capacity is exhausted.
+//
+// Codex emits at least two wordings for the same condition — "…usage limits for
+// code reviews." and a bare "…usage limits." — and both appeared on #3712 within
+// six minutes, about the same head. Recognising only the first withdrew the
+// reviewer-unavailable degradation exactly when the outage got WORSE (#3728),
+// and the withdrawn state has no reachable exit: the review it waits for cannot
+// arrive while the account is limited.
+//
+// #3743 then asked for the other direction — the same bot login serves the
+// dev-task path, and degrading publishes `PASS: The Codex reviewer is
+// usage-limited`, copy a maintainer acts on — so a limit about a DIFFERENT job
+// must not degrade. That is honoured by the observed-phrase list above rather
+// than by classifying the clause: an UNOBSERVED scope counts and degrades,
+// because the alternative risks a block with no exit. The residual — an
+// unobserved other-scope wording degrades to maintainer review until it is
+// observed and added — is documented on #3743 and is accepted.
+function codexReportsReviewUsageLimit(body) {
+  const text = String(body || "");
+  // FIRST, and structural: anything the verdict exclusion disqualifies must be
+  // recognised here. Those two answers together — "not a verdict" and "not an
+  // outage" — are the one state with no exit, and enumerating wordings in a test
+  // could only ever catch the cases someone thought of. It missed a body
+  // carrying two limit sentences, where the clause is read from the first and
+  // the exclusion matches the second. Making the implication true by
+  // construction removes the whole class.
+  if (CODEX_VERDICT_LIMIT_RE.test(text)) {
+    return true;
+  }
+  if (!CODEX_LIMIT_STEM_RE.test(text)) {
+    return false;
+  }
+  const clause = text.match(CODEX_LIMIT_CLAUSE_RE)?.[1];
+  if (clause === undefined) {
+    // No scope clause at all — the bare wording. This is #3728's whole point.
+    return true;
+  }
+  // Reject only a scope this repository has actually seen name another job.
+  // Anything else counts, per the asymmetry recorded on the list above.
+  const named = clause.toLowerCase();
+  return !CODEX_LIMIT_OTHER_JOB_PHRASES.some((phrase) => named.includes(phrase));
+}
+
+// The narrow pattern, kept narrow ON PURPOSE, for the one question the detector
+// above must not answer: "is this body disqualified from being a verdict?"
+//
+// parseReviewedCommit only ever reaches this test on a body that ALREADY carries
+// the `Codex Review` marker, and a genuine usage-limit message carries no such
+// marker — it short-circuits and returns null whatever this pattern says. So
+// widening HERE cannot help a real outage message; it can only change the answer
+// for bodies that are actually reviews.
+//
+// And that change is a harm. A review that QUOTES the detector — which every
+// review of this very file does — would stop parsing as a verdict, while
+// `!looksLikeReviewArtifact` simultaneously denies it the degradation. Requiring
+// the literal scope clause keeps that shut: a quoted pattern carries the escape
+// text `\s+`, not real whitespace.
+// NOT composed from CODEX_LIMIT_STEM, and NOT whitespace-tolerant. The two
+// patterns need OPPOSITE whitespace policies, which is why one constant cannot
+// serve both:
+//
+//   - the detector above should be tolerant. Its false negative is "a real
+//     outage message went unrecognised", so a wrapped or double-spaced body must
+//     still match.
+//   - this one must be strict. Its false POSITIVE is "a real review was stripped
+//     of its verdict", and a review that QUOTES the vendor phrase is exactly
+//     where that happens — GitHub wraps quoted prose, so `\s+` here matches
+//     across the wrap and disqualifies the review. `!looksLikeReviewArtifact`
+//     then denies it the degradation as well, and the head is stuck.
+//
+// Composing this from the tolerant stem was measured as a REGRESSION against
+// master: master's literal spaces leave a wrapped quote alone, the composed
+// version strands it. Literal spaces here, deliberately.
+//
+// `cod[e]` is `code`. The character class changes nothing about what this
+// matches — verified against both JS and jq — and it stops THIS LINE from
+// matching itself. Master's spelling means a Codex review quoting the constant,
+// or quoting the skill's jq mirror of it, is disqualified as a verdict and, being
+// a review artifact, is denied the degradation too. The files most likely to be
+// reviewed were the ones carrying the trap.
+const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits for cod[e] reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is
@@ -2951,7 +3095,7 @@ async function evaluateCodex({
     // gate lands on "keep blocking" rather than on a false degradation.
     const looksLikeReviewArtifact =
       CODEX_REVIEW_RE.test(latestCodexBody) && REVIEWED_COMMIT_RE.test(latestCodexBody);
-    const rateLimited = CODEX_RATE_LIMIT_RE.test(latestCodexBody) && !looksLikeReviewArtifact;
+    const rateLimited = codexReportsReviewUsageLimit(latestCodexBody) && !looksLikeReviewArtifact;
     // …and it has to be evidence about THIS head, on the same freshness rule the
     // verdict below is held to. A usage-limit answer only proves the reviewer was
     // out of quota when it answered; a head pushed after it may simply not have
@@ -3289,7 +3433,7 @@ async function evaluateCodex({
 }
 
 function parseReviewedCommit(body) {
-  if (!CODEX_REVIEW_RE.test(body) || CODEX_RATE_LIMIT_RE.test(body)) {
+  if (!CODEX_REVIEW_RE.test(body) || CODEX_VERDICT_LIMIT_RE.test(body)) {
     return null;
   }
   return body.match(REVIEWED_COMMIT_RE)?.[1]?.toLowerCase() || null;
@@ -3623,6 +3767,9 @@ module.exports = {
     artifactReferences,
     acknowledgementIsAnswerable,
     headCurrentSinceTime,
+    codexReportsReviewUsageLimit,
+    CODEX_VERDICT_LIMIT_RE,
+    CODEX_REVIEW_RE,
     bodyNamesReference,
     codexArtifactBindsToHead,
     codexArtifactStatesItsCommit,
