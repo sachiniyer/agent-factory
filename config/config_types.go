@@ -443,6 +443,35 @@ type Config struct {
 	// Global-only (daemon network surface), like listen_addr: a cloned repo must
 	// never be able to open a network port. See docs/configuration.md.
 	PreviewListenAddr string `json:"preview_listen_addr,omitempty" toml:"preview_listen_addr,omitempty"`
+	// DebugPprof serves the daemon's opt-in runtime profiling endpoint (#3651) at
+	// GET /v1/debug/pprof/{profile} — the stdlib net/http/pprof surface (heap,
+	// goroutine, allocs, profile, block, mutex, trace). It exists to answer the
+	// questions VmHWM and cgroup memory.stat cannot: which allocation site retains
+	// the heap, where goroutines are leaking, what a lock is contending on.
+	//
+	// It DEFAULTS to false and is served ONLY on the daemon's unix control socket,
+	// whose 0600 permissions are the authentication. It is never mounted on the
+	// listen_addr or preview_listen_addr listeners — not behind the bearer token,
+	// not on loopback, not on any interface (daemon/debug_pprof.go registers the
+	// handlers on the unix listener's chain alone, so there is no route to reach
+	// there). With the key false the endpoint returns the ordinary 404
+	// unknown-route envelope, so a daemon that did not opt in looks exactly like
+	// one built before the endpoint existed.
+	//
+	// The reason for both properties is that a heap or goroutine profile is a dump
+	// of live process memory, which on this daemon holds session titles, worktree
+	// paths, and prompt text. Turn it on to investigate, and turn it back off.
+	// AF_DEBUG_PPROF in the daemon's environment overrides this key for one
+	// process (1/true/yes/on, 0/false/no/off), which is the way to profile without
+	// editing config. The block and mutex sampling rates stay at Go's default of 0
+	// — those two profiles read empty until a rate is set separately — so enabling
+	// the endpoint costs nothing while nothing is being collected.
+	//
+	// Read at daemon start (the route table is built once, at bind), so a change
+	// waits for the next daemon start. Global-only, like the listener keys: a
+	// cloned repo must never be able to open a memory-dumping endpoint on the
+	// machine that runs it. See docs/daemon-memory.md.
+	DebugPprof bool `json:"debug_pprof" toml:"debug_pprof"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —

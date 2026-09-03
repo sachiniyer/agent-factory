@@ -102,12 +102,20 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// One mux, shared by both listeners, so the REST/RPC/WS handler graph is
 	// single-sourced and the two transports can never drift (§1.1).
 	mux := newHTTPMux(cs)
+	// The opt-in profiling routes (#3651), mounted HERE and nowhere else. This is
+	// the whole enforcement of "unix socket only": the wrapper is a new handler in
+	// front of the mux, so the mux handed to newWebListeners below is the unwrapped
+	// one and the TCP listeners carry no pprof handler to reach. Off by default,
+	// in which case withDebugPprof returns the mux untouched. The opt-in is read
+	// from the FROZEN startup config because the route table is built once, here —
+	// which is why the key is classified EffectNextDaemonStart.
+	unixHandler := withDebugPprof(mux, debugPprofEnabled(manager.cfg))
 	srv := &http.Server{
 		// The unix socket is trusted transport (0600 perms are the auth, #1029),
 		// so it passes a NIL gate: no token enforcement (#1592 Phase 3 PR2,
 		// §1.4). The TCP listener below passes a real gate over the same mux.
 		// CORS is config-driven (§1.5): empty allow-list ⇒ no ACAO emitted.
-		Handler:           withAuth(mux, nil, manager.cfg.CORSAllowedOrigins),
+		Handler:           withAuth(unixHandler, nil, manager.cfg.CORSAllowedOrigins),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 

@@ -94,6 +94,10 @@ var keyEffectClasses = map[string]EffectClass{
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
 	"branch_prefix": EffectNextDaemonStart,
+	// debug_pprof selects the daemon's route table, which is built once when the
+	// HTTP listeners bind (daemon/httpserver.go). Nothing re-reads it per request,
+	// so a save must say "next daemon start" rather than claim it took effect.
+	"debug_pprof": EffectNextDaemonStart,
 	// Next af launch — af's CLI/TUI owns what these control. The daemon's release
 	// check reads auto_update and update_channel (#2212), but it only reports a
 	// release; installing is still af's, at launch. See EffectNextAfLaunch.

@@ -84,7 +84,11 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
-	"auto_update":                    {kind: cfgBool},
+	"auto_update": {kind: cfgBool},
+	// The opt-in profiling endpoint (#3651). A plain bool: the daemon decides where
+	// it is served (unix socket only) and there is nothing here for a value to get
+	// wrong, so no validator.
+	"debug_pprof":                    {kind: cfgBool},
 	"network.require_token":          {kind: cfgBool, section: "network"},
 	"network.require_loopback_token": {kind: cfgBool, section: "network"},
 	"network.listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
