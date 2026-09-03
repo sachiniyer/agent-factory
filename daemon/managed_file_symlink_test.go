@@ -105,6 +105,25 @@ func TestPersistCursorRefusesASymlinkedCursorFile(t *testing.T) {
 	assertRefusedSymlink(t, err, link, target, "999\n")
 }
 
+// The daemon PID file: af's own liveness bookkeeping, written on start and
+// deleted on teardown, so both ends refuse a link the same way.
+func TestDaemonPIDFileRefusesASymlinkedPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	link, target := linkedManagedFile(t, home, "daemon.pid", "99999\n")
+
+	assertRefusedSymlink(t, writeDaemonPIDFile(), link, target, "99999\n")
+
+	// And the teardown must not unlink what the start refused to write through.
+	removeDaemonPIDFile()
+	info, err := os.Lstat(link)
+	require.NoError(t, err)
+	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink,
+		"teardown must not delete a link af could never have written through")
+	assert.FileExists(t, target)
+}
+
 // The unit file is what #3672 is titled after. ~/.config/systemd/user/ is a
 // directory where links are ordinary — that is how `systemctl enable` works — so
 // this is the one place a link is genuinely likely.

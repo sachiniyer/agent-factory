@@ -242,9 +242,10 @@ var followingWriterPackages = map[string]string{
 //
 // AtomicWriteFileFollowingLink exists for content af rewrites on the USER's
 // behalf rather than owns: the global config (#3660) and the task store
-// (#3672). af's own managed files — the bearer token, autostart units, the
-// editor-origin secret, the VS Code owner record, the upgrade interlock, the
-// auto-update cache, the event-queue cursor, skills and plugins — refuse a link
+// (#3672). af's own managed files — the bearer token, the PID file, autostart
+// units, the editor-origin secret, the VS Code owner record, the upgrade
+// interlock, the auto-update cache, the event-queue cursor, skills and plugins —
+// refuse a link
 // outright (AtomicWriteFileRefusingLink), because "write through whatever this
 // points at" is a stronger promise than any of them offered and replacing a link
 // silently is not what anyone asked for either.

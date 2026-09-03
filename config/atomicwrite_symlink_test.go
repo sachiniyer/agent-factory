@@ -576,9 +576,8 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 //
 // Replacing the link is what os.Rename does on its own, and it stays the
 // behaviour of the plain writer for every caller that took neither of the other
-// two answers — config's own state, TUI state, the project registry, the daemon
-// PID file (#3672 decided the af-managed group; anything it did not name keeps
-// this).
+// two answers — config's own state, TUI state, the project registry (#3672
+// decided the af-managed group; anything it did not name keeps this).
 //
 // This is the behaviour that a follow-by-default AtomicWriteFile broke, which is
 // why it is pinned rather than assumed. The callers that must NOT reach it —

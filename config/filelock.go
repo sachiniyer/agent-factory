@@ -324,10 +324,10 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 }
 
 // AtomicWriteFileRefusingLink is AtomicWriteFile for the files af MANAGES: the
-// bearer token, the autostart unit/plist, the editor-origin secret, the VS Code
-// owner record, the upgrade interlock's executable swap, the auto-update check
-// cache, the event-queue cursor, and the plugin/skill files af regenerates
-// (#3672).
+// bearer token, the daemon PID file, the autostart unit/plist, the
+// editor-origin secret, the VS Code owner record, the upgrade interlock's
+// executable swap, the auto-update check cache, the event-queue cursor, and the
+// plugin/skill files af regenerates (#3672).
 //
 // When path is a symlink it writes nothing and returns an error naming BOTH
 // ends, wrapping ErrManagedFileSymlink. These are af's own files at paths af
