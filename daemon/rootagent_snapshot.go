@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	stdlog "log"
+	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -98,10 +99,16 @@ func buildRootAgentSnapshot(warn *stdlog.Logger, cfg *config.Config) rootAgentSn
 		unresolvedRoots:    map[string]unresolvedProjectRecord{},
 	}
 
-	// RED (#3782 item 2): daemon START still resolves every root_agents path
-	// through the UNBOUNDED entry point, so one configured checkout on a
-	// stalled mount wedges construction and the daemon never comes up at all.
-	snap.legacy = legacyRepoIDSet(cfg, unboundedLegacyRootRepo, legacyRepoDedup{})
+	// BOUNDED, on the same budget as the poll goroutine's (#3782 item 2). A
+	// daemon that refuses to start because one configured checkout sits on a
+	// stalled mount takes every other session on the box with it — every
+	// status refresh, every Lost recovery, every scheduled task, for a repo
+	// that may have no live sessions at all. Refusing to start is not the
+	// honest outcome; starting degraded and saying so is, and what says so is
+	// the unknown latch: the candidate proves nothing, is covered
+	// provisionally so it cannot read as absent, and is re-attempted by the
+	// heal pass until it answers.
+	snap.legacy = legacyRepoIDSet(cfg, resolveLegacyRootRepo, legacyRepoDedup{})
 
 	projects, failures, strays, _, err := config.ListProjectsDetailed()
 	if err != nil {
@@ -141,20 +148,17 @@ func recordFailureDirectoryIDs(failures []config.ProjectRecordFailure) []string 
 	return ids
 }
 
-// legacyRepoResolver resolves one root_agents key to its repository. The two
-// callers of legacyRepoIDSet sit on different lifecycles — daemon start and the
-// instance poll goroutine — so the entry point is the caller's to choose rather
-// than the function's to assume.
+// legacyRepoResolver resolves one root_agents key to its repository.
+//
+// Production has exactly ONE of these — resolveLegacyRootRepo, the bounded
+// entry point — at both of legacyRepoIDSet's call sites, which is the whole
+// point of #3782 items 1 and 2: daemon start and the instance poll goroutine
+// are different lifecycles with the same answer. It stays a parameter because
+// the four outcomes this function classifies (resolved, verdict, unanswered
+// with provenance, unanswered without) cannot all be produced by pointing a
+// real probe at a real checkout, and a classifier whose branches are only
+// reachable during an outage is one nothing ever checks.
 type legacyRepoResolver func(path string) (*config.RepoContext, error)
-
-// unboundedLegacyRootRepo is config.RepoFromPath behind the legacy sweep's tilde
-// expansion: context.Background(), which is literally what config.RepoFromPath
-// passes its context-taking twin. Routed through the same legacyRootRepoFromPath
-// seam as the bounded resolver so a test can stall one configured path at either
-// call site without a process-global `git` shim on PATH.
-func unboundedLegacyRootRepo(path string) (*config.RepoContext, error) {
-	return legacyRootRepoFromPath(context.Background(), config.ExpandTilde(path))
-}
 
 // legacyRepoDedup is what the singleton sweep needs to know about the legacy
 // root_agents map: which repos it already covers, and — because a probe can
@@ -247,9 +251,17 @@ func legacyRepoIDSet(cfg *config.Config, resolve legacyRepoResolver, previous le
 			next.ids[previous.byPath[path]] = true
 			next.byPath[path] = previous.byPath[path]
 		default:
-			// RED (#3782 item 2): an unknown with nothing to carry forward
-			// contributes nothing and is never retried, so a boot-time
-			// timeout reads as absent for the life of the daemon.
+			// UNKNOWN, with nothing proven to stand. The provisional identity
+			// covers the repo this path most likely names, so a first probe
+			// that times out cannot read as absent.
+			if id := config.RepoIDFromRoot(filepath.Clean(config.ExpandTilde(path))); id != "" {
+				next.unknownIDs[id] = true
+			}
+		}
+		// Latched either way an unknown lands, so the heal pass keeps
+		// re-attempting exactly this resolution until it answers.
+		if err != nil && config.RepoProbeUnanswered(err) {
+			next.unknownPaths[path] = true
 		}
 	}
 	return next

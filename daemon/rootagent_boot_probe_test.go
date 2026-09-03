@@ -81,17 +81,36 @@ func TestStalledLegacyPathDoesNotWedgeDaemonStart(t *testing.T) {
 	repoPath := setupControlRepo(t)
 
 	release := stallBootLegacyResolution(t, repoPath)
-	t.Cleanup(release)
 
 	type built struct {
 		manager *Manager
 		err     error
 	}
 	done := make(chan built, 1)
+	var constructing sync.WaitGroup
+	constructing.Add(1)
 	go func() {
+		defer constructing.Done()
 		manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 		done <- built{manager, err}
 	}()
+	// Registered AFTER the stall's own cleanup, so LIFO runs this first: the
+	// seam is a package var, and restoring it while a wedged goroutine is still
+	// reading it is a data race — measured on the fail-first run, where the
+	// 60-second verdict below hit t.Fatal with the construction still inside
+	// the stall. Releasing and JOINING first means no goroutine is in the seam
+	// when it is put back. It runs after the verdict either way, so it cannot
+	// help the assertion pass.
+	t.Cleanup(func() {
+		release()
+		joined := make(chan struct{})
+		go func() { constructing.Wait(); close(joined) }()
+		select {
+		case <-joined:
+		case <-time.After(30 * time.Second):
+			t.Error("the constructing goroutine never returned after the stall was released; the seam cannot be restored safely")
+		}
+	})
 
 	var result built
 	select {

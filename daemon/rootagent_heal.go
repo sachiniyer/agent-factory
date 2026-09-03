@@ -35,7 +35,14 @@ import (
 func (m *Manager) healRootAgentLayers() {
 	layers := m.rootAgentLayers.Load()
 	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 &&
-		len(layers.unresolvedRoots) == 0 && len(layers.reconcileOwed) == 0 {
+		len(layers.unresolvedRoots) == 0 && len(layers.reconcileOwed) == 0 &&
+		// A root_agents path whose probe never answered is an unknown like any
+		// other, and this pass is the only thing that re-attempts it (#3782
+		// item 2). Without it a boot-time timeout stands for the life of the
+		// daemon: the ensure sweep keeps retrying the CREATE, but nothing
+		// revisits the dedup set, so the repo is covered by a provisional
+		// identity that may never be replaced by the real one.
+		len(layers.legacy.unknownPaths) == 0 {
 		return
 	}
 	// Two independent cadences (#3299 review round 8). The registry and
@@ -149,7 +156,13 @@ func (m *Manager) healRootAgentLayers() {
 		}()
 	}
 
-	if changed {
+	// The recompute rides EVERY published heal, and is ALSO the standalone
+	// retry for a root_agents path whose probe has not answered yet (#3782
+	// item 2) — paced on the same backoff as the other retried reads, so a
+	// permanently dead mount costs one bounded probe per cadence rather than
+	// one per tick.
+	legacyRetryDue := due && len(layers.legacy.unknownPaths) > 0
+	if changed || legacyRetryDue {
 		// Recompute the legacy dedup set on EVERY heal (#3315 review, both
 		// rounds): a legacy path that resolved only after boot must dedup its
 		// repo out of the singleton sweep in the published snapshot — whether
@@ -170,6 +183,18 @@ func (m *Manager) healRootAgentLayers() {
 		// answered is UNKNOWN, and an unknown that dropped out of the set
 		// would be #3315's double-visit re-entered through a deadline.
 		healed.legacy = legacyRepoIDSet(m.cfg, resolveLegacyRootRepo, healed.legacy)
+		if legacyRetryDue {
+			rpAttempted = true
+			// Only NARROWING is progress. A retry that leaves the same paths
+			// unknown must charge the backoff, or a dead mount drags the
+			// whole heal onto the per-tick cadence.
+			if len(healed.legacy.unknownPaths) < len(layers.legacy.unknownPaths) {
+				changed = true
+				rpChanged = true
+			}
+		}
+	}
+	if changed {
 		if rootHealPrePublishHookForTest != nil {
 			rootHealPrePublishHookForTest()
 		}
