@@ -55,7 +55,7 @@ func TestGuardFragmentsNameExactlyOneField(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			record := reflect.ValueOf(tc.probe).Elem()
 			filler := &sentinelFiller{}
-			filler.fill(record, "", 0, false)
+			filler.fill(record, "", 0, guardAddressable)
 			if len(filler.unsupported) > 0 || len(filler.tooDeep) > 0 {
 				t.Fatalf("the walk could not plant the fixture: unsupported=%v tooDeep=%v",
 					filler.unsupported, filler.tooDeep)
@@ -95,7 +95,7 @@ func TestGuardSeesAPartiallyRedactedContainer(t *testing.T) {
 	}
 	record := reflect.ValueOf(&probe).Elem()
 	filler := &sentinelFiller{}
-	filler.fill(record, "", 0, false)
+	filler.fill(record, "", 0, guardAddressable)
 	if len(filler.planted) != 1 {
 		t.Fatalf("planted %d field(s), want 1", len(filler.planted))
 	}
@@ -124,7 +124,7 @@ func TestGuardRefusesAnArrayWithoutIndependentEvidence(t *testing.T) {
 		Digest [guardMinContainer - 1]byte
 	}
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, false)
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, guardAddressable)
 	if len(filler.planted) != 0 {
 		t.Errorf("planted %d marker(s) in an array too short to survive a partial edit",
 			len(filler.planted))
@@ -143,7 +143,7 @@ func TestGuardSeesAPartialEditOfTheSmallestArray(t *testing.T) {
 	}
 	record := reflect.ValueOf(&probe).Elem()
 	filler := &sentinelFiller{}
-	filler.fill(record, "", 0, false)
+	filler.fill(record, "", 0, guardAddressable)
 	if len(filler.planted) != 1 {
 		t.Fatalf("planted %d field(s), want 1: unsupported=%v", len(filler.planted), filler.unsupported)
 	}
@@ -173,7 +173,7 @@ func TestGuardRefusesSelfRenderingSequenceElements(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			filler := &sentinelFiller{}
-			filler.fill(reflect.ValueOf(tc.probe).Elem(), "", 0, false)
+			filler.fill(reflect.ValueOf(tc.probe).Elem(), "", 0, guardAddressable)
 			if len(filler.planted) != 0 {
 				t.Errorf("planted %d marker(s) in a container whose element renders itself",
 					len(filler.planted))
@@ -279,7 +279,7 @@ func TestGuardReportsEveryRepeatedScalarLeaf(t *testing.T) {
 		Once mixed
 	}
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, false)
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, guardAddressable)
 
 	if len(filler.unsupported) > 0 {
 		t.Errorf("unsupported = %v, want none: a repeated scalar is classified, not a hole, "+
@@ -314,7 +314,7 @@ func TestGuardRefusesSelfRenderingScalarLeaves(t *testing.T) {
 		KeyPtr *guardTextScalar
 	}
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, false)
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, guardAddressable)
 	if len(filler.planted) != 0 {
 		t.Errorf("planted %d marker(s) in a self-rendering scalar", len(filler.planted))
 	}
@@ -344,7 +344,7 @@ func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
 	}
 	record := reflect.ValueOf(&probe).Elem()
 	filler := &sentinelFiller{}
-	filler.fill(record, "", 0, false)
+	filler.fill(record, "", 0, guardAddressable)
 	if len(filler.unsupported) > 0 {
 		t.Fatalf("the walk could not plant the fixture: %v", filler.unsupported)
 	}
@@ -371,3 +371,176 @@ func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
 		}
 	}
 }
+
+// guardPointerOnlyMarshaler declares MarshalJSON on the POINTER receiver only,
+// which is the shape whose encoding depends on where json finds it.
+type guardPointerOnlyMarshaler struct {
+	Text string `json:"text"`
+}
+
+func (v *guardPointerOnlyMarshaler) MarshalJSON() ([]byte, error) {
+	return []byte(`"FROM-POINTER-MARSHALER"`), nil
+}
+
+// TestGuardAddressabilityMatchesTheEncoder is the differential oracle the walk's
+// self-rendering check has to agree with.
+//
+// `rendersItself` asked whether the type OR its pointer supplies a marshaler,
+// which is the right question only where json can take the address. This table
+// is encoding/json's own answer for the same type in each position, so the walk
+// is held to the encoder rather than to a rule of thumb (#3703).
+func TestGuardAddressabilityMatchesTheEncoder(t *testing.T) {
+	held := guardPointerOnlyMarshaler{"planted"}
+	const invoked = `"FROM-POINTER-MARSHALER"`
+	for _, tc := range []struct {
+		name  string
+		value any
+		flags walkFlags
+	}{
+		{"a slice element", []guardPointerOnlyMarshaler{held}, guardAddressable},
+		{"a slice element inside a map", map[string][]guardPointerOnlyMarshaler{"k": {held}}, guardAddressable},
+		{"an array element under an addressable parent",
+			&struct{ A [1]guardPointerOnlyMarshaler }{[1]guardPointerOnlyMarshaler{held}}, guardAddressable},
+		{"a field of an addressable struct",
+			&struct{ F guardPointerOnlyMarshaler }{held}, guardAddressable},
+		{"a map value", map[string]guardPointerOnlyMarshaler{"k": held}, 0},
+		{"an array element inside a map",
+			map[string][1]guardPointerOnlyMarshaler{"k": {held}}, 0},
+		{"a field of a non-addressable struct",
+			struct{ F guardPointerOnlyMarshaler }{held}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("marshalling the shape failed: %v", err)
+			}
+			ran := strings.Contains(string(doc), invoked)
+			if got := rendersItselfAt(reflect.TypeOf(held), tc.flags); got != ran {
+				t.Errorf("rendersItselfAt(%s, addressable=%t) = %t, but encoding/json %s it: %s\n\n"+
+					"The walk refuses a shape it believes renders itself. Believing that where json "+
+					"does NOT call the marshaler refuses a shape whose fields it could plant into "+
+					"perfectly well; believing the reverse probes a value the document never shows.",
+					reflect.TypeOf(held), tc.flags.has(guardAddressable), got,
+					map[bool]string{true: "DID invoke", false: "did NOT invoke"}[ran], doc)
+			}
+		})
+	}
+}
+
+// TestGuardPlantsIntoAMapOfPointerOnlyMarshalers is the defect #3655 item 10
+// named, at the position it named.
+//
+// json never calls V's pointer marshaler for a `map[K]V`, so it emits V's
+// ordinary fields — the fields the walk can plant into and search for. The walk
+// refused the whole shape instead, and a refusal is a hole the guard reports as
+// unplantable rather than covering.
+func TestGuardPlantsIntoAMapOfPointerOnlyMarshalers(t *testing.T) {
+	var probe struct {
+		ByName map[string]guardPointerOnlyMarshaler
+	}
+	record := reflect.ValueOf(&probe).Elem()
+	filler := &sentinelFiller{}
+	filler.fill(record, "", 0, guardAddressable)
+	if len(filler.unsupported) > 0 {
+		t.Fatalf("the walk refused a map whose value type json renders by its FIELDS: %v\n\n"+
+			"json does not call a pointer-receiver marshaler for a map value, so nothing about "+
+			"this shape is opaque to the walk.", filler.unsupported)
+	}
+	if len(filler.planted) == 0 {
+		t.Fatal("planted nothing in a map of plantable values")
+	}
+
+	doc, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatalf("marshalling the fixture failed: %v", err)
+	}
+	// The premise, executed: the document really does show the fields, not the
+	// marshaler's output — otherwise the markers below would prove nothing.
+	if strings.Contains(string(doc), "FROM-POINTER-MARSHALER") {
+		t.Fatalf("the probe no longer exhibits the shape: json invoked the pointer marshaler "+
+			"for a map value: %s", doc)
+	}
+	if _, leaked := filler.leakedPaths(string(doc)); len(leaked) == 0 {
+		t.Errorf("no planted path survived into %s\n\n"+
+			"Planting into this shape is only worth doing if the markers reach the document, "+
+			"which is what makes the field searchable when redaction misses it.", doc)
+	}
+}
+
+// TestGuardStillRefusesWhereTheMarshalerRuns is the other half, and the control:
+// the same element type in a SLICE is genuinely opaque, because json does invoke
+// the pointer marshaler there. Loosening the map must not loosen this.
+func TestGuardStillRefusesWhereTheMarshalerRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		probe any
+	}{
+		{"a slice", &struct{ Entries []guardPointerOnlyMarshaler }{}},
+		// A slice is addressable wherever it sits, so its elements stay opaque
+		// even under a map — the row that makes this "addressability", not
+		// "somewhere under a map".
+		{"a slice inside a map", &struct {
+			ByName map[string][]guardPointerOnlyMarshaler
+		}{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filler := &sentinelFiller{}
+			filler.fill(reflect.ValueOf(tc.probe).Elem(), "", 0, guardAddressable)
+			if len(filler.unsupported) == 0 {
+				t.Errorf("the walk accepted a shape whose elements json renders through their "+
+					"POINTER marshaler: planted %d, unsupported %v\n\n"+
+					"Such an element can emit text out of state the walk never planted, so it "+
+					"has to be refused rather than probed as if its raw fields were what json "+
+					"emits.", len(filler.planted), filler.unsupported)
+			}
+		})
+	}
+}
+
+// TestGuardMapKeyMarshalerIsNotInvoked is the same asymmetry on the KEY side.
+//
+// fillMap refuses a non-string key type that renders itself, because json calls
+// MarshalText on such a key before any numeric conversion. It does not call a
+// POINTER-receiver one: a map key is never addressable. Measured:
+//
+//	map[PtrKey]string{7: "v"} -> {"7":"v"}
+//	map[ValKey]string{7: "v"} -> {"VAL-KEY-MARSHALED":"v"}
+func TestGuardMapKeyMarshalerIsNotInvoked(t *testing.T) {
+	doc, err := json.Marshal(map[guardPointerOnlyKey]string{7: "v"})
+	if err != nil {
+		t.Fatalf("marshalling the shape failed: %v", err)
+	}
+	if want := `{"7":"v"}`; string(doc) != want {
+		t.Fatalf("the probe no longer exhibits the shape: json rendered %s, want %s — a map key "+
+			"is not addressable, so a pointer-receiver MarshalText cannot run on it", doc, want)
+	}
+	var probe struct {
+		ByCode map[guardPointerOnlyKey]string
+	}
+	filler := &sentinelFiller{}
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, guardAddressable)
+	for _, gap := range filler.unsupported {
+		if strings.Contains(gap, "renders itself") {
+			t.Errorf("the walk refused a map key json renders as a plain number: %v\n\n"+
+				"The refusal exists for a key type whose MarshalText json CALLS. It does not "+
+				"call one declared on the pointer receiver.", filler.unsupported)
+		}
+	}
+	// The numeric-key hole is still reported — it is a different finding, and
+	// loosening the marshaler check must not swallow it.
+	var numeric bool
+	for _, gap := range filler.unsupported {
+		if strings.Contains(gap, "cannot carry a text marker") {
+			numeric = true
+		}
+	}
+	if !numeric {
+		t.Errorf("the numeric map-key hole went unreported: %v", filler.unsupported)
+	}
+}
+
+// guardPointerOnlyKey is a named integer key whose MarshalText is on the POINTER
+// receiver, so json never calls it.
+type guardPointerOnlyKey int
+
+func (k *guardPointerOnlyKey) MarshalText() ([]byte, error) { return []byte("PTR-KEY"), nil }
