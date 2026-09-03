@@ -171,6 +171,13 @@ func TestGuardNormalizedEmptyKeepsTheDeclaredForm(t *testing.T) {
 	}{
 		{emits: "[]", wantFinding: false},
 		{emits: "{}", wantFinding: true},
+		// The normalization DISAPPEARING is the third outcome, and the one a
+		// diff keyed on "the two sides differ" cannot see: both sides render
+		// null, so the member matches its field exactly and the declaration
+		// quietly describes nothing (#3686 review). One word inside
+		// cloneArchiveSkippedEntries — returning its argument rather than a
+		// make()d slice — is the whole regression.
+		{emits: "null", wantFinding: true},
 	} {
 		t.Run("renders the absent member as "+tc.emits, func(t *testing.T) {
 			value := reflect.ValueOf(&guardNormalizedEmptyRecord{as: tc.emits}).Elem()
@@ -188,8 +195,9 @@ func TestGuardNormalizedEmptyKeepsTheDeclaredForm(t *testing.T) {
 			found := append(append(append([]string(nil), report.added...), report.changed...), report.dropped...)
 			if got := len(found) > 0; got != tc.wantFinding {
 				t.Errorf("the contract reported a difference for a marshaler emitting %s: %t (%v), want %t\n\n"+
-					"The entry declares that member normalizes to []. The OTHER empty collection is a "+
-					"different public JSON type, and accepting it makes the declaration say nothing.",
+					"The entry declares that member normalizes to []. The other empty collection is a "+
+					"different public JSON type, and null is the normalization having gone away — "+
+					"accepting either makes the declaration say nothing.",
 					tc.emits, got, found, tc.wantFinding)
 			}
 		})

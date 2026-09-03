@@ -141,7 +141,7 @@ func diffFixture(t *testing.T, report *marshalerReport, typ reflect.Type, entry 
 	baselineMembers := decodeMembers(t, "the plain twin of "+typ.String(), fixture.baseline)
 	for name, got := range customMembers {
 		want, isField := baselineMembers[name]
-		switch {
+		switch declared, normalizes := entry.normalizesEmpty[name]; {
 		case !isField:
 			declared, ok := entry.extra[name]
 			if !ok {
@@ -149,16 +149,16 @@ func diffFixture(t *testing.T, report *marshalerReport, typ reflect.Type, entry 
 			} else if pinExtras && string(got) != declared {
 				note(&report.changed, "%s: %s emits %s, the entry declares %s", where, name, got, declared)
 			}
+		case normalizes && string(want) == "null":
+			// The declared normalization, read in the ONE state that exercises
+			// it — the member absent, so the marshaler's own choice of empty
+			// form is what is on show. It has its own arm because two of its
+			// three outcomes are invisible to a diff keyed on the two sides
+			// DIFFERING (#3686 review).
+			if finding := normalizedEmptyFinding(declared, name, got); finding != "" {
+				note(&report.changed, "%s: %s", where, finding)
+			}
 		case string(got) != string(want):
-			if normalizedEmpty(entry, name, got, want) {
-				continue
-			}
-			if declared, ok := entry.normalizesEmpty[name]; ok && string(want) == "null" {
-				note(&report.changed, "%s: %s renders the absent member as %s, and the entry "+
-					"declares it normalizes to %s — a different public JSON type",
-					where, name, got, declared)
-				continue
-			}
 			note(&report.changed, "%s: %s emits %s, the field holds %s", where, name, got, want)
 		}
 	}
@@ -927,21 +927,37 @@ func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, cl
 	}
 }
 
-// normalizedEmpty reports the one difference an entry may declare: a member the
-// marshaler renders as the empty collection IT DECLARES where the default
-// encoder renders the absent one as null. Anything else — including the reverse,
-// and including the other empty collection — still fails.
+// normalizedEmptyFinding reads a member the entry declares a normalization for,
+// against the twin rendering that member as null. It returns the finding, or ""
+// when the marshaler did exactly what the entry says.
 //
-// The declared FORM is what is compared, not just the member name (#3655 item
-// 6). Accepting `[]` or `{}` for any named member retained nothing about which
-// the member is, so a regression rendering a nil SLICE as an object read as the
-// normalization the entry describes while changing the member's public JSON
-// type — and the marshaler picks that form itself, so it is a one-character edit
-// away. TestGuardNormalizedEmptyFormsMatchTheirFields ties each declared form to
-// the member's Go kind, so the declaration cannot drift from the type either.
-func normalizedEmpty(entry reviewedMarshaler, name string, got, want json.RawMessage) bool {
-	declared, ok := entry.normalizesEmpty[name]
-	return ok && string(want) == "null" && string(got) == declared
+// THREE outcomes, not two, and only one of them is the permitted difference:
+//
+//   - the declared form — the one difference an entry may declare.
+//   - the OTHER empty collection (#3655 item 6). Accepting `[]` or `{}` for any
+//     named member retained nothing about which the member is, so a regression
+//     rendering a nil SLICE as an object read as the normalization the entry
+//     describes while changing the member's public JSON type. The marshaler
+//     picks that form itself, so it is a one-character edit away, and
+//     TestGuardNormalizedEmptyFormsMatchTheirFields ties each declared form to
+//     the member's Go kind so the declaration cannot drift from the type either.
+//   - null — the normalization GONE (#3686 review). This is the outcome a diff
+//     keyed on the two sides differing cannot see at all: the member then
+//     matches its field exactly, every comparison passes, and the declaration
+//     goes on describing a normalization that no longer happens. One word
+//     inside ArchiveRetainedTree's clone() — returning the argument instead of
+//     the make()d slice — is the whole regression.
+func normalizedEmptyFinding(declared, name string, got json.RawMessage) string {
+	switch string(got) {
+	case declared:
+		return ""
+	case "null":
+		return fmt.Sprintf("%s renders the absent member as null, and the entry declares it "+
+			"normalizes to %s — the normalization is gone, so the declaration describes nothing "+
+			"and every reading of that member passes vacuously", name, declared)
+	}
+	return fmt.Sprintf("%s renders the absent member as %s, and the entry declares it normalizes "+
+		"to %s — a different public JSON type", name, got, declared)
 }
 
 // jsonMemberName is the member name encoding/json gives a field: the tag's name
