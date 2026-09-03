@@ -552,6 +552,15 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		data, err = m.createVerifiedRoot(identity, req)
 	}
 	if err != nil {
+		if isRootCheckoutRefusal(err) {
+			// Report the refusal as itself. createVerifiedRoot returns before
+			// CreateSession, so no create was attempted and none may be reported
+			// as having failed — and the identical refusal on the pre-reap arm
+			// above carries no such prefix, so wrapping it here would make one
+			// cause read as two.
+			m.rootEnsureFailed(stateKey, st, err)
+			return
+		}
 		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
 		return
 	}

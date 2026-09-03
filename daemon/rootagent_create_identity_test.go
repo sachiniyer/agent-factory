@@ -208,8 +208,16 @@ func TestRootCreateReprovesTheCheckoutAfterTheReap(t *testing.T) {
 	if len(*seen) != 1 {
 		t.Fatalf("a swap landing after the pre-reap check must still be refused at the create, got %d creates", len(*seen))
 	}
-	if logged := warnings.String(); !strings.Contains(logged, "a different clone may be reusing the path") {
+	logged := warnings.String()
+	if !strings.Contains(logged, "a different clone may be reusing the path") {
 		t.Fatalf("the refusal must be the identity one, not an incidental create failure, got: %s", logged)
+	}
+	// The refusal returns BEFORE CreateSession, so reporting it as a failed
+	// create asserts something that never happened — and it would read
+	// differently from the identical refusal on the pre-reap arm, which carries
+	// no such prefix.
+	if strings.Contains(logged, "failed to create root session") {
+		t.Fatalf("no create was attempted, so none may be reported as having failed; got: %s", logged)
 	}
 }
 
