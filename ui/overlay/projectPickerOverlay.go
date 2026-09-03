@@ -198,12 +198,6 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 	return false
 }
 
-// visibleWindow returns the [start, end) window over the navigable rows Render
-// shows: at most maxVisible rows, slid so the selected row is always included.
-func (p *ProjectPickerOverlay) visibleWindow(maxVisible int) (startIdx, endIdx int) {
-	return selectionWindow(p.selectedIdx, p.rowCount(), maxVisible)
-}
-
 // Render renders the project picker overlay.
 func (p *ProjectPickerOverlay) Render() string {
 	t := ui.CurrentTheme()

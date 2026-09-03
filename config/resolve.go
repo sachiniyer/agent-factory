@@ -27,7 +27,7 @@ var retainedLegacyBareRepoConfigLogged sync.Map
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
 // (programs, remote hooks, post-worktree commands) must go through this file's
-// ResolveConfig or ResolveConfigForInspection entry point rather than reading
+// ResolveConfig or ResolveConfigForRepoInspection entry point rather than reading
 // source files directly, so precedence and scoping stay uniform.
 type ResolvedConfig struct {
 	// Config carries the effective app-level fields. DefaultProgram and
@@ -88,8 +88,8 @@ func ResolveGlobalConfig() (*ResolvedConfig, error) {
 // ResolveConfig returns effective configuration and provenance for repoRoot
 // (normally the main worktree root from RepoFromPath or CurrentRepo). It also
 // records the existing per-repo load observation for command-bearing checked-in
-// config. Inspection-only callers must use ResolveConfigForInspection so a read
-// cannot create that durable state.
+// config. Inspection-only callers must use ResolveConfigForRepoInspection so a
+// read cannot create that durable state.
 func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, recordInRepoLoadObservation)
 }
@@ -100,15 +100,6 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 // the bare directory owns identity but has no checked-out files.
 func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
 	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
-}
-
-// ResolveConfigForInspection returns the same effective values and provenance
-// as ResolveConfig without logging or persisting the per-repo load observation.
-// It is the resolver for read surfaces such as `af config --project`. This is
-// deliberately not called a generally write-free load: LoadConfig retains its
-// documented first-run and legacy-format migration behavior.
-func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
-	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
 }
 
 // ResolveConfigForRepoInspection is ResolveConfigForRepo without the durable

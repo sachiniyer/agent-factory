@@ -352,10 +352,3 @@ func seedNetworkConfig(t *testing.T, home string) {
 		"\n[network]\nlisten_addr = '127.0.0.1:8443'\n"
 	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName), []byte(body), 0o600))
 }
-
-// freeLoopbackAddrOrSkip is grabFreeLoopbackAddr's contract stated locally so this
-// file reads on its own: a loopback address nothing is listening on right now.
-func freeLoopbackAddrOrSkip(t *testing.T) string {
-	t.Helper()
-	return grabFreeLoopbackAddr(t)
-}
