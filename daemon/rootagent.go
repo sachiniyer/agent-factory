@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -278,7 +279,7 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 		return
 	}
 
-	repo, err := config.RepoFromPath(config.ExpandTilde(path))
+	repo, err := resolveLegacyRootRepo(path)
 	if err != nil {
 		m.rootEnsureFailed(path, st, fmt.Errorf("%s: %w", repoResolveClaim("root_agents entry", path, err), err))
 		return
@@ -290,6 +291,64 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 	// mismatch releases the repo so its legacy opt-in still applies — and #3366
 	// deliberately does not change it (see verifyRootCreateCheckout).
 	m.ensureResolvedRoot(path, st, repo, resolution, nil)
+}
+
+// rootLegacyRepoProbeTimeout bounds the repository resolution the legacy
+// root_agents sweep performs on the instance poll goroutine every
+// non-backed-off tick (#3757).
+//
+// 2s, matching rootHealProbeGrace — its sibling on the same goroutine for the
+// same purpose — and the value repoGitWaitDelay documents as "what every other
+// WaitDelay in this repo uses for this same mechanism".
+//
+// GENEROUS ON PURPOSE, and the asymmetry is the reason. A budget that expires
+// on a checkout which was merely slow costs a HEALTHY repo a backoff interval
+// of delayed healing, and #3503 is the standing lesson about stingy probe
+// budgets on a box whose load baseline is 60-95. Being late here is cheap;
+// being wrong about a live checkout is not. The bound exists to convert
+// "indefinitely" into "bounded", not to make the sweep prompt.
+//
+// The worst case is ~2x this, not this: repoProbeWaitDelay grants each probe a
+// WaitDelay allowance equal to the caller's remaining time, and that timer
+// STARTS WHEN THE CONTEXT IS DONE, so it is added to the deadline rather than
+// carved out of it. Commands attempted after the deadline get the 50ms floor,
+// so the total settles around 4s. Paid at most once per backoff interval — 10s
+// doubling to rootEnsureBackoffMax — rather than once per tick, and never
+// forever, which was the whole defect.
+//
+// A package var so tests can drive both sides of the bound; production never
+// reassigns it.
+var rootLegacyRepoProbeTimeout = 2 * time.Second
+
+// legacyRootRepoFromPath resolves one root_agents path for the ensure sweep,
+// under the caller's context. A package var so a test can drive the stalled-path
+// case this bound exists for; production assigns it once.
+var legacyRootRepoFromPath = config.RepoFromPathContext
+
+// resolveLegacyRootRepo resolves one root_agents path under a bound, owning the
+// context's lifetime so it cannot outlive the resolution it bounds.
+//
+// THE BOUNDED ENTRY POINT, NOT THE UNBOUNDED ONE, and the distinction is the
+// whole of #3757. config.RepoFromPathContext's contract states the split: it is
+// what "polling and registry scans use ... so one unreachable checkout cannot
+// indefinitely block an unrelated live project", while "admission paths retain
+// RepoFromPath's full error contract and unbounded caller lifetime". This sweep
+// is polling. It admits nothing — a refusal here returns before
+// ensureResolvedRoot, so nothing is adopted, reaped, created or released — so
+// there is no half-created object a deadline could strand. That is exactly the
+// property #3721's create does NOT have, which is why that one was moved off
+// this goroutine instead of bounded.
+//
+// A timed-out resolution is therefore UNKNOWN, never a verdict: the error
+// carries config.ErrRepoProbeUnanswered, rootEnsureFailed counts it as a
+// failure that established nothing, repoResolveClaim words it in #3500's form,
+// and the candidate settles onto the ensure backoff and keeps retrying forever
+// (#1122). A live root on that repo is untouched throughout — the sweep never
+// reaches the code that could touch it.
+func resolveLegacyRootRepo(path string) (*config.RepoContext, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rootLegacyRepoProbeTimeout)
+	defer cancel()
+	return legacyRootRepoFromPath(ctx, config.ExpandTilde(path))
 }
 
 // ensureSingletonRootAgent ensures the root for a registered project enabled by
