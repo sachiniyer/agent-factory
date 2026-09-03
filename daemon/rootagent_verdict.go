@@ -172,9 +172,14 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	if record, ok := layers.unresolvedRoots[repoID]; ok && record.markerUnreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, rootUnresolved: true, rootMarkerUnreadable: true, rootPathVanished: record.pathVanished, projectID: record.projectID}
 	}
-	// RED (#3782 item 4): the unknown answer is dropped, so an unanswered
-	// probe still reports the repo as unconfigured.
-	legacy, _ := m.legacyRootAgentForRepo(repoID)
+	legacy, legacyErr := m.legacyRootAgentForRepo(repoID)
+	if legacyErr != nil {
+		// UNKNOWN, and it may not become "not configured". nil from this
+		// lookup renders as "add a root_agents entry", which is advice a user
+		// cannot act on when the entry is already there and a probe simply did
+		// not answer (#3264's misreport, reached through a deadline).
+		return rootAgentMaterializeVerdict{reason: rootAgentLegacyProbeUnanswered}
+	}
 	_, isProject := layers.projectRoots[repoID]
 	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
 	if legacy == nil && isUnresolved && unresolved.root != "" {
@@ -186,8 +191,13 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 		// opt-in sits in root_agents the whole time resolves to "disabled"
 		// instead of "enabled, but its recorded path did not resolve" — the
 		// misreport #3264 exists to prevent.
-		// RED (#3782 item 4): same, for the recorded-root fallback.
-		legacy, _ = m.legacyRootAgentForRecordedRoot(unresolved.root)
+		recorded, recordedErr := m.legacyRootAgentForRecordedRoot(unresolved.root)
+		if recordedErr != nil {
+			// The LAST place an entry could be found, so an unknown here is an
+			// unknown for the whole verdict.
+			return rootAgentMaterializeVerdict{reason: rootAgentLegacyProbeUnanswered}
+		}
+		legacy = recorded
 	}
 	if legacy == nil && !isProject && !isUnresolved {
 		if len(layers.recordFailureIDs) > 0 {
@@ -255,9 +265,9 @@ func rootAgentCreateRefusalVerdict(refusal rootCreateRefusal, enabledSource conf
 // states the rule and its two limits; the daemon reads it from its start-of-day
 // config exactly as every other legacy lookup here does.
 func (m *Manager) legacyRootAgentForRecordedRoot(root string) (*config.RootAgentConfig, error) {
-	// RED (#3782 item 4): unbounded, on the same goroutine and under the same
-	// lock as the lookup above it.
-	entry, _, err := legacyRootAgentForRecordedRootContext(context.Background(), m.cfg, root)
+	ctx, cancel := context.WithTimeout(context.Background(), rootLegacyRepoProbeTimeout)
+	defer cancel()
+	entry, _, err := legacyRootAgentForRecordedRootContext(ctx, m.cfg, root)
 	return entry, err
 }
 
