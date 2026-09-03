@@ -293,7 +293,7 @@ func TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown(t *testing.T) {
 		"precondition: %q must derive the root's tmux name, or this proves nothing", collidingRootTitle)
 
 	var createErr error
-	var createAttempted bool
+	var createAttempted, claimedDuringKill, slotHeldDuringKill bool
 	(*backends)[0].duringKill = func() {
 		createAttempted = true
 		_, createErr = manager.CreateSession(context.Background(), CreateSessionRequest{
@@ -301,6 +301,16 @@ func TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown(t *testing.T) {
 			RepoPath: repoPath,
 			Program:  "bash",
 		})
+		// Sample INSIDE the teardown. Both facts are about the window, and both
+		// are legitimately false once reapDeadRoot returns: a successful reap
+		// deletes the instance from the map and releases the claim, which is the
+		// whole point of it. Asserting either afterwards tests the wrong moment —
+		// measured: the first cut of this test did exactly that and failed on the
+		// reap's own correct cleanup.
+		manager.mu.Lock()
+		_, claimedDuringKill = manager.killsInFlight[key]
+		slotHeldDuringKill = manager.instances[key] == first
+		manager.mu.Unlock()
 	}
 
 	_, _, err = manager.reapDeadRoot(repo.ID, first)
@@ -314,16 +324,18 @@ func TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown(t *testing.T) {
 		"a create colliding on the root's tmux name was admitted while its teardown was in flight; "+
 			"the sweep can now adopt the replacement's generation and reap it (#3309)")
 
-	// And the rename must not have happened: the archived root still owns its own
-	// key. This is the property the fence protects, asserted directly rather than
-	// inferred from the error text.
-	manager.mu.Lock()
-	stillAtOriginalKey := manager.instances[key] == first
-	manager.mu.Unlock()
-	require.True(t, stillAtOriginalKey,
+	// The claim was actually held while the teardown ran — without this, a green
+	// result could mean the create was refused for some unrelated reason.
+	require.True(t, claimedDuringKill,
+		"reapDeadRoot did not hold its killsInFlight claim during the teardown, so the fence above was not what refused the create")
+	// And the rename did not happen: the archived root still owned its own key
+	// throughout. This is the property the fence protects, asserted directly
+	// rather than inferred from the error text.
+	require.True(t, slotHeldDuringKill,
 		"the archived root was re-keyed out of its (repo, title) slot during its own teardown")
 
-	// And the claim must not leak: a heal that ends leaves the title operable.
+	// And the claim must not leak past the call: a heal that ends leaves the
+	// title operable.
 	manager.mu.Lock()
 	_, stillClaimed := manager.killsInFlight[key]
 	manager.mu.Unlock()
