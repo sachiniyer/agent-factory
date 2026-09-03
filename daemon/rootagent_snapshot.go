@@ -185,13 +185,23 @@ func legacyRepoIDSet(cfg *config.Config, resolve legacyRepoResolver, previous ma
 	byPath := map[string]string{}
 	for path := range cfg.RootAgents {
 		repo, err := resolve(path)
-		if err != nil {
-			// RED (#3782 item 1): every failure drops the entry, unanswered
-			// probes included. previous is threaded in for the fix to consume.
-			continue
+		switch {
+		case err == nil:
+			ids[repo.ID] = true
+			byPath[path] = repo.ID
+		case !config.RepoProbeUnanswered(err):
+			// A VERDICT. git ran and answered that the path is not a
+			// repository right now — #1122's not-yet-cloned entry, or a
+			// checkout that went away — and a verdict about the path may drop
+			// the entry, exactly as it always has.
+		case previous[path] != "":
+			// UNKNOWN. Nothing was established, so the last resolution stands.
+			ids[previous[path]] = true
+			byPath[path] = previous[path]
+		default:
+			// UNKNOWN, and nothing to stand: this path has never resolved, so
+			// it was never in the set to begin with.
 		}
-		ids[repo.ID] = true
-		byPath[path] = repo.ID
 	}
 	return ids, byPath
 }
