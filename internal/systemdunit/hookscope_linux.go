@@ -28,6 +28,20 @@ const (
 	hookScopeStopTimeout = 30 * time.Second
 )
 
+// hookLauncherSettleTimeout bounds how long the sweep waits for a launcher it
+// found to become a scope it can stop, and hookLauncherPollInterval is how often
+// it re-asks. The wait is normally microseconds — the window closes when systemd
+// answers StartTransientUnit — so this budget is for the pathological case: a
+// launcher wedged on a bus that never replies. Waiting it out and then FAILING
+// is the point; returning success at any moment in the window is the defect.
+//
+// Vars, not consts, only so a test can collapse the clock. Production never
+// reassigns them.
+var (
+	hookLauncherSettleTimeout = 15 * time.Second
+	hookLauncherPollInterval  = 100 * time.Millisecond
+)
+
 func systemctlUser(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "systemctl", append([]string{"--user", "--no-pager"}, args...)...)
 	// CommandContext kills only the immediate process; without a delay Output
@@ -88,11 +102,8 @@ func RunningHookScopes(prefixes ...string) ([]string, error) {
 		if fields[2] == "inactive" {
 			continue
 		}
-		for _, prefix := range present {
-			if strings.HasPrefix(fields[0], prefix+"-") {
-				units = append(units, fields[0])
-				break
-			}
+		if hasHookPrefix(fields[0], present) {
+			units = append(units, fields[0])
 		}
 	}
 	return units, nil
@@ -113,25 +124,84 @@ func nonEmpty(values []string) []string {
 // that are still there. Callers on the rebuild/remove path must fail closed on
 // the error, exactly as they already do for an unjoined in-process hook — a
 // survivor holding the old tree is the hazard the ordering exists to prevent.
+//
+// It consults TWO oracles, because one of them can be silent while a hook is
+// still coming. A unit's absence is not evidence on its own: for the interval
+// between systemd-run's execve and its StartTransientUnit reply the scope does
+// not exist yet, and a daemon that died in that window (KillMode=process) left
+// the launcher alive and unscoped. RunningHookLaunchers finds it, and a launcher
+// found means "a hook survives" — so this WAITS for it to become a stoppable
+// scope instead of reporting the tree clear (#3667).
+//
+// Neither oracle may fail quietly. A systemctl that cannot reach the manager and
+// a process table that cannot be read are both UNKNOWN, and both come back as an
+// error the caller must refuse on.
 func StopHookScopes(prefixes ...string) error {
-	units, err := RunningHookScopes(prefixes...)
-	if err != nil {
-		return err
-	}
-	if len(units) == 0 {
+	present := nonEmpty(prefixes)
+	if len(present) == 0 {
 		return nil
 	}
-	if err := StopScopeUnits(units...); err != nil {
-		return err
+	deadline := time.Now().Add(hookLauncherSettleTimeout)
+	for {
+		// The LAUNCHER oracle is read first, and the order is load-bearing. A
+		// launcher that registers between the two reads turns into a unit the
+		// list below still sees; reading the units first would let exactly that
+		// hook fall through the gap between them, seen by neither.
+		launchers, err := RunningHookLaunchers(present...)
+		if err != nil {
+			return err
+		}
+		units, err := RunningHookScopes(present...)
+		if err != nil {
+			return err
+		}
+		if len(units) > 0 {
+			if err := StopScopeUnits(units...); err != nil {
+				return err
+			}
+			if units, err = RunningHookScopes(present...); err != nil {
+				return err
+			}
+		}
+		if len(launchers) == 0 {
+			if len(units) == 0 {
+				return nil
+			}
+			return fmt.Errorf("hook scopes %s are still active after stop", strings.Join(units, ", "))
+		}
+		// A launcher is alive, so a hook survives even though its scope does not
+		// exist yet — and it cannot be stopped by name until it does. WAIT for it
+		// rather than proceeding: it is about to exec the operator's command with
+		// the cwd this caller is on its way to rebuild or move (#3667).
+		//
+		// Waiting rather than killing also keeps this inside the authority the
+		// sweep already had. What it ends is the SCOPE, through the manager, once
+		// the manager admits the scope exists.
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf(
+				"hook launcher%s %s did not register within %s, so a hook is still about to start in this worktree",
+				plural(len(launchers)), describeHookLaunchers(launchers), hookLauncherSettleTimeout)
+		}
+		time.Sleep(hookLauncherPollInterval)
 	}
-	remaining, err := RunningHookScopes(prefixes...)
-	if err != nil {
-		return err
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
 	}
-	if len(remaining) > 0 {
-		return fmt.Errorf("hook scopes %s are still active after stop", strings.Join(remaining, ", "))
+	return "s"
+}
+
+// describeHookLaunchers names the pids and the scopes they are about to claim,
+// so an operator reading the refusal can find the process rather than being told
+// only that one exists.
+func describeHookLaunchers(launchers []HookLauncher) string {
+	parts := make([]string, 0, len(launchers))
+	for _, launcher := range launchers {
+		parts = append(parts, fmt.Sprintf("pid %d (%s)", launcher.PID, launcher.Unit))
 	}
-	return nil
+	return strings.Join(parts, ", ")
 }
 
 // StopScopeUnits stops named scopes. A unit that is already gone is not an

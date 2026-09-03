@@ -276,8 +276,10 @@ func readArgv(pid int) ([]string, error) {
 	if len(argv) == 0 {
 		// Kernel threads and reaped-but-unwaited zombies have an empty
 		// cmdline. Nothing to classify; say so rather than returning a
-		// zero-length argv that reads as a successful parse.
-		return nil, fmt.Errorf("pid %d has no argv", pid)
+		// zero-length argv that reads as a successful parse. ErrNoArgv marks it
+		// as that POSITIVE finding, so a scan can skip it without confusing it
+		// with an argv it was refused (see ProcessesMatchingArgv).
+		return nil, fmt.Errorf("%w: pid %d", ErrNoArgv, pid)
 	}
 	return argv, nil
 }

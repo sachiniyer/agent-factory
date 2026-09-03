@@ -504,6 +504,14 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   in-flight build. It is stopped when af is about to rebuild or delete that
   worktree, and left alone otherwise.
 
+  A hook is discoverable from the instant it is launched, not from the instant
+  its scope appears. Before a scope is registered the launching `systemd-run` is
+  itself the handle, so af waits for it rather than treating the missing unit as
+  proof the worktree is free. That wait is normally imperceptible; if a launcher
+  never registers — a user manager that stops answering — af refuses to rebuild
+  or archive that worktree and names the pid, rather than moving a tree a hook is
+  about to be started in.
+
 Sessions created from the TUI or the CLI in-process are unaffected — those hooks
 run exactly as before — and on macOS the behaviour is unchanged everywhere.
 

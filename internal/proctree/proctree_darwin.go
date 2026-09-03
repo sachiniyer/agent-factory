@@ -210,7 +210,7 @@ func readArgv(pid int) ([]string, error) {
 		return nil, err
 	}
 	if len(argv) == 0 {
-		return nil, fmt.Errorf("pid %d has no argv", pid)
+		return nil, fmt.Errorf("%w: pid %d", ErrNoArgv, pid)
 	}
 	return argv, nil
 }
