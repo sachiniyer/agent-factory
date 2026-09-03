@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Probes against the FIXTURE the marshaler contract builds, rather than against
@@ -279,4 +281,352 @@ func emptyCollectionForm(typ reflect.Type) (string, bool) {
 		return "{}", true
 	}
 	return "", false
+}
+
+// reviewAs registers a synthetic type as a reviewed marshaler for the duration
+// of one probe.
+//
+// fill refuses a self-rendering type it has not been told about, and refuses it
+// at the ROOT before planting anything — rightly, since a marshaler it has not
+// read can emit text out of state it never planted. Every probe below is such a
+// type, so without this the fixture built for one is empty and the reading is
+// vacuous. The entry registered is the entry the probe is then read against, so
+// nothing is claimed here that the assertion does not also use.
+//
+// The tests in this package do not run in parallel, and this is why they must
+// not start: reviewedMarshalerTypes is shared, so two probes registered at once
+// would show each other's synthetic types to the contract — which iterates the
+// whole map — and to the gap register.
+func reviewAs(t *testing.T, typ reflect.Type, entry reviewedMarshaler) {
+	t.Helper()
+	if _, taken := reviewedMarshalerTypes[typ]; taken {
+		t.Fatalf("%s is already a reviewed marshaler; registering the probe would overwrite it", typ)
+	}
+	reviewedMarshalerTypes[typ] = entry
+	t.Cleanup(func() { delete(reviewedMarshalerTypes, typ) })
+}
+
+// guardStructuralGateRecord reaches for hidden state only in the two structural
+// shapes the hidden-state comparison never used to be built for: an optional
+// pointer ABSENT, and a collection allocated-but-EMPTY.
+//
+// The member it moves is one the entry DECLARES, which is what makes the defect
+// invisible to everything but the byte-identity reading — the member diff
+// accepts a declared extra by name whatever it holds, and the text-independence
+// reading sees no movement because every marker is the same length.
+type guardStructuralGateRecord struct {
+	Name     string   `json:"name"`
+	Optional *string  `json:"optional"`
+	Items    []string `json:"items"`
+	hidden   string
+}
+
+func (r guardStructuralGateRecord) MarshalJSON() ([]byte, error) {
+	tag := "constant"
+	if r.Optional == nil || (r.Items != nil && len(r.Items) == 0) {
+		tag = fmt.Sprintf("hidden:%d", len(r.hidden))
+	}
+	type wire guardStructuralGateRecord
+	return appendGuardTag(json.Marshal(wire(r)))(tag)
+}
+
+// guardNamedStateGateRecord opens the same gate only when a hand-named scalar
+// state and a structural shape COINCIDE.
+//
+// Kind is set to a value the generic patterns cannot produce — they seed 0
+// through 8 — so no reading of the generic states opens it, and only a named
+// reading that also builds the structural modes can (#3655 item 5).
+type guardNamedStateGateRecord struct {
+	Kind     int     `json:"kind"`
+	Optional *string `json:"optional"`
+	hidden   string
+}
+
+// guardNamedKind is that value.
+const guardNamedKind = 42
+
+func (r guardNamedStateGateRecord) MarshalJSON() ([]byte, error) {
+	tag := "constant"
+	if r.Kind == guardNamedKind && r.Optional == nil {
+		tag = fmt.Sprintf("hidden:%d", len(r.hidden))
+	}
+	type wire guardNamedStateGateRecord
+	return appendGuardTag(json.Marshal(wire(r)))(tag)
+}
+
+// guardHiddenScalarGateRecord is gated on a hidden BOOL and nothing else.
+//
+// Nothing plants a hidden scalar — the unwalked pass has no marker for one — so
+// the scalar seeder is the only thing that ever sets it, and seeding it on both
+// sides of the comparison left the gate in the same position in both records
+// (#3655 item 9).
+type guardHiddenScalarGateRecord struct {
+	Name string `json:"name"`
+	gate bool
+}
+
+func (r guardHiddenScalarGateRecord) MarshalJSON() ([]byte, error) {
+	tag := "shut"
+	if r.gate {
+		tag = "open"
+	}
+	type wire guardHiddenScalarGateRecord
+	return appendGuardTag(json.Marshal(wire(r)))(tag)
+}
+
+// appendGuardTag splices a `tag` member onto a marshalled object, which is how
+// each probe above adds the DECLARED extra whose value the reading has to watch.
+// Curried so a marshaler can pass its error through in one line.
+func appendGuardTag(out []byte, err error) func(string) ([]byte, error) {
+	return func(tag string) ([]byte, error) {
+		if err != nil {
+			return nil, err
+		}
+		return append(out[:len(out)-1], []byte(fmt.Sprintf(`,"tag":%q}`, tag))...), nil
+	}
+}
+
+// guardTagEntry is the exemption each of those probes is read against: `tag` is
+// declared, so only the independence readings can object to it.
+var guardTagEntry = reviewedMarshaler{
+	why:   "synthetic: declares a constant tag beside the fields, derived from nothing",
+	extra: map[string]string{"tag": `"constant"`},
+}
+
+// TestGuardHiddenStateIndependenceReadsEveryStructuralMode holds the with/without
+// comparison to every shape the fixture builds.
+//
+// It used to be built for the populated and sparse shapes only, so a marshaler
+// that reached for unwalked state exactly when an optional pointer was absent —
+// or when a collection was allocated-but-empty — kept that dependence in two of
+// the four modes the contract already constructs (#3655 item 2).
+//
+// The two shapes that do NOT open the gate are the control: the same marshaler,
+// read in the two modes that always had the comparison, must stay silent. A
+// probe that reported everywhere would pass for the wrong reason.
+func TestGuardHiddenStateIndependenceReadsEveryStructuralMode(t *testing.T) {
+	typ := reflect.TypeOf(guardStructuralGateRecord{})
+	reviewAs(t, typ, guardTagEntry)
+	report := &marshalerReport{}
+	readStructuralModes(t, report, typ, guardTagEntry, "probe",
+		fixtureSpec{seq: 100, pattern: guardScalarPatterns[1], state: 3, withUnwalked: true})
+	assertModesReported(t, report, []string{" (nil pointers)", " (empty, not nil)"}, []string{" (sparse)"})
+}
+
+// TestGuardNamedStateReadingCoversEveryStructuralMode is the same property for a
+// reading that names its own state.
+//
+// The archived reading built the fully populated shape and nothing else, so a
+// marshaler acting on a legacy archived row whose Tabs are nil — the shape a
+// pre-#1195 row actually has — was never read at all (#3655 item 5). The gate
+// here needs BOTH the named state and the structural shape, so nothing but a
+// named reading that builds the modes can open it.
+func TestGuardNamedStateReadingCoversEveryStructuralMode(t *testing.T) {
+	typ := reflect.TypeOf(guardNamedStateGateRecord{})
+	reviewAs(t, typ, guardTagEntry)
+	report := &marshalerReport{}
+	readStructuralModes(t, report, typ, guardTagEntry, "probe", fixtureSpec{
+		seq: 200, pattern: guardEveryScalarSet, state: 1, withUnwalked: true,
+		override: func(value reflect.Value) {
+			value.Addr().Interface().(*guardNamedStateGateRecord).Kind = guardNamedKind
+		},
+	})
+	assertModesReported(t, report, []string{" (nil pointers)"}, []string{" (sparse)", " (empty, not nil)"})
+
+	// Without the override the named state never occurs, so the generic
+	// readings cannot be what caught it.
+	generic := &marshalerReport{}
+	readStructuralModes(t, generic, typ, guardTagEntry, "probe",
+		fixtureSpec{seq: 300, pattern: guardScalarPatterns[1], state: 3, withUnwalked: true})
+	if found := allFindings(generic); len(found) > 0 {
+		t.Errorf("the generic states reported %v, and the probe's gate needs Kind = %d, which "+
+			"they never seed — so the named reading is not what this test is measuring",
+			found, guardNamedKind)
+	}
+}
+
+// TestGuardSeedsHiddenScalarsOnlyWithHiddenState holds the scalar seeder to the
+// fixture's own withUnwalked.
+//
+// Seeding hidden scalars unconditionally put the same value on both sides of the
+// comparison whose entire job is to differ, so a marshaler gated on a hidden
+// bool or numeric emitted identical bytes with hidden state populated and with
+// it empty (#3655 item 9). Read across every state, because the gate is open
+// only where the pattern makes it so.
+func TestGuardSeedsHiddenScalarsOnlyWithHiddenState(t *testing.T) {
+	typ := reflect.TypeOf(guardHiddenScalarGateRecord{})
+	reviewAs(t, typ, guardTagEntry)
+	var reported int
+	seq := 400
+	for _, spread := range guardScalarPatterns {
+		for _, state := range guardMarshalerStates {
+			report := &marshalerReport{}
+			readStructuralModes(t, report, typ, guardTagEntry, "probe",
+				fixtureSpec{seq: seq, pattern: spread, state: state, withUnwalked: true})
+			reported += len(allFindings(report))
+			seq += 100
+		}
+	}
+	if reported == 0 {
+		t.Errorf("no reading objected to a marshaler gated on a HIDDEN bool, across %d states.\n\n"+
+			"Nothing but the seeder ever sets one, so seeding it in the control record too "+
+			"leaves the two records identical in the only state the comparison exists to read.",
+			len(guardScalarPatterns)*len(guardMarshalerStates))
+	}
+}
+
+// guardWalkedTimestampRecord transforms an ordinary member when a walked
+// timestamp is set — the exported one, and the optional pointer beside it.
+type guardWalkedTimestampRecord struct {
+	Name      string     `json:"name"`
+	CreatedAt time.Time  `json:"created_at"`
+	Optional  *time.Time `json:"optional"`
+}
+
+func (r guardWalkedTimestampRecord) MarshalJSON() ([]byte, error) {
+	type wire guardWalkedTimestampRecord
+	out := wire(r)
+	if !r.CreatedAt.IsZero() {
+		out.Name = "created:" + out.Name
+	}
+	if r.Optional != nil {
+		out.Name = "optional:" + out.Name
+	}
+	return json.Marshal(out)
+}
+
+// TestGuardSeedsWalkedTimestamps pins both halves of #3655 item 13.
+//
+// fill exempts time.Time as text-free and returns at one BEFORE its pointer arm
+// allocates, and the seeder used to step over it — so every fixture carried its
+// exported timestamps at the zero instant and its optional ones absent. A
+// marshaler that adds or transforms text only when a timestamp is SET had that
+// branch shut in every reading. InstanceData alone has 26 such leaves.
+func TestGuardSeedsWalkedTimestamps(t *testing.T) {
+	typ := reflect.TypeOf(guardWalkedTimestampRecord{})
+	entry := reviewedMarshaler{why: "synthetic: claims to emit exactly its fields"}
+	reviewAs(t, typ, entry)
+	report := &marshalerReport{}
+	readStructuralModes(t, report, typ, entry, "probe",
+		fixtureSpec{seq: 900, pattern: guardScalarPatterns[1], state: 3, withUnwalked: true})
+
+	found := allFindings(report)
+	for _, want := range []string{"created:", "optional:"} {
+		if !containsAny(found, want) {
+			t.Errorf("no reading objected to a member transformed only while a timestamp is set "+
+				"(%q missing from %v).\n\n"+
+				"An exported timestamp seeded to a non-zero instant is what opens that branch, and "+
+				"an optional one has to be ALLOCATED before it can be read as present.", want, found)
+		}
+	}
+	// The nil-pointers mode is the control: it clears the optional again, so the
+	// absent reading is not lost to the allocation.
+	if !containsAny(found, "(nil pointers): name emits \"created:") {
+		t.Errorf("the nil-pointers mode did not read the optional timestamp as ABSENT: %v\n\n"+
+			"Allocating it in the seeder must not take the absent branch away — the structural "+
+			"mode is what keeps both readings.", found)
+	}
+}
+
+// guardWipingText is a named string whose POINTER-receiver marshaler renders the
+// value and then clears it: the wipe-after-read shape a secret-holding type
+// plausibly has.
+type guardWipingText string
+
+func (t *guardWipingText) MarshalJSON() ([]byte, error) {
+	out, err := json.Marshal(string(*t))
+	*t = ""
+	return out, err
+}
+
+// guardSharedStorageRecord holds one through a pointer, which a plain twin
+// SHARES — the twin copies the pointer, not the string behind it.
+type guardSharedStorageRecord struct {
+	Name string           `json:"name"`
+	Wipe *guardWipingText `json:"wipe"`
+}
+
+func (r guardSharedStorageRecord) MarshalJSON() ([]byte, error) {
+	type wire guardSharedStorageRecord
+	return json.Marshal(wire(r))
+}
+
+// TestGuardFixtureBuildsIndependentRecords pins the property #3655 item 4 says
+// the named reading did not have: the twin and the custom marshal must be built
+// from two records, not from two readings of one.
+//
+// The baseline is captured first, which protects it from a marshaler that
+// rewrites what it renders — but only until the NEXT call. json takes the
+// address of an addressable value when it invokes a pointer-receiver marshaler,
+// and a twin shares every pointer, slice and map with the record it was built
+// from, so marshalling the twin reaches through to the original. The custom call
+// then reads what the baseline call destroyed and the contract blames the
+// marshaler for a difference the fixture made.
+//
+// Both constructions are run here, so the defect is exhibited rather than
+// described: one record reports, two records do not.
+func TestGuardFixtureBuildsIndependentRecords(t *testing.T) {
+	typ := reflect.TypeOf(guardSharedStorageRecord{})
+	entry := reviewedMarshaler{why: "synthetic: claims to emit exactly its fields"}
+	reviewAs(t, typ, entry)
+	spec := fixtureSpec{seq: 800, pattern: guardScalarPatterns[0], state: 2, override: func(value reflect.Value) {
+		text := guardWipingText("PLANTED")
+		value.Addr().Interface().(*guardSharedStorageRecord).Wipe = &text
+	}}
+
+	// One record, read twice — what archivedFixture used to do.
+	shared, _ := plantedRecord(t, typ, spec)
+	single := marshalerFixture{
+		baseline: marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, shared)),
+		custom:   marshalReviewed(t, typ, shared),
+	}
+	report := &marshalerReport{}
+	diffFixture(t, report, typ, entry, "one record", single, false)
+	if found := allFindings(report); len(found) == 0 {
+		t.Fatalf("the probe no longer exhibits the defect: reading ONE record twice reported "+
+			"nothing.\n\nbaseline %s\ncustom   %s\n\nMarshalling the twin has to reach the "+
+			"original through the shared pointer, or there is nothing for two records to fix.",
+			single.baseline, single.custom)
+	}
+
+	report = &marshalerReport{}
+	diffFixture(t, report, typ, entry, "two records", newMarshalerFixture(t, typ, spec), false)
+	if found := allFindings(report); len(found) > 0 {
+		t.Errorf("two independent records still reported %v.\n\nEach marshal must read a record "+
+			"the other has not touched.", found)
+	}
+}
+
+// assertModesReported holds a reading to the modes it was supposed to object in,
+// and to silence in the rest.
+func assertModesReported(t *testing.T, report *marshalerReport, want, quiet []string) {
+	t.Helper()
+	found := allFindings(report)
+	for _, mode := range want {
+		if !containsAny(found, mode) {
+			t.Errorf("no reading objected in the%s mode: %v\n\n"+
+				"The probe's marshaler moves a DECLARED member with hidden state in exactly that "+
+				"shape, so only the with/without comparison built for it can see the movement.",
+				mode, found)
+		}
+	}
+	for _, mode := range quiet {
+		if containsAny(found, mode) {
+			t.Errorf("the%s mode reported, and the probe's gate is shut there: %v\n\n"+
+				"A probe that objects everywhere passes for the wrong reason.", mode, found)
+		}
+	}
+}
+
+func allFindings(report *marshalerReport) []string {
+	return append(append(append([]string(nil), report.added...), report.changed...), report.dropped...)
+}
+
+func containsAny(found []string, want string) bool {
+	for _, f := range found {
+		if strings.Contains(f, want) {
+			return true
+		}
+	}
+	return false
 }
