@@ -68,7 +68,8 @@ func TestLegacyRootAgentSelectionIsDeterministicAcrossEquivalentPaths(t *testing
 	}
 	manager := &Manager{cfg: cfg}
 	for range 100 {
-		got := manager.legacyRootAgentForRepo(repo.ID)
+		got, err := manager.legacyRootAgentForRepo(repo.ID)
+		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "first", got.Program)
 	}

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -144,8 +146,23 @@ func rootAgentKeyMatchesRepo(key, repoID string) bool {
 // is there now — the ensure sweep will create under that identity, not this
 // one — so it is not this project's answer.
 func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootAgentConfig, string) {
+	entry, key, _ := LegacyRootAgentForRecordedRootContext(context.Background(), global, recordedRoot)
+	return entry, key
+}
+
+// LegacyRootAgentForRecordedRootContext is LegacyRootAgentForRecordedRoot under
+// a caller-owned deadline, with the same third return and for the same reason
+// (#3782 item 4): its nil is conservative — it declines to hand a stale
+// project's opt-in to whatever occupies the path — but a nil produced because
+// the probe never answered is not that judgement, it is the absence of one.
+//
+// It matters because this is the LAST chance the verdict has to find an entry.
+// A nil here with a nil from LegacyRootAgentForRepoContext becomes "no root
+// agent is configured for this repo — add a root_agents entry", said to a user
+// whose entry is already there.
+func LegacyRootAgentForRecordedRootContext(ctx context.Context, global *Config, recordedRoot string) (*RootAgentConfig, string, error) {
 	if global == nil || recordedRoot == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 	cleaned := filepath.Clean(recordedRoot)
 	// Both sides go through ResolveForCompare, because the spellings genuinely
@@ -173,7 +190,7 @@ func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootA
 		}
 	}
 	if matched == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 	// A DETERMINATE verdict is required before the fallback may be returned
 	// (#3530 review ids 3918379034, 3919346216). "git failed" is not one: a
@@ -183,11 +200,20 @@ func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootA
 	// opt-in would promise a root the ensure sweep creates only for the
 	// occupant. Two outcomes qualify: git answered that the path is not inside
 	// a repository, or the path is provably gone.
-	if _, err := RepoFromPath(cleaned); err == nil || !PathIsDeterminatelyFree(cleaned, err) {
-		return nil, ""
+	_, probeErr := RepoFromPathContext(ctx, cleaned)
+	if probeErr != nil && RepoProbeUnanswered(probeErr) {
+		// Same nil, different meaning. The determinacy gate below ALREADY
+		// declines an unanswered probe — correctly, since a repository may own
+		// this path through one — but the caller cannot tell that decline from
+		// "the key does not apply", and only one of them entitles it to tell a
+		// user the repo is unconfigured.
+		return nil, "", fmt.Errorf("could not establish whether the root_agents entry %q applies to recorded root %q: %w", matched, cleaned, ErrRepoProbeUnanswered)
+	}
+	if probeErr == nil || !PathIsDeterminatelyFree(cleaned, probeErr) {
+		return nil, "", nil
 	}
 	entry := global.RootAgents[matched]
-	return &entry, matched
+	return &entry, matched, nil
 }
 
 // PathIsDeterminatelyFree reports that no repository owns path, on evidence
