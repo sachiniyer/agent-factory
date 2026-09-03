@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -364,7 +363,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if removed, cfgErr := deregisterRootAgents(optInIDs...); cfgErr != nil {
 		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
 	} else if len(removed) > 0 {
-		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
+		m.info().Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
 	}
 
 	// The repo's durable #2355 registry record is dropped LATER, only after every
@@ -552,7 +551,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		}
 		if deregistered {
 			result.Deregistered = true
-			log.InfoLog.Printf("delete project %s: a registry record recorded this identity while the delete was in flight; removed it too (recorded root %s)", repoID, root)
+			m.info().Printf("delete project %s: a registry record recorded this identity while the delete was in flight; removed it too (recorded root %s)", repoID, root)
 		}
 	}
 	if repoPath != "" {
@@ -567,11 +566,11 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		}
 		if deregistered {
 			result.Deregistered = true
-			log.InfoLog.Printf("delete project %s: removed its durable registry record", repoID)
+			m.info().Printf("delete project %s: removed its durable registry record", repoID)
 		}
 	}
 
-	log.InfoLog.Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))
+	m.info().Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))
 	return result, nil
 }
 
@@ -600,7 +599,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// config becomes readable again — the exact hazard this preflight refuses.
 	if !hasRoot {
 		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
-		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending, rootAgentLegacyProbeUnanswered:
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending, rootAgentLegacyProbeUnanswered, rootAgentProjectRootProbeUnanswered:
 			titles = append(titles, session.RootSessionTitle)
 		}
 	}

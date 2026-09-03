@@ -4,7 +4,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -255,7 +254,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	if hadReset {
 		trigger = "after its parsed usage-limit reset time passed"
 	}
-	log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
+	m.info().Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
 }
 
 // limitResumeAttempted records one auto-resume attempt and sets the gate for the

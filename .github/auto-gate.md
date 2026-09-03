@@ -59,6 +59,13 @@ It is bound by `headCurrentSince` like a Codex artifact, so a push after the
 sign-off returns the PR to the manual pass. It waives the review requirement and
 nothing else.
 
+An update-branch is not such a push (#3803). When the head is a merge with exactly
+two parents whose second is contained in the base branch, the approval and every
+Codex artifact bind to the merge's FIRST parent — the content head — because the
+reviewed change did not move. Otherwise the gate's own update-branch would void
+the approval it had just acted on, which is the livelock #3799 hit minutes after
+#3796 landed. The decision names both heads.
+
 Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.

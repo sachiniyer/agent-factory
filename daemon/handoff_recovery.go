@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -155,7 +154,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	if perr != nil {
 		return perr
 	}
-	log.InfoLog.Printf("handoff %q: delivered pending mission", entry.instance.Title)
+	m.info().Printf("handoff %q: delivered pending mission", entry.instance.Title)
 	return nil
 }
 

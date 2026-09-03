@@ -3,7 +3,6 @@ package daemon
 import (
 	"fmt"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -174,7 +173,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: %w", repoID, err)
 	}
 	if !deleted {
-		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
+		m.info().Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
 		return reapedRootState{}, false, nil
 	}
 	m.mu.Lock()

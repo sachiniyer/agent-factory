@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -156,7 +155,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 				"the record is writable",
 			instance.Title, branch, perr)
 	}
-	log.InfoLog.Printf("recovery of %q: pushed its sandbox's work to %s before replacing it", instance.Title, branch)
+	m.info().Printf("recovery of %q: pushed its sandbox's work to %s before replacing it", instance.Title, branch)
 	return nil
 }
 

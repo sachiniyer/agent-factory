@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // healRootAgentLayers is the safe-direction self-heal for the root-agent
@@ -103,7 +102,7 @@ func (m *Manager) healRootAgentLayers() {
 					changed = true
 					rpChanged = true
 					m.resetRootHealRegistryObservation()
-					log.InfoLog.Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
+					m.info().Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
 				} else if perr == nil && stillPresent {
 					// The post-read check is another valid observation. Retain it as
 					// the new candidate, but require the next cadence to agree before
@@ -324,7 +323,7 @@ func (m *Manager) retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map
 			}
 			healedCount++
 			m.resetPersonalAbsenceStreak(projectID)
-			log.InfoLog.Printf("root agent snapshot: project %s personal config was removed; root-agent resolution for repo %s resumes without a personal layer", projectID, repoID)
+			m.info().Printf("root agent snapshot: project %s personal config was removed; root-agent resolution for repo %s resumes without a personal layer", projectID, repoID)
 			continue
 		}
 		healedCount++
@@ -332,7 +331,7 @@ func (m *Manager) retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map
 		if layer := pc.RootAgentLayer(); layer != nil {
 			personal[repoID] = layer
 		}
-		log.InfoLog.Printf("root agent snapshot: project %s personal config loads again; root-agent resolution for repo %s resumes from config", projectID, repoID)
+		m.info().Printf("root agent snapshot: project %s personal config loads again; root-agent resolution for repo %s resumes from config", projectID, repoID)
 	}
 	return personal, personalUnreadable, healedCount
 }
@@ -673,6 +672,11 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			record.identityMismatch = probe.mismatch
 			record.markerUnreadable = probe.markerUnreadable
 			record.pathVanished = probe.vanished
+			// A probe RESULT establishes what the boot resolution could not,
+			// so the boot-time "nobody answered" no longer holds — clearing it
+			// here is what keeps a stale flag from wording a verdict whose
+			// cause has since been established (#3793).
+			record.rootProbeUnanswered = false
 			record.identityPass = pass
 			healed.unresolvedRoots[derivedID] = record
 			// A COMPLETED negative outcome is a normal failed read: it feeds
@@ -692,7 +696,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			// the pending gate without ever publishing the alias, and the
 			// same pass's legacy sweep could recreate the mid-delete root
 			// (#3299 review round 12).
-			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete keeps its target", record.root, record.projectID)
+			m.info().Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete keeps its target", record.root, record.projectID)
 			continue
 		}
 		// A verified match is positive proof that the checkout at the recorded
@@ -713,7 +717,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			defer m.mu.Unlock()
 			if claimant, ok := m.deletedRootRepos[derivedID]; ok && claimant == "" {
 				m.deletedRootRepos[derivedID] = record.projectID
-				log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as project %s's own checkout; adopting its unclaimed deletion tombstone so the delete is not undone by the identity transition", record.root, record.projectID)
+				m.info().Printf("root agent snapshot: recorded project root %s is verified as project %s's own checkout; adopting its unclaimed deletion tombstone so the delete is not undone by the identity transition", record.root, record.projectID)
 			}
 		}
 		adoptTombstone()
@@ -777,7 +781,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 					m.rootHealProbeFailures[derivedID]++
 					m.mu.Unlock()
 				})
-				log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but a delete holds that identity, so it was not recorded; abandoning this transition — a later pass re-derives one if the checkout is still there to prove it", record.root, repo.ID)
+				m.info().Printf("root agent snapshot: recorded project root %s is verified as repo %s, but a delete holds that identity, so it was not recorded; abandoning this transition — a later pass re-derives one if the checkout is still there to prove it", record.root, repo.ID)
 				continue
 			case err != nil:
 				// The durable write is what makes the promotion survive a
@@ -790,7 +794,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				m.warn().Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; leaving the project under its provisional identity and retrying on the ensure cadence: %v", record.root, repo.ID, record.projectID, err)
 				continue
 			case wrote:
-				log.InfoLog.Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)
+				m.info().Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)
 			}
 		}
 		// EVERYTHING keyed under the identity being left behind has to come
@@ -829,7 +833,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// of that delete. Deferring the promotion has to defer its retirement
 		// too; both retry on the next pass, together.
 		if !promoteRecordedIdentity(m, healed, derivedID, repo.ID) {
-			log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but the identity it is filed under (%s) is held by a delete or by another live project; leaving it unresolved for now", record.root, repo.ID, derivedID)
+			m.info().Printf("root agent snapshot: recorded project root %s is verified as repo %s, but the identity it is filed under (%s) is held by a delete or by another live project; leaving it unresolved for now", record.root, repo.ID, derivedID)
 			continue
 		}
 		retiredID := derivedID
@@ -841,7 +845,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		})
 		healed.projectRoots[repo.ID] = resolvedProjectRoot{root: record.root, projectID: record.projectID, checkoutID: record.checkoutID}
 		delete(healed.unresolvedRoots, derivedID)
-		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
+		m.info().Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}
 	return changed, settles
 }

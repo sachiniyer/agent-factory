@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -173,7 +172,7 @@ func (m *Manager) waitRootAgentCreatesForShutdown() {
 	m.mu.Unlock()
 	if len(pending) > 0 {
 		sort.Strings(pending)
-		log.InfoLog.Printf("waiting for %d in-flight root-agent create(s) before shutting down (%s); a create is never cancelled — one stalled on a checkout that does not answer will hold shutdown until it does (#3721)",
+		m.info().Printf("waiting for %d in-flight root-agent create(s) before shutting down (%s); a create is never cancelled — one stalled on a checkout that does not answer will hold shutdown until it does (#3721)",
 			len(pending), strings.Join(pending, ", "))
 	}
 	m.waitRootAgentCreates()
@@ -352,7 +351,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
 		return
 	}
-	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
+	m.info().Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
 	if reapedRoot {
 		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)

@@ -388,14 +388,13 @@ func TestEnsureRootAgentsUnlistableRegistryFailsClosed(t *testing.T) {
 			cfg := tc.setup(t, repoPath)
 			breakProjectRegistryEnumeration(t)
 
-			// The fail-closed ERROR fires from the snapshot inside NewManager,
-			// so the capture goes in first (httpserver_test.go idiom).
-			errorLog := captureErrors(t)
-
-			manager, err := NewManager(cfg)
-			if err != nil {
-				t.Fatalf("NewManager: %v", err)
-			}
+			// The fail-closed ERROR fires from the snapshot inside NewManager, so
+			// the logger is installed by the CONSTRUCTOR rather than captured
+			// around it — and it is this Manager's own, so the assertion below
+			// cannot be satisfied by an error another test's Manager emitted
+			// (#3797).
+			manager, ownLogs := newManagerCapturingLogs(t, cfg)
+			errorLog := ownLogs.errors
 			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != 0 {
