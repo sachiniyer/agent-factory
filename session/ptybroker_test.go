@@ -50,6 +50,12 @@ type fakeClientlessChannel struct {
 	// stopDone, when non-nil, is signaled AFTER StopCapture has closed the writer,
 	// so a test can order an assertion strictly after the teardown's effect.
 	stopDone chan struct{}
+	// snapshotErr, when non-nil, is what Snapshot returns instead of a screen — the
+	// test stand-in for a `tmux capture-pane` that fails (a pane that vanished under
+	// the exec). subscribe()'s repaint is BEST-EFFORT against exactly this: it queues
+	// no repaint when the snapshot cannot be taken, so the ring replay is the only
+	// thing left to render the pane.
+	snapshotErr error
 	// snapshotHook, when non-nil, runs at the START of each Snapshot with f.mu NOT
 	// held. The real Snapshot is a `tmux capture-pane` exec taking milliseconds, and
 	// the pane keeps producing the whole time; the hook is how a test drives output
@@ -113,6 +119,9 @@ func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots++
+	if f.snapshotErr != nil {
+		return PaneSnapshot{}, f.snapshotErr
+	}
 	return PaneSnapshot{
 		Screen:    append([]byte(nil), f.snapshot...),
 		CursorRow: f.cursorRow,
