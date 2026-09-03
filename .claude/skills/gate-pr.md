@@ -576,6 +576,41 @@ For a decomposition PR the diff must show exactly the one source file being
 decomposed, its split files, and any expected `scripts/file-length-allowlist.txt`
 or docs changes. Anything else is a tangled branch.
 
+### 7b. Reading the Auto Gate decision, when you need to
+
+You mostly do not — the gate's own decision is not one of the gates above. But
+when a landing stalls and you go to read it, read it correctly, because one field
+on this check does not mean what it means anywhere else.
+
+**The per-PR decision is refreshed IN PLACE.** `started_at` stays pinned to the
+*first* evaluation of that head forever, and `completed_at` is stamped by GitHub
+only on the first transition to `completed`. A later evaluation rewrites the
+output and moves neither. So the ordinary one-line read —
+`--jq '.check_runs[] | "\(.started_at) \(.output.title)"'` — reports a fresh
+decision as a stale one. That read is what cost #3776 its landing: a check stamped
+`09:26:48` was carrying a `CONFLICTING/DIRTY` summary that could not have been
+written before `09:55`, and the conclusion drawn was "my dispatch did not run".
+
+**Read the stamp instead.** The first line of `output.summary` is
+`evaluated: <ISO time> (run <id>)`, written on every evaluation, and the title
+names the first unmet requirement rather than one string for every block.
+
+```bash
+set -euo pipefail
+PR=<n>; G="${TMPDIR:-/tmp}/gate-pr-$PR"
+HEAD=$(jq -r '.head.sha' "$G/pr.json")
+
+gh api "repos/{owner}/{repo}/commits/$HEAD/check-runs" \
+  --jq '.check_runs[]
+        | select(.name | startswith("Auto Gate decision"))
+        | "\(.name)\n  \(.conclusion)  \(.output.title)\n  \(.output.summary | split("\n")[0])"'
+```
+
+If that first line is older than the last thing you did, the decision really is
+stale and a `workflow_dispatch` of Auto Gate by PR number will refresh it. If it
+is newer, the decision is current and the title tells you what it is waiting on —
+do not read `started_at` to decide.
+
 ### 8. Merge
 
 ```bash

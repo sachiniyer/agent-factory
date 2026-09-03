@@ -256,6 +256,36 @@ test("every document states the approval marker the gate actually matches", () =
   }
 });
 
+// The hand gate must read the decision the way the decision is written (#3800).
+//
+// The per-PR check is refreshed IN PLACE, so `started_at` stays pinned to the
+// first evaluation of that head forever and `completed_at` is stamped only on the
+// first transition to completed. Reading either the ordinary way says "stale"
+// about a decision that was rewritten seconds ago — which is exactly the wrong
+// read that cost #3776 its landing. The evaluation stamp is the first line of
+// `output.summary`, so the skill has to say so and has to spell the prefix the
+// script actually writes.
+test("the skill reads the decision by its stamp, not by started_at", () => {
+  const skill = fs.readFileSync(GATE_PR_SKILL, "utf8");
+  const { DECISION_STAMP_PREFIX } = __test;
+
+  assert.match(
+    skill,
+    /output\.summary/,
+    "gate-pr.md must tell the reader to read the decision's summary (#3800)",
+  );
+  assert.ok(
+    skill.includes(DECISION_STAMP_PREFIX),
+    `gate-pr.md must spell the stamp prefix the script writes (${JSON.stringify(DECISION_STAMP_PREFIX)})`,
+  );
+  // And it must warn off the field that lies here, by name.
+  assert.match(
+    skill,
+    /started_at/,
+    "gate-pr.md must name started_at as the field NOT to trust on this check",
+  );
+});
+
 // One rule, one wording, everywhere it is stated (#3744).
 //
 // The usage-limit rule was written out in four places — twice in auto-gate.js
@@ -513,6 +543,108 @@ test("an evaluated but blocked gate reports WAITING rather than NEVER_RAN", asyn
   assert.equal(github.createdChecks.length, 0);
   assert.equal(github.updatedChecks[0].check_run_id, 321);
   assert.match(github.updatedChecks[0].output.title, /^WAITING:/);
+});
+
+// #3800. The per-PR decision is refreshed IN PLACE, so `started_at` — and
+// `completed_at`, which GitHub stamps only on the first transition to completed —
+// stay pinned to the first evaluation of that head forever. A later evaluation
+// rewrites the summary and moves neither, and the title collapsed every unmet
+// requirement to one string. From outside the run log a freshly re-evaluated
+// block is indistinguishable from a stale one.
+//
+// That cost #3776 a wrong read: the check stamped 09:26:48 was carrying a
+// CONFLICTING/DIRTY summary that could not have been written before 09:55, so
+// the decision had been refreshed and only its timestamps lied.
+//
+// The stamp lives in the output, because that is the part an in-place update is
+// guaranteed to rewrite.
+test("an in-place update carries an evaluation stamp that changes with the decision", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      {
+        id: 321,
+        name: "Auto Gate decision / PR #1465 / " + HEAD_SHA,
+        external_id: `auto-gate:pr:1465:head:${HEAD_SHA}`,
+        app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+        status: "completed",
+        conclusion: "failure",
+        started_at: "2026-07-09T09:26:48Z",
+        completed_at: "2026-07-09T09:26:48Z",
+        output: { title: "WAITING: Auto Gate requirements are not yet satisfied", summary: "old" },
+      },
+    ],
+  });
+
+  // Each evaluation is a separate workflow run in production, which is what makes
+  // two stamps distinguishable even when they land in the same millisecond — a
+  // wall-clock timestamp alone does not guarantee it, and these two calls proved
+  // that by producing identical ISO strings.
+  const previousRunId = process.env.GITHUB_RUN_ID;
+  const evaluate = async (summary, runId) => {
+    process.env.GITHUB_RUN_ID = runId;
+    try {
+      return await autoGate.reportDecision({
+        github,
+        context: fakeContext(),
+        core: fakeCore(),
+        result: { prNumber: "1465", headSha: HEAD_SHA, shouldMerge: false, summary },
+        manual: false,
+      });
+    } finally {
+      if (previousRunId === undefined) {
+        delete process.env.GITHUB_RUN_ID;
+      } else {
+        process.env.GITHUB_RUN_ID = previousRunId;
+      }
+    }
+  };
+
+  await evaluate("BLOCKED: required check Build is missing", "33742779898");
+  const first = github.updatedChecks.at(-1);
+  await evaluate("BLOCKED: mergeability is blocked (CONFLICTING/DIRTY)", "33742999999");
+  const second = github.updatedChecks.at(-1);
+
+  const stampOf = (check) => String(check.output.summary).split("\n", 1)[0];
+  assert.match(
+    stampOf(first),
+    /^evaluated: \d{4}-\d{2}-\d{2}T[\d:.]+Z \(run 33742779898\)$/,
+    `the summary must open with the evaluation stamp, got: ${stampOf(first)}`,
+  );
+  assert.notEqual(
+    stampOf(first),
+    stampOf(second),
+    "two evaluations must not carry the same stamp — that is the whole defect",
+  );
+  // The reason still has to be there, under the stamp.
+  assert.match(second.output.summary, /CONFLICTING\/DIRTY/);
+});
+
+// A one-line read must say WHY. Every block used to collapse to the same title,
+// so "waiting on a check" and "the branch conflicts" — the one a human must act
+// on immediately and cannot fix by waiting — looked identical.
+test("the decision title names the first unmet requirement", async () => {
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "1465",
+      headSha: HEAD_SHA,
+      shouldMerge: false,
+      summary: "BLOCKED: mergeability is blocked (CONFLICTING/DIRTY); Codex has not reviewed head",
+      reasons: [
+        "mergeability is blocked (CONFLICTING/DIRTY)",
+        "Codex has not reviewed head abc123 yet",
+      ],
+    },
+    manual: false,
+  });
+
+  const title = github.createdChecks.at(-1).output.title;
+  assert.match(title, /^WAITING:/, "the state prefix stays, so existing reads keep working");
+  assert.match(title, /mergeability is blocked/, "…and the title now says which requirement");
 });
 
 test("a read-only fork token leaves the decision unreported without failing the gate", async () => {
