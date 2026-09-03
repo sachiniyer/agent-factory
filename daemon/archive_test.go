@@ -605,7 +605,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		inst, _ := registerArchivable(t, manager, repoID, repoPath, "archive-wait")
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertOperationLockWaitBounded(t, manager, key, guardHeldAcrossTheWait, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -620,7 +620,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		require.NoError(t, err)
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertOperationLockWaitBounded(t, manager, key, guardFreeWait, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -633,7 +633,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		inst := registerStarted(t, manager, repoID, repoPath, "lost-restore-wait", backend, true, session.Lost)
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertOperationLockWaitBounded(t, manager, key, guardFreeWait, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -641,18 +641,18 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 	})
 }
 
-// What an operation is expected to hold while it waits for the per-session
-// operation lock. Archive claims killsInFlight and then waits, so its timeout has
-// to release that guard. Both restore paths take the lock BEFORE they claim
-// (#3600), so their wait holds nothing at all — which is the same #2641 property
-// in its stronger form: there is no guard left to strand, and the row the wait
-// still advertises Kill for would genuinely admit one.
-const (
-	guardHeldAcrossTheWait = true
-	guardFreeWait          = false
-)
-
-func assertOperationLockWaitBounded(t *testing.T, manager *Manager, key string, guarded bool, operation func() error) {
+// assertOperationLockWaitBounded is #2641's property, now asked in its stronger
+// form for every caller. The original question was "a wedged peer must not leave
+// killsInFlight stranded, making the session undeletable"; archive and both
+// restore paths answered it by registering the guard before the wait and
+// releasing it on timeout.
+//
+// Since #3600 (restore) and #3715 (archive) every one of them takes the op-lock
+// BEFORE it claims, so the wait holds nothing at all — there is no guard left to
+// strand, and the row the wait still advertises Kill for would genuinely admit
+// one. That subsumes the old assertion: a claim that is never registered cannot
+// be leaked, and this catches a reorder that quietly reintroduces one.
+func assertOperationLockWaitBounded(t *testing.T, manager *Manager, key string, operation func() error) {
 	t.Helper()
 	opLock := manager.opLockFor(key)
 	opLock.Lock()
@@ -667,16 +667,11 @@ func assertOperationLockWaitBounded(t *testing.T, manager *Manager, key string, 
 	go func() {
 		done <- operation()
 	}()
-	if guarded {
-		require.Eventually(t, func() bool { return killGuardHeld(manager, key) }, time.Second, 5*time.Millisecond,
-			"operation never registered its killsInFlight guard")
-	} else {
-		// Sampled inside the wait: opLockTimeout is 200ms here and the peer never
-		// lets go, so the operation cannot get past the lock during this window.
-		require.Never(t, func() bool { return killGuardHeld(manager, key) }, 100*time.Millisecond, 5*time.Millisecond,
-			"a restore merely QUEUED behind a peer registered an exclusive-operation claim: the row goes on "+
-				"advertising a Kill that the admission gate would then refuse (#3600)")
-	}
+	// Sampled inside the wait: opLockTimeout is 200ms here and the peer never lets
+	// go, so the operation cannot get past the lock during this window.
+	require.Never(t, func() bool { return killGuardHeld(manager, key) }, 100*time.Millisecond, 5*time.Millisecond,
+		"an operation merely QUEUED behind a peer registered an exclusive-operation claim: the row goes on "+
+			"advertising a Kill that the admission gate would then refuse (#3600, #3715)")
 
 	select {
 	case err := <-done:
