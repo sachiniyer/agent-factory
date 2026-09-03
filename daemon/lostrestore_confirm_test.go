@@ -1,16 +1,13 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	stdlog "log"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -76,10 +73,7 @@ func TestRestoreLostSessions_ImmediateExitLogsTerminalGiveUp(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "always-exits", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	var errors bytes.Buffer
-	previous := aflog.ErrorLog
-	aflog.ErrorLog = stdlog.New(&errors, "ERROR: ", 0)
-	t.Cleanup(func() { aflog.ErrorLog = previous })
+	errors := captureErrors(t)
 
 	for i := 0; i < 2*lostRestoreMaxAttempts+4; i++ {
 		manager.RestoreLostSessions()
@@ -114,10 +108,7 @@ func TestRestoreLostSessions_ConfirmedAliveLogsTerminalSuccess(t *testing.T) {
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "healed", backend, true, session.Lost)
 
-	var info bytes.Buffer
-	previous := aflog.InfoLog
-	aflog.InfoLog = stdlog.New(&info, "INFO: ", 0)
-	t.Cleanup(func() { aflog.InfoLog = previous })
+	info := captureInfo(t)
 
 	manager.RestoreLostSessions()
 	if strings.Contains(info.String(), "restored after") {
@@ -139,10 +130,7 @@ func TestRestoreSession_FailureAfterPersistedGiveUpStaysTerminal(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "still-broken", backend, true, session.Lost)
 	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("previous startup failure"))
 
-	var terminal bytes.Buffer
-	previous := aflog.ErrorLog
-	aflog.ErrorLog = stdlog.New(&terminal, "ERROR: ", 0)
-	t.Cleanup(func() { aflog.ErrorLog = previous })
+	terminal := captureErrors(t)
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{ID: inst.ID, RepoID: repoID}); !errors.Is(err, newFailure) {
 		t.Fatalf("RestoreSession error = %v, want %v", err, newFailure)

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"path/filepath"
 	"reflect"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -225,10 +223,7 @@ func TestTimedOutLegacyRootProbeIsUnknownNotARefusal(t *testing.T) {
 	// ensure pass, so nothing can be appending to it concurrently.
 	createsBefore := len(*seen)
 
-	var warnings bytes.Buffer
-	prevWarning := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
+	warnings := captureWarnings(t)
 
 	prevTimeout := rootLegacyRepoProbeTimeout
 	rootLegacyRepoProbeTimeout = time.Nanosecond

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -52,13 +50,9 @@ func swapCheckoutForStrangersClone(t *testing.T, repoPath string) (restore func(
 // captureRootEnsureWarnings redirects the daemon WARNING log for one test. The
 // refusals below are logged, never returned to a caller, so the log is the only
 // place the diagnosis a user acts on survives.
-func captureRootEnsureWarnings(t *testing.T) *bytes.Buffer {
+func captureRootEnsureWarnings(t *testing.T) *logCapture {
 	t.Helper()
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
-	return &warnings
+	return captureWarnings(t)
 }
 
 // registerEnabledRootProject registers repoPath and turns its root agent on

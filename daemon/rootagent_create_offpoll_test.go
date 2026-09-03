@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -323,10 +321,7 @@ func TestShutdownJoinsAnInFlightRootCreateAndSaysSo(t *testing.T) {
 		manager.waitRootAgentCreates()
 	})
 
-	var logs bytes.Buffer
-	prevInfo := log.InfoLog.Writer()
-	log.InfoLog.SetOutput(&logs)
-	t.Cleanup(func() { log.InfoLog.SetOutput(prevInfo) })
+	logs := captureInfo(t)
 
 	manager.EnsureRootAgents()
 	stall.awaitEntries(t, 1, "the ensure pass never launched the create this shutdown must join")

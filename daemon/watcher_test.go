@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -15,7 +14,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -645,38 +643,11 @@ func TestPersistWatcherStatus_PreservesLastRunAt(t *testing.T) {
 	}
 }
 
-// syncBuffer is a mutex-guarded bytes.Buffer so tests can read captured log
-// output while watcher goroutines may still be writing it.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
 // captureWatcherLogs redirects the daemon's warning and error loggers into
-// buffers for the test's duration.
-func captureWatcherLogs(t *testing.T) (warn, errBuf *syncBuffer) {
+// synchronized buffers for the test's duration.
+func captureWatcherLogs(t *testing.T) (warn, errBuf *logCapture) {
 	t.Helper()
-	warn, errBuf = &syncBuffer{}, &syncBuffer{}
-	prevWarn, prevErr := aflog.WarningLog.Writer(), aflog.ErrorLog.Writer()
-	aflog.WarningLog.SetOutput(warn)
-	aflog.ErrorLog.SetOutput(errBuf)
-	t.Cleanup(func() {
-		aflog.WarningLog.SetOutput(prevWarn)
-		aflog.ErrorLog.SetOutput(prevErr)
-	})
-	return warn, errBuf
+	return captureWarnings(t), captureErrors(t)
 }
 
 // TestWatcherFailureLogsIncludeOutputTail replays the #797 support case: a

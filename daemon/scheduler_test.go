@@ -1,8 +1,6 @@
 package daemon
 
 import (
-	"bytes"
-	stdlog "log"
 	"sort"
 	"strings"
 	"testing"
@@ -11,7 +9,6 @@ import (
 	cron "github.com/robfig/cron/v3"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -169,10 +166,7 @@ func TestControlServerReloadTasksRPC(t *testing.T) {
 // s.cron.Entries() counts are the orphan detector: they must match the
 // tracked entry set after every reload.
 func TestSchedulerReloadDuplicateTaskIDs(t *testing.T) {
-	var warnings bytes.Buffer
-	prevWarn := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "", 0)
-	t.Cleanup(func() { aflog.WarningLog = prevWarn })
+	warnings := captureWarnings(t)
 
 	s := newTaskScheduler()
 	tasks := []task.Task{

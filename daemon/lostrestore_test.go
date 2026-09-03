@@ -1,11 +1,9 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	stdlog "log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,7 +18,6 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -405,10 +402,7 @@ func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 	manager.instances[daemonInstanceKey(repoID, "vanished")] = inst
 	manager.mu.Unlock()
 
-	var buf bytes.Buffer
-	prevError := aflog.ErrorLog
-	aflog.ErrorLog = stdlog.New(&buf, "ERROR: ", 0)
-	t.Cleanup(func() { aflog.ErrorLog = prevError })
+	buf := captureErrors(t)
 
 	manager.RestoreLostSessions()
 	manager.RestoreLostSessions()

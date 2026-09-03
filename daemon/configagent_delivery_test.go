@@ -2,16 +2,13 @@ package daemon
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +17,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
 const (
@@ -29,35 +25,9 @@ const (
 	configAgentCodexFixtureSentinel = "AF_CONFIG_AGENT_2220_RECEIVER_SENTINEL"
 )
 
-type synchronizedLogBuffer struct {
-	mu sync.Mutex
-	bytes.Buffer
-}
-
-func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.Buffer.Write(p)
-}
-
-func (b *synchronizedLogBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.Buffer.String()
-}
-
-func captureConfigAgentReceiptLogs(t *testing.T) (info, warnings *synchronizedLogBuffer) {
+func captureConfigAgentReceiptLogs(t *testing.T) (info, warnings *logCapture) {
 	t.Helper()
-	info, warnings = &synchronizedLogBuffer{}, &synchronizedLogBuffer{}
-	previousInfo := aflog.InfoLog
-	previousWarnings := aflog.WarningLog
-	aflog.InfoLog = stdlog.New(info, "", 0)
-	aflog.WarningLog = stdlog.New(warnings, "", 0)
-	t.Cleanup(func() {
-		aflog.InfoLog = previousInfo
-		aflog.WarningLog = previousWarnings
-	})
-	return info, warnings
+	return captureInfo(t), captureWarnings(t)
 }
 
 // TestConfigAgentCodexFixtureProcess is re-exec'd through a symlink named

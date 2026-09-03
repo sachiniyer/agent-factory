@@ -1,13 +1,10 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
-	stdlog "log"
 	"strings"
 	"testing"
 
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -74,11 +71,7 @@ func TestRestoreLostSessions_FlapAfterBriefLivenessReachesGiveUp(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	var info, errors bytes.Buffer
-	prevInfo, prevError := aflog.InfoLog, aflog.ErrorLog
-	aflog.InfoLog = stdlog.New(&info, "INFO: ", 0)
-	aflog.ErrorLog = stdlog.New(&errors, "ERROR: ", 0)
-	t.Cleanup(func() { aflog.InfoLog, aflog.ErrorLog = prevInfo, prevError })
+	info, errors := captureInfo(t), captureErrors(t)
 
 	// Every pass that spawns is followed by exactly ONE answering poll and then the
 	// agent's exit. Passes that only record the death leave the row Lost and are

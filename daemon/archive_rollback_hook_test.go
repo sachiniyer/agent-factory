@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"syscall"
@@ -11,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -34,13 +32,9 @@ import (
 // captureArchiveWarnings redirects WarningLog for one test. The log half is not a
 // nicety: an archive driven by an `af tasks` run has no one reading the returned
 // error, so the daemon log is the only place the diagnosis survives.
-func captureArchiveWarnings(t *testing.T) *bytes.Buffer {
+func captureArchiveWarnings(t *testing.T) *logCapture {
 	t.Helper()
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
-	return &warnings
+	return captureWarnings(t)
 }
 
 // plantStuckEditorAfterTeardown makes the FINAL VS Code sweep — the one below the
