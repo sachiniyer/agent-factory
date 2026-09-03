@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -292,5 +295,86 @@ func TestSecondEnsureTickDuringInFlightRootCreateStartsNoSecondCreate(t *testing
 	requireRootCreated(t, manager, rootRepo, "the released root create never registered its session")
 	if len(*seen) != 1 {
 		t.Fatalf("session.NewInstance was called %d times for one root, want 1", len(*seen))
+	}
+}
+
+// TestShutdownJoinsAnInFlightRootCreateAndSaysSo pins the operator-facing half
+// of the shutdown rule. A daemon that will not exit is indistinguishable from a
+// hung one from the outside, and since a create is never cancelled, a create on
+// a checkout that does not answer holds shutdown open indefinitely. So the wait
+// has to say what it is waiting for, name the checkout, and say the wait is
+// deliberate — and it has to say it BEFORE waiting, or the explanation arrives
+// only once the thing it explains has resolved.
+func TestShutdownJoinsAnInFlightRootCreateAndSaysSo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+
+	rootRepo := setupControlRepo(t)
+	project := registerTestProject(t, rootRepo)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+	stall := stallRepoResolutionFor(t, rootRepo)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() {
+		stall.unblock()
+		manager.waitRootAgentCreates()
+	})
+
+	var logs bytes.Buffer
+	prevInfo := log.InfoLog.Writer()
+	log.InfoLog.SetOutput(&logs)
+	t.Cleanup(func() { log.InfoLog.SetOutput(prevInfo) })
+
+	manager.EnsureRootAgents()
+	stall.awaitEntries(t, 1, "the ensure pass never launched the create this shutdown must join")
+
+	waitDone := make(chan struct{})
+	go func() { defer close(waitDone); manager.waitRootAgentCreatesForShutdown() }()
+
+	// It must not return while the create is in flight: a shutdown that abandoned
+	// the create is exactly the half-created session the join exists to prevent.
+	select {
+	case <-waitDone:
+		t.Fatal("the shutdown wait returned while a root create was still in flight; it must join the create, never abandon it")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	stall.unblock()
+	select {
+	case <-waitDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the shutdown wait never returned after the create was released")
+	}
+
+	// Reading the buffer is ordered by waitDone: the announcement is written
+	// before the wait, and the create's own logging is joined by it, so both
+	// happen-before the close.
+	got := logs.String()
+	announcements := strings.Count(got, "in-flight root-agent create")
+	if announcements != 1 {
+		t.Fatalf("the shutdown wait announced itself %d times, want exactly 1; logs were:\n%s", announcements, got)
+	}
+	if !strings.Contains(got, rootRepo) {
+		t.Fatalf("the announcement must name the checkout holding shutdown open (%s); logs were:\n%s", rootRepo, got)
+	}
+	// Before the wait, not after: the created-root line can only be written by the
+	// create this wait is joining, so its position proves the ordering.
+	announced := strings.Index(got, "in-flight root-agent create")
+	created := strings.Index(got, "ensured root agent for")
+	if created < 0 {
+		t.Fatalf("the released create never logged its success, so the ordering below proves nothing; logs were:\n%s", got)
+	}
+	if announced > created {
+		t.Fatalf("the shutdown wait announced itself only after the create it was waiting for finished, which explains nothing to an operator watching a daemon that will not exit; logs were:\n%s", got)
+	}
+
+	// And it stays quiet when there is nothing to wait for.
+	logs.Reset()
+	manager.waitRootAgentCreatesForShutdown()
+	if quiet := logs.String(); strings.Contains(quiet, "in-flight root-agent create") {
+		t.Fatalf("the shutdown wait announced a wait with no create in flight; logs were:\n%s", quiet)
 	}
 }

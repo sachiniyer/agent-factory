@@ -354,7 +354,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	if err := manager.lifecycle.markReady(); err != nil {
 		close(stopCh)
 		wg.Wait()
-		manager.waitRootAgentCreates()
+		manager.waitRootAgentCreatesForShutdown()
 		return fmt.Errorf("failed to mark daemon ready: %w", err)
 	}
 	log.InfoLog.Printf("daemon ready")
@@ -400,7 +400,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// that lands late is persisted rather than overwritten by a save that predates
 	// it. This is also what the poll goroutine's own wg.Wait did while the create
 	// still ran on it.
-	manager.waitRootAgentCreates()
+	manager.waitRootAgentCreatesForShutdown()
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under

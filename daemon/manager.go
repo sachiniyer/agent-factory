@@ -236,8 +236,10 @@ type Manager struct {
 	// neither waits for it nor starts a second one. Keyed by REPO rather than by
 	// the state key above, because two root_agents spellings of one repository are
 	// two states and one repo — see launchRootCreate. Guarded by mu; set with the
-	// launch and cleared by the create's own deferred exit, whatever ends it.
-	rootCreatesInFlight map[string]struct{}
+	// launch and cleared by the create's own deferred exit, whatever ends it. The
+	// value is that repo's workspace path, so the shutdown wait can name the
+	// checkout holding it rather than a repo-ID hash.
+	rootCreatesInFlight map[string]string
 	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
 	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is
 	// internally synchronized and needs no lock of its own; the Add nonetheless
@@ -555,7 +557,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
-		rootCreatesInFlight:       make(map[string]struct{}),
+		rootCreatesInFlight:       make(map[string]string),
 		rootKilledAt:              make(map[string]time.Time),
 		deletedRootRepos:          make(map[string]string),
 		killsInFlight:             make(map[string]struct{}),

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -91,14 +92,21 @@ type rootCreateJob struct {
 // backoff curve, and charging it a success would clear a real failure streak that
 // nothing has answered.
 func (m *Manager) launchRootCreate(job rootCreateJob) {
+	// The test, the mark, the Add and the spawn are ONE lock hold, so "this repo
+	// has a create" and "that create exists" can never be observed apart. The go
+	// statement itself does not block — it only makes the goroutine runnable —
+	// so holding mu across it costs nothing, and if that goroutine's first act
+	// were ever to take mu it would simply wait for this return.
+	//
+	// The value is the workspace, not a bare marker: it is what the shutdown
+	// wait prints, and a repo ID is a hash an operator cannot act on.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, inFlight := m.rootCreatesInFlight[job.repo.ID]; inFlight {
-		m.mu.Unlock()
 		return
 	}
-	m.rootCreatesInFlight[job.repo.ID] = struct{}{}
+	m.rootCreatesInFlight[job.repo.ID] = job.repo.WorkspacePath()
 	m.rootCreateWG.Add(1)
-	m.mu.Unlock()
 
 	// Both defers are registered before any work, so every exit path of
 	// runRootCreate unwinds through them: the checkout refusal, the reap error,
@@ -128,7 +136,15 @@ func (m *Manager) finishRootCreate(repoID string) {
 	m.mu.Unlock()
 }
 
-// waitRootAgentCreates blocks until every launched root create has finished.
+// waitRootAgentCreates blocks until every launched root create has finished. It
+// is silent, because tests join on every ensure pass; shutdown goes through
+// waitRootAgentCreatesForShutdown, which says what it is waiting for.
+func (m *Manager) waitRootAgentCreates() {
+	m.rootCreateWG.Wait()
+}
+
+// waitRootAgentCreatesForShutdown is the shutdown join, and it narrates itself
+// exactly once when there is anything to narrate.
 //
 // Shutdown JOINS an in-flight create; it never cancels one. RunDaemon closes
 // stopCh and waits out the poll loop, after which no further create can be
@@ -142,9 +158,25 @@ func (m *Manager) finishRootCreate(repoID string) {
 //
 // The honest cost: a create on a mount that never answers means a shutdown that
 // never completes — identical to before, and bounded from outside by whatever
-// escalates SIGTERM to SIGKILL, never from inside.
-func (m *Manager) waitRootAgentCreates() {
-	m.rootCreateWG.Wait()
+// escalates SIGTERM to SIGKILL, never from inside. THAT is what the log line is
+// for. A daemon that will not exit is indistinguishable from a hung one from the
+// outside, so the last thing it writes has to name the checkout holding it and
+// say the wait is deliberate; otherwise the only diagnosis available is a SIGKILL
+// and a guess. Logged before the wait, since a line written after it would arrive
+// only once the thing it was explaining had already resolved.
+func (m *Manager) waitRootAgentCreatesForShutdown() {
+	m.mu.Lock()
+	pending := make([]string, 0, len(m.rootCreatesInFlight))
+	for _, workspace := range m.rootCreatesInFlight {
+		pending = append(pending, workspace)
+	}
+	m.mu.Unlock()
+	if len(pending) > 0 {
+		sort.Strings(pending)
+		log.InfoLog.Printf("waiting for %d in-flight root-agent create(s) before shutting down (%s); a create is never cancelled — one stalled on a checkout that does not answer will hold shutdown until it does (#3721)",
+			len(pending), strings.Join(pending, ", "))
+	}
+	m.waitRootAgentCreates()
 }
 
 // runRootCreate is everything past the create boundary for one candidate: prove
