@@ -215,3 +215,130 @@ func TestUnprovenOccupantDeleteKeepsTheStaleRecord(t *testing.T) {
 		t.Fatalf("the occupant's own deletion must still take effect at %s", occupantID)
 	}
 }
+
+// TestDeleteByUnresolvablePathAddressesTheRecordedProject closes #3363 and is
+// the behavioural half of #3530.
+//
+// A delete whose recorded path no longer resolves used to hash that path — so
+// it addressed whatever repository was there, which for a reused path is a
+// stranger, and for an empty path was a value that happened to equal the
+// project's own id only by coincidence. It now addresses the identity the
+// project WROTE DOWN when it last resolved, which is the only thing that can
+// still be known once the path is gone.
+func TestDeleteByUnresolvablePathAddressesTheRecordedProject(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	// Recorded at a linked worktree: the recorded path and the repository
+	// identity differ, which is exactly where hashing the path went wrong.
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	realID := repoID(t, repoPath)
+	rewriteRecordRootForDeferral(t, project.ID, worktree)
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID, nil); err != nil {
+		t.Fatalf("record the resolved identity: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// The recorded path stops resolving, and an UNRELATED repository takes it.
+	if err := exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", worktree).Run(); err != nil {
+		t.Fatalf("git worktree remove: %v", err)
+	}
+	if err := exec.Command("git", "init", worktree).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+	occupantID := repoID(t, worktree)
+	if occupantID == realID {
+		t.Fatalf("fixture must make the occupant a DIFFERENT repository, both %s", realID)
+	}
+
+	// Delete by the recorded path while it is occupied by the stranger.
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if err != nil {
+		t.Fatalf("DeleteProject by recorded path: %v", err)
+	}
+	if result.RepoID != occupantID {
+		t.Fatalf("a path that RESOLVES addresses the repository actually there (%s), got %s", occupantID, result.RepoID)
+	}
+	manager.mu.Lock()
+	_, projectSuppressed := manager.deletedRootRepos[realID]
+	manager.mu.Unlock()
+	if projectSuppressed {
+		t.Fatalf("deleting the occupant must not reach the recorded project's identity %s", realID)
+	}
+
+	// Now the path is gone entirely: the delete must still reach the recorded
+	// project, through the identity it wrote down.
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove path: %v", err)
+	}
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree}); err != nil {
+		t.Fatalf("DeleteProject by an unresolvable recorded path: %v", err)
+	}
+	manager.mu.Lock()
+	_, nowSuppressed := manager.deletedRootRepos[realID]
+	manager.mu.Unlock()
+	if !nowSuppressed {
+		t.Fatalf("a delete by an unresolvable recorded path must address the recorded project's own identity %s — that is what the written-down id is for (#3363)", realID)
+	}
+}
+
+// TestInventedIDReachesNothing is what each of the seven collision guards on
+// PR #3334 becomes once the namespace is disjoint: instead of detecting that a
+// derived id had reached state it should not, there is no such id to reach it.
+func TestInventedIDReachesNothing(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	invented := config.DerivedRepoIDForUnresolvedRoot(repoPath)
+	realID := repoID(t, repoPath)
+	if invented == realID {
+		t.Fatalf("an invented id must not equal the repository's own, both %s", invented)
+	}
+
+	// Deleting the invented identity must be the clean no-op the delete path
+	// always claimed to be — it can name no real repository at all.
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: invented}); err != nil {
+		t.Fatalf("deleting an invented identity must be an idempotent no-op: %v", err)
+	}
+	manager.mu.Lock()
+	_, reached := manager.deletedRootRepos[realID]
+	manager.mu.Unlock()
+	if reached {
+		t.Fatalf("an invented id must not reach the real repository's state — that reach is the collision every #3334 guard existed to catch")
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("nor may it deregister the project's record: %v", statErr)
+	}
+}

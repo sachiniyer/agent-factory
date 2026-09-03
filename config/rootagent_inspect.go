@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,6 +165,20 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 			out.failClosed = fmt.Sprintf("the project registry %s could not be listed, so the daemon fails every root agent closed at its next start (a personal config it cannot enumerate may hold enabled=false); repair the registry", registry)
 			return out, nil
 		}
+		if found && legacy == nil {
+			// The daemon asks this too (its verdict's recorded-root lookup),
+			// and --explain describes the SAME next start, so it must not
+			// report a profile disabled because it could not see an opt-in the
+			// daemon will apply (#3530 review id 3917756780). Reached only for
+			// a registered project whose recorded root is not the workspace
+			// that resolved here — a removed linked worktree of a still-present
+			// bare repository, most visibly — because otherwise the entry was
+			// already matched by identity above.
+			if entry, key := LegacyRootAgentForRecordedRoot(global, project.Root); entry != nil {
+				out.inputs.Legacy = entry
+				out.locs.legacyKey = key
+			}
+		}
 		if found {
 			pc, err := LoadProjectConfig(project.ID)
 			if err != nil {
@@ -307,14 +322,14 @@ func LegacyRootAgentForRepo(global *Config, repoID string) (*RootAgentConfig, st
 		}
 		// The key's path does not resolve right now — an absent mount, a repo
 		// not yet cloned (#1122). Fall back to recorded-root identity
-		// (RepoIDForRecordedRoot), the same rule the daemon snapshot uses to
+		// (DerivedRepoIDForUnresolvedRoot), the same rule the daemon snapshot uses to
 		// attribute unresolvable project roots: a caller asking about that
 		// repo must still see this entry, because an empty entry means
 		// enabled and the legacy ensure sweep's per-tick retry creates the
 		// root the moment the path returns. Dropping it instead told
 		// consumers "no layer enables this repo" about a repo whose opt-in
 		// sat in root_agents the whole time (#3264 review).
-		if RepoIDForRecordedRoot(expanded) == repoID {
+		if RepoIDFromRoot(filepath.Clean(expanded)) == repoID {
 			entry := global.RootAgents[key]
 			return &entry, key
 		}

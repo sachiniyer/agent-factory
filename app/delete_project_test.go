@@ -25,7 +25,7 @@ func TestDeleteProjectCarriesRetainedRecordedIdentity(t *testing.T) {
 	require.NoError(t, cmd.Run())
 	recorded := filepath.Join(ancestor, "deleted-nested-repo")
 	require.NoError(t, os.Mkdir(recorded, 0o755))
-	require.NotEqual(t, config.RepoIDForRecordedRoot(recorded), config.RepoIDForPath(recorded))
+	require.NotEqual(t, config.RepoIDFromRoot(filepath.Clean(recorded)), config.RepoIDForPath(recorded))
 	data := []session.InstanceData{{
 		Title: "legacy", Path: recorded,
 		Worktree: session.GitWorktreeData{RepoPath: recorded, WorktreePath: "/archive/legacy"},
@@ -36,7 +36,7 @@ func TestDeleteProjectCarriesRetainedRecordedIdentity(t *testing.T) {
 	require.NotNil(t, cmdFn)
 	start, ok := cmdFn().(startDeleteProjectMsg)
 	require.True(t, ok)
-	assert.Equal(t, config.RepoIDForRecordedRoot(recorded), start.repoID,
+	assert.Equal(t, config.RepoIDFromRoot(filepath.Clean(recorded)), start.repoID,
 		"delete must carry the selected aggregate identity, not adopt the Git ancestor of its display root")
 }
 

@@ -203,7 +203,10 @@ func sessionRepoRoot(data *session.InstanceData) string {
 // Shared by `archive --self` and `whoami` so the two cannot drift.
 func sessionRepoID(data *session.InstanceData) string {
 	if data.Worktree.RepoPath != "" {
-		return config.RepoIDForRecordedRoot(data.Worktree.RepoPath)
+		// Canonical role (#3530): RepoPath is already the identity root, and
+		// this must stay bit-identical to session storage's key or scoping
+		// stops finding the rows it filters.
+		return config.RepoIDFromRoot(filepath.Clean(data.Worktree.RepoPath))
 	}
 	if data.Path != "" {
 		return config.RepoIDForPath(data.Path)

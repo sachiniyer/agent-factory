@@ -326,6 +326,9 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 // checkout marker still matches. It rejects upward resolution after a nested
 // checkout disappears and replacement checkouts at a reused path.
 func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (string, bool) {
+	if registeredProjectProofRaceHookForTest != nil {
+		registeredProjectProofRaceHookForTest()
+	}
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
 	root := project.Root
@@ -383,4 +386,19 @@ func ResolveProjectSelector(selector string) (Project, error) {
 	}
 	return Project{}, fmt.Errorf("%s is not a registered project — run `af projects register %s` first, then set per-project config",
 		binding.root, selector)
+}
+
+// registeredProjectProofRaceHookForTest, when non-nil, runs at the top of
+// ResolveRegisteredProjectRepoID. Its callers resolve the same path a moment
+// earlier, and the window between those two probes is where the same MARKED
+// checkout can come to resolve under a different identity — its common
+// directory moved (#3530 review id 3919604357). Nothing else can hold that
+// window open.
+var registeredProjectProofRaceHookForTest func()
+
+// SetRegisteredProjectProofRaceHookForTest installs hook for the duration of a
+// test in another package, and clears it afterwards.
+func SetRegisteredProjectProofRaceHookForTest(t interface{ Cleanup(func()) }, hook func()) {
+	registeredProjectProofRaceHookForTest = hook
+	t.Cleanup(func() { registeredProjectProofRaceHookForTest = nil })
 }

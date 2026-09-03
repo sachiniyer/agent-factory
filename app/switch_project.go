@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -156,7 +157,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		// by an enclosing, unrelated repository merely because its old parent
 		// path now resolves there.
 		identity := projectPathResolution{
-			id: config.RepoIDForRecordedRoot(identityPath), root: filepath.Clean(identityPath),
+			id: config.RepoIDFromRoot(filepath.Clean(identityPath)), root: filepath.Clean(identityPath),
 		}
 		// Path is the requested operational workspace. Prefer it only when Git
 		// proves it belongs to the session's recorded identity; this collapses a
@@ -195,25 +196,91 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// so a registered project on a stalled or missing checkout keeps its own
 	// row instead of vanishing or borrowing an ancestor's.
 	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
+	// recordedIdentities remembers which identity each registry row lent to a
+	// path, so the root_agents union below can ask rather than re-hash.
+	recordedIdentities := make(map[string]string, len(registeredProjects))
 	for _, project := range registeredProjects {
 		if project.Root == "" {
 			continue
 		}
 		resolved := resolvePath(project.Root)
 		provenID, proven := provenRegistryIDs[project.Root]
+		rootPriority := 2
 		switch {
 		case proven:
 			resolved.id = provenID
-		case resolved.id != config.RepoIDForRecordedRoot(project.Root):
+		default:
+			// IDENTITY and ROOT SPELLING are separate decisions here, and an
+			// unproven row answers them differently.
+			//
+			// Its identity is the one it RECORDED, never a hash of its path
+			// (#3530 review id 3914971730): hashing splits the row from
+			// sessions stored under the real id — most visibly once a bare
+			// repository's linked worktree disappears — and for a legacy row
+			// with nothing recorded it recreates the real/invented collision
+			// this change removes.
+			//
+			// Its path, though, is exactly what could not be verified, so it
+			// must not outrank a live workspace for the spelling the user is
+			// shown: a vanished or replaced registry root would otherwise
+			// relabel a project with a directory that is no longer there.
+			// Below session priority, but still above nothing — a registered
+			// project with no sessions is still named by its recorded root.
 			resolved = projectPathResolution{
-				id: config.RepoIDForRecordedRoot(project.Root), root: filepath.Clean(project.Root),
+				id: config.ReconciledRepoIDForProject(project), root: filepath.Clean(project.Root),
 			}
+			rootPriority = 0
 		}
-		ensure(resolved, 2)
+		// Keyed by the CANONICAL spelling: a root_agents key is written by a
+		// human, through whatever symlink they had, while a record stores the
+		// path registration resolved (#2110's rule — macOS `/var` ->
+		// `/private/var` makes the two unequal every time).
+		recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(project.Root))] = resolved.id
+		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
-			ensure(resolvePath(config.ExpandTilde(path)), 2)
+			expanded := config.ExpandTilde(path)
+			resolved := resolvePath(expanded)
+			// A root_agents key is a PATH, and an unresolvable one falls back
+			// to its own hash — which is no longer any project's identity now
+			// that a registered project is addressed by the identity it
+			// RECORDED (#3530 review id 3916912933). Unioned under that hash it
+			// becomes a second row for one project: zero sessions, nothing to
+			// open, and a delete that is refused because delete-project
+			// normalizes the same path back to the recorded identity.
+			//
+			// Only the FALLBACK defers to the record. A key whose path Git
+			// still resolves belongs to the repository actually there, exactly
+			// as rootAgentKeyMatchesRepo reads it — availability is not
+			// identity, and a stale row must not claim a live checkout.
+			//
+			// The active workspace is excluded explicitly: its resolution is
+			// pre-seeded from the identity opening the home already
+			// established, so it carries no probe timestamp and would
+			// otherwise look like a fallback.
+			priority := 2
+			// Only a probe that ANSWERED "not a repository" may hand this key
+			// to a registry row (#3530 review id 3918120760). A timed-out probe
+			// leaves resolvedAt zero exactly as a genuinely absent path does,
+			// and the daemon will apply this key to whatever repository is
+			// actually there — so deferring on an unanswered probe hides a live
+			// occupant behind a stale row and sends delete-project an
+			// inconsistent id/path pair.
+			if resolved.answeredNotARepo && expanded != m.repoRoot {
+				if recorded, ok := recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(expanded))]; ok && recorded != "" {
+					resolved.id = recorded
+					// Identity and root SPELLING are separate decisions, the
+					// same split an unproven registry row makes above (#3530
+					// review id 3917445677). This key's path is the one that
+					// could not be resolved, so it must not outrank a live
+					// session's workspace for what the user is shown and
+					// switched to — the row would collapse correctly and then
+					// name a directory that is not there.
+					priority = 0
+				}
+			}
+			ensure(resolved, priority)
 		}
 	}
 	// The active workspace is the best selectable spelling and wins over a

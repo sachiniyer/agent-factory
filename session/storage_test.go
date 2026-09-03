@@ -508,14 +508,14 @@ func TestRepoIDForStorageKeepsFreshRecordedWorktreeIdentity(t *testing.T) {
 	require.NoError(t, exec.Command("git", "init", ancestor).Run())
 	recordedRoot := filepath.Join(ancestor, "deleted-nested-origin")
 	require.NoError(t, os.Mkdir(recordedRoot, 0o755))
-	require.NotEqual(t, config.RepoIDForRecordedRoot(recordedRoot), config.RepoIDForPath(recordedRoot))
+	require.NotEqual(t, config.RepoIDFromRoot(filepath.Clean(recordedRoot)), config.RepoIDForPath(recordedRoot))
 	gw, err := git.NewGitWorktreeFromStorage(
 		recordedRoot, filepath.Join(t.TempDir(), "managed"), "fresh", "af/fresh", "", false, true,
 	)
 	require.NoError(t, err)
 	inst := &Instance{Path: recordedRoot, gitWorktree: gw}
 
-	assert.Equal(t, config.RepoIDForRecordedRoot(recordedRoot), inst.repoIDForStorage(),
+	assert.Equal(t, config.RepoIDFromRoot(filepath.Clean(recordedRoot)), inst.repoIDForStorage(),
 		"a recorded worktree origin must not adopt an enclosing repository before first save")
 }
 

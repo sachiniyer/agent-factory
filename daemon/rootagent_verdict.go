@@ -162,6 +162,17 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	legacy := m.legacyRootAgentForRepo(repoID)
 	_, isProject := layers.projectRoots[repoID]
 	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
+	if legacy == nil && isUnresolved && unresolved.root != "" {
+		// A root_agents key is a PATH, and LegacyRootAgentForRepo falls back to
+		// hashing one it cannot resolve — which is no longer this project's
+		// identity now that an unresolved record is addressed by the identity
+		// it RECORDED (#3530). Master matched here by accident, because it
+		// addressed such a project BY that hash. Without this a project whose
+		// opt-in sits in root_agents the whole time resolves to "disabled"
+		// instead of "enabled, but its recorded path did not resolve" — the
+		// misreport #3264 exists to prevent.
+		legacy = m.legacyRootAgentForRecordedRoot(unresolved.root)
+	}
 	if legacy == nil && !isProject && !isUnresolved {
 		if len(layers.recordFailureIDs) > 0 {
 			return rootAgentMaterializeVerdict{reason: rootAgentRecordsUnreadable, unreadableRecords: layers.recordFailureIDs}
@@ -222,6 +233,14 @@ func rootAgentCreateRefusalVerdict(refusal rootCreateRefusal, enabledSource conf
 		verdict.rootMarkerUnreadable = true
 	}
 	return verdict
+}
+
+// legacyRootAgentForRecordedRoot is config's shared recorded-root lookup, which
+// states the rule and its two limits; the daemon reads it from its start-of-day
+// config exactly as every other legacy lookup here does.
+func (m *Manager) legacyRootAgentForRecordedRoot(root string) *config.RootAgentConfig {
+	entry, _ := config.LegacyRootAgentForRecordedRoot(m.cfg, root)
+	return entry
 }
 
 // rootAgentUnavailableDetail renders a refusing verdict as the clause a
