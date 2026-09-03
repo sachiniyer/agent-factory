@@ -64,7 +64,21 @@ const CONCEDED_MERGE_REFUSALS = [
 ];
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
-const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
+// The stem, not the scope clause. Codex emits at least two usage-limit wordings
+// for the same condition — "…usage limits for code reviews." and a bare "…usage
+// limits." — and both appeared on #3712 within six minutes, from the same bot,
+// about the same head. Matching only the first withdrew the reviewer-unavailable
+// degradation exactly when the outage got WORSE: the bare wording reads as the
+// account-wide limit, and the gate blocked on it while tolerating the narrower
+// one (#3728). The withdrawn state has no reachable exit — the review it waits
+// for cannot arrive while the account is limited.
+//
+// Widening this is safe only because `!looksLikeReviewArtifact` stays ANDed with
+// it at the one site that degrades: a body that merely MENTIONS usage limits is
+// a review, not an outage, and reviewing this very file produces one. Keep that
+// conjunct load-bearing — it, not the narrowness of this pattern, is what stops
+// a false degradation.
+const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits?\b/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is
@@ -3516,6 +3530,7 @@ module.exports = {
     artifactReferences,
     acknowledgementIsAnswerable,
     headCurrentSinceTime,
+    CODEX_RATE_LIMIT_RE,
     bodyNamesReference,
     codexArtifactBindsToHead,
     codexArtifactStatesItsCommit,

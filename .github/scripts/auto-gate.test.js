@@ -10,6 +10,24 @@ const OTHER_SHA = "da0a05ea3b9036a12f67a3b3877d16dd0dac893d";
 const ACTIONS_APP_ID = 15368;
 const CHECK_CREATED_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
+const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
+
+// The two usage-limit wordings Codex actually emits, captured verbatim from the
+// outage on PR #3712: the long one at 2026-09-03T03:08:08Z (comment 5519732240)
+// and the short one six minutes later at 03:14:41Z (comment 5519782846) — same
+// bot, same condition, same head, no push in between. #3728 is the gate reading
+// only the first, so the degradation that exists FOR a quota outage was switched
+// off by the more severe form of that outage.
+//
+// Verbatim on purpose. A regex over vendor copy rots silently, and a paraphrase
+// here would keep passing through the next wording change; these two strings are
+// the evidence that the pattern still matches what Codex really sends.
+const CODEX_LIMIT_CODE_REVIEWS =
+  "You have reached your Codex usage limits for code reviews. You can see your limits in the " +
+  "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).";
+const CODEX_LIMIT_ACCOUNT =
+  "You have reached your Codex usage limits. You can see your limits in the " +
+  "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).";
 
 test("Auto Gate can be recovered manually by PR number", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
@@ -3076,6 +3094,124 @@ test("a review body that merely quotes the usage-limit text is not quota evidenc
   assert.equal(result.manualMergeRequired, false, "a review body is not a quota response");
   assert.equal(result.shouldMerge, false);
   assert.match(result.summary, /^BLOCKED:/);
+});
+
+// #3728. Codex emits at least two usage-limit wordings for the same condition,
+// and the gate recognised only the longer one — so the reviewer-unavailable
+// degradation was WITHDRAWN by the more severe outage. Observed live on #3712:
+// PASS at ~03:00 with the long wording latest, BLOCKED after 03:14 when the
+// short one landed, same head, no push in between. The withdrawn state has no
+// reachable exit, because the review it waits for cannot arrive while the
+// account is limited.
+//
+// Both strings are pinned verbatim rather than paraphrased: this table is what
+// makes the next vendor copy change fail loudly here instead of at merge time on
+// somebody's finished PR.
+test("both observed Codex usage-limit wordings are recognised", () => {
+  const { CODEX_RATE_LIMIT_RE } = __test;
+
+  for (const [label, body] of [
+    ["review-scoped (#3712 comment 5519732240)", CODEX_LIMIT_CODE_REVIEWS],
+    ["account-wide (#3712 comment 5519782846)", CODEX_LIMIT_ACCOUNT],
+  ]) {
+    assert.equal(CODEX_RATE_LIMIT_RE.test(body), true, `unrecognised wording: ${label}`);
+  }
+
+  // …and the stem stays a stem. It must not swallow an ordinary sentence that
+  // happens to talk about limits, or the guard below is the only thing left
+  // between a review and a false degradation.
+  for (const body of [
+    "Codex Review: Didn't find any major issues.",
+    "You have reached your quota.",
+    "This changes how the gate reads usage limits in auto-gate.js.",
+    // The word boundary is what makes the optional `s` a stem rather than a
+    // prefix match. Without `\\b`, "limit" alone satisfies the pattern and this
+    // sentence — a plausible thing for a review to say about this very file —
+    // reads as an outage.
+    "You have reached your Codex usage limitations, which is a different thing.",
+    "You have reached your Codex usage limitsX",
+  ]) {
+    assert.equal(CODEX_RATE_LIMIT_RE.test(body), false, `over-matched: ${body}`);
+  }
+});
+
+// The end of that mechanism: the shorter wording has to reach the same
+// degradation the longer one does. Anything else leaves a green PR blocked with
+// no action anyone can take.
+test("the account-wide usage-limit wording degrades to maintainer review too", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit("2026-07-09T01:20:00Z", CODEX_LIMIT_ACCOUNT)],
+  });
+
+  assert.equal(result.manualMergeRequired, true, "the worse outage must not withdraw the exemption");
+  assert.equal(result.shouldMerge, false, "degrading never merges");
+  assert.match(result.summary, /usage-limited/);
+});
+
+// A limit message is not a verdict, in either wording. parseReviewedCommit
+// excludes one by the same predicate, so the stem has to reach that site as
+// well — otherwise a limit body that also carries the review marker and a
+// `Reviewed commit:` line parses as a clean verdict for the head.
+test("a usage-limit body is never read as a verdict, in either wording", () => {
+  const { parseReviewedCommit } = __test;
+  const short = HEAD_SHA.slice(0, 10);
+
+  for (const limit of [CODEX_LIMIT_CODE_REVIEWS, CODEX_LIMIT_ACCOUNT]) {
+    assert.equal(parseReviewedCommit(limit), null, "a bare limit message names no commit");
+    assert.equal(
+      parseReviewedCommit(`### Codex Review\n\n${limit}\n\n**Reviewed commit:** \`${short}\``),
+      null,
+      "a limit message is not a verdict just because it carries the review marker",
+    );
+  }
+
+  // The exclusion must not eat a real verdict.
+  assert.equal(parseReviewedCommit(codexVerdict(HEAD_SHA).body), short);
+});
+
+// `!looksLikeReviewArtifact` is the conjunct that keeps the wider stem from
+// becoming a fail-open: a review body that merely MENTIONS usage limits is a
+// review, not an outage — and reviewing this very file produces such a body.
+test("a review artifact quoting either usage-limit wording is not quota evidence", async () => {
+  for (const quoted of [CODEX_LIMIT_CODE_REVIEWS, CODEX_LIMIT_ACCOUNT]) {
+    const quoting = {
+      ...codexVerdict(HEAD_SHA),
+      body:
+        // No P0-P3 marker anywhere: a finding in this body would be an
+        // INDEPENDENT blocker, and the gate would then block for that reason
+        // whether or not it wrongly degraded — masking the very thing under
+        // test. The quoting is the only variable here.
+        `### Codex Review\n\nThe detector fires on \u201c${quoted}\u201d anywhere in a ` +
+        `body.\n\n**Reviewed commit:** \`${HEAD_SHA.slice(0, 10)}\``,
+    };
+    const result = await evaluateGate({ issueComments: [quoting] });
+
+    assert.equal(result.manualMergeRequired, false, "a review body is not a quota response");
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.summary, /^BLOCKED:/);
+  }
+});
+
+// The gate-pr skill carries a hand-run jq mirror of this predicate, and a mirror
+// that drifts is worse than no mirror: it reports a clean hand gate on a PR the
+// real gate would hold. Asserted against the script's own regex source so the
+// two cannot part company silently.
+test("the gate-pr skill's usage-limit filter mirrors the script's predicate", () => {
+  const skill = fs.readFileSync(GATE_PR_SKILL, "utf8");
+  const stem = __test.CODEX_RATE_LIMIT_RE.source;
+
+  // The executable jq line, not the whole file. The skill legitimately QUOTES
+  // both wordings in the prose that explains them, so a whole-file search would
+  // be satisfied by the documentation while the filter people actually run still
+  // carried the narrow pattern — and it would break on an innocent reflow of
+  // that paragraph. This reads the one line that decides anything.
+  const filter = skill.match(/test\("([^"]*usage limit[^"]*)"; "i"\) \| not\)/);
+  assert.ok(filter, "gate-pr.md no longer carries a jq usage-limit filter");
+  assert.equal(
+    filter[1],
+    stem.replace(/\\/g, "\\\\"),
+    "the skill's jq filter has drifted from the script's predicate",
+  );
 });
 
 test("a usage-limited reviewer unblocks the aggregate without merging anything", async () => {
@@ -6665,10 +6801,10 @@ function prComment(login, body, timestamp = "2026-07-09T01:25:00Z") {
   return { user: { login }, body, created_at: timestamp, updated_at: timestamp };
 }
 
-function codexRateLimit(timestamp = "2026-07-09T01:20:00Z") {
+function codexRateLimit(timestamp = "2026-07-09T01:20:00Z", body = CODEX_LIMIT_CODE_REVIEWS) {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
-    body: "You have reached your Codex usage limits for code reviews.",
+    body,
     created_at: timestamp,
     updated_at: timestamp,
   };

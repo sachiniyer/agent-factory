@@ -229,7 +229,7 @@ jq -s --arg head "$HEAD" '
   add
   | map(select(.user.login == "chatgpt-codex-connector[bot]"))
   | map(select((.body // "") | test("\\bCodex Review\\b"; "i")))
-  | map(select((.body // "") | test("reached your Codex usage limits for code reviews"; "i") | not))
+  | map(select((.body // "") | test("reached your Codex usage limits?\\b"; "i") | not))
   | map(select((.body // "")
       | capture("(?:\\*\\*Reviewed commit:\\*\\*|Reviewed commit:)\\s*`(?<sha>[0-9a-f]{7,40})`"; "i")
       | .sha | ascii_downcase as $rc
@@ -552,10 +552,16 @@ is a pass**:
 
 - **No artifact.** Step 2 writes an empty `verdict.json`. That means the review
   step *did not run*, not that it ran and found nothing.
-- **A usage-limit comment** (`reached your Codex usage limits for code reviews`).
-  Step 2 filters it out, and so does `parseReviewedCommit` in `auto-gate.js`.
-  A message saying the reviewer declined to look is the opposite of a clean
-  verdict, and it is the one most likely to be misread as "Codex responded".
+- **A usage-limit comment.** Codex sends at least two wordings for this, and
+  they mean the same thing: `You have reached your Codex usage limits for code
+  reviews.` and a bare `You have reached your Codex usage limits.` — the second
+  reads as the account-wide limit, i.e. the WORSE outage. Match the stem
+  (`reached your Codex usage limits?\b`), never the scope clause; matching only
+  the long form is #3728, which withdrew the reviewer-unavailable exemption
+  during the more severe outage. Step 2 filters both out, and so does
+  `parseReviewedCommit` in `auto-gate.js`. A message saying the reviewer
+  declined to look is the opposite of a clean verdict, and it is the one most
+  likely to be misread as "Codex responded".
 
 Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
 fresh usage-limit reply degrades it to a manual-only pass that still does not
