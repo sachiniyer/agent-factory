@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -53,6 +54,18 @@ const (
 	// version so that bumping roundTripBaseUpstream cannot silently keep
 	// serving a retag of the old one.
 	roundTripBaseImage = "af-integration-base:alpine-3.20"
+
+	// alpineFallbackMirror is a SECOND repository for the apk layer below
+	// (#3779). The base image's own /etc/apk/repositories points at dl-cdn,
+	// which is Fastly; this one is kernel.org, a different operator on
+	// different infrastructure, so one having a bad minute does not correlate
+	// with the other. It is an official mirror listed by alpinelinux.org.
+	alpineFallbackMirror = "https://mirrors.edge.kernel.org/alpine"
+
+	// apkAddAttempts bounds the retry. Enough to ride out the seconds-long
+	// blip that was observed; small enough that a real outage fails the build
+	// promptly rather than holding a runner for minutes.
+	apkAddAttempts = 3
 )
 
 var (
@@ -141,6 +154,67 @@ func dockerImagePresent(ref string) bool {
 	return cmd.Run() == nil
 }
 
+// alpineBranch turns roundTripBaseUpstream ("alpine:3.20") into the path
+// component an alpine mirror uses for that release ("v3.20").
+//
+// Derived rather than spelled a second time: a mirror URL carrying a hardcoded
+// "v3.20" would keep serving the previous release after someone bumped the base,
+// and the build would still succeed — silently installing packages from the
+// wrong branch. TestApkMirrorBranchTracksTheBase pins the derivation.
+func alpineBranch() string {
+	_, version, ok := strings.Cut(roundTripBaseUpstream, ":")
+	if !ok {
+		return ""
+	}
+	return "v" + version
+}
+
+// apkAddRun renders the RUN line that installs pkgs into a round-trip image.
+//
+// THE BUG (#3779). This one fetch is intrinsic, which is what separates it from
+// #3774: there the failing source was one the step had no use for, so the fix
+// was to stop letting it vote. Here the packages genuinely have to come from a
+// mirror, and TestImageBuildsWithRegistryBlocked deliberately builds THIS text
+// rather than a copy, so there is nothing to pre-seed and no source to drop.
+//
+// On 2026-09-03 dl-cdn answered "temporary error (try again later)" for about a
+// minute; `apk add` exited 4 and reddened `Registry-free image build` — a job
+// that had already proved its own property one step earlier in the same log.
+//
+// So the layer tolerates one mirror's bad minute without tolerating an outage:
+//
+//	a SECOND mirror   — on a different operator, so apk has somewhere to go when
+//	                    one of them is unwell. apk warns about the unreachable
+//	                    repository and installs from the other; it fails only
+//	                    when the packages are available from neither.
+//	a BOUNDED retry   — for the case where both are unwell in the same moment.
+//	a LOUD failure    — every attempt exhausted exits 1 with the package list.
+//	                    Deliberately NOT a skip-with-reason: a check that
+//	                    declines to run is the failure mode this repo keeps
+//	                    paying for, and the whole point of this job is to fail
+//	                    when the images genuinely cannot build.
+//
+// Package names are rendered as literal words and never re-parsed, and the
+// emitted script is exercised directly against a stubbed apk in
+// apk_mirror_test.go — the mirrors are the variable there, so the retry and the
+// fallback are measured rather than assumed.
+func apkAddRun(pkgs ...string) string {
+	list := strings.Join(pkgs, " ")
+	branch := alpineBranch()
+	return "RUN set -eu; \\\n" +
+		"    for attempt in $(seq 1 " + strconv.Itoa(apkAddAttempts) + "); do \\\n" +
+		"      if apk add --no-cache \\\n" +
+		"          -X " + alpineFallbackMirror + "/" + branch + "/main \\\n" +
+		"          -X " + alpineFallbackMirror + "/" + branch + "/community \\\n" +
+		"          " + list + "; then exit 0; fi; \\\n" +
+		"      echo \"apk add attempt $attempt failed (" + list + "); retrying\" >&2; \\\n" +
+		"      sleep $((attempt * 3)); \\\n" +
+		"    done; \\\n" +
+		"    echo \"apk add FAILED after " + strconv.Itoa(apkAddAttempts) +
+		" attempts on every mirror: " + list + "\" >&2; \\\n" +
+		"    exit 1\n"
+}
+
 // dockerRoundTripDockerfile is the docker round-trip image: the minimum a BYO
 // image needs for the in-container agent-server (git worktree + tmux PTY).
 //
@@ -149,7 +223,7 @@ func dockerImagePresent(ref string) bool {
 // second spelling of the FROM line is exactly how the property under test would
 // rot without anything going red.
 func dockerRoundTripDockerfile(base string) string {
-	return "FROM " + base + "\nRUN apk add --no-cache git tmux bash\n"
+	return "FROM " + base + "\n" + apkAddRun("git", "tmux", "bash")
 }
 
 // sshdRoundTripDockerfile is the ssh round-trip image: a real sshd target for
@@ -157,7 +231,7 @@ func dockerRoundTripDockerfile(base string) string {
 // known_hosts pinning.
 func sshdRoundTripDockerfile(base string) string {
 	return "FROM " + base + "\n" +
-		"RUN apk add --no-cache git tmux bash openssh-server\n" +
+		apkAddRun("git", "tmux", "bash", "openssh-server") +
 		"RUN ssh-keygen -A && mkdir -p /root/.ssh && chmod 700 /root/.ssh\n" +
 		// The ssh runtime reaches the remote agent-server through an ssh
 		// local-forward (direct-tcpip) tunnel, which the sshd must permit — alpine's
