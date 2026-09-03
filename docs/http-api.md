@@ -177,6 +177,14 @@ fields accepts an empty body (`-d '{}'` or no `-d` at all).
 internal `Ping` RPC) that answers even while the daemon is restoring sessions,
 with response `data` of `{ "ok": true }`.
 
+**Not in the catalog.** A few routes are served without being cataloged, because
+they are not JSON-envelope RPCs: the WebSocket PTY/event streams, the web-tab
+proxy, and — when it is switched on — the profiling endpoint at
+`GET /v1/debug/pprof/{profile}`. That last one is **off by default**, is served
+on **this socket only** and never on `network.listen_addr`, and returns the
+ordinary 404 unknown-route envelope while it is off. See
+[Profiling the daemon](daemon-memory.md#profiling-the-daemon).
+
 **Response shapes.** These are not part of the generated request-field catalog,
 so they are documented here. `CreateSession` returns `{ "instance": <session> }`;
 `Snapshot` and `ImportRemoteHookSessions` return `{ "instances": [<session>…] }`;
