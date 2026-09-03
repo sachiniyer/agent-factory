@@ -30,6 +30,7 @@ var (
 	scanSnapshot = Snapshot
 	scanArgv     = readArgv
 	scanUID      = readUID
+	scanLookup   = Lookup
 )
 
 // ArgvUnreadableError reports the one process whose argv could not be read and
@@ -39,10 +40,20 @@ var (
 type ArgvUnreadableError struct {
 	PID int
 	Err error
+	// OwnedByUs distinguishes the two ways a refusal reaches here, because they
+	// are different situations and a reader cannot tell them apart from the
+	// errno: true means the process positively runs under our uid and could be
+	// something we spawned, false means its ownership could not be read at all
+	// while the process was still present.
+	OwnedByUs bool
 }
 
 func (e *ArgvUnreadableError) Error() string {
-	return fmt.Sprintf("cannot read the argv of pid %d: %v", e.PID, e.Err)
+	whose := "and its owner could not be read either, so it cannot be ruled out as ours"
+	if e.OwnedByUs {
+		whose = "which runs as this user and so could be a process we spawned"
+	}
+	return fmt.Sprintf("cannot read the argv of pid %d, %s: %v", e.PID, whose, e.Err)
 }
 
 func (e *ArgvUnreadableError) Unwrap() error { return e.Err }
@@ -53,6 +64,16 @@ func (e *ArgvUnreadableError) Unwrap() error { return e.Err }
 type ProcessArgv struct {
 	Process Process
 	Argv    []string
+}
+
+// isGone reports whether an error is a process saying it is not there any more,
+// as opposed to a read that failed. ErrProcessExited is the answer both process
+// oracles give for a corpse; a missing /proc entry and ESRCH are how Linux says
+// the same thing when the entry is already unlinked.
+func isGone(err error) bool {
+	return errors.Is(err, ErrProcessExited) ||
+		errors.Is(err, fs.ErrNotExist) ||
+		errors.Is(err, syscall.ESRCH)
 }
 
 // ProcessesMatchingArgv returns every process in the live process table whose
@@ -99,6 +120,14 @@ type ProcessArgv struct {
 // "I could not tell whether it is ours" is a third answer, and it is not the
 // negative.
 //
+// Before either of those becomes a failure, though, a second oracle is asked
+// whether the process is still THERE. Darwin needs it: kern.procargs2 answers
+// EINVAL for a departed process exactly as it does for a foreign one, and
+// kern.proc.pid then has no ownership to report either, so a process that
+// merely exited mid-scan looks identical to one we are being refused. Its
+// absence is a fact, and it is read as one rather than inferred from an
+// errno — a process still present stays a failure (#3693).
+//
 // # Platforms
 //
 // On an ordinary Linux mount /proc/<pid>/cmdline is world-readable, so the only
@@ -125,8 +154,7 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 		argv, err := scanArgv(pid)
 		switch {
 		case err == nil:
-		case errors.Is(err, ErrNoArgv), errors.Is(err, ErrProcessExited),
-			errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ESRCH):
+		case errors.Is(err, ErrNoArgv), isGone(err):
 			// Gone, or nothing to classify. Skipping can only omit a process
 			// that no longer exists; it can never invent one.
 			continue
@@ -134,10 +162,23 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 			// Not ours, so its refusal is not evidence about us. Ownership is
 			// read from /proc/<pid> itself, which hidepid=1 still discloses —
 			// it restricts the directory's CONTENTS, not who owns it.
-			if uid, known := scanUID(pid); known && uid != os.Getuid() {
+			uid, known := scanUID(pid)
+			if known && uid != os.Getuid() {
 				continue
 			}
-			return nil, &ArgvUnreadableError{PID: pid, Err: err}
+			// Ownership did not settle it, so ask the second oracle whether the
+			// process is even still there. On darwin this is the difference
+			// between the two facts EINVAL covers, and nothing else can tell
+			// them apart: a departed process answers kern.procargs2 exactly as a
+			// foreign one does, and its ownership is unreadable for the same
+			// reason it is unreadable for anything that no longer exists.
+			//
+			// "Gone" is established POSITIVELY here, never assumed from the
+			// refusal: a process that is still present stays a failure.
+			if _, lookupErr := scanLookup(pid); isGone(lookupErr) {
+				continue
+			}
+			return nil, &ArgvUnreadableError{PID: pid, Err: err, OwnedByUs: known}
 		}
 		if match(argv) {
 			matched = append(matched, ProcessArgv{Process: process, Argv: argv})
