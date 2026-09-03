@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 )
@@ -84,4 +85,62 @@ func IsMutationCommitted(err error) bool {
 	}
 	var outcome committed
 	return errors.As(err, &outcome) && outcome.MutationCommitted()
+}
+
+// RouteNotServedError reports that the daemon answered 404 for a /v1 route this
+// client called — the route is absent from THAT daemon's table, so the daemon is
+// OLDER than this client (or, on a remote target, something other than a daemon
+// is answering the URL).
+//
+// The inference is sound rather than a guess, and it is the reason this is a
+// separate type from VersionSkewError. The daemon's rpcHandler answers only 200,
+// 400, 405, 413, 500 and 503; a 404 comes from exactly one place, the mux
+// catch-all (daemon/httpserver.go), which is reached only by a path no route
+// registers. So a 404 on /v1/<Method> means the method is not served, never that
+// a handler ran and refused.
+//
+// It exists because the two are opposite instructions to a caller. An envelope
+// error is the daemon's considered answer and is final. A route that is not
+// served means NOTHING happened server-side — which is exactly what `af config
+// set --daemon-url` must be able to distinguish, because its only other option
+// would be writing THIS machine's config file for a change the operator asked to
+// make on another one (#3679). Collapsing both into a bare error is what would
+// make that fallback look reasonable.
+type RouteNotServedError struct {
+	// Route is the request path that 404ed, e.g. "/v1/UnsetConfigValue".
+	Route string
+	// Detail is the peer's verbatim message — the daemon's `unknown route "…"`
+	// envelope, or a snippet of whatever non-envelope body a proxy returned.
+	Detail string
+}
+
+func (e *RouteNotServedError) Error() string {
+	return fmt.Sprintf("daemon does not serve %s (it answered 404: %s)", e.Route, e.Detail)
+}
+
+// IsRouteNotServed reports whether err (or anything it wraps) is a
+// RouteNotServedError — the route is missing from the daemon that answered, as
+// opposed to present and refusing.
+func IsRouteNotServed(err error) bool {
+	var missing *RouteNotServedError
+	return errors.As(err, &missing)
+}
+
+// bodySnippetLimit caps how much of a non-envelope response body is quoted back.
+// A proxy's 404 page is HTML and can be kilobytes; the first line is the part
+// that identifies who answered.
+const bodySnippetLimit = 200
+
+// bodySnippet renders an unparseable response body for a human-readable error:
+// whitespace-collapsed and truncated, so an nginx error page becomes a
+// recognizable fragment rather than a wall of markup.
+func bodySnippet(raw []byte) string {
+	s := strings.Join(strings.Fields(string(raw)), " ")
+	if s == "" {
+		return "empty response body"
+	}
+	if len(s) > bodySnippetLimit {
+		return s[:bodySnippetLimit] + "…"
+	}
+	return s
 }

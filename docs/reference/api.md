@@ -39,6 +39,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/GetConfig` | — | List every user-facing global config key with its purpose, type, default, and current value. |
 | `POST` | `/v1/GetTheme` | — | Return the daemon's resolved semantic color palette for renderer clients. |
 | `POST` | `/v1/SetConfigValue` | `key`, `value` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
+| `POST` | `/v1/UnsetConfigValue` | `key` | Clear one migrated global backend setting, exactly as `af config unset` does (both alias spellings, atomically). |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task`, `actor` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |

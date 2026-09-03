@@ -249,10 +249,10 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/configcmd.go config unset without --project -> daemon.UnsetGlobalConfigValue"
+        "pointer": "commands/configcmd.go config unset without --project -> commands/configremote.go globalConfigUnset (local socket, or the targeted daemon's UnsetConfigValue)"
       },
       "verdict": "deliberate",
-      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope."
+      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope. #3679 added POST /v1/UnsetConfigValue so the CLI can reach a REMOTE daemon's clear (its `set` counterpart was already served); the route existing does not change the TUI/web answers, which are about what those editors expose rather than about what the daemon serves."
     },
     {
       "id": "config.write-project",
@@ -1621,6 +1621,7 @@
       "POST /v1/Snapshot": "session.list",
       "POST /v1/SuggestSessionName": "-",
       "POST /v1/TriggerTask": "task.trigger",
+      "POST /v1/UnsetConfigValue": "config.unset-global-alias",
       "POST /v1/UpdateTask": "task.edit"
     },
     "tui_bindings": {
