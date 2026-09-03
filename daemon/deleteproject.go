@@ -172,6 +172,15 @@ type deleteProjectTarget struct {
 	// registry read failure leaves it "" — an unreleasable tombstone, the
 	// conservative direction.
 	claimantProjectID string
+	// unattributedRecordRoot names a registry record this delete's identity
+	// may have come from and cannot be shown not to have: one written before
+	// af recorded repository identities, whose absent recorded root hashes to
+	// exactly this id (#3363's third window). See unattributableLegacyRecord —
+	// it is resolved there, ahead of taskTargetMu, for the same reason the
+	// claimant is. Empty whenever a record WAS selected, which settles the
+	// question, or when none could be this project's.
+	unattributedRecordRoot    string
+	unattributedRecordProject string
 }
 
 // deleteProject performs DeleteProject while taskTargetMu is already held from
@@ -229,8 +238,26 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if historical != "" {
 		stranded = m.repoSessionTitlesLocked(historical, false)
 	}
+	// The same question asked from the identity side (#3363's third window).
+	// There, a provisional target could not reach live sessions filed under its
+	// recorded path's hash; here the delete arrives AS that hash and cannot
+	// reach the record — so removing these sessions would leave the durable
+	// registration behind and the project would return on the next start.
+	//
+	// Only sessions make it worth refusing over. With nothing live under the
+	// identity there is nothing the surviving record can strand, and the delete
+	// stays the no-op #3638 made it — which is also the state a mid-delete
+	// reconciliation resolves by writing the identity onto the row.
+	//
+	// Read under the SAME acquisition as the fence below, like stranded and for
+	// the same reason (#3530 review id 3919194996): deciding in one critical
+	// section and fencing in another lets a session arrive in between.
+	unattributed := []string(nil)
+	if resolved.unattributedRecordRoot != "" {
+		unattributed = m.repoSessionTitlesLocked(repoID, false)
+	}
 	starting := m.repoSessionTitlesLocked(repoID, true)
-	if len(stranded) == 0 && len(starting) == 0 {
+	if len(stranded) == 0 && len(unattributed) == 0 && len(starting) == 0 {
 		if m.projectDeletes == nil {
 			m.projectDeletes = make(map[string]struct{})
 		}
@@ -243,6 +270,10 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if len(stranded) > 0 {
 		sort.Strings(stranded)
 		return result, fmt.Errorf("delete project %s: this project was registered before af recorded repository identities, and session(s) %v are still live under the identity its recorded path used to have; deleting now would deregister the project and leave them behind — nothing was changed. Bring the checkout at %s back once so af can record the project's identity, then delete; or archive those sessions first", repoID, stranded, repoPath)
+	}
+	if len(unattributed) > 0 {
+		sort.Strings(unattributed)
+		return result, fmt.Errorf("delete project %s: session(s) %v are live under this identity and no registry record answers to it — project %s was registered before af recorded repository identities and its recorded path %s is unavailable, so af cannot establish whether that record is this project's; removing these sessions would leave its durable registration behind and the project would return on the next start, so nothing was changed. Bring the checkout at %s back once so af can record the project's identity, then delete; or archive those session(s) first and delete the project by that path", repoID, unattributed, resolved.unattributedRecordProject, resolved.unattributedRecordRoot, resolved.unattributedRecordRoot)
 	}
 	if len(starting) > 0 {
 		sort.Strings(starting)
