@@ -1,6 +1,7 @@
 package apiclient
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -125,6 +126,21 @@ func (e *RouteNotServedError) Error() string {
 func IsRouteNotServed(err error) bool {
 	var missing *RouteNotServedError
 	return errors.As(err, &missing)
+}
+
+// notServedDetail renders a 404 body for the refusal message: the daemon's own
+// envelope message when it sent one (`unknown route "/v1/…"`), else a snippet of
+// whatever a proxy answered with. It is best-effort by construction — the body is
+// no longer what DECIDES the classification, only what describes it — so a body
+// it cannot parse costs a nicer sentence, never the classification itself.
+func notServedDetail(raw []byte) string {
+	var env struct {
+		Error *apiproto.EnvelopeError `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && env.Error != nil && env.Error.Message != "" {
+		return env.Error.Message
+	}
+	return bodySnippet(raw)
 }
 
 // bodySnippetLimit caps how much of a non-envelope response body is quoted back.

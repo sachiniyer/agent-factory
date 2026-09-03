@@ -278,6 +278,27 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		return &TransportError{Err: fmt.Errorf("apiclient: read response body: %w", err)}
 	}
 
+	// A 404 is decided by STATUS, before the body is interpreted at all. The
+	// daemon's rpcHandler answers only 200/400/405/413/500/503, so no registered
+	// route can produce one; a 404 on /v1/<Method> means the route is absent from
+	// THIS daemon's table — version skew, not a handler that ran and refused. The
+	// two are opposite instructions to a caller, and a caller whose fallback would
+	// be wrong (a remote config write must never become a local one, #3679) has to
+	// tell them apart.
+	//
+	// Keying this on the BODY was the first version and it was wrong three ways,
+	// all reachable through the reverse proxy docs/remote-http-auth.md recommends
+	// (af terminates no TLS, so fronting the daemon is the documented deployment).
+	// A proxy's JSON 404 — `{}` or `{"message":"not found"}` — parses fine and
+	// carries no envelope error, so a check on env.Error never ran and the caller
+	// got `malformed response data` instead of the actionable refusal. Worse, a
+	// body of `{"data":null,"error":null}` decodes into a zero-valued response with
+	// a NIL error: a 404 reported as SUCCESS. Status first closes all three, and
+	// the body is consulted only for the human-readable detail.
+	if httpResp.StatusCode == http.StatusNotFound {
+		return &RouteNotServedError{Route: httpReq.URL.Path, Detail: notServedDetail(raw)}
+	}
+
 	// Decode into a RawMessage-backed envelope so the typed response is decoded
 	// in a second pass — the daemon's data member is the RPC response struct,
 	// and keeping it raw until the error branch is checked avoids interpreting a
@@ -287,25 +308,9 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		Error *apiproto.EnvelopeError `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		// A 404 whose body is not an envelope at all is still a route this peer
-		// does not serve — a reverse proxy in front of the daemon (the deployment
-		// docs/remote-http-auth.md recommends) answers with its own HTML. Reporting
-		// that as "malformed envelope" would bury the one fact the caller needs.
-		if httpResp.StatusCode == http.StatusNotFound {
-			return &RouteNotServedError{Route: httpReq.URL.Path, Detail: bodySnippet(raw)}
-		}
 		return fmt.Errorf("apiclient: malformed response envelope: %w", err)
 	}
 	if env.Error != nil {
-		// A 404 is the daemon's mux catch-all: rpcHandler itself answers only
-		// 200/400/405/413/500/503, so no registered route can produce one. The
-		// route is therefore absent from THIS daemon's table — version skew, not a
-		// handler that ran and refused — and a caller whose fallback would be
-		// wrong (a remote config write must never become a local one, #3679) has
-		// to be able to tell the two apart.
-		if httpResp.StatusCode == http.StatusNotFound {
-			return &RouteNotServedError{Route: httpReq.URL.Path, Detail: env.Error.Message}
-		}
 		// Surface the daemon's message verbatim — byte-identical to what the
 		// net/rpc client would carry, since both transports wrap the same
 		// controlServer error — except where the message is provably a version

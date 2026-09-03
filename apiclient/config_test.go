@@ -159,6 +159,31 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		}
 	})
 
+	// The proxy shapes that the first version of this MISSED, because it keyed the
+	// classification on the body. Each parses as JSON and carries no envelope
+	// error, so a check on env.Error never ran (Codex, #3704). The third is the
+	// dangerous one: `{"data":null,"error":null}` decodes into a zero-valued
+	// response with a NIL error, so a 404 was reported to the caller as SUCCESS.
+	for _, body := range []string{
+		`{}`,
+		`{"message":"not found"}`,
+		`{"data":null,"error":null}`,
+		`{"error":"not found"}`, // error present but not the envelope's object shape
+	} {
+		t.Run("a proxy's JSON 404: "+body, func(t *testing.T) {
+			c := statusServer(t, func(*http.Request) (int, []byte) {
+				return http.StatusNotFound, []byte(body)
+			})
+			resp, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
+			if !IsRouteNotServed(err) {
+				t.Fatalf("a JSON 404 must classify as a missing route, got %T: %v", err, err)
+			}
+			if resp.Result != nil {
+				t.Errorf("a 404 must never yield a decoded result, got %+v", resp.Result)
+			}
+		})
+	}
+
 	// Every other status keeps its existing meaning. A 500 is the daemon
 	// answering, so a caller must not read it as "nothing happened".
 	t.Run("a non-404 malformed body is still a malformed envelope", func(t *testing.T) {
