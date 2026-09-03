@@ -94,7 +94,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// retry the error asks for is a true retry.
 	opLock := m.opLockFor(key)
 	if acquired, _ := lockWithin(opLock, opLockTimeout); !acquired {
-		log.WarningLog.Printf("kill of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", req.Title, opLockTimeout)
+		m.warn().Printf("kill of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", req.Title, opLockTimeout)
 		return session.InstanceData{}, errKillBusy(req.Title, opLockTimeout)
 	}
 	defer opLock.Unlock()
@@ -254,7 +254,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		teardownErr = instance.KillTrustingOwnLifecycleLock()
 		restoreCheckpoint()
 		if session.TeardownStateUnknown(teardownErr) {
-			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
+			m.warn().Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
 			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)}
 		}
 		// Checkpoint the settled live teardown BEFORE either fallible tail step.
@@ -313,10 +313,10 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 			// which merely outlived its deadline is not retried: its one definitive
 			// result is reconciled above, while the process fence blocks duplicates.
 			if descriptorStalled {
-				log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, and no second descriptor cleanup may start in this process — restart the daemon before retrying if the first worker does not settle: %v", req.Title, teardownErr)
+				m.warn().Printf("kill of session %q could not complete its ghost teardown; the record is kept, and no second descriptor cleanup may start in this process — restart the daemon before retrying if the first worker does not settle: %v", req.Title, teardownErr)
 				return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — restart the daemon before retrying once the cause clears: %w", req.Title, teardownErr)}
 			}
-			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill once the cause clears: %v", req.Title, teardownErr)
+			m.warn().Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill once the cause clears: %v", req.Title, teardownErr)
 			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)}
 		}
 	}
@@ -349,7 +349,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		// this call never returning: that is what starved the finisher and made
 		// the session undeletable until a daemon restart.
 		if errors.Is(err, config.ErrLockTimeout) {
-			log.WarningLog.Printf("kill of session %q: the instances record is locked by another agent-factory process; the kill is committed and the daemon will finish it on a later poll: %v", req.Title, err)
+			m.warn().Printf("kill of session %q: the instances record is locked by another agent-factory process; the kill is committed and the daemon will finish it on a later poll: %v", req.Title, err)
 			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not update its record because another agent-factory process is holding the repo's instances lock; the session is already marked killed and will be reaped automatically — retry if it lingers: %w", req.Title, err)}
 		}
 		return resolved, &mutationCommittedError{err: fmt.Errorf("failed to delete instance from storage: %w", err)}
@@ -456,7 +456,7 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.
 	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-		log.WarningLog.Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
+		m.warn().Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
 	}
 	if err != nil {
 		return status, fmt.Errorf("failed to send prompt: %w", err)
@@ -806,7 +806,7 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	if tracked := m.instances[key]; tracked != nil {
 		m.mu.Unlock()
 		if err := instance.CloseAttachOnly(); err != nil {
-			log.WarningLog.Printf("findSession %q: closing duplicate instance attach failed: %v", title, err)
+			m.warn().Printf("findSession %q: closing duplicate instance attach failed: %v", title, err)
 		}
 		return tracked, rid, data, nil
 	}

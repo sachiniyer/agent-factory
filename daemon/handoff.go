@@ -249,7 +249,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := m.persistHandoffCheckpointErr(repoID, instance, checkpoint); err != nil {
 		// Preserve the existing best-effort persist contract: delivery can still
 		// make the live agent useful, and the final settled write retries below.
-		log.WarningLog.Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
+		m.warn().Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
 	if err := m.deliverHandoffMission(delivery); err != nil {

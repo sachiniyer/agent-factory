@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -65,7 +64,7 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	}
 	conv, err := session.CaptureAgentConversation(agent, snap, timeout)
 	if err != nil {
-		log.WarningLog.Printf("conversation capture for %q failed: %v", inst.Title, err)
+		m.warn().Printf("conversation capture for %q failed: %v", inst.Title, err)
 		return
 	}
 	if !conv.HasID() {
@@ -146,6 +145,6 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 			// applied to its sibling write).
 			inst.ReconcileRootRecreateContext(previousNotice)
 		}
-		log.WarningLog.Printf("failed to persist conversation id for %q: %v", inst.Title, err)
+		m.warn().Printf("failed to persist conversation id for %q: %v", inst.Title, err)
 	}
 }

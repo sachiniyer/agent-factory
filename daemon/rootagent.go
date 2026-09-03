@@ -684,7 +684,7 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
 		return
 	}
-	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
+	m.warn().Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
 }
 
 // rootEnsureAnsweredFailures counts the failures in the current streak that

@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -45,7 +44,7 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 	if teardownErr != nil {
 		// The teardown TOLD us something went wrong, but not that the workspace's
 		// fate is unknown. The record may go; the error is the caller's to report.
-		log.WarningLog.Printf("session %q: teardown reported an error that does not leave its workspace state unknown; deleting the record as normal: %v", title, teardownErr)
+		m.warn().Printf("session %q: teardown reported an error that does not leave its workspace state unknown; deleting the record as normal: %v", title, teardownErr)
 	}
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {

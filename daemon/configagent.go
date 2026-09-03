@@ -369,7 +369,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// tmux nobody owns.
 	fail := func(err error) (string, string, error) {
 		if rerr := m.configAgents.reap(sessionName); rerr != nil {
-			log.WarningLog.Printf("config agent: cleanup after a failed spawn also failed: %v", rerr)
+			m.warn().Printf("config agent: cleanup after a failed spawn also failed: %v", rerr)
 		}
 		return "", "", err
 	}
@@ -382,7 +382,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// failing a spawn that would otherwise attach fine.
 	socketPath, serr := ts.SocketPath(ctx)
 	if serr != nil {
-		log.WarningLog.Printf("config agent: could not resolve the tmux socket path for %s (%v); the attach will fall back to the default socket", sessionName, serr)
+		m.warn().Printf("config agent: could not resolve the tmux socket path for %s (%v); the attach will fall back to the default socket", sessionName, serr)
 		socketPath = ""
 	}
 
@@ -452,7 +452,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							return
 						}
 						if errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
-							log.WarningLog.Printf(
+							m.warn().Printf(
 								"config agent: %s briefing receipt was still not observed after %s (%v); delivery remains unconfirmed",
 								sessionName,
 								configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
@@ -460,13 +460,13 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							)
 							return
 						}
-						log.WarningLog.Printf(
+						m.warn().Printf(
 							"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
 							sessionName, configAgentPromptReceiptTimeout, lateErr,
 						)
 					})
 				} else {
-					log.WarningLog.Printf(
+					m.warn().Printf(
 						"config agent: %s could not confirm the briefing receipt: %v",
 						sessionName, err,
 					)

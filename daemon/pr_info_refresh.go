@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
@@ -122,7 +121,7 @@ func (m *Manager) refreshStalePRInfo(ctx context.Context) {
 				IsDaemonQuiescingErr(err) || IsDaemonUpgradeProbationErr(err) {
 				return
 			}
-			log.WarningLog.Printf("PR info sweep: refresh for %q failed: %v", e.instance.Title, err)
+			m.warn().Printf("PR info sweep: refresh for %q failed: %v", e.instance.Title, err)
 		}
 	}
 }

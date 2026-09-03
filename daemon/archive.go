@@ -487,7 +487,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// and publish before this older Archived projection (#2680 Codex review).
 	m.publishEvent(agentproto.EventSessionArchived, archived)
 	if committedErr := archiveCommitWarning(instance, hookErr); committedErr != nil {
-		log.WarningLog.Printf("%v", committedErr)
+		m.warn().Printf("%v", committedErr)
 		return archivedPath, archived, committedErr
 	}
 	return archivedPath, archived, nil
@@ -662,7 +662,7 @@ func (m *Manager) persistHandoffCheckpointErr(repoID string, instance *session.I
 // held. Under m.mu, call persistInstanceData directly.
 func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
 	if err := m.persistInstanceErr(repoID, instance); err != nil {
-		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
+		m.warn().Printf("failed to persist instance %q: %v", instance.Title, err)
 	}
 }
 
@@ -692,7 +692,7 @@ func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
 // LOCK CONTRACT (#2106): inherits persistInstance's — never call it with m.mu held.
 func (m *Manager) persistAndPublishInstance(repoID string, instance *session.Instance) {
 	if err := m.persistAndPublishInstanceErr(repoID, instance); err != nil {
-		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
+		m.warn().Printf("failed to persist instance %q: %v", instance.Title, err)
 	}
 }
 

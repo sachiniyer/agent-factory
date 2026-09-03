@@ -200,7 +200,7 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 		// session down. Keep it — the conservative outcome, and the same one an
 		// older daemon produced — and say so once, on the tick that could not
 		// decide. A later run's completion asks again.
-		log.WarningLog.Printf("could not read the session lifecycle for task %s (session %q): %v; leaving the session in place",
+		m.warn().Printf("could not read the session lifecycle for task %s (session %q): %v; leaving the session in place",
 			taskID, title, err)
 		return
 	}
@@ -260,7 +260,7 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 		select {
 		case <-hooksDone:
 		case <-time.After(taskLifecycleHookWait):
-			log.WarningLog.Printf("task %s: post-worktree hooks for session %q have run for over %s; leaving the session in place rather than tearing down a worktree they may still be writing to",
+			m.warn().Printf("task %s: post-worktree hooks for session %q have run for over %s; leaving the session in place rather than tearing down a worktree they may still be writing to",
 				taskID, title, taskLifecycleHookWait)
 			return
 		}
@@ -275,11 +275,11 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 		// Unreachable: ValidateTrigger refuses an unknown verb on write, and
 		// SessionLifecycle canonicalizes. Log rather than guess — picking a verb
 		// here would be inventing destructive intent from a value nothing accepted.
-		log.WarningLog.Printf("task %s declares an unknown on_complete %q; leaving session %q in place", taskID, verb, title)
+		m.warn().Printf("task %s declares an unknown on_complete %q; leaving session %q in place", taskID, verb, title)
 		return
 	}
 	if isMutationCommitted(err) {
-		log.WarningLog.Printf("task %s: applied on_complete=%s to session %q with a committed warning: %v",
+		m.warn().Printf("task %s: applied on_complete=%s to session %q with a committed warning: %v",
 			taskID, verb, title, err)
 		return
 	}
@@ -288,7 +288,7 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 		// this never touches the task's last-run status. The session stays where it
 		// is and stays visible, which is the recoverable outcome; a user can finish
 		// the teardown by hand.
-		log.WarningLog.Printf("task %s: could not %s session %q after its run finished: %v", taskID, verb, title, err)
+		m.warn().Printf("task %s: could not %s session %q after its run finished: %v", taskID, verb, title, err)
 		return
 	}
 	log.InfoLog.Printf("task %s: applied on_complete=%s to session %q after its run finished", taskID, verb, title)

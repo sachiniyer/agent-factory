@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -323,7 +322,7 @@ func (m *Manager) requireCurrentVSCodeInstance(instance *session.Instance, key, 
 func (m *Manager) stopVSCodeForInstance(key, instanceID string) error {
 	err := m.vscode.stopForInstance(key, instanceID)
 	if err != nil {
-		log.WarningLog.Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
+		m.warn().Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
 	}
 	return err
 }

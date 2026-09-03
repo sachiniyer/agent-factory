@@ -268,7 +268,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// telling the user a workspace may remain would all be false.
 		killErr := instance.Kill()
 		if killErr != nil && !session.TeardownStateUnknown(killErr) {
-			log.WarningLog.Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
+			m.warn().Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
 		}
 		if session.TeardownStateUnknown(killErr) {
 			if keepErr := m.keepFailedCreate(repo.ID, title, instance); keepErr != nil {
@@ -846,7 +846,7 @@ func (m *Manager) worktreeHeldBranchesLocked(repoPath string, remote bool) map[s
 	}
 	held, err := branchesHeldByWorktrees(repoPath)
 	if err != nil {
-		log.WarningLog.Printf("could not list worktree branch holds for %s; resolving the session title without them (a name an archived worktree holds will fail at worktree add instead of being skipped): %v", repoPath, err)
+		m.warn().Printf("could not list worktree branch holds for %s; resolving the session title without them (a name an archived worktree holds will fail at worktree add instead of being skipped): %v", repoPath, err)
 		return nil
 	}
 	return held

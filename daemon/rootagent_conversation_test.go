@@ -276,14 +276,17 @@ func TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry(t *tes
 	repoPath := setupControlRepo(t)
 	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, newestConversationID)
 
-	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
-	require.NoError(t, err)
+	// This Manager's own warning log (#3787 part 2), so the assertions below
+	// cannot be satisfied by a warning another Manager emitted. Reset stands in
+	// for the old "install the capture here" — it drops the first ensure pass's
+	// output, which is what installing late used to accomplish.
+	manager, warning := newManagerCapturingWarnings(t, rootTestConfig(repoPath, config.RootAgentConfig{}))
 	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 
-	warning := captureWarnings(t)
+	warning.Reset()
 
 	first.SetStatusForTest(session.Lost)
 	manager.ensureRootAgentsAndWait()
@@ -459,8 +462,12 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 		Program: "CLAUDE_CONFIG_DIR=$HOME/.claude claude",
 	})
 
-	manager, err := NewManager(cfg)
-	require.NoError(t, err)
+	// This Manager's own warning log (#3787 part 2). The assertion below COUNTS
+	// occurrences, so contamination breaks it in both directions: a second
+	// Manager warning the same thing inflates the count, and the dedup this test
+	// exists to pin would look broken — or, worse, a dedup that stopped working
+	// could be masked by which Manager happened to emit what.
+	manager, warning := newManagerCapturingWarnings(t, cfg)
 	manager.ensureRootAgentsAndWait()
 	require.Len(t, *seen, 1)
 	root := findRootInstance(t, manager, repoPath)
@@ -468,7 +475,7 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 	seedRootConversation(t, root)
 	root.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle, cfg.RootAgents[repoPath].Program))
 
-	warning := captureWarnings(t)
+	warning.Reset()
 
 	manager.ensureRootAgentsAndWait()
 	advance(time.Hour)

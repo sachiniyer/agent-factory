@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -96,7 +97,7 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	}
 	repoStartLock.Unlock()
 	if err != nil {
-		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
+		m.warn().Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
 		return err
 	}
 	return nil
@@ -143,7 +144,7 @@ func (m *Manager) noteKillRetryFailure(key, title string, err error) {
 		log.ErrorLog.Printf("finishing kill of %q failed %d consecutive times; the cause looks persistent — "+
 			"retrying every %s: %v", title, failures, session.CleanupRetrySettledInterval(), err)
 	default:
-		log.WarningLog.Printf("finishing kill of %q: not deleting the record yet (retrying): %v", title, err)
+		m.warn().Printf("finishing kill of %q: not deleting the record yet (retrying): %v", title, err)
 	}
 }
 
@@ -212,7 +213,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		return
 	}
 
-	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
+	m.warn().Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
 	// Re-establish missing repo-gone cleanup authorization before retrying the
 	// teardown (#3278 review). The tombstone may have committed while the
 	// origin was present and the origin deleted before this retry; the

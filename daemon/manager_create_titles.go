@@ -378,7 +378,7 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 			// moved the on-disk row to the new title; that is pre-existing behavior this
 			// fix deliberately does not change, and the returned error covers it.
 			if wErr := persistInstanceData(repoID, archived.ToInstanceData()); wErr != nil {
-				log.WarningLog.Printf("archived session %q was renamed to %q but could not be persisted or rolled back; recording its new identity also failed: %v",
+				m.warn().Printf("archived session %q was renamed to %q but could not be persisted or rolled back; recording its new identity also failed: %v",
 					oldTitle, archived.Title, wErr)
 			}
 			return nil, fmt.Errorf("failed to durably rename archived session %q and could not roll it back (%v); it may need manual recovery: %w", oldTitle, rbErr, perr)

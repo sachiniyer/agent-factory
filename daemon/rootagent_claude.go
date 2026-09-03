@@ -6,7 +6,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -72,11 +71,11 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 	repoStartLock.Unlock()
 	if err != nil {
 		inst.SetAgentConversation(recorded)
-		log.WarningLog.Printf("root agent for %s could not persist replacement claude conversation %s: %v",
+		m.warn().Printf("root agent for %s could not persist replacement claude conversation %s: %v",
 			repoRoot, state.Resume.ID, err)
 		return
 	}
-	log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; persisted newest on-disk project conversation %s instead",
+	m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript; persisted newest on-disk project conversation %s instead",
 		repoRoot, recorded.ID, state.Resume.ID)
 }
 
@@ -100,7 +99,7 @@ func (m *Manager) logRootClaudeTranscriptWarning(st *rootEnsureState, format str
 	}
 	st.claudeTranscriptWarning = message
 	m.mu.Unlock()
-	log.WarningLog.Print(message)
+	m.warn().Print(message)
 }
 
 func (m *Manager) clearRootClaudeTranscriptWarning(st *rootEnsureState) {

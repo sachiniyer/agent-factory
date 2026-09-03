@@ -729,7 +729,7 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 	go func() {
 		if err := <-lateResult; err != nil {
 			m.clearGhostCleanupStall(key, stableID)
-			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
+			m.warn().Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
 			return
 		}
 		for {
@@ -748,7 +748,7 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 					return
 				}
 			}
-			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
+			m.warn().Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
 			timer := time.NewTimer(lateGhostCleanupRetryInterval)
 			<-timer.C
 		}

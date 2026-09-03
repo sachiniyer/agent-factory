@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // #3500: the root-agent sweeps narrated EVERY config.RepoFromPath failure as a
@@ -196,7 +197,7 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 
 	_ = installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
-	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers([]config.Project{project}, nil)
+	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers(log.WarningLog, []config.Project{project}, nil)
 
 	got := warnings.String()
 	if strings.Contains(got, "does not resolve to a git repository") {

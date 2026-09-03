@@ -53,7 +53,7 @@ func (m *Manager) ResumePendingHandoffs() {
 			continue
 		}
 		if err := m.resumePendingHandoff(entry, mission); err != nil {
-			log.WarningLog.Printf("handoff %q: pending mission retry did not complete: %v", entry.instance.Title, err)
+			m.warn().Printf("handoff %q: pending mission retry did not complete: %v", entry.instance.Title, err)
 		}
 	}
 }

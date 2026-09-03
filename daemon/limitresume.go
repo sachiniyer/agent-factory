@@ -244,7 +244,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	attempts, wait := m.limitResumeAttempted(st, now, hadReset, retryInterval)
 
 	if err := m.resumeFromLimitLocked(repoID, key, inst, inst.Title); err != nil {
-		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
+		m.warn().Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
 		return
 	}
 	// State the trigger that was actually observed (#3240): with a parsed reset
