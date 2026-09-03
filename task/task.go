@@ -516,7 +516,21 @@ func writeTasks(tasks []Task) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal tasks envelope: %w", err)
 	}
-	if err := config.AtomicWriteFile(path, enveloped, 0644); err != nil {
+	// tasks.json FOLLOWS a symlink (#3672). It is the one user-authored store in
+	// the af home — people write it by hand and a user may reasonably keep it in
+	// dotfiles beside config.toml — so it joins the global config on the follow
+	// side rather than af's own managed files on the refuse side. The link stays;
+	// the file it names is rewritten.
+	//
+	// The LOCK deliberately stays on af's own path (config.WithFileLock above,
+	// not the followed variant the global config uses). Two consequences, both
+	// wanted: af's .lock never lands in the user's dotfiles working tree, and
+	// every af process sharing one AF home locks the same file whatever the link
+	// points at. What it does not cover is two DIFFERENT AF homes aliasing one
+	// tasks.json — they would lock two paths and write one file. That is the
+	// #3697 class (the followed lock's own resolution), it is being reworked in
+	// #3696, and this change deliberately does not touch that machinery.
+	if err := config.AtomicWriteFileFollowingLink(path, enveloped, 0644); err != nil {
 		return "", err
 	}
 	return storeGeneration(enveloped), nil
@@ -684,6 +698,13 @@ func DeleteAllTasks() error {
 		return err
 	}
 	return config.WithFileLock(path, func() error {
+		// Unlinks the PATH, including when it is a symlink — unchanged by #3672,
+		// which moved the write side to follow. The asymmetry is deliberate and
+		// mild here: a wipe that removed the target instead would leave the link
+		// dangling and the next `af task add` refusing it, and one that removed
+		// both would delete a file in the user's dotfiles. Unlinking the link
+		// loses no data (the target keeps its content, and af stops reading it),
+		// so the conservative answer stands until #3672 says otherwise.
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to remove tasks file: %w", err)
 		}

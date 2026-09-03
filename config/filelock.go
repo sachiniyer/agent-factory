@@ -312,35 +312,153 @@ func lockFileIsCurrent(f *os.File, lockPath string) (bool, error) {
 // AtomicWriteFile writes data to a temporary file in the same directory as path
 // and atomically renames it to path. This prevents partial writes from being
 // visible to readers.
+//
+// A symlink at path is REPLACED by the regular file, which is what os.Rename
+// does on its own. That is the historical behaviour and it is deliberate for
+// callers who neither follow (AtomicWriteFileFollowingLink) nor refuse
+// (AtomicWriteFileRefusingLink) — see #3672 for the per-caller table.
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	// Its own path IS its target: this writer replaces the file at the path it
 	// was given, link or not.
 	return atomicWrite(path, path, data, perm)
 }
 
-// AtomicWriteFileFollowingLink is AtomicWriteFile for the one file af rewrites
-// on the user's behalf rather than owns: the global config (#3660, #3672).
+// AtomicWriteFileRefusingLink is AtomicWriteFile for the files af MANAGES: the
+// bearer token, the autostart unit/plist, the editor-origin secret, the VS Code
+// owner record, the upgrade interlock's executable swap, the auto-update check
+// cache, the event-queue cursor, and the plugin/skill files af regenerates
+// (#3672).
+//
+// When path is a symlink it writes nothing and returns an error naming BOTH
+// ends, wrapping ErrManagedFileSymlink. These are af's own files at paths af
+// chose, so a link there is not an arrangement af can honour either way:
+// replacing it destroys whatever the user set up, and writing through it is a
+// promise ("af will maintain a file wherever you point this") that none of these
+// callers ever offered. Failing closed hands the decision back to the person who
+// made the link.
+//
+// Refusing is also what keeps the write/cleanup asymmetry #3672 is titled after
+// from arising at all. A write that FOLLOWED a link, cleaned up by a plain
+// os.Remove of the same path, unlinks the link while its target keeps af's
+// content — a systemd unit af no longer knows about, still being read. Callers
+// that delete what they wrote pair this with RemoveFileRefusingLink, so neither
+// end ever acts on a link.
+//
+// This is a POLICY guard, not a security boundary. It lstats and then renames,
+// so a link swapped in between the two is still replaced — os.Rename never
+// follows a final-component link, so the outcome there is today's behaviour, not
+// a write through a link. Defending a path against a racing attacker needs the
+// in-repo writer's pinned-directory shape (config/inrepo.go), and #3697 tracks
+// the parent-directory case separately.
+func AtomicWriteFileRefusingLink(path string, data []byte, perm os.FileMode) error {
+	// The refusal is FIRST, before atomicWrite's ensureStorageParent, so a
+	// refused write leaves the filesystem exactly as it found it: no created
+	// parent, no AF-home chmod on a path af just declined to touch.
+	if err := refuseManagedSymlink(path); err != nil {
+		return err
+	}
+	// Its own path is its target, as for the plain writer: nothing here follows
+	// anything, it just stops when a link is in the way.
+	return atomicWrite(path, path, data, perm)
+}
+
+// ErrManagedFileSymlink reports that an af-managed path is a symlink, so the
+// write or delete was refused. Callers match on it (errors.Is) to tell this
+// deliberate refusal from an I/O failure; the message names both ends.
+var ErrManagedFileSymlink = errors.New("af-managed file is a symlink")
+
+// RemoveFileRefusingLink is os.Remove for a path an af-managed writer owns.
+//
+// It refuses a symlink for the same reason AtomicWriteFileRefusingLink does, and
+// it is the half #3672 was filed about: daemon/autostart.go wrote the unit with
+// one helper and cleaned up with a bare os.Remove, so a failed install or an
+// uninstall would have unlinked the LINK while its target held af's content. A
+// path af will not write through is a path af must not unlink either.
+//
+// A missing path returns the usual ENOENT, so callers keep their os.IsNotExist
+// checks unchanged.
+func RemoveFileRefusingLink(path string) error {
+	if err := refuseManagedSymlink(path); err != nil {
+		return err
+	}
+	return os.Remove(path)
+}
+
+// refuseManagedSymlink returns the both-ends error when path is a symlink, and
+// nil for anything else — including an absent path, which is an ordinary create
+// or an already-done delete.
+//
+// A DANGLING link is refused too, and by the same rule rather than a special
+// case: the policy is about the link's presence, not about what it resolves to.
+func refuseManagedSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to inspect %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	target, readErr := readLinkTarget(path)
+	if readErr != nil {
+		return fmt.Errorf("%w: %s is a symlink whose target could not be read (%v); "+
+			"af manages this file — remove the link and let af write a real file there",
+			ErrManagedFileSymlink, path, readErr)
+	}
+	return fmt.Errorf("%w: %s is a symlink to %s; af manages this file and will neither "+
+		"write through the link nor replace it — remove the link and let af write a real "+
+		"file there, or point af at the other location instead",
+		ErrManagedFileSymlink, path, target)
+}
+
+// readLinkTarget returns what a symlink points at, as an absolute path. A
+// relative target is joined against the LINK's directory, which is how the
+// kernel resolves it; reporting the raw relative text would name a path that
+// does not exist from the reader's working directory.
+func readLinkTarget(path string) (string, error) {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return target, nil
+}
+
+// AtomicWriteFileFollowingLink is AtomicWriteFile for the files af rewrites on
+// the user's behalf rather than owns: the global config (#3660) and the task
+// store (#3672).
 //
 // When path is a symlink it writes the file the link names, leaving the link in
 // place. That is right for config.toml — the user pointed it at their dotfiles
-// deliberately and every editor writes through it — and it is NOT right by
-// default, which is why it is a separate function rather than a flag on the
-// shared one. af's own managed files (the bearer token, autostart units, the
-// task store) keep the plain writer's semantics, and the in-repo config goes
-// further in the other direction with an O_NOFOLLOW pinned directory, because a
-// checked-in config belongs to a repository a clone does not control.
+// deliberately and every editor writes through it — and it is right for
+// tasks.json for the same reason: it is user-authored content a user may
+// reasonably keep beside their config. It is NOT right by default, which is why
+// it is a separate function rather than a flag on the shared one. af's own
+// managed files refuse a link outright (AtomicWriteFileRefusingLink), and the
+// in-repo config follows one only as far as the repository goes, with an
+// O_NOFOLLOW pinned directory, because a checked-in config belongs to a
+// repository a clone does not control.
 //
-// Callers outside config/ are refused by
+// Callers outside config/ and task/ are refused by
 // TestFollowingWriterStaysInsideTheConfigPackage rather than by the compiler,
 // so the promise cannot spread silently.
 //
-// Nothing in this package calls it today. Since #3688 every followed write
-// happens under withFollowedFileLock and goes through the resolution that lock
-// pinned, because resolving a second time inside a critical section is the bug
-// that issue is about. This is what a followed write looks like with no lock to
-// pin one — and it is the name TestFollowingWriterStaysInsideTheConfigPackage
-// fences the promise by, so it is also what keeps that fence pointed at
-// something.
+// Nothing in THIS package calls it. Since #3688 every followed write inside
+// config/ happens under withFollowedFileLock and goes through the resolution
+// that lock pinned, because resolving a second time inside a critical section
+// is the bug that issue is about. Its one caller is task/'s tasks.json writer
+// (#3672), which is exactly what a followed write looks like with no lock to
+// pin one: withFollowedFileLock and lockedTarget are unexported on purpose, so
+// task/ resolves here instead. That leaves tasks.json with the #3688 shape a
+// link retargeted MID-OPERATION can still catch — the read resolves at open
+// time and this write resolves again — which is the class #3697 owns and #3672
+// deliberately left alone. It is not the #3660 bug: an unmoving link is
+// followed correctly, which is the promise tasks.json was put on this side
+// for.
 func AtomicWriteFileFollowingLink(path string, data []byte, perm os.FileMode) error {
 	target, err := resolveWriteTarget(path)
 	if err != nil {
@@ -355,7 +473,9 @@ func AtomicWriteFileFollowingLink(path string, data []byte, perm os.FileMode) er
 // own path — what the AF-home hardening is judged against and what a symlink
 // notice names — and target is the file being replaced. The two differ only
 // when a link is being followed, and whoever followed it did the resolving
-// (#3688).
+// (#3688). A writer that REFUSES a link decides before calling here, for the
+// same reason: the refusal has to happen before ensureStorageParent, so a
+// refused write leaves the filesystem exactly as it found it (#3672).
 func atomicWrite(path, target string, data []byte, perm os.FileMode) error {
 	// ensureStorageParent runs on the ORIGINAL path rather than on target, and
 	// that is load-bearing: secureAFHomeForPath hardens the AF home only when
@@ -427,14 +547,14 @@ func atomicWrite(path, target string, data []byte, perm os.FileMode) error {
 	// the data is already visible to readers.
 	dirFd, err := os.Open(dir)
 	if err != nil {
-		log.WarningLog.Printf("AtomicWriteFile: failed to open directory %s for post-rename sync: %v", dir, err)
+		log.WarningLog.Printf("atomicWrite: failed to open directory %s for post-rename sync: %v", dir, err)
 		return nil
 	}
 	if err := dirFd.Sync(); err != nil {
-		log.WarningLog.Printf("AtomicWriteFile: failed to fsync directory %s after rename of %s: %v", dir, target, err)
+		log.WarningLog.Printf("atomicWrite: failed to fsync directory %s after rename of %s: %v", dir, target, err)
 	}
 	if err := dirFd.Close(); err != nil {
-		log.WarningLog.Printf("AtomicWriteFile: failed to close directory %s after post-rename sync of %s: %v", dir, target, err)
+		log.WarningLog.Printf("atomicWrite: failed to close directory %s after post-rename sync of %s: %v", dir, target, err)
 	}
 	return nil
 }
@@ -590,12 +710,9 @@ func resolveWriteTarget(path string) (string, error) {
 	}
 	// Name BOTH ends. "no such file or directory" against the link's own path
 	// would send the reader looking at a link that is plainly there.
-	target, readErr := os.Readlink(path)
+	target, readErr := readLinkTarget(path)
 	if readErr != nil {
 		return "", fmt.Errorf("failed to resolve the symlink %s: %w", path, evalErr)
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(path), target)
 	}
 	return "", fmt.Errorf("%s is a symlink to %s, which cannot be resolved: %w; "+
 		"af will not create it — repair the link or remove it and let af write a real file there",

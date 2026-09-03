@@ -229,7 +229,12 @@ func InstallAutostart() (string, error) {
 		}
 		unitPath := filepath.Join(dir, autostartUnitName)
 		content := systemdAutostartUnit(execPath, os.Getenv("PATH"), os.Getenv("SHELL"), os.Getenv("AGENT_FACTORY_HOME"))
-		if err := config.AtomicWriteFile(unitPath, []byte(content), 0644); err != nil {
+		// Refuses a symlinked unit path, and removeAutostartUnitFile refuses the
+		// same one — the pair #3672 is titled after. ~/.config/systemd/user/ is a
+		// directory where links are ordinary (that is how `systemctl enable`
+		// works), so a write that followed one would be cleaned up by a remove
+		// that unlinked the LINK, leaving af's content stranded in the target.
+		if err := config.AtomicWriteFileRefusingLink(unitPath, []byte(content), 0644); err != nil {
 			return "", fmt.Errorf("failed to write unit file: %w", err)
 		}
 		if out, err := autostartUnitCommand("systemctl", "--user", "daemon-reload"); err != nil {
@@ -269,7 +274,9 @@ func InstallAutostart() (string, error) {
 		// Boot out a previous agent first so bootstrap picks up the new file.
 		// Best-effort: it fails when no agent is loaded, which is the norm.
 		_, _ = autostartUnitCommand("launchctl", "bootout", launchdServiceTarget())
-		if err := config.AtomicWriteFile(plistPath, []byte(content), 0644); err != nil {
+		// Refuses a symlinked plist path, paired with removeAutostartUnitFile
+		// below, for the reason spelled out on the systemd branch (#3672).
+		if err := config.AtomicWriteFileRefusingLink(plistPath, []byte(content), 0644); err != nil {
 			return "", fmt.Errorf("failed to write plist file: %w", err)
 		}
 		// Hand any ad-hoc daemon over to the supervised one, but never let a
@@ -293,8 +300,13 @@ func InstallAutostart() (string, error) {
 // enabled file that AutostartInstalled would misreport as installed (#974).
 // Best-effort: a cleanup failure is logged, not surfaced, since the original
 // install error is the one the caller must act on.
+//
+// It refuses a symlinked path because the WRITE above refuses one: af cannot
+// have written this file through a link, so unlinking one here would delete an
+// arrangement af never touched (#3672). The refusal is logged like any other
+// cleanup failure — the install error is still what the caller acts on.
 func removeAutostartUnitFile(path string) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := config.RemoveFileRefusingLink(path); err != nil && !os.IsNotExist(err) {
 		log.WarningLog.Printf("failed to clean up autostart unit %s after a failed install: %v", path, err)
 	}
 }
@@ -408,7 +420,10 @@ func RefreshAutostartUnit() error {
 		changed = changed || directiveChanged
 	}
 	if changed {
-		if err := config.AtomicWriteFile(path, []byte(content), 0644); err != nil {
+		// Same refusal as the install writes: this rewrites the unit af
+		// installed, so it must not start writing through a link af never
+		// created (#3672).
+		if err := config.AtomicWriteFileRefusingLink(path, []byte(content), 0644); err != nil {
 			return fmt.Errorf("failed to rewrite daemon autostart unit %s: %w", path, err)
 		}
 	}
@@ -867,7 +882,9 @@ func UninstallAutostart() (string, error) {
 		if out, err := autostartUnitCommand("systemctl", "--user", "disable", "--now", autostartUnitName); err != nil {
 			return "", fmt.Errorf("failed to disable daemon service: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
-		if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+		// Refuses a symlinked unit path (#3672): the install writer refuses one
+		// too, so af never wrote through this link and must not unlink it.
+		if err := config.RemoveFileRefusingLink(unitPath); err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("failed to remove unit file: %w", err)
 		}
 		if out, err := autostartUnitCommand("systemctl", "--user", "daemon-reload"); err != nil {
@@ -887,7 +904,8 @@ func UninstallAutostart() (string, error) {
 		// Same gui/<uid> domain as the install's bootstrap (#1947). Best-effort:
 		// removing the plist is what makes the uninstall stick across logins.
 		_, _ = autostartUnitCommand("launchctl", "bootout", launchdServiceTarget())
-		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		// Refuses a symlinked plist path, as the systemd branch does (#3672).
+		if err := config.RemoveFileRefusingLink(plistPath); err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("failed to remove plist file: %w", err)
 		}
 		return plistPath, nil

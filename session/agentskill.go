@@ -75,7 +75,12 @@ func writeAfMarkedFile(path, content string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return false, err
 	}
-	if err := config.AtomicWriteFile(path, []byte(content), 0644); err != nil {
+	// Refuses a symlinked path (#3672). The marker check above is what decides
+	// whether af may overwrite this file at all, and it reads THROUGH a link: a
+	// marked target behind a link would authorize replacing the link itself,
+	// which is the arrangement the check exists to protect. Refusing keeps the
+	// ownership answer and the write pointed at the same inode.
+	if err := config.AtomicWriteFileRefusingLink(path, []byte(content), 0644); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -205,6 +210,8 @@ func ensureAfSkillDir(base string, legacy ...string) (string, error) {
 //   - A read that FAILS for any reason other than not-exist (permissions, I/O)
 //     leaves the file alone. "I could not look" is not "there is nothing of
 //     value here" — that conflation is the #1969/#2011 class.
+//   - A SYMLINK at our path is left alone, because the marker was read through
+//     it: the fact observed belongs to the target, not to the link (#3672).
 //   - The enclosing agent-factory/ directory is removed with os.Remove, not
 //     RemoveAll, so the kernel refuses (ENOTEMPTY) if anything else is in there.
 //     A user who dropped their own file beside ours keeps it, and we never have
@@ -220,7 +227,12 @@ func removeAfSkillDir(skillDir, path string) {
 	if !bytes.Contains(existing, []byte(afSkillMarker)) {
 		return
 	}
-	if err := os.Remove(path); err != nil {
+	// The same refusal as writeAfMarkedFile, and for the sharper version of its
+	// reason: os.ReadFile above followed the link to find the marker, so a plain
+	// os.Remove would unlink the LINK on the strength of the TARGET's content —
+	// deleting the user's arrangement while af's own file survives. That is the
+	// #3672 asymmetry, pointed at the delete side.
+	if err := config.RemoveFileRefusingLink(path); err != nil {
 		log.WarningLog.Printf("af skill: could not remove the af-managed %s (%v); it stays until removed by hand", path, err)
 		return
 	}

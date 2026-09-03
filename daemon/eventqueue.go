@@ -542,7 +542,8 @@ func (q *eventQueue) resetCursorBeforeFreshAppendLocked() error {
 		return nil
 	}
 	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
-		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+		// Refuses a link, like persistCursorValueLocked (#3672).
+		if resetErr := config.AtomicWriteFileRefusingLink(q.curPath, []byte("0"), 0644); resetErr != nil {
 			return fmt.Errorf("failed to reset stale event-queue cursor before enqueue: remove failed: %v; reset failed: %w", err, resetErr)
 		}
 		log.WarningLog.Printf("watch task %s: failed to remove stale event-queue cursor before enqueue; reset it to 0: %v", q.taskID, err)
@@ -690,7 +691,8 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 		return false, err
 	}
 	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
-		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+		// Refuses a link, like persistCursorValueLocked (#3672).
+		if resetErr := config.AtomicWriteFileRefusingLink(q.curPath, []byte("0"), 0644); resetErr != nil {
 			q.offset, q.size = 0, 0
 			return false, fmt.Errorf("failed to reset drained event-queue cursor: remove failed: %v; reset failed: %w", err, resetErr)
 		}
@@ -732,8 +734,8 @@ func (q *eventQueue) compactLocked() error {
 	if err := q.persistCursorValueLocked(0); err != nil {
 		return err
 	}
-	// AtomicWriteFile's directory sync is intentionally best-effort for its
-	// general callers. Compaction needs a stronger cross-file guarantee: cursor
+	// The shared atomic writer's directory sync is intentionally best-effort for
+	// its general callers. Compaction needs a stronger cross-file guarantee: cursor
 	// 0 must be durable before the shortened queue can become durable, or a
 	// crash could pair the new queue with the old nonzero cursor and skip events.
 	// Fence it before creating the compact temp so this sync cannot also persist
@@ -851,6 +853,13 @@ func (q *eventQueue) persistCursorLocked() error {
 // persistCursorValueLocked durably writes an explicit cursor value. Compaction
 // uses it to record the post-rewrite offset (0) BEFORE the rename that shrinks
 // the file (#1537). Callers hold q.mu.
+//
+// The cursor REFUSES a symlinked path (#3672). It is a byte offset into the
+// jsonl file beside it — a pair af creates, advances and deletes together — so
+// the two must stay in the same directory: following a link would leave the
+// queue's own compaction (which fsyncs the cursor's directory before renaming
+// the queue file) fencing the wrong directory, and replacing one would discard
+// an arrangement nobody has a reason to have made.
 func (q *eventQueue) persistCursorValueLocked(off int64) error {
-	return config.AtomicWriteFile(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
+	return config.AtomicWriteFileRefusingLink(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
 }
