@@ -432,6 +432,35 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 	return refreshed, nil
 }
 
+// graceObservationBarrier is called at the top of every observation pass of a
+// vanished-session grace wait, BEFORE that pass takes its process snapshot.
+// Production leaves it nil, so this costs one nil check per pass.
+//
+// It exists because the descendant a refusal is ABOUT has to exist, and still be
+// attributable, at the moment a pass looks — and a fixture that forks it N
+// milliseconds into the grace is racing reapGraceWait for that rather than
+// establishing it. That race is what made
+// TestVanishedSessionSweepRefusesDescendantThatChangesGeneration turn master red
+// on a loaded arm64 runner with the sweep code untouched (#3766): the child was
+// simply born after the last pass, so nothing mismatched and the refusal the
+// assertion demands was never produced. A barrier here lets the fixture create
+// the process and block until it has PROVED the process table shows it, knowing
+// the pass that follows is the one that will see it.
+//
+// The placement is the contract, and it is two-sided:
+//
+//   - BEFORE the snapshot, not after. A hook past the refresh could only report
+//     what the pass already saw, and a fixture that built its process there would
+//     be released into the deadline check below with nothing left to look again.
+//   - The deadline is checked at the BOTTOM of the loop, so the pass that follows
+//     a barrier return always happens, however long the barrier held. That is the
+//     guarantee the fixtures rely on; a barrier that held past the deadline would
+//     otherwise buy nothing.
+//
+// It does not extend the deadline: with the hook nil this loop is byte-for-byte
+// the loop it was, and a holding barrier simply spends the window it was given.
+var graceObservationBarrier func(match string)
+
 // observeOrphanAncestry keeps the verified tree connected throughout its grace
 // period. A helper can fork, call setsid, remove its markers, and then outlive
 // its parent; after the parent exits no final snapshot can reconstruct that
@@ -442,6 +471,9 @@ func observeOrphanAncestry(captured []proctree.Process, sanitizedName string, wa
 	deadline := time.Now().Add(wait)
 	var observeErr error
 	for {
+		if barrier := graceObservationBarrier; barrier != nil {
+			barrier(sanitizedName)
+		}
 		refreshed, snap, err := refreshCapturedAncestry(captured, sanitizedName)
 		if err != nil {
 			observeErr = errors.Join(observeErr, err)
