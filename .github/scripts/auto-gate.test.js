@@ -103,6 +103,35 @@ const LIMIT_WORDINGS = [
   ],
 ];
 
+// The verdict exclusion must never fire on text a review QUOTES, and GitHub
+// wraps quoted prose. Composing this pattern from the tolerant stem — whose
+// `\s+` spans a newline — was measured as a REGRESSION against master: master
+// leaves a wrapped quote alone, the composed version stranded it, and a stranded
+// review artifact gets no degradation either. Whitespace tolerance belongs in
+// the outage detector and nowhere near this one.
+test("a review quoting the vendor phrase across a line wrap keeps its verdict", () => {
+  const { parseReviewedCommit, CODEX_VERDICT_LIMIT_RE, codexReportsReviewUsageLimit } = __test;
+  const short = HEAD_SHA.slice(0, 10);
+  const quotedAcrossAWrap =
+    "### Codex Review\n\nNo issues. Quoting the description: You have reached your Codex usage " +
+    "limits for code\nreviews. You can see your limits.\n\n**Reviewed commit:** `" + short + "`";
+
+  assert.equal(
+    parseReviewedCommit(quotedAcrossAWrap),
+    short,
+    "a wrapped quote inside a review must not cost it the verdict",
+  );
+  assert.equal(CODEX_VERDICT_LIMIT_RE.test(quotedAcrossAWrap), false);
+
+  // The detector keeps the opposite policy on purpose: a REAL message that wraps
+  // must still be recognised, which is why one constant cannot serve both.
+  assert.equal(
+    codexReportsReviewUsageLimit("You have reached your Codex usage limits for code\nreviews."),
+    true,
+    "a wrapped real outage message must still count",
+  );
+});
+
 // The gate's own sources must never contain a phrase that disqualifies a body
 // from being a verdict, or reviewing them costs the review its verdict. Pinned
 // rather than remembered: the phrase is exactly what these files are about, so

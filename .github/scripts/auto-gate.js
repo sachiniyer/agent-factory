@@ -98,7 +98,12 @@ const CODEX_LIMIT_STEM_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\b`, "i");
 // has to backtrack across a variable separator. At least one character: a
 // degenerate "…limits for ." names no scope, and is treated as the bare wording
 // rather than as an unrecognised one.
-const CODEX_LIMIT_CLAUSE_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\s+for\s+([^.\n]{1,60})`, "i");
+// The clause may WRAP. Excluding `\n` from the capture truncated
+// "for code\nreviews." to "code", which matched neither the review test nor a
+// qualifier, so a real outage message wrapped by GitHub's renderer was
+// classified as another job and blocked. Bounded by the sentence end and 60
+// characters instead.
+const CODEX_LIMIT_CLAUSE_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\s+for\s+([^.]{1,60})`, "i");
 // A clause about review, however it is dressed: `**code reviews**`,
 // `code-reviews`, `automated code reviews`, and the gerund in "for reviewing
 // your PRs" are all this outage.
@@ -168,10 +173,30 @@ function codexReportsReviewUsageLimit(body) {
 // `!looksLikeReviewArtifact` simultaneously denies it the degradation. Requiring
 // the literal scope clause keeps that shut: a quoted pattern carries the escape
 // text `\s+`, not real whitespace.
-const CODEX_VERDICT_LIMIT_RE = new RegExp(
-  CODEX_LIMIT_STEM + String.raw`\s+for\s+code\s+reviews?\b`,
-  "i",
-);
+// NOT composed from CODEX_LIMIT_STEM, and NOT whitespace-tolerant. The two
+// patterns need OPPOSITE whitespace policies, which is why one constant cannot
+// serve both:
+//
+//   - the detector above should be tolerant. Its false negative is "a real
+//     outage message went unrecognised", so a wrapped or double-spaced body must
+//     still match.
+//   - this one must be strict. Its false POSITIVE is "a real review was stripped
+//     of its verdict", and a review that QUOTES the vendor phrase is exactly
+//     where that happens — GitHub wraps quoted prose, so `\s+` here matches
+//     across the wrap and disqualifies the review. `!looksLikeReviewArtifact`
+//     then denies it the degradation as well, and the head is stuck.
+//
+// Composing this from the tolerant stem was measured as a REGRESSION against
+// master: master's literal spaces leave a wrapped quote alone, the composed
+// version strands it. Literal spaces here, deliberately.
+//
+// `cod[e]` is `code`. The character class changes nothing about what this
+// matches — verified against both JS and jq — and it stops THIS LINE from
+// matching itself. Master's spelling means a Codex review quoting the constant,
+// or quoting the skill's jq mirror of it, is disqualified as a verdict and, being
+// a review artifact, is denied the degradation too. The files most likely to be
+// reviewed were the ones carrying the trap.
+const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits for cod[e] reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is

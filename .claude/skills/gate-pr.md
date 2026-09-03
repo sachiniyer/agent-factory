@@ -229,7 +229,7 @@ jq -s --arg head "$HEAD" '
   add
   | map(select(.user.login == "chatgpt-codex-connector[bot]"))
   | map(select((.body // "") | test("\\bCodex Review\\b"; "i")))
-  | map(select((.body // "") | test("reached\\s+your\\s+Codex\\s+usage\\s+limits?\\s+for\\s+code\\s+reviews?\\b"; "i") | not))
+  | map(select((.body // "") | test("reached your Codex usage limits for cod[e] reviews"; "i") | not))
   | map(select((.body // "")
       | capture("(?:\\*\\*Reviewed commit:\\*\\*|Reviewed commit:)\\s*`(?<sha>[0-9a-f]{7,40})`"; "i")
       | .sha | ascii_downcase as $rc
@@ -570,8 +570,11 @@ is a pass**:
   WHEN or HOW MUCH (`for now`, `for the day`, `for your plan`) counts, because
   that is the account-wide limit wearing a suffix. Only a clause naming a
   different job — the same bot login also serves dev tasks — is rejected.
-  Unrecognised clauses count, deliberately: degrading still needs a human, while
-  a false block has no exit.
+  An unrecognised clause does NOT count and the gate keeps blocking — that is
+  #3743's decision, and the code and this line now agree. (They did not for one
+  round: this paragraph said the reverse while the code blocked, which is the
+  worst kind of drift, because the hand gate and the real gate then disagree
+  about whether a PR may be merged.)
 
   *Is this body disqualified from being a verdict?* — step 2's jq filter above,
   and `parseReviewedCommit`. This one REQUIRES the literal code-review scope
