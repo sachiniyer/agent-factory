@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -26,13 +27,29 @@ import (
 // verdict. subject names the thing being resolved ("root_agents entry",
 // "project <id> root") so one wording serves both sites.
 func repoResolveClaim(subject, path string, err error) string {
-	if config.RepoProbeUnanswered(err) {
+	switch {
+	case config.RepoProbeUnanswered(err):
 		// One sentence for every surface that has to say this, so the honest
 		// half cannot drift between the daemon log and the CLI/TUI sites the
 		// #3504 sweep fixed.
 		return config.RepoProbeUnansweredClaim(subject, path)
+	case config.PathIsDeterminatelyFree(filepath.Clean(config.ExpandTilde(path)), err):
+		return fmt.Sprintf("%s %q does not resolve to a git repository", subject, path)
+	default:
+		// THE THIRD STATE, and the one this wording was missing (#3794). git
+		// ran and exited without a verdict — dubious ownership, an unreadable
+		// .git, an invalid .git file — which is neither "we could not ask" nor
+		// "the answer is no". Reporting it as the second is #3500's overclaim
+		// wearing a completed exit status: a repository may own the path
+		// through every one of those failures, so the remedy is the failure,
+		// not the path, and a maintainer sent to look at the path finds
+		// nothing wrong with it.
+		//
+		// Same predicate as the dedup set's, so the log line and the set
+		// membership cannot disagree about which state this is, and #3771's
+		// vocabulary, so the app poll and the daemon log do not either.
+		return fmt.Sprintf("%s %q could not be resolved: git ran and failed without a verdict, so whether the path is a git repository is unknown", subject, path)
 	}
-	return fmt.Sprintf("%s %q does not resolve to a git repository", subject, path)
 }
 
 // rootDeletionTombstoneApplies reports whether a root-agent deletion tombstone
