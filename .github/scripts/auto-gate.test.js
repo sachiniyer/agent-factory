@@ -11,6 +11,7 @@ const ACTIONS_APP_ID = 15368;
 const CHECK_CREATED_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
 const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
+const AUTO_GATE_DOC = path.join(__dirname, "..", "auto-gate.md");
 
 // The two usage-limit wordings Codex actually emits, captured verbatim from the
 // outage on PR #3712: the long one at 2026-09-03T03:08:08Z (comment 5519732240)
@@ -144,6 +145,53 @@ test("a review quoting the vendor phrase across a line wrap keeps its verdict", 
     true,
     "a wrapped real outage message must still count",
   );
+});
+
+// One rule, one wording, everywhere it is stated (#3744).
+//
+// A Codex usage-limit message counts as a review outage unless its scope clause
+// names a job this repository has OBSERVED naming something other than review.
+// An unobserved phrasing counts, because a false block during a real outage has
+// no exit while a false degrade is a maintainer-review PASS a human still reads.
+//
+// The usage-limit rule was written out in four places — twice in auto-gate.js
+// alone, plus the skill and .github/auto-gate.md — and the two copies inside one
+// file had ALREADY diverged ("Matching only the first" vs "Recognising only the
+// first", and one dropped "from the same bot"). Only the executable jq pattern
+// was pinned, so the prose could rot into several rules while every test stayed
+// green, and the copy furthest from the code is the one a maintainer reads
+// before hand-merging.
+//
+// The comparison normalises away comment markers, markdown emphasis and line
+// wrapping, so reflowing a paragraph is free and changing what it SAYS is not.
+test("every statement of the usage-limit rule says the same thing", () => {
+  const { CODEX_LIMIT_RULE } = __test;
+  const normalise = (text) =>
+    String(text)
+      // Comment markers, list bullets and blockquote prefixes, repeated: a
+      // markdown quote inside an indented list item carries "  > " per line.
+      .replace(/^[ \t]*(?:\/\/|\*|#|>)+[ \t]?/gm, " ")
+      .replace(/[`*_]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+
+  const rule = normalise(CODEX_LIMIT_RULE);
+  assert.ok(rule.length > 80, "the canonical rule should be a statement, not a phrase");
+
+  for (const file of [
+    path.join(__dirname, "auto-gate.js"),
+    path.join(__dirname, "auto-gate.test.js"),
+    GATE_PR_SKILL,
+    AUTO_GATE_DOC,
+  ]) {
+    assert.ok(
+      normalise(fs.readFileSync(file, "utf8")).includes(rule),
+      `${path.basename(file)} does not state the canonical usage-limit rule. It is CODEX_LIMIT_RULE ` +
+        "in auto-gate.js; quote it rather than paraphrasing, or the gate and the documents a " +
+        "maintainer reads before hand-merging drift into different rules (#3744).",
+    );
+  }
 });
 
 // The gate's own sources must never contain a phrase that disqualifies a body

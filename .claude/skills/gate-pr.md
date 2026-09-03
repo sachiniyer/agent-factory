@@ -567,11 +567,18 @@ is a pass**:
   **unless** the clause after `for` contains a phrase on a short list of
   other-job scopes actually OBSERVED in the wild. That list is empty today.
 
-  The asymmetry is the point, and it is why the list holds no inference: a false
-  BLOCK during a real outage has no exit — it is the #3728 defect — while a false
-  DEGRADE is a maintainer-review PASS a human still reads. Four attempts to
-  classify the clause by grammar each leaked one way or the other. So an
-  unobserved wording degrades, and that residual is documented on #3743.
+  The rule, stated once as `CODEX_LIMIT_RULE` in `auto-gate.js` and quoted here
+  verbatim because a test requires every statement of it to agree (#3744):
+
+  > A Codex usage-limit message counts as a review outage unless its
+  > scope clause names a job this repository has OBSERVED naming something other
+  > than review. An unobserved phrasing counts, because a false block during a real
+  > outage has no exit while a false degrade is a maintainer-review PASS a human
+  > still reads.
+
+  Four attempts to classify the clause by grammar each leaked one way or the
+  other, which is why the list holds no inference; the residual is documented on
+  #3743.
   Practically: if the latest Codex artifact is a usage-limit message of any
   phrasing, treat the reviewer as unavailable — the same answer the gate gives.
 

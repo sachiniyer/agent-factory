@@ -64,7 +64,30 @@ const CONCEDED_MERGE_REFUSALS = [
 ];
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
+// THE USAGE-LIMIT RULE, stated once (#3744).
+//
+// Every other statement of it — this file's own function comment, the gate-pr
+// skill, and .github/auto-gate.md — quotes this constant, and a test fails if
+// any of them stops saying it. The rule was written out four times before, twice
+// in this file alone, and those two copies had already drifted apart while every
+// test stayed green. The copy furthest from the code is the one a maintainer
+// reads before hand-merging, so it is the one that must not rot.
+//
+// Quote it; do not paraphrase. Reflowing is free — the check normalises comment
+// markers, markdown emphasis and line wrapping — but changing what it says is
+// not.
+const CODEX_LIMIT_RULE =
+  "A Codex usage-limit message counts as a review outage unless its scope clause names a job " +
+  "this repository has OBSERVED naming something other than review. An unobserved phrasing " +
+  "counts, because a false block during a real outage has no exit while a false degrade is a " +
+  "maintainer-review PASS a human still reads.";
+
 // Codex usage-limit detection, in three named pieces rather than one regex.
+//
+// A Codex usage-limit message counts as a review outage unless its scope clause
+// names a job this repository has OBSERVED naming something other than review.
+// An unobserved phrasing counts, because a false block during a real outage has
+// no exit while a false degrade is a maintainer-review PASS a human still reads.
 //
 // Codex emits at least two wordings for the same condition — "…usage limits for
 // code reviews." and a bare "…usage limits." — and both appeared on #3712 within
@@ -130,21 +153,13 @@ const CODEX_LIMIT_OTHER_JOB_PHRASES = [];
 
 // Whether a body is Codex saying REVIEW capacity is exhausted.
 //
-// Codex emits at least two wordings for the same condition — "…usage limits for
-// code reviews." and a bare "…usage limits." — and both appeared on #3712 within
-// six minutes, about the same head. Recognising only the first withdrew the
-// reviewer-unavailable degradation exactly when the outage got WORSE (#3728),
-// and the withdrawn state has no reachable exit: the review it waits for cannot
-// arrive while the account is limited.
+// Implements CODEX_LIMIT_RULE — see the constant for the rule and why it points
+// this way. The history is there too; it is not repeated here, because the copy
+// that used to sit in this comment had already drifted from the one above it.
 //
-// #3743 then asked for the other direction — the same bot login serves the
-// dev-task path, and degrading publishes `PASS: The Codex reviewer is
-// usage-limited`, copy a maintainer acts on — so a limit about a DIFFERENT job
-// must not degrade. That is honoured by the observed-phrase list above rather
-// than by classifying the clause: an UNOBSERVED scope counts and degrades,
-// because the alternative risks a block with no exit. The residual — an
-// unobserved other-scope wording degrades to maintainer review until it is
-// observed and added — is documented on #3743 and is accepted.
+// The residual this leaves — an unobserved other-scope wording degrades to
+// maintainer review until it is observed and added to
+// CODEX_LIMIT_OTHER_JOB_PHRASES — is documented on #3743 and is accepted.
 function codexReportsReviewUsageLimit(body) {
   const text = String(body || "");
   // FIRST, and structural: anything the verdict exclusion disqualifies must be
@@ -3768,6 +3783,7 @@ module.exports = {
     acknowledgementIsAnswerable,
     headCurrentSinceTime,
     codexReportsReviewUsageLimit,
+    CODEX_LIMIT_RULE,
     CODEX_VERDICT_LIMIT_RE,
     CODEX_REVIEW_RE,
     bodyNamesReference,
