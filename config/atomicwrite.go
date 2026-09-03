@@ -167,18 +167,29 @@ func readLinkTarget(path string) (string, error) {
 // TestFollowingWriterStaysInsideTheConfigPackage rather than by the compiler,
 // so the promise cannot spread silently.
 //
-// Nothing in THIS package calls it. Since #3688 every followed write inside
-// config/ happens under withFollowedFileLock and goes through the resolution
-// that lock pinned, because resolving a second time inside a critical section
-// is the bug that issue is about. Its one caller is task/'s tasks.json writer
-// (#3672), which is exactly what a followed write looks like with no lock to
-// pin one: withFollowedFileLock and lockedTarget are unexported on purpose, so
-// task/ resolves here instead. That leaves tasks.json with the #3688 shape a
-// link retargeted MID-OPERATION can still catch — the read resolves at open
-// time and this write resolves again — which is the class #3697 owns and #3672
-// deliberately left alone. It is not the #3660 bug: an unmoving link is
-// followed correctly, which is the promise tasks.json was put on this side
-// for.
+// TWO callers, and neither has a followed LOCK to pin its resolution:
+//
+//   - task/'s tasks.json writer (#3672), the store's ordinary writes;
+//   - this package's schema-migration write-back (writeMigratedSchemaFile), for
+//     a plan whose LinkPolicy is SchemaWriteFollowLink — today tasks.json again,
+//     because a migration must give the same answer about a file as the writes
+//     around it (#3718).
+//
+// Since #3688 every followed write to the GLOBAL CONFIG happens under
+// withFollowedFileLock and goes through the resolution that lock pinned, and
+// #3697 went further and pinned the DIRECTORY the lock was taken in, because
+// resolving again inside a critical section is the bug those issues are about.
+// withFollowedFileLock and lockedTarget are unexported on purpose, so neither
+// caller above can reach that machinery — task/ cannot by package, and the
+// write-back must not, since its lock is bounded where that one blocks forever.
+//
+// So both leave tasks.json with the #3688 shape a link retargeted MID-OPERATION
+// can still catch: the read resolves at open time and the write resolves again.
+// #3697 closed that for the global config's followed lock, not for a followed
+// write with no lock to pin one; #3672 and #3718 deliberately left it alone, and
+// writeMigratedSchemaFile records why the migration takes the same unresolved
+// lock the ordinary writes do. It is not the #3660 bug: an unmoving link is
+// followed correctly, which is the promise tasks.json was put on this side for.
 func AtomicWriteFileFollowingLink(path string, data []byte, perm os.FileMode) error {
 	target, err := resolveWriteTarget(path)
 	if err != nil {
