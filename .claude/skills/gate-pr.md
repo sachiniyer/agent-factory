@@ -563,18 +563,17 @@ is a pass**:
   `auto-gate.js` keeps them apart on purpose.
 
   *Is the reviewer out of quota?* — `codexReportsReviewUsageLimit()`. It matches
-  the stem `reached your Codex usage limits?`, then looks at the clause after
-  `for`, if any: no clause at all counts (the bare wording, which is the whole of
-  #3728); a clause mentioning `review` counts however it is dressed
-  (`**code reviews**`, `code-reviews`, `automated code reviews`); a clause naming
-  WHEN or HOW MUCH (`for now`, `for the day`, `for your plan`) counts, because
-  that is the account-wide limit wearing a suffix. Only a clause naming a
-  different job — the same bot login also serves dev tasks — is rejected.
-  An unrecognised clause does NOT count and the gate keeps blocking — that is
-  #3743's decision, and the code and this line now agree. (They did not for one
-  round: this paragraph said the reverse while the code blocked, which is the
-  worst kind of drift, because the hand gate and the real gate then disagree
-  about whether a PR may be merged.)
+  the stem `reached your Codex usage limits?` and then counts the message,
+  **unless** the clause after `for` contains a phrase on a short list of
+  other-job scopes actually OBSERVED in the wild. That list is empty today.
+
+  The asymmetry is the point, and it is why the list holds no inference: a false
+  BLOCK during a real outage has no exit — it is the #3728 defect — while a false
+  DEGRADE is a maintainer-review PASS a human still reads. Four attempts to
+  classify the clause by grammar each leaked one way or the other. So an
+  unobserved wording degrades, and that residual is documented on #3743.
+  Practically: if the latest Codex artifact is a usage-limit message of any
+  phrasing, treat the reviewer as unavailable — the same answer the gate gives.
 
   *Is this body disqualified from being a verdict?* — step 2's jq filter above,
   and `parseReviewedCommit`. This one REQUIRES the literal code-review scope

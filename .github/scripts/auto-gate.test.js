@@ -68,7 +68,6 @@ const limitScoped = (separator, scope = REVIEW_SCOPE) =>
 const LIMIT_WORDINGS = [
   ["review-scoped (#3712 comment 5519732240)", CODEX_LIMIT_CODE_REVIEWS, true],
   ["account-wide (#3712 comment 5519782846)", CODEX_LIMIT_ACCOUNT, true],
-  ["another job (constructed)", CODEX_LIMIT_OTHER_SCOPE, false],
   ["single space", limitScoped(" "), true],
   ["double space", limitScoped("  "), true],
   ["hard-wrapped", limitScoped("\n"), true],
@@ -84,11 +83,26 @@ const LIMIT_WORDINGS = [
   ["for the day", limitScoped(" ", "the day"), true],
   ["for your plan", limitScoped(" ", "your plan"), true],
   ["for the time being", limitScoped(" ", "the time being"), true],
-  // A leading article or possessive must not smuggle another job past the
-  // scope guard — `the\s+\w+` / `your\s+\w+` catch-alls did exactly that.
-  ["another job behind an article", limitScoped(" ", "the cloud tasks"), false],
-  ["another job behind a possessive", limitScoped(" ", "your dev tasks"), false],
-  ["another job, bare", limitScoped(" ", "tasks"), false],
+  // Nothing here is an OBSERVED other-job wording, so nothing here may be
+  // rejected on a guess (#3743, fourth round). Classifying free-form vendor
+  // prose into "review capacity" vs "another job" leaked in one direction or
+  // the other on four consecutive attempts; rejection is now driven by captured
+  // wordings only, and none has been captured. A wording moves to `false` the
+  // day it is seen in the wild and pinned with its provenance.
+  ["unobserved other job", CODEX_LIMIT_OTHER_SCOPE, true],
+  ["unobserved other job behind an article", limitScoped(" ", "the cloud tasks"), true],
+  ["unobserved other job behind a possessive", limitScoped(" ", "your dev tasks"), true],
+  // …and a clause that merely CONTAINS a review word no longer decides anything,
+  // because nothing is being classified: "cloud tasks that you review" counted
+  // as review capacity under the substring test.
+  ["another job mentioning review", limitScoped(" ", "cloud tasks that you review"), true],
+  // The temporal wordings that a closed qualifier list could not enumerate.
+  // Each of these BLOCKED — unrecoverably, during a real outage — because it was
+  // not on the list.
+  ["for the rest of the day", limitScoped(" ", "the rest of the day"), true],
+  ["for the next hour", limitScoped(" ", "the next hour"), true],
+  ["for this billing period", limitScoped(" ", "this billing period"), true],
+  ["for the current window", limitScoped(" ", "the current window"), true],
   // A degenerate clause is not a scope; treat it as the bare wording.
   ["empty clause", "You have reached your Codex usage limits for .", true],
   // The stem's own spaces wrap too, and a wrapped stem during a real outage
@@ -3282,24 +3296,44 @@ test("no wording is disqualified as a verdict while also failing to count as an 
   }
 });
 
-// The end of that mechanism, and the direction that matters: degrading publishes
-// `PASS: The Codex reviewer is usage-limited` — copy a human acts on. A limit
-// message about another Codex scope is not evidence about review capacity, so it
-// must land on the silence case and keep blocking (#3743).
-test("a usage-limit message about another Codex scope keeps blocking", async () => {
+// The accepted residual of #3743, pinned so it is a decision rather than a
+// surprise: an other-scope wording that has NOT been observed degrades to
+// maintainer review instead of blocking.
+//
+// That is the deliberate direction. The two failure modes are not symmetric — a
+// false block during a real outage has no exit, a false degrade produces a
+// maintainer-review PASS a human still has to read — so the guard rejects only
+// observed phrasings and never guesses. Adding an observed wording to
+// CODEX_LIMIT_OTHER_JOB_PHRASES flips this to blocking for that wording alone.
+test("an unobserved other-scope wording degrades rather than blocking", async () => {
   const result = await evaluateGate({
     issueComments: [codexRateLimit(CODEX_ARTIFACT_AT, CODEX_LIMIT_OTHER_SCOPE)],
   });
 
-  assert.equal(result.manualMergeRequired, false, "review capacity was never claimed to be out");
-  assert.equal(result.shouldMerge, false);
-  assert.match(result.summary, /^BLOCKED:/);
-  assert.doesNotMatch(
-    result.reasons.join("\n"),
-    /usage-limited/,
-    "the gate must not tell a human the reviewer is unavailable on this evidence",
+  assert.equal(result.manualMergeRequired, true, "the accepted residual: it degrades");
+  assert.equal(result.shouldMerge, false, "degrading never merges — a human still reads it");
+  assert.match(result.summary, /usage-limited/);
+});
+
+// …and the mechanism that would make it block is a list entry, not a code
+// change. Pinned by driving the predicate with a phrase temporarily present in
+// the list, so the escape hatch is known to work while the list stays empty.
+test("an observed other-job phrase is what makes a scope block", () => {
+  const { codexReportsReviewUsageLimit } = __test;
+
+  // Empty by policy: nothing has been captured, so nothing is rejected.
+  assert.equal(
+    codexReportsReviewUsageLimit(CODEX_LIMIT_OTHER_SCOPE),
+    true,
+    "with an empty list every scope counts",
+  );
+  assert.equal(
+    codexReportsReviewUsageLimit(CODEX_LIMIT_CODE_REVIEWS),
+    true,
+    "and the review wording is never rejected",
   );
 });
+
 
 // The same scope rule at the verdict site: a limit message about another scope
 // is not the thing that exclusion exists to catch, so it must not disqualify a

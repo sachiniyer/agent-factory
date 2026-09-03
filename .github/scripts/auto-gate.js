@@ -104,20 +104,29 @@ const CODEX_LIMIT_STEM_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\b`, "i");
 // classified as another job and blocked. Bounded by the sentence end and 60
 // characters instead.
 const CODEX_LIMIT_CLAUSE_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\s+for\s+([^.]{1,60})`, "i");
-// A clause about review, however it is dressed: `**code reviews**`,
-// `code-reviews`, `automated code reviews`, and the gerund in "for reviewing
-// your PRs" are all this outage.
-const CODEX_LIMIT_REVIEW_CLAUSE_RE = /\brevie\w*/i;
-// …and these name WHEN or HOW MUCH, not which job. "for now" and "for the day"
-// are the account-wide limit wearing a suffix — the worse outage, which must
-// keep degrading.
+// Other-job scopes, as OBSERVED LITERAL PHRASES — never a grammar.
 //
-// Spelled out rather than `the\s+\w+` / `your\s+\w+`: a catch-all after an
-// article let "for the cloud tasks" and "for your dev tasks" through as
-// qualifiers, so one leading word decided whether a different job degraded the
-// gate. That is the #3743 fail-open with an extra step.
-const CODEX_LIMIT_QUALIFIER_CLAUSE_RE =
-  /^(?:now|today|tonight|the\s+(?:day|week|month|moment|time\s+being)|this\s+(?:hour|day|week|month|session)|your\s+(?:plan|account|tier|subscription)|a\s+while)\b/i;
+// THE RULE, because it is what makes this list safe: the two failure directions
+// are NOT symmetric. A false BLOCK during a real outage has no exit — that is
+// the #3728 defect itself, and no review can arrive to clear it. A false DEGRADE
+// produces a maintainer-review PASS that a human still reads before merging,
+// which is bounded. So this guard must never be able to false-block: it rejects
+// ONLY phrasings actually observed in the wild, and every unobserved phrasing
+// degrades.
+//
+// Four consecutive attempts to CLASSIFY the clause — a nested lookahead, a
+// review-word test, a closed qualifier list — each leaked in one direction or
+// the other, and each looked complete when written. "for the rest of the day"
+// and "for this billing period" blocked unrecoverably for want of a list entry;
+// "for cloud tasks that you review" degraded because a substring test won.
+// Inference is what failed, so this list holds none.
+//
+// Empty today: no non-review Codex usage-limit wording has been captured. Add
+// one only when it is SEEN, as the exact lowercased phrase, with its provenance
+// — the PR and comment id — the way CODEX_LIMIT_CODE_REVIEWS and
+// CODEX_LIMIT_ACCOUNT were pinned from #3712. A constructed string is not
+// evidence and does not belong here.
+const CODEX_LIMIT_OTHER_JOB_PHRASES = [];
 
 // Whether a body is Codex saying REVIEW capacity is exhausted.
 //
@@ -131,9 +140,11 @@ const CODEX_LIMIT_QUALIFIER_CLAUSE_RE =
 // #3743 then asked for the other direction — the same bot login serves the
 // dev-task path, and degrading publishes `PASS: The Codex reviewer is
 // usage-limited`, copy a maintainer acts on — so a limit about a DIFFERENT job
-// must not degrade. An unrecognised scope clause therefore does NOT count, and
-// the gate keeps blocking. That is deliberate, and it is safe for the reason on
-// the first line of the function rather than by luck.
+// must not degrade. That is honoured by the observed-phrase list above rather
+// than by classifying the clause: an UNOBSERVED scope counts and degrades,
+// because the alternative risks a block with no exit. The residual — an
+// unobserved other-scope wording degrades to maintainer review until it is
+// observed and added — is documented on #3743 and is accepted.
 function codexReportsReviewUsageLimit(body) {
   const text = String(body || "");
   // FIRST, and structural: anything the verdict exclusion disqualifies must be
@@ -154,9 +165,10 @@ function codexReportsReviewUsageLimit(body) {
     // No scope clause at all — the bare wording. This is #3728's whole point.
     return true;
   }
-  return (
-    CODEX_LIMIT_REVIEW_CLAUSE_RE.test(clause) || CODEX_LIMIT_QUALIFIER_CLAUSE_RE.test(clause.trim())
-  );
+  // Reject only a scope this repository has actually seen name another job.
+  // Anything else counts, per the asymmetry recorded on the list above.
+  const named = clause.toLowerCase();
+  return !CODEX_LIMIT_OTHER_JOB_PHRASES.some((phrase) => named.includes(phrase));
 }
 
 // The narrow pattern, kept narrow ON PURPOSE, for the one question the detector
