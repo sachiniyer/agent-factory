@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -278,7 +279,7 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 		return
 	}
 
-	repo, err := config.RepoFromPath(config.ExpandTilde(path))
+	repo, err := resolveLegacyRootRepo(path)
 	if err != nil {
 		m.rootEnsureFailed(path, st, fmt.Errorf("%s: %w", repoResolveClaim("root_agents entry", path, err), err))
 		return
@@ -290,6 +291,25 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 	// mismatch releases the repo so its legacy opt-in still applies — and #3366
 	// deliberately does not change it (see verifyRootCreateCheckout).
 	m.ensureResolvedRoot(path, st, repo, resolution, nil)
+}
+
+// legacyRootRepoFromPath resolves one root_agents path for the ensure sweep.
+// A package var so a test can drive the stalled-path case the sweep has to
+// survive; production assigns it once.
+//
+// IT DOES NOT HONOUR ITS CONTEXT YET. That is #3757 itself, kept intact in this
+// commit so the tests that come with it fail against the real defect rather than
+// against a stand-in: config.RepoFromPath passes context.Background() to `git
+// rev-parse`, so a checkout that stops answering owns the instance poll
+// goroutine for as long as it stays quiet.
+var legacyRootRepoFromPath = func(_ context.Context, path string) (*config.RepoContext, error) {
+	return config.RepoFromPath(path)
+}
+
+// resolveLegacyRootRepo resolves one root_agents path, owning the lifetime of
+// the probe's context so it cannot outlive the resolution it bounds.
+func resolveLegacyRootRepo(path string) (*config.RepoContext, error) {
+	return legacyRootRepoFromPath(context.Background(), config.ExpandTilde(path))
 }
 
 // ensureSingletonRootAgent ensures the root for a registered project enabled by
