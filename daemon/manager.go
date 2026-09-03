@@ -303,8 +303,14 @@ type Manager struct {
 	// spawned it, and a result is only consumed by that same pass: a probe
 	// finishing after its pass's grace expired describes a filesystem from a
 	// previous cadence, and publishing it later would attribute a checkout
-	// nobody has re-verified (#3299 review round 4). Touched only by the poll
-	// goroutine.
+	// nobody has re-verified (#3299 review round 4).
+	//
+	// It is also the CLOCK the snapshot's identity verdicts are dated against
+	// (#3611): each consumed probe result stamps its record with the pass that
+	// established it, and a consumer needing current evidence — the deletion
+	// tombstone's release rule — compares the two. Written only by the poll
+	// goroutine, but under mu, because that comparison is read from whatever
+	// goroutine is asking for a verdict.
 	rootHealPassSeq uint64
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
@@ -325,7 +331,9 @@ type Manager struct {
 	// the deleted one (#3299 review round 15), so an occupant's own deletion
 	// can never be released by a dead third party's mismatch. It is also what
 	// scopes an ALIAS tombstone to the record that owns the alias (#3299
-	// review id 3884615898).
+	// review id 3884615898). Since #3611 that mismatch must also be CURRENT:
+	// a verdict nobody has re-proved since the checkout could have changed is
+	// unknown rather than disproof, and unknown holds the tombstone.
 	deletedRootRepos map[string]string
 	// deferredTaskLifecycle parks a task's declared on_complete verb (#2595) for a
 	// session whose run finished while a TUI was attached, mapping the session's
