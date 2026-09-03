@@ -60,6 +60,19 @@ func LoadConfig() (*Config, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyTomlPath := prettyHomePath(tomlPath)
 
+	// A DANGLING symlink reads as ENOENT, which would send this straight past
+	// the JSON branch into materializeDefaultConfig — whose exclusive create then
+	// fails EEXIST on the link itself, and whose failed reread falls through to
+	// an in-memory DefaultConfig with no error at all. af would start on defaults
+	// while the operator believes it is reading their dotfiles config, silently
+	// changing every setting including the listener (#3660 review).
+	//
+	// It is the same broken link AtomicWriteFileFollowingLink refuses, so it is
+	// refused the same way, naming both ends.
+	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+		return nil, err
+	}
+
 	// 1. config.toml is canonical whenever it exists.
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
@@ -74,6 +87,15 @@ func LoadConfig() (*Config, error) {
 			// re-materialize, exactly as the JSON path does for an empty
 			// config.json.
 			if jsonExists {
+				return parseConfigTOML(tomlData, prettyTomlPath)
+			}
+			// A SYMLINK is never a failed first-run write — that path creates a
+			// regular file — so the #864 ambiguity this branch disambiguates does
+			// not arise, and removing it would unlink the operator's dotfiles
+			// arrangement just for starting af (#3660 review). Contentless through
+			// a link is a hand-made stub by construction: report it loudly and
+			// leave the link alone.
+			if info, lerr := os.Lstat(tomlPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
 				return parseConfigTOML(tomlData, prettyTomlPath)
 			}
 			if rmErr := os.Remove(tomlPath); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -138,6 +160,16 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyTomlPath := prettyHomePath(tomlPath)
 
+	// The same refusal the startup path makes, and for a sharper reason here: a
+	// dangling link reads as ENOENT, which this would report as Missing — so
+	// `af config validate` would exit 0 and `af doctor` would advise starting af
+	// to write defaults, while af itself refuses to start on that very link. A
+	// diagnostic that disagrees with the thing it diagnoses is worse than no
+	// diagnostic (#3660 review).
+	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+		return ReadOnlyConfigLoad{Path: tomlPath}, err
+	}
+
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
 		cfg, err := parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
@@ -175,6 +207,19 @@ func fileExists(path string) bool {
 	return err == nil || !os.IsNotExist(err)
 }
 
+// pathOccupied is fileExists for choosing a name NOBODY else holds. It uses
+// Lstat, so a symlink counts as occupied even when it dangles.
+//
+// fileExists follows links, which is right where the question is "can af read a
+// config here" but wrong where the question is "is this name free". A dangling
+// <config>.bak link reports ENOENT through Stat, so the backup would be written
+// straight over the link — destroying a filesystem entry the user made, and
+// breaking the one promise this function exists to keep (#3660 review).
+func pathOccupied(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil || !os.IsNotExist(err)
+}
+
 // availableBackupPath returns the first backup path that does not yet exist:
 // base, then base.1, base.2, … so an existing backup is never overwritten.
 // The original backup (base) is left untouched, preserving the oldest — and
@@ -182,12 +227,21 @@ func fileExists(path string) bool {
 // error only if an absurd number of backups already exist, in which case the
 // caller leaves config.json in place with a warning rather than clobbering.
 func availableBackupPath(base string) (string, error) {
-	if !fileExists(base) {
+	return availableBackupPathWith(base, pathOccupied)
+}
+
+// availableBackupPathWith is availableBackupPath with the occupancy question
+// injected, so a caller holding a directory open can ask IT rather than ask a
+// path that something else can repoint between the question and the write
+// (#3697). The naming rule, the ordering rule and the error are one
+// implementation either way; only who answers "is this name taken" differs.
+func availableBackupPathWith(base string, occupied func(string) bool) (string, error) {
+	if !occupied(base) {
 		return base, nil
 	}
 	for i := 1; i < 1000; i++ {
 		candidate := fmt.Sprintf("%s.%d", base, i)
-		if !fileExists(candidate) {
+		if !occupied(candidate) {
 			return candidate, nil
 		}
 	}
@@ -268,13 +322,23 @@ var convertRaceHookForTest func()
 // best-effort — a failure is logged, not fatal.
 func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
 	var result *Config
-	lockErr := WithFileLock(tomlPath, func() error {
+	lockErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		if convertRaceHookForTest != nil {
 			convertRaceHookForTest()
 		}
 		// The winner of a concurrent conversion already wrote config.toml.
 		// (Our writes are atomic, so a non-empty config.toml here is complete.)
-		if td, err := os.ReadFile(tomlPath); err == nil {
+		// Read the LOCKED file: reopening the link would resolve it again, and a
+		// link that moved since acquisition would answer this question about a
+		// file the lock does not cover (#3688).
+		//
+		// Unlike the writers, this branch deliberately does NOT re-confirm and
+		// refuse. It is a LOAD — the value it produces is the config af starts
+		// on — and the rest of the load path reads through the link outside any
+		// lock, so refusing here would make a moved link the one arrangement
+		// that stops af from starting at all, over a window that opens once per
+		// install (#3696 review).
+		if td, err := locked.read(); err == nil {
 			if !isEffectivelyEmptyToml(td) {
 				cfg, perr := parseLoadedConfigTOML(td, prettyTomlPath, tomlPath)
 				if perr != nil {
@@ -297,6 +361,18 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			// The racer renamed config.json to .bak (and its config.toml is
 			// gone/incomplete), or the file is an empty first-run stub — either
 			// way there is nothing to convert, so materialize fresh defaults.
+			//
+			// This one keeps the LINK path deliberately. It creates with
+			// O_CREATE|O_EXCL, which fails on a symlink rather than following
+			// it, so it can never write through the link; and the questions it
+			// asks — is something already at config.toml, is that something a
+			// link — are questions about the link itself, which the pinned
+			// target cannot answer.
+			//
+			// It does not confirm-and-refuse either, for the same reason as the
+			// winner branch above: what it returns is the config af STARTS on,
+			// not a report about what af changed. Every command outcome under
+			// this lock confirms; these two loads deliberately do not.
 			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
 			if mErr != nil {
 				return mErr
@@ -315,7 +391,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
-		if err := AtomicWriteFile(tomlPath, tomlBytes, 0644); err != nil {
+		if err := locked.write(tomlBytes, 0644); err != nil {
 			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
 		}
 
@@ -390,11 +466,30 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 	if !created {
 		// Lost the create race: a concurrent process wrote config.toml after
 		// our read. Treat its file as authoritative.
-		if data, err := os.ReadFile(tomlPath); err == nil && !isEffectivelyEmptyToml(data) {
-			return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
+		if data, err := os.ReadFile(tomlPath); err == nil {
+			if !isEffectivelyEmptyToml(data) {
+				return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
+			}
+			// The winner's file is contentless. Through a SYMLINK that is the
+			// hand-made-stub case the steady-state path reports loudly, and the
+			// verdict must not depend on whether the link was installed before
+			// startup or during it — the same arrangement cannot mean "loud
+			// error" one moment and "silent defaults" the next (#3660 review).
+			if info, lerr := os.Lstat(tomlPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+				return parseConfigTOML(data, prettyTomlPath)
+			}
 		}
 		// The concurrent file vanished or is empty; fall back to in-memory
-		// defaults without another write attempt.
+		// defaults without another write attempt — UNLESS what actually
+		// occupies the path is a broken link. The earlier check cannot cover
+		// this: check-then-act is not atomic, and materializeRaceHookForTest
+		// exists because another process really can install one in this window.
+		// The exclusive create then reports EEXIST on the link and the reread
+		// fails, which would land right back on silent defaults — the exact
+		// outcome refuseDanglingConfigLink was added to stop (#3660 review).
+		if err := refuseDanglingConfigLink(tomlPath); err != nil {
+			return nil, err
+		}
 	}
 	if created {
 		data, err := marshalGlobalConfigTOML(defaultCfg, nil)

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -35,23 +36,91 @@ func (p *rootReattributionProbe) inconclusive() bool {
 	return !p.matches && !p.mismatch && !p.markerUnreadable && !p.vanished
 }
 
+// rootReattributionProbeStepTimeout bounds EACH git-touching step of one probe
+// (#3599). Not the probe as a whole: the step that REBINDS the gate to whatever
+// is at the path now must get its own budget, because the case it exists for is
+// precisely the one where the step before it overran. Sharing a single deadline
+// would leave the re-resolution cancelled before it ran, which is the fail-open
+// #3334 (review id 3787592555) added it to close.
+//
+// The value is rootHealProbeResultTTL's, deliberately reused rather than tuned
+// separately, and the two ends it has to fit between are:
+//
+//   - ABOVE rootHealProbeGrace, and not marginally. A probe is allowed to
+//     outlive its pass — that is what the freshness TTL is for, so a
+//     responsive-but-slow mount heals on a later tick instead of never. A budget
+//     at the grace would convert every such mount into a permanent
+//     markerUnreadable.
+//   - Finite, because the gate is what is at stake. While a step runs, the
+//     recorded root's identity is held fail-closed and a repository the path may
+//     have flipped to is not held at all; unbounded meant "for as long as the
+//     mount stalls", i.e. forever.
+//
+// What this does NOT claim: no bound here closes the flip window. B is only
+// knowable by resolving the path, which is the operation being waited on, so
+// "ungated indefinitely" becomes "ungated for at most a step" and no better.
+// Keying the gate on something other than the first-resolved identity is #3599
+// option 2, still filed.
+//
+// It bounds the GIT SUBPROCESSES. A stat or a read wedged on a stale mount is
+// not interruptible from Go; what covers that is the probe goroutine itself,
+// which is why this work is off the poll loop to begin with.
+//
+// A var, not a const, only so tests can drive it; production never reassigns it.
+var rootReattributionProbeStepTimeout = rootHealProbeResultTTL
+
+// probeStepContext is the deadline one git-touching probe step runs under. Each
+// step takes a fresh one: see rootReattributionProbeStepTimeout for why the
+// budget is per step and not per probe.
+func probeStepContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), rootReattributionProbeStepTimeout)
+}
+
+// probeResolveRecordedRoot resolves the recorded path's repository identity
+// under one step's budget.
+func probeResolveRecordedRoot(root string) (*config.RepoContext, error) {
+	ctx, cancel := probeStepContext()
+	defer cancel()
+	return config.RepoFromPathContext(ctx, root)
+}
+
+// probeReadCheckoutMarker reads the checkout marker at the recorded path under
+// one step's budget. A read the deadline kills comes back as an error carrying
+// ErrRepoProbeUnanswered — never as a clean "does not match" — so the caller
+// below classifies it as an unreadable marker rather than as a proven mismatch
+// that would release the repository it contradicts (#3500, #3599).
+func probeReadCheckoutMarker(record unresolvedProjectRecord) (bool, error) {
+	ctx, cancel := probeStepContext()
+	defer cancel()
+	return config.ProjectCheckoutMatchesContext(ctx, record.root, record.checkoutID)
+}
+
 // runRootReattributionProbe performs the blocking half of one re-attribution
 // check — git resolution and the checkout-marker probe, both of which touch
 // the recorded path's filesystem — so the poll goroutine never blocks on a
 // stalled mount. It logs its own negative outcomes because the consuming pass
 // only learns pass/fail.
+//
+// Every git step carries rootReattributionProbeStepTimeout (#3599). The stats
+// and file reads between them cannot be bounded from Go at all, which is the
+// other half of why this work sits in its own goroutine.
 func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedProjectRecord) {
 	defer func() {
 		probe.completedAt = nowFunc()
 		close(probe.done)
 	}()
-	repo, err := config.RepoFromPath(record.root)
+	repo, err := probeResolveRecordedRoot(record.root)
 	if err != nil {
+		// Nothing established and nothing gated yet, so this is inconclusive
+		// and the entry settles onto its backoff for a fresh probe later. That
+		// is also where a first resolution the step budget killed lands: the
+		// alternative it replaces was a goroutine wedged on the mount forever,
+		// holding this entry's probe slot against every later pass (#3599).
 		return
 	}
 	probe.repo = repo
 	probe.candidate.Store(repo)
-	matches, markerErr := config.ProjectCheckoutMatches(record.root, record.checkoutID)
+	matches, markerErr := probeReadCheckoutMarker(record)
 	if rootReattributionProbeHookForTest != nil {
 		rootReattributionProbeHookForTest(record.root)
 	}
@@ -69,7 +138,12 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	// repository actually at the path stays ungated — so a legacy root_agents
 	// entry resolving there starts its root off the lower-precedence layers
 	// alone, which is the fail-open this whole pass exists to close.
-	verify, verr := config.RepoFromPath(record.root)
+	//
+	// Which is why it takes its OWN step budget rather than sharing the marker
+	// read's (#3599): the case it exists for is exactly the one where that read
+	// overran, so a single probe-wide deadline would leave this cancelled
+	// before it ran and the gate still on the first identity.
+	verify, verr := probeResolveRecordedRoot(record.root)
 	switch {
 	case verr != nil && errors.Is(verr, config.ErrRepoProbeUnanswered):
 		// git never answered the RE-resolution, so this pass established
@@ -138,7 +212,7 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	// can, and rootHealProbeResultTTL's comment already owns that residue.
 	// What they remove is the silent WRONG answer: a swap inside the window
 	// now lands on the fail-closed branch instead of on a confident one.
-	recheck, recheckErr := config.ProjectCheckoutMatches(record.root, record.checkoutID)
+	recheck, recheckErr := probeReadCheckoutMarker(record)
 	if recheckErr != nil || recheck != matches {
 		probe.markerUnreadable = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s changed under verification — its checkout marker did not read the same twice; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, recheckErr)
@@ -453,6 +527,14 @@ func cloneLayerMap(in map[string]*config.RootAgentLayer) map[string]*config.Root
 
 func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneResolvedRootMap(in map[string]resolvedProjectRoot) map[string]resolvedProjectRoot {
+	out := make(map[string]resolvedProjectRoot, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

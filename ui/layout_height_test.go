@@ -199,10 +199,10 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 				automations.SetCompact(lay.AutomationsCompact)
 				requireExactRect(t, automations.View(), lay.Automations, "automations")
 				rule := strings.Repeat("─", lay.RailRule.W)
-				rail = lipgloss.JoinVertical(lipgloss.Left, rail, rule, automations.View())
+				rail = layout.JoinVertical(rail, rule, automations.View())
 			}
-			top := lipgloss.JoinHorizontal(lipgloss.Top, rail, paneA.View())
-			full := lipgloss.JoinVertical(lipgloss.Left, top, statusBar.View())
+			top := layout.JoinHorizontal(rail, paneA.View())
+			full := layout.JoinVertical(top, statusBar.View())
 			requireExactRect(t, full, layout.Rect{W: tc.w, H: tc.h}, "composed workspace")
 		})
 	}
@@ -233,9 +233,9 @@ func TestWorkspaceFocusedAutomationsTilesExactly(t *testing.T) {
 		"the manager must NOT render in-rail — it lives in the tasks overlay")
 
 	rule := strings.Repeat("─", lay.RailRule.W)
-	rail := lipgloss.JoinVertical(lipgloss.Left, sidebar.View(), rule, automations.View())
-	top := lipgloss.JoinHorizontal(lipgloss.Top, rail, paneA.View())
-	full := lipgloss.JoinVertical(lipgloss.Left, top, statusBar.View())
+	rail := layout.JoinVertical(sidebar.View(), rule, automations.View())
+	top := layout.JoinHorizontal(rail, paneA.View())
+	full := layout.JoinVertical(top, statusBar.View())
 	requireExactRect(t, full, layout.Rect{W: 100, H: 30}, "composed workspace")
 }
 

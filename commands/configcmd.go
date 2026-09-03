@@ -13,7 +13,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -93,6 +92,7 @@ var globalConfigReadOrder = []string{
 	"network.preview_listen_addr",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
+	"debug_pprof",
 	"log_max_size_mb",
 	"log_max_backups",
 	"branch_prefix",
@@ -242,11 +242,17 @@ print as JSON.
 Use --repo <repository-path> to inspect another project. The path is a selector
 only; this command does not register a project or write identity state.
 --project remains accepted as a deprecated alias. --explain prints the same
-resolved value with the complete source trace.`,
+resolved value with the complete source trace.
+
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		if err := requireLocalTarget("af config get", "resolves the value from this machine's config"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 		warnDeprecatedConfigProjectAlias(cmd)
 
 		projectSelector, explicitProject, err := configReadProjectSelector(configGetRepoFlag, configGetProjectFlag)
@@ -354,11 +360,17 @@ project. --project remains accepted as a deprecated alias. --explain prints
 every source candidate and the reason it won, was shadowed, was absent, or is
 disallowed for that key. Human output renders an empty built-in value as
 "(unset)"; an explicitly configured empty value remains visible as "", [], {},
-or null. JSON output preserves the typed effective values.`,
+or null. JSON output preserves the typed effective values.
+
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		if err := requireLocalTarget("af config list", "resolves values from this machine's config"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 		warnDeprecatedConfigProjectAlias(cmd)
 
 		projectSelector, explicitProject, err := configReadProjectSelector(configListRepoFlag, configListProjectFlag)
@@ -464,6 +476,10 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
+                             unix control socket only, never on the web address. A profile dumps live daemon
+                             memory — session titles, worktree paths, prompt text — so turn it off again.
+                             AF_DEBUG_PPROF=1 overrides it for one daemon process. Next daemon start.)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string
@@ -508,13 +524,30 @@ Examples:
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
-  af config unset default_program --project ~/work/myrepo`, tmux.SupportedProgramsString()),
+  af config unset default_program --project ~/work/myrepo
+
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global write is sent
+to THAT daemon's admission-gated write — the same one the web config form posts
+to — and the success line names the daemon it landed on. It is never silently
+applied to this machine instead: a daemon too old to serve the route is refused,
+not written around. --project is the exception and stays local-only, because it
+writes a registered project's machine-local override file, which no remote daemon
+owns.`, tmux.SupportedProgramsString()),
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
-
 		if configSetProjectFlag != "" {
+			// Inside the --project branch, not above both (#3679). The global write
+			// now ROUTES to a targeted daemon, so a guard above the branch would
+			// refuse the very feature this verb grew. What this branch writes is a
+			// registered project's machine-local override file, which no remote
+			// daemon owns under any routing, so it stays local-only in the same sense
+			// the read verbs are.
+			if err := requireLocalTarget("af config set --project",
+				"writes a project's machine-local config file"); err != nil {
+				return jsonWrapError(cmd, configJSONFlag, err)
+			}
 			res, err := config.SetProjectConfigValue(configSetProjectFlag, args[0], args[1])
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
@@ -535,9 +568,12 @@ Examples:
 		// (#3231) — the same handler the web form posts — so a daemon that is
 		// quiescing or validating an upgrade refuses BEFORE the file changes,
 		// instead of the CLI writing first and live-applying through an ungated
-		// poke. With no daemon running it writes locally, as before (#2480: the
-		// value then takes effect on the next start). Never spawns a daemon.
-		resp, err := daemon.SetGlobalConfigValue(args[0], args[1])
+		// poke. WHICH daemon is the target's to decide (#3679, configremote.go):
+		// the local socket by default, with today's local-write fallback when none
+		// is running (#2480: the value then takes effect on the next start), or the
+		// remote daemon named by --daemon-url/AF_DAEMON_URL, which has no local
+		// fallback at all. Never spawns a daemon.
+		resp, err := globalConfigSet(args[0], args[1])
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
@@ -545,7 +581,7 @@ Examples:
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, echoValue(res.Value), prettyPath(res.Path))
+		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, echoValue(res.Value), configWriteLocation(res.Path))
 		// Writer warnings (validation) before the apply note: what the value MEANS
 		// matters more than when it takes effect, and the last line is read first.
 		for _, w := range res.Warnings {
@@ -580,11 +616,18 @@ materializes nothing — a read-only check.
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
 edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
-names what must be fixed before the next launch.`,
+names what must be fixed before the next launch.
+
+Local-only: it checks the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to check that host.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		if err := requireLocalTarget("af config validate", "checks this machine's config file"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 
 		// LoadConfigReadOnly is the same parse+validate af runs at startup, minus
 		// the materialize/convert/secure side effects LoadConfig has — so validate
@@ -622,14 +665,22 @@ ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
-there is nothing to clear.`,
+there is nothing to clear.
+
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global form is sent
+to THAT daemon's admission-gated write, like 'af config set'; a daemon too old to
+serve the route is refused rather than written around, so a remote unset never
+quietly clears a key on this machine instead. --project stays local-only — the
+override file it clears is this machine's.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
-
 		if configUnsetProjectFlag == "" {
-			resp, err := daemon.UnsetGlobalConfigValue(args[0])
+			// Routed to whichever daemon this invocation targets, exactly like `set`
+			// (#3679, configremote.go). The refusal below covers the --project form
+			// only, which clears a per-project override file on THIS machine.
+			resp, err := globalConfigUnset(args[0])
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
@@ -638,10 +689,10 @@ there is nothing to clear.`,
 				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 			}
 			if !res.Removed {
-				fmt.Fprintf(cmd.OutOrStdout(), "no %s value to clear in %s\n", res.Key, prettyPath(res.Path))
+				fmt.Fprintf(cmd.OutOrStdout(), "no %s value to clear in %s\n", res.Key, configWriteLocation(res.Path))
 				return nil
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "cleared %s in %s\n", res.Key, prettyPath(res.Path))
+			fmt.Fprintf(cmd.OutOrStdout(), "cleared %s in %s\n", res.Key, configWriteLocation(res.Path))
 			fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
 			for _, warning := range resp.Warnings {
 				fmt.Fprintln(cmd.ErrOrStderr(), warning)
@@ -649,6 +700,10 @@ there is nothing to clear.`,
 			return nil
 		}
 
+		if err := requireLocalTarget("af config unset --project",
+			"clears a project's machine-local override file"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 		res, err := config.UnsetProjectConfigValue(configUnsetProjectFlag, args[0])
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)

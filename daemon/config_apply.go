@@ -96,6 +96,9 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
 	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
 	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
+	// debug_pprof: the pprof mount is decided when startHTTPServer builds the unix
+	// listener's handler, so a change is reported pending rather than applied.
+	"debug_pprof": func(a, b *config.Config) bool { return a.DebugPprof != b.DebugPprof },
 }
 
 // ApplyConfig re-reads the global config from disk and applies it to the running

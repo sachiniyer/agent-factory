@@ -316,6 +316,14 @@ it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
 
+**A thread's location is not part of the test (#3689).** GitHub nulls `line`
+once a push moves the code a thread points at, and a rebase, a re-indent, or a
+fix to the *neighbouring* line does that exactly as readily as the fix itself —
+so an outdated thread says nothing about whether anyone read the finding. Both
+queries below therefore select on `.in_reply_to_id == null` alone and report the
+thread's `original_line`; filtering on `.line != null` is what merged #3687 and
+#3688 unanswered on #3669. Only an answer clears a finding; a push never does.
+
 ```bash
 set -euo pipefail
 PR=<n>; G="${TMPDIR:-/tmp}/gate-pr-$PR"
@@ -336,12 +344,12 @@ jq -s '
   | map(select(
       .user.login == "chatgpt-codex-connector[bot]"
       and .in_reply_to_id == null
-      and .line != null
       and ((.id | IN($resolved[])) | not)))
-  | map({id, path, line})
+  | map({id, path, line: (.line // .original_line), outdated: (.line == null)})
 ' "$G/inline.json" > "$G/unresolved.json"
 
-jq -r '.[] | "  \(.id)  \(.path):\(.line)"' "$G/unresolved.json"
+jq -r '.[] | "  \(.id)  \(.path):\(.line)\(if .outdated then "  (outdated — a push moved the line, the finding is still live)" else "" end)"' \
+  "$G/unresolved.json"
 N=$(jq 'length' "$G/unresolved.json")
 [[ "$N" == 0 ]] || { echo "$N unresolved finding(s) — do not merge"; exit 1; }
 echo "no unresolved inline findings"
@@ -366,10 +374,9 @@ jq -s -r --arg hd "$HD" '
   | map(select(
       .user.login == "chatgpt-codex-connector[bot]"
       and .in_reply_to_id == null
-      and .line != null
       and (.id | IN($claimed[]))
       and (.created_at >= $hd)))
-  | .[] | "  \(.id)  \(.path):\(.line)  filed \(.created_at), head committed \($hd)"
+  | .[] | "  \(.id)  \(.path):\(.line // .original_line)  filed \(.created_at), head committed \($hd)"
 ' "$G/inline.json" > "$G/unpushed.txt"
 
 [[ -s "$G/unpushed.txt" ]] && {

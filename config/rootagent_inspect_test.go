@@ -149,7 +149,8 @@ func TestRootAgentInspectionErrorUsesCanonicalProjectWording(t *testing.T) {
 // TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot: a
 // root_agents key whose path does not resolve (absent mount, not yet cloned)
 // must still be attributed to the repo its recorded spelling names, by the
-// same RepoIDForRecordedRoot rule the daemon snapshot uses — an empty entry
+// same DerivedRepoIDForUnresolvedRoot rule the daemon snapshot uses — an empty
+// entry
 // means enabled, and dropping it told consumers "no layer enables this repo"
 // about a repo whose opt-in sat in root_agents the whole time (#3264).
 func TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot(t *testing.T) {

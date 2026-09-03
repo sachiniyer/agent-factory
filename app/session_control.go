@@ -55,6 +55,20 @@ var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 	if err != nil {
 		return err
 	}
+	// Every helper here builds a fresh Client for ONE round-trip, and a fresh
+	// Client is a fresh http.Transport. A completed keep-alive connection stays in
+	// that transport's idle pool with its read-loop goroutine, and the pool is
+	// never drained: the transport is unreachable but not collectable, because the
+	// goroutine holds it. Measured against a real unix-socket server: 200 one-shot
+	// clients leak 400 descriptors (both ends), and two forced GCs reclaim none of
+	// them. The TUI polls through here twice every 750ms, so this is the one place
+	// it compounds (#3626 review).
+	//
+	// The same discipline the WS path already applies to its cloned transport
+	// (apiclient/stream.go, session/agentserver_remote.go). It costs the keep-alive
+	// only for callers that were never going to reuse the connection anyway —
+	// which is all of them, since the Client dies with this function.
+	defer c.CloseIdleConnections()
 	err = fn(c)
 	deadline := time.Now().Add(daemonHTTPRetryWait)
 	for httpCallRetryable(err) && time.Now().Before(deadline) {
@@ -292,11 +306,11 @@ var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectatio
 // the snapshot fetcher / poll-pause seams).
 var (
 	addTaskThroughDaemon = func(t task.Task) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t) })
+		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t, task.ActorTUI) })
 	}
 	updateTaskThroughDaemon = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error {
-			_, err := c.UpdateTask(id, update, expect)
+			_, err := c.UpdateTask(id, update, expect, task.ActorTUI)
 			return err
 		})
 	}
@@ -399,6 +413,88 @@ func previewThroughDaemon(req daemon.PreviewRequest) (resp daemon.PreviewRespons
 		return e
 	})
 	return resp, err
+}
+
+// liveTaskArmingFetcher returns the daemon's task list, whose records carry the
+// LIVE arming state — whether the running scheduler is actually holding each
+// task, and what its armed entry will fire next (#3623).
+//
+// The TUI reads tasks.json itself every 750ms (#1168) and that read can observe
+// nothing about the running scheduler, so the automations rail had to fall back
+// to evaluating the cron expression: it rendered a confident "next Mar 04 09:00"
+// for a task no daemon was holding, which is exactly how two tasks went dark for
+// 18 days while every surface called them healthy. This is the observation the
+// rail was missing (#3626).
+//
+// It deliberately does NOT go through withDaemonHTTP, which is the only seam in
+// this file that does not. Two reasons, both about what a 750ms poll is allowed
+// to do:
+//
+//   - withDaemonHTTP ensures a daemon, and EnsureDaemon SPAWNS one when none is
+//     running. Starting a background process is not something an observation may
+//     do as a side effect — least of all this observation, whose entire subject
+//     is whether a daemon is holding these tasks. Snapshot already owns the
+//     ensure; the TUI's cold start cannot proceed without it, so by the time this
+//     runs the daemon question has been settled by something whose job it is.
+//   - withDaemonHTTP also retries a transient failure for up to five seconds,
+//     inline. This call shares its goroutine with the session snapshot, so a
+//     down daemon would stretch the poll from 750ms to five seconds and stall
+//     the sidebar behind a health field.
+//
+// So it dials whatever is already listening, once. No daemon means no answer,
+// which is the case the fallback exists for.
+//
+// A package var, like allReposSnapshotFetcher above and for the same reasons: it
+// holds no per-home state, tests swap it wholesale, and fetchSnapshotCmd reads it
+// ON the event loop before handing the value to its goroutine.
+//
+// Its error is deliberately not surfaced. A daemon that cannot answer this also
+// cannot answer Snapshot, which reports the outage once; and the failure mode
+// here is benign by construction — no observation leaves every record's arming
+// UNKNOWN, which is the honest answer, and never the not-armed that would accuse
+// every task on the box of being broken because one poll missed.
+// liveArmingTimeout bounds one arming read. ListTasks takes the task-control
+// lock, which every task mutation holds across its write AND its scheduler
+// reload — a watch edit waits out a SIGTERM-resistant watcher in there — and the
+// local socket carries no overall deadline (apiclient.callCtx). Unbounded, a
+// blocked read would pin the poll goroutine, and because the next tick is armed
+// only after this one's result is handled, it would stall the SESSION snapshot
+// behind a health field. Two seconds is long enough that an ordinary read never
+// trips it and short enough that the worst case is a couple of stale polls; a
+// trip leaves arming UNKNOWN, which the rail already renders honestly (#3626
+// review).
+const liveArmingTimeout = 2 * time.Second
+
+var liveTaskArmingFetcher = func() ([]task.Task, error) {
+	// Not in remote mode. The rail's task DEFINITIONS come from the local
+	// tasks.json (LoadTasksForKnownRepo) while NewTargeted would send this to the
+	// daemon named by --daemon-url / AF_DAEMON_URL, so the answer would be about a
+	// different machine's tasks. Mostly that yields UNKNOWN, which is true and
+	// harmless — but two stores that share a task id and a cron expression would
+	// copy a remote task's arming onto an unrelated local one, and a fabricated
+	// "armed" is exactly the false clean bill #3623 exists to remove. Observation
+	// and definition have to come from the same daemon; until the rail reads
+	// remote tasks too, the honest answer for a remote target is "nothing
+	// reported" (#3626 review).
+	if apiclient.IsRemoteTarget() {
+		return nil, nil
+	}
+	c, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, err
+	}
+	defer c.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), liveArmingTimeout)
+	defer cancel()
+	return c.ListTasks(ctx)
+}
+
+// SetLiveTaskArmingFetcherForTest swaps the live arming fetcher and returns a
+// restore func. Test-only.
+func SetLiveTaskArmingFetcherForTest(f func() ([]task.Task, error)) func() {
+	prev := liveTaskArmingFetcher
+	liveTaskArmingFetcher = f
+	return func() { liveTaskArmingFetcher = prev }
 }
 
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo

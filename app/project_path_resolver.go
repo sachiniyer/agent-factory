@@ -46,13 +46,35 @@ type projectPathProbeResult struct {
 	answered bool
 }
 
-// resolveProjectPaths gives every uncached path the same bounded wall-clock
-// opportunity. Probes start together: an unreachable checkout cannot exhaust a
-// shared sequential deadline before a later healthy linked worktree is tried.
+// projectPathProbeBudget is ONE resolution budget a poll opened: the path it was
+// opened for, and the whole window that path's probe was given to answer in.
+//
+// Budgets are per PATH and never per poll (see resolveProjectPaths), and this
+// record is what lets that independence be asserted as a PROPERTY rather than
+// inferred from how long a poll took. It was inferred from elapsed time until
+// #3710: a test stalled one inactive path and then checked that a healthy
+// worktree had still resolved inside the first poll — which holds only when the
+// healthy probe's own Git work finishes inside the window on whatever machine
+// the test lands on. A loaded runner misses that while the property it stood in
+// for still holds, and master's release Build went red for exactly that.
+type projectPathProbeBudget struct {
+	path   string
+	window time.Duration
+}
+
+// resolveProjectPaths gives every uncached path a bounded resolution
+// opportunity of its OWN: each probe is opened with the whole scan window, and
+// the probes run together rather than in turn. An unreachable checkout
+// therefore spends only its own budget — a healthy linked worktree later in the
+// list is neither queued behind it nor handed whatever it left.
 // Successful answers are cached briefly to avoid probing on every 750ms sidebar
 // poll, then revalidated so a present path replaced by another checkout cannot
 // retain its former repository identity forever.
-func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolution {
+//
+// The second return is the ledger of budgets opened, one entry per uncached
+// path, in the order they were opened. Production ignores it; it exists so the
+// independence above can be asserted without a stopwatch (#3710).
+func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolution, []projectPathProbeBudget) {
 	now := time.Now()
 	resolvedPaths := make(map[string]projectPathResolution, len(paths))
 	if m.repoRoot != "" && m.repoID != "" {
@@ -80,14 +102,26 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 		uncached = append(uncached, path)
 	}
 	if len(uncached) == 0 {
-		return resolvedPaths
+		return resolvedPaths, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
-	defer cancel()
+	// One window per path, opened at the probe that spends it. Sharing a single
+	// window across the paths is what this must not do: whichever path the poll
+	// reached first would spend it, and every path after it would be probed with
+	// the remainder — which is nothing at all once one of them is stalled.
+	budgets := make([]projectPathProbeBudget, 0, len(uncached))
+	cancels := make([]context.CancelFunc, 0, len(uncached))
+	defer func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}()
 	results := make(chan projectPathProbeResult, len(uncached))
 	for _, path := range uncached {
-		go func(path string) {
+		ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
+		cancels = append(cancels, cancel)
+		budgets = append(budgets, projectPathProbeBudget{path: path, window: projectPathScanTimeout})
+		go func(ctx context.Context, path string) {
 			repo, err := config.RepoFromPathContext(ctx, path)
 			if err != nil {
 				// A DETERMINATE verdict is what a caller may act on, and
@@ -119,8 +153,17 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 				},
 				resolved: true,
 			}
-		}(path)
+		}(ctx, path)
 	}
+	// The gather's deadline bounds a different thing from the budgets above, and
+	// hands out no opportunity that a path could be competing for: every probe
+	// cancels its own Git, but a stall BELOW Git — an unresponsive mount, or a
+	// killed process whose child still holds the pipe — outlives that kill, so
+	// the loop has to stop waiting on a clock of its own. It is started after
+	// the probes so it can only ever expire later than their windows: a probe
+	// still inside its own budget is never cut short by it.
+	gather, cancelGather := context.WithTimeout(context.Background(), projectPathScanTimeout)
+	defer cancelGather()
 	if m.projectPathResolutions == nil {
 		m.projectPathResolutions = make(map[string]projectPathResolution)
 	}
@@ -141,11 +184,11 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 				fallback.answeredNotARepo = true
 				resolvedPaths[result.path] = fallback
 			}
-		case <-ctx.Done():
-			return resolvedPaths
+		case <-gather.Done():
+			return resolvedPaths, budgets
 		}
 	}
-	return resolvedPaths
+	return resolvedPaths, budgets
 }
 
 // registeredProjectIdentity is a registry entry's PROVEN repository identity —
@@ -181,8 +224,9 @@ type registeredProjectProbeResult struct {
 // Failure is not exclusion: an unproven entry falls back to its RECORDED root
 // identity at the call site, so a registered project on a stalled mount stays
 // visible under its own hash instead of vanishing or borrowing an ancestor's.
-// Probes start together and share one deadline, matching resolveProjectPaths:
-// one unreachable registration must not spend the whole poll's opportunity.
+// Each registration is given a proving budget of its OWN and they run together,
+// exactly as resolveProjectPaths does: one unreachable registration must not
+// spend an opportunity that belongs to another.
 func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map[string]string {
 	now := time.Now()
 	proven := make(map[string]string, len(projects))
@@ -208,15 +252,26 @@ func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map
 		return proven
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
-	defer cancel()
+	cancels := make([]context.CancelFunc, 0, len(uncached))
+	defer func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}()
 	results := make(chan registeredProjectProbeResult, len(uncached))
 	for _, project := range uncached {
-		go func(project config.Project) {
+		ctx, cancel := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
+		cancels = append(cancels, cancel)
+		go func(ctx context.Context, project config.Project) {
 			id, ok := config.ResolveRegisteredProjectRepoID(ctx, project)
 			results <- registeredProjectProbeResult{root: project.Root, id: id, resolved: ok}
-		}(project)
+		}(ctx, project)
 	}
+	// The backstop for the gather, not a budget any registration competes for —
+	// see resolveProjectPaths for why the loop cannot wait on the probes' own
+	// deadlines, and why this one is started after them.
+	gather, cancelGather := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
+	defer cancelGather()
 	if m.registeredProjectIdentities == nil {
 		m.registeredProjectIdentities = make(map[string]registeredProjectIdentity)
 	}
@@ -229,7 +284,7 @@ func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map
 					id: result.id, resolvedAt: time.Now(),
 				}
 			}
-		case <-ctx.Done():
+		case <-gather.Done():
 			return proven
 		}
 	}

@@ -14,7 +14,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 var automationsTitleStyle = lipgloss.NewStyle().
@@ -29,6 +28,18 @@ var automationsEnabledStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.Info)
 
 var automationsDisabledStyle = lipgloss.NewStyle().
+	Foreground(activeTheme.ForegroundMuted)
+
+// automationsOverdueStyle paints the overdue marker and its detail text in the
+// theme's warning color. It is a color and a static glyph and nothing else — no
+// spinner, no blink (#1766): state reads from a glyph in this app.
+var automationsOverdueStyle = lipgloss.NewStyle().
+	Foreground(activeTheme.Warning)
+
+// automationsUnknownStyle paints a row whose health could not be established.
+// Muted rather than warning-colored on purpose: an unknown is not a failure, and
+// coloring it like one trains people to ignore the rows that are.
+var automationsUnknownStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.ForegroundMuted)
 
 // automationItemTitleStyle paints an automation's title in the SAME adaptive
@@ -196,16 +207,106 @@ func (a *AutomationsPane) ScrollDown() {
 // thoroughly plausible "next Jan 01 00:00"; name the absence instead of
 // promising a fire time the task will never reach. The schedule picker's
 // Custom preview guards the same trap (see renderPreviewLine).
+// watchSupervision is the watch branch's status fragment: what the supervisor is
+// LIVE-observed to be doing, falling back to persisted history only where
+// nothing observed it.
+//
+// watchTaskStatus infers supervision from LastRunStatus, which is history rather
+// than supervision, and the two disagree in both directions: a watcher whose
+// process died past its restart budget still read "watching", and one that has
+// been repaired and re-armed keeps rendering the "stopped"/"errored" its last
+// run wrote until some future run overwrites it. The live observation settles
+// both, so it is consulted across the whole tri-state rather than only for the
+// negative case (#3626 review).
+func watchSupervision(tsk task.Task) string {
+	if !tsk.Enabled {
+		// Not a supervision question: nobody asked for this watcher to run.
+		return watchTaskStatus(tsk)
+	}
+	switch tsk.Arming {
+	case task.ArmingArmed:
+		// Observed: the supervisor IS running a watcher for this exact definition,
+		// so a persisted "stopped" or "errored" describes a past run and must not
+		// be rendered as the current state of the watch.
+		return "watching"
+	case task.ArmingNotArmed:
+		// Nothing: attentionFragment leads the line with "not armed", and the rail
+		// says a thing once.
+		return ""
+	}
+	// Nothing observed — no daemon running, or one still starting. The persisted
+	// history is the only evidence there is, which is what this pane had before
+	// arming reached it at all.
+	return watchTaskStatus(tsk)
+}
+
 func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	var parts []string
 	if tsk.IsWatch() {
-		parts = append(parts, watchTaskStatus(tsk))
-	} else if tsk.Enabled && tsk.CronExpr != "" {
-		if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
-			if next := sched.Next(a.now()); next.IsZero() {
-				parts = append(parts, "No upcoming run")
-			} else {
-				parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+		if s := watchSupervision(tsk); s != "" {
+			parts = append(parts, s)
+		}
+	} else if tsk.Enabled && tsk.CronExpr != "" && !tsk.Unschedulable {
+		// An unschedulable record says nothing HERE, in any of the cases below.
+		// attentionFragment diagnoses every shape of it at the FRONT of the line,
+		// because the rail clips from the right and a reason behind the trigger is
+		// the half that gets cut. That was already true of the computed fallback;
+		// it became true of the arming cases the moment app/sync.go started
+		// feeding them (#3626), and "not armed" beside "No upcoming run" is not a
+		// second finding — an expression that matches no date will not fire
+		// whoever is holding it, so the expression is the only thing to fix.
+		//
+		// The record's verdict is what decides, not a second local evaluation: a
+		// record carrying no verdict (a caller that did not annotate) still falls
+		// through to the evaluation below, which is where "No upcoming run" came
+		// from before (#2596).
+		switch {
+		case tsk.NextRunAt != nil:
+			// The LIVE armed entry when the record carries one (#3623): a number
+			// read off the scheduler cannot promise a fire the scheduler is not
+			// holding.
+			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
+		case notArmed(tsk):
+			// Nothing: attentionFragment leads the line with "not armed", and the
+			// rail's rule is to say it once. Emphatically NOT falling through to the
+			// computed fallback below — a task nothing is holding gets no fire time,
+			// which is the whole lie #3623 was about.
+		case tsk.Arming == task.ArmingArmed:
+			// Armed, with no fire time on the entry yet — the daemon has taken the
+			// task but its cron has not computed first fires (see withLiveArming).
+			// Falling through to the expression here would label a LIVE observation
+			// as computed, which is the mislabel in the other direction; the
+			// observation is worth more than the number anyway.
+			parts = append(parts, "armed")
+		default:
+			// Nothing has reported on this task, so the expression is all there is
+			// and the fragment SAYS so (#3626). The rail is a tasks.json reader on a
+			// 750ms poll; app/sync.go now fetches the daemon's arming observation
+			// beside that read, so in steady state one of the cases above answers
+			// and this is the daemon-down (or not-yet-answered) path.
+			//
+			// The qualifier is the whole point of keeping the fallback. "What a
+			// running daemon will fire" and "what this expression would imply if
+			// something were holding it" are different claims that used to render
+			// as the same string — and a task can be enabled, correctly configured
+			// and held by nothing at all (#2929). It rides INSIDE the fragment
+			// rather than as another "·" part so the caveat cannot drift away from
+			// the number it qualifies when the line is joined.
+			if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
+				if next := sched.Next(a.now()); next.IsZero() {
+					// No caveat on this one: an expression that matches no date will
+					// never fire whoever is holding it, so the absence is a property of
+					// the record and not of what was observed (#2596).
+					parts = append(parts, "No upcoming run")
+				} else {
+					// The caveat comes FIRST, inside the fragment. Trailing, it was the
+					// half a clip ate: this line is ellipsized from the right and the
+					// trigger sits ahead of it, so at intermediate widths the timestamp
+					// survived while "(from cron)" became the ellipsis — leaving an
+					// inference rendered exactly like an observation, which is the one
+					// ambiguity the qualifier exists to remove (#3626 review).
+					parts = append(parts, "from cron: next "+next.Format("Jan 02 15:04"))
+				}
 			}
 		}
 	}
@@ -240,6 +341,21 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	if !tsk.Enabled {
 		glyph, glyphStyle = "[✗]", automationsDisabledStyle
 	}
+	// An overdue task takes over the enabled glyph rather than adding a column
+	// (#3623). It can only ever BE enabled — the derivation says nothing about a
+	// disabled task — so the two can never collide, and replacing the mark keeps
+	// the row exactly as wide as it was at the 22-column rail minimum. Collapsed
+	// rows are the point: a warning you have to focus a row to see is one nobody
+	// sees.
+	// An unknown gets its own mark rather than borrowing either neighbour's. A
+	// tick would be the claim this whole change exists to stop making, and "[!]"
+	// would call an unestablished thing a failure (#3623 review).
+	if tsk.Unassessable {
+		glyph, glyphStyle = "[?]", automationsUnknownStyle
+	}
+	if needsAttention(tsk) {
+		glyph, glyphStyle = "[!]", automationsOverdueStyle
+	}
 	marker := " "
 	nameStyle := automationItemTitleStyle
 	if expanded {
@@ -265,6 +381,13 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 // that used to trail every collapsed row (#1126). Empty when a task has neither.
 func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	var parts []string
+	// An overdue task leads with the problem, ahead of its own configuration
+	// (#3623). The rail is narrow and this line is ellipsized to fit, so whatever
+	// sits last is what gets cut: at the 22-column minimum the cron expression
+	// would survive and the warning would not, which is backwards.
+	if fragment := attentionFragment(tsk, a.now()); fragment != "" {
+		parts = append(parts, fragment)
+	}
 	trigger := tsk.CronExpr
 	if tsk.IsWatch() {
 		trigger = "watch: " + tsk.WatchCmd
@@ -278,6 +401,91 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	return strings.Join(parts, " · ")
 }
 
+// needsAttention reports whether the row carries a warning: the task has stopped
+// firing on its schedule, its expression can never fire at all, or the daemon
+// reports it is not holding it. The first two are read off the record, so the
+// rail's disk-backed poll sees them without a daemon; the third arrives on the
+// snapshot poll (#3626) and is simply absent when no daemon answered.
+func needsAttention(tsk task.Task) bool {
+	return tsk.Overdue || tsk.Unschedulable || notArmed(tsk)
+}
+
+// notArmed reports an ENABLED task the running daemon says it is not holding. It
+// will not fire — that is #2929 — and af doctor already treats it as actionable.
+//
+// Gated on Enabled because the daemon reports arming for every task, and
+// "disabled and therefore not armed" is a true, unsurprising reading of the same
+// field; deciding that the enabled one is the interesting case is this surface's
+// job. And on ArmingNotArmed specifically, never on ArmingUnknown: nothing having
+// reported is not an observation that the task is unarmed, and treating it as one
+// would mark every row on the box while a daemon restarts — which is exactly what
+// the rail sees, since it polls straight through a restart.
+func notArmed(tsk task.Task) bool {
+	return tsk.Enabled && tsk.Arming == task.ArmingNotArmed
+}
+
+// attentionFragment is the detail line's warning text, or "" when the row is
+// healthy. The missed count is omitted rather than printed as zero when the walk
+// found none — an uncounted "missed 0" beside "overdue" reads as a
+// contradiction — and a count that hit the derivation's cap is marked with a
+// trailing "+" so a floor never renders as an exact number.
+// The order below is a PRECEDENCE CHAIN, and titleRow's glyph selection runs the
+// same one: each rung is a stronger statement about the same task than the rung
+// under it, and af doctor orders these facts identically for the same reason — a
+// row it has already named is not named again.
+//
+// Unassessable sits at the BOTTOM, which it did not before arming reached this
+// pane. The derivation's own verdicts are mutually exclusive, so while attention
+// meant "overdue or unschedulable" nothing could outrank an unknown and checking
+// it first was harmless. Arming is layered on separately, so a record with
+// nothing to measure from can ALSO be one the daemon refused to arm — and that
+// task took the "[!]" glyph from needsAttention while this function explained it
+// with "Health unknown", a marked row whose text is about something else. The web
+// hit the identical defect the moment its mark widened (#3626 review).
+func attentionFragment(tsk task.Task, now time.Time) string {
+	if tsk.Unschedulable {
+		// EVERY shape is diagnosed here, at the front, for the same reason the
+		// overdue fragment leads: at the 22-column rail minimum the line is clipped
+		// from the right, and a reason sitting behind the expression leaves the
+		// mark unexplained. Leaving the parsing case to the next/last summary put
+		// its "No upcoming run" after the trigger, which clipped to
+		// "0 0 31 2 * · …" — a [!] row with no explanation, the exact failure the
+		// mark exists to prevent (#3623 review).
+		//
+		// Which shape comes from the SHARED classifier rather than a local
+		// ParseCron, which is what had this row calling an ABSENT expression
+		// invalid. nextRunSummary suppresses its own copy, so the line says it once.
+		switch task.UnschedulableReason(tsk, now) {
+		case task.ReasonNoTrigger:
+			return "No trigger"
+		case task.ReasonInvalidExpression:
+			return "Invalid cron expression"
+		default:
+			return "No upcoming run"
+		}
+	}
+	if tsk.Overdue {
+		if tsk.MissedOccurrences <= 0 {
+			return "overdue"
+		}
+		if tsk.MissedOccurrencesCapped {
+			return fmt.Sprintf("overdue · missed %d+", tsk.MissedOccurrences)
+		}
+		return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
+	}
+	if notArmed(tsk) {
+		// Below overdue deliberately: an overdue task is usually also unarmed, and
+		// "it has missed 432 fires" is the sentence worth the rail's width.
+		return "not armed"
+	}
+	if tsk.Unassessable {
+		// Says what could not be done rather than what is wrong, and leads the line
+		// for the same reason the others do — the rail clips from the right.
+		return "Health unknown"
+	}
+	return ""
+}
+
 // detailRow renders the expanded row's detail as a dim line indented under the
 // title, ellipsized to the rail width. Returns "" when the task has no detail.
 func (a *AutomationsPane) detailRow(tsk task.Task) string {
@@ -287,6 +495,25 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 	}
 	indent := strings.Repeat(" ", itemPrefixWidth)
 	return automationDetailStyle.Render(fitLine(indent+detail, a.rect.W))
+}
+
+// attentionCount returns how many of the projection's tasks carry a WARNING —
+// stopped firing, or an expression the scheduler cannot fire. Only enabled cron
+// tasks can (see task.DeriveScheduleHealth).
+//
+// Tasks whose health could not be established are deliberately absent: the
+// compact summary this feeds answers "is anything wrong?", and an unknown is not
+// an answer of yes. Same line `af doctor` draws — unknowns are named where there
+// is room and never raise an alarm — and the rows carry "[?]" for it at any
+// width that has rows at all.
+func (a *AutomationsPane) attentionCount() int {
+	n := 0
+	for _, tsk := range a.proj.GetTasks() {
+		if needsAttention(tsk) {
+			n++
+		}
+	}
+	return n
 }
 
 // enabledCount returns how many of the projection's tasks are enabled.
@@ -300,122 +527,14 @@ func (a *AutomationsPane) enabledCount() int {
 	return n
 }
 
-func automationHelpKey(name keys.KeyName) string {
-	return keys.GlobalKeyBindings[name].Help().Key
-}
-
-func automationsActionHint(name keys.KeyName, desc string) string {
-	return automationHelpKey(name) + " " + desc
-}
-
-// automationsHeader is the section header's text, split at the seam the width
-// ladder needs: the noun is decoration and may be shortened or dropped, the
-// counts are the only information the header carries and never may be (#3630).
-type automationsHeader struct {
-	noun   string // "Automations" — or "Automations:" in the compact summary
-	counts string // "(2)", or "2 (1 on)" in the compact summary
-	// primary is counts reduced to the one number that must survive, and it is a
-	// rung of its own before the affordance is touched. The compact summary
-	// carries two numbers ("100 (100 on)" is 12 cells), which at the 22-column
-	// rail minimum left nothing for the hint and truncated it — regressing the
-	// contract that the manage affordance is cut last, at a SUPPORTED width
-	// rather than below one (#3641 review). Empty means counts is already
-	// minimal, as it is in full mode.
-	primary string
-}
-
-// text is the header at full width: " Automations (2)".
-func (h automationsHeader) text() string { return " " + h.noun + " " + h.counts }
-
-// countsOnly sheds the noun but keeps the numbers: " (2)".
-func (h automationsHeader) countsOnly() string { return " " + h.counts }
-
-// primaryOnly sheds the secondary number too: " 100" from " 100 (100 on)". It
-// is the last rung that still says anything true before clipping.
-func (h automationsHeader) primaryOnly() string {
-	if h.primary == "" {
-		return ""
-	}
-	return " " + h.primary
-}
-
-// shrunk ellipsizes the NOUN inside w cells while keeping the counts whole, or
-// returns "" when there is no room for a noun worth rendering.
-func (h automationsHeader) shrunk(w int) string {
-	room := w - runewidth.StringWidth(h.countsOnly()) - 1 // 1 for the leading pad
-	// Below three cells a "noun" is an ellipsis and a letter or two; drop it and
-	// let countsOnly have the width instead.
-	if room < 3 {
-		return ""
-	}
-	return " " + fitLine(h.noun, room) + " " + h.counts
-}
-
-// automationsHintSeparator is the repo's fragment separator (CLAUDE.md), and it
-// belongs to the HINT rather than to the title's trailing space. That is the
-// whole of #3630: while the leading space lived on the end of the title, every
-// shrink of the title ate it, and the header rendered "Automation…· m manage" —
-// an ellipsis welded to a separator, reading as one mangled token.
-const automationsHintSeparator = " · "
-
-// titleLine renders the section header width-aware. Segments shed in order of
-// what they cost the reader:
-//
-//	Automations (2) · m manage · e hooks    full
-//	Automations (2) · m manage              hooks drops first
-//	Automatio… (2) · m manage               then the noun shrinks, counts intact
-//	(2) · m manage                          then the noun goes, counts intact
-//	100 · m manage                          then the secondary count goes
-//
-// Three rules hold at every step, and #3630 was the first two failing at once.
-//
-// The " · " separator is never ellipsized into. Its leading space used to live
-// on the END of the title, so every shrink of the title ate it and the header
-// rendered "Automation…· m manage" — an ellipsis welded to a separator, reading
-// as one mangled token rather than a truncated word beside a hint. The
-// separator now belongs to the hint, where it cannot be shortened away.
-//
-// The counts survive every form. The old fallback replaced the whole title with
-// an ellipsized constant, so below 110 columns a section with two tasks was
-// byte-identical to one with none — the header stopped carrying the only
-// information it has.
-//
-// And the manage affordance is the last thing cut, which is the shipped contract
-// (TestAutomationsTitleWidthAware: "22-col rail still shows the manage
-// affordance", "the shrunk name marks its cut with an ellipsis"): the key to the
-// manager stays reachable at the 22-column rail minimum (#1090 width).
-func (a *AutomationsPane) titleLine(header automationsHeader, nameStyle lipgloss.Style) string {
-	w := a.rect.W
-	manage := automationsHintSeparator + automationsActionHint(keys.KeyTaskList, "manage")
-	hooks := automationsHintSeparator + automationsActionHint(keys.KeyHooks, "hooks")
-
-	render := func(title, hint string) string {
-		return nameStyle.Render(title) + automationsHintStyle.Render(hint)
-	}
-	fits := func(title, hint string) bool {
-		return runewidth.StringWidth(title+hint) <= w
-	}
-
-	full := header.text()
-	if fits(full, manage+hooks) {
-		return render(full, manage+hooks)
-	}
-	if fits(full, manage) {
-		return render(full, manage)
-	}
-	if shrunk := header.shrunk(w - runewidth.StringWidth(manage)); shrunk != "" && fits(shrunk, manage) {
-		return render(shrunk, manage)
-	}
-	counts := header.countsOnly()
-	if fits(counts, manage) {
-		return render(counts, manage)
-	}
-	if primary := header.primaryOnly(); primary != "" && fits(primary, manage) {
-		return render(primary, manage)
-	}
-	// Narrower than the rail minimum: nothing composes, so clip the whole line
-	// rather than pretend one of the pieces still fits.
-	return nameStyle.Render(fitLine(counts+manage, w))
+// titleLine renders the section header through the shared rail ladder
+// (ui/rail_header.go). The manage affordance is hints[0], so it is the last
+// thing cut — the shipped contract TestAutomationsTitleWidthAware pins.
+func (a *AutomationsPane) titleLine(header railHeader, nameStyle lipgloss.Style) string {
+	return railTitleLine(header, a.rect.W, nameStyle, automationsHintStyle,
+		railHintSeparator+railActionHint(keys.KeyTaskList, "manage"),
+		railHintSeparator+railActionHint(keys.KeyHooks, "hooks"),
+	)
 }
 
 // View implements layout.Pane: exactly rect-sized.
@@ -441,10 +560,39 @@ func (a *AutomationsPane) String() string {
 
 	// 1-line degraded summary (RFC §2.6, <80 cols).
 	if a.compact || a.rect.H <= 1 {
-		header := automationsHeader{
+		header := railHeader{
 			noun:    "Automations:",
 			counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
 			primary: fmt.Sprintf("%d", len(tasks)),
+		}
+		if attention := a.attentionCount(); attention > 0 {
+			// The degraded one-line mode has no rows, so this line IS the section —
+			// and it is the narrowest thing the rail draws. A task that has stopped
+			// firing is easiest to miss exactly here, so the count rides the header
+			// (#3623).
+			//
+			// It becomes the PRIMARY as well as riding the counts, which is what
+			// #3641's ladder is for: when the width sheds everything but one number,
+			// the number that must survive is the one saying something is wrong, not
+			// the total.
+			//
+			// The primary carries the ROW GLYPH rather than the word, and that is a
+			// width decision rather than a style one. #3641's last rung exists to
+			// keep the manage affordance from being clipped at the 22-column rail
+			// minimum, and " 100 overdue" needs 12 of the 11 cells that rung has —
+			// measured, it fell straight through to the clip and truncated the
+			// affordance, which is the contract that rung was added to protect. A
+			// spelling picked by digit count would be no better: rebinding the
+			// manager key changes the budget. "[!] 100" fits at any count, and it is
+			// the mark the rows above carry at wider widths.
+			//
+			// The label is the GLYPH rather than the word "overdue", because the
+			// count includes every task carrying the mark — one whose expression the
+			// scheduler cannot fire is not late, and compact mode has no rows to
+			// correct the impression with (#3623 review). It is also what the primary
+			// rung below shows, so the two rungs speak the same vocabulary.
+			header.counts = fmt.Sprintf("%d (%d on · [!] %d)", len(tasks), a.enabledCount(), attention)
+			header.primary = fmt.Sprintf("[!] %d", attention)
 		}
 		style := automationsTitleDimStyle
 		if a.focused {
@@ -457,14 +605,14 @@ func (a *AutomationsPane) String() string {
 	if a.focused {
 		nameStyle = automationsTitleStyle
 	}
-	title := a.titleLine(automationsHeader{
+	title := a.titleLine(railHeader{
 		noun:   "Automations",
 		counts: fmt.Sprintf("(%d)", len(tasks)),
 	}, nameStyle)
 	lines := []string{title}
 	if len(tasks) == 0 {
 		lines = append(lines, automationsDisabledStyle.Render(
-			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", automationHelpKey(keys.KeyTaskList)), a.rect.W)))
+			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", railHelpKey(keys.KeyTaskList)), a.rect.W)))
 	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace

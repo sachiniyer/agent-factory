@@ -310,7 +310,14 @@ func writeExecutableInPlaceWaiting(
 				active.ID, active.Phase,
 			)
 		}
-		return config.AtomicWriteFile(resolvedPath, binary, 0755)
+		// Refuses a symlinked destination (#3672). Both production callers hand
+		// this an already-EvalSymlinks'd path, so a link here means the final
+		// component became one between that resolution and this write — exactly
+		// the state where swapping the binary is least safe. Refusing keeps the
+		// in-place installer from writing an executable to a path nobody
+		// resolved, and it is the same fail-closed polarity as the rest of this
+		// interlock.
+		return config.AtomicWriteFileRefusingLink(resolvedPath, binary, 0755)
 	}
 
 	// Check and write under the transaction preparation lock, so the two cannot

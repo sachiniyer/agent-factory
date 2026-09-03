@@ -146,6 +146,24 @@
       "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes."
     },
     {
+      "id": "config.migrate",
+      "title": "Rewrite deprecated config keys to their current spelling",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configmigratecmd.go config migrate (config.MigrateGlobalConfig)"
+      },
+      "verdict": "deliberate",
+      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place \u2014 their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling \u2014 so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
+    },
+    {
       "id": "config.read-project",
       "title": "Read the effective config for a selected project",
       "tui": {
@@ -231,10 +249,10 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/configcmd.go config unset without --project -> daemon.UnsetGlobalConfigValue"
+        "pointer": "commands/configcmd.go config unset without --project -> commands/configremote.go globalConfigUnset (local socket, or the targeted daemon's UnsetConfigValue)"
       },
       "verdict": "deliberate",
-      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope."
+      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope. #3679 added POST /v1/UnsetConfigValue so the CLI can reach a REMOTE daemon's clear (its `set` counterpart was already served); the route existing does not change the TUI/web answers, which are about what those editors expose rather than about what the daemon serves."
     },
     {
       "id": "config.write-project",
@@ -1276,6 +1294,24 @@
       "notes": "Scripting read-verb; both UIs render the task list continuously."
     },
     {
+      "id": "task.health",
+      "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue \u00b7 missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue \u00b7 missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks_show.go tasksShowCmd; the same fields ride af tasks list/get --json, and doctor/tasks.go raises the af doctor row"
+      },
+      "verdict": "parity",
+      "issue": "#3626",
+      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight \u2014 the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see \u2014 so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."    },
+    {
       "id": "task.list",
       "title": "List tasks",
       "tui": {
@@ -1495,6 +1531,7 @@
       "af completion zsh": "cli.shell-completion",
       "af config get": "config.read",
       "af config list": "config.read",
+      "af config migrate": "config.migrate",
       "af config set": "config.write",
       "af config unset": "config.unset-global-alias",
       "af config validate": "config.validate",
@@ -1543,6 +1580,7 @@
       "af tasks list": "task.list",
       "af tasks remove": "task.remove",
       "af tasks restart": "task.restart",
+      "af tasks show": "task.health",
       "af tasks trigger": "task.trigger",
       "af tasks update": "task.edit",
       "af token rotate": "daemon.token",
@@ -1583,6 +1621,7 @@
       "POST /v1/Snapshot": "session.list",
       "POST /v1/SuggestSessionName": "-",
       "POST /v1/TriggerTask": "task.trigger",
+      "POST /v1/UnsetConfigValue": "config.unset-global-alias",
       "POST /v1/UpdateTask": "task.edit"
     },
     "tui_bindings": {
@@ -1712,6 +1751,8 @@
       "af config list --json": "cli.json-envelope",
       "af config list --project": "config.read-project",
       "af config list --repo": "config.read-project",
+      "af config migrate --help": "meta.discovery",
+      "af config migrate --json": "cli.json-envelope",
       "af config set --help": "meta.discovery",
       "af config set --json": "cli.json-envelope",
       "af config set --project": "config.write-project",
@@ -1844,6 +1885,7 @@
       "af tasks get --help": "meta.discovery",
       "af tasks list --all": "task.list",
       "af tasks list --help": "meta.discovery",
+      "af tasks show --help": "meta.discovery",
       "af tasks remove --help": "meta.discovery",
       "af tasks restart --help": "meta.discovery",
       "af tasks trigger --help": "meta.discovery",
@@ -2014,6 +2056,39 @@
       },
       "AddTaskRequest": {
         "cli": {
+          "task.store_generation": {
+            "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
+          },
+          "task.ordinal": {
+            "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
+          },
+          "task.arming": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.missed_occurrences_capped": {
+            "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+          },
+          "task.unschedulable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+          },
+          "task.unschedulable_reason": {
+            "ok": "Derived at READ time and stripped on write (#3626): it names WHICH shape of unschedulable the store's own classifier reached (task.UnschedulableReason), so a surface that cannot call it renders that answer instead of re-deriving one from cron_expr. It is the wording of a verdict the store reached, not an input to it."
+          },
+          "task.unassessable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
+          },
+          "task.missed_occurrences": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.next_run_at": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.overdue": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.audit": {
+            "ok": "Store-owned append-only history (#3623): task.AddTaskChecked/UpdateTaskChecked write each entry inside the locked mutation, diffed against the record actually replaced. A client-supplied trail could describe a change that never happened, which is the one thing an audit trail must not do."
+          },
           "task.last_run_at": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
           },
@@ -2025,6 +2100,39 @@
           }
         },
         "tui": {
+          "task.store_generation": {
+            "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
+          },
+          "task.ordinal": {
+            "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
+          },
+          "task.arming": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.missed_occurrences_capped": {
+            "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+          },
+          "task.unschedulable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+          },
+          "task.unschedulable_reason": {
+            "ok": "Derived at READ time and stripped on write (#3626): it names WHICH shape of unschedulable the store's own classifier reached (task.UnschedulableReason), so a surface that cannot call it renders that answer instead of re-deriving one from cron_expr. It is the wording of a verdict the store reached, not an input to it."
+          },
+          "task.unassessable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
+          },
+          "task.missed_occurrences": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.next_run_at": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.overdue": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.audit": {
+            "ok": "Store-owned append-only history (#3623): task.AddTaskChecked/UpdateTaskChecked write each entry inside the locked mutation, diffed against the record actually replaced. A client-supplied trail could describe a change that never happened, which is the one thing an audit trail must not do."
+          },
           "task.last_run_at": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
           },
@@ -2225,6 +2333,9 @@
         }
       },
       "UpdateTask": {
+        "actor": {
+          "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
+        },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
         },
@@ -2233,6 +2344,42 @@
         }
       },
       "AddTask": {
+        "actor": {
+          "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
+        },
+        "task.store_generation": {
+          "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
+        },
+        "task.ordinal": {
+          "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
+        },
+        "task.arming": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.missed_occurrences_capped": {
+          "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+        },
+        "task.unschedulable": {
+          "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+        },
+        "task.unschedulable_reason": {
+          "ok": "Derived at READ time and stripped on write (#3626): it names WHICH shape of unschedulable the store's own classifier reached (task.UnschedulableReason), so a surface that cannot call it renders that answer instead of re-deriving one from cron_expr. It is the wording of a verdict the store reached, not an input to it."
+        },
+        "task.unassessable": {
+          "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
+        },
+        "task.missed_occurrences": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.next_run_at": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.overdue": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.audit": {
+          "ok": "Store-owned append-only history (#3623): task.AddTaskChecked/UpdateTaskChecked write each entry inside the locked mutation, diffed against the record actually replaced. A client-supplied trail could describe a change that never happened, which is the one thing an audit trail must not do."
+        },
         "task.last_run_at": {
           "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run. A surface setting it would be lying about history."
         },

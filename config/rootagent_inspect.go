@@ -322,7 +322,7 @@ func LegacyRootAgentForRepo(global *Config, repoID string) (*RootAgentConfig, st
 		}
 		// The key's path does not resolve right now — an absent mount, a repo
 		// not yet cloned (#1122). Fall back to recorded-root identity
-		// (RepoIDForRecordedRoot), the same rule the daemon snapshot uses to
+		// (DerivedRepoIDForUnresolvedRoot), the same rule the daemon snapshot uses to
 		// attribute unresolvable project roots: a caller asking about that
 		// repo must still see this entry, because an empty entry means
 		// enabled and the legacy ensure sweep's per-tick retry creates the

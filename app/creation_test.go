@@ -86,6 +86,13 @@ func newTestHome(t *testing.T) *home {
 	t.Cleanup(SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error {
 		return nil
 	}))
+	// The snapshot poll also asks the daemon which tasks are actually armed
+	// (#3626). It dials rather than spawns, so an unstubbed call would fail
+	// harmlessly — but it would still reach for a socket on every poll, and
+	// "harmlessly" is not something a test should have to keep being right about.
+	// Nil is the no-observation answer, which leaves arming UNKNOWN exactly as a
+	// down daemon does; tests exercising the merge swap in their own.
+	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) { return nil, nil }))
 
 	// The live-termpane bind would dial a real WS PTY stream (#1592 PR6). Default
 	// the factory to an inert fake so a test that incidentally reaches a bind

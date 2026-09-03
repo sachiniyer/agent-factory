@@ -26,6 +26,9 @@ func newTasksSchemaMigrationPlan(path string) config.SchemaMigrationPlan {
 		Migrators:      registry,
 		Validate:       validateTasksEnvelope,
 		Perm:           0644,
+		// Same shape as the instances plan: DetectJSONSchemaVersion plus a
+		// "null" -> legacy pre-case the probe declines to answer for.
+		ProveCurrentVersion: config.ProveJSONSchemaVersion,
 	}
 }
 

@@ -423,17 +423,21 @@ func TestRunTask_PersistsFailureStatusOnBadRepo(t *testing.T) {
 	notARepo := t.TempDir()
 	now := time.Now()
 	if err := task.AddTask(task.Task{
-		ID:            "dddd0001",
-		Name:          "broken",
-		Prompt:        "do it",
-		CronExpr:      "0 3 * * *",
-		ProjectPath:   notARepo,
-		Enabled:       true,
-		CreatedAt:     now,
-		LastRunAt:     &now,
-		LastRunStatus: "started",
+		ID:          "dddd0001",
+		Name:        "broken",
+		Prompt:      "do it",
+		CronExpr:    "0 3 * * *",
+		ProjectPath: notARepo,
+		Enabled:     true,
+		CreatedAt:   now,
 	}); err != nil {
 		t.Fatalf("seed task: %v", err)
+	}
+	// The stale "started" this test is about is seeded through the
+	// scheduler-owned writer: a create supplies the task's definition and the
+	// store supplies its history (task.resetStoreOwnedFields).
+	if _, err := task.UpdateTaskStatus("dddd0001", &now, "started"); err != nil {
+		t.Fatalf("seed run status: %v", err)
 	}
 
 	err := RunTask("dddd0001", task.ProjectExpectation{})

@@ -1,9 +1,11 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -185,16 +187,66 @@ func waitForPidFile(t *testing.T, pidFile string, timeout time.Duration) int {
 	return 0
 }
 
-// waitForProcessExit polls until syscall.Kill(pid, 0) reports ESRCH. Signal 0
-// is a permission/existence probe that delivers nothing; ESRCH means the
-// process has been reaped (init reaps the orphaned grandchild after SIGKILL).
+// waitForProcessExit polls until the process is terminated. Signal 0 is a
+// permission/existence probe that delivers nothing; ESRCH means the process has
+// been reaped.
+//
+// A ZOMBIE counts as terminated, and that is the load-bearing part. These tests
+// kill an orphaned grandchild, so whether it is reaped promptly is up to
+// whatever inherited it — init on a normal box, but in a container PID 1 is
+// often the test harness or a shell that never reaps. There, kill(pid, 0) keeps
+// succeeding on a process that cannot run, and an ESRCH-only oracle reports the
+// process-group kill as having failed when it did exactly what it should. Read
+// the state field of /proc/<pid>/stat instead, which is unambiguous.
 func waitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
 			return true
 		}
+		if processIsZombie(pid) {
+			return true
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// processIsZombie reads /proc/<pid>/stat, whose third space-separated field
+// after the comm is the state character. comm is parenthesized and may itself
+// contain spaces and parentheses, so the scan starts after the LAST ')'.
+func processIsZombie(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		// ANY read failure means "cannot tell", never "exited". On a host without
+		// procfs — macOS, or a container that does not mount it — every pid returns
+		// ENOENT, and treating that as exit would make waitForProcessExit accept a
+		// live process instantly and pass these tests without testing anything.
+		// "Gone" is the ESRCH probe's answer to give, and it already gives it.
+		return false
+	}
+	closing := bytes.LastIndexByte(data, ')')
+	if closing < 0 || closing+2 >= len(data) {
+		return false
+	}
+	return data[closing+2] == 'Z'
+}
+
+// waitForProcessExit must never accept a LIVE process. It reads /proc to tell a
+// zombie from a runnable process, and a host without procfs — macOS, or a
+// container that does not mount it — fails that read for every pid; treating
+// that as exit would make every caller of this helper pass instantly without
+// testing anything (#3650 review). CI runs this on macOS, where the read fails.
+func TestWaitForProcessExitDoesNotAcceptALiveProcess(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if waitForProcessExit(cmd.Process.Pid, 300*time.Millisecond) {
+		t.Fatalf("a live process (pid %d) was reported as exited", cmd.Process.Pid)
+	}
 }

@@ -28,7 +28,8 @@ import (
 // (PendingTabCleanup[].TmuxName): a field added after the policy was written
 // passed through unredacted.
 func TestRedactInstanceDataRedactsArchiveReportSkippedPath(t *testing.T) {
-	const treePath = "/worktrees/.af-source-0123456789abcdef0123456789abcdef"
+	const worktreeRoot = "/worktrees/kingfisher"
+	const treePath = worktreeRoot + "/.af-source-0123456789abcdef0123456789abcdef"
 	// The realistic relative file names the codebase's own fixtures use for
 	// unreadable-but-retained sources (session/git/worktree_archive_report_test.go
 	// and session/git/repo_gone_cleanup_test.go).
@@ -40,9 +41,10 @@ func TestRedactInstanceDataRedactsArchiveReportSkippedPath(t *testing.T) {
 		})
 	}
 	d := session.InstanceData{
-		ID:      "abc123",
-		Program: "claude",
-		Status:  session.Status(1),
+		ID:       "abc123",
+		Program:  "claude",
+		Status:   session.Status(1),
+		Worktree: session.GitWorktreeData{WorktreePath: worktreeRoot},
 		ArchiveReport: &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
 			Path:          treePath,
 			IdentityKnown: true,
@@ -53,17 +55,20 @@ func TestRedactInstanceDataRedactsArchiveReportSkippedPath(t *testing.T) {
 		}}},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	if d.ArchiveReport == nil {
 		t.Fatal("redactInstanceData dropped the whole ArchiveReport; it should redact only the skipped paths so triage can still see the archive was incomplete")
 	}
 	tree := d.ArchiveReport.RetainedTrees[0]
-	// The retained tree's own path is the SYSTEM worktree path the text scrub
-	// collapses via $HOME→~; the structured redactor must leave it for that pass,
-	// exactly as it leaves Worktree.Path and Branch for the scrub.
-	if tree.Path != treePath {
-		t.Errorf("retained_trees[0].path was changed by the structured redactor: got %q want %q (it is a system path the text scrub should collapse, not a user file name)", tree.Path, treePath)
+	// The retained tree's own path is a SYSTEM path, so it is COLLAPSED to the
+	// root it hangs off rather than blanked like the user file names beside it:
+	// which worktree a retained tree belongs to is triage signal. It used to be
+	// left for the text scrub to collapse via $HOME, which reached it only when
+	// the worktree happened to sit under the home directory (#3588).
+	const wantTree = "[worktree:1]/.af-source-0123456789abcdef0123456789abcdef"
+	if tree.Path != wantTree {
+		t.Errorf("retained_trees[0].path = %q, want %q (a system path collapsed to its root, not a user file name)", tree.Path, wantTree)
 	}
 	for j, entry := range tree.Skipped {
 		if entry.Path != redactedMarker {
@@ -106,7 +111,7 @@ func TestRedactInstanceDataClearsArchiveReportSkippedPathBytes(t *testing.T) {
 		}}},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	entry := d.ArchiveReport.RetainedTrees[0].Skipped[0]
 	if entry.Path != redactedMarker {
@@ -131,7 +136,7 @@ func TestRedactInstanceDataKeepsArchiveReportNil(t *testing.T) {
 		Title:   "ConfidentialDeal",
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	if d.ArchiveReport != nil {
 		t.Errorf("ArchiveReport mutated from nil to %+v", d.ArchiveReport)
@@ -151,7 +156,8 @@ func TestRedactInstanceDataKeepsArchiveReportNil(t *testing.T) {
 // publicly shared bundle verbatim.
 func TestRedactInstancesJSONRedactsArchiveReportSkippedPath(t *testing.T) {
 	leaks := []string{"credential", "private-work.txt", "private/old", "generated/private-019"}
-	const treePath = "/worktrees/.af-source-0123456789abcdef0123456789abcdef"
+	const worktreeRoot = "/worktrees/kingfisher"
+	const treePath = worktreeRoot + "/.af-source-0123456789abcdef0123456789abcdef"
 	skipped := make([]sessiongit.ArchiveSkippedEntry, 0, len(leaks))
 	for _, name := range leaks {
 		skipped = append(skipped, sessiongit.ArchiveSkippedEntry{
@@ -159,9 +165,10 @@ func TestRedactInstancesJSONRedactsArchiveReportSkippedPath(t *testing.T) {
 		})
 	}
 	row := session.InstanceData{
-		ID:      "s-1",
-		Program: "claude",
-		Status:  session.Status(1),
+		ID:       "s-1",
+		Program:  "claude",
+		Status:   session.Status(1),
+		Worktree: session.GitWorktreeData{WorktreePath: worktreeRoot},
 		ArchiveReport: &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
 			Path: treePath, Skipped: skipped,
 		}}},
@@ -190,11 +197,13 @@ func TestRedactInstancesJSONRedactsArchiveReportSkippedPath(t *testing.T) {
 	if !strings.Contains(out, "permission_denied") {
 		t.Errorf("skip reason should survive redaction:\n%s", out)
 	}
-	// The retained tree path is the system worktree path; the structured redactor
-	// leaves it for the text scrub to collapse $HOME (no home set here, so it is
-	// unchanged), and it must not be redacted as if it were a user file name.
-	if !strings.Contains(out, treePath) {
-		t.Errorf("retained tree system path should survive redaction:\n%s", out)
+	// The retained tree path is a system path: collapsed to the worktree token it
+	// hangs off, never blanked as if it were a user file name.
+	if !strings.Contains(out, "[worktree:1]/.af-source-0123456789abcdef0123456789abcdef") {
+		t.Errorf("retained tree system path should survive as its collapsed form:\n%s", out)
+	}
+	if strings.Contains(out, treePath) {
+		t.Errorf("retained tree path shipped its own directory name:\n%s", out)
 	}
 }
 
@@ -344,11 +353,38 @@ func TestScrubLogRedactsArchiveWarningWithNoInstanceState(t *testing.T) {
 	if !strings.Contains(got, "permission denied") {
 		t.Errorf("log scrub dropped the skip reason:\n%s", got)
 	}
-	// The retained root is a SYSTEM path, kept here for the same reason
-	// redactInstanceData keeps tree.Path: the scrub collapses $HOME in it. It is
-	// valid UTF-8, so the display rewrite is the identity.
-	if !strings.Contains(got, strconv.Quote(treePath)) {
-		t.Errorf("retained tree system path should survive the log scrub:\n%s", got)
+	// The retained root gets the same treatment as the ArchiveReport field it was
+	// rendered from: collapsed to the root it hangs off, or — as here, where this
+	// redactor knows no root at all and no home either — dropped. Keeping it
+	// verbatim is the assumption #3588 removed: a root outside every known root
+	// ships its own directory names, and no home-to-tilde pass reaches it.
+	if strings.Contains(got, treePath) {
+		t.Errorf("a retained root under no known root shipped verbatim:\n%s", got)
+	}
+}
+
+// TestScrubLogCollapsesAKnownRetainedRoot is the other half of that rule, and
+// the one a real run takes: a retained root under a root this redactor knows
+// keeps its shape, so triage can still see which worktree the tree belongs to.
+// Only a root it can place NOWHERE is dropped.
+func TestScrubLogCollapsesAKnownRetainedRoot(t *testing.T) {
+	const worktreeRoot = "/srv/ConfidentialClient/af/worktrees/kingfisher"
+	report := archiveReportWithSkipped(worktreeRoot+"/.af-source-abc123", "private-work.txt")
+
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Worktree: session.GitWorktreeData{WorktreePath: worktreeRoot},
+	})
+	got := r.scrubLog(archiveWarningLog(report, "restore"))
+
+	if strings.Contains(got, "ConfidentialClient") {
+		t.Errorf("the retained root shipped its own directory names:\n%s", got)
+	}
+	if !strings.Contains(got, strconv.Quote("[worktree:1]/.af-source-abc123")) {
+		t.Errorf("a known retained root should keep its shape under its token:\n%s", got)
+	}
+	if strings.Contains(got, "private-work.txt") {
+		t.Errorf("skipped file name survived beside the retained root:\n%s", got)
 	}
 }
 
@@ -436,11 +472,18 @@ func TestScrubLogRedactsArchiveWarningBeforeTitles(t *testing.T) {
 func TestScrubLogRewritesRetainedRootToDisplayPath(t *testing.T) {
 	// A root OUTSIDE the configured home — the case Codex named, where the
 	// home-to-tilde collapse has nothing to match even after the escaping is gone.
-	const invalidRoot = "/data/worktrees/.af-source-\xff-kingfisher"
+	// The worktree it belongs to IS known, which is what makes the display rewrite
+	// observable: the raw bytes match no root, so without it the collapse below
+	// could not place this tree and would drop it (#3588).
+	const worktreeRoot = "/data/worktrees/kingfisher"
+	const invalidRoot = worktreeRoot + "/.af-source-\xff-copy"
 	report := archiveReportWithSkipped(invalidRoot, "private-work.txt")
 	report.RetainedTrees[0].PathBytes = []byte(invalidRoot)
 
 	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	r.noteSession(&session.InstanceData{
+		Worktree: session.GitWorktreeData{WorktreePath: worktreeRoot},
+	})
 	got := r.scrubLog(archiveWarningLog(report, "restore"))
 
 	if strings.Contains(got, strconv.Quote(invalidRoot)) {
@@ -449,8 +492,8 @@ func TestScrubLogRewritesRetainedRootToDisplayPath(t *testing.T) {
 	if strings.Contains(got, invalidRoot) {
 		t.Errorf("the raw retained root bytes survived the log scrub:\n%s", got)
 	}
-	if !strings.Contains(got, strconv.Quote(strings.ToValidUTF8(invalidRoot, "�"))) {
-		t.Errorf("the retained root should survive as its display spelling, for triage:\n%s", got)
+	if !strings.Contains(got, strconv.Quote("[worktree:1]/.af-source-�-copy")) {
+		t.Errorf("the retained root should survive as its collapsed display spelling, for triage:\n%s", got)
 	}
 	if strings.Contains(got, "private-work.txt") {
 		t.Errorf("skipped file name survived beside the retained root:\n%s", got)
@@ -520,19 +563,23 @@ func TestScrubLogRedactsBoundedArchiveWarningForms(t *testing.T) {
 // demands at least one entry silently stops matching the whole clause and ships
 // the raw root.
 func TestScrubLogRewritesRetainedRootWithNoSkippedEntries(t *testing.T) {
-	const invalidRoot = "/worktrees/.af-source-\xff-kingfisher"
+	const worktreeRoot = "/worktrees/kingfisher"
+	const invalidRoot = worktreeRoot + "/.af-source-\xff-copy"
 	report := &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
 		Path: strings.ToValidUTF8(invalidRoot, "�"), PathBytes: []byte(invalidRoot),
 	}}}
 
 	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Worktree: session.GitWorktreeData{WorktreePath: worktreeRoot},
+	})
 	got := r.scrubLog(archiveWarningLog(report, "restore"))
 
 	if strings.Contains(got, strconv.Quote(invalidRoot)) {
 		t.Errorf("the raw retained root survived on an empty skipped list:\n%s", got)
 	}
-	if !strings.Contains(got, strconv.Quote(strings.ToValidUTF8(invalidRoot, "�"))) {
-		t.Errorf("the retained root should survive as its display spelling:\n%s", got)
+	if !strings.Contains(got, strconv.Quote("[worktree:1]/.af-source-�-copy")) {
+		t.Errorf("the retained root should survive as its collapsed display spelling:\n%s", got)
 	}
 }
 
@@ -546,13 +593,17 @@ func TestScrubLogRewritesRetainedRootWithNoSkippedEntries(t *testing.T) {
 // token. A matcher that split on `", "` would cut a name in half and leave the
 // remainder in a public bundle.
 func TestScrubLogRedactsQuoteBearingArchiveWarningNames(t *testing.T) {
-	root := `/worktrees/.af-source"; skipped paths: "decoy`
+	const worktreeRoot = "/worktrees/kingfisher"
+	root := worktreeRoot + `/.af-source"; skipped paths: "decoy`
 	report := archiveReportWithSkipped(root,
 		`inner" (permission denied), "escape.txt`,
 		`back\slash.txt`,
 	)
 
 	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Worktree: session.GitWorktreeData{WorktreePath: worktreeRoot},
+	})
 	got := r.scrubLog(archiveWarningLog(report, "restore"))
 
 	for _, fragment := range []string{"inner", "escape.txt", "back", "slash.txt"} {
@@ -560,10 +611,11 @@ func TestScrubLogRedactsQuoteBearingArchiveWarningNames(t *testing.T) {
 			t.Errorf("a quote-bearing skipped name left %q in the log:\n%s", fragment, got)
 		}
 	}
-	// The retained root survives as ONE token, punctuation and all: the spoofed
+	// The retained root is collapsed as ONE token, punctuation and all: the spoofed
 	// "; skipped paths:" inside it is escaped text, not a clause boundary, and
-	// reading it as one would have redacted the wrong half of this line.
-	if !strings.Contains(got, strconv.Quote(root)) {
+	// reading it as one would have redacted the wrong half of this line — leaving
+	// the decoy remainder in a public bundle.
+	if !strings.Contains(got, strconv.Quote(`[worktree:1]/.af-source"; skipped paths: "decoy`)) {
 		t.Errorf("the retained root was not carried through as a single token:\n%s", got)
 	}
 	if !strings.Contains(got, "af skipped 2 unreadable files") {
@@ -705,9 +757,11 @@ func TestScrubLogRedactsUnrecognizedArchiveWarningTail(t *testing.T) {
 // text scrub cannot see a home directory or a username through base64, so the
 // raw root path shipped in a bundle that had otherwise been redacted.
 func TestRedactInstanceDataClearsRetainedTreePathBytes(t *testing.T) {
-	const invalidRoot = "/worktrees/.af-source-\xff-kingfisher"
+	const worktreeRoot = "/worktrees/kingfisher"
+	const invalidRoot = worktreeRoot + "/.af-source-\xff-copy"
 	d := session.InstanceData{
-		ID: "badroot",
+		ID:       "badroot",
+		Worktree: session.GitWorktreeData{WorktreePath: worktreeRoot},
 		ArchiveReport: &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
 			Path:          strings.ToValidUTF8(invalidRoot, "�"),
 			PathBytes:     []byte(invalidRoot),
@@ -718,7 +772,7 @@ func TestRedactInstanceDataClearsRetainedTreePathBytes(t *testing.T) {
 		}}},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	tree := d.ArchiveReport.RetainedTrees[0]
 	if tree.PathBytes != nil {
@@ -734,10 +788,11 @@ func TestRedactInstanceDataClearsRetainedTreePathBytes(t *testing.T) {
 	if strings.Contains(string(out), "path_bytes") {
 		t.Errorf("redacted report still emits path_bytes on the wire:\n%s", out)
 	}
-	// The display path still survives for triage — it is the system worktree path
-	// the text scrub collapses, not a user file name.
-	if tree.Path == "" || tree.Path == redactedMarker {
-		t.Errorf("retained_trees[0].path should survive for the text scrub, got %q", tree.Path)
+	// The display path still survives for triage, collapsed to the root it hangs
+	// off — it is a system path, not a user file name. The display rewrite is what
+	// makes that collapse possible at all: the raw bytes match no root.
+	if want := "[worktree:1]/.af-source-\uFFFD-copy"; tree.Path != want {
+		t.Errorf("retained_trees[0].path = %q, want the collapsed display form %q", tree.Path, want)
 	}
 }
 
@@ -798,7 +853,7 @@ func TestRedactInstanceDataRetainedTreePathBytesStayClearedOnMarshal(t *testing.
 		}}},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	out, err := json.Marshal(d.ArchiveReport)
 	if err != nil {

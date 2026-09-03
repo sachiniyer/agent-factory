@@ -210,7 +210,7 @@ func TestTaskMutationsCarryProjectExpectation(t *testing.T) {
 			return apiproto.Success(daemon.UpdateTaskResponse{OK: true})
 		})
 		enabled := false
-		if _, err := c.UpdateTask("t-1", task.TaskUpdate{Enabled: &enabled}, expect); err != nil {
+		if _, err := c.UpdateTask("t-1", task.TaskUpdate{Enabled: &enabled}, expect, task.ActorTUI); err != nil {
 			t.Fatalf("UpdateTask: %v", err)
 		}
 		if got.ID != "t-1" || got.Expect != expect {

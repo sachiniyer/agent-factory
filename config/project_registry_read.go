@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -402,4 +403,19 @@ var identityWriteDeclinedHookForTest func()
 func SetIdentityWriteDeclinedHookForTest(t interface{ Cleanup(func()) }, hook func()) {
 	identityWriteDeclinedHookForTest = hook
 	t.Cleanup(func() { identityWriteDeclinedHookForTest = nil })
+}
+
+// ProjectCheckoutMatchesContext is ProjectCheckoutMatches with caller-owned
+// cancellation (#3599). Finding the marker means resolving the path's binding
+// first, which forks git; a caller that runs this against a path that may be
+// wedged — the daemon's re-attribution probe, which has already published one
+// repository as gated and cannot rebind that gate until this returns — must be
+// able to bound it.
+//
+// A read the deadline kills is NOT a verdict about the checkout: it comes back
+// as an error carrying ErrRepoProbeUnanswered, never as a clean "does not
+// match", so the caller holds the identity unknowable instead of settling a
+// mismatch that would release what it contradicts (#3500).
+func ProjectCheckoutMatchesContext(ctx context.Context, root, checkoutID string) (bool, error) {
+	return projectRootHasCheckoutIDContext(ctx, root, checkoutID)
 }

@@ -7482,18 +7482,6 @@ function paletteFetchFailurePlan(status, hasLoadedPalette) {
     reauthenticate: rejectedCredential
   };
 }
-function createLatestRequestGate() {
-  let generation = 0;
-  return {
-    begin() {
-      const requestGeneration = ++generation;
-      return { isCurrent: () => requestGeneration === generation };
-    },
-    invalidate() {
-      generation += 1;
-    }
-  };
-}
 function semantic(candidate, fallback, surfaces, minimum, toward) {
   return readable(candidate, surfaces, minimum, fallback, toward);
 }
@@ -9332,6 +9320,13 @@ var CircleDashed = [
   ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
+var CircleQuestionMark = [
+  ["circle", { cx: "12", cy: "12", r: "10" }],
+  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
 // node_modules/lucide/dist/esm/icons/circle.mjs
 var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
 
@@ -9454,6 +9449,13 @@ var Terminal2 = [
   ["path", { d: "m4 17 6-6-6-6" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
+var TriangleAlert = [
+  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
+  ["path", { d: "M12 9v4" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
 // node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
@@ -9470,6 +9472,7 @@ var ICONS = {
   "chevron-down": ChevronDown,
   circle: Circle,
   "circle-dashed": CircleDashed,
+  "circle-question": CircleQuestionMark,
   diamond: Diamond,
   ellipsis: Ellipsis,
   "external-link": ExternalLink,
@@ -9485,6 +9488,7 @@ var ICONS = {
   square: Square,
   "square-check": SquareCheckBig,
   terminal: Terminal2,
+  "triangle-alert": TriangleAlert,
   x: X
 };
 function icon(name, className = "") {
@@ -10846,11 +10850,33 @@ function tabToKeepOnClose(ids, closedIndex, activeIndex) {
   const keepIndex = closedIndex === activeIndex ? activeIndex - 1 : activeIndex;
   return ids[keepIndex] ?? "";
 }
-function rebindTargetAfterAwait(pinnedGen, pinnedSelId, currentGen, currentSelId, targetIdx) {
-  if (currentGen !== pinnedGen || currentSelId !== pinnedSelId || targetIdx < 0) {
-    return -1;
+function rebindTargetAfterAwait(inputs) {
+  if (!inputs.pinnedSessionAlive) {
+    return { kind: "refused", reason: "session-gone" };
   }
-  return targetIdx;
+  if (inputs.currentSelId !== inputs.pinnedSelId) {
+    return { kind: "refused", reason: "selection-moved" };
+  }
+  if (inputs.currentGen !== inputs.pinnedGen) {
+    return { kind: "refused", reason: "layout-moved" };
+  }
+  if (inputs.targetIdx < 0) {
+    return { kind: "refused", reason: "tab-gone" };
+  }
+  return { kind: "rebind", idx: inputs.targetIdx };
+}
+function tabRebindRefusalNotice(reason, verb) {
+  const done = verb === "create" ? "Tab created" : "Tab closed";
+  switch (reason) {
+    case "session-gone":
+      return `${done} \xB7 its session is gone now`;
+    case "selection-moved":
+      return `${done} on the session you left \xB7 this pane kept its tab`;
+    case "layout-moved":
+      return `${done} \xB7 the layout changed meanwhile, so the pane kept its tab`;
+    case "tab-gone":
+      return verb === "create" ? `${done}, but it is no longer in the tab list \xB7 the pane kept its tab` : `${done} \xB7 the tab the pane would have moved to is gone too`;
+  }
 }
 
 // src/layout.ts
@@ -12296,6 +12322,45 @@ function registerServiceWorker() {
   });
 }
 
+// src/refetch.ts
+function createLatestRequestGate() {
+  let generation = 0;
+  return {
+    begin() {
+      const requestGeneration = ++generation;
+      return { isCurrent: () => requestGeneration === generation };
+    },
+    invalidate() {
+      generation += 1;
+    }
+  };
+}
+function createFencedRefetcher(spec) {
+  const gate = createLatestRequestGate();
+  return {
+    refresh() {
+      const tok = spec.readToken();
+      if (tok === null) {
+        return;
+      }
+      const request = gate.begin();
+      const isNewest = () => request.isCurrent() && spec.readToken() === tok;
+      void spec.fetch(tok).then((value) => {
+        if (isNewest()) {
+          spec.commit(value);
+        }
+      }).catch((error) => {
+        if (isNewest()) {
+          spec.onError?.(error);
+        }
+      });
+    },
+    invalidate() {
+      gate.invalidate();
+    }
+  };
+}
+
 // src/schedule.ts
 var SCHEDULE_TYPE_OPTIONS = [
   { type: "everyNMinutes", label: "Every N minutes" },
@@ -12529,6 +12594,53 @@ function lastRunSummary(t) {
   const status = t.last_run_status ? ` (${t.last_run_status})` : "";
   return `last run ${t.last_run_at}${status}`;
 }
+function taskNeedsAttention(t) {
+  return !!t.overdue || !!t.unschedulable || notArmed(t);
+}
+function notArmed(t) {
+  return !!t.enabled && t.arming === "not-armed";
+}
+function taskHealthMark(t) {
+  if (taskNeedsAttention(t)) {
+    return { icon: "triangle-alert", cls: "af-task-warn" };
+  }
+  if (t.unassessable) {
+    return { icon: "circle-question", cls: "af-task-unknown" };
+  }
+  return null;
+}
+var NOT_ARMED = "enabled but not armed";
+function taskHealthSummary(t) {
+  if (t.unschedulable) {
+    switch (t.unschedulable_reason) {
+      case "no-trigger":
+        return "No trigger";
+      case "invalid-expression":
+        return "Invalid cron expression";
+      case "no-occurrence":
+        return "No upcoming run";
+      default:
+        return "Cannot be scheduled";
+    }
+  }
+  if (t.overdue) {
+    if (!t.missed_occurrences || t.missed_occurrences <= 0) {
+      return "overdue";
+    }
+    const capped = t.missed_occurrences_capped ? "+" : "";
+    return `overdue \xB7 missed ${t.missed_occurrences}${capped}`;
+  }
+  if (notArmed(t)) {
+    return NOT_ARMED;
+  }
+  return t.unassessable ? "Health unknown" : "";
+}
+function taskArmingSummary(t) {
+  if (t.next_run_at) {
+    return `next run ${t.next_run_at}`;
+  }
+  return "";
+}
 var TasksPane = class {
   constructor(actions2) {
     this.actions = actions2;
@@ -12586,20 +12698,29 @@ var TasksPane = class {
     this.el.replaceChildren(head, h("ul", { class: "af-tasks-list" }, ...rows));
   }
   taskRow(t) {
+    const mark = taskHealthMark(t);
     const enabledDot = h(
       "span",
-      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` },
-      icon(t.enabled ? "square-check" : "square")
+      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
+      icon(mark ? mark.icon : t.enabled ? "square-check" : "square")
     );
     enabledDot.setAttribute("aria-hidden", "true");
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
     const metaParts = [];
+    const health = taskHealthSummary(t);
+    if (health !== "") {
+      metaParts.push(h("span", { class: `af-task-health${mark ? ` ${mark.cls}` : ""}` }, health), " \xB7 ");
+    }
     if (t.target_session && t.target_session.trim() !== "") {
       metaParts.push(
         h("span", { class: "af-task-target" }, icon("arrow-right"), t.target_session),
         " \xB7 "
       );
+    }
+    const arming = taskArmingSummary(t);
+    if (arming !== "") {
+      metaParts.push(arming, " \xB7 ");
     }
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
@@ -15410,18 +15531,29 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
-function guardedTabRebind(selId, run, resolve, attach) {
+function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
   void run().then((sessions) => {
     const targetIdx = resolve(sessions);
+    const currentGen = splitView.layoutGeneration();
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    const idx = rebindTargetAfterAwait(gen, selId, splitView.layoutGeneration(), store.get().selectedId, targetIdx);
-    if (idx >= 0) {
-      splitView.setFocusedTab(idx);
-      if (attach) {
+    const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
+    const outcome = rebindTargetAfterAwait({
+      pinnedGen: gen,
+      pinnedSelId: selId,
+      currentGen,
+      currentSelId: store.get().selectedId,
+      pinnedSessionAlive,
+      targetIdx
+    });
+    if (outcome.kind === "rebind") {
+      splitView.setFocusedTab(outcome.idx);
+      if (verb === "create") {
         focusTerminal();
       }
+      return;
     }
+    surfaceNotice(tabRebindRefusalNotice(outcome.reason, verb));
   }).catch((e) => surfaceTabError(e));
 }
 function createSessionTab(kind = "shell") {
@@ -15449,7 +15581,7 @@ function createSessionTab(kind = "shell") {
       const grown = sessions.find((s) => s.id === selId);
       return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
     },
-    true
+    "create"
   );
 }
 function closeSessionTab(index) {
@@ -15476,7 +15608,7 @@ function closeSessionTab(index) {
       const shrunk = sessions.find((s) => s.id === selId);
       return shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
     },
-    false
+    "close"
   );
 }
 function renameSessionTab(id, name, editedSessionId) {
@@ -15546,16 +15678,22 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
-function refreshConfig() {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  void getConfig(tok).then((resp) => {
+var configRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: getConfig,
+  commit: (resp) => {
     store.set({ config: resp.entries, configPath: resp.path });
-  }).catch((err) => {
+  },
+  // Surfaced, not swallowed: an empty config screen would read as "you have no
+  // settings" rather than "the read failed". Under the fence like the commit — an
+  // older request's transport blip must not paint an error over the fresher answer
+  // already on screen, which is the same "the older one commits nothing" rule.
+  onError: (err) => {
     surfaceTabError(err);
-  });
+  }
+});
+function refreshConfig() {
+  configRefetcher.refresh();
 }
 var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
@@ -15581,12 +15719,17 @@ function applyConfigValueNow(key, value, tok) {
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
   });
 }
-function refreshTasks() {
-  const tok = token;
-  if (tok === null) {
-    return;
+var TASK_HEALTH_POLL_MS = 6e4;
+window.setInterval(() => {
+  const state = store.get();
+  if (state.phase === "app" && state.view === "tasks") {
+    refreshTasks();
   }
-  void listTasks(tok).then((tasks) => {
+}, TASK_HEALTH_POLL_MS);
+var tasksRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listTasks,
+  commit: (tasks) => {
     const selectedProject = reconcileProject(
       store.get().sessions,
       tasks,
@@ -15595,8 +15738,12 @@ function refreshTasks() {
       store.get().registeredProjects
     );
     store.set({ tasks, selectedProject });
-  }).catch(() => {
-  });
+  }
+  // No onError: a transport/auth failure leaves the last-known list up; a task.*
+  // event or the next mutation refetches. Nothing to surface here.
+});
+function refreshTasks() {
+  tasksRefetcher.refresh();
 }
 function requestTaskResync() {
   if (taskResyncTimer !== null) {
@@ -15607,12 +15754,10 @@ function requestTaskResync() {
     refreshTasks();
   }, 150);
 }
-function refreshRegisteredProjects() {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  void listProjects(tok).then((projects) => {
+var projectsRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listProjects,
+  commit: (projects) => {
     const registeredProjects = projects.map((p) => p.root);
     const selectedProject = reconcileProject(
       store.get().sessions,
@@ -15622,8 +15767,12 @@ function refreshRegisteredProjects() {
       registeredProjects
     );
     store.set({ registeredProjects, selectedProject });
-  }).catch(() => {
-  });
+  }
+  // No onError: a transport/auth failure keeps the last-known registry up; the next
+  // projects.changed event or reconnect refetches. Never blank the union on a blip.
+});
+function refreshRegisteredProjects() {
+  projectsRefetcher.refresh();
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
@@ -15910,6 +16059,9 @@ async function refreshDaemonPalette(tok) {
 }
 function stopStream() {
   resyncRequestGeneration += 1;
+  tasksRefetcher.invalidate();
+  projectsRefetcher.invalidate();
+  configRefetcher.invalidate();
   paletteRefreshGate.invalidate();
   clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
@@ -16107,6 +16259,7 @@ lucide/dist/esm/icons/bot.mjs:
 lucide/dist/esm/icons/check.mjs:
 lucide/dist/esm/icons/chevron-down.mjs:
 lucide/dist/esm/icons/circle-dashed.mjs:
+lucide/dist/esm/icons/circle-question-mark.mjs:
 lucide/dist/esm/icons/circle.mjs:
 lucide/dist/esm/icons/diamond.mjs:
 lucide/dist/esm/icons/ellipsis.mjs:
@@ -16123,6 +16276,7 @@ lucide/dist/esm/icons/refresh-cw.mjs:
 lucide/dist/esm/icons/square-check-big.mjs:
 lucide/dist/esm/icons/square.mjs:
 lucide/dist/esm/icons/terminal.mjs:
+lucide/dist/esm/icons/triangle-alert.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:
   (**

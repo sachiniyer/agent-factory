@@ -28,6 +28,7 @@ func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
 	if err != nil {
 		return taskArmingSnapshot{}, fmt.Errorf("could not load and stabilize task bindings: %w", err)
 	}
+	tasks = firstOccurrencePerID(tasks)
 	snapshot := taskArmingSnapshot{
 		all: tasks, safe: make([]task.Task, 0, len(tasks)), bindingUpdates: bindingUpdates,
 	}
@@ -134,12 +135,18 @@ func (m *Manager) recordArmingStatus(t task.Task, status string) {
 	if t.LastRunStatus == status {
 		return
 	}
-	if err := task.UpdateTaskStatus(t.ID, nil, status); err != nil {
+	updated, err := task.UpdateTaskStatus(t.ID, nil, status)
+	if err != nil {
 		log.WarningLog.Printf("could not record the arming status for task %q: %v", t.ID, err)
 		return
 	}
-	t.LastRunStatus = status
-	m.publishEvent(agentproto.EventTaskUpdated, t)
+	// The record the WRITE produced, not the copy this walked in with. That copy
+	// was identified against the pre-write bytes, so publishing it would announce
+	// a version of the store this call had just retired — unpairable with every
+	// later read, and a client merging it would quietly lose that row's arming
+	// (#3684 review). It is also simply more current: it carries whatever else the
+	// store holds for this task, not one patched field.
+	m.publishEvent(agentproto.EventTaskUpdated, updated)
 }
 
 // clearStaleNotArmedStatus removes a not-armed status from a task that is armed
@@ -155,4 +162,35 @@ func (m *Manager) clearStaleNotArmedStatus(t task.Task) {
 		return
 	}
 	m.recordArmingStatus(t, "")
+}
+
+// firstOccurrencePerID keeps only the FIRST row for each task ID, warning about
+// the rest. A duplicated ID can only ever come from a hand-edited tasks.json,
+// and it has to be resolved HERE — over the whole ordered list, before anything
+// filters by trigger kind — rather than inside each subsystem (#3623 review).
+//
+// The per-subsystem checks cannot see the collision when the duplicates are of
+// DIFFERENT kinds: the cron scheduler skips watch rows before its own duplicate
+// check and the watch supervisor skips cron rows before its own, so an enabled
+// cron row followed by an enabled watch row sharing an ID passes both. The
+// scheduler then arms the cron entry, the supervisor starts the watch process,
+// and every event that process emits is delivered by ID — resolving to the FIRST
+// record, the cron one, and running that task's configuration on someone else's
+// trigger.
+//
+// First wins, which is the rule the scheduler already documents (#855) and the
+// one `af tasks list` reports through the arming state, so all three agree on
+// which row a duplicated ID means.
+func firstOccurrencePerID(tasks []task.Task) []task.Task {
+	seen := make(map[string]struct{}, len(tasks))
+	kept := make([]task.Task, 0, len(tasks))
+	for _, t := range tasks {
+		if _, dup := seen[t.ID]; dup {
+			log.WarningLog.Printf("duplicate task ID %q in tasks.json, arming only its first occurrence", t.ID)
+			continue
+		}
+		seen[t.ID] = struct{}{}
+		kept = append(kept, t)
+	}
+	return kept
 }

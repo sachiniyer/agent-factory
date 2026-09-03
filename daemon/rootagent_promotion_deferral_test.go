@@ -320,7 +320,7 @@ func TestRealToRealReattributionCarriesItsState(t *testing.T) {
 	manager.EnsureRootAgents()
 
 	layers := manager.rootAgentLayers.Load()
-	if root, ok := layers.projectRoots[realID]; !ok || root != repoPath {
+	if root, ok := layers.projectRoots[realID]; !ok || root.root != repoPath {
 		t.Fatalf("the verified checkout must join projectRoots under the identity it resolves to (%s at %s), got %q (present=%v)", realID, repoPath, root, ok)
 	}
 	if _, stale := layers.personal[staleID]; stale {
@@ -857,10 +857,10 @@ func TestReprovedIdentityCarriesTheProjectWithIt(t *testing.T) {
 	stale := config.RepoIDFromRoot(filepath.Join(testguard.CanonicalTempDir(t), "former-identity-root"))
 	healed := *manager.rootAgentLayers.Load()
 	healed.reconcileOwed = map[string]reconcileOwedEntry{project.ID: {repoID: stale}}
-	healed.projectRoots = cloneStringMap(healed.projectRoots)
+	healed.projectRoots = cloneResolvedRootMap(healed.projectRoots)
 	healed.personal = cloneLayerMap(healed.personal)
 	delete(healed.projectRoots, realID)
-	healed.projectRoots[stale] = repoPath
+	healed.projectRoots[stale] = resolvedProjectRoot{root: repoPath, projectID: project.ID, checkoutID: project.CheckoutID}
 	if layer, ok := healed.personal[realID]; ok {
 		healed.personal[stale] = layer
 		delete(healed.personal, realID)
@@ -876,7 +876,7 @@ func TestReprovedIdentityCarriesTheProjectWithIt(t *testing.T) {
 	if _, stillStale := after.projectRoots[stale]; stillStale {
 		t.Fatalf("the project must not stay published under the identity the boot resolved once its checkout is proven under another")
 	}
-	if root, ok := after.projectRoots[realID]; !ok || root != repoPath {
+	if root, ok := after.projectRoots[realID]; !ok || root.root != repoPath {
 		t.Fatalf("it must be published under the identity just proven (%s at %s), got %q (present=%v)", realID, repoPath, root, ok)
 	}
 	if _, moved := after.personal[realID]; !moved {
@@ -973,7 +973,7 @@ func TestStartupProofUnderANewIdentityPublishesIt(t *testing.T) {
 	if _, stale := layers.projectRoots[idA]; stale {
 		t.Fatalf("the project must not be published under the identity its resolution named (%s) once the proof names another", idA)
 	}
-	if root, ok := layers.projectRoots[idB]; !ok || root != workspace {
+	if root, ok := layers.projectRoots[idB]; !ok || root.root != workspace {
 		t.Fatalf("it must be published under the identity its checkout PROVES (%s at %s), got %q (present=%v)", idB, workspace, root, ok)
 	}
 	if _, ok := layers.personal[idB]; !ok {

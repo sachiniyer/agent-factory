@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -112,6 +113,10 @@ type watcherSupervisor struct {
 	// stays available while Stop joins in-flight deliveries, so a concurrent
 	// ReloadTasks RPC must not repopulate the map after Stop snapshots it.
 	stopped bool
+	// armed latches on the first completed reload, for the same reason the cron
+	// scheduler's does: before arming has run, an empty watcher map means "not
+	// observed yet", never "this watch task is not armed" (#3623).
+	armed bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
@@ -187,6 +192,14 @@ func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
 			log.WarningLog.Printf("not watching task with invalid id %q: %v", t.ID, err)
 			continue
 		}
+		// Duplicate IDs in a hand-edited store: watch the FIRST occurrence, which
+		// is what the cron scheduler already does (#855). A map assignment quietly
+		// kept the LAST instead, so the two subsystems disagreed about which row a
+		// duplicated ID meant — and nothing anywhere said a row had been skipped.
+		if _, dup := desired[t.ID]; dup {
+			log.WarningLog.Printf("duplicate task ID %q in tasks.json, watching only its first occurrence", t.ID)
+			continue
+		}
 		desired[t.ID] = t
 	}
 
@@ -218,6 +231,7 @@ func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
 		s.watchers[id] = w
 		go w.run()
 	}
+	s.armed = true
 
 	// Queue files for tasks that no longer exist at all are removed — a
 	// deleted task's backlog must not replay into a recreated namesake. A
@@ -512,7 +526,7 @@ func exitedFromSignal(err error, sig syscall.Signal) bool {
 // run's output tail (never nil) for the caller's failure logging.
 func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	tail := &tailBuffer{}
-	cmd := newDaemonChildCommand(w.sup.shell, "-c", w.cmdStr)
+	cmd := systemdunit.NewBoundChildCommand(w.sup.shell, "-c", w.cmdStr)
 	cmd.Dir = w.dir
 	cmd.Env = append(os.Environ(),
 		"AF_TASK_ID="+w.taskID,
@@ -926,7 +940,7 @@ func deliverWatchEvent(taskID, line string) error {
 		return errTargetBusy
 	}
 	now := time.Now()
-	if err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil
@@ -942,7 +956,7 @@ func deliverWatchEvent(taskID, line string) error {
 // Program enum validation so legacy task records still receive status bumps
 // (#664).
 func persistWatcherStatus(taskID, status string) {
-	if err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
+	if _, err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
 		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)
 	}
 }

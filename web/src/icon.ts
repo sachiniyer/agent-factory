@@ -12,6 +12,7 @@ import {
   Check,
   ChevronDown,
   Circle,
+  CircleQuestionMark,
   CircleDashed,
   Diamond,
   Ellipsis,
@@ -28,6 +29,7 @@ import {
   Square,
   SquareCheckBig,
   Terminal,
+  TriangleAlert,
   X,
   type IconNode,
 } from "lucide";
@@ -41,6 +43,7 @@ const ICONS = {
   "chevron-down": ChevronDown,
   circle: Circle,
   "circle-dashed": CircleDashed,
+  "circle-question": CircleQuestionMark,
   diamond: Diamond,
   ellipsis: Ellipsis,
   "external-link": ExternalLink,
@@ -56,6 +59,7 @@ const ICONS = {
   square: Square,
   "square-check": SquareCheckBig,
   terminal: Terminal,
+  "triangle-alert": TriangleAlert,
   x: X,
 } as const satisfies Record<string, IconNode>;
 

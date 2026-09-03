@@ -458,7 +458,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// with the published value until replaced.
 		healed.personal = cloneLayerMap(healed.personal)
 		healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
-		healed.projectRoots = cloneStringMap(healed.projectRoots)
+		healed.projectRoots = cloneResolvedRootMap(healed.projectRoots)
 		healed.unresolvedRoots = cloneUnresolvedMap(healed.unresolvedRoots)
 		changed = true
 	}
@@ -781,7 +781,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			delete(m.rootHealProbeFailures, retiredID)
 			m.mu.Unlock()
 		})
-		healed.projectRoots[repo.ID] = record.root
+		healed.projectRoots[repo.ID] = resolvedProjectRoot{root: record.root, projectID: record.projectID, checkoutID: record.checkoutID}
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}

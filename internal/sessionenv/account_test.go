@@ -702,14 +702,20 @@ func TestApplyAccount_RefusesGeminiWhileACloudModeIsActive(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// The roster and the launch proof answer DIFFERENT questions, and #3609 is the
-// first time an agent sat between them: gemini's credential root relocates, so it
-// is on the roster, but nobody has verified how af launches it, so `--account`
-// refuses. Two separate lists is the design — it is what makes a newly rostered
-// agent fail closed at the launch boundary (#3051, #3083). What the two must not
-// do is describe that state differently to the user.
-func TestAccountRoster_SeparatesRegistrationFromLaunchProof(t *testing.T) {
-	for _, agent := range []string{"claude", "codex"} {
+// The roster and the launch proof answer DIFFERENT questions, and the two lists
+// must stay separate: that is what makes an agent added to accountConfigVars fail
+// CLOSED at the launch boundary until someone checks the second question (#3051,
+// #3083).
+//
+// They AGREE today. gemini sat between them from #3609 until #3639, which is the
+// state the registration-only machinery exists for, and #3639 closed it by running
+// the check: af hands a gemini pane the resolved command unchanged, and a session
+// scoped to a gemini account was observed using the account directory while an
+// unscoped control beside it kept the ambient identity.
+func TestAccountRoster_LaunchProofIsASecondListThatAgreesToday(t *testing.T) {
+	for _, agent := range []string{"claude", "codex", "gemini"} {
+		_, supported := SupportsAccounts(agent)
+		require.True(t, supported, "%s must be on the account roster", agent)
 		require.True(t, AccountLaunchProven(agent), "%s launches under an account today", agent)
 		require.False(t, AccountRegistrationOnly(agent), "%s is not registration-only", agent)
 		reason, ok := AccountRegistrationOnlyReason(agent)
@@ -717,42 +723,99 @@ func TestAccountRoster_SeparatesRegistrationFromLaunchProof(t *testing.T) {
 		require.Empty(t, reason)
 	}
 
-	_, supported := SupportsAccounts("gemini")
-	require.True(t, supported, "gemini's credential root was measured to relocate (#3387)")
-	require.False(t, AccountLaunchProven("gemini"), "gemini's launch proof is the open follow-up")
-	require.True(t, AccountRegistrationOnly("gemini"))
-
-	reason, ok := AccountRegistrationOnlyReason("gemini")
-	require.True(t, ok)
-	require.Contains(t, reason, "gemini", "the sentence must name which agent it is about")
-	require.Contains(t, reason, accountLaunchProofIssueURL,
-		"a state the operator cannot act on has to name the follow-up that lifts it")
-	require.NotContains(t, reason, "does not support",
-		"registration works, so calling it unsupported is the false half of the contradiction")
-
-	// Every launch-proven agent is on the roster. The reverse is the interesting
-	// direction and is deliberately allowed; this one is incoherent — a launch
-	// proof for an agent with no credential root scopes nothing.
+	// Every launch-proven agent is on the roster. A launch proof for an agent with
+	// no credential root scopes nothing.
 	for agent := range accountLaunchProvenAgents {
 		_, ok := SupportsAccounts(agent)
 		require.True(t, ok, "%s is launch-proven but has no credential root to launch into", agent)
 	}
+
+	// And the summary carries no marker while they agree.
+	require.Equal(t, "claude, codex, gemini", AccountAgentsSummary())
+	require.Equal(t, []string{"claude", "codex", "gemini"}, AccountAgents())
 }
 
-// Every "supported: …" list a user reads comes from AccountAgentsSummary, so a
-// registration-only agent cannot appear in one as though a session could use it.
-func TestAccountAgentsSummary_MarksRegistrationOnlyAgents(t *testing.T) {
-	summary := AccountAgentsSummary()
-	require.Contains(t, summary, "gemini ("+AccountRegistrationOnlyMarker+")")
-	require.NotContains(t, summary, "claude ("+AccountRegistrationOnlyMarker+")")
-	require.NotContains(t, summary, "codex ("+AccountRegistrationOnlyMarker+")")
+// rosterAnUnprovenAgent puts an agent in the state no real agent is in today: on
+// the roster, with no launch proof.
+//
+// The registration-only surfaces are the reason #3609 exists, and with the two
+// lists agreeing there is no agent left to exercise them — so they would rot
+// silently until the next agent is added, which is precisely when they matter.
+// Mutating the package maps is safe because these tests are not parallel, and it
+// exercises the REAL functions rather than a reimplementation of their rules.
+func rosterAnUnprovenAgent(t *testing.T, agent, configVar, followUp string) {
+	t.Helper()
+	_, exists := accountConfigVars[agent]
+	require.False(t, exists, "%s is a real rostered agent; pick a name no agent uses", agent)
+	accountConfigVars[agent] = configVar
+	if followUp != "" {
+		accountLaunchProofFollowUps[agent] = followUp
+	}
+	t.Cleanup(func() {
+		delete(accountConfigVars, agent)
+		delete(accountLaunchProofFollowUps, agent)
+	})
+}
 
-	// AccountAgents stays BARE, because its callers index directories by these
-	// names; a marked name would look up an account root that does not exist.
-	require.Equal(t, []string{"claude", "codex", "gemini"}, AccountAgents())
+// The registration-only state still describes itself honestly when an agent enters
+// it. This is the machinery #3609 added, kept alive after #3639 emptied it.
+func TestAccountRegistrationOnly_DescribesAnUnprovenRosterEntry(t *testing.T) {
+	const followUp = "https://github.com/sachiniyer/agent-factory/issues/9999"
+	rosterAnUnprovenAgent(t, "probeagent", "PROBEAGENT_HOME", followUp)
 
-	// And the refusal an unsupported agent gets carries the marked form.
+	require.False(t, AccountLaunchProven("probeagent"),
+		"adding an agent to the roster must NOT admit it at the launch boundary")
+	require.True(t, AccountRegistrationOnly("probeagent"))
+
+	reason, ok := AccountRegistrationOnlyReason("probeagent")
+	require.True(t, ok)
+	require.Contains(t, reason, "probeagent", "the sentence must name which agent it is about")
+	require.Contains(t, reason, followUp, "a state the operator cannot act on must name the follow-up")
+	require.NotContains(t, reason, "does not support",
+		"registration works, so calling it unsupported is the false half of the contradiction")
+
+	// And it reaches the list a user reads, so `af accounts add` succeeding cannot
+	// be contradicted by a bare "supported: …" elsewhere.
+	require.Contains(t, AccountAgentsSummary(), "probeagent ("+AccountRegistrationOnlyMarker+")")
+	require.NotContains(t, AccountAgentsSummary(), "gemini ("+AccountRegistrationOnlyMarker+")")
+
+	// The bare list stays bare: its callers index account directories by these
+	// names, and a marked name would look up a path that does not exist.
+	require.Contains(t, AccountAgents(), "probeagent")
+	require.NotContains(t, AccountAgents(), "probeagent ("+AccountRegistrationOnlyMarker+")")
+}
+
+// A registration-only agent must name the issue that lifts the state.
+//
+// The map is empty today. It is the guard for the NEXT agent: rostering one
+// without a launch proof and without filing the follow-up leaves the operator with
+// a refusal and nowhere to go, which is the dead end #3609's review objected to.
+func TestAccountRegistrationOnly_NamesItsFollowUp(t *testing.T) {
+	for _, agent := range AccountAgents() {
+		if !AccountRegistrationOnly(agent) {
+			continue
+		}
+		require.NotEmpty(t, accountLaunchProofFollowUps[agent],
+			"%s is on the roster with no launch proof, so af tells operators to wait — record the issue "+
+				"they should watch in accountLaunchProofFollowUps", agent)
+	}
+
+	// A follow-up recorded for an agent that is NOT registration-only is stale: it
+	// points at an issue that has already been answered.
+	for agent := range accountLaunchProofFollowUps {
+		require.True(t, AccountRegistrationOnly(agent),
+			"%s is not registration-only, so its follow-up entry is stale and would never print", agent)
+	}
+}
+
+// A reason for an agent in neither state is empty rather than a sentence about
+// nothing, and the unsupported-agent refusal still names the alternatives.
+func TestAccountAgentsSummary_NamesTheAlternativesInARefusal(t *testing.T) {
 	_, err := ApplyAccount(nil, "", Account{Agent: "aider", Name: "work", Dir: "/d"})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "gemini ("+AccountRegistrationOnlyMarker+")")
+	require.Contains(t, err.Error(), "supported: claude, codex, gemini")
+
+	reason, ok := AccountRegistrationOnlyReason("aider")
+	require.False(t, ok, "an agent that is not on the roster at all is not registration-only")
+	require.Empty(t, reason)
 }

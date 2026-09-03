@@ -231,7 +231,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// attach-session does not re-exec the program.
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
-			program := injectSystemPrompt(resolution.command)
+			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command))
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase))
 		}
@@ -281,7 +281,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			resolution := resolveLaunchProgramForInstance(i)
 			base := resolution.command
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPrompt(program)
+			program = injectSystemPrompt(program, resolveSkillTarget(i, program))
 			proof = accountLaunchProof(base, program, resolution.trustBase)
 		}
 		setLaunchProgram(tmuxSession, program, proof)
@@ -580,7 +580,8 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 	}
 
-	program := injectSystemPrompt(prepareResumeConversation(i, resolvedProgram))
+	resumeProgram := prepareResumeConversation(i, resolvedProgram)
+	program := injectSystemPrompt(resumeProgram, resolveSkillTarget(i, resumeProgram))
 	setLaunchProgram(ts, program,
 		accountLaunchProof(declarationBase, program, resolution.trustBase))
 	if err := refreshSessionEnvironment(i, ts); err != nil {

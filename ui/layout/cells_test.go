@@ -98,28 +98,67 @@ func TestCellsAgreesWithEveryCandidateOnPlainContent(t *testing.T) {
 	}
 }
 
-// BlockWidth takes the widest LINE; Cells measures one line and, handed a block,
-// returns the SUM of its rows because that is what x/ansi does with newlines.
+// BlockWidth takes the widest LINE, and since #3614 so does Cells — the two are
+// one answer, and this pins that they stay one.
 //
-// This is not a nicety. overlayOrigin measures a whole frame to centre a modal in
-// it, and summing its rows reported a 120-column frame as far wider, pushed the
-// modal to the right-hand clamp, and left every mouse zone registered somewhere
-// the modal was not drawn — #3585's own defect, reintroduced by its fix. The
-// real-terminal play-test caught it; this pins it here so it fails in a second.
+// It was not always so. Cells returned the SUM of a block's rows, because that is
+// what x/ansi does with newlines in it, and BlockWidth existed to keep callers off
+// that answer. This is not a nicety: overlayOrigin measures a whole frame to
+// centre a modal in it, and summing its rows reported a 120-column frame as far
+// wider, pushed the modal to the right-hand clamp, and left every mouse zone
+// registered somewhere the modal was not drawn — #3585's own defect, reintroduced
+// by its fix. The real-terminal play-test caught it; this pins it here so it fails
+// in a second.
 func TestBlockWidthTakesTheWidestLineNotTheSum(t *testing.T) {
 	block := "abcd\nab\nabcdefgh"
 	if got, want := BlockWidth(block), 8; got != want {
 		t.Fatalf("BlockWidth = %d, want %d (the widest line)", got, want)
 	}
-	if Cells(block) <= 8 {
-		t.Fatal("precondition: Cells is expected to SUM a multi-line block, which is why " +
-			"BlockWidth exists; if that changed, revisit both")
+	if got := Cells(block); got != 8 {
+		t.Fatalf("Cells(block) = %d, want the widest line 8. Cells SUMMED a block until "+
+			"#3614 — which is why BlockWidth exists — and now takes the widest line "+
+			"itself, so the summed answer is unreachable rather than merely avoided", got)
 	}
 	if got, want := BlockWidth("one line"), Cells("one line"); got != want {
 		t.Fatalf("for a single line the two must agree: BlockWidth=%d Cells=%d", got, want)
 	}
 	if got := BlockWidth(""); got != 0 {
 		t.Fatalf("BlockWidth(\"\") = %d, want 0", got)
+	}
+}
+
+// #3614. Cells is handed a whole block by callers that mean "how wide is this",
+// and x/ansi's StringWidth answers with the SUM of the rows — which is nobody's
+// question. It cost a real defect: overlayOrigin measured a 120-column frame as
+// ~188, pushed the modal to the right-hand clamp, and registered every mouse zone
+// somewhere the modal was not drawn, reintroducing #3585 inside its own fix. That
+// was repaired at the one call site; this pins it at the source, so no caller can
+// reach the summed answer again.
+func TestCellsOfAMultiLineBlockIsTheWidestLine(t *testing.T) {
+	for _, c := range []struct {
+		block string
+		want  int
+	}{
+		{"abcd\nab\nabcdefgh", 8},
+		{"one line", 8},
+		{"", 0},
+		{"\n\n", 0},
+		{"short\n" + strings.Repeat("x", 40), 40},
+		{strings.Repeat("x", 40) + "\nshort", 40},
+		{"\x1b[31mred\x1b[0m\nplainer", 7},
+	} {
+		if got := Cells(c.block); got != c.want {
+			t.Errorf("Cells(%q) = %d, want the widest line %d", c.block, got, c.want)
+		}
+		if got, want := BlockWidth(c.block), Cells(c.block); got != want {
+			t.Errorf("BlockWidth(%q) = %d, Cells = %d: they must be the same answer", c.block, got, want)
+		}
+	}
+	// And a frame-shaped block must agree with lipgloss.Width, whose callers
+	// reached for Cells in the first place.
+	frame := "╭──────────╮\n│ contents │\n╰──────────╯"
+	if got, want := Cells(frame), lipgloss.Width(frame); got != want {
+		t.Errorf("Cells(frame) = %d, lipgloss.Width = %d", got, want)
 	}
 }
 
@@ -138,19 +177,29 @@ func TestBlockWidthMatchesLipglossOnPlainBlocks(t *testing.T) {
 	}
 }
 
-// #3585 review. ClampToRect promises a rectangle of exactly r.W cells per row.
-// Measuring with Cells while truncating with x/ansi broke that promise wherever
-// the two disagree: "\U0001F44D\U0001F3FD" is 4 cells to Cells and 2 to x/ansi, so
-// clamping it into 3 columns returned the grapheme untouched — still 4 by Cells,
-// so the pad was skipped — and the row went out narrower than the rectangle.
+// #3585 review, re-pointed by #3614. ClampToRect bounds a rectangle of r.W cells
+// per row, and it must fit and pad on ONE measure to do it: measuring with one
+// function while truncating with another means the truncator can return a row the
+// measure still calls over-wide, the pad is skipped on `width < r.W`, and the row
+// goes out NARROWER than the rectangle it promised.
+//
+// The case is a skin-tone modifier, which the contract measure bounds at 4 cells
+// and x/ansi's truncator counts as 2 — so asking that truncator once for 3 columns
+// returns the grapheme untouched, still 4 to the measure that has to pad it.
+//
+// Written on the bound rather than on Cells, because #3614 made the promise
+// one-sided for exactly this content: the row can fall short of r.W on screen (the
+// accepted cost), but the rectangle it CLAIMS must be filled to the edge, or a
+// short row lets whatever is composited after it start in the wrong column.
 func TestClampToRectFillsTheRectangleForOverestimatedGraphemes(t *testing.T) {
 	const skinTone = "\U0001F44D\U0001F3FD"
-	if Cells(skinTone) <= 3 {
-		t.Skipf("this case needs Cells to over-report the grapheme; got %d", Cells(skinTone))
+	if CellsUpperBound(skinTone) <= 3 {
+		t.Fatalf("this case needs the contract measure to over-report the grapheme; got %d",
+			CellsUpperBound(skinTone))
 	}
 	for _, w := range []int{1, 2, 3, 4, 6} {
 		out := ClampToRect(skinTone, Rect{W: w, H: 1})
-		if got := Cells(out); got != w {
+		if got := contractCells(out); got != w {
 			t.Errorf("ClampToRect(w=%d) produced %d cells, want exactly %d: %q", w, got, w, out)
 		}
 	}

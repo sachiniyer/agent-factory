@@ -2,11 +2,16 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // afSkillDirName is the directory- and skill-name every agent that auto-discovers
@@ -70,7 +75,12 @@ func writeAfMarkedFile(path, content string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return false, err
 	}
-	if err := config.AtomicWriteFile(path, []byte(content), 0644); err != nil {
+	// Refuses a symlinked path (#3672). The marker check above is what decides
+	// whether af may overwrite this file at all, and it reads THROUGH a link: a
+	// marked target behind a link would authorize replacing the link itself,
+	// which is the arrangement the check exists to protect. Refusing keeps the
+	// ownership answer and the write pointed at the same inode.
+	if err := config.AtomicWriteFileRefusingLink(path, []byte(content), 0644); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -136,7 +146,20 @@ func globalAgentSkillsConsent() globalSkillConsent {
 // CODEX_HOME and gemini's GEMINI_CLI_HOME relocate the agent's whole home,
 // auth and history included, and amp's --settings-file would have af own
 // settings the user also sets), so consent is the honest seam until one does.
-func ensureAfSkillDir(base string) (string, error) {
+// ensureAfSkillDir writes — or, when consent is declined, removes — af's skill at
+// base, and additionally cleans every legacy base.
+//
+// legacy exists because the WRITE target moved. A scoped session's skill belongs
+// under its account root (#3645), but every scoped launch before that fix wrote
+// into the agent's ambient root, and the declined-consent cleanup is what makes
+// #1977's promise true: af's edits to the user's global config must not outlive
+// the decision not to make them. Cleaning only the new target would quietly narrow
+// that promise for an operator who launches nothing but scoped sessions — the
+// stale ambient file would then survive forever (#3645 review).
+//
+// Nothing is ever WRITTEN to a legacy base. It is a cleanup list, not a second
+// destination.
+func ensureAfSkillDir(base string, legacy ...string) (string, error) {
 	skillDir := filepath.Join(base, afSkillDirName)
 	path := filepath.Join(skillDir, "SKILL.md")
 
@@ -147,6 +170,13 @@ func ensureAfSkillDir(base string) (string, error) {
 		// existed, so af's edits to the user's global config do not outlive the
 		// decision not to make them (#1977's first objection).
 		removeAfSkillDir(skillDir, path)
+		for _, other := range legacy {
+			if other == "" || other == base {
+				continue
+			}
+			legacyDir := filepath.Join(other, afSkillDirName)
+			removeAfSkillDir(legacyDir, filepath.Join(legacyDir, "SKILL.md"))
+		}
 		// INFO, not WARNING (#2166): global_agent_skills defaults false, so this
 		// fires on every codex/gemini/amp session start on a DEFAULT install. af
 		// is honoring the documented default, which is not a defect.
@@ -180,6 +210,8 @@ func ensureAfSkillDir(base string) (string, error) {
 //   - A read that FAILS for any reason other than not-exist (permissions, I/O)
 //     leaves the file alone. "I could not look" is not "there is nothing of
 //     value here" — that conflation is the #1969/#2011 class.
+//   - A SYMLINK at our path is left alone, because the marker was read through
+//     it: the fact observed belongs to the target, not to the link (#3672).
 //   - The enclosing agent-factory/ directory is removed with os.Remove, not
 //     RemoveAll, so the kernel refuses (ENOTEMPTY) if anything else is in there.
 //     A user who dropped their own file beside ours keeps it, and we never have
@@ -195,7 +227,12 @@ func removeAfSkillDir(skillDir, path string) {
 	if !bytes.Contains(existing, []byte(afSkillMarker)) {
 		return
 	}
-	if err := os.Remove(path); err != nil {
+	// The same refusal as writeAfMarkedFile, and for the sharper version of its
+	// reason: os.ReadFile above followed the link to find the marker, so a plain
+	// os.Remove would unlink the LINK on the strength of the TARGET's content —
+	// deleting the user's arrangement while af's own file survives. That is the
+	// #3672 asymmetry, pointed at the delete side.
+	if err := config.RemoveFileRefusingLink(path); err != nil {
 		log.WarningLog.Printf("af skill: could not remove the af-managed %s (%v); it stays until removed by hand", path, err)
 		return
 	}
@@ -214,7 +251,17 @@ func removeAfSkillDir(skillDir, path string) {
 // automatically". This retires the #1043 wall: codex 0.144.1 auto-discovers user
 // skills dropped here (its own built-ins live under a sibling .system/ dir), so af
 // no longer needs to stuff afUsageReference into -c developer_instructions.
-func codexSkillsBaseDir() (string, error) {
+func codexSkillsBaseDir(target skillTarget) (string, error) {
+	if target.unresolved {
+		return "", errUnresolvedAccountSkillRoot
+	}
+	// The account root SUBSTITUTES for the variable, because the account boundary
+	// sets that variable to exactly this directory. One rule serves both agents:
+	// the skills base is a function of the agent's config-root VALUE, and scoping a
+	// session changes that value (#3645).
+	if codexHome := target.root; codexHome != "" {
+		return filepath.Join(codexHome, "skills"), nil
+	}
 	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
 		return filepath.Join(codexHome, "skills"), nil
 	}
@@ -227,12 +274,12 @@ func codexSkillsBaseDir() (string, error) {
 
 // ensureCodexSkillDir writes the af skill into codex's skills base. See
 // ensureAfSkillDir and codexSkillsBaseDir.
-func ensureCodexSkillDir() (string, error) {
-	base, err := codexSkillsBaseDir()
+func ensureCodexSkillDir(target skillTarget) (string, error) {
+	base, err := codexSkillsBaseDir(target)
 	if err != nil {
 		return "", err
 	}
-	return ensureAfSkillDir(base)
+	return ensureAfSkillDir(base, ambientSkillBase(codexSkillsBaseDir, target))
 }
 
 // geminiSkillsBaseDir returns gemini's USER-scope skills base:
@@ -242,7 +289,17 @@ func ensureCodexSkillDir() (string, error) {
 // .gemini folder inside the given path — enterprise docs). Gemini scans this dir at
 // session start and ENABLES a dropped skill automatically (verified: `gemini skills
 // list --all` reports agent-factory [Enabled]).
-func geminiSkillsBaseDir() (string, error) {
+func geminiSkillsBaseDir(target skillTarget) (string, error) {
+	if target.unresolved {
+		return "", errUnresolvedAccountSkillRoot
+	}
+	// GEMINI_CLI_HOME is a HOME-like root — the CLI appends `.gemini/` itself — so
+	// the account directory takes the variable's place and the skills land at
+	// <account dir>/.gemini/skills. Same substitution as codex, different shape,
+	// which is exactly the distinction #3387 measured and #3609 wrote down.
+	if geminiHome := target.root; geminiHome != "" {
+		return filepath.Join(geminiHome, ".gemini", "skills"), nil
+	}
 	if geminiHome := os.Getenv("GEMINI_CLI_HOME"); geminiHome != "" {
 		return filepath.Join(geminiHome, ".gemini", "skills"), nil
 	}
@@ -255,12 +312,12 @@ func geminiSkillsBaseDir() (string, error) {
 
 // ensureGeminiSkillDir writes the af skill into gemini's user-scope skills base.
 // See ensureAfSkillDir and geminiSkillsBaseDir.
-func ensureGeminiSkillDir() (string, error) {
-	base, err := geminiSkillsBaseDir()
+func ensureGeminiSkillDir(target skillTarget) (string, error) {
+	base, err := geminiSkillsBaseDir(target)
 	if err != nil {
 		return "", err
 	}
-	return ensureAfSkillDir(base)
+	return ensureAfSkillDir(base, ambientSkillBase(geminiSkillsBaseDir, target))
 }
 
 func ensureDevinSkillDir() (string, error) {
@@ -313,4 +370,158 @@ func ensureAiderReadFile() (string, error) {
 		return "", nil
 	}
 	return path, nil
+}
+
+// skillTarget says WHERE af's guidance skill belongs for one launch.
+//
+// The two agents that discover af's guidance from a config root — codex, from
+// $CODEX_HOME/skills, and gemini, from <GEMINI_CLI_HOME>/.gemini/skills — read
+// that root from an environment variable the ACCOUNT BOUNDARY sets per session.
+// af writes the skill from the daemon, before that variable exists, so reading it
+// out of the daemon's own environment described the daemon and not the session:
+// an account-scoped session searched its account directory while af had written
+// into the operator's ambient home, and the opted-in guidance was simply absent
+// (#3645).
+//
+// claude is the contrast that names the defect. af hands claude its guidance with
+// an explicit `--plugin-dir <af-owned path>` on the command line, so it does not
+// depend on where CLAUDE_CONFIG_DIR points and account scoping cannot lose it.
+// aider (--read) and opencode (an env seam at an af-owned path) are handed theirs
+// the same way. Guidance passed BY PATH survives; guidance DISCOVERED from a
+// config root does not. Preferring the explicit form was the first choice here and
+// neither CLI offers one — gemini's `skills` subcommand only manages skills inside
+// the already-discovered scope, and codex 0.152.1 has no skills subcommand at all
+// (both checked against the installed binaries) — so the remaining option is to
+// write into the account's own root.
+//
+// THREE states, not a bool. "unscoped" and "scoped but af cannot say where" are
+// different answers, and collapsing them fails OPEN: the unresolved case would
+// take the daemon's root, which is the exact defect this type exists to close.
+type skillTarget struct {
+	// root is the agent config root the account boundary will install for this
+	// launch, or "" for an unscoped session, which reads the daemon's own.
+	root string
+	// unresolved is true when the session IS account-scoped and af could not
+	// resolve which directory that is. Writing nothing is the honest answer — a
+	// skill in the wrong root is invisible to the session AND edits a directory
+	// the operator did not select — and the launch itself refuses moments later
+	// for the same reason the resolution failed.
+	unresolved bool
+}
+
+// errUnresolvedAccountSkillRoot reports that af declined to place the skill
+// because it could not name the account's config root. It is not a launch
+// failure: injectSystemPrompt logs it and returns the command unchanged, exactly
+// as it does for a skills directory it cannot write.
+var errUnresolvedAccountSkillRoot = errors.New(
+	"cannot place the af skill: the session is account-scoped but af could not resolve the account's directory")
+
+// resolveSkillTarget answers skillTarget for one launch.
+//
+// It resolves the account HERE rather than taking a directory from the caller
+// because the daemon is where injectSystemPrompt runs, and the local launch defers
+// account resolution to the exec shim — so no caller on that path has the
+// directory to hand. agentaccount.Selected is the same resolver the boundary uses,
+// so the skill cannot land somewhere the session will not read.
+//
+// The agent is derived from the RESOLVED command, never from i.Program: an account
+// validated in one agent's namespace with program_overrides pointing at another is
+// refused later (#3082/#3108), and until then af must not write into the account
+// directory of an agent this session is not running.
+func resolveSkillTarget(i *Instance, program string) skillTarget {
+	if i == nil {
+		return skillTarget{}
+	}
+	agent := tmux.DetectAgentFromCommand(program)
+	if agent == "" {
+		// An opaque command names no agent, so there is no per-agent skills base to
+		// choose and injectSystemPrompt will not write one either.
+		return skillTarget{}
+	}
+	configVar, scopable := sessionenv.SupportsAccounts(agent)
+
+	// A MOUNTED ACCOUNT ROOT belongs to the host, and this process may be inside
+	// the container af mounted it into.
+	//
+	// The in-container agent-server builds its instance with NO account and the
+	// local backend (daemon/agentserver_headless.go), while docker has pointed the
+	// agent's config variable at /af-account — a writable bind mount of the HOST's
+	// account directory. Without this the container reads that as its own ambient
+	// root: with its own /af-home config, where global_agent_skills defaults false,
+	// the declined-consent cleanup would DELETE the af-marked skill the host's
+	// scoped launch had just written, and race that launch's discovery (#3645
+	// review).
+	//
+	// Unresolved rather than unscoped, and that distinction is the point: the
+	// container cannot know whether the host operator opted in, so it must neither
+	// write nor clean. The host owns that directory.
+	if scopable && underDockerAccountHome(os.Getenv(configVar)) {
+		return skillTarget{unresolved: true}
+	}
+
+	name := strings.TrimSpace(i.Account)
+	if name == "" {
+		return skillTarget{}
+	}
+	if !scopable {
+		// The session names an account for an agent that cannot be scoped. The
+		// launch refuses this; until it does, af must write nothing rather than
+		// guess a directory.
+		return skillTarget{unresolved: true}
+	}
+	// The account name was validated in the namespace of the session's OWN agent,
+	// and account namespaces are separate — the same name means a DIFFERENT
+	// identity for a different agent (#3082/#3108). So a launch whose resolved
+	// command is another agent must not resolve this name against that agent's
+	// registry: a handoff to gemini, or a cross-agent program_overrides, would
+	// otherwise write into a gemini account the operator never selected, moments
+	// before the launch refuses for exactly that reason (#3645 review).
+	if requested := sessionenv.AgentForCommand(i.AgentProgram()); requested != agent {
+		return skillTarget{unresolved: true}
+	}
+	home, err := config.GetConfigDir()
+	if err != nil {
+		log.WarningLog.Printf("af skill: cannot locate the agent-factory home to resolve account %q for %s: %v", name, agent, err)
+		return skillTarget{unresolved: true}
+	}
+	account, err := agentaccount.Selected(home, agent, name, "")
+	if err != nil {
+		log.WarningLog.Printf("af skill: cannot resolve account %q for %s: %v", name, agent, err)
+		return skillTarget{unresolved: true}
+	}
+	if account.Dir == "" {
+		return skillTarget{unresolved: true}
+	}
+	return skillTarget{root: account.Dir}
+}
+
+// underDockerAccountHome reports whether a config root is the account directory
+// af bind-mounts into a container, or a path inside it. Compared as PATH
+// SEGMENTS, never as a string prefix, so a sibling named /af-account-backup is
+// not swept in with it.
+func underDockerAccountHome(root string) bool {
+	if root == "" {
+		return false
+	}
+	clean := filepath.Clean(root)
+	if clean == dockerAccountHome {
+		return true
+	}
+	return strings.HasPrefix(clean, dockerAccountHome+string(filepath.Separator))
+}
+
+// ambientSkillBase is where this agent's skill would have gone before the account
+// root became the target — the location a declined-consent launch must still
+// clean. Empty for an unscoped launch, whose base already IS the ambient one, and
+// empty when the ambient base cannot be resolved, since there is then no path to
+// clean rather than a path to guess.
+func ambientSkillBase(base func(skillTarget) (string, error), target skillTarget) string {
+	if target.root == "" {
+		return ""
+	}
+	ambient, err := base(skillTarget{})
+	if err != nil {
+		return ""
+	}
+	return ambient
 }

@@ -809,7 +809,7 @@ func TestForeignIdentityRootIsReattributed(t *testing.T) {
 		t.Fatalf("the personal program must reach the create verbatim, got %q", got)
 	}
 	layers := manager.rootAgentLayers.Load()
-	if root, ok := layers.projectRoots[realID]; !ok || root != worktree {
+	if root, ok := layers.projectRoots[realID]; !ok || root.root != worktree {
 		t.Fatalf("the project must join projectRoots under its REAL identity %s at the recorded root %s, got %q (present=%v)", realID, worktree, root, ok)
 	}
 	if _, stillUnresolved := layers.unresolvedRoots[config.RepoIDFromRoot(filepath.Clean(worktree))]; stillUnresolved {

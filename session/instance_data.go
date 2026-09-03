@@ -178,6 +178,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			BaseCommitSHA:     i.gitWorktree.GetBaseCommitSHA(),
 			ExternalWorktree:  externalWorktree,
 			BranchCreatedByUs: &branchCreatedByUs,
+			// Empty until a hook actually entered a scope, and omitempty then keeps
+			// it out of the record entirely — so "no scope" stays indistinguishable
+			// from a pre-#3650 record, which is what makes absence mean today's
+			// behaviour for both.
+			HookScopeUnitPrefix: i.gitWorktree.HookScopeUnitPrefix(),
 		}
 		if hasRecovery {
 			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
@@ -447,6 +452,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			if data.ArchiveReport != nil {
 				gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 			}
+			// Name future scopes after this session, and carry back the handle to
+			// any that a previous daemon generation left running (#3650). An empty
+			// prefix — a legacy record, or one whose hooks never entered a scope —
+			// leaves the sweep disabled, which is the pre-#3650 behaviour.
+			gw.SetHookScopeSessionID(id)
+			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
 			instance.gitWorktree = gw
 		}
 

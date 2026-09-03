@@ -778,6 +778,13 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	// had just made false, and the user had no way to tell which surface was wrong.
 	// sessionenv owns the one list now, and every surface says the same thing about a
 	// rostered-but-unproven agent.
+	//
+	// gemini joined the list in #3639, by running the check rather than waiving it:
+	// af hands its pane the resolved command unchanged, so ValidateAccountCommand
+	// proves it without a declaration, and a scoped session was observed using the
+	// account directory while an unscoped control kept the ambient identity. The two
+	// lists agree again, which is the normal state — the registration-only surfaces
+	// exist for the gap between them, not as a permanent fixture.
 	if sessionenv.AccountLaunchProven(agent) {
 		return nil
 	}

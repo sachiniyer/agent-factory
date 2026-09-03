@@ -60,6 +60,9 @@ const SESSION_C = process.env.AF_WEB_SESSION_C ?? "probe-c";
 // The name of the task the harness seeds (web-selftest-entry.sh) so the tasks list
 // is non-empty on load.
 const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
+// The task the harness seeds ALREADY OVERDUE (#3626): created a month back with an
+// hourly schedule and no run, so the daemon derives it as overdue on first read.
+const OVERDUE_TASK = process.env.AF_WEB_OVERDUE_TASK ?? "probe-overdue";
 // The task in the TASK-ONLY project (a third repo with a task but no session,
 // redesign PR2): proves a task-only repo lists in the switcher and its tasks scope.
 const TASK3_NAME = process.env.AF_WEB_TASK3_NAME ?? "mock3-task";
@@ -3111,6 +3114,55 @@ test("#2517: Escape interrupts the agent (forwards down the PTY) and never detac
   }
 });
 
+test("#3626: the tasks list marks a task that has stopped firing, and says how far behind", REAL_FIXTURE, async () => {
+  // The web is the surface the #2212 owner — a box whose owner never opens the
+  // TUI — actually opens, and before this it was the one showing none of #3623:
+  // an enabled task dark for a month read exactly like a healthy one.
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const tasks = page.locator(".af-tasks");
+  await expect(tasks).toBeVisible();
+
+  const overdue = tasks.locator(".af-task-row", { hasText: OVERDUE_TASK });
+  await expect(overdue).toHaveCount(1);
+
+  // The MARK, on the row you are not scrolling to — the enabled tick is replaced
+  // rather than a column added, as the rail does it.
+  const mark = overdue.locator(".af-task-enabled.af-task-warn");
+  await expect(mark).toHaveCount(1);
+  // Hidden from assistive tech: the glyph is there to survive visual clipping,
+  // and CSS ellipsis does not clip the accessibility tree — labelling it with the
+  // same summary the row already shows announced the verdict twice (#3626
+  // review). The words below are what a screen reader gets.
+  await expect(mark).toHaveAttribute("aria-hidden", "true");
+
+  // The DETAIL, in the row, in the rail's own words. The count is whatever the
+  // daemon derived from a month of a daily schedule, so the assertion is on the
+  // shape rather than on a number the harness would have to keep in step. (Daily,
+  // and at an hour computed half a day out from setup: a fixture armed on a real
+  // daemon for the whole suite would otherwise FIRE mid-run, clear its own overdue
+  // verdict, and fail this by wall-clock luck — see the seeding script.)
+  await expect(overdue.locator(".af-task-health")).toHaveText(/^overdue · missed \d+\+?$/);
+
+  // A static glyph and nothing else: no animation anywhere on the marked row
+  // (#1766 — state reads from a glyph in this app).
+  const animated = await overdue.evaluate((row) =>
+    Array.from(row.querySelectorAll("*")).filter((el) => {
+      const s = getComputedStyle(el);
+      return s.animationName !== "none" || (s.transitionDuration !== "0s" && s.transitionProperty !== "none");
+    }).length,
+  );
+  expect(animated).toBe(0);
+
+  // And the healthy seeded task in the same list carries neither, which is what
+  // makes the mark mean something.
+  const healthy = tasks.locator(".af-task-row", { hasText: SEEDED_TASK });
+  await expect(healthy).toHaveCount(1);
+  await expect(healthy.locator(".af-task-enabled.af-task-warn")).toHaveCount(0);
+  await expect(healthy.locator(".af-task-health")).toHaveCount(0);
+
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+});
+
 test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", REAL_FIXTURE, async () => {
   // Establish rail mode on the sessions view rather than inheriting it from the
   // previous flow (#2816) — same reasoning as the j/k test above: an inherited
@@ -3423,205 +3475,255 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   await page.unroute("**/v1/CloseTab");
 });
 
-test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", REAL_FIXTURE, async () => {
-  // Attach to A and give it a second tab, so there is a distinct tab to drag into a
-  // split (dragging the only tab onto itself just moves it — no split).
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
-
-  // A single pane so far — today's zero-config default.
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-
-  // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two, the
-  // new right pane bound to the agent tab with its OWN live WS stream.
-  await dragTabToPane(page, "Agent", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
-  // Two concurrent xterm instances now render side by side, each with per-pane chrome.
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
-  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
-
-  // BOTH panes show live output. The new agent pane streams the ready marker over its
-  // own stream — identify it by that marker.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
-  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
-  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
-  await expect(agentPane).toHaveCount(1);
-  await expect(shellPane).toHaveCount(1);
-  // The other pane (the shell tab) is an independent live PTY — focus it and type, and
-  // its echo comes back over its own stream, proving both panes are live at once.
-  await shellPane.locator(".af-pane-host").click();
-  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
-  await page.keyboard.type("echo AF_SPLIT_OK");
-  await page.keyboard.press("Enter");
-  await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
-
-  // Close the agent pane via its × — the split collapses and the shell pane fills the
-  // whole area (one pane again), without closing the underlying tab.
-  await agentPane.locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  // The tab list is unchanged — only the pane closed, not the underlying tab.
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
-
-  // Restore A to a single tab for the later create/kill/archive flows.
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
-
-test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", REAL_FIXTURE, async () => {
-  // The regression: only tabs present at first render were drag sources; a tab created
-  // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
-  // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
-  // splits into two live panes — the drag wiring must cover tabs created after render.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
-  await expect(shellTab).toHaveClass(/af-tab-active/);
-
-  // The freshly-created tab is a real HTML5 drag source: draggable is set on it just
-  // like an initial tab. A real mouse drag needs this attribute (a synthetic dispatch
-  // would fire regardless), so assert it directly — a missing draggable is exactly the
-  // "the new tab isn't a drag source" framing of the bug.
-  await expect(shellTab).toHaveJSProperty("draggable", true);
-
-  // Show the AGENT tab in the single pane, so dragging the new Terminal tab produces a
-  // split with two DISTINCT tabs (agent + the freshly-created shell), not a self-split.
-  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
-  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-
-  // Drag the NEWLY-CREATED Terminal tab (index 1) onto the RIGHT edge → the pane splits,
-  // the new right pane bound to the shell tab with its OWN live WS stream.
-  await dragTabToPane(page, "Terminal", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
-  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
-
-  // BOTH panes are live: the agent pane still streams the ready marker, and the other
-  // pane is the shell tab the freshly-created drag source bound. Type into the shell
-  // pane and its echo returns over its own stream — proving the split from the NEW tab
-  // is a real, independent PTY, not a dead pane.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
-  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
-  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
-  await expect(agentPane).toHaveCount(1);
-  await expect(shellPane).toHaveCount(1);
-  await shellPane.locator(".af-pane-host").click();
-  await page.keyboard.type("echo AF_NEWTAB_DRAG_OK");
-  await page.keyboard.press("Enter");
-  await expect(shellPane).toContainText("AF_NEWTAB_DRAG_OK", { timeout: 15_000 });
-
-  // Collapse the split and restore A to a single tab for the later flows.
-  await shellPane.locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
-
-test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
-  // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
-  // bar), no dragend can fire on the now-detached source — the global "dragging" state
-  // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
-  // bar rebuild must reconcile-clear that state.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-
-  // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
-  // overlay — the exact on-screen state a drop/dragend would normally clear. The single
-  // shared DataTransfer carries the tab MIME, so split.ts recognises the drag.
-  await page.evaluate(() => {
-    const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Terminal"));
-    const pane = document.querySelector(".af-term-host .af-pane");
-    if (!tab || !pane) {
-      throw new Error("drag source or pane not found");
+/**
+ * The five split-pane flows below drive one shared roster — `SESSION_A` — and each ends
+ * by restoring it to a single tab "for the later flows". That tail is precisely what does
+ * NOT run when a test aborts mid-body, and #3663 is what that costs: a rebind race redded
+ * out :3531's setup, SESSION_A kept the Terminal tab it had just created, and the next
+ * test in the block — which asserts an ABSOLUTE count of 2 — then failed at 3. One race,
+ * two reds, the second pointing at the wrong subject (#1897). Playwright restarts the
+ * worker after a failure and hands the next test a fresh page, but the roster lives in
+ * the daemon, so the stray tab outlives that reset.
+ *
+ * The hook normalizes the roster regardless of outcome, so a failure costs one red that
+ * names its own cause. A describe-scoped afterEach rather than a `resetToAgentTab` at
+ * each entry, deliberately: an entry call only covers the test someone remembered to
+ * annotate, and this block is where the next split-pane flow will be written. The entry
+ * calls already in the file stay — asserting the state you need is still cheaper than
+ * inheriting it, and they read as each test's own precondition rather than as cleanup.
+ *
+ * NOT `mode: "serial"`. That is #2816's remedy for a different defect — a test consuming
+ * state it never established — and it would SKIP the rest of the block on the first
+ * failure, trading a misattributed red for lost coverage. These tests each do establish
+ * their own precondition; the gap is the state a FAILING one leaves behind.
+ */
+test.describe("split panes (SESSION_A roster)", () => {
+  test.afterEach(async ({}, testInfo) => {
+    // A test skipped because the seeded rail is unavailable (the #2276 beforeEach) still
+    // runs this hook, and there is no live app to normalize. Asserting against it would
+    // turn one honest diagnostic failure into a red for every test in the block.
+    if (realRailUnavailable !== "") {
+      return;
     }
-    const dt = new DataTransfer();
-    tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
-    const r = pane.getBoundingClientRect();
-    const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.right - 6, clientY: r.top + r.height / 2 };
-    pane.dispatchEvent(new DragEvent("dragenter", init));
-    pane.dispatchEvent(new DragEvent("dragover", init));
+    // Hook time is spent from the TEST's budget, so a flow that used most of its 60s
+    // would starve the cleanup and red out here instead of where it actually went wrong.
+    // Buy the cleanup its own headroom (the documented shape for a slow hook).
+    testInfo.setTimeout(testInfo.timeout + 60_000);
+
+    // Re-select A rather than assume the aborted test left it selected — re-selecting the
+    // session already showing is a supported no-op (#1855), so the healthy path pays one
+    // click and two settled assertions.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await resetToAgentTab(page);
+    // The layout follows the roster: layout.ts's validate() clamps every leaf into the
+    // surviving tab range and drops the duplicates it produces, so dropping to one tab
+    // collapses a stray split back to one pane. Assert that rather than assume it — a
+    // leftover split reds the next test's entry `toHaveCount(1)` on `.af-pane` exactly as
+    // surely as a stray tab reds its tab count.
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   });
-  // The drag is visibly in progress: body flag set, a drop overlay shown.
-  await expect(page.locator("body.af-dragging-tab")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).toBeVisible();
 
-  // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
-  // add another tab (a concurrent tab change would do the same).
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+  test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", REAL_FIXTURE, async () => {
+    // Attach to A and give it a second tab, so there is a distinct tab to drag into a
+    // split (dragging the only tab onto itself just moves it — no split).
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
-  // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
-  // visibility is gated on the now-cleared flag).
-  await expect(page.locator("body.af-dragging-tab")).toHaveCount(0);
-  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).not.toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
-  // Restore A to a single tab for the later flows.
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
+    // A single pane so far — today's zero-config default.
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
 
-test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", REAL_FIXTURE, async () => {
-  // Attach to A (a single agent tab, so tab index 1+ does not exist).
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two, the
+    // new right pane bound to the agent tab with its OWN live WS stream.
+    await dragTabToPane(page, "Agent", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+    // Two concurrent xterm instances now render side by side, each with per-pane chrome.
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+    await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
 
-  // Drop an out-of-range tab index (99) on the pane's edge. The drop handler validates
-  // it against the live tab count and no-ops it — no split is created, so no pane can
-  // bind to a nonexistent tab and break its stream.
-  await dropSnapshotOnPane(page, { index: 99, tabs: ["0:x"] });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
-  // The one pane still shows the live agent output — it was never disturbed.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-});
+    // BOTH panes show live output. The new agent pane streams the ready marker over its
+    // own stream — identify it by that marker.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+    const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+    const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+    await expect(agentPane).toHaveCount(1);
+    await expect(shellPane).toHaveCount(1);
+    // The other pane (the shell tab) is an independent live PTY — focus it and type, and
+    // its echo comes back over its own stream, proving both panes are live at once.
+    await shellPane.locator(".af-pane-host").click();
+    await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+    await page.keyboard.type("echo AF_SPLIT_OK");
+    await page.keyboard.press("Enter");
+    await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
 
-test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", REAL_FIXTURE, async () => {
-  // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
-  // This is the T-Rex reproduction: the index is valid, but the tab set changed since
-  // the drag began, so binding by index alone would attach the new pane to the WRONG
-  // live tab.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    // Close the agent pane via its × — the split collapses and the shell pane fills the
+    // whole area (one pane again), without closing the underlying tab.
+    await agentPane.locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    // The tab list is unchanged — only the pane closed, not the underlying tab.
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2);
 
-  // Drop an IN-RANGE index (1) whose drag-time snapshot (2 entries — count matches the
-  // live 2 tabs, so neither the range nor a count check would catch it) does NOT match
-  // the live tab identities. Only the snapshot-vs-live comparison can reject this, and
-  // it must: the layout stays a single pane, no split bound to the wrong tab.
-  await dropSnapshotOnPane(page, { index: 1, tabs: ["0:stale-agent", "1:stale-shell"] });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+    // Restore A to a single tab for the later create/kill/archive flows.
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
 
-  // A well-formed drag with the LIVE snapshot still splits (the happy path is intact) —
-  // proven here to show the cancel above was the stale check, not a broken drop path.
-  await dragTabToPane(page, "Agent", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", REAL_FIXTURE, async () => {
+    // The regression: only tabs present at first render were drag sources; a tab created
+    // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
+    // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
+    // splits into two live panes — the drag wiring must cover tabs created after render.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
-  // Clean up: collapse back to one pane and restore A to a single tab.
-  await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
+    await expect(shellTab).toHaveClass(/af-tab-active/);
+
+    // The freshly-created tab is a real HTML5 drag source: draggable is set on it just
+    // like an initial tab. A real mouse drag needs this attribute (a synthetic dispatch
+    // would fire regardless), so assert it directly — a missing draggable is exactly the
+    // "the new tab isn't a drag source" framing of the bug.
+    await expect(shellTab).toHaveJSProperty("draggable", true);
+
+    // Show the AGENT tab in the single pane, so dragging the new Terminal tab produces a
+    // split with two DISTINCT tabs (agent + the freshly-created shell), not a self-split.
+    await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drag the NEWLY-CREATED Terminal tab (index 1) onto the RIGHT edge → the pane splits,
+    // the new right pane bound to the shell tab with its OWN live WS stream.
+    await dragTabToPane(page, "Terminal", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+    await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+    // BOTH panes are live: the agent pane still streams the ready marker, and the other
+    // pane is the shell tab the freshly-created drag source bound. Type into the shell
+    // pane and its echo returns over its own stream — proving the split from the NEW tab
+    // is a real, independent PTY, not a dead pane.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+    const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+    const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+    await expect(agentPane).toHaveCount(1);
+    await expect(shellPane).toHaveCount(1);
+    await shellPane.locator(".af-pane-host").click();
+    await page.keyboard.type("echo AF_NEWTAB_DRAG_OK");
+    await page.keyboard.press("Enter");
+    await expect(shellPane).toContainText("AF_NEWTAB_DRAG_OK", { timeout: 15_000 });
+
+    // Collapse the split and restore A to a single tab for the later flows.
+    await shellPane.locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
+    // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
+    // bar), no dragend can fire on the now-detached source — the global "dragging" state
+    // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
+    // bar rebuild must reconcile-clear that state.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+    // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
+    // overlay — the exact on-screen state a drop/dragend would normally clear. The single
+    // shared DataTransfer carries the tab MIME, so split.ts recognises the drag.
+    await page.evaluate(() => {
+      const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Terminal"));
+      const pane = document.querySelector(".af-term-host .af-pane");
+      if (!tab || !pane) {
+        throw new Error("drag source or pane not found");
+      }
+      const dt = new DataTransfer();
+      tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const r = pane.getBoundingClientRect();
+      const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.right - 6, clientY: r.top + r.height / 2 };
+      pane.dispatchEvent(new DragEvent("dragenter", init));
+      pane.dispatchEvent(new DragEvent("dragover", init));
+    });
+    // The drag is visibly in progress: body flag set, a drop overlay shown.
+    await expect(page.locator("body.af-dragging-tab")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).toBeVisible();
+
+    // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
+    // add another tab (a concurrent tab change would do the same).
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+
+    // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
+    // visibility is gated on the now-cleared flag).
+    await expect(page.locator("body.af-dragging-tab")).toHaveCount(0);
+    await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).not.toBeVisible();
+
+    // Restore A to a single tab for the later flows.
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", REAL_FIXTURE, async () => {
+    // Attach to A (a single agent tab, so tab index 1+ does not exist).
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drop an out-of-range tab index (99) on the pane's edge. The drop handler validates
+    // it against the live tab count and no-ops it — no split is created, so no pane can
+    // bind to a nonexistent tab and break its stream.
+    await dropSnapshotOnPane(page, { index: 99, tabs: ["0:x"] });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+    // The one pane still shows the live agent output — it was never disturbed.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+  });
+
+  test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", REAL_FIXTURE, async () => {
+    // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
+    // This is the T-Rex reproduction: the index is valid, but the tab set changed since
+    // the drag began, so binding by index alone would attach the new pane to the WRONG
+    // live tab.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drop an IN-RANGE index (1) whose drag-time snapshot (2 entries — count matches the
+    // live 2 tabs, so neither the range nor a count check would catch it) does NOT match
+    // the live tab identities. Only the snapshot-vs-live comparison can reject this, and
+    // it must: the layout stays a single pane, no split bound to the wrong tab.
+    await dropSnapshotOnPane(page, { index: 1, tabs: ["0:stale-agent", "1:stale-shell"] });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+
+    // A well-formed drag with the LIVE snapshot still splits (the happy path is intact) —
+    // proven here to show the cancel above was the stale check, not a broken drop path.
+    await dragTabToPane(page, "Agent", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+
+    // Clean up: collapse back to one pane and restore A to a single tab.
+    await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
 });
 
 test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT tab beside it", REAL_FIXTURE, async () => {
@@ -8310,6 +8412,298 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
   }
 });
 
+// --- the icon audit's measurement (#3681) -----------------------------------
+//
+// The audit reads geometry off a LIVE shell. On the master re-run at 11f91a24 it
+// measured 4 of 40 icons as having a box, 28 ms after a screencast frame in which
+// every one of them is painted, with the rail's 8 rows reporting innerText
+// byte-identical to the passing run one step earlier.
+//
+// The four survivors are exactly the icons built once at shell construction (the
+// appbar project glyph and caret, the rail head funnel and New plus, ui.ts:1040-1076).
+// The 36 that measured zero are exactly the ones inside the two containers the shell
+// replaces wholesale on every render — the filter menu items (ui.ts:1600) and the rail
+// rows (ui.ts:1444).
+//
+// The trace cannot say which of those two readings is right, and that is the defect
+// fixed here. It holds no record of whether a render happened: the DOM snapshots
+// around the audit are back-references, but a replaceChildren rebuild that produces
+// identical markup is invisible to a snapshot differ, and snapshot SIZE carries no
+// signal either — the passing run's own screenshot snapshot is 29081 bytes against the
+// failing audit's 29084. What the trace does show is a busier main thread in exactly
+// that window: the identical in-page callback took 11.65 ms against 5.71 ms in the
+// passing run, and the click before it 48.7 ms against 27.7 ms.
+//
+// So the measurement records the answer instead of leaving it to be excavated. This
+// file already states the rule, three thousand lines down in
+// settledMobileDrawerGeometry: "Live session events rebuild the rail with
+// replaceChildren(); resolving action locators and later measuring a row in separate
+// browser calls can otherwise inspect different row generations." The icon audit is
+// the one measurement that never applied it.
+
+/** One `.af-icon` as the audit measured it, with everything needed to say WHY it was
+ *  rejected. The old audit collapsed display, visibility and the box into a single
+ *  boolean, so a zero count cost a trace excavation and still could not name the
+ *  clause that dropped it (#3681). */
+interface MeasuredIcon {
+  icon: string;
+  className: string;
+  display: string;
+  visibility: string;
+  fontSize: string;
+  width: number;
+  height: number;
+  ariaHidden: string | null;
+  focusable: string | null;
+  stroke: string;
+  color: string;
+}
+
+/** One reading of every icon, taken inside a single animation frame, plus how many
+ *  times the shell rebuilt itself between arming the watch and that frame — and which
+ *  of the audit's bounded attempts it came from, so a reading that cost four voided
+ *  windows carries that fact itself rather than only in the caller's message (#3690).
+ */
+interface IconReading {
+  attempt: number;
+  icons: MeasuredIcon[];
+  rebuilds: number;
+  quiesced: boolean;
+  rows: { className: string; text: string }[];
+  unnamedIconControls: string[];
+  fontFaces: number;
+  fontRequests: string[];
+}
+
+/** The containers the shell replaces wholesale on every render — the two the #3681
+ *  survivor pattern implicates, and the only ones whose rebuild can swap the nodes a
+ *  reading is about. */
+const REBUILT_ICON_CONTAINERS = [".af-rail-list", ".af-filter-menu"];
+
+/** Starts counting rebuilds of those containers, so a later reading can say whether
+ *  one moved underneath it.
+ *
+ *  Armed before the audit's PRECONDITIONS, not merely before the measurement. The
+ *  reading itself is one page task and nothing can interleave inside it; the window
+ *  that needs watching is the one made of several round trips — in the failing trace,
+ *  43 ms between the `toHaveCount(4)` gate and the geometry, which is ample for a
+ *  session.updated to rebuild both containers. */
+async function armIconRebuildWatch(p: Page): Promise<void> {
+  await p.evaluate((selectors) => {
+    const w = window as unknown as { __afIconWatch?: { observer: MutationObserver; rebuilds: number } };
+    w.__afIconWatch?.observer.disconnect();
+    const state: { observer: MutationObserver; rebuilds: number } = {
+      observer: null as unknown as MutationObserver,
+      rebuilds: 0,
+    };
+    state.observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.addedNodes.length > 0 || record.removedNodes.length > 0) {
+          state.rebuilds += 1;
+        }
+      }
+    });
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el) {
+        state.observer.observe(el, { childList: true, subtree: true });
+      }
+    }
+    w.__afIconWatch = state;
+  }, REBUILT_ICON_CONTAINERS);
+}
+
+/** Reads every icon's geometry in ONE animation frame, after that frame's layout.
+ *
+ *  Three properties the old audit lacked:
+ *
+ *   - it waits for the watched containers to go quiet for two consecutive frames, so
+ *     the reading is not taken mid-rebuild;
+ *   - every icon is measured inside a single page task, so the first and the last
+ *     describe the same DOM generation;
+ *   - it returns the rebuild count and each rejected icon's display, visibility,
+ *     font-size and rect, so a zero box can be attributed rather than guessed at.
+ *
+ *  A rail that never goes quiet is reported through `quiesced` rather than waited on
+ *  forever: silence about it would be the same unfalsifiable reading again. */
+async function readIconGeometry(p: Page, attempt: number): Promise<IconReading> {
+  return p.evaluate(async (attemptNumber) => {
+    const w = window as unknown as { __afIconWatch?: { observer: MutationObserver; rebuilds: number } };
+    const watch = w.__afIconWatch;
+    const drain = (): void => {
+      if (!watch) return;
+      for (const record of watch.observer.takeRecords()) {
+        if (record.addedNodes.length > 0 || record.removedNodes.length > 0) {
+          watch.rebuilds += 1;
+        }
+      }
+    };
+    const frame = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+    let quiesced = false;
+    let quiet = 0;
+    for (let i = 0; i < 60 && !quiesced; i += 1) {
+      const before = watch?.rebuilds ?? 0;
+      await frame();
+      drain();
+      quiet = (watch?.rebuilds ?? 0) === before ? quiet + 1 : 0;
+      quiesced = quiet >= 2;
+    }
+
+    // Everything below is one task. No render can interleave between the first icon
+    // measured and the last, so the reading describes a single DOM generation.
+    drain();
+    const measure = (node: Element): MeasuredIcon => {
+      const style = getComputedStyle(node);
+      const box = node.getBoundingClientRect();
+      return {
+        icon: node.getAttribute("data-icon") ?? "?",
+        className: node.getAttribute("class") ?? "",
+        display: style.display,
+        visibility: style.visibility,
+        fontSize: style.fontSize,
+        width: box.width,
+        height: box.height,
+        ariaHidden: node.getAttribute("aria-hidden"),
+        focusable: node.getAttribute("focusable"),
+        stroke: style.stroke,
+        color: style.color,
+      };
+    };
+    const icons = Array.from(document.querySelectorAll(".af-icon")).map(measure);
+    const unnamedIconControls = Array.from(
+      document.querySelectorAll<HTMLElement>("button:has(.af-icon), a:has(.af-icon)"),
+    )
+      .filter((control) => {
+        const style = getComputedStyle(control);
+        const box = control.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          box.width > 0 &&
+          box.height > 0 &&
+          (control.innerText ?? "").trim() === ""
+        );
+      })
+      .filter((control) => (control.getAttribute("aria-label") ?? "").trim() === "")
+      .map((control) => control.className);
+    const fontFaces = Array.from(document.styleSheets).flatMap((sheet) => {
+      try {
+        return Array.from(sheet.cssRules).filter((rule) => rule instanceof CSSFontFaceRule);
+      } catch {
+        return [];
+      }
+    }).length;
+    return {
+      attempt: attemptNumber,
+      icons,
+      rebuilds: watch?.rebuilds ?? -1,
+      quiesced,
+      rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
+        className: row.className,
+        text: (row.innerText ?? "").trim(),
+      })),
+      unnamedIconControls,
+      fontFaces,
+      fontRequests: performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
+    };
+  }, attempt);
+}
+
+/** How many windows the audit will buy before it stops asking. Five, because the shell
+ *  it measures rebuilds on ordinary roster churn: one voided window is routine, two in
+ *  a row is a slow runner (#3690), and five consecutive dirty windows is not timing —
+ *  it is a shell that never goes quiet, which is a finding of its own and is reported
+ *  as one, with the count. */
+const ICON_AUDIT_ATTEMPTS = 5;
+
+/** The reading the assertions consume: windows are bought until one of them is clean,
+ *  bounded at ICON_AUDIT_ATTEMPTS.
+ *
+ *  #3683 bought exactly one retry, reasoning that a second dirty window is itself
+ *  worth reporting. It is — but reporting is not the same as failing, and failing on
+ *  it made the audit's own recovery path the flake (#3690): the test that injects ONE
+ *  rebuild went red on a runner where ordinary churn happened to land in the
+ *  replacement window too, which is a property of the runner rather than of the code
+ *  under test. So the count is DATA now — every attempt is kept and the winning
+ *  reading carries its own `attempt` — and the failure is reserved for the shell that
+ *  yields no quiet window at all inside the bound.
+ *
+ *  Reporting is still the CALLER's job, and still not optional. The returned reading
+ *  can be dirty (all ICON_AUDIT_ATTEMPTS windows straddled a rebuild) or unquiesced,
+ *  and its geometry is then void — so a caller that consumes it without checking
+ *  `rebuilds` and `quiesced` silently accepts exactly the sustained race this exists
+ *  to surface (#3683 Codex). */
+async function settledIconAudit(p: Page): Promise<{ reading: IconReading; attempts: IconReading[] }> {
+  const attempts: IconReading[] = [];
+  for (let attempt = 1; attempt <= ICON_AUDIT_ATTEMPTS; attempt += 1) {
+    // Attempt 1 measures the window the CALLER armed, which spans the audit's
+    // preconditions — the 43 ms of round trips #3681's rebuild landed in. Every retry
+    // arms a window of its own.
+    if (attempt > 1) {
+      await armIconRebuildWatch(p);
+    }
+    const reading = await readIconGeometry(p, attempt);
+    attempts.push(reading);
+    if (reading.rebuilds === 0) {
+      break;
+    }
+  }
+  return { reading: attempts[attempts.length - 1], attempts };
+}
+
+/** Whether an icon presented a real box to the user. */
+function iconIsVisible(icon: MeasuredIcon): boolean {
+  return icon.display !== "none" && icon.visibility !== "hidden" && icon.width > 0 && icon.height > 0;
+}
+
+/** Why one icon was rejected, in the terms the audit filters on — the three clauses the
+ *  old boolean collapsed into one. */
+function iconRejection(icon: MeasuredIcon): string {
+  if (icon.display === "none") return "display:none";
+  if (icon.visibility === "hidden") return "visibility:hidden";
+  return `zero box ${icon.width}x${icon.height} (font-size ${icon.fontSize}, display ${icon.display})`;
+}
+
+/** The rejected icons, named and grouped, so 36 identical rejections read as four
+ *  lines rather than a wall. */
+function describeRejectedIcons(icons: MeasuredIcon[]): string {
+  const groups = new Map<string, number>();
+  for (const icon of icons.filter((candidate) => !iconIsVisible(candidate))) {
+    const key = `${icon.icon}:${icon.className} — ${iconRejection(icon)}`;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  return groups.size === 0 ? "none" : Array.from(groups, ([key, n]) => `${key} x${n}`).join("; ");
+}
+
+/** The one-line diagnosis a failing audit leaves behind: whether the shell moved under
+ *  the reading, how many windows it cost, what each attempt saw, and — named — the
+ *  icons that had no box. */
+function iconAuditMessage(reading: IconReading, attempts: IconReading[]): string {
+  const verdict =
+    reading.rebuilds === 0
+      ? `no rebuild in the window this reading was taken over (attempt ${reading.attempt} of ` +
+        `${ICON_AUDIT_ATTEMPTS}), so a zero box is a real collapse and these icons are the defect`
+      : `the shell rebuilt inside all ${attempts.length} windows the audit bought — the last one ` +
+        `${reading.rebuilds}x — so a shell that never yields a quiet window is the finding here, ` +
+        `not the icons; this reading is void, not evidence`;
+  const seen = attempts
+    .map(
+      (attempt) =>
+        `#${attempt.attempt} ${attempt.icons.filter(iconIsVisible).length}/${attempt.icons.length}` +
+        `@${attempt.rebuilds}rebuilds${attempt.quiesced ? "" : ",never quiesced"}`,
+    )
+    .join(" then ");
+  return (
+    `the live shell must exercise several real icon placements — ${verdict}` +
+    `; attempts=${seen}; zero-box=${describeRejectedIcons(reading.icons)}` +
+    `; rows=${JSON.stringify(reading.rows)}`
+  );
+}
+
 test("icons: the Lucide subset is inline, accessible, and currentColor-themed at desktop and 375px", REAL_FIXTURE, async ({
   browser,
 }, testInfo) => {
@@ -8333,6 +8727,10 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           // floor. The default filter always exposes four checked semantic groups.
           await p.getByRole("button", { name: "Filter sessions" }).click();
           await expect(p.locator(".af-filter-menu")).toBeVisible();
+          // Armed here, before the gate below rather than just before the geometry: the
+          // window that went wrong in the #3681 trace is the 43 ms of round trips
+          // BETWEEN this gate and the measurement, not the measurement itself.
+          await armIconRebuildWatch(p);
           await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
 
           const projectIcon = p.locator(".af-project-glyph");
@@ -8352,64 +8750,36 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           expect(projectPaint.height).toBe(projectPaint.width);
           accentByTheme.set(theme, projectPaint.color);
 
-          const audit = await p.locator(".af-icon").evaluateAll((nodes) => {
-            const visible = nodes.filter((node) => {
-              const style = getComputedStyle(node);
-              const box = node.getBoundingClientRect();
-              return style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
-            });
-            const unnamedIconControls = Array.from(document.querySelectorAll<HTMLElement>("button:has(.af-icon), a:has(.af-icon)"))
-              .filter((control) => {
-                const style = getComputedStyle(control);
-                const box = control.getBoundingClientRect();
-                return (
-                  style.display !== "none" &&
-                  style.visibility !== "hidden" &&
-                  box.width > 0 &&
-                  box.height > 0 &&
-                  (control.innerText ?? "").trim() === ""
-                );
-              })
-              .filter((control) => (control.getAttribute("aria-label") ?? "").trim() === "")
-              .map((control) => control.className);
-            const fontFaces = Array.from(document.styleSheets).flatMap((sheet) => {
-              try {
-                return Array.from(sheet.cssRules).filter((rule) => rule instanceof CSSFontFaceRule);
-              } catch {
-                return [];
-              }
-            }).length;
-            return {
-              count: visible.length,
-              placements: visible.map(
-                (node) => `${node.getAttribute("data-icon") ?? "?"}:${node.getAttribute("class") ?? ""}`,
-              ),
-              rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
-                className: row.className,
-                text: (row.innerText ?? "").trim(),
-              })),
-              allHiddenFromAT: visible.every(
-                (node) => node.getAttribute("aria-hidden") === "true" && node.getAttribute("focusable") === "false",
-              ),
-              allCurrentColor: visible.every((node) => getComputedStyle(node).stroke === getComputedStyle(node).color),
-              unnamedIconControls,
-              fontFaces,
-              fontRequests: performance
-                .getEntriesByType("resource")
-                .map((entry) => entry.name)
-                .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
-            };
-          });
+          const { reading, attempts } = await settledIconAudit(p);
+          // A SUSTAINED race is the one condition this instrumentation exists to name,
+          // and it has to be asserted rather than merely described: a dirty reading
+          // that happens to look healthy would otherwise pass silently, and the "void,
+          // not evidence" verdict in the message would never be read by anyone (#3683
+          // Codex). Since #3690 "sustained" means all ICON_AUDIT_ATTEMPTS windows came
+          // back dirty, not two — a second dirty window is ordinary churn on a slow
+          // runner, and the audit buys another rather than failing on its own recovery
+          // path. Checked before the geometry so a void reading fails as a void
+          // reading, never as an icon defect.
+          expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
+          expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
+          const visible = reading.icons.filter(iconIsVisible);
+          // The assertion stays. With the rebuild count beside it, a zero box over a
+          // quiet window is a product defect — the shell would be painting icons the
+          // user cannot see, and this audit is the only thing in the suite that would
+          // ever notice — while a reading straddling a rebuild says so in its own
+          // message instead of being read as one.
+          expect(visible.length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
           expect(
-            audit.count,
-            `the live shell must exercise several real icon placements; ` +
-              `placements=${JSON.stringify(audit.placements)} rows=${JSON.stringify(audit.rows)}`,
-          ).toBeGreaterThan(5);
-          expect(audit.allHiddenFromAT, "decorative SVGs stay out of the accessibility tree").toBe(true);
-          expect(audit.allCurrentColor, "every visible icon inherits the active theme color").toBe(true);
-          expect(audit.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);
-          expect(audit.fontFaces, "the SVG subset must not smuggle in an icon font").toBe(0);
-          expect(audit.fontRequests, "the icon surface must make no font/network request").toEqual([]);
+            visible.every((icon) => icon.ariaHidden === "true" && icon.focusable === "false"),
+            "decorative SVGs stay out of the accessibility tree",
+          ).toBe(true);
+          expect(
+            visible.every((icon) => icon.stroke === icon.color),
+            "every visible icon inherits the active theme color",
+          ).toBe(true);
+          expect(reading.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);
+          expect(reading.fontFaces, "the SVG subset must not smuggle in an icon font").toBe(0);
+          expect(reading.fontRequests, "the icon surface must make no font/network request").toEqual([]);
           expect(await horizontalOverflow(p), "icons must not widen the desktop or phone layout").toBeLessThanOrEqual(1);
 
           await testInfo.attach(`icons-${width}-${theme}`, {
@@ -8425,6 +8795,273 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
   expect(accentByTheme.get("light"), "light and dark tokens must paint distinct icon colors").not.toBe(
     accentByTheme.get("dark"),
   );
+});
+
+// Both of these FORCE the condition rather than wait for it. The reading that took
+// master red is 1 in 100+ runs, and `retries: 0` means waiting for it is not a test —
+// it is a lottery whose losing ticket is a red nobody can diagnose (#3681).
+
+test("#3681 a rebuild scheduled mid-audit voids the reading and buys another, rather than reading as collapsed icons", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The rebuild the survivor pattern implicates, scheduled inside the audit's own
+  // window. It replaces the rail's children with the SAME nodes, so the markup is
+  // byte-identical afterwards — which is exactly why the trace could not settle the
+  // question from its DOM snapshots, and why the watch has to live in the page.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await p.evaluate(() => {
+      const list = document.querySelector(".af-rail-list");
+      if (list) {
+        setTimeout(() => list.replaceChildren(...Array.from(list.childNodes)), 0);
+      }
+    });
+
+    const { reading, attempts } = await settledIconAudit(p);
+    // What this pins is the VOID-AND-RETRY, not how many windows it took. Asserting
+    // "exactly two, and the second was quiet" made ordinary churn landing in the
+    // REPLACEMENT window a red — the audit's own recovery path failing as if it were
+    // the behaviour under test, which is #3690.
+    expect(attempts.length, "a rebuild inside the window must void the reading and buy another").toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(attempts.length, "…without exceeding the bound").toBeLessThanOrEqual(ICON_AUDIT_ATTEMPTS);
+    expect(attempts[0]?.rebuilds ?? 0, "the watch must see the rebuild the DOM snapshots cannot").toBeGreaterThan(0);
+    expect(reading, "the LAST attempt is the one the assertions consume").toBe(attempts[attempts.length - 1]);
+    expect(reading.attempt, "and it says which window it was finally taken over").toBe(attempts.length);
+    expect(reading.rebuilds, "windows are bought until one of them is clean").toBe(0);
+    expect(reading.quiesced, "the shell must go quiet for two consecutive frames before it is measured").toBe(true);
+    // And the recovered reading is a real one: the icons were never the problem here,
+    // so the audit must not report them as collapsed.
+    expect(reading.icons.filter(iconIsVisible).length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
+  } finally {
+    await ctx.close();
+  }
+});
+
+/** Dirties the icon audit's window from inside the page — once per armed watch, up to
+ *  `windows` times — so a test can FORCE the condition #3690 is about instead of
+ *  waiting for a slow runner to produce it.
+ *
+ *  It has to be driven by the ARMING rather than by a timer, because the audit's
+ *  windows have no fixed length: each one runs until the watched containers go quiet
+ *  for two consecutive frames. Hooking `window.__afIconWatch` — the handle
+ *  `armIconRebuildWatch` installs, and the last thing it does — puts exactly one
+ *  rebuild inside each window by construction, whatever the runner's timing. The first
+ *  window is already armed by the caller when this runs, so it is dirtied directly.
+ *
+ *  The rebuild is the shell's own: a self-`replaceChildren`, byte-identical markup
+ *  afterwards, visible only to the watch. */
+async function injectIconRebuildChurn(p: Page, windows: number): Promise<void> {
+  await p.evaluate((limit) => {
+    const w = window as unknown as { __afIconWatch?: unknown; __afIconChurn?: { performed: number } };
+    const churn = { scheduled: 0, performed: 0 };
+    w.__afIconChurn = churn;
+    const dirty = (): void => {
+      if (churn.scheduled >= limit) return;
+      churn.scheduled += 1;
+      // Next frame, not this task: the arming evaluate has to return first, so the
+      // rebuild lands inside the window the reading is taken over. Re-queried rather
+      // than captured, because a real render can replace the list element itself and
+      // the fresh watch observes whichever one is in the document by then.
+      requestAnimationFrame(() => {
+        const list = document.querySelector(".af-rail-list");
+        if (!list) return;
+        list.replaceChildren(...Array.from(list.childNodes));
+        churn.performed += 1;
+      });
+    };
+    let armed = w.__afIconWatch;
+    Object.defineProperty(window, "__afIconWatch", {
+      configurable: true,
+      get: () => armed,
+      set: (next: unknown) => {
+        armed = next;
+        dirty();
+      },
+    });
+    dirty();
+  }, windows);
+}
+
+/** How many injected rebuilds actually reached the DOM, so a green test cannot be one
+ *  whose injection quietly did nothing. */
+async function injectedIconChurn(p: Page): Promise<number> {
+  return p.evaluate(
+    () => (window as unknown as { __afIconChurn?: { performed: number } }).__afIconChurn?.performed ?? -1,
+  );
+}
+
+test("#3690 two rebuilds in consecutive windows still yield a clean reading, inside the bound", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The flake, forced. #3683 bought exactly ONE retry, so a rebuild in the first
+  // window and another in the replacement window left the audit handing back a void
+  // reading and the caller failing on it — a red about the runner's timing, never
+  // about the icons. Two consecutive dirty windows must now cost more windows, not a
+  // failure.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    // The injected rebuild is a self-replaceChildren, so it only records a mutation if
+    // the list has children to replace. Pinned, rather than left to make an empty rail
+    // look like a quiet one.
+    await expect(p.locator(".af-rail-list .af-row").first()).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await injectIconRebuildChurn(p, 2);
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(await injectedIconChurn(p), "both injected rebuilds must actually have landed").toBe(2);
+    expect(attempts[0]?.rebuilds ?? 0, "the first window is dirtied").toBeGreaterThan(0);
+    expect(
+      attempts[1]?.rebuilds ?? 0,
+      "and so is the replacement — the case #3683's single retry could not survive",
+    ).toBeGreaterThan(0);
+    expect(attempts.length, "so a third window is bought rather than the second being consumed").toBeGreaterThanOrEqual(
+      3,
+    );
+    expect(attempts.length, "and the buying stays inside the bound").toBeLessThanOrEqual(ICON_AUDIT_ATTEMPTS);
+    expect(reading, "the reading consumed is the last attempt").toBe(attempts[attempts.length - 1]);
+    expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
+    expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
+    // #3683's point survives as DATA: what the recovery cost is recorded in the
+    // reading, and is not the reason for a failure.
+    expect(reading.attempt, "what it cost is recorded, not failed on").toBeGreaterThanOrEqual(3);
+    expect(reading.icons.filter(iconIsVisible).length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("#3690 a shell that rebuilds in EVERY window is refused at the bound, and named with the count", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The other end of the bound. Buying windows until one is clean has to TERMINATE,
+  // and what it terminates with has to be the finding rather than silence: a shell
+  // that never goes quiet is not an icon defect and must not be reported as one.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    await expect(p.locator(".af-rail-list .af-row").first()).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await injectIconRebuildChurn(p, ICON_AUDIT_ATTEMPTS);
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(await injectedIconChurn(p), "every window the audit armed must have been dirtied").toBe(
+      ICON_AUDIT_ATTEMPTS,
+    );
+    expect(attempts.length, "the loop stops at the bound rather than spinning on a shell that never settles").toBe(
+      ICON_AUDIT_ATTEMPTS,
+    );
+    expect(
+      attempts.every((attempt) => attempt.rebuilds > 0),
+      "…having found no quiet window anywhere inside it",
+    ).toBe(true);
+    expect(reading, "the reading handed back is still the last attempt").toBe(attempts[ICON_AUDIT_ATTEMPTS - 1]);
+    expect(reading.attempt, "which names itself as the last one").toBe(ICON_AUDIT_ATTEMPTS);
+    expect(reading.rebuilds, "and is void — the caller's rebuilds===0 assertion is what refuses it").toBeGreaterThan(0);
+
+    const message = iconAuditMessage(reading, attempts);
+    expect(message, "the refusal names the shell, not the icons").toContain("void, not evidence");
+    expect(message, "and says how many windows it bought before giving up").toContain(
+      `all ${ICON_AUDIT_ATTEMPTS} windows`,
+    );
+    expect(message, "with every attempt numbered beside its own count").toContain(`#${ICON_AUDIT_ATTEMPTS} `);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("#3681 a zero box over a QUIET window is reported as a product defect, naming the icons", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The other half: with the measurement sound, a real collapse must still be caught
+  // and must say WHICH icons and WHY. The box is zeroed directly, and the two routes
+  // that did NOT work are worth recording, because both narrow #3681's product
+  // reading — the one the issue framed as "every .af-icon is width: 1em, so the box is
+  // font-relative and inherited, and if that resolves to zero the user sees the rail
+  // flicker its icons out":
+  //
+  //   - `font-size: 0` on `.af-rail-list` / `.af-filter-menu` leaves all 40 icons
+  //     measuring a full box. Intermediate elements re-declare their own size
+  //     (`.af-row-title` in rem; the action `<button>`s take the UA default rather
+  //     than inheriting), so an inherited zero never reaches the icons.
+  //   - `font-size: 0` on the icons themselves collapses 32 of the 36 — but not the 8
+  //     `git-branch` glyphs, because `.af-branch-icon` is sized in REM
+  //     (styles.css:1271-1274) and no font-size anywhere can touch it.
+  //
+  // In the failing master reading those 8 measured zero along with the rest. So the
+  // observed collapse cannot have been a font-size collapse at all: it would have had
+  // to leave the rem-sized glyphs standing, and it did not. Measured here rather than
+  // reasoned about, which is the whole point of the exercise.
+  //
+  // No rebuild is involved: a stylesheet mutates no childList, so the window stays
+  // quiet and the reading is evidence rather than void.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+
+    await armIconRebuildWatch(p);
+    await p.addStyleTag({
+      content: ".af-rail-list .af-icon, .af-filter-menu .af-icon { width: 0; height: 0 }",
+    });
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(reading.rebuilds, "a stylesheet mutates no childList, so the window stays quiet").toBe(0);
+    const survivors = reading.icons.filter(iconIsVisible).map((icon) => icon.icon);
+    expect(survivors, "only the icons built outside the replaced containers keep a box").toEqual([
+      "folder-git",
+      "chevron-down",
+      "funnel",
+      "plus",
+    ]);
+    // 4 is the count master reported. The audit must still refuse it…
+    expect(survivors.length).toBeLessThanOrEqual(5);
+    // …and the message must name the icons and the clause, so the next occurrence
+    // costs a glance rather than a trace excavation.
+    const message = iconAuditMessage(reading, attempts);
+    expect(message, "a quiet window makes a zero box the product's defect, not the reading's").toContain(
+      "no rebuild in the window",
+    );
+    for (const named of ["check:af-icon", "circle:af-icon", "git-branch:af-icon", "archive:af-icon", "octagon-x:af-icon"]) {
+      expect(message, `the failure must name ${named}`).toContain(named);
+    }
+    expect(message, "and say which of the three clauses rejected it").toContain("zero box 0x0");
+    // Not merely "no box": every rejected icon carries the resolved font-size and
+    // display behind it, which is the reading the old single boolean threw away and
+    // the trace therefore could not reconstruct.
+    const collapsed = reading.icons.filter((icon) => !iconIsVisible(icon));
+    // Not a fixed count: this file is serial, and by here earlier flows have added
+    // tabs and rows, so the rail carries more icons than the 40 the master reading
+    // saw. What must hold is that the injection emptied enough of the replaced
+    // containers to take the audit below its own floor, which the survivors assertion
+    // above already pins from the other side.
+    expect(collapsed.length, "the injection must actually empty the replaced containers").toBeGreaterThan(5);
+    expect(
+      collapsed.every((icon) => icon.fontSize !== "" && icon.display !== ""),
+      "each rejected icon carries the computed values that name its cause",
+    ).toBe(true);
+  } finally {
+    await ctx.close();
+  }
 });
 
 test("vscode tab (#2743): one session's editor state is readable in another's on the shared origin, and is NOT once each session has its own", REAL_FIXTURE, async () => {

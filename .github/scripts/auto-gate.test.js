@@ -2110,6 +2110,557 @@ test("a body finding blocks the manual-merge decision, not just the auto one", a
   assert.doesNotMatch(decision.output.summary, /reply RESOLVED[^\n]*to clear this/);
 });
 
+test("an issue-comment finding blocks on the head its own links name", async () => {
+  // #3670, reproduced from #3656: the finding shape Codex uses for lines outside
+  // the diff hunks is an ISSUE COMMENT. It carries no `commit_id` — issue
+  // comments have no such field — and no `Reviewed commit:` line, so both
+  // binding branches missed it, `latestBoundArtifact` fell through to an older
+  // clean artifact, and the PR auto-merged with eight live P2s the gate never
+  // read. Every finding in it links `blob/<head>/…`: the head IS stated.
+  const github = fakeGateGithub({
+    issueComments: [
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: "2026-07-09T01:20:00Z" }),
+      // The real ordering: Codex rewrites its table when it posts a finding, so
+      // the summary row is one second NEWER than the finding it accompanies, and
+      // the summary comment is the newest artifact on the PR. That row is what
+      // supplied #3656's passing verdict.
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "eight live P2s for this head must not auto-merge");
+  assert.ok(
+    result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // The verdict still resolved from the row, so the block is attributable to the
+  // finding rather than to the gate having lost the review it already had.
+  assert.ok(
+    result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`),
+    `got: ${result.notes.join("; ")}`,
+  );
+});
+
+test("a finding artifact that names no commit blocks anyway", async () => {
+  // The same body with every SHA stripped. Binding by body SHAs cannot save this
+  // one, which is the point: a finding-bearing artifact the gate cannot place
+  // against any head is unclassified, and unknown is not clean. Without this
+  // half, the next artifact shape nobody anticipated reopens the hole.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  assert.doesNotMatch(stripped.body, /[0-9a-f]{40}/i, "the fixture must name no commit at all");
+  assert.match(stripped.body, /P2/, "…while still carrying findings");
+
+  const result = await evaluateGate({
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "an unclassifiable finding is not a clean one");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // …and it says WHICH artifact, because the remedy is to go and answer that one
+  // by its link. A count alone sends the reader hunting through the comment list.
+  assert.ok(
+    result.reasons.some((reason) => reason.includes(stripped.html_url)),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // …and it is the second half doing the work, not the first: nothing bound it.
+  assert.ok(
+    !result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a clean head-bound summary row still passes", async () => {
+  // The guard on both halves: neither may turn the ordinary passing shape — an
+  // automatic review that completed cleanly and recorded itself in the table —
+  // into a block. The summary comment names a commit, so it is not
+  // unclassifiable; it carries no finding, so there is nothing to bind.
+  const result = await evaluateGate({
+    issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+  assert.ok(result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`));
+});
+
+test("only an assertion makes a finding stale, never a link", async () => {
+  // An artifact that STATES an older commit is stale evidence, which is the
+  // pre-existing rule for reviews and is untouched: `Reviewed commit:` and
+  // commit_id are assertions about what was reviewed.
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const stated = await evaluateGate({
+    issueComments: [summary],
+    reviews: [codexReview(OTHER_SHA, "P1: a finding about the previous head", "2026-07-09T01:19:00Z")],
+  });
+  assert.equal(stated.shouldMerge, true, `blocked on: ${stated.reasons.join("; ")}`);
+
+  // The same finding, said only in permalinks to that older head, is NOT stale:
+  // a link cannot be shown to be the finding's own location, so it places
+  // nothing. The cost is one acknowledgement naming the artifact — the discipline
+  // inline findings already have, where pushing a fix clears nothing by itself.
+  const linked = await evaluateGate({
+    issueComments: [
+      codexIssueCommentFinding(OTHER_SHA, { timestamp: "2026-07-09T01:19:00Z" }),
+      summary,
+    ],
+  });
+  assert.equal(linked.shouldMerge, false, "a link to an older head classifies nothing");
+  assert.ok(
+    linked.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${linked.reasons.join("; ")}`,
+  );
+});
+
+test("a supporting commit link does not place a finding", async () => {
+  // Codex P1 on #3676, filed twice: nothing in a body distinguishes the link
+  // that is the finding's own location from one cited as supporting context, so
+  // a link can never make an artifact STALE. Placing by "any commit this PR had"
+  // closed the foreign-commit half and left this one open — a finding whose
+  // location links are branch-based, citing an earlier commit of this same PR,
+  // was placed, bound to no head, and dropped: the shape #3656 merged past.
+  const earlier = "9f2c1a4e77d0b3856ac21e0f4b9d6c8a13e57f20";
+  const citing = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+    citing: earlier,
+  });
+  // The premise, asserted rather than assumed: the body names that commit, and
+  // it is not this head's.
+  assert.deepEqual([...__test.parseBodyCommits(citing.body)], [earlier]);
+  assert.equal(__test.codexArtifactBindsToHead(citing, HEAD_SHA), false);
+
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+
+  // …and it blocks whether or not that commit is one this PR had. Neither answer
+  // to "was this commit ever in the PR" makes the LINK the finding's location.
+  for (const label of ["a commit this PR never had", "an earlier commit of this PR"]) {
+    const result = await evaluateGate({ issueComments: [citing, summary] });
+    assert.equal(result.shouldMerge, false, `dropped on ${label}`);
+    assert.ok(
+      result.reasons.some((reason) => reason.includes("name no commit")),
+      `got: ${result.reasons.join("; ")}`,
+    );
+  }
+});
+
+test("a quoted Reviewed-commit footer does not classify the artifact quoting it", async () => {
+  // Codex P1 on #3676: REVIEWED_COMMIT_RE is unanchored, so a finding that
+  // QUOTES another artifact's footer — which reviewing this very parser produces
+  // — claimed that artifact's revision as its own. Naming a commit that is not
+  // the head made it stale by its own quotation: out of headBoundArtifacts, out
+  // of the unbound set, dropped.
+  const quoting = {
+    id: 606060,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-606060",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "### 💡 Codex Review",
+      "",
+      "P1: the footer match is unanchored, so this very comment claims a commit:",
+      "",
+      "```",
+      `**Reviewed commit:** \`${OTHER_SHA.slice(0, 10)}\``,
+      "```",
+    ].join("\n"),
+    created_at: "2026-07-09T01:20:00Z",
+    updated_at: "2026-07-09T01:20:00Z",
+  };
+  // The premise, asserted rather than assumed: the quoted footer really does
+  // parse, and really does name something other than this head.
+  assert.equal(__test.parseReviewedCommit(quoting.body), OTHER_SHA.slice(0, 10));
+  assert.equal(__test.codexArtifactBindsToHead(quoting, HEAD_SHA), false);
+
+  const result = await evaluateGate({
+    issueComments: [
+      quoting,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "a quotation is not a statement about this artifact");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a tie for newest bound artifact is broken toward the finding", async () => {
+  // Codex P1 on #3676: the sort is by timestamp alone and is stable, so two
+  // artifacts stamped in the same whole second keep their API order. With the
+  // clean one first, a finding for this head sitting beside it was never
+  // inspected. Whole-second collisions are ordinary — #3656's finding and its
+  // summary rewrite were one second apart.
+  const tied = "2026-07-09T01:20:00Z";
+  const cleanFirst = await evaluateGate({
+    issueComments: [
+      // Clean, and first in API order.
+      codexVerdict(HEAD_SHA, tied),
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: tied }),
+      codexSummaryTable(HEAD_SHA, { rowTime: tied, commentTime: "2026-07-09T01:20:06Z" }),
+    ],
+  });
+  assert.equal(cleanFirst.shouldMerge, false, "a tie is not evidence the clean artifact came later");
+  assert.ok(
+    cleanFirst.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${cleanFirst.reasons.join("; ")}`,
+  );
+
+  // …and a genuinely newer clean verdict still supersedes, so this does not turn
+  // every answered finding into a permanent block.
+  const newerClean = await evaluateGate({
+    issueComments: [
+      codexVerdict(HEAD_SHA, "2026-07-09T01:21:00Z"),
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: tied }),
+      codexSummaryTable(HEAD_SHA, { rowTime: tied, commentTime: "2026-07-09T01:20:06Z" }),
+    ],
+  });
+  assert.equal(newerClean.shouldMerge, true, `blocked on: ${newerClean.reasons.join("; ")}`);
+});
+
+test("an unclassifiable finding clears only by an answer that names it", async () => {
+  // The block has to terminate, and nothing mechanical can end this one: no push
+  // changes the fact that the artifact names no commit, and there is no thread to
+  // reply on. So the exit is explicit — an allowed author answers it on the PR —
+  // and the answer must NAME the artifact.
+  //
+  // Maintainer review on #3676: a marker alone is not an answer. Lanes post
+  // top-level round comments like "head moved to <sha>, findings RESOLVED
+  // in-thread", written about that round's INLINE findings, and one of those
+  // would silently clear an unbound artifact nobody read — reopening the hole
+  // through its own exit.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const anchor = `#issuecomment-${stripped.id}`;
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const clears = async (comment) =>
+    (await evaluateGate({ issueComments: [stripped, summary, comment] })).shouldMerge;
+
+  // The lane round comment, verbatim in shape: allowed author, later, carries
+  // RESOLVED, and is about something else entirely.
+  assert.equal(
+    await clears(
+      prComment(
+        "sachiniyer",
+        `head moved to ${OTHER_SHA.slice(0, 7)}, findings RESOLVED in-thread — @codex review`,
+      ),
+    ),
+    false,
+    "a round comment about other findings is not an answer to this artifact",
+  );
+  assert.equal(
+    await clears(prComment("outside-contributor", `ACCEPTED — ignore ${anchor}.`)),
+    false,
+    "only an allowed author's answer counts",
+  );
+  assert.equal(
+    await clears(prComment("sachiniyer", `Looking at ${anchor} now.`)),
+    false,
+    "naming it without a marker is discussion, not an answer",
+  );
+  assert.equal(
+    await clears(
+      prComment("sachiniyer", `All eight read — [gate-ack] ${anchor}.`, "2026-07-09T01:19:00Z"),
+    ),
+    false,
+    "an answer cannot precede the finding it answers",
+  );
+
+  // …and the two spellings that DO clear it: the anchor, and the full permalink
+  // GitHub's own "Copy link" produces.
+  assert.equal(
+    await clears(prComment("sachiniyer", `All eight read — [gate-ack] ${anchor}.`)),
+    true,
+    "the anchor names the artifact",
+  );
+  assert.equal(
+    await clears(
+      prComment("sachiniyer", `Read every one of these: ${stripped.html_url} — ACCEPTED.`),
+    ),
+    true,
+    "so does the permalink it ends in",
+  );
+});
+
+test("an answer to a longer id does not clear the artifact whose id it prefixes", async () => {
+  // Both reference forms END in the numeric id, so a plain substring test would
+  // let an answer to `#issuecomment-1234` also clear `#issuecomment-123` — a
+  // fail-open in the exit of a rule that exists to close one.
+  const shortId = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    id: 123,
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+
+  const neighbour = await evaluateGate({
+    issueComments: [
+      shortId,
+      summary,
+      prComment("sachiniyer", "Read #issuecomment-1234 — [gate-ack]."),
+    ],
+  });
+  assert.equal(neighbour.shouldMerge, false, "an answer to a different comment is not an answer");
+
+  const itself = await evaluateGate({
+    issueComments: [
+      shortId,
+      summary,
+      prComment("sachiniyer", "Read #issuecomment-123 — [gate-ack]."),
+    ],
+  });
+  assert.equal(itself.shouldMerge, true, `blocked on: ${itself.reasons.join("; ")}`);
+
+  const { bodyNamesReference } = __test;
+  assert.equal(bodyNamesReference("see #issuecomment-1234 — ACCEPTED", "#issuecomment-123"), false);
+  assert.equal(bodyNamesReference("see #issuecomment-123 — ACCEPTED", "#issuecomment-123"), true);
+  // A permalink is full of regex metacharacters, so the escape is load-bearing:
+  // an unescaped `.` would make a lookalike host match a real one.
+  assert.equal(
+    bodyNamesReference(
+      "see https://githubxcom/sachiniyer/agent-factory/pull/1465#issuecomment-123 — ACCEPTED",
+      "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-123",
+    ),
+    false,
+  );
+});
+
+test("a RESOLVED answer owes a commit; ACCEPTED and gate-ack do not", async () => {
+  // Codex P1 on #3676: RESOLVED claims a code change was MADE, and a fix for a
+  // finding filed at T cannot exist in a commit made before T (#2878). The
+  // unbound path accepted it on recency alone, so "RESOLVED <link>" posted
+  // before the fix merged the unchanged head — the premature merge
+  // unpushedFixClaims already prevents for inline findings.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const anchor = `#issuecomment-${stripped.id}`;
+  const withHead = (headCommittedDate, comment) => ({
+    headCommittedDate,
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:23:00Z",
+        commentTime: "2026-07-09T01:23:00Z",
+      }),
+      comment,
+    ],
+  });
+  const claim = prComment("sachiniyer", `Fixed — RESOLVED ${anchor}.`, "2026-07-09T01:24:00Z");
+
+  // Head predates the finding: the commit cannot contain the fix it claims.
+  const unpushed = await evaluateGate(withHead("2026-07-09T01:00:00Z", claim));
+  assert.equal(unpushed.shouldMerge, false, "a fix claim the head cannot contain is not an answer");
+
+  // A commit landed after the finding, so the claim is at least possible.
+  const pushed = await evaluateGate(withHead("2026-07-09T01:22:00Z", claim));
+  assert.equal(pushed.shouldMerge, true, `blocked on: ${pushed.reasons.join("; ")}`);
+
+  // …and the claims that owe no commit are unaffected by the head's age.
+  for (const body of [`Not a defect — ACCEPTED ${anchor}.`, `Read it — [gate-ack] ${anchor}.`]) {
+    const noChange = await evaluateGate(
+      withHead("2026-07-09T01:00:00Z", prComment("sachiniyer", body, "2026-07-09T01:24:00Z")),
+    );
+    assert.equal(noChange.shouldMerge, true, `blocked on: ${noChange.reasons.join("; ")}`);
+  }
+});
+
+test("a finding that quotes the summary table is not thereby named to a commit", async () => {
+  // Codex P1 on #3676: parseSummaryRows accepts the marker ANYWHERE in a body, so
+  // reading summary cells here let a finding artifact that merely QUOTES this
+  // script's table — which reviewing this very file produces — count as naming a
+  // commit. It bound to no head and was dropped: the exact fail-open the rule
+  // exists to close. Genuine summaries never reach that test; the caller excludes
+  // them first, on the LEADING marker.
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const marker = summary.body.split("\n")[0];
+  const quoting = {
+    id: 4242,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-4242",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "### 💡 Codex Review",
+      "",
+      "P1: the marker test has to be anchored, or this body classifies itself:",
+      "",
+      // Fenced, the way a review quotes code — so the table lines start with `|`
+      // and parseSummaryRows really does read them. Blockquoting them instead
+      // would make this test pass without exercising the defect at all.
+      "```",
+      marker,
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ✅ **Completed** | \`${HEAD_SHA.slice(0, 7)}\` | New commits |`,
+      "```",
+    ].join("\n"),
+    created_at: "2026-07-09T01:20:00Z",
+    updated_at: "2026-07-09T01:20:00Z",
+  };
+  assert.equal(__test.isCodexSummaryArtifact(quoting), false, "the marker is quoted, not leading");
+  assert.equal(__test.codexArtifactBindsToHead(quoting, HEAD_SHA), false, "…and it binds to nothing");
+  // The premise of the defect, asserted rather than assumed: the quoted rows DO
+  // parse as summary rows naming a commit. Without this the test would go green
+  // on a body whose table was never read.
+  const rows = __test.parseSummaryRows(quoting.body);
+  assert.equal(rows.length, 1, "the quoted table must actually parse");
+  assert.equal(rows[0].commit, HEAD_SHA.slice(0, 7));
+
+  const result = await evaluateGate({ issueComments: [quoting, summary] });
+
+  assert.equal(result.shouldMerge, false, "an artifact that binds to nothing is not clean");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("an answer in the same second as the finding still answers it", async () => {
+  // Codex P2 on #3676: GitHub serialises two events into one whole second often
+  // enough that a bot answering immediately was rejected, leaving the finding
+  // stuck until someone reposted a second later. Equality is safe here precisely
+  // because an answer must name the artifact's server-generated id, which does
+  // not exist until the artifact does.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const result = await evaluateGate({
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+      prComment(
+        "app-detail-app[bot]",
+        `Read it — [gate-ack] #issuecomment-${stripped.id}.`,
+        "2026-07-09T01:20:00Z",
+      ),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+test("an artifact is referenced by its permalink or the anchor it ends in", () => {
+  const { artifactReferences } = __test;
+  const finding = codexIssueCommentFinding(HEAD_SHA);
+  assert.deepEqual(artifactReferences(finding), [finding.html_url, `#issuecomment-${finding.id}`]);
+
+  // A review spells its anchor differently, so the anchor is read OFF the URL
+  // rather than assembled from a guessed kind — assembling `#issuecomment-` for
+  // a review would make a real answer unrecognisable.
+  assert.deepEqual(
+    artifactReferences({
+      id: 77,
+      html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#pullrequestreview-77",
+    }),
+    [
+      "https://github.com/sachiniyer/agent-factory/pull/1465#pullrequestreview-77",
+      "#pullrequestreview-77",
+    ],
+  );
+
+  // Only with no URL at all does it fall back to both spellings of the id.
+  assert.deepEqual(artifactReferences({ id: 77 }), ["#issuecomment-77", "#pullrequestreview-77"]);
+  assert.deepEqual(artifactReferences({}), []);
+});
+
+test("only a URL-form commit binds an artifact body to a head", () => {
+  const { parseBodyCommits, codexArtifactBindsToHead, isCodexSummaryArtifact } = __test;
+
+  // The summary table names the head in a backticked CELL. Reading that as a
+  // binding would make the summary comment the newest finding-capable artifact
+  // and clear the finding beside it — the #3606 rule, now load-bearing for a
+  // second reason.
+  const summary = codexSummaryTable(HEAD_SHA);
+  assert.equal(parseBodyCommits(summary.body).size, 0, "a backticked short SHA is not a binding");
+  assert.equal(codexArtifactBindsToHead(summary, HEAD_SHA), false);
+  assert.equal(isCodexSummaryArtifact(summary), true);
+
+  // …and a body that merely QUOTES the marker is not the summary comment. This
+  // gate script holds that marker as a string literal, so a Codex review OF this
+  // file quotes it; exempting such a body would drop its findings.
+  const marker = summary.body.split("\n")[0];
+  const quoting = {
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "Codex Review",
+      "",
+      "P1: the exemption must not key on `includes`:",
+      "",
+      `> ${marker}`,
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ✅ **Completed** | \`${HEAD_SHA.slice(0, 7)}\` | New commits |`,
+    ].join("\n"),
+    commit_id: HEAD_SHA,
+    submitted_at: "2026-07-09T01:20:00Z",
+  };
+  assert.equal(isCodexSummaryArtifact(quoting), false, "quoting the marker is not carrying it");
+  assert.equal(codexArtifactBindsToHead(quoting, HEAD_SHA), true, "…so its finding is inspected");
+
+  // The permalink form binds, and only to the head it names.
+  const finding = codexIssueCommentFinding(HEAD_SHA);
+  assert.deepEqual([...parseBodyCommits(finding.body)], [HEAD_SHA]);
+  assert.equal(codexArtifactBindsToHead(finding, HEAD_SHA), true);
+  assert.equal(codexArtifactBindsToHead(finding, OTHER_SHA), false);
+  // Nothing read out of a BODY states the reviewed revision (Codex P1, twice):
+  // not a permalink, because prose cites commits for any purpose, and not the
+  // `Reviewed commit:` footer, because REVIEWED_COMMIT_RE is unanchored and an
+  // artifact quoting another's footer would claim that revision as its own.
+  // Only GitHub's commit_id, which a body cannot forge.
+  assert.equal(__test.codexArtifactStatesItsCommit(finding), false, "a link is not a statement");
+  assert.equal(
+    __test.codexArtifactStatesItsCommit(codexVerdict(HEAD_SHA)),
+    false,
+    "an issue comment's own footer is still only prose",
+  );
+  assert.equal(__test.codexArtifactStatesItsCommit({ commit_id: HEAD_SHA, body: "P1" }), true);
+});
+
 test("a row whose cell prefixes a different commit does not match this head", () => {
   // The commit cell is matched as a prefix of the head, with no lookup: the head
   // SHA is already known, so there is nothing to resolve. What keeps a stale row
@@ -2210,6 +2761,206 @@ test("an unknown head timestamp never degrades the gate", async () => {
   assert.match(result.summary, /^BLOCKED:/);
 });
 
+// #3380. `committedDate` is a property of the COMMIT OBJECT, not of when that
+// SHA became this PR's head. A rebase, an amend, or a reset to an older commit
+// sets it arbitrarily, and a rewind moves it BACKWARDS — so artifacts that
+// predate the head transition start looking newer than the head. The two rules
+// below ask a TRANSITION question ("was this produced for the current head
+// state?"), so they anchor on when the head became current, not on when its
+// commit was written.
+test("a verdict that predates the force-push that made this head current is stale", async () => {
+  const result = await evaluateGate({
+    // The rewind: head is an OLD commit, put back in place at 02:00.
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.shouldMerge, false, "a verdict from before the rewind is not about this head");
+  assert.match(
+    result.reasons.join("\n"),
+    /Codex verdict for the head commit is older than the head/,
+  );
+});
+
+test("a usage-limit response that predates the force-push to this head is stale evidence", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexRateLimit("2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "evidence from before the rewind is not evidence");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /predates this head/);
+});
+
+// The sibling case the force-push framing misses: a PR opened from a branch
+// whose head commit was written long before, where there is no force-push event
+// at all. No real verdict can predate the PR itself, so the floor cannot cause a
+// false block — and without it the same stale-verdict hole stays open.
+test("the PR's own creation time floors the anchor when nothing was force-pushed", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    prCreatedAt: "2026-07-09T02:00:00Z",
+    headForcePushes: [],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.shouldMerge, false, "no artifact can predate the PR and still be about it");
+});
+
+// Latest matching wins, and only matching counts. A branch pushed to X, moved
+// away to Y, then rewound back to X carries two events for X; the anchor is the
+// one that made X current NOW, not the one that first put it there.
+test("the anchor is the latest force-push that landed on this head, not the first", async () => {
+  const rewound = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [
+      { createdAt: "2026-07-09T01:10:00Z", afterCommit: { oid: HEAD_SHA } },
+      { createdAt: "2026-07-09T01:30:00Z", afterCommit: { oid: OTHER_SHA } },
+      { createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } },
+    ],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(rewound.shouldMerge, false, "the first arrival of this head is not when it became current");
+
+  // …and a push that landed on some OTHER sha says nothing about this head, so
+  // it must not be folded into the anchor: taking the max over every event
+  // regardless of target would block this verdict too.
+  const otherHead = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [
+      { createdAt: "2026-07-09T01:10:00Z", afterCommit: { oid: HEAD_SHA } },
+      { createdAt: "2026-07-09T03:00:00Z", afterCommit: { oid: OTHER_SHA } },
+    ],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(otherHead.shouldMerge, true, `blocked on: ${otherHead.reasons.join("; ")}`);
+});
+
+// Fails closed on an unknown order, like every other timestamp comparison in
+// this file: an anchor that cannot be computed is not a permissive one.
+test("an unparseable force-push timestamp on this head blocks rather than being skipped", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "not a date", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.shouldMerge, false, "an unknown transition time is not a proven one");
+  assert.match(result.reasons.join("\n"), /freshness cannot be verified/);
+});
+
+test("headCurrentSinceTime takes the max of the commit, the PR and the matching pushes", () => {
+  const { headCurrentSinceTime } = __test;
+  const at = (value) => Date.parse(value);
+
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+      headSha: HEAD_SHA,
+    }),
+    at("2026-07-09T02:00:00Z"),
+  );
+
+  // The commit is the latest of the three — the ordinary case, where this
+  // returns exactly what the old anchor did.
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T03:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } }],
+      headSha: HEAD_SHA,
+    }),
+    at("2026-07-09T03:00:00Z"),
+  );
+
+  // An event whose commit is gone (GitHub nulls `afterCommit` once it is
+  // garbage-collected) cannot be the event that set a head that still exists,
+  // so it is skipped rather than treated as unparseable.
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "2026-07-09T02:00:00Z", afterCommit: null }],
+      headSha: HEAD_SHA,
+    }),
+    at("2026-07-09T01:00:00Z"),
+  );
+
+  for (const broken of [
+    { lastCommitDate: null, prCreatedAt: "2026-07-09T00:00:00Z", headForcePushes: [] },
+    { lastCommitDate: "2026-07-09T01:00:00Z", prCreatedAt: undefined, headForcePushes: [] },
+    {
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [{ createdAt: "", afterCommit: { oid: HEAD_SHA } }],
+    },
+  ]) {
+    assert.equal(headCurrentSinceTime({ ...broken, headSha: HEAD_SHA }), null);
+  }
+
+  // No usable head sha means no event can be matched to it, and "matched
+  // nothing" would silently read as "never force-pushed".
+  assert.equal(
+    headCurrentSinceTime({
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+      headForcePushes: [],
+      headSha: "not-a-sha",
+    }),
+    null,
+  );
+});
+
+// The #2878 rule asks a CONTENT question — "could this commit contain the
+// claimed fix?" — and its answer is a property of when the commit was MADE, not
+// of when it became head. Anchoring it on the transition would re-open #2878:
+// a force-push at 01:30 back to a commit written at 01:00 would read as "a
+// commit landed after the finding" and clear a claim the head provably cannot
+// contain.
+test("a rewind does not clear an inline RESOLVED claim the head cannot contain", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T01:30:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T02:00:00Z")],
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — fixed." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /marked RESOLVED with no commit pushed/);
+});
+
+test("a rewind does not clear an unbound artifact's RESOLVED claim either", async () => {
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:15:00Z",
+  });
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [{ createdAt: "2026-07-09T01:30:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T02:00:00Z",
+        commentTime: "2026-07-09T02:00:00Z",
+      }),
+      prComment("sachiniyer", `Fixed — RESOLVED #issuecomment-${stripped.id}.`, "2026-07-09T01:20:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "the head still cannot contain the claimed fix");
+});
+
 // Degrading waives exactly one requirement: the verdict that cannot arrive.
 // Every other gate is independent of the reviewer, and manualMergeRequired
 // makes the decision pass, so waiving them together would let "the reviewer is
@@ -2225,6 +2976,63 @@ test("a usage-limited reviewer does not waive an unrelated blocker", async () =>
   assert.match(result.summary, /^BLOCKED:/);
   assert.match(result.reasons.join("\n"), /missing the play-tested label/);
   assert.match(result.reasons.join("\n"), /usage-limited/);
+});
+
+// The TUI path gate asks whether a user could SEE the change, and answered it by
+// prefix alone — so a diff whose only file under app/, ui/ or session/tmux/ was
+// a `_test.go` file demanded a play-test of nothing (#3607). #3601 paid for one.
+test("a test-only change under a TUI prefix does not demand the play-tested label", async () => {
+  const result = await evaluateGate({
+    files: ["ui/config_pane_test.go", "session/tmux/pty_test.go", "app/app_test.go"],
+  });
+
+  assert.doesNotMatch(
+    result.reasons.join("\n"),
+    /play-tested/,
+    "a Go test file is not compiled into the binary, so it changes nothing a play-test could see",
+  );
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
+});
+
+// The subtraction is per FILE. Excluding tests must not exempt a PR that merely
+// contains one, which is how "skip the gate when any test file is present" would
+// read — the same diff with one production file in it is still a visible change.
+test("a TUI change shipped alongside its test still demands the play-tested label", async () => {
+  const result = await evaluateGate({
+    files: ["ui/config_pane.go", "ui/config_pane_test.go"],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+// Renaming a production file INTO a test file removes it from the shipped
+// binary, which is a visible change spelled as one `_test.go` path. The gate
+// only ever saw the API's `filename`, so the subtraction above read the rename
+// as a test-only diff; the old path is now listed too, and it is the one that
+// still demands the label.
+test("renaming a TUI production file into a test file still demands the label", async () => {
+  const result = await evaluateGate({
+    files: [{ filename: "ui/config_pane_test.go", previous_filename: "ui/config_pane.go", status: "renamed" }],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+// …and the reverse rename is still test-only: a test file moving to another test
+// path adds no production code, so neither of its two paths demands a play-test.
+test("renaming one test file to another stays outside the TUI gate", async () => {
+  const result = await evaluateGate({
+    files: [{ filename: "ui/pane_test.go", previous_filename: "ui/config_pane_test.go", status: "renamed" }],
+  });
+
+  assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
 });
 
 test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
@@ -2318,12 +3126,64 @@ test("a clean exact-head verdict cannot override live Codex findings", async () 
   assert.match(result.reasons.join("\n"), /1 unresolved live Codex inline finding/);
 });
 
-test("a stale Codex finding with a null line does not block", async () => {
+// #3669's exact shape: Codex raised a wrong docs sentence inline, a later push
+// moved the line, and the gate read the outdated thread as clear and merged it
+// unanswered — twice (#3687, #3688). A thread's location says nothing about
+// whether its finding was addressed, so it is not part of the live test (#3689).
+test("an outdated Codex finding nobody answered still blocks", async () => {
   const result = await evaluateGate({
-    reviewComments: [codexFinding({ id: 10, line: null })],
+    reviewComments: [outdatedCodexFinding({ id: 10 })],
   });
 
-  assert.equal(result.shouldMerge, true);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /1 unresolved live Codex inline finding/);
+});
+
+test("a threaded ACCEPTED clears an outdated finding", async () => {
+  const result = await evaluateGate({
+    reviewComments: [
+      outdatedCodexFinding({ id: 10 }),
+      // A reply on an outdated thread is outdated too: `line` is null on both.
+      findingReply({ id: 11, inReplyToId: 10, body: "ACCEPTED — the sentence is right.", line: null }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+// The happy path this rule has to leave alone: the lane answered the thread, and
+// the push that carried the fix is what outdated it. Blocking here would make
+// every correctly handled finding un-mergeable.
+test("an outdated finding answered before the push that outdated it passes", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:18:00Z",
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+    reviewComments: [
+      outdatedCodexFinding({ id: 10, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — reworded.", line: null }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+// A thread whose line still resolves is unaffected in either direction: it
+// blocked unanswered before this change and it still does, and a marker still
+// clears it.
+test("a non-outdated finding behaves exactly as it did", async () => {
+  const unanswered = await evaluateGate({
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+  assert.equal(unanswered.shouldMerge, false);
+  assert.match(unanswered.reasons.join("\n"), /1 unresolved live Codex inline finding/);
+
+  const answered = await evaluateGate({
+    reviewComments: [
+      codexFinding({ id: 10, line: 32 }),
+      findingReply({ id: 11, inReplyToId: 10, body: "ACCEPTED — intentional." }),
+    ],
+  });
+  assert.equal(answered.shouldMerge, true, answered.reasons.join("\n"));
 });
 
 test("an allowed author resolves a live finding only with an explicit marker", async () => {
@@ -3007,6 +3867,169 @@ test("the master-verify list names every workflow that gates master on push", ()
   }
 });
 
+test("every workflow is spelled the way the scans above read it", () => {
+  // #3617. The conformance half of the arrangement: the scans above stay lexical
+  // and this makes their assumptions TRUE, rather than each of them growing a
+  // regex per valid YAML spelling — a series #3550 established has no end.
+  //
+  // What it protects is not the workflow, which GitHub runs either way. It is
+  // the reading: `if : …` is skipped before `consultsEvent()` sees it, a quoted
+  // `"required": true` slips past the dispatch-contract check, a flow-style job
+  // hides every key it contains, a trailing comment on an `if:` line becomes
+  // part of the expression `topLevelDisjuncts()` splits, and a `push` token in
+  // an input's `options:` list keeps answering "this workflow gates master"
+  // after the real trigger is gone. Every one of those is silent.
+  const workflowDir = path.join(__dirname, "..", "workflows");
+  const workflowFiles = fs
+    .readdirSync(workflowDir)
+    .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+  assert.ok(workflowFiles.length > 0, "no workflow files were found, so this test proved nothing");
+
+  const violations = [];
+  for (const name of workflowFiles) {
+    const text = fs.readFileSync(path.join(workflowDir, name), "utf8");
+    for (const { number, source, reason } of nonCanonicalSpellings(text)) {
+      violations.push(`${name}:${number}: ${reason}\n    ${source.trim()}`);
+    }
+    for (const { number, source } of misplacedEventTokens(onSection(text))) {
+      violations.push(
+        `${name}: a push/workflow_dispatch token under \`on:\` outside an event position\n    ${source.trim()}` +
+          ` (line ${number} of the trigger section)`,
+      );
+    }
+  }
+
+  assert.deepEqual(
+    violations,
+    [],
+    "a workflow uses a spelling the lexical scans in this file cannot read, so it is silently " +
+      "unscanned while they stay green. Rewrite the line in the canonical form — `key: value`, " +
+      "unquoted keys, lowercase booleans, block mappings, no comment on an `if:` line, and no " +
+      "push/workflow_dispatch token under `on:` outside an event key or shorthand entry — or, if " +
+      "the spelling has to stay, teach the scan to read it and relax the rule here in the same " +
+      `change:\n\n${violations.join("\n")}\n`,
+  );
+});
+
+test("the conformance scan detects each spelling it claims to", () => {
+  // A conformance test passes by finding NOTHING, so a detector that has stopped
+  // detecting is indistinguishable from a clean tree — it would go green on the
+  // day it broke and stay green forever after. Every spelling is asserted
+  // against a synthetic workflow here, and every canonical form asserted clean,
+  // so the green above means "no such spelling" rather than "no scan".
+  const reasons = (text) => nonCanonicalSpellings(text).map((finding) => finding.reason);
+  const input = (property) => `on:\n  workflow_dispatch:\n    inputs:\n      token:\n        ${property}\n`;
+
+  // The spellings #3550's review rounds found in the scans themselves.
+  assert.deepEqual(reasons("jobs:\n  gate:\n    if : github.event_name == 'push'\n"), [
+    "a key with whitespace before its colon",
+  ]);
+  assert.deepEqual(reasons(input("required : true")), ["a key with whitespace before its colon"]);
+  assert.deepEqual(reasons(input('"required": true')), ["a quoted key"]);
+  assert.deepEqual(reasons(input("required: TRUE")), ["a non-lowercase boolean (`TRUE`)"]);
+  assert.deepEqual(reasons("on:\n  workflow_dispatch:\n    inputs: { token: { required: true } }\n"), [
+    "a flow-style mapping",
+  ]);
+  assert.deepEqual(reasons("jobs:\n  gate:\n    steps: [{ if: github.event_name == 'push' }]\n"), [
+    "a flow sequence with a non-scalar entry",
+  ]);
+  assert.deepEqual(
+    reasons("jobs:\n  gate:\n    if: github.event_name == 'push' # || github.event_name == 'workflow_dispatch'\n"),
+    ["a comment on the same line as an `if:` expression"],
+  );
+
+  // …and the ones the ban-list version of this scan still let through, each of
+  // which is why it is now a shape rather than a list. A quoted key INSIDE a
+  // flow mapping matched no anchored `^key:` and no `{…key:` sniff; an anchor
+  // put `&must_supply true` where an exact-boolean test read a string; an
+  // explicit key split the property across two lines with no `key:` on either;
+  // and `- if:` moved the condition past `/^\s*if:/` in the master-verify loop.
+  assert.deepEqual(reasons(input('hidden_required: { "required": true }')), ["a flow-style mapping"]);
+  assert.deepEqual(reasons(input("required: &must_supply true")), ["an anchored value"]);
+  assert.deepEqual(reasons(input("required: *must_supply")), ["an aliased value"]);
+  assert.deepEqual(reasons(input("required: !!bool true")), ["a tagged value"]);
+  assert.deepEqual(reasons("on:\n  workflow_dispatch:\n    inputs:\n      ? required\n      : true\n"), [
+    "an explicit mapping key (`? key` / `: value`)",
+    "an explicit mapping key (`? key` / `: value`)",
+  ]);
+  assert.deepEqual(reasons("jobs:\n  gate:\n    steps:\n      - if: github.event_name == 'push'\n"), [
+    "a sequence-prefixed `if:` key (lead the step with `- name:` instead)",
+  ]);
+  assert.deepEqual(reasons("on:\n  <<: *defaults\n  push:\n"), ["a merge key (`<<: *base`)"]);
+
+  // A COMPACT block scalar owns its body from the key's column, not the dash's.
+  // Measuring from the dash swallowed every later sibling of that key — so a
+  // step spelled `- run: |` could carry an unreadable `if :` below its script
+  // and this scan would report nothing at all, which is the silent direction.
+  assert.deepEqual(
+    reasons("jobs:\n  g:\n    steps:\n      - run: |\n          echo hi\n        if : github.event_name == 'push'\n"),
+    ["a key with whitespace before its colon"],
+    "a sibling key after a compact block scalar must still be scanned",
+  );
+
+  // A double-quoted scalar DECODES: `"pu\\u0073h"` is the token `push` to
+  // GitHub and to nothing here, so the workflow gates master while every scan
+  // reads it as one that does not.
+  assert.deepEqual(reasons('on: "pu\\u0073h"\njobs:\n'), ["an escaped double-quoted scalar"]);
+  assert.deepEqual(reasons('on: ["pu\\u0073h"]\njobs:\n'), ["an escaped double-quoted scalar"]);
+  assert.deepEqual(reasons('on:\n  - "pu\\u0073h"\njobs:\n'), ["an escaped double-quoted scalar"]);
+
+  // The canonical forms this repository is written in, and the two exemptions
+  // that keep the rules honest: a quoted `'true'` is a STRING in a choice input,
+  // and a block scalar's body is a program rather than YAML — `run: |` holds
+  // shell, and shell holds colons, braces, anchors and quoted keys.
+  for (const canonical of [
+    "on:\n  push:\n    branches: [master]\n  workflow_dispatch:\n",
+    "on:\n  push:\n    branches: [ master ]\n    paths:\n      - '**.go'\n      - 'go.mod'\n",
+    "on:\n  workflow_dispatch:\n    inputs:\n      dry_run:\n        type: boolean\n        default: false\n",
+    "on:\n  workflow_dispatch:\n    inputs:\n      mode:\n        options: [auto, 'true', 'false']\n",
+    "on:\n  workflow_run:\n    workflows: [PR Validation]\n    types: [completed]\n",
+    "jobs:\n  gate:\n    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'\n",
+    "jobs:\n  gate:\n    if: >-\n      always() &&\n      needs.a.outputs.b != ''\n",
+    "jobs:\n  gate:\n    name: Build & verify\n    steps:\n      - uses: actions/checkout@v6\n",
+    "jobs:\n  gate:\n    steps:\n      - name: Scope\n        run: ${{ steps.scope.outputs.run }}\n",
+    'jobs:\n  gate:\n    steps:\n      - run: |\n          jq \'{ "required": true }\' <<<"$x"\n          test a : b\n          echo "? explicit" && echo &pid\n',
+    "jobs:\n  gate:\n    steps:\n      - run: |\n          echo hi\n        if: github.event_name == 'workflow_dispatch'\n",
+    'jobs:\n  gate:\n    steps:\n      - name: Set up Go\n        with:\n          go-version: "1.25"\n',
+  ]) {
+    assert.deepEqual(reasons(canonical), [], `a canonical workflow must be clean: ${JSON.stringify(canonical)}`);
+  }
+
+  // The event-position rule, which is about WHERE a token is rather than how it
+  // is spelled, so it is asked of the trigger section separately.
+  const misplaced = (text) => misplacedEventTokens(onSection(text)).map((finding) => finding.source.trim());
+  assert.deepEqual(
+    misplaced("on:\n  workflow_dispatch:\n    inputs:\n      mode:\n        options: [push, dry-run]\n"),
+    ["options: [push, dry-run]"],
+    "a push token in an input's options keeps answering `gates master` after the trigger is removed",
+  );
+  assert.deepEqual(misplaced("on:\n  push:\n    paths:\n      - 'scripts/push-release.sh'\n"), [
+    "- 'scripts/push-release.sh'",
+  ]);
+  assert.deepEqual(
+    misplaced("on:\n  workflow_dispatch:\n    inputs:\n      push:\n        type: boolean\n"),
+    ["push:"],
+    "an INPUT named push is not an event key; only the direct child of `on:` is",
+  );
+  // Legitimate positions: event keys at the direct-child indent, and every
+  // shorthand form of the trigger list.
+  for (const canonical of [
+    "on:\n  push:\n    branches: [master]\n  workflow_dispatch:\n",
+    "on:\n    push:\n      branches: [master]\n    workflow_dispatch:\n",
+    "on: push\njobs:\n",
+    "on: 'push'\njobs:\n",
+    "on: [push, pull_request]\njobs:\n",
+    'on: ["push", "workflow_dispatch"]\njobs:\n',
+    "on:\n  - push\n  - workflow_dispatch\njobs:\n",
+  ]) {
+    assert.deepEqual(misplaced(canonical), [], `a canonical trigger must be clean: ${JSON.stringify(canonical)}`);
+  }
+  // A flow-style `on:` is not shorthand: it is a mapping, reported as one by the
+  // rule above, and its tokens are not in a position this scan can vouch for.
+  assert.deepEqual(misplaced('on: {"push": {"branches": ["master"]}}\njobs:\n'), [
+    'on: {"push": {"branches": ["master"]}}',
+  ]);
+});
 
 test("a NOT_FOUND for the PR's own node id is retried instead of throwing", async () => {
   // #3396: this is not retryable by status (404), so before this change it went
@@ -4503,9 +5526,25 @@ async function runApplyGateStep({
   return { notices, error };
 }
 
+// One entry of the pulls.listFiles response. A `files:` option is normally a
+// list of path strings, which becomes the plain shape the API returns for an
+// edit. A RENAME carries a second path — pass the object form
+// `{ filename, previous_filename, status: "renamed" }` to get it, rather than
+// echoing back whatever the caller asked for: the old path is exactly the field
+// the gate used to drop, so a fake that could not express it could not fail.
+function pullRequestFile(file) {
+  return typeof file === "string" ? { filename: file, status: "modified" } : { ...file };
+}
+
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
+  // When this PR was opened, and the HeadRefForcePushedEvent timeline. Together
+  // with the commit's own date these are what the head-transition anchor is
+  // built from (#3380); the defaults sit before every artifact time the suite
+  // uses, which is the real ordering — a PR exists before anything reviews it.
+  prCreatedAt = "2026-07-09T00:00:00Z",
+  headForcePushes = [],
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -4642,7 +5681,7 @@ function fakeGateGithub({
     };
   };
   const responses = new Map([
-    [listFiles, files.map((filename) => ({ filename }))],
+    [listFiles, files.map(pullRequestFile)],
     [listForRef, checkRuns],
     [listCommitStatusesForRef, statuses],
     [listComments, issueComments],
@@ -4820,8 +5859,12 @@ function fakeGateGithub({
                 ? { enabledAt: "2026-07-09T01:05:00Z" }
                 : null,
             labels: { nodes: [] },
+            createdAt: pullRequestOverride.prCreatedAt ?? prCreatedAt,
             commits: {
               nodes: [{ commit: { committedDate: headCommittedDate } }],
+            },
+            timelineItems: {
+              nodes: pullRequestOverride.headForcePushes ?? headForcePushes,
             },
           },
         },
@@ -4887,7 +5930,7 @@ function fakeGateGithub({
         return options.head ? siblingPullRequests : dependentPullRequests;
       }
       if (fn === listFiles && pullRequestOverride.files) {
-        return pullRequestOverride.files.map((filename) => ({ filename }));
+        return pullRequestOverride.files.map(pullRequestFile);
       }
       return responses.get(fn) || [];
     },
@@ -5132,6 +6175,282 @@ function mentionsPushTrigger(section) {
   return /(?:^|[\s[{,"'])push["']?\s*(?::|,|\]|\}|$)/m.test(triggers);
 }
 
+// ---------------------------------------------------------------------------
+// Workflow spelling conformance (#3617).
+//
+// Everything above reads these workflows lexically, and #3550's review found —
+// correctly, four separate times in its last two rounds — that valid YAML
+// escapes it: `if :`, `"required": true`, `required: TRUE`, a flow-style job
+// mapping, a trailing `# comment` on an `if:` line, and a `push` token sitting
+// in an input's `options:` list rather than in an event position. Each miss
+// leaves that workflow silently unscanned while the tests above stay green.
+//
+// The maintainer ACCEPTED all four rather than widening a sixth regex: the scan
+// is a tripwire over files THIS repository controls, it was never a YAML parser,
+// and making it one is an unbounded series. So the assumptions are enforced
+// instead. These helpers answer the opposite question — does any workflow use a
+// spelling the scan cannot read? — and the conformance test below fails naming
+// the file and the line. A non-canonical spelling is then loud at the moment it
+// is introduced, which is the direction that cannot cost master a silent gap.
+//
+// Being a tripwire too, its errors run the same way: a false positive is a
+// visible failure someone resolves by rewriting one line canonically, and every
+// rule is written to fail in that direction rather than to be clever.
+// ---------------------------------------------------------------------------
+
+function indentOf(line) {
+  return line.match(/^ */)[0].length;
+}
+
+// GitHub expression spans removed. `${{ fromJSON(…) }}` is not a flow mapping
+// and `${{ steps.x.outputs.y }}` carries no key; left in, every expression in
+// the repository reads as one.
+function withoutExpressions(line) {
+  return line.replace(/\$\{\{.*?\}\}/g, "");
+}
+
+// A workflow's YAML STRUCTURE lines, as [lineNumber, text] pairs. A block
+// scalar's body is arbitrary text — `run: |` holds shell, and shell holds
+// colons, braces and quoted keys — so scanning it for YAML spellings reports
+// the program rather than the workflow. Everything indented under a block-scalar
+// header is dropped; the header line itself stays, since it is a real key.
+function structuralLines(text) {
+  const rows = [];
+  let scalarIndent = null;
+  for (const [index, line] of text.split("\n").entries()) {
+    if (scalarIndent !== null) {
+      if (line.trim().length === 0 || indentOf(line) > scalarIndent) {
+        continue;
+      }
+      scalarIndent = null;
+    }
+    rows.push([index + 1, line]);
+    const header = /^(?<indent>[ \t]*)(?<dashes>(?:-[ \t]+)*)(?<key>[^\s#][^:]*:)?[ \t]*[|>][+-]?[0-9]*[ \t]*(?:#.*)?$/.exec(
+      line,
+    );
+    if (header) {
+      // A block scalar's body is indented past the node that OWNS it, and for a
+      // compact sequence entry that node is the key, not the dash: in
+      // `- run: |`, a later `if:` sibling of `run` sits between the dash column
+      // and the body, so measuring from the dash swallows a real key — silently,
+      // which is the one direction this whole test exists to prevent. A bare
+      // `- |` is the entry itself, so there the dash column is right.
+      scalarIndent = header.groups.indent.length + (header.groups.key ? header.groups.dashes.length : 0);
+    }
+  }
+  return rows;
+}
+
+// YAML node-type indicators that can open a VALUE, and what each one is. They
+// are a CLOSED set — which is the whole reason the rule below is written as "the
+// value must be a scalar" rather than as a list of spellings to ban.
+const NON_SCALAR_VALUES = {
+  "&": "an anchored value",
+  "*": "an aliased value",
+  "!": "a tagged value",
+  "{": "a flow-style mapping",
+};
+
+// Whether a VALUE is one the scans can read: a plain or quoted scalar, a flow
+// sequence of those, or a block-scalar header (whose body is a program, not
+// YAML, and is dropped by structuralLines above). Returns why it is not, or
+// null.
+function scalarFault(text) {
+  if (NON_SCALAR_VALUES[text[0]]) {
+    return NON_SCALAR_VALUES[text[0]];
+  }
+  // A DOUBLE-quoted scalar processes escapes, so `"pu\\u0073h"` is the token
+  // `push` to GitHub and is not the token `push` to anything here — the workflow
+  // gates master and every scan reads it as one that does not. Plain and
+  // single-quoted scalars do no such decoding, and every escape begins with a
+  // backslash, so the whole class is this one test.
+  if (/^"(?:[^"\\]|\\.)*"$/.test(text) && text.includes("\\")) {
+    return "an escaped double-quoted scalar";
+  }
+  return null;
+}
+
+function nonScalarValueFault(value) {
+  const text = value.trim();
+  if (text.length === 0 || /^[|>][+-]?[0-9]*$/.test(text)) {
+    return null;
+  }
+  if (!text.startsWith("[")) {
+    return scalarFault(text);
+  }
+  const sequence = /^\[(?<entries>.*)\]$/.exec(text);
+  if (!sequence) {
+    return "a flow sequence that does not close on its own line";
+  }
+  for (const entry of sequence.groups.entries.split(",")) {
+    const item = entry.trim();
+    if (item.length === 0) {
+      continue;
+    }
+    if (item.startsWith("[")) {
+      return "a flow sequence with a non-scalar entry";
+    }
+    const fault = scalarFault(item);
+    if (fault) {
+      return NON_SCALAR_VALUES[item[0]] ? "a flow sequence with a non-scalar entry" : fault;
+    }
+  }
+  return null;
+}
+
+// The canonical shape of a workflow line — optional sequence dashes, a BARE
+// key, a colon, a scalar value; or a scalar sequence entry. Returns the reason a
+// line is not that shape, or null.
+//
+// Stated POSITIVELY on purpose. The first version of this scan banned the six
+// spellings #3550 had already found, and one review round produced four more:
+// a quoted key INSIDE a flow mapping, `- if:`, `required: &must_supply true`,
+// and `? required` / `: true`. That is the same unbounded series the maintainer
+// ended on #3550, reappearing one level up — a ban list can always be escaped by
+// a spelling nobody has thought of yet, and each escape is silent. A shape can
+// only be MET. So the question asked here is "is this line the form the scans
+// assume?", which rejects every anchor, alias, tag, merge key, explicit key and
+// flow mapping there is, including the ones invented after this was written.
+function canonicalLineFault(line) {
+  const text = line.trim();
+  if (text.length === 0) {
+    return null;
+  }
+  // `? required` on one line and `: true` on the next resolve to the same
+  // property and leave no `key:` for any scan to anchor on.
+  if (/^\?(?:[ \t]|$)/.test(text) || /^:(?:[ \t]|$)/.test(text)) {
+    return "an explicit mapping key (`? key` / `: value`)";
+  }
+  const sequenceEntry = /^-(?:[ \t]|$)/.test(text);
+  const rest = text.replace(/^(?:-[ \t]+)*/, "").trim();
+  if (rest.length === 0) {
+    return null;
+  }
+  // A merge key splices another mapping in wholesale, so the keys the scans look
+  // for are not in the file at all. GitHub resolves it; nothing here can.
+  if (/^<<[ \t]*:/.test(rest)) {
+    return "a merge key (`<<: *base`)";
+  }
+  if (/^["'][^"']*["'][ \t]*:/.test(rest)) {
+    return "a quoted key";
+  }
+  if (/^[A-Za-z_][A-Za-z0-9_.-]*[ \t]+:/.test(rest)) {
+    return "a key with whitespace before its colon";
+  }
+  const mapping = /^(?<key>[A-Za-z_][A-Za-z0-9_.-]*):(?:[ \t]+(?<value>.*))?$/.exec(rest);
+  if (mapping) {
+    // `- if:` defeats `/^\s*if:/`, which is how the master-verify loop above
+    // finds the conditions it checks for dispatch admission. Steps in this
+    // repository lead with `- name:`, so the key never carries the dash.
+    if (mapping.groups.key === "if" && sequenceEntry) {
+      return "a sequence-prefixed `if:` key (lead the step with `- name:` instead)";
+    }
+    return nonScalarValueFault(mapping.groups.value || "");
+  }
+  if (sequenceEntry) {
+    return scalarFault(rest) || nonScalarValueFault(rest);
+  }
+  return "a line that is neither `key: value` nor a sequence entry";
+}
+
+// Every spelling in a workflow file that the scans above would read wrongly.
+// Each one is valid YAML that GitHub honours, so the workflow itself works —
+// what breaks is this suite's reading of it, silently, which is the failure mode
+// every one of these findings shared.
+function nonCanonicalSpellings(text) {
+  const findings = [];
+  for (const [number, source] of structuralLines(text)) {
+    const line = withoutExpressions(source);
+    // Comments are prose about workflows and routinely quote the very spellings
+    // being banned, so the shape rules read the line without them. The `if:`
+    // rule at the end is the one that needs them and takes the raw line.
+    const bare = withoutComments(line);
+    const reasons = [];
+
+    const fault = canonicalLineFault(bare);
+    if (fault) {
+      reasons.push(fault);
+    }
+
+    // A value spelling rather than a shape: `required: TRUE` is a boolean to
+    // YAML and not to `/required:\s*true\b/`, which is case-sensitive on
+    // purpose — matching either case would also match the STRING "True" in a
+    // choice input. Quoted values are exempt for the same reason: docs.yml's
+    // `options: [auto, 'true', 'false']` are strings by intent.
+    const property = /^[ \t]*(?:-[ \t]+)*[A-Za-z_][A-Za-z0-9_.-]*[ \t]*:[ \t]*(?<value>.*)$/.exec(bare);
+    const value = property ? property.groups.value.trim() : "";
+    if (/^(?:true|false)$/i.test(value) && !/^(?:true|false)$/.test(value)) {
+      reasons.push(`a non-lowercase boolean (\`${value}\`)`);
+    }
+
+    // `topLevelDisjuncts()` reads the raw scalar, so a trailing comment is part
+    // of the expression it splits: `if: … == 'push' # || … 'workflow_dispatch'`
+    // reads as admitting a dispatch that it does not admit. Only the header line
+    // can carry one — measured with a YAML parser: a `#` inside a BLOCK scalar
+    // is literal expression text, which the scan and YAML read identically, and
+    // a comment inside a plain multi-line scalar is a parse error.
+    if (/^\s*(?:-[ \t]+)*if[ \t]*:/.test(line) && /(?:^|\s)#/.test(line)) {
+      reasons.push("a comment on the same line as an `if:` expression");
+    }
+
+    for (const reason of reasons) {
+      findings.push({ number, source, reason });
+    }
+  }
+  return findings;
+}
+// Every `push` / `workflow_dispatch` token in a trigger section that is not in a
+// position the scan reads as an event. `mentionsPushTrigger()` matches the token
+// anywhere in the section and the dispatch check matches `workflow_dispatch:` at
+// any depth, so an input named `push`, a `paths:` glob containing it, or an
+// `options: [push, dry-run]` list is read as a trigger that is not declared —
+// and, worse, keeps reading as one after the real trigger is removed.
+//
+// Two positions are legitimate: an event KEY at the direct-child indent of
+// `on:`, and a SHORTHAND entry (`on: push`, `on: [push, …]`, `on:` with a
+// `- push` list under it). Everything else is reported.
+function misplacedEventTokens(section) {
+  if (section == null) {
+    return [];
+  }
+  const lines = withoutComments(section).split("\n");
+  const content = lines.slice(1).filter((line) => line.trim().length > 0);
+  // Read from the section rather than assumed. This repository indents `on:` by
+  // two; the scans above do not require that and neither does this.
+  const childIndent = content.length === 0 ? null : Math.min(...content.map(indentOf));
+  const misplaced = [];
+  for (const [index, source] of lines.entries()) {
+    let line = source;
+    if (index === 0) {
+      const shorthand = /^on[ \t]*:[ \t]*(?<value>.*)$/.exec(line);
+      if (shorthand && isPlainEventShorthand(shorthand.groups.value)) {
+        line = "on:";
+      }
+    } else if (indentOf(line) === childIndent) {
+      line = line
+        .replace(/^([ \t]*)(?:push|workflow_dispatch)[ \t]*:/, "$1:")
+        .replace(/^([ \t]*-[ \t]*)(?:push|workflow_dispatch)[ \t]*$/, "$1");
+    }
+    if (/\b(?:push|workflow_dispatch)\b/.test(line)) {
+      misplaced.push({ number: index + 1, source: source.trimEnd() });
+    }
+  }
+  return misplaced;
+}
+
+// Whether an `on:` value is the shorthand form: one plain event name, or a flow
+// sequence of them. `on: {"push": {…}}` is not — it is a flow mapping, reported
+// as one — and neither is anything carrying nested structure.
+function isPlainEventShorthand(value) {
+  const text = value.trim();
+  if (text.length === 0) {
+    return false;
+  }
+  const sequence = /^\[(?<entries>[^[\]{}]*)\]$/.exec(text);
+  const entries = sequence ? sequence.groups.entries.split(",") : [text];
+  return entries.every((entry) => /^[ \t]*(?:"[A-Za-z_]+"|'[A-Za-z_]+'|[A-Za-z_]+)[ \t]*$/.test(entry));
+}
+
 // The exact wire shape from Auto Gate run 32044471684: GET
 // /repos/:o/:r/pulls/3395/reviews answered HTTP 404 with a GraphQL NOT_FOUND
 // body naming the PR's OWN node id, during a wider GitHub degradation.
@@ -5281,6 +6600,71 @@ function codexSummaryTable(
   };
 }
 
+// Codex's OTHER finding artifact: an ISSUE COMMENT, captured from the real one
+// #3656 auto-merged past (comment 5514996957) with the commit substituted and
+// six of its eight P2 findings elided. Issue comments have no `commit_id` field
+// at all — not null, absent — and this shape emits no `Reviewed commit:` line,
+// so the only thing naming a head is the permalink on every finding (#3670).
+//
+// `ref` substitutes what those permalinks point at. A branch name is how the
+// SHA-stripped variant is built: the same body, naming no commit anywhere.
+function codexIssueCommentFinding(
+  sha,
+  { timestamp = "2026-07-09T01:20:00Z", ref = null, id = 5514996957, citing = null } = {},
+) {
+  const target = ref ?? sha;
+  const finding = (anchor, title, prose) =>
+    [
+      `https://github.com/sachiniyer/agent-factory/blob/${target}/docs/daemon-memory.md${anchor}`,
+      `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${title}**`,
+      "",
+      prose,
+    ].join("\n");
+  return {
+    id,
+    html_url: `https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-${id}`,
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "",
+      "### 💡 Codex Review",
+      "",
+      finding(
+        "#L145-L147",
+        "Include unscoped descendant process trees",
+        "When a plain-exec child forks, every descendant inherits the daemon cgroup unless it is explicitly moved.",
+      ),
+      "",
+      "---",
+      "",
+      finding(
+        "#L194",
+        "Stop labeling the file counter as page cache",
+        "The `file` counter also includes tmpfs/shared memory and dirty or writeback pages.",
+      ),
+      // A commit cited as supporting context, not as the finding's location —
+      // the shape that must not place the artifact.
+      ...(citing
+        ? [
+            "",
+            `Introduced in https://github.com/sachiniyer/agent-factory/commit/${citing}.`,
+          ]
+        : []),
+      "    ",
+      "",
+      "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+      "<br/>",
+      "",
+      "</details>",
+    ].join("\n"),
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
+function prComment(login, body, timestamp = "2026-07-09T01:25:00Z") {
+  return { user: { login }, body, created_at: timestamp, updated_at: timestamp };
+}
+
 function codexRateLimit(timestamp = "2026-07-09T01:20:00Z") {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
@@ -5294,27 +6678,38 @@ function codexReview(sha, summary = "Here are some suggestions.", timestamp = "2
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
     body: `### Codex Review\n\n${summary}\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
+    // A review always carries commit_id; a fake that omitted it would hide the
+    // difference between what GitHub asserts and what a body merely says.
+    commit_id: sha,
     submitted_at: timestamp,
   };
 }
 
-function codexFinding({ id, line, createdAt = "2026-07-09T01:15:00Z" }) {
+function codexFinding({ id, line, createdAt = "2026-07-09T01:15:00Z", body = "P1: this needs attention" }) {
   return {
     id,
     user: { login: "chatgpt-codex-connector[bot]" },
-    body: "P1: this needs attention",
+    body,
     created_at: createdAt,
     line,
   };
 }
 
-function findingReply({ id, inReplyToId, body }) {
+// A thread a later push OUTDATED, as GitHub reports it: `line` goes null while
+// `original_line` keeps where the finding was filed. The finding underneath is
+// untouched, and a rebase or a fix to the neighbouring line produces this shape
+// just as readily as the fix itself does (#3689).
+function outdatedCodexFinding({ id, createdAt = "2026-07-09T01:15:00Z", body = "P2: this needs attention" }) {
+  return { ...codexFinding({ id, line: null, createdAt, body }), original_line: 17 };
+}
+
+function findingReply({ id, inReplyToId, body, line = 32 }) {
   return {
     id,
     in_reply_to_id: inReplyToId,
     user: { login: "sachiniyer" },
     body,
     created_at: "2026-07-09T01:16:00Z",
-    line: 32,
+    line,
   };
 }

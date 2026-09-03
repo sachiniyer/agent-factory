@@ -157,9 +157,12 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 	return c.call("ResumeStatusPoll", req, &daemon.ResumeStatusPollResponse{})
 }
 
-// AddTask asks the daemon to append a task and re-arm its schedule set.
-func (c *Client) AddTask(t task.Task) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t}, &daemon.AddTaskResponse{})
+// AddTask asks the daemon to append a task and re-arm its schedule set. actor
+// names the calling surface for the task's audit trail (#3623) — the TUI reaches
+// the daemon over these same HTTP routes the web UI uses, so the transport alone
+// cannot tell them apart and each client says which it is.
+func (c *Client) AddTask(t task.Task, actor task.Actor) error {
+	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
@@ -172,12 +175,36 @@ func (c *Client) AddTask(t task.Task) error {
 // atomically with the write — see task.ProjectExpectation (#3230). It is a
 // required parameter, not an option: dropping it silently reopens the
 // stale-authorization race the CAS exists to close.
-func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+//
+// actor names the calling surface for the audit trail — see AddTask.
+func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
+}
+
+// ListTasks returns the daemon's task list, every record carrying both halves
+// of its schedule health: the derivation any reader can do, plus the LIVE
+// arming state only the process holding the scheduler can observe (#3623).
+//
+// It is a read for the arming half specifically. A caller that already reads
+// tasks.json itself — the TUI's automations rail does, every 750ms — keeps its
+// own repo-scoped records as the definition and adopts only the observation,
+// through task.ApplyLiveArming (#3626).
+func (c *Client) ListTasks(ctx context.Context) ([]task.Task, error) {
+	var resp daemon.ListTasksResponse
+	// Context-bound, and that is not optional for this one. ListTasks takes the
+	// task-control lock — the same lock every task mutation holds across its write
+	// AND its scheduler reload — so it can legitimately block for seconds behind a
+	// watch edit waiting out a SIGTERM-resistant watcher. The local socket carries
+	// no overall deadline by design (see callCtx), so an unbounded call here would
+	// wedge whatever goroutine is waiting on it (#3626 review).
+	if err := c.callCtx(ctx, "ListTasks", daemon.ListTasksRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tasks, nil
 }
 
 // RemoveTask asks the daemon to delete a task and re-arm its schedule. expect

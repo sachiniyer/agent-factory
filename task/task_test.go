@@ -366,7 +366,8 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 
 	// Scheduler bumps the status to a fresher value via the canonical path.
 	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
-	require.NoError(t, UpdateTaskStatus("u1", &t2, "completed"))
+	_, statusErr := UpdateTaskStatus("u1", &t2, "completed")
+	require.NoError(t, statusErr)
 
 	// A user edit patches only user-editable fields; the scheduler-owned status
 	// fields and immutable CreatedAt are not part of TaskUpdate, so they can
@@ -570,7 +571,8 @@ func TestUpdateTaskStatus_BypassesProgramValidation(t *testing.T) {
 	setupTestTasks(t, stored)
 
 	now := time.Now().Truncate(time.Second)
-	require.NoError(t, UpdateTaskStatus("legacy1", &now, "started"))
+	_, statusErr := UpdateTaskStatus("legacy1", &now, "started")
+	require.NoError(t, statusErr)
 
 	got, err := GetTask("legacy1")
 	require.NoError(t, err)
@@ -594,10 +596,12 @@ func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
 
 	// A newer event delivery lands first (this is the value we must not lose).
 	newer := existing.Add(90 * time.Second)
-	require.NoError(t, UpdateTaskStatus("w1", &newer, "completed"))
+	_, statusErr := UpdateTaskStatus("w1", &newer, "completed")
+	require.NoError(t, statusErr)
 
 	// A supervision-status write races in with a nil timestamp.
-	require.NoError(t, UpdateTaskStatus("w1", nil, "stopped"))
+	_, stopErr := UpdateTaskStatus("w1", nil, "stopped")
+	require.NoError(t, stopErr)
 
 	got, err := GetTask("w1")
 	require.NoError(t, err)
@@ -614,7 +618,7 @@ func TestUpdateTaskStatus_NotFound(t *testing.T) {
 	setupTestTasks(t, []Task{{ID: "exists"}})
 
 	now := time.Now()
-	err := UpdateTaskStatus("missing", &now, "started")
+	_, err := UpdateTaskStatus("missing", &now, "started")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }

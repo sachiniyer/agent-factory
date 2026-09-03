@@ -23,6 +23,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config`](#af-config) — Read global or project-effective config and write global config
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
+- [`af config migrate`](#af-config-migrate) — Rewrite deprecated config keys to their current spelling
 - [`af config set`](#af-config-set) — Set one global config key
 - [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
@@ -72,6 +73,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
+- [`af tasks show`](#af-tasks-show) — Show one task's schedule health and audit trail
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
@@ -172,13 +174,6 @@ bind-MOUNTS the directory, so account writes land in your real account. An accou
 
 af never switches accounts on its own — not on a rate limit, not on a failure.
 A session runs as the account it was started with.
-
-Registration only · a session cannot be scoped to a gemini account yet — af has
-not verified that the account boundary can prove how it launches gemini, so
---account refuses rather than risk starting the session on the ambient identity
-while reporting the account you asked for. Registering and logging in work
-today, and the launch proof is tracked at
-https://github.com/sachiniyer/agent-factory/issues/3639
 
 ```
 af accounts
@@ -366,10 +361,12 @@ file and printing where it is so you can attach it to an issue by hand.
 Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
-session prompts, task prompts, tab commands, remote metadata) are dropped; $HOME and your
-username are collapsed to ~ / [user]; and known credential shapes are scrubbed
-wherever they appear. Perfect redaction is impossible — open the file and
-review it before sharing it publicly.
+session prompts, task prompts, tab and session commands, tab names, account
+labels, remote metadata) are dropped; every directory the bundle names is
+replaced by the role it plays ([repo:N], [worktree:N], [af-home], ~) rather than
+by its own name, and your username by [user]; and known credential shapes are
+scrubbed wherever they appear. Perfect redaction is impossible — open the file
+and review it before sharing it publicly.
 
 Use --json to emit the structured manifest (wrapped in the shared {data,error}
 envelope) to stdout instead of writing a file or opening a draft.
@@ -596,6 +593,7 @@ af config
 
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
+- [`af config migrate`](#af-config-migrate) — Rewrite deprecated config keys to their current spelling
 - [`af config set`](#af-config-set) — Set one global config key
 - [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
@@ -622,6 +620,9 @@ Use --repo <repository-path> to inspect another project. The path is a selector
 only; this command does not register a project or write identity state.
 --project remains accepted as a deprecated alias. --explain prints the same
 resolved value with the complete source trace.
+
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.
 
 ```
 af config get <key> [flags]
@@ -655,6 +656,9 @@ disallowed for that key. Human output renders an empty built-in value as
 "(unset)"; an explicitly configured empty value remains visible as "", [], {},
 or null. JSON output preserves the typed effective values.
 
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.
+
 ```
 af config list [flags]
 ```
@@ -666,6 +670,72 @@ af config list [flags]
 | `--explain` |  | Show every source candidate and why it did or did not supply each value |
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
 | `--repo` | `string` | Resolve config for this project instead of the current repository |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af config migrate
+
+Rewrite deprecated config keys to their current spelling
+
+Rewrite the deprecated keys in the global config to their current spelling, in
+place, and print the diff. This is the command the deprecated-key warnings name.
+
+It changes spelling, never meaning. A value written on one line is carried over
+exactly as its own bytes, quoting and all; a value spread over several lines (an
+array, typically) is re-encoded compactly rather than relocated as raw text, so
+its formatting can change even though its contents do not. Either way the
+rewritten file is re-parsed before anything is saved, and a rewrite that would
+change even one effective value is refused rather than written. The
+readers of the old spellings stay, so an older config keeps loading and nothing
+about your running configuration changes.
+
+One thing to know before you DOWNGRADE. The grouped spellings have only been
+read since 2026-08-14 (#3354); an af older than that does not know them and
+falls back to the built-in default for a migrated key. For most keys that
+default is the conservative one (strict host-key checking, no credential
+mount). Two cases are not, both because the listener defaults to a LIVE 127.0.0.1:8443:
+migrating network.require_token = true loses the token an older binary could
+read (network.require_loopback_token only matters alongside it, being inert on
+its own), and migrating an empty network.listen_addr hides the fact that the web
+server was turned OFF, so an older binary starts one. Migrate compares what such
+a binary saw before and after, and says so explicitly when a migration costs you
+either. Restore the backup before such a downgrade.
+
+The previous file is kept beside it as config.toml.bak (an existing backup is
+never overwritten; the copy is numbered instead). A legacy config.json is
+converted to config.toml on the way in, exactly as any af start would convert it.
+
+Running it twice is safe: the second run finds nothing to migrate.
+
+Two things it will not do:
+
+  A key written in BOTH spellings with different values is refused, naming the
+  key. af has a documented winner at load time — the grouped value — but no
+  migration should make that tie-break permanent on your behalf.
+
+  root_agents is reported and left exactly where it is. Its successor is a
+  registered project's personal [root_agent], so migrating it would mean
+  registering projects for you: durable state outside this file. The keys that
+  can move still move.
+
+Local-only: it rewrites the file on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to migrate that host.
+
+```
+af config migrate [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Emit the migration result wrapped in the {data,error} envelope |
 
 **Global flags**
 
@@ -708,6 +778,10 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
+                             unix control socket only, never on the web address. A profile dumps live daemon
+                             memory — session titles, worktree paths, prompt text — so turn it off again.
+                             AF_DEBUG_PPROF=1 overrides it for one daemon process. Next daemon start.)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string
@@ -754,6 +828,14 @@ Examples:
   af config set default_program codex --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo
 
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global write is sent
+to THAT daemon's admission-gated write — the same one the web config form posts
+to — and the success line names the daemon it landed on. It is never silently
+applied to this machine instead: a daemon too old to serve the route is refused,
+not written around. --project is the exception and stays local-only, because it
+writes a registered project's machine-local override file, which no remote daemon
+owns.
+
 ```
 af config set <key> <value> [flags]
 ```
@@ -790,6 +872,12 @@ conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
 there is nothing to clear.
 
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global form is sent
+to THAT daemon's admission-gated write, like 'af config set'; a daemon too old to
+serve the route is refused rather than written around, so a remote unset never
+quietly clears a key on this machine instead. --project stays local-only — the
+override file it clears is this machine's.
+
 ```
 af config unset <key> [flags]
 ```
@@ -820,6 +908,10 @@ This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
 edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
 names what must be fixed before the next launch.
+
+Local-only: it checks the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to check that host.
 
 ```
 af config validate [flags]
@@ -1091,8 +1183,18 @@ that the run is unhealthy. A CI step or health probe should fail on the command
 exit code (equivalently, JSON summary.unresolved > 0), which includes only
 actionable rows.
 
-High-volume process findings are summarized by default so the actionable
-problem is visible first. Use --verbose to show each process behind those
+A clean run and a run that did not finish looking are NOT the same thing, and
+the exit code cannot tell them apart. A check that stops early — the temp-home
+sweep hits a candidate budget on a machine with a very large temp dir — reports
+no unhealthy condition for what it never looked at, so it exits 0 while having
+assessed only part of the machine. Such a run says so: the summary line ends
+with "INCOMPLETE" naming the checks that gave up, and summary.incomplete lists
+them in --json. A probe that treats unresolved == 0 as healthy must require
+summary.incomplete to be empty as well.
+
+High-volume findings are summarized by default so the actionable problem is
+visible first — process findings, and abandoned temp homes, both of which run
+to hundreds on a busy machine. Use --verbose to show each item behind those
 summaries.
 
 Read-only by default. With --fix, applies the safe remediations — killing
@@ -1102,7 +1204,8 @@ reported rather than acted on, and remain advisory unless another check
 establishes a specific unhealthy condition.
 
 Exits 1 when unresolved actionable issues remain, 0 when doctor established no
-unhealthy condition (advisory warnings may still be present).
+unhealthy condition (advisory warnings may still be present, and a check may
+have stopped early — see summary.incomplete above).
 
 ```
 af doctor [flags]
@@ -2287,6 +2390,7 @@ af tasks
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
+- [`af tasks show`](#af-tasks-show) — Show one task's schedule health and audit trail
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 
@@ -2421,6 +2525,33 @@ The task must belong to the resolved project: --repo when given, otherwise the c
 
 ```
 af tasks restart <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af tasks show
+
+Show one task's schedule health and audit trail
+
+Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, or disabled it.
+
+Overdue is derived, never stored: a cron task is overdue when it has gone more than one period (or five minutes, whichever is larger) past its most recent scheduled occurrence, measured from the latest of its last run, its last enable, and its creation — so a task paused and switched back on does not report the occurrences it missed while it was off. Watch tasks have no schedule and are never overdue — their arming state is the signal.
+
+"Enabled but not armed" means the task is enabled on disk and the running daemon is not holding it: it will not fire until that is fixed. When nothing has reported on it — no daemon running, or one still starting up — the arming state is reported as unknown rather than guessed.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id resolves globally.
+
+Pass --json for the same record `af tasks get` returns, in the {data,error} envelope.
+
+```
+af tasks show <id>
 ```
 
 **Global flags**

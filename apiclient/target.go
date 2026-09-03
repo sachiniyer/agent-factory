@@ -48,6 +48,16 @@ func IsRemoteTarget() bool {
 	return url != ""
 }
 
+// RemoteTargetURL returns the resolved remote daemon URL, or "" when none is
+// configured (the local unix socket). It is IsRemoteTarget's companion for the
+// callers that must NAME the target rather than merely branch on it: a message
+// about a remote write says which daemon it reached, so an operator reading it
+// on the wrong machine can tell at a glance (#3679).
+func RemoteTargetURL() string {
+	url, _ := resolveTarget()
+	return url
+}
+
 // NewTargeted returns a Client for the resolved target: NewRemote against the
 // remote daemon when --daemon-url/AF_DAEMON_URL is set, else New against the local
 // unix socket (unchanged default). It is the single construction seam the TUI and

@@ -85,6 +85,9 @@ SESSION_WEB_RESTORED=probe-restored
 # of proxying, and its tab is not deletable. Same substring caveat as above.
 SESSION_WEB_SHELVED=probe-shelved
 SEEDED_TASK=probe-task
+# The already-overdue task (#3626), seeded with a creation time a month back so the
+# web list has schedule health to render on load.
+OVERDUE_TASK=probe-overdue
 # The task-only project's task name (MOCK3), kept distinct from SEEDED_TASK so the
 # scoped Tasks assertions never collide on a substring match.
 TASK3_NAME=mock3-task
@@ -374,6 +377,34 @@ done
 # it just has to exist for the list + the enable/disable/trigger/remove flows.
 echo ">>> seeding task $SEEDED_TASK ..."
 "$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "0 9 * * *" >/dev/null
+
+# A task that is already OVERDUE on arrival (#3626), so the web's schedule-health
+# rendering has something to render without the test waiting out a cron window.
+#
+# It goes in over the daemon's own AddTask route rather than through `af tasks
+# add`, because the CLI has no way to say "created a month ago" — and the store
+# deliberately KEEPS an earlier created_at while clamping a future one, exactly so
+# a migration can import real history (task.resetStoreOwnedFields). With no
+# last_run_at, the derivation measures lateness from that creation time, so a
+# daily task created 30 days ago is overdue the moment the daemon reads it — about
+# thirty missed occurrences. No clock manipulation, no hand-edited tasks.json, and
+# no waiting.
+#
+# The HOUR is computed, not fixed, and that is load-bearing. This fixture is armed
+# on a real daemon for the whole suite, so a schedule whose next occurrence falls
+# inside the run would actually FIRE: the daemon would stamp last_run_at, the task
+# would stop being overdue, and the assertion would fail depending on what time CI
+# happened to start — while also launching an agent run nobody asked for. Half a
+# day out puts the next fire ~12 hours past the far end of a ~35-minute suite from
+# whenever it starts. Local hour, not UTC: a schedule with no zone is evaluated in
+# the location of the clock handed to it, and that is the daemon's (#3626 review).
+echo ">>> seeding overdue task $OVERDUE_TASK ..."
+OVERDUE_CREATED="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+OVERDUE_HOUR="$(( ( $(date +%-H) + 12 ) % 24 ))"
+curl -sS -X POST "$BASE_URL/v1/AddTask" \
+  -H 'Content-Type: application/json' \
+  -d "{\"task\":{\"id\":\"3626dead\",\"name\":\"$OVERDUE_TASK\",\"prompt\":\"echo overdue\",\"cron_expr\":\"0 $OVERDUE_HOUR * * *\",\"project_path\":\"$MOCK\",\"program\":\"claude\",\"enabled\":true,\"created_at\":\"$OVERDUE_CREATED\"},\"actor\":\"api\"}" \
+  >/dev/null
 
 # A task in the THIRD repo, which has NO session (redesign PR2, Greptile Fix 1): this
 # makes MOCK3 a TASK-ONLY project so the harness can prove it lists in the switcher
@@ -758,6 +789,7 @@ export AF_WEB_SESSION_WEB_RESTORED="$SESSION_WEB_RESTORED"
 export AF_WEB_SESSION_WEB_SHELVED="$SESSION_WEB_SHELVED"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
+export AF_WEB_OVERDUE_TASK="$OVERDUE_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
 export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"
 export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"

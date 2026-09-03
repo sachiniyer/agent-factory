@@ -178,12 +178,12 @@ func moveResolvedIdentity(m *Manager, healed *rootAgentSnapshot, from, to, root 
 	// to another claimant at that identity and is not ours to move (#3611's
 	// case, as in promoteRecordedIdentity's own guard).
 	published, ok := healed.projectRoots[from]
-	if !ok || published != root {
+	if !ok || published.root != root {
 		return false
 	}
 	// Copy-on-write before touching anything: these maps are shared with the
 	// published snapshot until they are replaced.
-	healed.projectRoots = cloneStringMap(healed.projectRoots)
+	healed.projectRoots = cloneResolvedRootMap(healed.projectRoots)
 	healed.personal = cloneLayerMap(healed.personal)
 	healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
 	// Removed BEFORE the promotion, because promoteRecordedIdentity refuses

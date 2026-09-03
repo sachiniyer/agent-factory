@@ -596,6 +596,17 @@ func (m *Manager) restoreInstances() error {
 	}
 	owed := persistLoadRuntimeReplacements(instances)
 	m.attachCredentialsToAll(instances)
+	// A post-worktree hook started by the PREVIOUS daemon generation may still be
+	// running over an intact tree — #3658 keeps it alive on purpose, so a restart
+	// or an auto-upgrade does not kill an operator's build mid-pnpm. Adopt it
+	// here, before the instances are published, so the restored session reports
+	// hooks in flight exactly as a first run does. Adoption reports; it never
+	// re-runs the hook and never stops it (#3682).
+	//
+	// Restore only, not the refresh poll: the poll runs on a timer and would turn
+	// this into a manager round trip per tick, while a survivor by definition
+	// belongs to the generation this one replaced.
+	session.AdoptRunningHookRuns(daemonInstances(instances))
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts

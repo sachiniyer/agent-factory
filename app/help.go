@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -111,12 +112,18 @@ func helpKeyColumnGutter(keyColumnWidth int) int {
 // widest effective key across ALL sections, capped at helpKeyColumnFraction of
 // the content width. When contentWidth is known, the description is a separate
 // block: lipgloss wraps it beneath its first word, never beneath the key (#2577).
+//
+// Keys are measured with layout.Cells, the ONE width answer (#3585/#3610). They
+// are ASCII today, so nothing here renders differently — the point is that the
+// invariant is literal rather than nearly true, and that a rebind to a glyph key
+// cannot make this column disagree with the pane the overlay is drawn into
+// (#3635).
 func renderHelpSections(header string, sections []helpSection, contentWidth int) string {
 	keyWidth := 0
 	var keyWidths []int
 	for _, s := range sections {
 		for _, r := range s.rows {
-			w := lipgloss.Width(r.key)
+			w := layout.Cells(r.key)
 			keyWidths = append(keyWidths, w)
 			if w > keyWidth {
 				keyWidth = w
@@ -140,7 +147,7 @@ func renderHelpSections(header string, sections []helpSection, contentWidth int)
 		lines = append(lines, headerStyle.Render(s.title))
 		for _, r := range s.rows {
 			if contentWidth <= 0 {
-				pad := strings.Repeat(" ", keyWidth-lipgloss.Width(r.key)+2)
+				pad := strings.Repeat(" ", keyWidth-layout.Cells(r.key)+2)
 				lines = append(lines, keyStyle.Render(r.key)+pad+descStyle.Render("- "+r.desc))
 				continue
 			}

@@ -2,6 +2,7 @@ package task
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -117,73 +118,131 @@ type Task struct {
 	CreatedAt     time.Time  `json:"created_at"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
+	// Audit is the bounded trail of mutations to this task — the one field here
+	// that is a HISTORY rather than a current value, and the only way to answer
+	// "did someone turn this off?" (#3623). Written by the store inside the same
+	// locked operation that commits the change; see task/audit.go.
+	Audit []AuditEntry `json:"audit,omitempty"`
+
+	// The fields below are DERIVED AT READ TIME and never persisted — see
+	// task/overdue.go for the derivation and saveTasks for the strip that
+	// enforces it. They are ordinary fields on the record rather than a side
+	// channel because every surface that reads a task needs them, and a health
+	// signal that lives somewhere other than the thing it describes is a signal
+	// people forget to look at.
+
+	// Overdue reports that this task's last run precedes its most recent
+	// scheduled occurrence by more than one slack window.
+	Overdue bool `json:"overdue,omitempty"`
+	// MissedOccurrences counts the fires the schedule has had since that last
+	// run, saturating at MaxMissedOccurrences.
+	MissedOccurrences int `json:"missed_occurrences,omitempty"`
+	// MissedOccurrencesCapped says MissedOccurrences hit that cap and is a FLOOR,
+	// not an exact count. Without it a reader cannot tell "exactly 10000" from
+	// "at least 10000", and every surface would render a capped count as precise.
+	MissedOccurrencesCapped bool `json:"missed_occurrences_capped,omitempty"`
+	// Unschedulable says the scheduler cannot derive a next fire from this task's
+	// cron expression — it does not parse, or nothing matches inside the search
+	// horizon. Such a task is not late (nothing was ever due) and is emphatically
+	// not healthy either, so it needs a field of its own rather than the absence
+	// of one.
+	Unschedulable bool `json:"unschedulable,omitempty"`
+	// UnschedulableReason is WHICH shape it is — one of the Reason* constants —
+	// and is empty unless Unschedulable is set. The verdict is deliberately one
+	// thing; this is the wording, and it rides the record so that a surface which
+	// cannot call UnschedulableReason (the web, a script reading --json) renders
+	// the classifier's own answer instead of re-deriving one from cron_expr. Go
+	// surfaces keep calling the classifier directly — they have the record and a
+	// clock, which is all it needs (#3626).
+	UnschedulableReason string `json:"unschedulable_reason,omitempty"`
+	// Unassessable says no lateness verdict could be reached: there is no instant
+	// to measure from, or none the schedule can be evaluated against. UNKNOWN, not
+	// healthy — see ScheduleHealth.Unassessable for both ways in.
+	Unassessable bool `json:"unassessable,omitempty"`
+	// NextRunAt is what the LIVE scheduler will actually fire next, read off its
+	// armed entry rather than recomputed from the expression. Absent when the
+	// task is not armed, and that absence is itself the signal.
+	NextRunAt *time.Time `json:"next_run_at,omitempty"`
+	// Arming is the live arming observation: ArmingArmed, ArmingNotArmed, or
+	// ArmingUnknown (the zero value) when no daemon answered.
+	Arming string `json:"arming,omitempty"`
+
+	// Ordinal is this record's row number in tasks.json — 1-based, derived by
+	// the read that produced it (stampOrdinals) and stripped on the way to disk
+	// like the health fields above.
+	//
+	// It is the row's IDENTITY, which is the one thing the record itself does
+	// not carry. ID is the natural key and a hand-edited store can duplicate
+	// it — the daemon already handles that case explicitly — so a reader pairing
+	// two reads of this file by CONTENT is reconstructing an identity it does
+	// not have, and content is not unique: each mispairing is fixed by comparing
+	// one more field, and the next case finds a pair that agrees on all of them
+	// (#3680, off #3626's review). The ordinal is not stored, so the file cannot
+	// lie about it, and it cannot collide within one read: row N is the Nth row,
+	// once. A stamped per-row id would buy neither — it is exactly as duplicable
+	// as ID, because copying a row in an editor copies its stamp too.
+	//
+	// It identifies a row within ONE tasks.json, and two lists may be paired on
+	// it only when both were read from the same file. Two unrelated stores both
+	// have a row 3, so pairing across them would hand one machine's "armed" to
+	// another machine's task. That is why the observation ApplyLiveArming
+	// consumes is a LOCAL one only — app/session_control.go's
+	// liveTaskArmingFetcher declines to fetch arming for a remote target,
+	// because the definitions beside it are local — and why a future remote read
+	// must carry the store's own identity alongside the ordinal rather than
+	// compare ordinals from two files.
+	//
+	// Zero means NOT STAMPED, and nothing pairs on it. That is what lets the
+	// field say "unknown" rather than fail open: a record built in memory
+	// occupies no row, and an older daemon's response carries no ordinal at all,
+	// which JSON decodes to zero. Numbered from zero, every such record would
+	// claim to be row 0 and collect the first observation going — a fabricated
+	// answer produced by a MISSING field. Numbered from one, that skew degrades
+	// to unknown, which is what the rail already renders honestly.
+	Ordinal int `json:"ordinal,omitempty"`
+
+	// StoreGeneration identifies the VERSION of tasks.json this record was read
+	// from — a digest of the bytes the read decoded, stamped beside the ordinal by
+	// the same helper and stripped with it.
+	//
+	// A row number alone is not an identity, because the file is mutable. Two
+	// reads that straddle a write disagree about which task row N is: a removal
+	// shifts every row below it up, and if the rows involved are duplicates — same
+	// id, same project, same expression, which is exactly the store this feature
+	// exists for — nothing about the two records differs, so no comparison of
+	// their CONTENT can tell that the reads came from different generations. It
+	// took a review round to find that case (#3684), and it is the same shape as
+	// the heuristic this change replaced: a guard that needs one more field.
+	//
+	// So the row is qualified by the generation it was read in, and the two are
+	// only ever used together (see ApplyLiveArming's key). Two lists pair only
+	// when they saw the same bytes; when they did not, every answer is UNKNOWN,
+	// which costs a poll or two of the labelled cron fallback after a task edit
+	// and is the honest reading in between.
+	//
+	// It also settles the remote question by construction rather than by comment:
+	// two stores on two machines are two different files, so their rows can never
+	// pair. Empty means the record came from no read — see Ordinal for why that
+	// has to fail closed.
+	//
+	// The contract it implies, stated once so a caller cannot get it wrong
+	// quietly: a row identity belongs to ONE LIST FROM ONE READ. It is file-wide,
+	// so any write retires every row's identity at once, not just the row that
+	// changed — which means a list assembled from more than one read (a cached
+	// list patched with single records from mutation events, say) is a mixture of
+	// generations and pairs only where the generations happen to line up. That
+	// degrades to UNKNOWN per row rather than to a wrong answer, which is the
+	// right direction, but it is still less than the caller wanted: a consumer
+	// that pairs arming should re-read the list, which is what app/sync.go does on
+	// every poll. A record delivered on its own — an EventTaskUpdated payload, a
+	// mutation response — carries the identity of the write that produced it and
+	// is not a member of anyone else's list (#3684 review).
+	StoreGeneration string `json:"store_generation,omitempty"`
 }
 
-// ProjectExpectation is an optional compare-and-swap on a task's recorded
-// ProjectPath, evaluated inside the SAME locked operation that mutates the task.
-//
-// It closes a check-then-act race (#1893 review). The CLI authorizes a task id
-// against the current project client-side, but the mutation is a separate RPC
-// carrying only the id. ProjectPath is a supported patch field (#1836), so
-// another client can rebind the task between the two: the check authorizes the
-// old project and the daemon acts on the newly-rebound task, letting a
-// current-project command mutate ANOTHER project's task — precisely what the
-// scoping exists to prevent. An authorization that is not atomic with the action
-// it authorizes is not an authorization.
-//
-// It compares the recorded path STRING rather than resolving repo identity on
-// the daemon side, for two reasons. Identity resolution shells out to git, and
-// this runs while the tasks.json file lock is held — a subprocess under a held
-// lock is a hazard this repo already knows. And a string compare is the right
-// question here: the caller is asking "is this still the record I authorized?",
-// not "are these the same project". Any rebind changes the string, so it fails
-// closed. A rebind between two DIFFERENT paths naming the SAME project is
-// refused too — a false rejection, but a safe one that a re-run resolves.
-//
-// Zero value = no expectation, which is what a caller with no project context
-// (rule 3) sends and what an older daemon decodes an absent field as. Both
-// fields are plain values, never pointers: net/rpc gob elides zero-value
-// POINTER fields, so a *string would arrive nil and silently disable the check
-// (#1700).
-// The json tags define the HTTP body shape (#1029 PR 4) and must stay
-// snake_case like every other route's fields; gob ignores them entirely.
-type ProjectExpectation struct {
-	// Enforce distinguishes "no expectation" from "expected to be unbound"
-	// (ProjectPath == ""), which an empty ProjectPath alone cannot express.
-	Enforce     bool   `json:"enforce"`
-	ProjectPath string `json:"project_path"`
-}
-
-// Verify reports whether t still matches the expectation. Callers must run it
-// against a FRESHLY loaded record inside the locked operation — verifying a
-// record the caller already held would re-introduce the race it closes.
-func (e ProjectExpectation) Verify(t Task) error {
-	if !e.Enforce || t.ProjectPath == e.ProjectPath {
-		return nil
-	}
-	return fmt.Errorf(
-		"task %q was re-bound to a different project while this command was running (expected %s, now %s) — nothing was changed; re-run the command to act on it in its current project",
-		t.ID, describeProjectPath(e.ProjectPath), describeProjectPath(t.ProjectPath))
-}
-
-func describeProjectPath(path string) string {
-	if strings.TrimSpace(path) == "" {
-		return "no project"
-	}
-	return path
-}
-
-// ExpectProject returns the expectation a mutating caller must attach when it
-// authorized the task from a loaded record: "act only if this is still bound
-// where I saw it". It is the ONE constructor every surface shares — the CLI's
-// scope check, the TUI's pane/trigger paths, and (mirrored in web/src/api.ts)
-// the web client — so the admission predicate is defined here once rather than
-// re-derived per surface (#3190, #3230). Enforce is always true: a caller
-// holding a record always has a binding to pin, including the unbound one
-// (ProjectPath == ""), which Enforce distinguishes from "no expectation".
-func ExpectProject(t Task) ProjectExpectation {
-	return ProjectExpectation{Enforce: true, ProjectPath: t.ProjectPath}
-}
+// unstampedOrdinal is the Ordinal of a record no read has numbered. See
+// Task.Ordinal for why the zero value has to mean "unknown" rather than "row 0".
+const unstampedOrdinal = 0
 
 // IsWatch reports whether the task is event-triggered (WatchCmd) rather than
 // time-triggered (CronExpr).
@@ -298,8 +357,67 @@ func LoadTasks() ([]Task, error) {
 		return nil, fmt.Errorf("failed to parse tasks file: %w", err)
 	}
 
-	return tasksFromSchemaBytes(data)
+	tasks, err := tasksFromSchemaBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	// Every READ carries the schedule-health derivation (#3623). Deriving it here
+	// rather than in each surface is what stops the next surface from being the
+	// one that renders a dark task as healthy. loadTasksLocked — the WRITE path's
+	// loader — deliberately does not, so nothing derived can reach disk.
+	return stampRowIdentity(WithScheduleHealth(tasks, nowFn()), storeGeneration(data)), nil
 }
+
+// stampRowIdentity gives every record the two halves of its row identity: the
+// generation of the bytes this read decoded, and its 1-based position within
+// them. See Task.Ordinal and Task.StoreGeneration.
+//
+// One helper for both halves on purpose. They are meaningless apart — a row
+// number without the version it was read in is the bug #3684 found — so nothing
+// should be able to stamp one and forget the other.
+//
+// It runs LAST on each read path — after WithScheduleHealth here, and after the
+// strip in loadTasksLocked — so a record's identity always describes the read
+// that produced it and never a value the file supplied. A hand-typed "ordinal"
+// or "store_generation" is therefore overwritten rather than believed, which is
+// the rule the health fields follow and for the same reason.
+//
+// WRITE paths call it too, with the generation writeTasks reports, and they have
+// to. A write loads under the lock, and loadTasksLocked stamps what it READ —
+// the pre-write bytes. Mutate and save, and every record the path hands back
+// names a version of the store that no longer exists, so it can never pair with
+// a later read and a consumer merging a mutation response or an EventTaskUpdated
+// record into its list would silently lose that row's arming (#3684 review).
+//
+// Re-derived over the whole written slice rather than patched onto one record,
+// because a write can move rows: replacing the generation while leaving a stale
+// ordinal would produce an identity that MATCHES and is wrong, which is the one
+// failure direction worth spending code to avoid.
+func stampRowIdentity(tasks []Task, generation string) []Task {
+	for i := range tasks {
+		tasks[i].Ordinal = i + 1
+		tasks[i].StoreGeneration = generation
+	}
+	return tasks
+}
+
+// storeGeneration tags one version of the store, so two reads can tell whether
+// they saw the same bytes.
+//
+// Truncated deliberately. This is an EQUALITY TAG for two reads taken seconds
+// apart, not a security primitive: the only question asked of it is "are these
+// the same file contents", and anyone who could aim a collision at it can edit
+// tasks.json directly and skip the trouble. Sixty-four bits puts an accidental
+// match between two specific stores at about one in 1.8e19, and keeps the tag
+// short enough to ride every record of every ListTasks response.
+func storeGeneration(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
+}
+
+// nowFn is the clock the read-time derivation reads. A package variable so tests
+// can pin it; production reads the wall clock.
+var nowFn = time.Now
 
 // loadTasksLocked reads tasks while the caller already holds path's file lock.
 // It must not call LoadTasks because LoadTasks may migrate and acquire the same
@@ -317,7 +435,32 @@ func loadTasksLocked(path string) ([]Task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse tasks file: %w", err)
 	}
-	return tasksFromSchemaBytes(migrated)
+	tasks, err := tasksFromSchemaBytes(migrated)
+	if err != nil {
+		return nil, err
+	}
+	// Derived state is stripped here as well as on the way out (saveTasks), and
+	// for a reason the write path does not make obvious: records loaded here do
+	// not only go back to disk. They ride EventTaskUpdated to every connected
+	// client — the legacy RepoID backfill publishes them, and so does an update
+	// whose post-commit reload failed — so a hand-edited tasks.json carrying
+	// `arming` or `next_run_at` would have those fields decoded and broadcast as
+	// though a daemon had observed them (#3623 review).
+	//
+	// The write path derives nothing, so clearing is the whole of it: a reader
+	// gets its verdict from LoadTasks, which derives, and every other exit
+	// carries none.
+	for i := range tasks {
+		tasks[i].stripDerived()
+	}
+	// Identified after the strip, not before it: stripDerived clears the row
+	// identity along with the rest, and this path's records do not only go back to
+	// disk either. LoadTasksWithStableRepoBindingUpdates returns exactly this
+	// slice as its authoritative list, so leaving it unstamped would hand a future
+	// caller a set of rows that all claim to be unidentified — the one shape
+	// ApplyLiveArming reads as "nothing to pair on" and refuses. Every read path
+	// returns identified rows; only the write path carries none (#3680).
+	return stampRowIdentity(tasks, storeGeneration(migrated)), nil
 }
 
 func ensureTasksSchemaMigrated(path string) error {
@@ -335,24 +478,70 @@ func ensureTasksSchemaMigrated(path string) error {
 }
 
 // saveTasks writes tasks without locking. Must be called from within WithFileLock.
+//
+// It strips the read-time derived fields on the way out (#3623). Every load now
+// populates them, so a load-modify-save path would otherwise store a stale
+// "overdue" — a claim about an instant that has already passed by the time
+// anything reads it back. Enforcing it in the ONE writer rather than in each
+// caller is what makes "derived, never persisted" a property instead of a
+// convention.
 func saveTasks(tasks []Task) error {
+	_, err := writeTasks(tasks)
+	return err
+}
+
+// writeTasks is saveTasks, also reporting the generation of the bytes it wrote.
+//
+// Only the create path needs it, and it needs it for a reason worth stating: the
+// record AddTaskChecked hands back is published as EventTaskCreated, and a
+// generation is a property of the file as a whole, so the appended row cannot
+// know its own until the write that produces it has been marshalled. Reading it
+// off the write is exact and costs nothing; re-reading the file afterwards would
+// be a second read that a concurrent writer could make disagree.
+func writeTasks(tasks []Task) (string, error) {
 	path, err := getTasksPathFn()
 	if err != nil {
-		return err
+		return "", err
 	}
-	data, err := json.MarshalIndent(tasks, "", "  ")
+	stored := make([]Task, len(tasks))
+	copy(stored, tasks)
+	for i := range stored {
+		stored[i].stripDerived()
+	}
+	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal tasks: %w", err)
+		return "", fmt.Errorf("failed to marshal tasks: %w", err)
 	}
 	enveloped, err := marshalTasksEnvelope(data)
 	if err != nil {
-		return fmt.Errorf("failed to marshal tasks envelope: %w", err)
+		return "", fmt.Errorf("failed to marshal tasks envelope: %w", err)
 	}
-	return config.AtomicWriteFile(path, enveloped, 0644)
+	// tasks.json FOLLOWS a symlink (#3672). It is the one user-authored store in
+	// the af home — people write it by hand and a user may reasonably keep it in
+	// dotfiles beside config.toml — so it joins the global config on the follow
+	// side rather than af's own managed files on the refuse side. The link stays;
+	// the file it names is rewritten.
+	//
+	// The LOCK deliberately stays on af's own path (config.WithFileLock above,
+	// not the followed variant the global config uses). Two consequences, both
+	// wanted: af's .lock never lands in the user's dotfiles working tree, and
+	// every af process sharing one AF home locks the same file whatever the link
+	// points at. What it does not cover is two DIFFERENT AF homes aliasing one
+	// tasks.json — they would lock two paths and write one file. That is the
+	// #3697 class (the followed lock's own resolution), it is being reworked in
+	// #3696, and this change deliberately does not touch that machinery.
+	if err := config.AtomicWriteFileFollowingLink(path, enveloped, 0644); err != nil {
+		return "", err
+	}
+	return storeGeneration(enveloped), nil
 }
 
+// AddTask appends a task with no declared actor, recording the create in the
+// audit trail as ActorUnknown. Production writers go through the daemon, which
+// calls AddTaskChecked with the surface the request came from; this wrapper
+// exists for callers that genuinely have no surface to name.
 func AddTask(t Task) error {
-	_, err := AddTaskChecked(t, nil)
+	_, err := AddTaskChecked(t, ActorUnknown, nil)
 	return err
 }
 
@@ -363,10 +552,16 @@ func AddTask(t Task) error {
 // session lifecycle validation atomic with archive fencing (#2646). On success
 // it returns the canonical record that was appended, including derived fields
 // such as RepoID, so callers do not publish a stale request projection.
-func AddTaskChecked(t Task, validate func(Task) error) (Task, error) {
+//
+// actor names the surface the create came from; it is recorded as this task's
+// first audit entry (#3623).
+func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error) {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return Task{}, err
 	}
+	// Everything the STORE owns is reset here, as a class rather than one field
+	// at a time — see resetStoreOwnedFields.
+	t.resetStoreOwnedFields(nowFn())
 	// Canonicalize before validating so validation judges exactly what will be
 	// stored — a whitespace-only target session must not validate as "no target
 	// session" and then behave as one at delivery time (#1892).
@@ -405,8 +600,24 @@ func AddTaskChecked(t Task, validate func(Task) error) (Task, error) {
 				return err
 			}
 		}
+		// Stamped inside the lock, immediately before the append, so the audit
+		// timestamp is the commit's and an entry can never exist for a create
+		// that a validator or a failed write rolled back.
+		appendAudit(&t, actor, AuditCreated, nil, nowFn())
 		tasks = append(tasks, t)
-		return saveTasks(tasks)
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		// Identified from the write, which is the only thing that knows both
+		// halves: the append happens under the tasks-file lock, so this slice IS
+		// the file that was just written. Without it a create publishes "no row"
+		// for a record the very next read identifies, so EventTaskCreated and
+		// GetTask disagree about the same task in fields a client can see — the
+		// same reason RepoID is derived and returned rather than echoed back from
+		// the request. saveTasks strips both halves, so neither reaches disk.
+		t = stampRowIdentity(tasks, generation)[len(tasks)-1]
+		return nil
 	})
 	if lockErr != nil {
 		return Task{}, lockErr
@@ -487,6 +698,13 @@ func DeleteAllTasks() error {
 		return err
 	}
 	return config.WithFileLock(path, func() error {
+		// Unlinks the PATH, including when it is a symlink — unchanged by #3672,
+		// which moved the write side to follow. The asymmetry is deliberate and
+		// mild here: a wipe that removed the target instead would leave the link
+		// dangling and the next `af task add` refusing it, and one that removed
+		// both would delete a file in the user's dotfiles. Unlinking the link
+		// loses no data (the target keeps its content, and af stops reading it),
+		// so the conservative answer stands until #3672 says otherwise.
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to remove tasks file: %w", err)
 		}
@@ -580,24 +798,32 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 // written. Callers that record a supervision-status change (not an event
 // delivery) pass nil so a concurrent writer's newer LastRunAt is never reverted
 // by a value the caller read outside the file lock (#1215).
-func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) error {
+// It returns the record as committed, identified against the file the write
+// produced. Returning it rather than only an error is what stops the next caller
+// that PUBLISHES a status change from announcing the copy it walked in with:
+// that copy was identified against the pre-write bytes, so it names a version of
+// the store that this very call retired (#3684 review). Callers that only need
+// the error discard it.
+func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
 	if err := ValidateTaskID(taskID); err != nil {
-		return err
+		return Task{}, err
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
-		return err
+		return Task{}, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return err
+		return Task{}, err
 	}
-	return config.WithFileLock(path, func() error {
+	var updated Task
+	lockErr := config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
 		}
 
 		found := false
+		row := -1
 		for i := range tasks {
 			if tasks[i].ID == taskID {
 				// nil means "preserve the on-disk LastRunAt": a status-only
@@ -608,6 +834,7 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 					tasks[i].LastRunAt = lastRunAt
 				}
 				tasks[i].LastRunStatus = lastRunStatus
+				row = i
 				found = true
 				break
 			}
@@ -617,145 +844,17 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 			return fmt.Errorf("task with id %q not found", taskID)
 		}
 
-		return saveTasks(tasks)
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		updated = stampRowIdentity(tasks, generation)[row]
+		return nil
 	})
-}
-
-// TaskUpdate is a field-level patch for UpdateTask (#1700). Each non-nil field
-// replaces that field on the freshly-loaded record under the file lock; a nil
-// field is left exactly as stored. Because the write carries ONLY the fields the
-// caller changed — never a full, possibly-stale copy — a single-field edit (the
-// enable/disable toggle sends just Enabled) is structurally incapable of
-// clobbering a concurrent edit another client made to a different field.
-//
-// Only the user-editable fields are patchable. The scheduler-owned LastRunAt/
-// LastRunStatus and the immutable CreatedAt never appear here — UpdateTaskStatus
-// stays their canonical writer (#731/#1215), and preserving them is now inherent
-// to the merge (the record starts from the on-disk copy).
-//
-// The json tags define the HTTP JSON body shape for the daemon's /v1/UpdateTask
-// route; a nil pointer serializes as an absent key (omitempty), so the wire form
-// carries exactly the changed fields. The net/rpc gob control socket the CLI
-// uses goes through the same JSON encoding via GobEncode/GobDecode below — see
-// there for why plain gob would be lossy for this type.
-type TaskUpdate struct {
-	Name          *string `json:"name,omitempty"`
-	Prompt        *string `json:"prompt,omitempty"`
-	CronExpr      *string `json:"cron_expr,omitempty"`
-	WatchCmd      *string `json:"watch_cmd,omitempty"`
-	TargetSession *string `json:"target_session,omitempty"`
-	// MaxConcurrentRuns patches the watch-task concurrency cap (#1892). A pointer
-	// because 0 is a meaningful value ("unlimited"), not "unchanged" — the same
-	// nil-vs-zero distinction Enabled and TargetSession rely on, and the reason
-	// this type needs the JSON gob codec below.
-	MaxConcurrentRuns *int `json:"max_concurrent_runs,omitempty"`
-	// OnComplete patches the spawned-session lifecycle verb (#2595). A pointer for
-	// the same reason as MaxConcurrentRuns: "keep" is a meaningful value to patch
-	// BACK to, and a plain string could not tell "revert to keep" from "leave it
-	// alone".
-	OnComplete  *string `json:"on_complete,omitempty"`
-	ProjectPath *string `json:"project_path,omitempty"`
-	Program     *string `json:"program,omitempty"`
-	Enabled     *bool   `json:"enabled,omitempty"`
-}
-
-// GobEncode/GobDecode route TaskUpdate through JSON on the net/rpc gob control
-// socket the CLI uses (daemon.UpdateTask → callDaemon). This is REQUIRED for
-// correctness, not an optimization: gob elides a struct field holding its zero
-// value, and — fatally here — a *bool pointing at false (or a *string at "", or
-// an *int at 0) is followed to that zero and dropped, so the pointer decodes back
-// as nil. That would silently turn `af tasks update --enabled false`, the
-// trigger-clearing WatchCmd:"" / CronExpr:"" patches, and `--max-concurrent-runs
-// 0` (revert to unlimited, #1892) into no-ops. JSON preserves the exact
-// nil-vs-non-nil-zero-pointer distinction (omitempty omits ONLY a nil pointer, so
-// a non-nil &false serializes as `false`), so this round-trip is lossless.
-func (u TaskUpdate) GobEncode() ([]byte, error) {
-	return json.Marshal(u)
-}
-
-func (u *TaskUpdate) GobDecode(data []byte) error {
-	return json.Unmarshal(data, u)
-}
-
-// IsEmpty reports whether the patch changes no field. An empty patch is a
-// well-formed no-op: UpdateTask still validates and returns the record but
-// writes nothing new.
-func (u TaskUpdate) IsEmpty() bool {
-	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
-		u.WatchCmd == nil && u.TargetSession == nil && u.MaxConcurrentRuns == nil &&
-		u.OnComplete == nil &&
-		u.ProjectPath == nil && u.Program == nil && u.Enabled == nil
-}
-
-// apply merges the non-nil fields of u onto t and returns the result. It never
-// touches CreatedAt/LastRunAt/LastRunStatus, so a merge onto the freshly-loaded
-// record preserves those scheduler-owned values automatically.
-func (u TaskUpdate) apply(t Task) Task {
-	if u.Name != nil {
-		t.Name = *u.Name
+	if lockErr != nil {
+		return Task{}, lockErr
 	}
-	if u.Prompt != nil {
-		t.Prompt = *u.Prompt
-	}
-	if u.CronExpr != nil {
-		t.CronExpr = *u.CronExpr
-	}
-	if u.WatchCmd != nil {
-		t.WatchCmd = *u.WatchCmd
-	}
-	if u.TargetSession != nil {
-		t.TargetSession = *u.TargetSession
-	}
-	if u.MaxConcurrentRuns != nil {
-		t.MaxConcurrentRuns = *u.MaxConcurrentRuns
-	}
-	if u.OnComplete != nil {
-		t.OnComplete = *u.OnComplete
-	}
-	if u.ProjectPath != nil {
-		t.ProjectPath = *u.ProjectPath
-	}
-	if u.Program != nil {
-		t.Program = *u.Program
-	}
-	if u.Enabled != nil {
-		t.Enabled = *u.Enabled
-	}
-	// Canonicalize the MERGED target, unconditionally — never gated on
-	// u.TargetSession != nil (#1892). Gating it there left the original defect live
-	// on the legacy path: a task written before this rule can hold a whitespace-only
-	// target on disk, and a patch that touches only the cap never enters the branch
-	// that would fix it. ValidateTrigger would then read the target as empty and
-	// accept the cap, while delivery read the raw value, took the target-session
-	// path, and never passed the cap to CreateSession — the silently-ignored cap
-	// this PR exists to close, reachable by simply not mentioning the field. Every
-	// write now canonicalizes what it is about to store, so the record cannot
-	// persist a value the two sides would read differently.
-	t.canonicalizeTargetSession()
-	t.canonicalizeOnComplete()
-	// Drop a cap the merged record can no longer carry, unless this patch set it
-	// explicitly (#1892). A partial patch that only moves the trigger or the
-	// delivery mode — which is every non-CLI writer, since DiffTask sends just the
-	// changed fields and the TUI pane has no cap control — would otherwise leave a
-	// positive cap on a cron/target-session task and have ValidateTrigger reject
-	// the whole save. The rule lives here, in the shared merge, so the daemon,
-	// TUI, API, and CLI all get it; an explicitly-patched cap is left alone so a
-	// contradictory request still surfaces as an error instead of being silently
-	// dropped. It runs AFTER the canonicalization above, which decides what
-	// capApplies sees.
-	if u.MaxConcurrentRuns == nil {
-		t.clearInapplicableCap()
-	}
-	// Same rule, same reason, for the spawned-session lifecycle (#2595): adding a
-	// target_session to a per-run task that declares on_complete would otherwise
-	// merge into a record ValidateTrigger rejects, so ordinary retargeting would
-	// fail from every surface that does not expose the field — and force a CLI user
-	// to know to pass --on-complete keep alongside. An explicitly-patched verb is
-	// left alone so a contradictory request still surfaces as an error.
-	if u.OnComplete == nil {
-		t.clearInapplicableOnComplete()
-	}
-	return t
+	return updated, nil
 }
 
 // capApplies reports whether this task's shape can carry a concurrency cap: it
@@ -832,163 +931,4 @@ func CanonicalTargetSession(target string) string {
 // on every write, unconditionally — see apply.
 func (t *Task) canonicalizeTargetSession() {
 	t.TargetSession = CanonicalTargetSession(t.TargetSession)
-}
-
-// TaskEdit pairs a task ID with the field-level patch to apply to it. The TUI's
-// task pane emits one per edited task (see DiffTask) so a save sends only the
-// fields the user actually changed.
-//
-// Expect pins the project binding of the record the pane LOADED (not the
-// edited copy — an edit may itself move the task), so the daemon refuses the
-// patch if another client rebound the task while the pane was open (#3230).
-type TaskEdit struct {
-	ID     string
-	Update TaskUpdate
-	Expect ProjectExpectation
-}
-
-// DiffTask returns a TaskUpdate holding exactly the user-editable fields that
-// differ between old and cur. The TUI uses it to turn an in-place edit of a
-// cached task into a minimal patch, so saving one field never rewrites another
-// that changed out-of-band while the editor was open (#1700/#1213).
-func DiffTask(old, cur Task) TaskUpdate {
-	var u TaskUpdate
-	if cur.Name != old.Name {
-		u.Name = &cur.Name
-	}
-	if cur.Prompt != old.Prompt {
-		u.Prompt = &cur.Prompt
-	}
-	if cur.CronExpr != old.CronExpr {
-		u.CronExpr = &cur.CronExpr
-	}
-	if cur.WatchCmd != old.WatchCmd {
-		u.WatchCmd = &cur.WatchCmd
-	}
-	if cur.TargetSession != old.TargetSession {
-		u.TargetSession = &cur.TargetSession
-	}
-	if cur.MaxConcurrentRuns != old.MaxConcurrentRuns {
-		u.MaxConcurrentRuns = &cur.MaxConcurrentRuns
-	}
-	// Included before any editor offers it (#2595). An unchanged field patches
-	// nothing either way, so this is inert today — but a differ that silently
-	// omits a user-editable field is the #1700 clobber waiting to be reintroduced
-	// the moment a surface starts editing it.
-	if cur.OnComplete != old.OnComplete {
-		u.OnComplete = &cur.OnComplete
-	}
-	if cur.ProjectPath != old.ProjectPath {
-		u.ProjectPath = &cur.ProjectPath
-	}
-	if cur.Program != old.Program {
-		u.Program = &cur.Program
-	}
-	if cur.Enabled != old.Enabled {
-		u.Enabled = &cur.Enabled
-	}
-	return u
-}
-
-// UpdateTask applies a field-level patch to the task with the given id under the
-// file lock and returns the merged record. Only the patch's non-nil fields are
-// written; every other field — including a value a concurrent writer committed
-// after the caller read its copy — is preserved from the freshly-loaded record.
-// This closes the full-struct read-modify-write clobber (#1700): an enable/
-// disable toggle patches only Enabled and cannot revert another client's edit to
-// the prompt, trigger, target session, or program.
-//
-// The merged task is validated (ValidateTrigger, plus the program enum when the
-// patch sets Program) before it is written, so a patch that would leave the task
-// in an invalid state is rejected. Scheduler-owned fields (LastRunAt/
-// LastRunStatus) and CreatedAt are never patchable — UpdateTaskStatus remains
-// their canonical writer (#731/#1215). Returns the not-found error when no task
-// with the given id exists.
-// UpdateTask applies a field-level patch. expect optionally asserts, inside the
-// same locked operation, that the task is still bound to the project the caller
-// authorized it against — see ProjectExpectation.
-func UpdateTask(id string, update TaskUpdate, expect ProjectExpectation) (Task, error) {
-	return UpdateTaskChecked(id, update, expect, nil)
-}
-
-// UpdateTaskChecked is UpdateTask with a validator applied to the authoritative
-// merged record immediately before commit. Alongside an error, the validator
-// may return a nonempty resolved RepoID to persist on a legacy row; no other
-// field can be changed after ordinary task validation. A validator error leaves
-// the stored task unchanged. See AddTaskChecked for the callback constraints.
-func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, validate func(Task) (string, error)) (Task, error) {
-	if err := ValidateTaskID(id); err != nil {
-		return Task{}, err
-	}
-	path, err := getTasksPathFn()
-	if err != nil {
-		return Task{}, err
-	}
-	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return Task{}, err
-	}
-	// Re-resolve the retained RepoID when the patch rebinds the task, and do it
-	// BEFORE taking the lock: this shells out to git, and holding the tasks.json
-	// lock across a subprocess is the hazard ProjectExpectation's doc calls out.
-	rebindRepoID := ""
-	if update.ProjectPath != nil {
-		rebindRepoID = repoIDForPath(*update.ProjectPath)
-	}
-	var merged Task
-	lockErr := config.WithFileLock(path, func() error {
-		tasks, err := loadTasksLocked(path)
-		if err != nil {
-			return err
-		}
-
-		found := false
-		for i, existing := range tasks {
-			if existing.ID == id {
-				// Verify against the freshly loaded record, before the patch is
-				// applied — the pre-patch ProjectPath is what the caller
-				// authorized against.
-				if err := expect.Verify(existing); err != nil {
-					return err
-				}
-				merged = update.apply(existing)
-				if update.ProjectPath != nil {
-					merged.RepoID = rebindRepoID
-				}
-				if err := merged.ValidateTrigger(); err != nil {
-					return err
-				}
-				// Validate the program ONLY when the patch sets it: a toggle or
-				// an unrelated field edit must not fail on a pre-existing Program
-				// value that would no longer pass current enum validation (the
-				// same tolerance UpdateTaskStatus applies to legacy records).
-				if update.Program != nil && merged.Program != "" {
-					if err := config.ValidateProgramEnum("task program", "task program", merged.Program, ""); err != nil {
-						return err
-					}
-				}
-				if validate != nil {
-					validatedRepoID, err := validate(merged)
-					if err != nil {
-						return err
-					}
-					if validatedRepoID != "" {
-						merged.RepoID = validatedRepoID
-					}
-				}
-				tasks[i] = merged
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			return fmt.Errorf("task with id %q not found", id)
-		}
-
-		return saveTasks(tasks)
-	})
-	if lockErr != nil {
-		return Task{}, lockErr
-	}
-	return merged, nil
 }

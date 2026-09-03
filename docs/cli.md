@@ -118,11 +118,14 @@ af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>]
 af tasks get <id>
+af tasks show <id>             # human-readable: schedule health and audit trail
 af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--project-path <repo>] [--program <agent>] [--enabled true|false]
 af tasks restart <id>          # reload an edited watch script (watch tasks only)
 af tasks trigger <id>          # run a cron task immediately (cron tasks only)
 af tasks remove <id>
 ```
+
+`af tasks show` answers "is this thing actually running?": the trigger, whether the daemon has it armed, when the live scheduler entry fires next, whether it has missed scheduled runs and how many, and the bounded audit trail of who created, updated, enabled, or disabled it. The same facts ride `af tasks list`/`get` as the `overdue`, `missed_occurrences`, `next_run_at`, `arming` and `audit` fields, and `af doctor` raises a WARN row for any task that has stopped firing. See [tasks.md](tasks.md#is-it-actually-firing).
 
 Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigger clears the other. `--target-session ""` explicitly reverts to create-a-session-per-run; omitting the flag leaves it untouched. `--project-path` moves the task to that repository; `--repo` still names the task's current project for authorization. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 
@@ -194,11 +197,21 @@ af config get <key> --explain                       # candidates and why one won
 af config list --repo ../another-project            # inspect another repository
 af config get program_overrides.codex --repo . --explain
 af config set <key> <value>                         # global write, preserving comments/ordering
+af config migrate                                   # rewrite deprecated keys to their current spelling
 ```
 
 Bare `get`/`list` report the current repository's effective values (defaults plus global, legacy per-repo, checked-in, and personal layers); outside Git they report global values. `--repo <repository-path>` inspects another repository, while the deprecated `--project` read alias remains accepted for compatibility. The path is a selector only and does not register or persist a project. `--explain` reports the on-disk effective value, merge policy, precedence, every candidate's path/presence/result/reason, and per-leaf origins for merged maps/tables. Displayed source locations keep the selected/configured path spelling; symlinks are resolved for identity comparison, never for display. The output also says explicitly that the running daemon value was not checked. JSON mode carries the same data structurally.
 
+`--daemon-url`/`AF_DAEMON_URL` means one thing across the whole group, and it is never silently dropped (#3661, #3679). They are persistent root flags, so they appear in every subcommand's `--help`, and accepting one and ignoring it would hand you a confident verdict about the wrong host — or, on a write, a success line naming a local path for a change you believe you made remotely. Two answers, by what the verb can actually reach:
+
+- **Routed.** Global `af config set` and `af config unset` are sent to the targeted daemon's admission-gated write — the same handler the web config form posts to (#3231) — and the success line names the daemon's own path and URL, so which machine changed is never in doubt. A daemon too old to serve that route is **refused by name and version**; af never falls back to writing this machine's config for a remote target, because that is precisely the wrong-machine mutation the flag exists to prevent. Everything is unchanged with no target set: the local control socket, and today's local write when no daemon is running.
+- **Refused.** `get`, `list`, `validate`, `migrate`, and the `--project` form of `set`/`unset` read or write a file on the machine they run on that no remote daemon owns — a personal per-project override, in the `--project` case. They refuse a remote target and tell you to run them on the daemon host.
+
 `set` edits only the target value's bytes and preserves unrelated comments, blank lines, and key ordering. It validates with the loader's own rules before writing, so it cannot produce a config that fails to load. Every global config key is settable: scalars use their ordinary text form, tables and `session_env_passthrough` use compact JSON, `theme` accepts either a named preset or its custom JSON table, and `network.cors_allowed_origins` remains comma-separated. `program_overrides` and `limit_patterns` accept either their whole JSON object or a dotted single-entry key. The canonical network keys live under `network.*`; the old flat spellings `listen_addr`, `preview_listen_addr`, `require_token`, `require_loopback_token`, and `cors_allowed_origins` remain permanent TOML, JSON, and CLI aliases. Without `--project`, `set` writes the global config; with `--project <id-or-path>` it writes a permitted personal per-project override instead. `af config unset` clears a per-project override (with `--project`) or a migrated global backend setting (without it). A global write uses the same apply-on-save path as both config panes (#2480); most keys take effect at once, and `set` prints the exact notice for keys that wait for the next daemon or `af` launch. A raw hand-edit is not applied for you and takes effect on the next `af`/daemon start.
+
+`migrate` is the command the deprecated-key warnings name. It rewrites the deprecated spellings in the global config to their current ones **in place**, prints the diff, and keeps the previous file beside it as `config.toml.bak` (an existing backup is never overwritten — the copy is numbered instead). It changes spelling, never meaning: a value written on one line is carried over as its own bytes, quoting and all, while a value spread over several lines (an array, typically) is re-encoded compactly rather than relocated as raw text, so its formatting can change even though its contents do not. Either way the rewritten file is re-parsed before anything is saved, and a rewrite that would change even one effective value is refused rather than written. A leading byte-order mark is preserved. Running it twice is safe — the second run reports nothing to migrate. The readers of the old spellings stay, so an older config keeps loading and your running configuration is untouched. Worth knowing before a **downgrade**: the grouped spellings have only been read since #3354 (2026-08-14), so an af older than that falls back to the built-in default for a migrated key rather than reading it. For most keys that default is the conservative one (strict host-key checking, no credential mount). Two cases are **not**, both because the listener defaults to a live `127.0.0.1:8443`. Migrating `network.require_token = true` loses the token an older binary could read (`network.require_loopback_token` only matters alongside it, being inert on its own) — exactly what that key exists to prevent on a shared host. And migrating an **empty** `network.listen_addr` hides the fact that the web server was turned *off*, so an older binary starts one where the operator had none. `migrate` compares what such a binary saw before and after the rewrite, and prints a caution naming the backup when a migration costs you either. A legacy `config.json` is converted to `config.toml` on the way in, exactly as any af start would convert it.
+
+Two things it will not do. A key written in **both** spellings with **different** values is refused, naming the key: af has a documented winner at load time (the grouped value), but no migration should make that tie-break permanent on your behalf — delete whichever line is wrong and run it again. The same key in both spellings with the *same* value is not ambiguous, so the redundant flat line is simply dropped. And `root_agents` is reported and left exactly where it is: its successor is a *registered* project's personal `[root_agent]`, so migrating it would mean registering projects for you — durable state outside the config file. The keys that can move still move, and the report names each legacy path with the step that ends it: register the path as a project, set `enabled = true` plus the optional program in its personal `[root_agent]`, **then remove its `root_agents` entry** — stopping before the removal leaves the key, and therefore the warning, exactly where they were.
 
 ## Maintenance commands
 
@@ -222,10 +235,12 @@ snapshot), the configured tasks, the session state from `instances.json`, the
 text file (default `~/af-bug-report-<ts>.txt`, mode 0600; override with
 `-o/--output`) so you can read the whole thing in one scroll before attaching
 it. Redaction is **best-effort**: free-text and secret-bearing fields (session
-titles, session prompts, task prompts, tab commands, remote metadata) are dropped, `$HOME` and
-your username are collapsed to `~` / `[user]`, and known credential shapes are
-scrubbed everywhere — but perfect redaction is impossible, so **review the file
-before sharing it publicly**. It is read-only and local (like `af doctor`): it
+titles, session prompts, task prompts, tab and session commands, tab names,
+account labels, remote metadata) are dropped; every directory the bundle names is
+replaced by the role it plays (`[repo:N]`, `[worktree:N]`, `[af-home]`, `~`)
+rather than by its own name, and your username by `[user]`; and known credential
+shapes are scrubbed everywhere — but perfect redaction is impossible, so
+**review the file before sharing it publicly**. It is read-only and local (like `af doctor`): it
 never dials the daemon or the network, and is not part of the HTTP `af api`
 surface.
 

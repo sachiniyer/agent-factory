@@ -352,6 +352,18 @@ func TestHTTPMutationAndInteractiveStreamReturnRetryableProbation(t *testing.T) 
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 	require.Contains(t, recorder.Body.String(), daemonUpgradeProbationErrText)
 
+	// Its unset counterpart, served over HTTP since #3679 so a CLI pointed at a
+	// REMOTE daemon can clear a key there. 503 rather than 404 is the whole
+	// assertion: 404 would say the route is not registered, and 200 would say the
+	// new surface reached config.UnsetGlobalConfigValue around the admission gate
+	// the RPC twin sits behind (see the probation ledger above).
+	request = httptest.NewRequest(http.MethodPost, "/v1/UnsetConfigValue",
+		strings.NewReader(`{"key":"sandbox.ssh"}`))
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), daemonUpgradeProbationErrText)
+
 	request = httptest.NewRequest(http.MethodGet, "/v1/sessions/session-id/stream", nil)
 	recorder = httptest.NewRecorder()
 	mux.ServeHTTP(recorder, request)

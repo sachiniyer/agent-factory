@@ -85,7 +85,11 @@ func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 	out := a.View()
 	assert.Contains(t, out, "▾[✓]  nightly-sweep", "the focused row is marked expanded")
 	assert.Contains(t, out, "0 3 * * *", "the expanded row reveals its cron trigger")
-	assert.Contains(t, out, "next Jul 02 03:00 · last Jul 01 03:00",
+	// "from cron:" because this fixture is a plain disk read with no arming
+	// observation on it, so the time is what the expression implies rather than
+	// what a daemon is holding (#3626). The pin keeps the whole joined fragment
+	// so a change to either half has to be deliberate.
+	assert.Contains(t, out, "from cron: next Jul 02 03:00 · last Jul 01 03:00",
 		"the expanded row reveals its next/last-run detail")
 	assert.NotContains(t, out, "watch: tail -f ci.log",
 		"a collapsed (unselected) row keeps its detail hidden")
@@ -213,8 +217,8 @@ func TestAutomationsStripKeyRouting(t *testing.T) {
 // never a bare hard clamp.
 func TestAutomationsTitleWidthAware(t *testing.T) {
 	tasks := stripTasks()
-	manageHint := automationHelpKey(keys.KeyTaskList) + " manage"
-	hooksHint := automationHelpKey(keys.KeyHooks) + " hooks"
+	manageHint := railHelpKey(keys.KeyTaskList) + " manage"
+	hooksHint := railHelpKey(keys.KeyHooks) + " hooks"
 
 	wide := newTestAutomations(tasks)
 	wide.SetRect(layout.Rect{W: 60, H: 3})
@@ -421,7 +425,7 @@ func TestAutomationsCompactHeaderKeepsItsCounts(t *testing.T) {
 // broke the contract that the affordance is the last thing cut at exactly the
 // width the contract is about.
 func TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount(t *testing.T) {
-	manageHint := automationHelpKey(keys.KeyTaskList) + " manage"
+	manageHint := railHelpKey(keys.KeyTaskList) + " manage"
 	for _, n := range []int{0, 2, 9, 10, 99, 100, 999} {
 		a := newTestAutomations(nSimpleTasks(n))
 		a.SetCompact(true)
@@ -430,7 +434,7 @@ func TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount(t *testing.T) {
 
 		require.Containsf(t, line, manageHint,
 			"%d tasks: the manage affordance is the last thing cut, and 22 is the supported rail minimum: %q", n, line)
-		require.NotContainsf(t, line, "…"+automationsHintSeparator,
+		require.NotContainsf(t, line, "…"+railHintSeparator,
 			"%d tasks: the separator must stay intact: %q", n, line)
 		require.Containsf(t, line, fmt.Sprintf("%d", n),
 			"%d tasks: the task count survives: %q", n, line)

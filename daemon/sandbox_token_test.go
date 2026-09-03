@@ -122,6 +122,7 @@ func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
 		// there, so sampling reveals which combinations are persistently taken.
 		"/v1/SuggestSessionName",
 		"/v1/SetConfigValue",
+		"/v1/UnsetConfigValue",
 		"/v1/DeleteProject",
 		"/v1/KillSession",
 	} {

@@ -43,6 +43,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Finding is one visible diagnostic observation.
@@ -107,6 +108,35 @@ type Report struct {
 	OK []string
 	// Findings holds detected problems in detection order.
 	Findings []Finding
+	// Incomplete names the checks that did NOT finish looking, in the order
+	// they gave up.
+	//
+	// It exists because the alternative is the failure mode #3466 was filed
+	// for: a sweep that stopped early prints a SMALLER problem count than a
+	// sweep that finished, and nothing in the output distinguishes the two. A
+	// reader — including one who is looking straight at it — reads the shorter
+	// list as the healthier machine. Whatever is in here must reach the
+	// summary line, because that is the part people actually read.
+	//
+	// Deliberately NOT part of UnresolvedCount: "I did not finish looking" is
+	// an unknown, not a proven unhealthy condition, and this package keeps
+	// those axes apart everywhere else (see the Finding.Actionable contract).
+	// Flipping the exit code here would also break every CI probe on a box
+	// whose only sin is a large temp dir. Scripts that need to distinguish
+	// "clean" from "did not look" branch on summary.incomplete in --json.
+	Incomplete []string
+}
+
+// markIncomplete records that a check stopped before it had seen everything.
+// Naming the check is the point: "something was skipped" is not usable, and
+// the summary prints these names.
+func (r *Report) markIncomplete(check string) {
+	for _, existing := range r.Incomplete {
+		if existing == check {
+			return
+		}
+	}
+	r.Incomplete = append(r.Incomplete, check)
 }
 
 // addActionableFinding records a condition doctor established is unhealthy.
@@ -167,6 +197,16 @@ type Options struct {
 	// test or debug run is still coming back for it).
 	MinTempHomeAge time.Duration
 
+	// MaxTempHomeCandidates bounds how many candidate directories one temp-home
+	// sweep will inspect; defaults to defaultMaxTempHomeCandidates. A sweep that
+	// hits the bound reports how far it got rather than returning a short list
+	// as if it were the whole picture.
+	//
+	// Zero means "use the default". Tests set it low to exercise truncation
+	// deterministically, and a caller may set it negative to disable the bound
+	// and accept an unbounded sweep.
+	MaxTempHomeCandidates int
+
 	// remoteConfig resolves the remote-hook backend to validate and the repo
 	// root it was loaded from; nil hooks mean no remote is configured and the
 	// remote checks skip cleanly. Defaults to resolving the repo of the current
@@ -222,6 +262,12 @@ type Options struct {
 	// checkpointed to disk yet, so an inventory that reads only disk would call
 	// a live session's directory an orphan (#3560).
 	sessionInventory func() ([]session.InstanceData, error)
+
+	// taskInventory returns every task on the box, each carrying whether its
+	// arming was actually observed (task.ArmingUnknown when it was not). Defaults
+	// to daemonTaskInventory; see there for why there is deliberately no
+	// run-level "a daemon answered" flag alongside it.
+	taskInventory func() ([]task.Task, error)
 }
 
 // scanContext carries the shared, immutable inputs of one run.
@@ -293,6 +339,9 @@ func (o *Options) applyDefaults() error {
 	if o.MinTempHomeAge == 0 {
 		o.MinTempHomeAge = 7 * 24 * time.Hour
 	}
+	if o.MaxTempHomeCandidates == 0 {
+		o.MaxTempHomeCandidates = defaultMaxTempHomeCandidates
+	}
 	if o.killGrace == 0 {
 		o.killGrace = 2 * time.Second
 	}
@@ -307,6 +356,9 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.sessionInventory == nil {
 		o.sessionInventory = daemonSessionInventory
+	}
+	if o.taskInventory == nil {
+		o.taskInventory = daemonTaskInventory
 	}
 	if o.daemonHealth == nil {
 		o.daemonHealth = daemon.Health
@@ -400,6 +452,7 @@ func Run(opts Options) (*Report, error) {
 	checkLeakedTmuxSessions(ctx, report)
 	checkStaleTempHomes(ctx, report)
 	checkForeignDaemons(ctx, report)
+	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)
 	checkOrphanedHookHosts(ctx, report)
 

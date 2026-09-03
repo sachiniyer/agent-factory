@@ -12,6 +12,9 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // onArchiveHookTimeout bounds an operator hook that never returns. Archive is a
@@ -72,6 +75,37 @@ type onArchiveHookContext struct {
 // while LoadInRepoConfig rejects the same key before any repository-controlled
 // command can execute.
 func runOnArchiveHook(hookCtx onArchiveHookContext) error {
+	// BEFORE anything else, and before the caller's move: a previous daemon
+	// generation may have died with this session's post-worktree or archive hook
+	// still running in its scope — the survival the unbound shape now guarantees
+	// (#3650). Archive is retryable and it MOVES the tree, so this is the #2770
+	// ordering restated across the restart boundary: running the operator's
+	// command a second time while the first is still writing through its old cwd
+	// is exactly what that ordering exists to prevent. It runs even when no hook
+	// is configured, because the MOVE is the hazard, not just the second run.
+	//
+	// It needs no persisted handle: the prefix is derived from the session id, so
+	// it is correct for a session whose record never carried one — including one
+	// with no post_worktree_commands at all, which is the case with no other
+	// handle available. RunningDaemonProcess() is the gate for the same reason it
+	// is in session/git: only that process creates these scopes, and only it is
+	// guaranteed a reachable user manager.
+	//
+	// The same call also covers the survivor that has no scope YET — a launcher
+	// caught between systemd-run's execve and its StartTransientUnit reply, which
+	// the manager cannot report because the unit does not exist. That needs no
+	// separate mechanism here: StopHookScopes consults the process table beside
+	// the manager and waits the launcher out (#3667).
+	scopePrefix := ""
+	if systemdunit.RunningDaemonProcess() {
+		scopePrefix = systemdunit.HookScopeUnitPrefix(hookCtx.sessionID)
+		if err := systemdunit.StopHookScopes(scopePrefix); err != nil {
+			return fmt.Errorf(
+				"%w: refusing to run the on-archive hook for %s because a previous run's hook scopes (%s-*) could not be stopped: %w",
+				session.ErrHookTeardownUnconfirmed, hookCtx.sessionID, scopePrefix, err)
+		}
+	}
+
 	// Prefer the live worktree so a bare repository's identity directory is
 	// never treated as a checkout. If Git metadata is already unavailable, keep
 	// the historical identity-root fallback: on_archive_command is admitted only
@@ -96,7 +130,15 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	defer cancel()
 
 	var output archiveHookOutputTail
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// Same lifetime class as post_worktree_commands, same shape (#3650): a
+	// daemon-spawned operator hook enters its own transient scope with no
+	// dependency edge to the daemon unit, so a dependency sweep is charged to its
+	// own cgroup instead of the daemon's and is not killed by a restart or an
+	// auto-upgrade. The scope shares the session's af-hook-<id> prefix, so the
+	// worktree sweep that runs before a rebuild or removal names it too.
+	scopeUnit := systemdunit.HookScopeUnit(scopePrefix, systemdunit.NewHookScopeGeneration(), 0)
+	program, argv := systemdunit.UnboundScopeArgv(scopeUnit, "sh", "-c", command)
+	cmd := exec.CommandContext(ctx, program, argv...)
 	cmd.Dir = hookCtx.worktree
 	cmd.Env = append(
 		sessionenv.Filter(os.Environ(), "", resolved.SessionEnvPassthrough),
@@ -127,8 +169,29 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	if cmd.Process != nil {
 		// A hook may background a descendant and exit. Kill the process group on
 		// every path so no cleanup process survives the archive operation with a
-		// cwd or inherited pipe in the worktree.
+		// cwd or inherited pipe in the worktree. systemd-run --scope execs rather
+		// than forks, so cmd.Process.Pid is still the hook shell and this signals
+		// exactly the group it always did.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// The scope is the wider net over the same tree: a descendant that left the
+	// process group (setsid) is still in the control group, where the SIGKILL
+	// above cannot reach it. `systemctl stop` waits for the job — StopScopeUnits
+	// passes no --no-block — so a failure here is not "the stop is still running",
+	// it is no proof the stop completed at all.
+	//
+	// That makes it a SAFETY error, not a hook error: the caller relocates the
+	// worktree immediately after this returns, and every ordinary hook failure is
+	// deliberately best-effort there. Wrapping it in ErrHookTeardownUnconfirmed is
+	// what makes the move refuse instead (#3650 review). It outranks the hook's
+	// own outcome below, which is only a report.
+	if scopeUnit != "" {
+		if stopErr := systemdunit.StopScopeUnits(scopeUnit); stopErr != nil {
+			log.WarningLog.Printf("on-archive hook scope %s did not stop: %v", scopeUnit, stopErr)
+			return fmt.Errorf(
+				"%w: the on-archive hook's scope %s could not be stopped, so a descendant may still be writing into the worktree: %w",
+				session.ErrHookTeardownUnconfirmed, scopeUnit, stopErr)
+		}
 	}
 	// What the hook ITSELF did outranks what the clock says (#3407). Both checks
 	// below used to run in the opposite order, so a deadline that fired anywhere in

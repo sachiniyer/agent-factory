@@ -49,9 +49,21 @@ func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
 // renders comes from the manifest, and every write goes through
 // daemon.SetGlobalConfigValue — the daemon's admission-gated SetConfigValue
 // when one is running, the same validated/locked/atomic
-// config.SetGlobalConfigValue write otherwise — exactly as `af config set`
-// does. Adding a key to config_types.go surfaces it here with no edit to this
-// file, which is what TestConfigPaneRendersEveryManifestKey pins.
+// config.SetGlobalConfigValue write otherwise. Adding a key to config_types.go
+// surfaces it here with no edit to this file, which is what
+// TestConfigPaneRendersEveryManifestKey pins.
+//
+// That sentence used to end "exactly as `af config set` does", and since #3679
+// it would only be true with no remote target: `af config set --daemon-url`
+// routes its global write to THAT daemon, while this pane is local on BOTH
+// halves — its rows come from an in-process config.ManifestWithValues read of
+// this machine (app/handle_overlay.go), and this write dials the LOCAL control
+// socket. Both halves are why routing the write alone would be worse than not
+// routing it: it would send values read from machine A to machine B. Making the
+// pane follow a remote target means making its READ follow one too (the daemon
+// already serves GetConfig for exactly that, which is what the web form uses),
+// which is a design question of its own rather than something to settle inside
+// a CLI change. Tracked on #3708.
 //
 // What this pane must never do is misstate WHEN an edit takes effect. Since #2480
 // most keys reach a running daemon in place, but not all do, so the pane shows the

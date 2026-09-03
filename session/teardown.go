@@ -211,16 +211,16 @@ func TeardownStateUnknown(err error) bool {
 // Two copies of a safety rule is one copy of a safety rule.
 //
 // trustLiveGeneration (#3413) must come from the caller, not be assumed here:
-// this session-layer helper is reachable from BOTH daemon's locked
-// KillSession/ArchiveSession entry points (which hold the op-lock +
-// killsInFlight for their entire call, ruling out a same-name replacement
-// appearing mid-teardown) AND from unlocked internal cleanup — a setup-error
-// defer killing an instance before it is even registered is one real example —
-// which cannot make that claim. Passing true from the wrong caller would let a
-// trusted scan adopt a genuine replacement's generation and reap it: exactly
-// the #3309 regression the guard exists to prevent. See
-// Instance.KillTrustingOwnLifecycleLock and daemon/archive.go's archiveTeardown
-// for the only two callers allowed to pass true.
+// this session-layer helper is reachable from BOTH daemon's locked kill/archive
+// entry points (which hold this session's op-lock unbroken for their entire
+// call while the instance still owns its (repo, title) map slot, ruling out a
+// same-name replacement appearing mid-teardown) AND from unlocked internal
+// cleanup — a setup-error defer killing an instance before it is even
+// registered is one real example — which cannot make that claim. Passing true
+// from the wrong caller would let a trusted scan adopt a genuine replacement's
+// generation and reap it: exactly the #3309 regression the guard exists to
+// prevent. See Instance.KillTrustingOwnLifecycleLock and daemon/archive.go's
+// archiveTeardown for the only two methods allowed to pass true.
 func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string, trustLiveGeneration bool) (teardownState, bool, error) {
 	// A session that provably never created a pane has no liveness to establish,
 	// so it is KNOWN without asking tmux — which matters because the machines
@@ -793,6 +793,13 @@ func (m teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (
 	return archiveCloseTab(ts, title, tabName)
 }
 
+// ErrHookTeardownUnconfirmed marks a pre-move hook callback failure that is a
+// SAFETY fact rather than an operator-command failure: af could not establish
+// that the hook's processes are gone. Archive treats it as a refusal to relocate
+// (see handleWorktree), because every other beforeMove error is deliberately
+// best-effort and moves the tree anyway.
+var ErrHookTeardownUnconfirmed = errors.New("post-worktree hook teardown could not be confirmed")
+
 func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
 	if gw == nil {
 		return stateKnown, fmt.Errorf("cannot archive %q: instance has no worktree to relocate", title)
@@ -815,10 +822,19 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 		// Cleanup policy is deliberately best-effort. Record its failure for the
 		// daemon to surface after the archive commits, then always relocate the
 		// worktree so a broken operator hook cannot strand or lose the session.
+		beforeMoveErr := m.beforeMove()
+		// With ONE exception, and it is the same distinction the claim
+		// revalidation above makes: "the operator's command failed" is best-effort,
+		// but "a process from that command may still be running in this tree" is a
+		// safety fact, and nothing downstream re-checks it. Relocating underneath
+		// such a process lets it keep writing through its old cwd into the archived
+		// tree (#3650 review). stateUnknown keeps the record recoverable, so this
+		// refuses the move without stranding the session.
+		if errors.Is(beforeMoveErr, ErrHookTeardownUnconfirmed) {
+			return stateUnknown, fmt.Errorf("archive %q: %w", title, beforeMoveErr)
+		}
 		if m.hookErr != nil {
-			*m.hookErr = m.beforeMove()
-		} else {
-			_ = m.beforeMove()
+			*m.hookErr = beforeMoveErr
 		}
 	}
 	// The move is now BOUNDED, which is the case this comment used to reserve:

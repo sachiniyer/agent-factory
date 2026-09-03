@@ -46,6 +46,12 @@ after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
 path, because a finding is the only unmet requirement an external PR's reviewer
 can answer per item.
 
+A push never clears an inline finding by itself, and where the thread currently
+points is no part of the test. Moving the code a thread was anchored to only
+marks that thread outdated, which a rebase or a fix to the neighbouring line does
+as readily as the fix itself — so an outdated thread blocks exactly like any
+other until it is answered in-thread (#3689).
+
 The same manual-only pass applies when the Codex reviewer is observed to be
 usage-limited against the head — no verdict can arrive in that case, so the
 gate degrades to maintainer review rather than wait indefinitely. Auto Gate disables any pending GitHub-native auto-merge

@@ -267,12 +267,14 @@ func (t *TmuxSession) CloseAndWaitForPaneExitReportingBlindness() (PaneState, bo
 // CloseAndWaitForPaneExitTrustingOwnGeneration is
 // CloseAndWaitForPaneExitReportingBlindness for the one class of caller that can
 // vouch for something the generic path cannot: exclusive ownership of this
-// session's lifecycle for the ENTIRE call (#3413). Archive and kill are that
-// caller — closeTabForDestructiveTeardown, which holds the op-lock and
-// killsInFlight the whole time — so no other daemon-created instance can mint a
-// same-named replacement mid-call, and a foreign af HOME is excluded before the
-// generation check ever runs regardless. With #3309's actual risk structurally
-// ruled out here, a vanished session whose live processes carry a NEWER
+// session's lifecycle for the ENTIRE call (#3413). Archive, kill, and the
+// root-agent reap are those callers — reaching here through
+// closeTabForDestructiveTeardown while holding this session's op-lock unbroken,
+// with the instance still occupying its (repo, title) map slot — so no other
+// daemon-created instance can mint a same-named replacement mid-call, and a
+// foreign af HOME is excluded before the generation check ever runs
+// regardless. With #3309's actual risk structurally ruled out here, a
+// vanished session whose live processes carry a NEWER
 // generation than any captured predecessor (a session that flapped through a
 // restore while its teardown was starting) is reapable instead of being refused
 // forever behind a guard built for callers with no such guarantee. Every other
