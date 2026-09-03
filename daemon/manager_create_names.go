@@ -195,8 +195,20 @@ func (m *Manager) validateTitleShapeLocked(title string, namespace runtimeNameNa
 	// name everywhere. Only the daemon's own ensure loop passes
 	// allowReserved; title-base derivation (nextAvailableTitleLocked) never
 	// does, so a base of "root" skips to "root-2" instead of erroring.
-	if !allowReserved && session.IsReservedTitle(title) {
-		return fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", title)
+	//
+	// What is reserved is the NAME, not the spelling (#3732). The refusal asks
+	// session.ReservedTitleCollision, which also catches a title deriving the
+	// reserved tmux session name without looking like "root" — "ro ot", whose
+	// interior space toTmuxName deletes. That check belongs HERE, in the shape
+	// half, rather than in findTitleConflictLocked below: it compares against a
+	// constant rather than against any af record, so it is a refusal the
+	// archived-name-reuse rename can never clear, and validateTitleClaimableLocked
+	// must therefore see it too (#2415). The record scan still owns the other
+	// axis — a derived-name collision with an existing session, reserved or not.
+	if !allowReserved {
+		if err := session.ReservedTitleRefusal(title); err != nil {
+			return err
+		}
 	}
 	return nil
 }

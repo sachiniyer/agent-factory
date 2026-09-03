@@ -117,7 +117,13 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	// deliberately leaves a surviving live root alone, but will not recreate it
 	// after the next kill/outage; accepting a task there would defer the permanent
 	// failure until that disappearance.
-	if session.IsReservedTitle(target) {
+	// The admission predicate, because that is what the delivery auto-create
+	// will ask: a target deriving the reserved tmux name ("ro ot") can no more
+	// materialize than a reserved spelling can (#3732). Refusing at the task
+	// write keeps a task that could only fail on every run from being committed
+	// at all — the arm below reports it, and does so without consulting ctx,
+	// which prepareTaskTargetValidation only fills for the exact spelling.
+	if session.ReservedTitleCollision(target) != "" {
 		if target != session.RootSessionTitle {
 			return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
 		}
