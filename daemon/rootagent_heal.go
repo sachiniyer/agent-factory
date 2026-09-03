@@ -680,6 +680,18 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// recomputed — it is what lets a delete-by-recorded-path or the TUI
 		// reach the project's real state after the path is gone. One-way: the
 		// writer never overwrites an identity already recorded.
+		// BOTH fences, before the durable write and not only before the
+		// in-memory move (#3530 review id 3919824579). ReconcileProjectRepoID
+		// is permanent — the one-way writer never replaces what it wrote — and
+		// a delete holding the destination identity resolved no registry row,
+		// so it cannot deregister a row that gains that identity here: its
+		// sessions are archived and its identity suppressed, and the project
+		// comes back on the next start. The next pass writes it once the
+		// delete settles.
+		if m.identityTransitionFenced(derivedID, repo.ID) {
+			log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but a delete holds one of the two identities; leaving both the record and the snapshot untouched for now", record.root, repo.ID)
+			continue
+		}
 		if config.IsDerivedRepoID(derivedID) {
 			if wrote, err := config.ReconcileProjectRepoID(record.projectID, repo.ID); err != nil {
 				// The durable write is what makes the promotion survive a
@@ -856,6 +868,27 @@ func projectByID(projects []config.Project, id string) (config.Project, bool) {
 	return config.Project{}, false
 }
 
+// identityTransitionFenced reports that a delete holds either end of an
+// identity transition (#3530 review ids 3915518792, 3919604386, 3919824579).
+//
+// Both ends matter, and so does WHERE it is asked. A delete on the SOURCE owns
+// the identity the record is filed under right now. A delete on the
+// DESTINATION resolved no registry row — the row still answers to the source —
+// so it cannot deregister a project that acquires that identity mid-delete:
+// the project would be archived and suppressed under it and come back on the
+// next start. Neither fence is ever COPIED across the transition, because a
+// copy at an identity its delete does not own would never be cleared; they are
+// only read.
+func (m *Manager) identityTransitionFenced(from, to string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, fenced := m.projectDeletes[from]; fenced {
+		return true
+	}
+	_, fenced := m.projectDeletes[to]
+	return fenced
+}
+
 // moveResolvedIdentity carries a RESOLVED project's snapshot state from the
 // identity its boot recorded to the one its checkout has just been proven to
 // have (#3530 review id 3919346220).
@@ -927,18 +960,7 @@ func promoteRecordedIdentity(m *Manager, healed *rootAgentSnapshot, recordedID, 
 	// repository until the daemon restarts (#3530 review id 3915518792).
 	// Refusing the promotion is the honest answer — the delete owns this
 	// identity right now, and the next pass promotes once it settles.
-	m.mu.Lock()
-	_, sourceFenced := m.projectDeletes[recordedID]
-	// The DESTINATION fence counts too (#3530 review id 3919604386). A delete
-	// aimed at the candidate identity installs it, resolves no registry row —
-	// the row still answers to the identity it is filed under — and would
-	// otherwise have this promotion move the durable project into the very
-	// identity being torn down: archived and suppressed, never deregistered,
-	// and back after a restart. Either fence defers the promotion; the next
-	// pass runs once the delete settles.
-	_, destinationFenced := m.projectDeletes[realID]
-	m.mu.Unlock()
-	if sourceFenced || destinationFenced {
+	if m.identityTransitionFenced(recordedID, realID) {
 		return false
 	}
 	// And refuse when the identity being left behind is one ANOTHER live

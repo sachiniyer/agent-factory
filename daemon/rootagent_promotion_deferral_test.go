@@ -1024,6 +1024,14 @@ func TestDestinationFenceDefersThePromotion(t *testing.T) {
 
 	manager.EnsureRootAgents()
 
+	// The DURABLE write is what this pins beyond the in-memory deferral
+	// (#3530 review id 3919824579): a delete holding the destination resolved
+	// no registry row, so it cannot deregister a row that gains that identity
+	// here — the project would come back on the next start with its sessions
+	// archived and its identity suppressed.
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("nothing may be written to the record while a delete holds the identity it would gain, got %q", recorded)
+	}
 	layers := manager.rootAgentLayers.Load()
 	if _, still := layers.unresolvedRoots[derivedID]; !still {
 		t.Fatalf("a promotion into an identity a delete holds must be deferred, leaving the record where it is")
