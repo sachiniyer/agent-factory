@@ -70,8 +70,9 @@ type webListeners struct {
 	// returning cannot clear the lifecycle bound-state the NEW listener just set. A
 	// done-watcher clears health and binding state only while its own generation is
 	// still current, allowing an unchanged configured address to be rebound. It
-	// clears the closer only after our Close initiated the exit; after listener
-	// failure the closer remains the handle to accepted connections.
+	// clears the handle only after a teardown WE asked for initiated the exit
+	// (close or retire, both of which set closeRequested); after listener failure
+	// the handle remains the owner of the accepted connections.
 	webGen uint64
 
 	previewHandle     *tcpListenerHandle
@@ -96,7 +97,7 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
 	var errs []error
-	// A closer retained after unexpected listener death outlives the empty
+	// A handle retained after unexpected listener death outlives the empty
 	// binding sentinel. Disabling that listener must still enter bindWebLocked's
 	// teardown path so accepted connections do not survive reconciliation.
 	if newCfg.ListenAddr != wl.webConfigAddr ||

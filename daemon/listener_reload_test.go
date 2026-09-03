@@ -281,7 +281,7 @@ func TestWebListenersRetainCloserAfterUnexpectedListenerDeath(t *testing.T) {
 				}
 			}, time.Second, 10*time.Millisecond, "the server must accept and begin reading the connection")
 
-			require.NoError(t, listener.Close(), "fail the listener without calling the server closer")
+			require.NoError(t, listener.Close(), "fail the listener without tearing the server down through its handle")
 			require.Eventually(t, func() bool {
 				wl.mu.Lock()
 				defer wl.mu.Unlock()
@@ -359,7 +359,7 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 				}
 			}, time.Second, 10*time.Millisecond, "the server must accept and begin reading the connection")
 
-			require.NoError(t, listener.Close(), "fail the listener without calling the server closer")
+			require.NoError(t, listener.Close(), "fail the listener without tearing the server down through its handle")
 			require.Eventually(t, func() bool {
 				wl.mu.Lock()
 				defer wl.mu.Unlock()
@@ -367,7 +367,7 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 					return wl.webConfigAddr == "" && wl.webHandle != nil
 				}
 				return wl.previewConfigAddr == "" && wl.previewHandle != nil
-			}, time.Second, 10*time.Millisecond, "listener death must leave only the accepted-connection closer")
+			}, time.Second, 10*time.Millisecond, "listener death must leave only the handle owning the accepted connections")
 
 			disabled := *m.Config()
 			if kind == "control" {

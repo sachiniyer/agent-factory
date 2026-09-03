@@ -237,7 +237,7 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 // startTCPListenerWithListen is startTCPListener with the socket constructor
 // supplied by the restartable-listener owner. Production uses net.Listen; the
 // seam lets lifecycle tests fail the listener underneath http.Server without
-// conflating that path with calling the returned server closer.
+// conflating that path with tearing the server down through the returned handle.
 func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, listen func(network, address string) (net.Listener, error)) (*tcpListenerHandle, tcpListenerInfo, error) {
 	var token string
 	var expectedToken func() (string, error)
