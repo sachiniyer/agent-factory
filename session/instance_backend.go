@@ -46,10 +46,20 @@ func (i *Instance) Kill() error {
 	return i.AgentServer().Kill(false)
 }
 
-// KillTrustingOwnLifecycleLock is Kill for the ONE caller that holds this
-// session's exclusive lifecycle lock for its entire call — daemon's
-// KillSession (#3413). Every other Kill caller (create-failure cleanup,
-// root-kill, rootagent teardown, and any future one) must keep calling Kill
+// KillTrustingOwnLifecycleLock is Kill for the callers that hold this session's
+// exclusive lifecycle lock for their ENTIRE call: daemon's KillSession (#3413),
+// finishUserKill's tombstone retry (#3583), and reapDeadRoot's root-agent
+// teardown (#3699). What licenses the trust is the per-session op-lock held
+// unbroken across the teardown, a killsInFlight claim registered for its whole
+// duration, and the instance keeping its (repo, title) map slot until the
+// teardown settles — together those rule out a same-name replacement appearing
+// mid-sweep. All three parts are load-bearing: the map slot alone is not
+// enough, because the archived-name-reuse rename re-keys it, and killsInFlight
+// is that path's own fence (Codex on #3700). Each call site carries its own
+// version of the argument; do not add a fourth without writing one.
+//
+// Every other Kill caller (create-failure cleanup of a not-yet-registered
+// instance is the standing example, and any future one) must keep calling Kill
 // and get the strict #3309 default: none of them can make the same claim. See
 // tmux.TmuxSession.CloseAndWaitForPaneExitTrustingOwnGeneration.
 //

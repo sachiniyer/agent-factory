@@ -50,7 +50,7 @@ import {
   triggerTask,
   updateTask,
 } from "./api.js";
-import { createKeyedQueue } from "./config.js";
+import { createKeyedQueue, saveNotice } from "./config.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
 import { eventRequestsPaletteRefresh, EventStream, type EventStreamStatus } from "./events.js";
 import {
@@ -1316,7 +1316,7 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
           key: resp.result.key,
           // Echo the CANONICAL value the writer reported, not the one sent.
           value: resp.result.value,
-          notice: resp.result.requires_restart ? resp.restart_notice : "",
+          notice: saveNotice(resp),
           error: "",
         },
       });

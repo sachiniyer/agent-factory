@@ -107,7 +107,7 @@ func ValidateAccountCommand(command string, account Account) error {
 	if provable {
 		return nil
 	}
-	if commandUsesExecSeparator(command) {
+	if CommandUsesExecSeparator(command) {
 		return accountCommandValidationErrorf(
 			"account %q cannot scope agent %q: its program begins with `exec --`, and af runs that program through "+
 				"/bin/sh, where the separator is not portable; dash — /bin/sh on Debian and Ubuntu — gives its exec "+

@@ -43,14 +43,21 @@ func repoResolveClaim(subject, path string, err error) string {
 // it, and a verdict that disagreed with the sweep would explain a root that is
 // running, or fail to explain one that is not.
 //
-// The reason it needs care at all: RepoIDForRecordedRoot is a plain path hash
-// and so is RepoIDFromRoot, so a re-attributed project's DERIVED alias equals,
-// by construction, the real identity of whatever repository is later
-// main-rooted at that recorded path. An ALIAS tombstone therefore counts only
-// when its recorded claimant is the record that OWNS the alias (#3299 review id
-// 3884615898) — an occupant-safe delete deliberately leaves an unattributed
-// tombstone, and propagating that one reported the old project as deleted by
-// someone else's delete, so its root stopped being healed.
+// The reason it needs care at all: a tombstone is recorded under whichever
+// identity the deleted project was filed under, and a project whose root did
+// not resolve was filed under the DERIVED alias. Before #3530 that alias was a
+// plain hash of the recorded path, so it equalled, by construction, the real
+// identity of whatever repository was later main-rooted there — one delete
+// could suppress an unrelated live project's root. Namespacing the fallback
+// retires that collision outright: a derived id carries the `d-` prefix
+// RepoIDFromRoot can never produce, so the two value spaces cannot meet.
+//
+// The claimant rule outlives the collision, for its own reason. An ALIAS
+// tombstone counts only when its recorded claimant is the record that OWNS the
+// alias (#3299 review id 3884615898) — an occupant-safe delete deliberately
+// leaves an unattributed tombstone, and propagating that one reported the old
+// project as deleted by someone else's delete, so its root stopped being
+// healed.
 //
 // The cost of the stricter rule, stated rather than hidden: a delete whose
 // registry read failed records no claimant, so if only its derived ID was
@@ -58,12 +65,12 @@ func repoResolveClaim(subject, path string, err error) string {
 // opt-in was already removed, so it cannot survive a restart — and the
 // alternative is suppressing a live unrelated project, which is worse.
 //
-// A DIRECT tombstone at this identity is released only by the round-15 proven
-// mismatch. #3530 tracks the residue: once re-attribution has removed the
-// unresolved record, an occupant arriving LATER has no release path, because
-// the snapshot's project view is boot-time and cannot see a checkout registered
-// after start. Namespacing the derived fallback retires that whole class rather
-// than guarding one more site.
+// A DIRECT tombstone at a canonical identity is released only by the round-15
+// proven mismatch, and what is left there is not this issue's. Two different
+// repositories main-rooted at the same path hash to the same canonical id, so
+// an occupant arriving after re-attribution removed the unresolved record still
+// has no release path — identity REUSE at a reused path, which is #3611's
+// territory rather than the derived-fallback namespacing #3530 delivers.
 func (m *Manager) rootDeletionTombstoneApplies(layers *rootAgentSnapshot, repoID string) bool {
 	if claimant, ok := m.deletedRootRepos[repoID]; ok && !deletedClaimDisproven(layers, repoID, claimant) {
 		return true

@@ -81,21 +81,30 @@ func TestRewriteProgramCmdByAf_ClearsAnUndescribableRewrite(t *testing.T) {
 // coverage of Restore itself.
 //
 // The helper above is unit-tested, but the thing that actually breaks is the CALL
-// SITE: reverting Restore to `setProgramCmd(resumeProgram(...))` leaves every test
+// SITE: reverting Restore to a bare setter around resumeProgram leaves every test
 // here green while the declaration goes stale again. Binding that properly needs a
 // real re-spawn against real tmux, which this suite can do but only by spawning a
 // server for a one-line assertion.
 //
-// So this asserts the drift-prone spelling is absent. It is weak — it proves a
-// string is not present, not that the behaviour is right — and it is here because
-// the alternative was to claim the call site was covered when it was not.
+// The HALF of that this used to assert — that `setProgramCmd(resumeProgram(` is
+// absent from start.go — is now the compiler's, because #3734 deleted
+// setProgramCmd: it survived the #3083 rewrite with no caller at all, which is
+// to say the only thing left reaching for it was this string. A spelling that
+// does not compile cannot drift back, so the string check is kept only as a
+// tripwire against someone reintroducing the setter, and the assertion that
+// still carries weight is the positive one below.
+//
+// It remains weak — it proves a string is present, not that the behaviour is
+// right — and it is here because the alternative was to claim the call site was
+// covered when it was not.
 func TestRestoreUsesTheDeclarationPreservingRewrite(t *testing.T) {
 	source, err := os.ReadFile("start.go")
 	require.NoError(t, err)
 	require.NotContains(t, string(source), "setProgramCmd(resumeProgram(",
 		"Restore must rewrite the program through rewriteProgramCmdByAf, which moves the generated-args "+
-			"declaration with it; setProgramCmd alone leaves the declaration stale and an account-scoped "+
-			"re-spawn then exits 127 (#3083 review)")
+			"declaration with it; a bare setter leaves the declaration stale and an account-scoped "+
+			"re-spawn then exits 127 (#3083 review). setProgramCmd was removed in #3734, so reaching "+
+			"this assertion means it was reintroduced")
 	require.Contains(t, string(source), "rewriteProgramCmdByAf(resumeProgram)",
 		"and it must still be doing that rewrite at all")
 }

@@ -30,6 +30,17 @@ func NewInstancesSchemaMigrationPlan(path string) SchemaMigrationPlan {
 		Migrators:      registry,
 		Validate:       validateInstancesEnvelope,
 		Perm:           0644,
+		// detectInstancesSchemaVersion is DetectJSONSchemaVersion plus a
+		// "null" -> legacy pre-case, and the probe refuses "null" (it is not a
+		// JSON object), so the two agree wherever the probe answers true.
+		ProveCurrentVersion: ProveJSONSchemaVersion,
+		// instances.json is af-managed state at a path af chose, so the
+		// migration write-back keeps the plain writer's semantics — the same
+		// side of #3672 every other write to this file is on. Stated rather
+		// than left to the zero value because the store next door
+		// (task/schema_migration.go) answers the other way, and a reader
+		// comparing the two should find the decision, not its absence.
+		LinkPolicy: SchemaWriteReplaceLink,
 	}
 }
 
@@ -139,20 +150,45 @@ func RepoInstancesMigrateOnLoadPaths() ([]string, error) {
 	return paths, nil
 }
 
-func migrateInstancesSchemaBytes(raw []byte, path string) ([]byte, SchemaMigrationResult, error) {
-	return MigrateSchemaBytes(raw, NewInstancesSchemaMigrationPlan(path))
-}
-
+// extractInstancesArray migrates raw to the current schema and returns its
+// instances array, decoding the envelope EXACTLY ONCE (#3726).
+//
+// The decode is not cheap and it used to happen twice per read. Migration
+// validates the bytes it is about to hand back — for this store that means
+// decoding the envelope and normalizing the array — and this function then threw
+// that away and decoded the same bytes again for the array it wanted.
+// `json.RawMessage` copies what it captures, so each pass copied the whole
+// instances array (1.36 MB on this repo's largest file) and normalization
+// unmarshalled it into a []json.RawMessage and marshalled it straight back.
+//
+// So take the validator's work instead of repeating it: swap in a Validate that
+// keeps the array it decoded. The plan is a value, so this affects no other
+// caller, and validation still runs INSIDE MigrateSchemaBytes — which is what
+// keeps every error identically worded and identically classified. The store's
+// default validator is the same function with the array discarded, so the two
+// cannot drift.
 func extractInstancesArray(raw []byte, path string) (json.RawMessage, error) {
-	upgraded, _, err := migrateInstancesSchemaBytes(raw, path)
-	if err != nil {
+	var instances json.RawMessage
+	validated := false
+	plan := NewInstancesSchemaMigrationPlan(path)
+	plan.Validate = func(migrated []byte) error {
+		validated = true
+		var err error
+		instances, err = decodeInstancesEnvelope(migrated)
+		return err
+	}
+	if _, _, err := MigrateSchemaBytes(raw, plan); err != nil {
 		return nil, err
 	}
-	var envelope instancesEnvelope
-	if err := json.Unmarshal(upgraded, &envelope); err != nil {
-		return nil, fmt.Errorf("%w: failed to parse instances envelope: %v", errInstancesSchemaContent, err)
+	// MigrateSchemaBytes calls Validate on every path that returns nil, so this
+	// cannot fire today. It is here because the alternative failure mode is
+	// silent: a future path that skipped validation would hand callers a nil
+	// array and no error, which reads as "this repo has no sessions" — the
+	// clobbering bug #766 exists to prevent.
+	if !validated {
+		return nil, fmt.Errorf("%w: instances envelope was migrated without being decoded", errInstancesSchemaContent)
 	}
-	return normalizeJSONRawArray(envelope.Instances, "instances")
+	return instances, nil
 }
 
 func loadRepoInstancesForAll(repoID string) (json.RawMessage, error) {
@@ -199,18 +235,24 @@ func migrateLegacyInstancesArray(raw []byte) ([]byte, error) {
 	return marshalInstancesEnvelope(raw)
 }
 
-func validateInstancesEnvelope(raw []byte) error {
+// decodeInstancesEnvelope decodes one instances.json envelope, checks it, and
+// returns its normalized instances array. It is the single decode both readers
+// share: validateInstancesEnvelope is this with the array dropped, and
+// extractInstancesArray is this with the array kept (#3726).
+func decodeInstancesEnvelope(raw []byte) (json.RawMessage, error) {
 	var envelope instancesEnvelope
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return fmt.Errorf("%w: failed to parse instances envelope: %v", errInstancesSchemaContent, err)
+		return nil, fmt.Errorf("%w: failed to parse instances envelope: %v", errInstancesSchemaContent, err)
 	}
 	if envelope.SchemaVersion != InstancesSchemaVersion {
-		return fmt.Errorf("schema_version = %d, want %d", envelope.SchemaVersion, InstancesSchemaVersion)
+		return nil, fmt.Errorf("schema_version = %d, want %d", envelope.SchemaVersion, InstancesSchemaVersion)
 	}
-	if _, err := normalizeJSONRawArray(envelope.Instances, "instances"); err != nil {
-		return err
-	}
-	return nil
+	return normalizeJSONRawArray(envelope.Instances, "instances")
+}
+
+func validateInstancesEnvelope(raw []byte) error {
+	_, err := decodeInstancesEnvelope(raw)
+	return err
 }
 
 func detectInstancesSchemaVersion(raw []byte) (int, error) {

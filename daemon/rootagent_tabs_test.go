@@ -41,7 +41,7 @@ func TestEnsureRootAgentsCarriesTabsAcrossTmuxVanish(t *testing.T) {
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first, "root instance missing after first ensure")
@@ -52,7 +52,7 @@ func TestEnsureRootAgentsCarriesTabsAcrossTmuxVanish(t *testing.T) {
 
 	// The #1104 outage class: tmux vanished under a healthy daemon.
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, *seen, 2, "the vanished root must be reaped and re-created")
 	carried := (*seen)[1].RestoreTabs
@@ -89,14 +89,14 @@ func TestEnsureRootAgentsKeepsTheTabCarryWhenTheConversationCannotResume(t *test
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 	seedRootTabs(t, first)
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, seen, 3, "the failed carried create must be retried without the conversation")
 	require.False(t, seen[2].ResumeConversation.HasID())

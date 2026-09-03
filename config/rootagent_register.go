@@ -1,5 +1,14 @@
 package config
 
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"sort"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
+)
+
 // DeregisterRootAgentsForRepo removes every root_agents opt-in that resolves to
 // ANY of repoIDs and persists the result, returning the config keys it removed.
 // It is the durable half of "delete a project" (#1735), so an emptied project
@@ -82,8 +91,116 @@ func deregisterRootAgentsLocked(locked lockedTarget, repoIDs []string) ([]string
 // hashing the expanded/cleaned path when the repo no longer resolves.
 func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	expanded := ExpandTilde(key)
-	if repo, err := RepoFromPath(expanded); err == nil {
+	repo, probeErr := RepoFromPath(expanded)
+	if probeErr == nil {
 		return repo.ID == repoID
 	}
-	return RepoIDForRecordedRoot(expanded) == repoID
+	// CANONICAL role (#3530): the question is "does this key name that
+	// repository", so an unresolvable key is compared by hashing the path the
+	// same way a real identity is derived. Inventing a namespaced id here would
+	// make a stale entry for a gone repo unsweepable.
+	cleaned := filepath.Clean(expanded)
+	if RepoIDFromRoot(cleaned) == repoID {
+		return true
+	}
+	// The CANONICAL fallback is gated on a determinate verdict (#3530 review id
+	// 3919604362), unlike the lexical one above it, which is master's rule and
+	// stays as it was. A symlink-spelled key may name a live repository through
+	// an operational git failure, and hashing its canonical spelling can then
+	// match a DIFFERENT repository's old path-derived id — sweeping the live
+	// one's opt-in on that project's behalf. Uncertainty declines the extra
+	// match rather than making it.
+	if !PathIsDeterminatelyFree(cleaned, probeErr) {
+		return false
+	}
+	// …and again through the key's CANONICAL spelling (#3530 review id
+	// 3918120733). The caller derives its id from a path the registry
+	// resolved, while this key was written by a human through whatever symlink
+	// they had — `/private/var/...` against `/var/...` on macOS — so the
+	// lexical hashes differ and a stale opt-in survives a delete that reported
+	// success. Additive: a key that matched before still matches, and identity
+	// DERIVATION is untouched, because an id is defined by the exact recorded
+	// string and canonicalizing there would re-key durable state.
+	return RepoIDFromRoot(pathutil.ResolveForCompare(cleaned)) == repoID
+}
+
+// LegacyRootAgentForRecordedRoot returns the root_agents entry spelled as a
+// registered project's RECORDED root (and the matched key), while that root
+// does not resolve (#3530 review ids 3916912933, 3917294309, 3917756780).
+//
+// A root_agents key is a path, and rootAgentKeyMatchesRepo falls back to
+// hashing one it cannot resolve — which is nobody's identity once a registered
+// project is addressed by the identity it RECORDED rather than by its path.
+// Master matched such an entry by accident, because it addressed that project
+// BY the path hash; both the daemon's verdict and `af config get --explain`
+// have to ask for it deliberately now, and they share this so the running
+// daemon and the explanation of the next start cannot disagree.
+//
+// Two steps, and neither may be collapsed into the other. The key is found by
+// its SPELLING, with no resolver involved: hashing the path and asking a
+// resolver matches a repository main-rooted there, whose identity IS that hash,
+// so the occupant's opt-in would be returned for this project. Then the
+// recorded root is resolved ONCE: if it resolves, the entry belongs to whatever
+// is there now — the ensure sweep will create under that identity, not this
+// one — so it is not this project's answer.
+func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootAgentConfig, string) {
+	if global == nil || recordedRoot == "" {
+		return nil, ""
+	}
+	cleaned := filepath.Clean(recordedRoot)
+	// Both sides go through ResolveForCompare, because the spellings genuinely
+	// differ: a root_agents key is written by a human — through whatever
+	// symlink they had — while the record stores the path registration
+	// resolved. Comparing Clean-ed strings makes those unequal wherever the
+	// temp or working root is itself a symlink, which is macOS `/var` ->
+	// `/private/var` every time (#2110's rule; caught by CI's darwin job on
+	// #3530). The recorded root does not exist in the case this function is
+	// FOR, so plain EvalSymlinks cannot be used on either side.
+	target := pathutil.ResolveForCompare(cleaned)
+	// Sorted for the same reason LegacyRootAgentForRepo sorts: inspection, the
+	// daemon lookup and the ensure pass must agree on one winner when two
+	// spellings name the same root.
+	keys := make([]string, 0, len(global.RootAgents))
+	for key := range global.RootAgents {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	matched := ""
+	for _, key := range keys {
+		if pathutil.ResolveForCompare(filepath.Clean(ExpandTilde(key))) == target {
+			matched = key
+			break
+		}
+	}
+	if matched == "" {
+		return nil, ""
+	}
+	// A DETERMINATE verdict is required before the fallback may be returned
+	// (#3530 review ids 3918379034, 3919346216). "git failed" is not one: a
+	// killed probe establishes nothing, and neither does dubious ownership, an
+	// unreadable .git or a permission error — a repository occupying this path
+	// owns the key through any of them, and reporting the stale project's
+	// opt-in would promise a root the ensure sweep creates only for the
+	// occupant. Two outcomes qualify: git answered that the path is not inside
+	// a repository, or the path is provably gone.
+	if _, err := RepoFromPath(cleaned); err == nil || !PathIsDeterminatelyFree(cleaned, err) {
+		return nil, ""
+	}
+	entry := global.RootAgents[matched]
+	return &entry, matched
+}
+
+// PathIsDeterminatelyFree reports that no repository owns path, on evidence
+// rather than on a failure: git answered that it is not inside a repository, or
+// the path itself is provably gone. Every other failure leaves the question
+// open — see LegacyRootAgentForRecordedRoot and normalizeDeleteProjectPath,
+// which both refuse to act on one.
+func PathIsDeterminatelyFree(path string, probeErr error) bool {
+	if errors.Is(probeErr, ErrNotGitRepository) {
+		return true
+	}
+	if _, err := os.Stat(path); err != nil && PathDeterminatelyAbsent(err) {
+		return true
+	}
+	return false
 }

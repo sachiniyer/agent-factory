@@ -85,7 +85,7 @@ func TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository(t *testing.T)
 	// under test sees an unanswerable probe.
 	_ = installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	got := warnings.String()
 	if !strings.Contains(got, "root agent ensure for") {
@@ -111,7 +111,7 @@ func TestRootEnsureStillNarratesAnAnsweredRefusalAsAPathFailure(t *testing.T) {
 	}
 
 	warnings, _ := captureRootEnsureLogs(t)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	got := warnings.String()
 	if !strings.Contains(got, "does not resolve to a git repository") {
@@ -145,7 +145,7 @@ func TestRootEnsureEscalationDoesNotAssertPersistenceFromUnansweredProbes(t *tes
 	_ = installUnanswerableGit(t)
 	_, errorLog := captureRootEnsureLogs(t)
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	got := errorLog.String()
@@ -187,7 +187,7 @@ func TestRootEnsureEscalationStillAssertsPersistenceForAnsweredFailures(t *testi
 
 	_, errorLog := captureRootEnsureLogs(t)
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	if got := errorLog.String(); !strings.Contains(got, "the cause looks persistent") {
@@ -206,7 +206,7 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 
 	_ = installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
-	_, _, projectRoots, unresolvedRoots := projectRootAgentLayers([]config.Project{project})
+	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers([]config.Project{project}, nil)
 
 	got := warnings.String()
 	if strings.Contains(got, "does not resolve to a git repository") {
@@ -218,10 +218,17 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 	// The fail-open handling itself is unchanged: the root is still recorded as
 	// unresolved for this run, and the singleton sweep still starts nothing for
 	// it. Only the claim the log makes about WHY changes.
-	if _, ok := projectRoots[config.RepoIDForRecordedRoot(project.Root)]; ok {
+	// This record carries no recorded identity (#3530), so it is keyed by an
+	// INVENTED id — one no repository can hold — rather than by a hash of its
+	// path, which is what a stranger arriving at that path would also produce.
+	key := config.ReconciledRepoIDForProject(project)
+	if !config.IsDerivedRepoID(key) {
+		t.Fatalf("a project with no recorded identity must be keyed by an invented id, got %s", key)
+	}
+	if _, ok := projectRoots[key]; ok {
 		t.Fatalf("an unresolved root must stay out of projectRoots")
 	}
-	if _, ok := unresolvedRoots[config.RepoIDForRecordedRoot(project.Root)]; !ok {
+	if _, ok := unresolvedRoots[key]; !ok {
 		t.Fatalf("an unresolved root must still be recorded as unresolved")
 	}
 }
@@ -249,7 +256,7 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	letGitAnswer := installUnanswerableGit(t)
 	_, errorLog := captureRootEnsureLogs(t)
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	if got := errorLog.String(); !strings.Contains(got, "no attempt got an answer out of git") {
 		t.Fatalf("expected the unknown-cause escalation first, got: %q", got)
@@ -263,7 +270,7 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	// (#3500 review round 2).
 	errorLog.Reset()
 	letGitAnswer()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if got := errorLog.String(); got != "" {
 		t.Fatalf("one answered failure is not a persistent cause; it must not re-escalate: %q", got)
 	}
@@ -271,7 +278,7 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	// A full threshold of answered failures is the same bar the first
 	// escalation cleared. Now the established cause gets its ERROR.
 	for i := 1; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	got := errorLog.String()
@@ -286,7 +293,7 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	// must not re-log the ERROR on every pass.
 	errorLog.Reset()
 	for i := 0; i < 3; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	if got := errorLog.String(); got != "" {
 		t.Fatalf("the escalation must not repeat once the cause is established: %q", got)
@@ -318,10 +325,10 @@ func TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade(t *t
 	// One short of the threshold, all unanswered; then git answers, and that
 	// single real error is what crosses it.
 	for i := 0; i < rootEnsureEscalationThreshold-1; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	letGitAnswer()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	got := errorLog.String()
 	if !strings.Contains(got, fmt.Sprintf("failed %d consecutive times", rootEnsureEscalationThreshold)) {
@@ -338,7 +345,7 @@ func TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade(t *t
 	// still be available — this is the half a streak-class flag locked out.
 	errorLog.Reset()
 	for i := 1; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	if got := errorLog.String(); !strings.Contains(got, "the cause looks persistent") {
 		t.Fatalf("a mixed first escalation must stay eligible for the upgrade, got: %q", got)

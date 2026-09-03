@@ -570,24 +570,37 @@ func RepoIDForPath(path string) string {
 	return RepoIDFromRoot(path)
 }
 
-// RepoIDForRecordedRoot is the identity fallback for a RECORDED repo root
-// whose path does not currently resolve through git: the ID a checkout at that
-// recorded spelling gets. Every consumer that matches or attributes state
-// against a possibly-absent recorded root must derive the fallback here —
-// attribution (the daemon's root-agent snapshot) and matching
-// (rootAgentKeyMatchesRepo, delete-project normalization) only agree while
-// their fallbacks stay bit-identical, so strengthening the canonicalization in
-// one copy would silently split identity between them.
-func RepoIDForRecordedRoot(recorded string) string {
-	return RepoIDFromRoot(filepath.Clean(recorded))
+// derivedRepoIDPrefix marks an identity af INVENTED for a path, keeping it out
+// of the value space RepoIDFromRoot produces. It is a legal repoID segment
+// (ValidateRepoID admits [a-zA-Z0-9_-]) so a derived id can still key state and
+// appear in paths and errors.
+const derivedRepoIDPrefix = "d-"
+
+// DerivedRepoIDForUnresolvedRoot invents an identity for a recorded root that
+// has NEVER been seen to resolve, and it is deliberately a value no real
+// repository can hold (#3530).
+//
+// One function used to serve two jobs — "hash a path already known to be the
+// identity root", where the answer MUST be the real id, and "invent an identity
+// for a path that did not resolve", where it must never be. Sharing a value
+// space made a project recorded at a path and a repository later main-rooted
+// there bit-identical, so seven separate consumers each needed a guard to tell
+// them apart after the fact (PR #3334). Splitting the roles makes the question
+// unaskable: this range and RepoIDFromRoot's are disjoint by construction.
+//
+// It is a LAST RESORT, not the normal path. A registered project records the
+// real identity it resolved to (Project.RepoID), so an absent path is still
+// addressed by its own repository's id; this covers only a record written
+// before that field existed and not yet re-resolved. See
+// ReconciledRepoIDForProject.
+func DerivedRepoIDForUnresolvedRoot(recorded string) string {
+	return derivedRepoIDPrefix + RepoIDFromRoot(filepath.Clean(recorded))
 }
 
-func repoContextFromRoot(root string) *RepoContext {
-	return &RepoContext{
-		Root:         root,
-		IdentityRoot: root,
-		ID:           RepoIDFromRoot(root),
-	}
+// IsDerivedRepoID reports whether id was invented for an unresolved path rather
+// than resolved from a repository.
+func IsDerivedRepoID(id string) bool {
+	return strings.HasPrefix(id, derivedRepoIDPrefix)
 }
 
 func repoContextFromResolution(resolved repoRootResolution) *RepoContext {

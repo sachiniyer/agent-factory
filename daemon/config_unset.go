@@ -31,5 +31,12 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 		}
 	}
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
+	// Where the daemon is accepting now, for a listener key (#3722). Same read as
+	// SetConfigValue's, after the apply for the same reason: clearing
+	// network.listen_addr moves the listener back to its default address, and the
+	// caller may have been talking over the one it moved off.
+	if s.manager != nil {
+		resp.ListenerAddr = s.manager.ListenerAddress(result.Key)
+	}
 	return nil
 }

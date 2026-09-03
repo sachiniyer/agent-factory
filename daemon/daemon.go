@@ -354,6 +354,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	if err := manager.lifecycle.markReady(); err != nil {
 		close(stopCh)
 		wg.Wait()
+		manager.waitRootAgentCreatesForShutdown()
 		return fmt.Errorf("failed to mark daemon ready: %w", err)
 	}
 	log.InfoLog.Printf("daemon ready")
@@ -392,6 +393,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// Stop the goroutines so we don't race.
 	close(stopCh)
 	wg.Wait()
+	// The poll loop is out, so no further root-agent create can be launched; wait
+	// for one that already is (#3721). JOINED, never cancelled — a create torn
+	// down mid-provision is the half-created session the always-ensure loop has no
+	// way to reconcile — and BEFORE the final SaveInstances below, so a create
+	// that lands late is persisted rather than overwritten by a save that predates
+	// it. This is also what the poll goroutine's own wg.Wait did while the create
+	// still ran on it.
+	manager.waitRootAgentCreatesForShutdown()
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
@@ -709,24 +718,33 @@ func daemonPIDFilePath() (string, error) {
 // writeDaemonPIDFile atomically writes the current process's PID to the daemon
 // PID file with mode 0600. Used by RunDaemon so callers (StopDaemon, the
 // SIGTERM fallback in RequestShutdown) can locate and signal this daemon.
+//
+// It REFUSES a symlinked path (#3672). The PID file is af's own liveness
+// bookkeeping at a path af chose, written on start and deleted on teardown, so
+// a link there is neither af's to write through nor af's to replace — the same
+// answer the bearer token and the autostart unit take.
 func writeDaemonPIDFile() error {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
 }
 
 // removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
 // already harmless (a stale file is fine — readers verify cmdline) and
 // permission errors only occur in pathological setups. Logs at warning level
 // rather than failing the daemon teardown.
+//
+// It refuses a symlinked path because the write above refuses one: af cannot
+// have written this file through a link, so unlinking one on teardown would
+// delete an arrangement af never touched (#3672).
 func removeDaemonPIDFile() {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := config.RemoveFileRefusingLink(path); err != nil && !os.IsNotExist(err) {
 		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
 	}
 }

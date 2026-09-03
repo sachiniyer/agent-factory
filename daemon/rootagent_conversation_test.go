@@ -82,7 +82,7 @@ func TestEnsureRootAgentsCarriesConversationAcrossTmuxVanish(t *testing.T) {
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first, "root instance missing after first ensure")
@@ -93,7 +93,7 @@ func TestEnsureRootAgentsCarriesConversationAcrossTmuxVanish(t *testing.T) {
 
 	// The #1104 outage class: tmux vanished under a healthy daemon.
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, *seen, 2, "the vanished root must be reaped and re-created")
 	carried := (*seen)[1].ResumeConversation
@@ -115,7 +115,7 @@ func TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation(t *testing
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	inst := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, inst)
@@ -170,7 +170,7 @@ func TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling(t *testing.
 		Program: tmux.ProgramCodex,
 	}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
@@ -179,7 +179,7 @@ func TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling(t *testing.
 	manager.mu.Unlock()
 	require.Equal(t, 1, pending, "the create must register capture before publishing the root")
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, seen, 1,
 		"the vanished root must stay recorded until its in-flight conversation discovery can commit")
@@ -191,7 +191,7 @@ func TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling(t *testing.
 		return manager.pendingConversationCaptures[first] == 0
 	}, 2*time.Second, 20*time.Millisecond)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	require.Len(t, seen, 2, "the root may be re-created once discovery settles")
 }
 
@@ -231,13 +231,13 @@ func TestEnsureRootAgentsFallsBackToAFreshAgentWhenTheCarriedCreateFails(t *test
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, seen, 3, "the failed carried create must be retried without the carry, in the same pass")
 	require.Equal(t, priorRootConversationID, seen[1].ResumeConversation.ID)
@@ -280,7 +280,7 @@ func TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry(t *tes
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
@@ -291,7 +291,7 @@ func TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry(t *tes
 	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.GreaterOrEqual(t, len(seen), 2)
 	for _, attempt := range seen[1:] {
@@ -323,13 +323,13 @@ func TestEnsureRootAgentsUsesResolvedProgramOverrideForClaudeTranscripts(t *test
 
 	manager, err := NewManager(cfg)
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, *seen, 2)
 	require.Equal(t, newestConversationID, (*seen)[1].ResumeConversation.ID,
@@ -350,7 +350,7 @@ func TestEnsureRootAgentsRefreshUsesTheLiveClaudeCommandAfterConfigChanges(t *te
 	seen := installOptionsRecordingBackend(t)
 	manager, err := NewManager(cfg)
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	require.Len(t, *seen, 1)
 	root := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, root)
@@ -365,7 +365,7 @@ func TestEnsureRootAgentsRefreshUsesTheLiveClaudeCommandAfterConfigChanges(t *te
 	cfg.ProgramOverrides[tmux.ProgramClaude] = "CLAUDE_CONFIG_DIR=" + newConfigDir + " claude"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Equal(t, liveReplacementID, root.AgentConversation().ID,
 		"a live root must inspect the immutable pane command, not a changed program_overrides value")
@@ -398,13 +398,13 @@ func TestEnsureRootAgentsRechecksClaudeTranscriptsAfterResumeFailure(t *testing.
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, seen, 3, "the heal must try the stored and substituted conversations without a fresh attempt")
 	require.Equal(t, priorRootConversationID, seen[1].ResumeConversation.ID)
@@ -423,7 +423,7 @@ func TestEnsureRootAgentsOnlyReplacesAMissingClaudeConversationAfterThePollInter
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	root := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, root)
 	seedRootConversation(t, root)
@@ -436,18 +436,18 @@ func TestEnsureRootAgentsOnlyReplacesAMissingClaudeConversationAfterThePollInter
 	newTime := oldTime.Add(time.Second)
 	require.NoError(t, os.Chtimes(newPath, newTime, newTime))
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, *seen, 1, "refreshing conversation metadata must not restart a healthy root")
 	require.Equal(t, priorRootConversationID, root.AgentConversation().ID,
 		"a still-valid root conversation must not be replaced by another process's newer transcript")
 
 	require.NoError(t, os.Remove(oldPath))
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	require.Equal(t, priorRootConversationID, root.AgentConversation().ID,
 		"the one-second ensure loop must not rescan every project transcript on every tick")
 	advance(time.Hour)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Equal(t, newestConversationID, root.AgentConversation().ID)
 	repo, err := config.RepoFromPath(repoPath)
@@ -466,7 +466,7 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 
 	manager, err := NewManager(cfg)
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	require.Len(t, *seen, 1)
 	root := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, root)
@@ -478,9 +478,9 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 	log.WarningLog.SetOutput(&warning)
 	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	advance(time.Hour)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Equal(t, 1, strings.Count(warning.String(), "could not verify its recorded claude conversation"),
 		"a persistent inspection error must not flood the one-second daemon poll log")

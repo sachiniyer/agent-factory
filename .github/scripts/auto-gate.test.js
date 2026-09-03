@@ -3718,6 +3718,175 @@ test("the happy path squash-merges the exact evaluated head", async () => {
   assert.equal(github.mergedWith.merge_method, "squash");
 });
 
+// ---------------------------------------------------------------------------
+// Up-to-date-before-merge (#3747).
+//
+// A required check is computed against the merge of the PR head with the base as
+// it stood when the check ran; master moving afterwards does not re-run it. #3712
+// and #3707 were each green against a shared base at 762 and 942 lines of
+// config/filelock.go and composed to 1068 when the second landed on the first,
+// past the 1000-line limit neither PR had crossed. The gate updates the branch
+// instead of merging, so the checks that authorize the merge are the ones
+// computed against the tree that actually lands.
+// ---------------------------------------------------------------------------
+
+test("a green PR whose head is behind master is updated instead of merged", async () => {
+  const github = fakeGateGithub({ files: ["session/storage.go"], behindBy: 2 });
+
+  await assert.rejects(
+    autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    (error) => {
+      // The refusal prefix is what processAggregateHead reads as ordinary
+      // waiting state, and the reason after it is what a human reads.
+      assert.match(error.message, /^Refusing to merge PR #1465; /);
+      assert.match(error.message, /head is behind master by 2 commits/);
+      assert.match(
+        error.message,
+        /updating the branch so the required checks run against the merge that will actually land/,
+      );
+      return true;
+    },
+  );
+
+  assert.equal(github.mergeAttempts, 0, "a behind head must never reach the merge write");
+  assert.equal(github.mergedWith, null);
+  assert.deepEqual(
+    github.compareRequests.map((request) => request.basehead),
+    [`master...${HEAD_SHA}`],
+    "the position is read against the base BRANCH, so it reflects where master is now",
+  );
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.equal(github.updateBranchCalls[0].pull_number, 1465);
+  // Compare-and-set: an update racing a push must not rebuild the branch on top
+  // of a head this run never evaluated.
+  assert.equal(github.updateBranchCalls[0].expected_head_sha, HEAD_SHA);
+  // Nothing after the merge runs: no head-ref deletion, no master re-verification.
+  assert.deepEqual(github.dispatchedWorkflows, []);
+  assert.deepEqual(github.deletedRefs, []);
+});
+
+test("a green PR whose head already contains master still merges", async () => {
+  const github = fakeGateGithub({ files: ["session/storage.go"], behindBy: 0 });
+
+  await autoGate.merge({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+  });
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.equal(github.compareRequests.length, 1, "the position is read on every merge, not skipped");
+  assert.deepEqual(github.updateBranchCalls, [], "an up-to-date head is never rewritten");
+  assert.deepEqual(
+    github.dispatchedWorkflows.map((dispatch) => dispatch.workflow_id),
+    __test.MASTER_PUSH_WORKFLOWS,
+  );
+});
+
+test("a PR the gate refuses never has its branch rewritten", async () => {
+  // Updating a branch is a write on someone's PR. It is the alternative to a
+  // merge this run would otherwise perform, so a refusal that stops short of the
+  // merge must stop short of the update too.
+  const github = fakeGateGithub({
+    files: ["session/storage.go"],
+    behindBy: 4,
+    mergeable: "CONFLICTING",
+    mergeStateStatus: "DIRTY",
+  });
+
+  await assert.rejects(
+    autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; gate no longer passes/,
+  );
+
+  assert.deepEqual(github.compareRequests, []);
+  assert.deepEqual(github.updateBranchCalls, []);
+  assert.equal(github.mergeAttempts, 0);
+});
+
+test("a branch update that conflicts blocks the merge and names the conflict", async () => {
+  const conflict = new Error("merge conflict between base and head");
+  conflict.status = 422;
+  const github = fakeGateGithub({
+    files: ["session/storage.go"],
+    behindBy: 3,
+    updateBranchError: conflict,
+  });
+
+  await assert.rejects(
+    autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    (error) => {
+      assert.match(error.message, /^Refusing to merge PR #1465; /);
+      assert.match(error.message, /head is behind master by 3 commits/);
+      assert.match(error.message, /the update failed: 422 merge conflict between base and head/);
+      return true;
+    },
+  );
+
+  assert.equal(github.updateBranchCalls.length, 1, "a failed update is single-shot, never replayed");
+  assert.equal(github.mergeAttempts, 0, "a failed update must never fall through to the merge");
+  assert.equal(github.mergedWith, null);
+});
+
+test("a base position that cannot be read is not treated as up to date", async () => {
+  const github = fakeGateGithub({ files: ["session/storage.go"], behindByRaw: null });
+
+  await assert.rejects(
+    autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Could not read how far PR head .* is behind master; compare returned behind_by=null/,
+  );
+
+  assert.equal(github.mergeAttempts, 0);
+  assert.deepEqual(github.updateBranchCalls, []);
+});
+
+test("an unreadable comparison blocks the merge rather than skipping the check", async () => {
+  const unavailable = new Error("compare unavailable");
+  unavailable.status = 404;
+  const github = fakeGateGithub({ files: ["session/storage.go"], compareError: unavailable });
+
+  await assert.rejects(
+    autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /compare unavailable/,
+  );
+
+  assert.equal(github.mergeAttempts, 0);
+  assert.deepEqual(github.updateBranchCalls, []);
+});
+
+test("a behind head leaves the aggregate that authorized it non-green", async () => {
+  const github = fakeGateGithub({ files: ["session/storage.go"], behindBy: 1 });
+  const notices = [];
+  const core = { ...fakeCore(), notice: (message) => notices.push(message) };
+
+  const result = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core,
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  // The PASS this transaction published authorized a merge against a master the
+  // head does not contain, so it must not stand while the updated head builds.
+  assert.equal(result.state, "waiting");
+  assert.equal(github.mergeAttempts, 0);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.ok(
+    notices.some((notice) => /head is behind master by 1 commit;/.test(notice)),
+    "the reason is recorded where a human reads the run",
+  );
+  assert.ok(
+    github.createdChecks.some(
+      (check) =>
+        check.external_id === aggregateExternalId(HEAD_SHA) && check.conclusion === "failure",
+    ),
+    "the aggregate is invalidated on the way out",
+  );
+});
+
 test("merge invalidates the old-head aggregate before dispatching docs", async () => {
   const github = fakeGateGithub({
     files: ["docs/auto-gate.md"],
@@ -5981,6 +6150,15 @@ function fakeGateGithub({
   graphqlErrorsByNumber = {},
   mergeError = null,
   mergeErrors = [],
+  // How far master is ahead of this PR's head, as the compare endpoint reports
+  // it. Zero is the default because it is the ordinary state: the gate merges
+  // only a head that already contains master.
+  behindBy = 0,
+  // Overrides the whole `behind_by` field, so a test can hand back something
+  // that is not a count at all.
+  behindByRaw = undefined,
+  compareError = null,
+  updateBranchError = null,
   pullGetSnapshots = null,
   pullGetErrors = [],
   checkWriteError = null,
@@ -6122,6 +6300,8 @@ function fakeGateGithub({
     reviewCommentReads: 0,
     reviewCommentReadsByNumber: {},
     createdChecks: [],
+    compareRequests: [],
+    updateBranchCalls: [],
     graphqlReadsByNumber: {},
     updatedChecks: [],
     workflowDispatchAttempts: 0,
@@ -6163,10 +6343,30 @@ function fakeGateGithub({
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
+        compareCommitsWithBasehead: async (options) => {
+          github.compareRequests.push(options);
+          if (compareError) {
+            throw compareError;
+          }
+          return {
+            data: {
+              behind_by: behindByRaw === undefined ? behindBy : behindByRaw,
+              ahead_by: 1,
+              status: behindBy > 0 ? "diverged" : "ahead",
+            },
+          };
+        },
       },
       pulls: {
         list: listOpenPullRequests,
         listFiles,
+        updateBranch: async (options) => {
+          github.updateBranchCalls.push(options);
+          if (updateBranchError) {
+            throw updateBranchError;
+          }
+          return { data: { message: "Updating pull request branch.", url: "https://example.invalid/status" } };
+        },
         listReviews,
         listReviewComments,
         merge,

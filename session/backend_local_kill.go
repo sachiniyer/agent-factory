@@ -10,9 +10,11 @@ package session
 // returned before pane teardown so the daemon retains the persisted handle.
 // See issue #478.
 //
-// trustLiveGeneration (#3413): true only from the daemon's locked KillSession
-// path, via Instance.KillTrustingOwnLifecycleLock; every other caller passes
-// false. See Backend.Kill for why this is a parameter, not a second method.
+// trustLiveGeneration (#3413): true only from a daemon path that holds this
+// session's op-lock unbroken for its whole teardown, via
+// Instance.KillTrustingOwnLifecycleLock — see there for the roster and what
+// licenses it; every other caller passes false. See Backend.Kill for why this
+// is a parameter, not a second method.
 func (b *LocalBackend) Kill(i *Instance, trustLiveGeneration bool) error {
 	// The manager already checked the still-missing origin before committing the
 	// kill tombstone. prepareKillTeardown is the post-commit guard: it consumes

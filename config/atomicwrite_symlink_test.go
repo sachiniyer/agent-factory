@@ -46,8 +46,17 @@ func linkedConfigHome(t *testing.T, content string) (link, real string) {
 // pinnedTestTarget is the lockedTarget for a config that is a real file rather
 // than a link — the resolution withFollowedFileLock would have pinned for it.
 // Tests that drive a writer directly, below the lock, need one to hand it.
-func pinnedTestTarget(path string) lockedTarget {
-	return lockedTarget{link: path, file: path}
+//
+// It pins the same way production does rather than filling in a struct literal.
+// A handle carries an open directory fd since #3697, and one built by hand
+// would carry fd 0 — a writer aimed at whatever this process has on standard
+// input, which is not a mistake a test should be able to make.
+func pinnedTestTarget(t *testing.T, path string) lockedTarget {
+	t.Helper()
+	target, release, err := pinFollowedTarget(path)
+	require.NoError(t, err)
+	t.Cleanup(release)
+	return target
 }
 
 // assertWroteThroughLink is the shared verdict: the link survives as a link, and
@@ -445,7 +454,7 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 	// file the lock pinned — the state a body finds itself in when stow or a
 	// dotfiles checkout runs mid-operation.
 	//
-	// The pin is taken the way withFollowedFileLock takes it — resolveWriteTarget
+	// The pin is taken the way withFollowedFileLock takes it — pinFollowedTarget
 	// through the link, WHILE it still points at the locked file — and only then
 	// is the link moved. Handing the fixture a raw path instead builds a handle
 	// production cannot produce: on macOS t.TempDir() is under /var, which
@@ -465,15 +474,17 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		link := filepath.Join(t.TempDir(), TomlConfigFileName)
 		require.NoError(t, os.Symlink(locked, link))
 
-		pinned, err := resolveWriteTarget(link)
+		target, release, err := pinFollowedTarget(link)
 		require.NoError(t, err)
+		t.Cleanup(release)
+		pinned = target.file
 
 		require.NoError(t, os.Remove(link))
 		require.NoError(t, os.Symlink(moved, link))
 		movedTo, err = resolveWriteTarget(link)
 		require.NoError(t, err)
 
-		return lockedTarget{link: link, file: pinned}, pinned, movedTo
+		return target, pinned, movedTo
 	}
 
 	t.Run("unset refuses instead of reporting nothing to remove", func(t *testing.T) {
@@ -536,8 +547,10 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 
 		// Pinned the way withFollowedFileLock pins, so the entry confirm passes
 		// and the retarget lands in the window this test is about.
-		pinned, err := resolveWriteTarget(link)
+		target, release, err := pinFollowedTarget(link)
 		require.NoError(t, err)
+		t.Cleanup(release)
+		pinned := target.file
 
 		var movedTo string
 		migrateWriteRaceHookForTest = func() {
@@ -552,7 +565,7 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		before, err := os.ReadFile(locked)
 		require.NoError(t, err)
 
-		_, err = migrateConfigFile(lockedTarget{link: link, file: pinned})
+		_, err = migrateConfigFile(target)
 
 		require.Error(t, err, "the guarded write must refuse once the link has moved")
 		require.NotEmpty(t, movedTo, "premise: the hook must have run, or the refusal came from the wrong place")
@@ -574,15 +587,15 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 // TestAtomicWriteFileDoesNotFollowLinksByDefault is the counterpart guarantee,
 // and the reason following is a separate function rather than a flag.
 //
-// af's own managed files — the bearer token, autostart units, the task store —
-// go through the plain writer, and #3672's caller table depends on their
-// semantics being unchanged. The concrete case there: daemon/autostart.go writes
-// a unit with AtomicWriteFile and cleans up with os.Remove of the SAME path, so
-// a writer that silently followed would leave the cleanup unlinking a link whose
-// content had gone somewhere else.
+// Replacing the link is what os.Rename does on its own, and it stays the
+// behaviour of the plain writer for every caller that took neither of the other
+// two answers — config's own state, TUI state, the project registry (#3672
+// decided the af-managed group; anything it did not name keeps this).
 //
 // This is the behaviour that a follow-by-default AtomicWriteFile broke, which is
-// why it is pinned rather than assumed.
+// why it is pinned rather than assumed. The callers that must NOT reach it —
+// af's own managed files — now use AtomicWriteFileRefusingLink and are pinned in
+// atomicwrite_refuse_symlink_test.go and beside each caller.
 func TestAtomicWriteFileDoesNotFollowLinksByDefault(t *testing.T) {
 	dir := t.TempDir()
 	elsewhere := t.TempDir()

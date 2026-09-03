@@ -27,13 +27,20 @@ import (
 const ProjectRegistryDirName = ".agent-factory-projects"
 
 const (
-	projectRegistrySchemaVersion = 1
-	projectMetadataFileName      = "project.json"
-	checkoutMarkerDirName        = "agent-factory"
-	checkoutMarkerFilePrefix     = "checkout-id-"
-	projectIDPrefix              = "prj_"
-	checkoutIDPrefix             = "chk_"
-	opaqueIDBytes                = 16
+	// 2 adds repo_id (#3530). The bump is the compatibility mechanism, not
+	// bookkeeping: an older af rejects a version it does not know
+	// ("upgrade af"), whereas at v1 it would have unmarshalled the unknown
+	// field away and silently erased a durable identity on its next rebind.
+	// v1 records are still READ — they are exactly the legacy records the
+	// reconciliation backfills — and are rewritten as v2.
+	projectRegistrySchemaVersion    = 2
+	projectRegistryMinSchemaVersion = 1
+	projectMetadataFileName         = "project.json"
+	checkoutMarkerDirName           = "agent-factory"
+	checkoutMarkerFilePrefix        = "checkout-id-"
+	projectIDPrefix                 = "prj_"
+	checkoutIDPrefix                = "chk_"
+	opaqueIDBytes                   = 16
 )
 
 var (
@@ -51,6 +58,23 @@ type Project struct {
 	CheckoutID   string `json:"checkout_id"`
 	Root         string `json:"root"`
 	RelativeRoot string `json:"relative_root"`
+	// RepoID is the repository identity this project RESOLVED to, written down
+	// the first time it was seen to resolve and never rewritten back to an
+	// invented one (#3530).
+	//
+	// It is durable because the moment it is needed is the moment it cannot be
+	// computed: a recorded root that has stopped resolving cannot be hashed
+	// canonically, yet the project's sessions were keyed by the real id when
+	// they were created. Without this written down, a delete by that recorded
+	// path or a TUI grouping has nothing to reach the real id with — and
+	// hashing the path instead reaches whatever repository is there NOW, which
+	// is the collision #3530 removes and the missed match #3363 describes.
+	//
+	// Empty only for a record written before this field existed; the daemon
+	// backfills it on the first successful resolution, and until then that
+	// project is addressed by DerivedRepoIDForUnresolvedRoot, which cannot
+	// collide with anything real.
+	RepoID string `json:"repo_id,omitempty"`
 	// PathExists is availability, not identity proof. The registry deliberately
 	// does not infer that a new checkout appearing at the same path is the old
 	// one; only the checkout marker provides that evidence.
@@ -64,9 +88,17 @@ type projectRecord struct {
 	Root          string `json:"root"`
 	CheckoutRoot  string `json:"checkout_root"`
 	RelativeRoot  string `json:"relative_root"`
+	// RepoID is the resolved repository identity — see Project.RepoID. An
+	// older record simply omits it; nothing reads it as "no identity", only as
+	// "not written down yet".
+	RepoID string `json:"repo_id,omitempty"`
 }
 
 type projectBinding struct {
+	// repoID is the repository identity this path resolved to. Binding always
+	// resolves through git, so it is always known here — which is what lets a
+	// record write it down for the times it cannot be recomputed (#3530).
+	repoID             string
 	root               string
 	checkoutRoot       string
 	relativeRoot       string
@@ -81,128 +113,6 @@ func ValidateProjectID(id string) error {
 		return fmt.Errorf("invalid project id %q (expected %s followed by 32 lowercase hex characters)", id, projectIDPrefix)
 	}
 	return nil
-}
-
-// ResetProjectRegistry removes durable project records and this AF home's
-// checkout markers. Markers are home-scoped so resetting one home cannot break
-// another home's registry for the same checkout. It validates every record and
-// marker before deleting anything, then removes only the unmistakably AF-owned
-// registry directory. Callers must run this before deleting registered
-// worktrees so their Git common directories are still resolvable.
-func ResetProjectRegistry() error {
-	dir, err := projectRegistryDir()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(dir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("inspect project registry: %w", err)
-	}
-
-	return WithFileLock(projectRegistryLockPath(dir), func() error {
-		records, err := loadProjectRecords(dir)
-		if err != nil {
-			return err
-		}
-		markers := make(map[string]string, len(records))
-		for _, record := range records {
-			marker, accessible, err := storedProjectMarkerPath(record.Root)
-			if err != nil {
-				return fmt.Errorf("locate checkout marker for project %s: %w", record.ID, err)
-			}
-			if !accessible {
-				continue
-			}
-			markerID, exists, err := readCheckoutID(marker)
-			if err != nil {
-				return err
-			}
-			if exists && markerID != record.CheckoutID {
-				return fmt.Errorf("project %s expects checkout marker %s, but %s contains %s", record.ID, record.CheckoutID, marker, markerID)
-			}
-			if prior, exists := markers[marker]; exists && prior != record.CheckoutID {
-				return fmt.Errorf("checkout marker %s is claimed by both %s and %s", marker, prior, record.CheckoutID)
-			}
-			markers[marker] = record.CheckoutID
-		}
-
-		for marker := range markers {
-			if err := removeCheckoutMarker(marker); err != nil {
-				return err
-			}
-		}
-		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("remove project registry %s: %w", dir, err)
-		}
-		return nil
-	})
-}
-
-// DeregisterProject removes the single durable registry record whose last-known
-// root matches path (compared with sameProjectPath: clean/symlink/SameFile aware),
-// and reports whether one was removed. It is the symmetric counterpart to
-// RegisterProject that DeleteProject calls (#2456): without it a registered project
-// could never leave the switcher, since ListProjects would keep re-adding it.
-//
-// Unlike ResetProjectRegistry it leaves the checkout marker in place — removing one
-// project must never disturb another home's identity for the same checkout, and a
-// later re-add simply mints a fresh project id. A path that matches no record is a
-// (false, nil) no-op: deleting a session- or task-derived project that was never
-// registered removes nothing here, exactly as intended.
-func DeregisterProject(path string) (bool, error) {
-	dir, err := projectRegistryDir()
-	if err != nil {
-		return false, err
-	}
-	if _, err := os.Stat(dir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("inspect project registry: %w", err)
-	}
-	removed := false
-	err = WithFileLock(projectRegistryLockPath(dir), func() error {
-		// Tolerant read (#3297): a corrupt UNRELATED record must not brick the
-		// removal of a readable one — the registry's own repair tooling has to
-		// keep working while a bad entry exists. A failed record cannot match
-		// the target (its root is exactly what could not be read); if the
-		// target is not found among readable records while failures exist,
-		// "nothing to remove" is unprovable, so that one case stays an error
-		// naming the entries to repair by hand.
-		records, failures, _, err := loadProjectRecordsDetailed(dir)
-		if err != nil {
-			return err
-		}
-		for _, record := range records {
-			if !sameProjectPath(record.Root, path) {
-				continue
-			}
-			if err := os.RemoveAll(filepath.Join(dir, record.ID)); err != nil {
-				return fmt.Errorf("remove project record %s: %w", record.ID, err)
-			}
-			removed = true
-			return nil
-		}
-		if len(failures) > 0 {
-			return fmt.Errorf("%s is not among the readable project records, and %d registry record(s) could not be read (%s); repair or remove those directories under %s, then retry", path, len(failures), projectRecordFailureIDs(failures), dir)
-		}
-		return nil
-	})
-	if err != nil {
-		return false, fmt.Errorf("deregister project: %w", err)
-	}
-	return removed, nil
-}
-
-// projectRecordFailureIDs joins failed record directory names for messages.
-func projectRecordFailureIDs(failures []ProjectRecordFailure) string {
-	ids := make([]string, 0, len(failures))
-	for _, failure := range failures {
-		ids = append(ids, failure.DirectoryID)
-	}
-	return strings.Join(ids, ", ")
 }
 
 // RegisterProject records path as a project and returns its opaque identity.
@@ -259,11 +169,37 @@ func RegisterProject(path string) (Project, error) {
 						return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 					}
 					if !oldRootHasMarker {
+						if err := verifyBindingStillCurrent(binding, checkoutID, "rediscovering its moved checkout for"); err != nil {
+							return err
+						}
 						record.Root = binding.root
 						record.CheckoutRoot = binding.checkoutRoot
+						// A whole-checkout move changes the identity root, so
+						// it changes the real id. Leaving the old one recorded
+						// would make an absent path resolve to the
+						// repository's FORMER state (#3530). Same rule
+						// RebindProject applies: a verified move is a
+						// real→real transition, which "one-way" permits.
+						if binding.repoID != "" {
+							record.RepoID = binding.repoID
+						}
 						if err := writeProjectRecord(dir, record); err != nil {
 							return err
 						}
+					}
+				}
+				// One-way backfill (#3530): a record written before RepoID
+				// existed learns its identity the first time it is seen to
+				// resolve. Never rewritten once set, and never back to an
+				// invented id — a rebind is the only thing that moves it, and
+				// it moves it to another REAL id.
+				if record.RepoID == "" && binding.repoID != "" {
+					if err := verifyBindingStillCurrent(binding, record.CheckoutID, "recording the identity of"); err != nil {
+						return err
+					}
+					record.RepoID = binding.repoID
+					if err := writeProjectRecord(dir, record); err != nil {
+						return err
 					}
 				}
 				registered = projectFromRecord(record)
@@ -277,6 +213,9 @@ func RegisterProject(path string) (Project, error) {
 		if err != nil {
 			return err
 		}
+		if err := verifyBindingStillCurrent(binding, checkoutID, "registering"); err != nil {
+			return err
+		}
 		record := projectRecord{
 			SchemaVersion: projectRegistrySchemaVersion,
 			ID:            projectID,
@@ -284,6 +223,7 @@ func RegisterProject(path string) (Project, error) {
 			Root:          binding.root,
 			CheckoutRoot:  binding.checkoutRoot,
 			RelativeRoot:  binding.relativeRoot,
+			RepoID:        binding.repoID,
 		}
 		if err := writeNewProjectRecord(dir, record); err != nil {
 			return err
@@ -365,10 +305,19 @@ func RebindProject(id, path string) (Project, error) {
 				return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 			}
 		}
+		if err := verifyBindingStillCurrent(binding, checkoutID, "rebinding"); err != nil {
+			return err
+		}
 		record.CheckoutID = checkoutID
 		record.Root = binding.root
 		record.CheckoutRoot = binding.checkoutRoot
 		record.RelativeRoot = binding.relativeRoot
+		// A rebind is the one thing that legitimately moves a project's
+		// identity, and it moves it to another RESOLVED one — never back to an
+		// invented id, which is what "one-way" means here (#3530).
+		if binding.repoID != "" {
+			record.RepoID = binding.repoID
+		}
 		if err := writeProjectRecord(dir, record); err != nil {
 			return err
 		}
@@ -379,6 +328,47 @@ func RebindProject(id, path string) (Project, error) {
 		return Project{}, fmt.Errorf("rebind project: %w", err)
 	}
 	return rebound, nil
+}
+
+// verifyBindingStillCurrent re-resolves a binding's root immediately before a
+// record is written and refuses if the repository there has changed (#3530
+// review ids 3919195005, 3919346204, 3919346210).
+//
+// resolveProjectBinding runs BEFORE the registry lock, so guarding its own two
+// probes against each other leaves the whole registry scan unguarded: a path
+// repointed in that window would be committed pairing the new workspace with
+// the previous repository's identity and marker — permanently, since the
+// one-way writer never replaces what it wrote. Every durable write that
+// publishes binding data goes through here, not just the new-record one.
+//
+// It narrows the window to the write itself; check-then-act cannot close it,
+// and a refusal costs only a retry.
+func verifyBindingStillCurrent(binding projectBinding, checkoutID, verb string) error {
+	if projectRegistryCommitRaceHookForTest != nil {
+		projectRegistryCommitRaceHookForTest()
+	}
+	current, err := RepoFromPath(binding.root)
+	if err != nil {
+		return fmt.Errorf("re-check repository identity for %q before %s: %w", binding.root, verb, err)
+	}
+	if current.ID != binding.repoID {
+		return fmt.Errorf("project path %q changed repositories while af was %s it: it resolved to %s and now resolves to %s — nothing was changed; retry once the path is stable", binding.root, verb, binding.repoID, current.ID)
+	}
+	// The identity alone is not enough (#3530 review id 3919490138). A repo ID
+	// is derived from the identity ROOT, so another clone at the same root
+	// produces the same one — and a record pairing the live checkout with the
+	// previous clone's CheckoutID fails its own marker proof immediately,
+	// leaving the project unresolved until someone rebinds it by hand. The
+	// marker is the only thing that distinguishes the two, so it is what this
+	// re-reads.
+	recorded, present, err := readCheckoutID(binding.checkoutMarkerPath)
+	if err != nil {
+		return fmt.Errorf("re-check the checkout marker for %q before %s: %w", binding.root, verb, err)
+	}
+	if !present || recorded != checkoutID {
+		return fmt.Errorf("the checkout at %q changed while af was %s it: its marker read %s and now reads %q — nothing was changed; retry once the path is stable", binding.root, verb, checkoutID, recorded)
+	}
+	return nil
 }
 
 func projectRegistryDir() (string, error) {
@@ -494,6 +484,13 @@ func resolveProjectBindingContext(ctx context.Context, path string) (projectBind
 		return projectBinding{}, err
 	}
 	checkoutRoot := worktreeRoot
+	// The identity root the probes above have ESTABLISHED, which is a
+	// different question from the workspace root next to it: a bare
+	// repository's identity is the bare common directory shared by all of its
+	// worktrees, while the checkout being registered is the linked worktree.
+	// repoContextFromResolution draws the same line; this names it so the
+	// resolution below can be checked against it.
+	identityRoot := commonDir
 	if bare == "false" {
 		checkoutRoot, err = resolveMainRepoRootContext(ctx, "-C", resolved)
 		if err != nil {
@@ -503,8 +500,44 @@ func resolveProjectBindingContext(ctx context.Context, path string) (projectBind
 		if err != nil {
 			return projectBinding{}, fmt.Errorf("resolve git checkout root: %w", err)
 		}
+		identityRoot = checkoutRoot
 	}
+	if projectBindingIdentityRaceHookForTest != nil {
+		projectBindingIdentityRaceHookForTest()
+	}
+	// A binding that cannot state its identity must not be committed: the
+	// record would be written legacy-shaped, and if the path disappeared
+	// before anything re-resolved it, the project would be addressed by a
+	// provisional id and miss state already stored under the real one (#3530
+	// review id 3914971775). Every other probe here has already succeeded, so
+	// a failure at this one is transient — surface it and let the caller retry.
+	identityRepo, identityErr := RepoFromPath(resolved)
+	if identityErr != nil {
+		return projectBinding{}, fmt.Errorf("resolve repository identity for %q: %w", resolved, identityErr)
+	}
+	// One binding, one repository. The resolution above is a SECOND probe of
+	// the same path, and a path that changed repositories in between answers
+	// both of them successfully — so registration would record repository A's
+	// root, checkout root and marker with repository B's id, permanently, and
+	// a later delete or policy lookup would target B's state (#3530 review id
+	// 3915722459).
+	//
+	// The id itself still comes from RepoFromPath rather than from
+	// RepoIDFromRoot(identityRoot) on purpose: that is the value every runtime
+	// consumer computes for this path, and re-deriving it here from a
+	// differently-normalised spelling would write down an identity nothing
+	// else agrees with — a silent split, which is worse than the collision.
+	// What changes is that it must now AGREE with what the earlier probes
+	// established, and a disagreement refuses the binding instead of
+	// committing a record that describes two repositories at once. Comparison
+	// is by identity of the directory, not by spelling, so the normalisation
+	// difference above is not itself a disagreement.
+	if !sameProjectPath(identityRepo.IdentityPath(), identityRoot) {
+		return projectBinding{}, fmt.Errorf("project path %q changed repositories while af was resolving it: its checkout root and marker describe the repository rooted at %s, but its identity now resolves to %s — nothing was registered; retry once the path is stable", resolved, identityRoot, identityRepo.IdentityPath())
+	}
+	identity := identityRepo.ID
 	return projectBinding{
+		repoID:             identity,
 		root:               filepath.Clean(checkoutRoot),
 		checkoutRoot:       filepath.Clean(checkoutRoot),
 		relativeRoot:       ".",
@@ -577,39 +610,6 @@ func readCheckoutID(markerPath string) (id string, exists bool, err error) {
 	return id, true, nil
 }
 
-// storedProjectMarkerPath resolves a marker only while the record's last-known
-// root is still reachable. A moved/deleted checkout gives reset no safe path to
-// mutate, but must not strand AF's own registry. An existing root with a broken
-// Git entry remains an error because it may still contain identity state that
-// reset cannot validate.
-func storedProjectMarkerPath(root string) (string, bool, error) {
-	binding, err := resolveProjectBinding(root)
-	if err == nil {
-		return binding.checkoutMarkerPath, true, nil
-	}
-	info, statErr := os.Stat(root)
-	// determinatelyAbsent, not ErrNotExist alone: a root replaced by a symlink
-	// cycle or a regular-file ancestor resolves to nothing, so it holds no marker
-	// — and erroring there would leave the record neither usable nor repairable
-	// while ListProjects already reports it absent (#2949 review). An ambiguous
-	// failure (EACCES, EIO) still errors: we cannot tell, so we do not guess.
-	if determinatelyAbsent(statErr) {
-		return "", false, nil
-	}
-	if statErr != nil {
-		return "", false, fmt.Errorf("inspect last-known project root %s: %w", root, statErr)
-	}
-	if !info.IsDir() {
-		return "", false, nil
-	}
-	if _, gitErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(gitErr, os.ErrNotExist) {
-		return "", false, nil
-	} else if gitErr != nil {
-		return "", false, fmt.Errorf("inspect last-known project Git entry %s: %w", root, gitErr)
-	}
-	return "", false, err
-}
-
 func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
 	return projectRootHasCheckoutIDContext(context.Background(), root, checkoutID)
 }
@@ -651,20 +651,6 @@ func projectRootHasCheckoutIDContext(ctx context.Context, root, checkoutID strin
 	return exists && id == checkoutID, nil
 }
 
-// removeCheckoutMarker removes only the current AF home's marker path. The
-// containing directory is shared by other home-scoped markers, so it is removed
-// only if empty.
-func removeCheckoutMarker(marker string) error {
-	if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove checkout marker %s: %w", marker, err)
-	}
-	if err := os.Remove(marker + ".lock"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove checkout marker lock %s: %w", marker+".lock", err)
-	}
-	_ = os.Remove(filepath.Dir(marker))
-	return nil
-}
-
 func projectRootUsesGitCommonDir(root, commonDir string) bool {
 	binding, err := resolveProjectBinding(root)
 	return err == nil && sameProjectPath(binding.gitCommonDir, commonDir)
@@ -695,6 +681,22 @@ func writeNewProjectRecord(dir string, record projectRecord) error {
 }
 
 func writeProjectRecord(dir string, record projectRecord) error {
+	// The field and the version travel together, for every writer (#3530
+	// review ids 3914971928, 3915518778, 3915722471). A record carrying
+	// repo_id at schema v1 is accepted by an OLDER af, which unmarshals the
+	// unknown field away and writes the record back without it on its next
+	// rebind or checkout rediscovery — the durable identity loss the bump
+	// exists to prevent. Registration's backfill, the moved-checkout
+	// rediscovery, the rebind and the reconciliation all add that field, so
+	// the stamp belongs at the one place they share rather than at four call
+	// sites that can each forget it.
+	//
+	// Deliberately conditional: a rewrite that adds nothing new stays at the
+	// version it was read at, so an older af keeps reading the records it
+	// could always read.
+	if record.RepoID != "" && record.SchemaVersion < projectRegistrySchemaVersion {
+		record.SchemaVersion = projectRegistrySchemaVersion
+	}
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal project metadata: %w", err)
@@ -733,6 +735,7 @@ func projectFromRecord(record projectRecord) Project {
 		CheckoutID:   record.CheckoutID,
 		Root:         record.Root,
 		RelativeRoot: record.RelativeRoot,
+		RepoID:       record.RepoID,
 		PathExists:   projectPathExists(record.Root),
 	}
 }
@@ -825,3 +828,17 @@ func sameProjectPath(left, right string) bool {
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
+
+// projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes
+// that establish a path's checkout root, common directory and marker and the
+// resolution that names its repository identity. That window is #3530 review
+// id 3915722459's entire subject and nothing else can hold it open: a real
+// mount flip or worktree re-point lands inside microseconds, so a test that
+// races it pins nothing.
+var projectBindingIdentityRaceHookForTest func()
+
+// projectRegistryCommitRaceHookForTest, when non-nil, runs inside the
+// registration lock, immediately before the identity re-check that guards the
+// commit. That window — binding resolved, lock taken, record not yet written —
+// is #3530 review id 3919195005's subject, and nothing else can hold it open.
+var projectRegistryCommitRaceHookForTest func()

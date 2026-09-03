@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { getConfig, setConfigValue } from "./api.js";
-import { canCommit, controlKind, createKeyedQueue } from "./config.js";
-import type { ConfigEntry } from "./types.js";
+import { canCommit, controlKind, createKeyedQueue, saveNotice } from "./config.js";
+import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
 // These are the web client's config-editor contracts. They are pure logic +
 // stubbed fetch, matching the rest of web/src/*.test.ts (no DOM, no jsdom): the
@@ -92,6 +92,66 @@ test("setConfigValue posts the key and the RAW value for the daemon to validate"
   // so it must NOT drop the user to a shell to run a command (#2479); the client
   // passes it through verbatim from the daemon.
   assert.doesNotMatch(resp.restart_notice, /daemon restart|run `/, "the notice must not tell the user to run a command (#2479)");
+});
+
+// --- saveNotice: what the form says after a write (#2480 notice, #3722 address) ---
+
+const setResp = (over: Partial<ConfigSetResponse> = {}): ConfigSetResponse => ({
+  result: { key: "network.listen_addr", value: "127.0.0.1:9443", path: "/tmp/config.toml", requires_restart: false },
+  restart_notice: "Applied — the running daemon is using the new value now.",
+  ...over,
+});
+
+test("saveNotice names where the daemon is listening after a listener move", () => {
+  // The whole point of #3722 on this surface: saving network.listen_addr moves the
+  // listener this page is talking over, so the address it moved TO has to reach the
+  // operator — the next request from this page goes nowhere.
+  const notice = saveNotice(setResp({ listener_addr: "127.0.0.1:9443" }));
+  assert.match(notice, /Daemon now listening at 127\.0\.0\.1:9443/);
+});
+
+test("saveNotice reports the address the DAEMON named, not the value that was sent", () => {
+  // A rebind that failed leaves the daemon on its previous address and says so.
+  // Echoing the typed value here would name an address nothing answers, in the one
+  // case where the operator most needs the real one.
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: "127.0.0.1:9443", path: "/tmp/config.toml", requires_restart: false },
+      restart_notice: "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).",
+      listener_addr: "127.0.0.1:8443",
+    }),
+  );
+  assert.match(notice, /Daemon now listening at 127\.0\.0\.1:8443/);
+  assert.doesNotMatch(notice, /9443/, "the form must not echo the requested address as if it were bound");
+});
+
+test("saveNotice says nothing for an ordinary key that needs no restart", () => {
+  assert.equal(
+    saveNotice(
+      setResp({
+        result: { key: "default_program", value: "codex", path: "/tmp/config.toml", requires_restart: false },
+      }),
+    ),
+    "",
+    "an \"Applied\" line under every field is noise — that gate is unchanged",
+  );
+});
+
+test("saveNotice keeps the restart notice for a key that requires one", () => {
+  const notice = saveNotice(
+    setResp({
+      result: { key: "update_channel", value: "preview", path: "/tmp/config.toml", requires_restart: true },
+      restart_notice: "Saved — this setting takes effect the next time you launch af.",
+    }),
+  );
+  assert.equal(notice, "Saved — this setting takes effect the next time you launch af.");
+});
+
+test("saveNotice tolerates an older daemon that sends no address", () => {
+  // listener_addr is additive: a daemon predating #3722 omits it entirely, and the
+  // form must not render "undefined" at the user.
+  const notice = saveNotice(setResp({ result: { key: "update_channel", value: "preview", path: "/tmp/config.toml", requires_restart: true } }));
+  assert.doesNotMatch(notice, /undefined/);
 });
 
 test("setConfigValue surfaces the validator's own message on a rejected value", async () => {

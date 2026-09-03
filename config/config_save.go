@@ -64,12 +64,14 @@ func withGlobalConfigLock(fn func(lockedTarget) error) error {
 // means it was removed in the window between the two — the same pathological
 // case LoadConfig answers with defaults, answered the same way.
 //
-// The read is of the LOCKED file, not of the path it was reached through. A
-// symlinked config re-opened by its link would be resolved again by the kernel,
-// so a link that moved after acquisition would feed this sequence bytes from a
-// file the lock does not cover (#3688). What the user is shown stays the link.
+// The read goes through the LOCKED handle, not through the path it was reached
+// through. Reopening the link by name lets the kernel resolve it again, so a
+// link that moved after acquisition would feed this sequence bytes from a file
+// the lock does not cover (#3688) — and a symlinked AF home does that to an
+// ORDINARY config.toml, whose path never changes spelling (#3697). What the
+// user is shown stays the link.
 func loadConfigLocked(locked lockedTarget) (*Config, error) {
-	data, err := os.ReadFile(locked.file)
+	data, err := locked.read()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return DefaultConfig(), nil

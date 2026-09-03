@@ -1843,6 +1843,62 @@ function decisionIdentity(prNumber, headSha) {
   };
 }
 
+// How many commits the base branch holds that this PR's head does not.
+//
+// Read against the base BRANCH rather than a pinned SHA on purpose: the question
+// is where master is NOW, not where it was when anything about this PR was
+// recorded. `behind_by` stays accurate past the 250-commit listing cap the
+// compare endpoint applies to its `commits` array, which is why the count is
+// read rather than derived from that array.
+async function commitsBehindBase({ github, context, baseRefName, headSha }) {
+  const { owner, repo } = context.repo;
+  const comparison = await retryRead(
+    `could not compare ${baseRefName} with ${headSha}`,
+    () =>
+      github.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${baseRefName}...${headSha}`,
+        // Only the counts are read. The commit list is paginated; the counts are
+        // not, so asking for one commit keeps the payload off a comparison that
+        // may span hundreds.
+        per_page: 1,
+      }),
+  );
+  const reported = comparison?.data?.behind_by;
+  // A position that cannot be read is not a position of zero. Read the field
+  // WITHOUT coercing it: `Number(null)` and `Number("")` are both 0, so a
+  // coercing guard would report a missing count as "already up to date" and
+  // merge — the exact defect this check exists to prevent (#3747). Anything but
+  // a whole count throws, which is louder than this file's waiting state and
+  // correct, because merging on an unknown base position is the defect.
+  const behindBy = typeof reported === "number" ? reported : Number.NaN;
+  if (!Number.isInteger(behindBy) || behindBy < 0) {
+    throw new Error(
+      `Could not read how far PR head ${headSha} is behind ${baseRefName}; ` +
+        `compare returned behind_by=${JSON.stringify(reported)}`,
+    );
+  }
+  return behindBy;
+}
+
+// Bring the PR branch up to date with its base, the way the "Update branch"
+// button does. Single-shot, like every other write in this file: an update that
+// was accepted but reported a failure would be replayed against a head it had
+// already moved.
+async function updateBranchToBase({ github, context, prNumber, headSha }) {
+  const { owner, repo } = context.repo;
+  return github.rest.pulls.updateBranch({
+    owner,
+    repo,
+    pull_number: prNumber,
+    // Compare-and-set. Without it an update racing a push would rebuild the
+    // branch on top of a head this run never evaluated, and the next evaluation
+    // would inherit an update nothing authorized.
+    expected_head_sha: headSha,
+  });
+}
+
 async function merge({ github, context, core, prNumber, expectedHeadSha }) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
@@ -1880,6 +1936,57 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
   }
 
   const { owner, repo } = context.repo;
+
+  // Every required check on this head was computed against the base as it stood
+  // when that check ran, and master moving afterwards does not re-run it. So a
+  // green that was accurate for its own base can be consumed against a base it
+  // never saw: #3712 and #3707 were each green against a shared base at 762 and
+  // 942 lines of config/filelock.go, and composed to 1068 — past the file-length
+  // limit — when the second landed on the first (#3747). A whole-file threshold
+  // shows it most sharply because it is non-compositional, but any check whose
+  // result depends on the base carries the same hazard.
+  //
+  // So a head that is behind master does not merge on those checks. The gate
+  // brings the branch up to date instead, which re-runs every required check
+  // against the merge that will actually land, and merges on a LATER evaluation
+  // once that new head is green. The gate performs the update itself so the
+  // fleet pays no manual rebases.
+  //
+  // This narrows the window; it does not close it. Master can still advance
+  // between the compare below and the merge call a few lines down. Closing the
+  // remainder is a server-side job — the ruleset's strict required-status-checks
+  // policy — and is a separate decision (#3747).
+  const behindBy = await commitsBehindBase({
+    github,
+    context,
+    baseRefName: gate.baseRefName,
+    headSha: gate.headSha,
+  });
+  if (behindBy > 0) {
+    const reason =
+      `head is behind ${gate.baseRefName} by ${behindBy} ` +
+      `commit${behindBy === 1 ? "" : "s"}; updating the branch so the required checks run ` +
+      "against the merge that will actually land";
+    // Both exits below are thrown rather than returned, and the wording is
+    // literal: this evaluation is refusing to merge. That prefix is the shape
+    // processAggregateHead already treats as ordinary waiting state — it
+    // invalidates the aggregate that authorized this merge and records the
+    // reason — which is exactly what both cases need. Returning instead would
+    // mean a second state carrying a copy of that invalidation.
+    try {
+      await updateBranchToBase({ github, context, prNumber, headSha: gate.headSha });
+    } catch (error) {
+      // A conflict with the base is the ordinary failure here, and it blocks:
+      // nothing merges, and the next evaluation sees CONFLICTING and says so.
+      // A head that moved under the compare-and-set lands here too, correctly —
+      // this run evaluated a head that is no longer current.
+      throw new Error(
+        `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
+      );
+    }
+    throw new Error(`Refusing to merge PR #${prNumber}; ${reason}`);
+  }
+
   const response = await github.rest.pulls.merge({
     owner,
     repo,

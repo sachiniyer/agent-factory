@@ -67,7 +67,7 @@ func TestMigrateRepoInstancesWriteFailurePreservesLegacyArray(t *testing.T) {
 
 	prevWrite := schemaAtomicWriteFile
 	writeErr := errors.New("forced write failure")
-	schemaAtomicWriteFile = func(string, []byte, os.FileMode) error {
+	schemaAtomicWriteFile = func(SchemaWriteLinkPolicy, string, []byte, os.FileMode) error {
 		return writeErr
 	}
 	t.Cleanup(func() { schemaAtomicWriteFile = prevWrite })

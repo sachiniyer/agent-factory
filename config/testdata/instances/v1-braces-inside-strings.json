@@ -1,0 +1,1 @@
+{"schema_version": 1, "instances": [{"title": "a {brace} [bracket] \" quote", "note": "trailing backslash \\", "colon": "k:v,x"}, {"title": "unicode \u00e9 and \\\" mixed"}]}

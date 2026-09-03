@@ -132,7 +132,7 @@
       "title": "Read global config",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:198 (,) config_editor -> app/home_model.go:323 config pane reads the manifest"
+        "pointer": "keys/keys.go:267 (,) config_editor -> ui/config_target.go:62 ReadConfigForEditor (the local manifest, or the targeted daemon's GetConfig)"
       },
       "web": {
         "status": "yes",
@@ -143,7 +143,7 @@
         "pointer": "commands/configcmd.go:140,170 config get/list"
       },
       "verdict": "parity",
-      "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes."
+      "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes. #3708 routed the TUI read through the daemon's GetConfig when --daemon-url/AF_DAEMON_URL names one, so all three surfaces now answer about the SAME machine; `af config get`/`list` stay local-only by #3661's decision, which is about what those verbs claim to resolve rather than about what the daemon serves."
     },
     {
       "id": "config.migrate",
@@ -223,7 +223,7 @@
       "title": "Set a global config key",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:198 (,) config_editor writes config.toml via the same path as `af config set` (app/home_model.go:324)"
+        "pointer": "keys/keys.go:267 (,) config_editor -> ui/config_target.go:114 applyingConfigSet (the local control socket, or the targeted daemon's SetConfigValue)"
       },
       "web": {
         "status": "yes",
@@ -234,7 +234,7 @@
         "pointer": "commands/configcmd.go:193 config set"
       },
       "verdict": "parity",
-      "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. (The TUI writes config directly in-process rather than via the SetConfigValue RPC — same capability, different transport, like session.send-prompt.)"
+      "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. Since #3231 all three go through the daemon's admission-gated SetConfigValue while a daemon runs, and since #3708 the TUI's write follows --daemon-url/AF_DAEMON_URL exactly as `af config set` has since #3679 — together with its read, which had to move at the same time or the editor would write values it never read."
     },
     {
       "id": "config.unset-global-alias",
@@ -1270,7 +1270,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> daemonUpdateTask"
+        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> routedUpdateTask (local socket, or the targeted daemon's UpdateTask when --daemon-url names one, #3730)"
       },
       "verdict": "parity",
       "notes": "The web half was subsumed by #1935: its seeded project picker sends update.project_path. The CLI now sends the same TaskUpdate.ProjectPath patch with `af tasks update --project-path`; `--repo` remains the authorization scope for the task's current project, so `--repo old --project-path new` is unambiguous. This also supplies a repair path for the wrong-project automation incident in #1891 without duplicating the daemon's rebind and RepoID logic."
@@ -2280,6 +2280,14 @@
         }
       },
       "RestartTaskRequest": {
+        "tui": {
+          "expect.enforce": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+          },
+          "expect.project_path": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+          }
+        },
         "cli": {
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."

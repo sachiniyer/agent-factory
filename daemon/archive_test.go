@@ -589,10 +589,13 @@ func TestArchiveSession_RejectsWhenOperationInFlight(t *testing.T) {
 }
 
 // TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely is the
-// #2641 regression across every archive/restore path that registers in
-// killsInFlight before acquiring the per-session operation lock. A wedged peer
-// may delay these operations, but it must not make the session undeletable for
-// the daemon's lifetime.
+// #2641 regression across every archive/restore path that waits for the
+// per-session operation lock. A wedged peer may delay these operations, but it
+// must not make the session undeletable for the daemon's lifetime.
+//
+// All three used to register in killsInFlight BEFORE that wait; since #3600
+// (restore) and #3715 (archive) none of them do, which is why the helper below
+// asks the stronger question.
 //
 // PRE-FIX: each case misses the deadline below because it waits in opLock.Lock.
 func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *testing.T) {
@@ -605,7 +608,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		inst, _ := registerArchivable(t, manager, repoID, repoPath, "archive-wait")
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -620,7 +623,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		require.NoError(t, err)
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -633,7 +636,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		inst := registerStarted(t, manager, repoID, repoPath, "lost-restore-wait", backend, true, session.Lost)
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -641,7 +644,18 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 	})
 }
 
-func assertGuardedOperationLockWaitBounded(t *testing.T, manager *Manager, key string, operation func() error) {
+// assertOperationLockWaitBounded is #2641's property, now asked in its stronger
+// form for every caller. The original question was "a wedged peer must not leave
+// killsInFlight stranded, making the session undeletable"; archive and both
+// restore paths answered it by registering the guard before the wait and
+// releasing it on timeout.
+//
+// Since #3600 (restore) and #3715 (archive) every one of them takes the op-lock
+// BEFORE it claims, so the wait holds nothing at all — there is no guard left to
+// strand, and the row the wait still advertises Kill for would genuinely admit
+// one. That subsumes the old assertion: a claim that is never registered cannot
+// be leaked, and this catches a reorder that quietly reintroduces one.
+func assertOperationLockWaitBounded(t *testing.T, manager *Manager, key string, operation func() error) {
 	t.Helper()
 	opLock := manager.opLockFor(key)
 	opLock.Lock()
@@ -656,8 +670,11 @@ func assertGuardedOperationLockWaitBounded(t *testing.T, manager *Manager, key s
 	go func() {
 		done <- operation()
 	}()
-	require.Eventually(t, func() bool { return killGuardHeld(manager, key) }, time.Second, 5*time.Millisecond,
-		"operation never registered its killsInFlight guard")
+	// Sampled inside the wait: opLockTimeout is 200ms here and the peer never lets
+	// go, so the operation cannot get past the lock during this window.
+	require.Never(t, func() bool { return killGuardHeld(manager, key) }, 100*time.Millisecond, 5*time.Millisecond,
+		"an operation merely QUEUED behind a peer registered an exclusive-operation claim: the row goes on "+
+			"advertising a Kill that the admission gate would then refuse (#3600, #3715)")
 
 	select {
 	case err := <-done:

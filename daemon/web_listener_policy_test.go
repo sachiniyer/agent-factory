@@ -92,7 +92,7 @@ func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
 
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 	require.NotEmpty(t, info.Token)
 
 	// Connect over loopback to the network-bound socket — exactly what a same-host
@@ -152,7 +152,7 @@ func TestTCPListener_LoopbackBindStillExemptViaPolicy(t *testing.T) {
 
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("http://" + info.Addr + "/v1/health")
@@ -183,7 +183,7 @@ func TestTCPListener_DefaultConfigIsTokenless(t *testing.T) {
 
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 

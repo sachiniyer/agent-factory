@@ -63,6 +63,13 @@ var opLockPollInterval = 5 * time.Millisecond
 // lock. It preserves mutual exclusion exactly — a true result means the caller
 // holds the lock and must Unlock it, the same contract as mu.Lock().
 //
+// It also reports how long the acquisition actually WAITED, and zero is a
+// distinct answer rather than a rounded one: the first TryLock either succeeds —
+// uncontended, nobody was ahead of us — or the lock was genuinely held by a peer
+// and the wait is at least one poll interval. #3600's restore refusals are
+// decided after this wait, so they need to say whether there was one; a caller
+// that does not care ignores it.
+//
 // It polls TryLock because sync.Mutex has no timed acquire. The cost is a wakeup
 // every opLockPollInterval while contended, and the loss of the mutex's
 // starvation-avoidance fairness (TryLock never queues), so a caller can in
@@ -70,11 +77,12 @@ var opLockPollInterval = 5 * time.Millisecond
 // acceptable here and nowhere near the hot path: the bounded acquirers are
 // user-initiated lifecycle operations, the poll cost lasts only as long as the
 // contention, and the alternative it replaces is waiting forever.
-func lockWithin(mu *sync.Mutex, d time.Duration) bool {
+func lockWithin(mu *sync.Mutex, d time.Duration) (bool, time.Duration) {
 	if mu.TryLock() {
-		return true
+		return true, 0
 	}
-	deadline := time.Now().Add(d)
+	start := time.Now()
+	deadline := start.Add(d)
 	for {
 		wait := opLockPollInterval
 		if remaining := time.Until(deadline); remaining < wait {
@@ -84,26 +92,34 @@ func lockWithin(mu *sync.Mutex, d time.Duration) bool {
 			time.Sleep(wait)
 		}
 		if mu.TryLock() {
-			return true
+			return true, time.Since(start)
 		}
 		if !time.Now().Before(deadline) {
-			return false
+			return false, time.Since(start)
 		}
 	}
 }
 
 // lockSessionOperationWithin takes the per-session operation lock with the same
-// bound for archive and both manual restore paths. Each caller has registered in
-// killsInFlight but has not mutated the session yet, so timeout is a known no-op:
-// the requested action did not start, the deferred guard cleanup can run, and a
-// later kill or retry remains possible (#2641).
-func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*sync.Mutex, error) {
+// bound for archive and both manual restore paths. No caller has mutated the
+// session yet, so timeout is a known no-op: the requested action did not start
+// and a later kill or retry remains possible (#2641).
+//
+// The two kinds of caller differ in what they hold across this wait, and that is
+// #3600. Archive registers in killsInFlight first, so its timeout also has to
+// release that guard — which its deferred cleanup does. Both restore paths take
+// this lock BEFORE claiming anything, so their wait holds nothing at all: the row
+// is unclaimed and unfenced for its whole duration, which is what keeps the Kill
+// it advertises admissible. It returns how long it waited so those callers can
+// say so in a refusal that is now decided at the END of the wait.
+func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*sync.Mutex, time.Duration, error) {
 	opLock := m.opLockFor(key)
-	if !lockWithin(opLock, opLockTimeout) {
+	acquired, waited := lockWithin(opLock, opLockTimeout)
+	if !acquired {
 		log.WarningLog.Printf("%s of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", operation, title, opLockTimeout)
-		return nil, fmt.Errorf("%s of session %q timed out after %s waiting for another operation on it to finish; the requested %s did not start and made no changes — retry", operation, title, opLockTimeout, operation)
+		return nil, waited, fmt.Errorf("%s of session %q timed out after %s waiting for another operation on it to finish; the requested %s did not start and made no changes — retry", operation, title, opLockTimeout, operation)
 	}
-	return opLock, nil
+	return opLock, waited, nil
 }
 
 // killWatchdogDelay is how long a kill may run before the watchdog reports the

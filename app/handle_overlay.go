@@ -2,10 +2,8 @@ package app
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -347,25 +345,25 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// showConfigEditor opens the global config editor overlay, reading config.toml
-// fresh so the form shows the file as it is NOW — including a hand-edit or an
-// `af config set` made since the TUI started. The pane must never render the
-// TUI's own startup snapshot: config.toml is hand-editable by design, and an
-// editor showing a stale copy would silently overwrite the newer file.
+// showConfigEditor opens the global config editor overlay, reading config fresh
+// so the form shows it as it is NOW — including a hand-edit or an `af config
+// set` made since the TUI started. The pane must never render the TUI's own
+// startup snapshot: config.toml is hand-editable by design, and an editor
+// showing a stale copy would silently overwrite the newer file.
 //
-// A config that will not load is surfaced rather than swallowed: opening an
-// editor onto a broken file and letting the user "fix" one key would write the
-// rest of the broken state back.
+// The read goes through ui.ReadConfigForEditor, which answers from whichever
+// daemon this session is attached to (#3708) — the same daemon the pane's save
+// writes to. Both halves move together or the editor writes values it never
+// read; see ui/config_target.go. A read that fails — a config that will not
+// load, or a remote daemon that refuses — is surfaced rather than swallowed:
+// opening an editor onto a broken or absent config and letting the user "fix"
+// one key would write the rest of that state back.
 func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return m, m.handleError(fmt.Errorf("cannot open the config editor: %w", err))
-	}
-	configDir, err := config.GetConfigDir()
+	entries, location, err := ui.ReadConfigForEditor()
 	if err != nil {
 		return m, m.handleError(err)
 	}
-	m.configPane.SetEntries(config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName))
+	m.configPane.SetEntries(entries, location)
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor

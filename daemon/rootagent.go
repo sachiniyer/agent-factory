@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -19,8 +18,10 @@ import (
 // "root" attached in-place at the repo root (the `af sessions create --here`
 // shape from #1107 — worktree_path == repo_path, current branch, cleanup
 // never touches the user's tree). The poll loop calls EnsureRootAgents right
-// after RefreshStatuses, so a root whose tmux died is marked Dead and healed
-// in the same tick.
+// after RefreshStatuses, so a root whose tmux died is marked Dead and its heal
+// begins in the same tick — begins, not completes: since #3721 the reap and
+// (re-)create run on their own goroutine (rootagent_create.go), because their
+// unbounded filesystem work must never own the poll goroutine.
 //
 // The loop is adopt-first: an existing root instance in any state other than
 // Dead — whatever program it runs and however it was created — is left
@@ -83,8 +84,10 @@ func rootEnsureBackoffFor(consecutiveFailures int) time.Duration {
 var rootKillHealDelay = 2 * time.Minute
 
 // rootEnsureState is the per-configured-repo retry state for the ensure
-// loop. Guarded by Manager.mu (the loop runs on the daemon poll goroutine,
-// but tests drive EnsureRootAgents directly).
+// loop. Guarded by Manager.mu, and since #3721 written from two goroutines
+// rather than one: the sweep on the poll goroutine records what it decides
+// without a create, and each create goroutine records its own outcome
+// (rootEnsureSucceeded/rootEnsureFailed). Tests drive EnsureRootAgents directly.
 type rootEnsureState struct {
 	consecutiveFailures int
 	// unansweredFailures counts how many of those consecutive failures never
@@ -281,7 +284,12 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 		return
 	}
 	resolution := m.resolvedRootAgentFor(repo.ID, &rc)
-	m.ensureResolvedRoot(path, st, repo, resolution)
+	// No identity to re-prove: a root_agents entry is an opt-in the user wrote
+	// against a PATH, not a registry record, so there is no recorded checkout id
+	// a checkout there must match. #3334 already settled that shape — a proven
+	// mismatch releases the repo so its legacy opt-in still applies — and #3366
+	// deliberately does not change it (see verifyRootCreateCheckout).
+	m.ensureResolvedRoot(path, st, repo, resolution, nil)
 }
 
 // ensureSingletonRootAgent ensures the root for a registered project enabled by
@@ -289,17 +297,22 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 // identity and root come from the snapshot the caller enumerated (no per-tick
 // git resolution — a registered project resolved when its snapshot was read),
 // and the state is keyed by that resolved root path.
-func (m *Manager) ensureSingletonRootAgent(repoID, root string) {
+//
+// The binding's identity evidence rides down to ensureResolvedRoot, which
+// re-proves it at the create boundary only (#3366): a binding made once, at
+// boot or at re-attribution, is not evidence about the checkout that is at the
+// path now.
+func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjectRoot) {
 	m.mu.Lock()
-	st := m.rootEnsureStateForLocked(root)
+	st := m.rootEnsureStateForLocked(binding.root)
 	skip := time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if skip {
 		return
 	}
-	repo := &config.RepoContext{Root: root, ID: repoID}
+	repo := &config.RepoContext{Root: binding.root, ID: repoID}
 	resolution := m.resolvedRootAgentFor(repoID, nil)
-	m.ensureResolvedRoot(root, st, repo, resolution)
+	m.ensureResolvedRoot(binding.root, st, repo, resolution, &binding)
 }
 
 // rootEnsureStateForLocked returns the retry state for a candidate key, creating
@@ -321,8 +334,10 @@ func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
 // the retry state and leaves any existing root alone — removing an opt-in never
 // tears a live root down, it just stops re-ensuring it. All outcomes are logged;
 // failures back off exponentially and settle at rootEnsureBackoffMax, so the
-// loop always heals once the cause clears.
-func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution) {
+// loop always heals once the cause clears. identity is the registry binding a
+// registry-backed candidate was enumerated from, re-proven at the create
+// boundary (#3366), and nil for a legacy root_agents path.
+func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution, identity *resolvedProjectRoot) {
 	if !resolution.Enabled {
 		m.rootEnsureSucceeded(st)
 		return
@@ -381,16 +396,6 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		log.InfoLog.Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", workspace)
 	}
 
-	// What the vanished root was, snapshotted before the reap deletes the record
-	// that holds it: the conversation it was in (#2616) and the tabs it had open
-	// (#2628). reapedRoot distinguishes "the reaped root had none of these" from
-	// "there was no prior root at all" — only the first is worth reporting, and
-	// they are different answers to the question an operator asks after an outage.
-	var (
-		carried    reapedRootState
-		reapedRoot bool
-	)
-
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
@@ -401,143 +406,24 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			m.rootEnsureSucceeded(st)
 			return
 		}
-		// An Archived root (#1028) is inert — no tmux — so it must NOT be
-		// adopted as live; fall through to reap-and-recreate like Dead/Lost so
-		// the always-ensured root comes back. In practice ArchiveSession
-		// rejects archiving the reserved root title, so this is defensive; the
-		// in-place root worktree is external, so reapDeadRoot's Cleanup is a
-		// no-op that only removes daemon-owned state.
-		// The root's tmux vanished (crash, tmux server death — the #1104
-		// outage class; recorded as Lost since #1108, Dead by older builds).
-		// Reap the dead record and fall through to re-create in place — the
-		// root keeps its stronger always-ensure semantics rather than waiting
-		// for the general Lost-restore loop. Kill is best-effort teardown of
-		// already-dead tmux, and an in-place worktree's Cleanup never touches
-		// the user's tree (#1107), so this can only remove daemon-owned state.
-		//
-		// Carrying agent_conversation across that reap is what keeps the two
-		// halves of the heal from disagreeing (#2616): the record about to be
-		// deleted holds the only pointer to the conversation the root was in, and
-		// CreateSession would otherwise mint a fresh id — leaving the one session
-		// every watch/monitor delivery targets healthy, Ready, and amnesiac. The
-		// tab roster rides across for the same reason and from the same record
-		// (#2628): a fresh create comes up with only its agent tab, so everything
-		// else the user had open — a terminal, a process tab, a dev-server web
-		// tab, an editor — would vanish with the record that listed it.
-		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
-		var err error
-		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst)
-		if err != nil {
-			m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to remove dead root record: %w", err))
-			return
-		}
-		if !reapedRoot {
-			return
-		}
 	}
 
-	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
-	skipRecordedResume := false
-	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
-		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-		if inspectErr == nil {
-			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
-		}
-		switch {
-		case inspectErr != nil:
-			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
-				workspace, carried.conversation.ID, inspectErr)
-		case !state.RecordedExists && state.Resume.HasID():
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
-				workspace, carried.conversation.ID, state.Resume.ID)
-			carried.conversation = state.Resume
-		case !state.RecordedExists:
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
-				workspace, carried.conversation.ID)
-			skipRecordedResume = true
-		}
-	}
-	req := CreateSessionRequest{
-		Title:    session.RootSessionTitle,
-		RepoPath: workspace,
-		Program:  program,
-		InPlace:  true,
-		// Say local out loud, because InPlace already decided it. A root agent is
-		// documented as the `af sessions create --here` shape — in-place at the
-		// repo root, no worktree, no branch (configuration.md § root_agents) — and
-		// an in-place session has no meaning on a runtime that works in a sandbox
-		// clone it cannot see.
-		//
-		// Left empty, the create resolves the repo's `backend` key, so a project
-		// that opted into docker/ssh/hook silently got a root whose agent ran in a
-		// clone while its record claimed the working tree — the #2778 contradiction,
-		// on the one session the daemon guarantees. Once #2778 refuses that
-		// contradiction, the same repos would instead lose their always-on root
-		// entirely. Neither is what `root_agents` asks for.
-		//
-		// This does not override the repo's choice for anything else: `backend`
-		// still governs every ordinary session there. It only stops the reserved,
-		// daemon-owned, hardcoded-in-place session from being read as a sandbox
-		// create it can never be.
-		Backend:       string(session.BackendLocal),
-		allowReserved: true,
-		// Both zero on every path that did not just reap a root — a first-ever
-		// create, or a kill whose grace window elapsed (KillSession already deleted
-		// that record, so there is nothing to continue or rebuild).
-		resumeConversation: carried.conversation,
-		restoreTabs:        carried.tabs,
-		// True only for a heal, including one whose reaped root had nothing to
-		// carry — that is the heal whose replacement most needs the marker.
-		replacesReapedRecord:  reapedRoot,
-		pendingRecreateNotice: carried.notice,
-	}
-	if skipRecordedResume {
-		req.resumeConversation = session.AgentConversationData{}
-	}
-	data, err := m.CreateSession(context.Background(), req)
-	if err != nil && req.resumeConversation.HasID() {
-		// The always-on guarantee outranks continuity. A conversation the provider
-		// can no longer resume (cleared history, a transcript store the agent no
-		// longer has) makes the resumed command exit at startup — and since the
-		// reaped record is already gone, retrying it here rather than next tick is
-		// what keeps an unresumable id from costing the root a backoff interval of
-		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
-		// would be worse than the bug.
-		if req.resumeConversation.Agent == tmux.ProgramClaude {
-			transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
-			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-			if inspectErr == nil {
-				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)
-			}
-			if inspectErr != nil {
-				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
-					workspace, req.resumeConversation.ID, inspectErr)
-			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
-				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
-					workspace, req.resumeConversation.ID, err, state.Resume.ID)
-				req.resumeConversation = state.Resume
-				carried.conversation = state.Resume
-				data, err = m.CreateSession(context.Background(), req)
-			}
-		}
-	}
-	if err != nil && req.resumeConversation.HasID() {
-		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
-			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
-		req.resumeConversation = session.AgentConversationData{}
-		data, err = m.CreateSession(context.Background(), req)
-	}
-	if err != nil {
-		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
-		return
-	}
-	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
-	if reapedRoot {
-		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
-		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
-	}
-	m.rootEnsureSucceeded(st)
+	// THE CREATE BOUNDARY (#3721). Everything above this line reads state; nothing
+	// below it can be relied on to return. A (re-)create is an admission path whose
+	// first act is an unbounded `git rev-parse`, so running it here made one
+	// unreachable checkout stop the poll goroutine — and with it RefreshStatuses,
+	// RestoreLostSessions and the settlement retries — for every session on the box.
+	// It gets its own goroutine instead; see rootagent_create.go for why the create
+	// is moved rather than bounded, and for what keeps the next tick from starting a
+	// second one.
+	m.launchRootCreate(rootCreateJob{
+		stateKey:   stateKey,
+		st:         st,
+		repo:       repo,
+		resolution: resolution,
+		identity:   identity,
+		inst:       inst,
+	})
 }
 
 // reportRootTabCarry records what became of the reaped root's non-agent tabs
@@ -695,103 +581,6 @@ type reapedRootState struct {
 	// the replacement'"'"'s own verdict so the older, unseen loss is not erased by a
 	// cleaner second heal.
 	notice session.RootRecreateContext
-}
-
-// reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
-// the title. On success it returns the state snapshotted under the operation
-// lock from the exact record it deleted. The boolean reports whether
-// the root was actually reaped; false means a concurrent operation owns or
-// changed the title, or provider conversation discovery is still polling, so
-// ensure should wait for a later tick instead of falling through to
-// CreateSession. Mirrors KillSession's teardown but deliberately does NOT
-// record rootKilledAt: this is the daemon healing itself, not a user decision.
-func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRootState, bool, error) {
-	key := daemonInstanceKey(repoID, session.RootSessionTitle)
-	opLock := m.opLockFor(key)
-	if !opLock.TryLock() {
-		// A user kill (or its finish pass) owns this title right now. Let that
-		// operation decide whether the root is removed or left for the next tick.
-		return reapedRootState{}, false, nil
-	}
-	defer opLock.Unlock()
-
-	m.mu.Lock()
-	current := m.instances[key]
-	_, killing := m.killsInFlight[key]
-	capturePending := m.pendingConversationCaptures[inst] > 0
-	m.mu.Unlock()
-	if killing || current != inst || capturePending {
-		return reapedRootState{}, false, nil
-	}
-
-	// Snapshot only after taking the same operation lock used by async
-	// conversation capture and re-confirming that this is still the tracked
-	// instance. Reading before the lock leaves a narrow loss window: capture can
-	// commit a newly discovered ID after the read but before the reap acquires
-	// the lock, and the reap would then delete the updated record while carrying
-	// the stale snapshot.
-	//
-	// Both fields come out of ONE projection — the same one the record on disk is
-	// written from — rather than two reads of the instance. Two reads could land
-	// on either side of a capture commit and hand the replacement a conversation
-	// and a roster that never coexisted; there is no reason to leave that open
-	// when the whole record is available atomically.
-	snapshot := inst.ToInstanceData()
-	carried := reapedRootState{tabs: snapshot.Tabs, notice: snapshot.RootRecreateContext}
-	if snapshot.AgentConversation != nil {
-		carried.conversation = *snapshot.AgentConversation
-	}
-
-	// The reaped root's per-session editor is bound to the record this pass is
-	// deleting, so it must not outlive it — a carried vscode tab re-resolves
-	// against the REPLACEMENT record and lazily spawns a fresh editor on the next
-	// proxy request (WebTabTarget), which is what makes the carry safe here. Stop
-	// before runtime teardown and confirm again before record deletion, mirroring
-	// KillSession/finishUserKill and closing a proxy spawn that resolved the dead
-	// root immediately before this pass took ownership. Either unknown result
-	// retains the record for the next ensure pass.
-	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
-		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed, retaining its record for a retry: %w", repoID, err)
-	}
-
-	// Best-effort by design (#478): tmux is already gone and an in-place
-	// worktree's Cleanup is a no-op, so failures Kill can ANSWER for only log
-	// inside Kill and never surface here.
-	//
-	// An error that does reach us therefore means the teardown could not complete
-	// SAFELY — tmux never confirmed the pane dead, or a worktree removal was cut off
-	// mid-delete — so the workspace is still there. Deleting the record would orphan
-	// it and leave nothing pointing at it. Keep the record; this loop runs every
-	// tick, so it IS the retry (#1917: found by auditing every record delete against
-	// the invariant, not reported).
-	teardownErr := inst.Kill()
-	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
-		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed after runtime teardown, retaining its record for a retry: %w", repoID, err)
-	}
-	// Through the one choke point (#1917): it refuses while the teardown's outcome
-	// is unknown. This site was still log-and-delete after two audits I called
-	// exhaustive — which is the argument for there being exactly one place to call.
-	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr)
-	if err != nil {
-		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
-		// absence-of-error wearing a different hat: the caller reads it as "nothing to
-		// reap" and skips rootEnsureFailed, so a persistent tmux/file-lock timeout
-		// re-runs this whole bounded teardown on EVERY tick — occupying the single
-		// status/restore poll loop and spamming warnings — instead of backing off.
-		// A failure has to look like one for the retry cadence to see it.
-		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: %w", repoID, err)
-	}
-	if !deleted {
-		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
-		return reapedRootState{}, false, nil
-	}
-	m.mu.Lock()
-	if m.instances[key] == inst {
-		delete(m.instances, key)
-		m.forgetSessionRuntimeStateLocked(repoID, inst)
-	}
-	m.mu.Unlock()
-	return carried, true, nil
 }
 
 // rootEnsureSucceeded resets a repo's retry state after a pass that left a

@@ -46,13 +46,6 @@ func (t *TmuxSession) programCmd() string {
 	return t.program
 }
 
-// setProgramCmd stores the pane's program command string under programMu.
-func (t *TmuxSession) setProgramCmd(program string) {
-	t.programMu.Lock()
-	defer t.programMu.Unlock()
-	t.program = program
-}
-
 // rewriteProgramCmdByAf replaces the program with a rewrite AF ITSELF produced and
 // extends the generated-args declaration by the words that rewrite adds, in ONE
 // critical section (#3083 review).

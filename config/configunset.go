@@ -157,10 +157,10 @@ func UnsetGlobalConfigValue(key string) (*UnsetResult, error) {
 // alias that name different settings — which is exactly the shape of the bug the
 // guard exists to catch: an edit that does not do what the command says it does.
 func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alias configKeyAlias) (*UnsetResult, error) {
-	// The read is of the locked file, and so is the write below: a config.toml
-	// that is a symlink must not be resolved a second time inside the lock
-	// (#3688).
-	current, err := os.ReadFile(locked.file)
+	// The read is of the locked file, and so is the write below: neither a
+	// config.toml that is a symlink nor an AF home that is one may be resolved a
+	// second time inside the lock (#3688, #3697).
+	current, err := locked.read()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}

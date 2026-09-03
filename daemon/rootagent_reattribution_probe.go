@@ -33,7 +33,7 @@ func (p *rootReattributionProbe) inconclusive() bool {
 	// once a probe could resolve the path and still learn nothing from it: an
 	// unanswered RE-resolution leaves repo set while proving nothing (#3299
 	// review id 3911002406).
-	return !p.matches && !p.mismatch && !p.markerUnreadable && !p.vanished && !p.foreignIdentity
+	return !p.matches && !p.mismatch && !p.markerUnreadable && !p.vanished
 }
 
 // rootReattributionProbeStepTimeout bounds EACH git-touching step of one probe
@@ -116,19 +116,6 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 		// is also where a first resolution the step budget killed lands: the
 		// alternative it replaces was a goroutine wedged on the mount forever,
 		// holding this entry's probe slot against every later pass (#3599).
-		return
-	}
-	// SCOPE GATE FIRST (#3299 review id 3911002404). A foreign identity is
-	// deferred to #3530, so this probe has no business publishing it as a
-	// candidate or reading its marker: publishing gates that REAL repository
-	// through rootAttributionPendingFor, and the marker read below waits on the
-	// recorded path's filesystem — bounded per step since #3599, but a stalled
-	// foreign worktree would still block a legitimate legacy or singleton root
-	// reached through another path in that same repository for the whole of it.
-	// Classify and leave.
-	if repo.ID != config.RepoIDForRecordedRoot(record.root) {
-		probe.foreignIdentity = true
-		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, whose identity root is not that path, so its layers cannot be attributed without a second identity; project %s stays unresolved until #3530 namespaces the derived fallback", record.root, repo.ID, record.projectID)
 		return
 	}
 	probe.repo = repo
@@ -231,25 +218,6 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s changed under verification — its checkout marker did not read the same twice; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, recheckErr)
 		return
 	}
-	// SCOPE GATE (#3299, residue deferred to #3530). Only a recorded root that
-	// IS its repository's identity root is re-attributed here. When the two
-	// differ — a linked worktree of a bare clone, a subdirectory registration,
-	// or a spelling that re-resolves through a symlink — attributing the record
-	// would give the project a SECOND identity, and a derived recorded-path
-	// hash is equal BY CONSTRUCTION to the real identity of any repository
-	// later main-rooted at that path. Every consumer of that alias then needs
-	// its own collision guard, which is the class #3530 removes by namespacing
-	// the derived fallback. Until it lands, these records stay unresolved
-	// exactly as they are on master today: this defers the residue, it does not
-	// regress anything.
-	//
-	// A concrete verdict rather than an inconclusive one, so the entry settles
-	// onto its backoff instead of re-forking git every pass.
-	if verify.ID != config.RepoIDForRecordedRoot(record.root) {
-		probe.foreignIdentity = true
-		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, whose identity root is not that path, so its layers cannot be attributed without a second identity; project %s stays unresolved until #3530 namespaces the derived fallback", record.root, verify.ID, record.projectID)
-		return
-	}
 	if !matches {
 		probe.mismatch = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
@@ -276,6 +244,14 @@ var rootHealPrePublishHookForTest func()
 // pins nothing. Tests mutate the recorded path here and assert the
 // classification the probe reaches.
 var rootReattributionProbeHookForTest func(root string)
+
+// rootPromotionFenceHookForTest, when non-nil, runs inside
+// promoteDerivedIdentity BEFORE it re-checks the delete fence — the window
+// between the consume phase's own fence check and the promotion's. A delete
+// landing there defers the promotion, and #3530 review id 3915722486 is about
+// what the pass must NOT have already done by then. Nothing else can hold that
+// window open: it is two locked reads apart in a real daemon.
+var rootPromotionFenceHookForTest func(derivedID string)
 
 // recordRootAbsent reports whether a recorded project root is GONE, as opposed
 // to present but unresolvable. It is what separates the "bring the path back"
@@ -326,25 +302,118 @@ func (m *Manager) rootAttributionPendingFor(repoID string) bool {
 	return m.pendingReattributionDerivedID(repoID) != ""
 }
 
-// pendingReattributionRealID returns the REAL identity an unconsumed probe has
-// already resolved for derivedID, or "" when none has. It is
-// pendingReattributionDerivedID's other direction, and DeleteProject needs both
-// (#3299 review id 3910107330): a delete arriving by PATH or by derived ID
-// while a probe is stalled mid-marker-read finds no published alias, so without
-// this it would proceed under the derived ID, archive nothing under the
-// candidate real identity, and still deregister the project — leaving live
-// sessions as orphans with no registry record.
-func (m *Manager) pendingReattributionRealID(derivedID string) string {
+// probeProvedItsCheckout reports what a probe has ESTABLISHED about whether the
+// checkout at the recorded path is the record's own, without blocking:
+// verified when the marker matched, disproven when the marker read succeeded
+// and differed. Neither, when it has not finished or finished without a verdict
+// — that is the UNKNOWN state, and it is a state, not a "no".
+//
+// matches and mismatch are written by the probe goroutine before it closes
+// done, so observing done closed is what makes reading them safe.
+func probeProvedItsCheckout(p *rootReattributionProbe) (verified, disproven bool) {
+	select {
+	case <-p.done:
+	default:
+		return false, false
+	}
+	return p.matches, p.mismatch
+}
+
+// probeStillDeciding reports that a probe holds an unconsumed candidate other
+// than the identity its record is filed under — the state in which "which
+// project does this id name" has two answers.
+//
+// ONLY a proven mismatch releases it (#3530 review id 3917756777). A settled
+// markerUnreadable or vanished outcome is not a release: those establish
+// nothing about whether the candidate is this record's checkout, and treating
+// them as one let a delete by either identity act on half the project — the
+// record deregistered without its sessions, or the sessions archived without
+// the record.
+func probeStillDeciding(probe *rootReattributionProbe, recordedID string) bool {
+	if probe == nil {
+		return false
+	}
+	if _, disproven := probeProvedItsCheckout(probe); disproven {
+		return false
+	}
+	candidate := probe.candidate.Load()
+	return candidate != nil && candidate.ID != recordedID
+}
+
+// recordedRootIsGone reports that the recorded root of the project filed under
+// recordedID is PROVABLY absent, so no verdict about a checkout there is
+// coming (#3530 review id 3917756769).
+//
+// It is the escape hatch on the refusal below, and it is load-bearing rather
+// than an optimisation. A probe whose re-resolution went unanswered settles
+// INCONCLUSIVE while keeping its candidate, every replacement inherits that
+// candidate, and an absent path makes each replacement inconclusive in turn —
+// so nothing ever verifies, disproves or retires it, and without this the
+// refusal would stand for the daemon's life while telling the user to retry.
+//
+// Determinate absence is the same positive evidence claimantForRecord requires:
+// a stat that fails in a way that proves nothing is there. A stalled mount says
+// nothing and keeps the gate closed.
+func (m *Manager) recordedRootIsGone(recordedID string) bool {
+	record, ok := m.rootAgentLayers.Load().unresolvedRoots[recordedID]
+	if !ok || record.root == "" {
+		return false
+	}
+	absent, err := recordRootAbsent(record.root)
+	return err == nil && absent
+}
+
+// identityTransitionPendingFor reports that the daemon is mid-transition on the
+// identity a request named: a probe keyed by it holds an unconsumed candidate
+// that is some OTHER identity, so which project the id names is being decided
+// right now (#3530 review ids 3915722493, 3916379586, 3917445659).
+//
+// It is a REFUSAL predicate, not a redirect. An earlier round tried to follow
+// the probe — delete under the identity it had resolved — and that keys on an
+// id, which is exactly what a repository at a reused path can also legitimately
+// own: deleting an occupant whose real id equals a stale record's recorded one
+// found that record's probe and aimed the delete at a different project's
+// sessions. The collision this whole change removes, re-entered through the
+// probe map. Nothing here acts across identities any more; the caller refuses
+// and the next pass, which has the record in hand, completes the transition.
+func (m *Manager) identityTransitionPendingFor(repoID string) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	probe := m.rootHealProbes[derivedID]
-	if probe == nil || (probe.settled && !probe.inconclusive()) {
-		return ""
+	probe := m.rootHealProbes[repoID]
+	m.mu.Unlock()
+	if !probeStillDeciding(probe, repoID) {
+		return false
 	}
-	if c := probe.candidate.Load(); c != nil && c.ID != derivedID {
-		return c.ID
+	return !m.recordedRootIsGone(repoID)
+}
+
+// identityTransitionPendingOn is the same question from the other side: some
+// record's probe has resolved repoID as ITS candidate, so a request naming
+// repoID may be naming that record rather than the repository whose id it is
+// (#3530 review ids 3916379577, 3916912942, 3917445684).
+//
+// Callers ask it only when they could find no registry row for repoID, which is
+// precisely the state a mid-transition record produces — its row still answers
+// to the identity it is filed under. With a row in hand the request has already
+// selected its project and nothing is ambiguous.
+func (m *Manager) identityTransitionPendingOn(repoID string) bool {
+	m.mu.Lock()
+	deciding := make([]string, 0, len(m.rootHealProbes))
+	for recordedID, probe := range m.rootHealProbes {
+		if recordedID == repoID || !probeStillDeciding(probe, recordedID) {
+			continue
+		}
+		if candidate := probe.candidate.Load(); candidate != nil && candidate.ID == repoID {
+			deciding = append(deciding, recordedID)
+		}
 	}
-	return ""
+	m.mu.Unlock()
+	// The absence check stats the filesystem, so it runs outside the lock.
+	for _, recordedID := range deciding {
+		if !m.recordedRootIsGone(recordedID) {
+			return true
+		}
+	}
+	return false
 }
 
 // pendingReattributionDerivedID returns the DERIVED recorded-path ID of an
@@ -362,30 +431,66 @@ func (m *Manager) pendingReattributionRealID(derivedID string) string {
 // probe resolved this repo".
 func (m *Manager) pendingReattributionDerivedID(repoID string) string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for derivedID, probe := range m.rootHealProbes {
-		// A settled probe normally releases the gate: a proven mismatch says
-		// a different project's layers do not govern this repo, and an
-		// unreadable marker holds it closed through the snapshot bridge
-		// instead. An INCONCLUSIVE settle does neither — it established
-		// nothing — and settling it anyway dropped a gate its inherited
-		// candidate was the last thing holding (#3299 review id 3908517185).
+	deciding := make([]string, 0, len(m.rootHealProbes))
+	for recordedID, probe := range m.rootHealProbes {
+		// The SAME disproof-only release the delete gate uses (#3530 review id
+		// 3918120753). Only a proven mismatch says a different project's layers
+		// do not govern this repo; an unreadable marker or a vanished path
+		// established nothing, and on master they were held closed by the
+		// invented-to-real bridge that this change removes. Without the bridge,
+		// releasing on them leaves the unreadable verdict published under the
+		// recorded id alone while the candidate repo resolves from the global
+		// or legacy layers — starting a root the project's personal disable
+		// forbids, and adopt-first keeps it running when the gate returns.
 		//
-		// The sequence: a verified probe held behind a derived-ID delete
-		// fence past the TTL, the fence clears, the replacement inherits the
-		// real repo ID, and the path is gone by the time it runs. That
-		// replacement writes no bridge and no verdict, and the alias was
-		// never published because the verified result was never consumed —
-		// so the tombstone stays reachable only through an alias that does
-		// not exist, and a legacy entry through another path in the real
-		// repository recreates the deleted root. The inherited candidate
-		// stays pending until a concrete verdict supersedes it or the alias
-		// is published.
-		if probe.settled && !probe.inconclusive() {
+		// An INCONCLUSIVE settle never released it either (#3299 review id
+		// 3908517185): a verified probe held behind a delete fence past the
+		// TTL, whose replacement inherits the real repo ID and finds the path
+		// gone, writes no verdict at all — and the inherited candidate is then
+		// the only thing holding the gate.
+		if probe == nil {
 			continue
 		}
-		if c := probe.candidate.Load(); c != nil && c.ID == repoID {
-			return derivedID
+		if _, disproven := probeProvedItsCheckout(probe); disproven {
+			continue
+		}
+		candidate := probe.candidate.Load()
+		if candidate == nil || candidate.ID != repoID {
+			continue
+		}
+		// A CONCRETE settled negative — an unreadable marker, a path that
+		// vanished mid-verification — is published in the snapshot under the
+		// identity the RECORD is filed under. When that is the same id being
+		// asked about, the record's own flags carry the fail-closed verdict and
+		// name the actual remedy ("repair the marker"), so holding the gate
+		// here would only replace that with a vaguer "pending" one.
+		//
+		// When they DIFFER, nothing else carries it (#3530 review id
+		// 3918120753): the unreadable state sits under the recorded id while
+		// the candidate repository resolves from the global and legacy layers,
+		// never seeing the project's personal disable. On master the
+		// invented-to-real bridge held it; this change removed the bridge, so
+		// the gate carries the rule instead.
+		//
+		// An INCONCLUSIVE settle establishes nothing either way and never
+		// releases (#3299 review id 3908517185): a verified probe held behind a
+		// delete fence past the TTL, whose replacement inherits the real repo
+		// ID and finds the path gone, writes no verdict at all — and the
+		// inherited candidate is then the only thing holding the gate.
+		if probe.settled && !probe.inconclusive() && recordedID == repoID {
+			continue
+		}
+		deciding = append(deciding, recordedID)
+	}
+	m.mu.Unlock()
+	// The absence escape, for the same reason the delete has one (#3530 review
+	// id 3917756769): an unanswered re-resolution keeps its candidate forever
+	// through inheriting replacements, so without this a provably-gone recorded
+	// root would fail its candidate repository closed for the daemon's life.
+	// Stats the filesystem, so it runs outside the lock.
+	for _, recordedID := range deciding {
+		if !m.recordedRootIsGone(recordedID) {
+			return recordedID
 		}
 	}
 	return ""
@@ -401,6 +506,14 @@ func cloneLayerMap(in map[string]*config.RootAgentLayer) map[string]*config.Root
 
 func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneResolvedRootMap(in map[string]resolvedProjectRoot) map[string]resolvedProjectRoot {
+	out := make(map[string]resolvedProjectRoot, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

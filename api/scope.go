@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session"
@@ -42,15 +43,24 @@ import (
 // Remote targets (--daemon-url) are deliberately exempt from rule 2 wherever a
 // command's request actually reaches the remote: the client's cwd names a repo
 // on THIS machine, which says nothing about the daemon's projects. That
-// exemption lives in resolveRepoIDForLookup (api.go), NOT here — the dividing
-// line is the transport, not the command.
+// exemption lives in resolveRepoIDForLookup (api.go) for the session reads, and
+// in resolveProjectScope below for the task verbs — the dividing line is the
+// transport, not the command, and #3730 moved the whole `af tasks` group across
+// it.
 //
-// resolveProjectScope below therefore always consults the cwd, which is correct
-// only because its callers are the task commands, and every task RPC goes over
-// the LOCAL control socket regardless of --daemon-url (daemon.ListTasksNoSpawn,
-// AddTask, …). If a task command is ever migrated onto the apiclient transport,
-// it must take resolveRepoIDForLookup's remote branch too, or a bare id against
-// a remote daemon will be scoped by a repo the remote has never heard of.
+// The task verbs go one step further than the session reads: against a remote
+// target they refuse --repo instead of honouring it. A session lookup can send
+// its repo ID to the daemon and let the daemon decide, with the documented
+// limitation that the ID only matches when both hosts have the project at the
+// same absolute path. A task scope has no such out — the daemon serves no
+// repo-filtered task read, so the filtering happens HERE, against records the
+// remote sent, using an identity derived by hashing a path on THIS machine
+// (config.RepoIDFromRoot). When the two hosts disagree about the path, that
+// filter matches nothing and `af tasks list --daemon-url … --repo …` prints an
+// empty list for a project that has tasks. A silently empty answer about the
+// wrong machine is the #3730 shape exactly, so it is refused rather than
+// rendered. Scoping a remote by a project the daemon owns needs a daemon-side
+// lookup, which is additive when it exists.
 
 // projectScope is the resolved project context for one command invocation. A
 // nil Repo means "no project context" (rule 3): unscoped, not "every project by
@@ -75,6 +85,20 @@ func resolveProjectScope(allFlag bool) (projectScope, error) {
 	}
 	if allFlag {
 		return projectScope{All: true}, nil
+	}
+	if apiclient.IsRemoteTarget() {
+		if repoFlag != "" {
+			return projectScope{}, fmt.Errorf(
+				"--repo cannot scope tasks on the daemon at %s: a project's identity is derived from its path on THIS machine, "+
+					"so filtering the daemon's tasks by it would silently match nothing when the two hosts hold the project at "+
+					"different paths. Drop --repo to act across the daemon's projects (task ids are unique), or run the command on the daemon host",
+				apiclient.RemoteTargetURL())
+		}
+		// No project context (rule 3), for the reason resolveRepoIDForLookup gives:
+		// the client's cwd names a repository here, not on the daemon's machine. An
+		// id therefore resolves across the remote's projects, exactly as it does
+		// from outside a git repository locally.
+		return projectScope{}, nil
 	}
 	if repoFlag != "" {
 		// A provided-but-invalid --repo must name the path it could not
@@ -179,7 +203,10 @@ func sessionRepoRoot(data *session.InstanceData) string {
 // Shared by `archive --self` and `whoami` so the two cannot drift.
 func sessionRepoID(data *session.InstanceData) string {
 	if data.Worktree.RepoPath != "" {
-		return config.RepoIDForRecordedRoot(data.Worktree.RepoPath)
+		// Canonical role (#3530): RepoPath is already the identity root, and
+		// this must stay bit-identical to session storage's key or scoping
+		// stops finding the rows it filters.
+		return config.RepoIDFromRoot(filepath.Clean(data.Worktree.RepoPath))
 	}
 	if data.Path != "" {
 		return config.RepoIDForPath(data.Path)

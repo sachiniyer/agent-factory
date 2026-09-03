@@ -68,6 +68,35 @@ func (r *SchemaMigrationRegistry) migrator(fromVersion int) (SchemaMigrator, boo
 	return migrator, ok
 }
 
+// SchemaWriteLinkPolicy decides what the migration write-back does when the
+// store's path is a symlink. It is the plan's answer to #3672's per-caller
+// question, carried to the one place that answers it for a store the caller
+// does not otherwise write: LoadAndMigrateSchemaFile.
+//
+// It exists because the two stores that migrate through this helper need
+// DIFFERENT answers. tasks.json is user-authored content a user may keep in
+// dotfiles, so its ordinary writes follow a link (#3672); instances.json is
+// af-managed, so its writes do not. One shared writer here would have to be
+// wrong for one of them, and it was: the write-back replaced a linked
+// tasks.json that every other write to the same file preserved (#3718).
+type SchemaWriteLinkPolicy int
+
+const (
+	// SchemaWriteReplaceLink replaces a symlink at the store's path with the
+	// migrated regular file. It is the ZERO VALUE on purpose: following a link
+	// is a promise a store has to ask for, never one it inherits by omission
+	// (#3672), and replacing is what every store did before this field existed.
+	SchemaWriteReplaceLink SchemaWriteLinkPolicy = iota
+	// SchemaWriteFollowLink rewrites the file the link names and leaves the link
+	// in place. Only for a store whose ORDINARY writes already follow, so the
+	// migration cannot disagree with them about the same file.
+	SchemaWriteFollowLink
+)
+
+func (p SchemaWriteLinkPolicy) valid() bool {
+	return p == SchemaWriteReplaceLink || p == SchemaWriteFollowLink
+}
+
 // SchemaMigrationPlan describes how one store is detected, migrated, and validated.
 type SchemaMigrationPlan struct {
 	StoreName      string
@@ -77,6 +106,33 @@ type SchemaMigrationPlan struct {
 	Migrators      *SchemaMigrationRegistry
 	Validate       SchemaValidator
 	Perm           os.FileMode
+
+	// ProveCurrentVersion is an optional fast path for the overwhelmingly
+	// common case: bytes that are already at CurrentVersion and have nothing to
+	// migrate. It answers one question cheaply — are these bytes provably at
+	// currentVersion? — and MigrateSchemaBytes uses it to skip DetectVersion and
+	// the migrator chain when the answer is yes.
+	//
+	// The contract is one-directional. A true answer MUST mean
+	// DetectVersion(raw) would return (currentVersion, nil); a false answer
+	// promises nothing and costs only the full path, which runs anyway. Probes
+	// are therefore written to refuse whenever they are unsure.
+	//
+	// currentVersion is passed rather than closed over so a plan cannot wire a
+	// probe that proves a version this plan is not on.
+	//
+	// Every store in the tree detects its version the same way — a top-level
+	// schema_version field, DetectJSONSchemaVersion — and so shares one probe,
+	// ProveJSONSchemaVersion. TestFastPathMatchesFullPlanOverInstancesFixtures
+	// enforces the contract for the instances plan over every fixture in
+	// config/testdata/instances, so a migration step added later cannot make the
+	// fast path lie without turning that test red.
+	ProveCurrentVersion func(raw []byte, currentVersion int) bool
+
+	// LinkPolicy is what the write-back does with a symlink at Path. Unset
+	// means SchemaWriteReplaceLink; see the type's comment for why that is the
+	// zero value rather than something a plan must state.
+	LinkPolicy SchemaWriteLinkPolicy
 }
 
 // SchemaMigrationResult reports what happened during a migration attempt.
@@ -104,11 +160,44 @@ func (e *UnsupportedSchemaVersionError) Error() string {
 // MigrateSchemaBytes upgrades raw bytes to plan.CurrentVersion and validates
 // the result. It does not write files; callers that own a disk store should use
 // LoadAndMigrateSchemaFile.
+//
+// On the fast path the returned slice ALIASES raw rather than copying it — a
+// 1.36 MB copy per read on this repo's largest instances.json — so callers must
+// treat it as read-only. Every caller in the tree only unmarshals it.
 func MigrateSchemaBytes(raw []byte, plan SchemaMigrationPlan) ([]byte, SchemaMigrationResult, error) {
 	if err := validateSchemaMigrationPlan(plan); err != nil {
 		return nil, SchemaMigrationResult{}, err
 	}
+	if plan.ProveCurrentVersion != nil && plan.ProveCurrentVersion(raw, plan.CurrentVersion) {
+		return migrateSchemaBytesAlreadyCurrent(raw, plan)
+	}
+	return migrateSchemaBytesFullPlan(raw, plan)
+}
 
+// migrateSchemaBytesAlreadyCurrent is the fast path: the probe has proved raw is
+// at plan.CurrentVersion, so no migrator can run and the migrated bytes are the
+// input bytes. Only validation is left, and it is deliberately NOT skipped —
+// dropping it would change what MigrateSchemaBytes reports for a file that is at
+// the current version but holds content the store cannot use, which is a
+// behavior change rather than an optimization.
+func migrateSchemaBytesAlreadyCurrent(raw []byte, plan SchemaMigrationPlan) ([]byte, SchemaMigrationResult, error) {
+	result := SchemaMigrationResult{
+		OriginalVersion: plan.CurrentVersion,
+		FinalVersion:    plan.CurrentVersion,
+	}
+	if plan.Validate != nil {
+		if err := plan.Validate(raw); err != nil {
+			return nil, result, fmt.Errorf("%s: validate schema version %d: %w",
+				describeSchemaStore(plan.StoreName, plan.Path), result.FinalVersion, err)
+		}
+	}
+	return raw, result, nil
+}
+
+// migrateSchemaBytesFullPlan runs the plan end to end: detect, migrate forward
+// one version at a time, validate. It stays a named function so the fast path
+// can be tested against it directly.
+func migrateSchemaBytesFullPlan(raw []byte, plan SchemaMigrationPlan) ([]byte, SchemaMigrationResult, error) {
 	version, err := plan.DetectVersion(raw)
 	if err != nil {
 		return nil, SchemaMigrationResult{}, fmt.Errorf("%s: detect schema version: %w", describeSchemaStore(plan.StoreName, plan.Path), err)
@@ -212,7 +301,7 @@ func LoadAndMigrateSchemaFile(plan SchemaMigrationPlan) ([]byte, SchemaMigration
 			return fmt.Errorf("%s: back up pre-migration file: %w", describeSchemaStore(plan.StoreName, plan.Path), err)
 		}
 		result.BackupPath = backupPath
-		if err := schemaAtomicWriteFile(plan.Path, migrated, perm); err != nil {
+		if err := schemaAtomicWriteFile(plan.LinkPolicy, plan.Path, migrated, perm); err != nil {
 			return fmt.Errorf("%s: write migrated schema version %d: %w",
 				describeSchemaStore(plan.StoreName, plan.Path), result.FinalVersion, err)
 		}
@@ -256,6 +345,14 @@ func validateSchemaMigrationPlan(plan SchemaMigrationPlan) error {
 	if plan.DetectVersion == nil {
 		return fmt.Errorf("%s: schema version detector is required", describeSchemaStore(plan.StoreName, plan.Path))
 	}
+	// Rejected HERE, before LoadAndMigrateSchemaFile has read, backed up, or
+	// written anything. A policy nobody recognises means the caller does not
+	// know what it is asking for, and the safe moment to say so is the one
+	// where the file is still untouched.
+	if !plan.LinkPolicy.valid() {
+		return fmt.Errorf("%s: unknown schema write link policy %d",
+			describeSchemaStore(plan.StoreName, plan.Path), plan.LinkPolicy)
+	}
 	return nil
 }
 
@@ -293,7 +390,40 @@ func checkedSchemaVersion(value int) (int, error) {
 	return value, nil
 }
 
-var schemaAtomicWriteFile = AtomicWriteFile
+// schemaAtomicWriteFile is the migration write-back, and the seam tests inject
+// at. It takes the POLICY rather than being chosen by it so there is one hook
+// covering both answers: a second var per writer would let a test override the
+// replacing path and leave the following one running for real, which is the
+// shape of a hook that stops covering what it claims to.
+var schemaAtomicWriteFile = writeMigratedSchemaFile
+
+// writeMigratedSchemaFile puts the migrated bytes back under the plan's link
+// policy.
+//
+// Both branches take the lock LoadAndMigrateSchemaFile already holds, which is
+// on the plan's OWN path — unresolved, even when the write follows. That is
+// deliberate and it is not the pinned-resolution shape #3688 established for
+// the global config, for two reasons. The lock here is bounded
+// (WithFileLockTimeout) because an unbounded wait on this path freezes the
+// daemon (#1917), and withFollowedFileLock blocks forever. And the follow-side
+// store's ORDINARY writes lock their own path too (task/task.go, #3672): a
+// write-back that resolved the lock while writeTasks did not would put the two
+// writers to one tasks.json behind two different .lock files, which is strictly
+// worse than both being unresolved. The cross-AF-home aliasing that leaves open
+// is the class #3697 owns, for both writers at once.
+func writeMigratedSchemaFile(policy SchemaWriteLinkPolicy, path string, data []byte, perm os.FileMode) error {
+	switch policy {
+	case SchemaWriteReplaceLink:
+		return AtomicWriteFile(path, data, perm)
+	case SchemaWriteFollowLink:
+		return AtomicWriteFileFollowingLink(path, data, perm)
+	default:
+		// validateSchemaMigrationPlan rejects this before the file is touched,
+		// so reaching it means a caller built the plan some other way. Fail
+		// closed rather than silently picking a policy for them.
+		return fmt.Errorf("unknown schema write link policy %d", policy)
+	}
+}
 
 func writeSchemaMigrationBackup(path string, raw []byte, fromVersion int, perm os.FileMode) (string, error) {
 	base := fmt.Sprintf("%s.bak.schema-v%d", path, fromVersion)

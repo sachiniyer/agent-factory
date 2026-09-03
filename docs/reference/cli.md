@@ -361,10 +361,12 @@ file and printing where it is so you can attach it to an issue by hand.
 Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
-session prompts, task prompts, tab commands, remote metadata) are dropped; $HOME and your
-username are collapsed to ~ / [user]; and known credential shapes are scrubbed
-wherever they appear. Perfect redaction is impossible — open the file and
-review it before sharing it publicly.
+session prompts, task prompts, tab and session commands, tab names, account
+labels, remote metadata) are dropped; every directory the bundle names is
+replaced by the role it plays ([repo:N], [worktree:N], [af-home], ~) rather than
+by its own name, and your username by [user]; and known credential shapes are
+scrubbed wherever they appear. Perfect redaction is impossible — open the file
+and review it before sharing it publicly.
 
 Use --json to emit the structured manifest (wrapped in the shared {data,error}
 envelope) to stdout instead of writing a file or opening a draft.
@@ -2416,6 +2418,8 @@ A task is bound to exactly one project, and every run's worktree is created insi
 
 Outside a git repository, --repo is required — the binding is never guessed. A current directory that resolves to a clone inside af's own home is refused as a stray checkout (#1891); pass --repo to name the intended project.
 
+With --daemon-url/AF_DAEMON_URL set, the task is added to that daemon and --repo is required, naming a path on the DAEMON's host: it is sent as typed and resolved there, since a path on this machine says nothing about the daemon's filesystem. The success line names the daemon URL beside the path. An omitted --program is left to the daemon's own default_program rather than resolved from this machine's config.
+
 ```
 af tasks add [flags]
 ```
@@ -2450,6 +2454,8 @@ Get a task in the current project by ID.
 
 The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Inspecting another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
 
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+
 ```
 af tasks get <id>
 ```
@@ -2472,6 +2478,8 @@ List tasks in the current project.
 Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's tasks are listed.
 
 This default changed in #1893: `af tasks list` inside a repository used to list every project's tasks. Pass --all for the old behavior.
+
+With --daemon-url/AF_DAEMON_URL set, the list comes from that daemon and never from this machine's task store — a daemon that cannot be reached is an error, not a fall back to local rows. There is no project context against a remote daemon: your current directory names a repository here, which says nothing about the daemon's projects, so every project's tasks are listed and --repo is refused rather than silently matching nothing.
 
 ```
 af tasks list [flags]
@@ -2500,6 +2508,8 @@ Remove a task in the current project.
 
 The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Removing another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
 
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+
 ```
 af tasks remove <id>
 ```
@@ -2520,6 +2530,8 @@ Restart an enabled watch task without process overlap
 Restart an enabled watch task in the current project. The command waits for the old process tree to exit before starting one replacement, so an edited script is re-read without double-emitting events.
 
 The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id resolves globally.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
 
 ```
 af tasks restart <id>
@@ -2548,6 +2560,8 @@ The task must belong to the resolved project: --repo when given, otherwise the c
 
 Pass --json for the same record `af tasks get` returns, in the {data,error} envelope.
 
+With --daemon-url/AF_DAEMON_URL set, the task is read from that daemon, a Daemon row names it beside the project path, and the schedule verdict is the one the DAEMON derived — a cron expression is evaluated in the scheduler's timezone, and re-deriving it here would answer in this terminal's. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
+
 ```
 af tasks show <id>
 ```
@@ -2568,6 +2582,8 @@ Trigger a task in the current project to run immediately
 Trigger a task in the current project to run immediately.
 
 The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Triggering another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused.
 
 ```
 af tasks trigger <id>
@@ -2591,6 +2607,8 @@ Update a task in the current project.
 The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Updating another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
 
 --repo scopes which task may be updated; it never re-binds one. Pass --project-path to move that task to another existing git repository. The new path becomes the task's working directory and project binding.
+
+With --daemon-url/AF_DAEMON_URL set, the patch is applied on that daemon and never to this machine's store. There is no project context against a remote daemon, so the id resolves across its projects and --repo is refused; --project-path names a path on the DAEMON's host and is sent as typed for it to resolve.
 
 ```
 af tasks update <id> [flags]

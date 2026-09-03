@@ -39,3 +39,32 @@ func (c *Client) Health(ctx context.Context) (daemon.PingResponse, error) {
 	}
 	return resp, nil
 }
+
+// DaemonVersionPhrase asks the targeted daemon what version it is and renders
+// the answer as a clause for a skew refusal ("version 0.9.1", or why it could
+// not say). It is the sentence a caller drops into "that daemon (%s) does not
+// serve the %s route".
+//
+// All three answers are stated as facts about the daemon rather than collapsed
+// into "unknown". An empty Version from a RESPONDING daemon is itself positive
+// evidence (see daemon.PingResponse.Version): the field rides Ping since #1044,
+// so a daemon that omits it is older than that — which is consistent with, and
+// further narrows, the missing route. A health probe that fails outright is a
+// different fact again and is reported as one.
+//
+// It lives here rather than beside either caller because the second one arrived
+// (#3708: the TUI config editor refuses a daemon that does not serve GetConfig,
+// exactly as `af config set` refuses one that does not serve SetConfigValue).
+// Two copies of this reasoning would be two sentences to keep true. It runs ONLY
+// on a refusal path, never on a successful call, so no happy path pays for it.
+func (c *Client) DaemonVersionPhrase(ctx context.Context) string {
+	health, err := c.Health(ctx)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("its version could not be read: %v", err)
+	case health.Version == "":
+		return "it reports no version, so it predates version reporting"
+	default:
+		return "version " + health.Version
+	}
+}

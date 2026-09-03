@@ -93,7 +93,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// a timeout at this line leaves the session bit-for-bit unchanged and the
 	// retry the error asks for is a true retry.
 	opLock := m.opLockFor(key)
-	if !lockWithin(opLock, opLockTimeout) {
+	if acquired, _ := lockWithin(opLock, opLockTimeout); !acquired {
 		log.WarningLog.Printf("kill of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", req.Title, opLockTimeout)
 		return session.InstanceData{}, errKillBusy(req.Title, opLockTimeout)
 	}

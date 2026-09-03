@@ -96,13 +96,17 @@ func ensurePluginDir() (string, error) {
 	if err := os.Remove(filepath.Join(hooksDir, "hooks.json")); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
-	if err := config.AtomicWriteFile(filepath.Join(hooksDir, "guard-tmux.sh"), []byte(legacyGuardNoop), 0755); err != nil {
+	// Every write below refuses a symlinked destination (#3672). <config-dir>/plugin
+	// is regenerated wholesale on each claude session launch — af writes the
+	// manifest, rewrites the commands, and prunes what it no longer declares — so
+	// a link inside it is a path af would otherwise clobber on the next launch.
+	if err := config.AtomicWriteFileRefusingLink(filepath.Join(hooksDir, "guard-tmux.sh"), []byte(legacyGuardNoop), 0755); err != nil {
 		return "", err
 	}
 
 	// Write plugin manifest
 	manifestPath := filepath.Join(manifestDir, "plugin.json")
-	if err := config.AtomicWriteFile(manifestPath, []byte(pluginManifest), 0644); err != nil {
+	if err := config.AtomicWriteFileRefusingLink(manifestPath, []byte(pluginManifest), 0644); err != nil {
 		return "", err
 	}
 
@@ -127,7 +131,7 @@ func ensurePluginDir() (string, error) {
 	// Write command files
 	for name, content := range pluginCommands {
 		path := filepath.Join(commandsDir, name)
-		if err := config.AtomicWriteFile(path, []byte(content), 0644); err != nil {
+		if err := config.AtomicWriteFileRefusingLink(path, []byte(content), 0644); err != nil {
 			return "", err
 		}
 	}
