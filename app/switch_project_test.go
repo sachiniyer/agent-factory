@@ -325,6 +325,21 @@ func TestBuildProjectListRevalidatesPresentReplacementCheckout(t *testing.T) {
 		"an expired registry resolution must not lend the bare identity to a replacement checkout")
 }
 
+// probeOutcomeFor reports how the poll's probe for path ended, from the budget
+// ledger the poll returned. It fails the test when no budget was opened for the
+// path at all: that means the poll never probed it, which no assertion about
+// the probe's outcome can be read against.
+func probeOutcomeFor(t *testing.T, budgets []projectPathProbeBudget, path string) projectPathProbeOutcome {
+	t.Helper()
+	for _, budget := range budgets {
+		if budget.path == path {
+			return budget.outcome
+		}
+	}
+	t.Fatalf("no resolution budget was opened for %s: %+v", path, budgets)
+	return probeOutcomeUnanswered
+}
+
 func projectWithCountHasRoot(projects []overlay.Project, count int, root string) bool {
 	for _, project := range projects {
 		if project.SessionCount == count && project.Root == root {
@@ -1181,8 +1196,16 @@ func TestBuildProjectListKeepsAnOccupantWhenItsProbeTimesOut(t *testing.T) {
 	t.Setenv("AF_REAL_GIT", realGit)
 	t.Setenv("PATH", binDir)
 
-	projects, degraded := h.buildProjectListFrom(nil)
+	projects, degraded, budgets := h.buildProjectListFromCounted(nil)
 	require.False(t, degraded)
+	// The half of the pair this test owns, now stated rather than assumed: the
+	// probe spent its whole budget without answering. Its neighbour asserts the
+	// opposite outcome on the same fallback, so the two can no longer collapse
+	// into each other under load (#3765). Deterministic in the right direction —
+	// the stand-in sleeps for an order of magnitude longer than the budget, and
+	// a stand-in that never starts at all is unanswered too.
+	require.Equal(t, probeOutcomeUnanswered, probeOutcomeFor(t, budgets, registeredRoot),
+		"the stalled stand-in must leave the probe unanswered")
 	found := false
 	for _, project := range projects {
 		if project.RepoID == pathID {
@@ -1225,8 +1248,38 @@ func TestBuildProjectListKeepsAnOccupantWhenGitFailsOperationally(t *testing.T) 
 	t.Setenv("AF_REAL_GIT", realGit)
 	t.Setenv("PATH", binDir)
 
-	projects, degraded := h.buildProjectListFrom(nil)
-	require.False(t, degraded)
+	// The probe has to REACH git for this test to be about anything. A probe
+	// cancelled by its own budget leaves exactly the fallback an operational
+	// failure leaves, so asserting only the fallback made this a duplicate of
+	// the timeout test above whenever the runner was slow enough — it passed,
+	// for that test's reason, and the distinction #3530 asked for went
+	// unchecked (#3765). The ledger's outcome is what separates them: git ran
+	// and exited without a verdict, versus never having answered at all.
+	//
+	// An unanswered probe is therefore a poll that did not exercise the case,
+	// not a failure of it. Nothing caches a failed probe, so polling again is a
+	// fresh attempt at the same question rather than a reread of a settled one.
+	var projects []overlay.Project
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var degraded bool
+		var budgets []projectPathProbeBudget
+		projects, degraded, budgets = h.buildProjectListFromCounted(nil)
+		require.False(t, degraded)
+		outcome := probeOutcomeFor(t, budgets, registeredRoot)
+		if outcome == probeOutcomeUnanswered {
+			require.True(t, time.Now().Before(deadline),
+				"git never ran inside the %s budget, so the operational failure this test is about was never produced",
+				projectPathScanTimeout)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		require.Equal(t, probeOutcomeFailed, outcome,
+			"the stand-in must COMPLETE with an operational failure — the state this test "+
+				"distinguishes from the cancelled probe next door")
+		break
+	}
+
 	found := false
 	for _, project := range projects {
 		if project.RepoID == pathID {

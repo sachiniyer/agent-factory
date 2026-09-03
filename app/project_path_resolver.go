@@ -38,12 +38,78 @@ type projectPathResolution struct {
 	answeredNotARepo bool
 }
 
+// projectPathProbeOutcome is HOW one path's probe ended, which is a different
+// question from what the poll concluded about the path. The distinction exists
+// because two of these outcomes produce the identical fallback — a probe git
+// answered with an operational failure and a probe that was killed unspent both
+// leave the recorded identity in place — so an assertion about the fallback
+// cannot tell them apart, and a test meaning to pin the first silently passes
+// on the second whenever the runner is slow enough (#3765).
+type projectPathProbeOutcome int
+
+const (
+	// probeOutcomeUnanswered is the ZERO VALUE on purpose: a budget is
+	// unanswered until a result proves otherwise. That is the same inverted
+	// discipline config.probeWentUnanswered documents — enumerating the ways a
+	// probe can fail to answer is how #3500 happened, and each gap in such a
+	// list becomes a fabricated verdict. Here it also covers the budget whose
+	// result never reached the gather loop at all, which is unanswered in the
+	// most literal sense.
+	probeOutcomeUnanswered projectPathProbeOutcome = iota
+	// probeOutcomeResolved: git answered with a repository.
+	probeOutcomeResolved
+	// probeOutcomeNotARepository: git answered that the path is not inside a
+	// repository. Deliberately NOT the same as the poll's answeredNotARepo,
+	// which a provably-absent path also satisfies without git having said
+	// anything — that verdict is about the PATH and this is about the PROBE.
+	probeOutcomeNotARepository
+	// probeOutcomeFailed: git ran and exited without a verdict — dubious
+	// ownership, an unreadable .git, output it could not parse.
+	probeOutcomeFailed
+)
+
+func (o projectPathProbeOutcome) String() string {
+	switch o {
+	case probeOutcomeResolved:
+		return "resolved"
+	case probeOutcomeNotARepository:
+		return "answered: not a repository"
+	case probeOutcomeFailed:
+		return "git ran and failed without a verdict"
+	default:
+		return "unanswered: the probe did not complete"
+	}
+}
+
+// classifyProbeOutcome reads how the probe ended off the ERROR, using config's
+// shared classifier rather than a second copy of the rule (#3504). Two
+// properties of that classifier are what make this sound: an answer is proven
+// only by a completed exit status, and it deliberately never consults ctx.Err(),
+// so a budget expiring in the window just after git exited 128 cannot retag
+// git's answer as a cancellation (#3500 review).
+func classifyProbeOutcome(err error) projectPathProbeOutcome {
+	switch {
+	case err == nil:
+		return probeOutcomeResolved
+	case errors.Is(err, config.ErrNotGitRepository):
+		return probeOutcomeNotARepository
+	case config.RepoProbeUnanswered(err):
+		return probeOutcomeUnanswered
+	default:
+		return probeOutcomeFailed
+	}
+}
+
 type projectPathProbeResult struct {
 	path       string
 	resolution projectPathResolution
 	resolved   bool
 	// answered marks a failed probe that Git nevertheless answered.
 	answered bool
+	// outcome is how the probe ENDED, which answered cannot express: answered
+	// is a verdict about the path (and a provably-absent path sets it with no
+	// help from Git), while this says whether Git ran at all.
+	outcome projectPathProbeOutcome
 }
 
 // projectPathProbeBudget is ONE resolution budget a poll opened: the path it was
@@ -60,6 +126,9 @@ type projectPathProbeResult struct {
 type projectPathProbeBudget struct {
 	path   string
 	window time.Duration
+	// outcome is filled in when the probe's result reaches the gather loop, and
+	// stays probeOutcomeUnanswered when none ever does.
+	outcome projectPathProbeOutcome
 }
 
 // resolveProjectPaths gives every uncached path a bounded resolution
@@ -110,6 +179,10 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 	// reached first would spend it, and every path after it would be probed with
 	// the remainder — which is nothing at all once one of them is stalled.
 	budgets := make([]projectPathProbeBudget, 0, len(uncached))
+	// Every path in uncached is distinct (a path already in resolvedPaths is
+	// skipped above), so one index per path is enough to route each result back
+	// to the budget it was granted under.
+	budgetIndex := make(map[string]int, len(uncached))
 	cancels := make([]context.CancelFunc, 0, len(uncached))
 	defer func() {
 		for _, cancel := range cancels {
@@ -120,6 +193,7 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 	for _, path := range uncached {
 		ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
 		cancels = append(cancels, cancel)
+		budgetIndex[path] = len(budgets)
 		budgets = append(budgets, projectPathProbeBudget{path: path, window: projectPathScanTimeout})
 		go func(ctx context.Context, path string) {
 			repo, err := config.RepoFromPathContext(ctx, path)
@@ -143,6 +217,7 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 					answered:   answered,
 					resolved:   false,
 					resolution: projectPathResolution{},
+					outcome:    classifyProbeOutcome(err),
 				}
 				return
 			}
@@ -152,6 +227,7 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 					id: repo.ID, root: repo.WorkspacePath(), resolvedAt: time.Now(),
 				},
 				resolved: true,
+				outcome:  probeOutcomeResolved,
 			}
 		}(ctx, path)
 	}
@@ -170,6 +246,9 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 	for range uncached {
 		select {
 		case result := <-results:
+			if index, ok := budgetIndex[result.path]; ok {
+				budgets[index].outcome = result.outcome
+			}
 			if result.resolved {
 				resolvedPaths[result.path] = result.resolution
 				m.projectPathResolutions[result.path] = result.resolution
