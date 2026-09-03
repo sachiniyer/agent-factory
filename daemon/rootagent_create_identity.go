@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The create-boundary identity re-check for registry-backed root agents
@@ -24,6 +27,59 @@ import (
 // states (#3299 review): git resolving the path says a repo is THERE, and only
 // the registry's marker says it is the recorded one. This is that rule applied
 // at the one moment the binding is acted on rather than merely held.
+
+// createVerifiedRoot re-proves the checkout and only then creates. The proof has
+// to be the LAST thing that happens before a create, not merely something that
+// happened earlier in the pass (#3366 review): between the ensure loop's
+// pre-reap check and the create sits real blocking work — reapDeadRoot's tmux
+// teardown, VS Code editor shutdown and record delete, then a transcript-store
+// scan for a carried conversation — and every one of those is window a swap can
+// land in. The resume fallbacks retry CreateSession twice more, further out
+// still, so they go through here too rather than inheriting a proof taken before
+// the failure that provoked them.
+//
+// This does not make verification and creation atomic; nothing available here
+// can, and CreateSession does its own work after this returns. What it removes
+// is the AVOIDABLE part of the window — every blocking operation the ensure pass
+// itself performs — leaving only the irreducible residue this cluster already
+// accepts in writing at rootHealProbeResultTTL.
+//
+// A nil identity (the legacy root_agents path) verifies nothing, so this is a
+// plain CreateSession there.
+func (m *Manager) createVerifiedRoot(identity *resolvedProjectRoot, req CreateSessionRequest) (session.InstanceData, error) {
+	if rootCreateVerifyHookForTest != nil {
+		rootCreateVerifyHookForTest()
+	}
+	if err := verifyRootCreateCheckout(identity); err != nil {
+		return session.InstanceData{}, err
+	}
+	return m.CreateSession(context.Background(), req)
+}
+
+// rootCreateVerifyHookForTest, when non-nil, runs at the top of
+// createVerifiedRoot — standing in for everything that happens between the
+// ensure pass's pre-reap identity check and this create's own: the reap's tmux
+// teardown, editor shutdown and record delete, and a transcript-store scan. A
+// real swap lands inside those milliseconds, so a test that races it pins
+// nothing; this holds the window open (the rootReattributionProbeHookForTest
+// idiom, for the same reason).
+var rootCreateVerifyHookForTest func()
+
+// rootCheckoutRefusal marks an error as an identity refusal from this file,
+// leaving its message untouched. The create path needs the distinction: a
+// CreateSession failure that IS a refusal must not be retried as if a
+// conversation had failed to resume, or one swap would produce three refusals
+// and a log that blames the agent's history for a checkout problem.
+type rootCheckoutRefusal struct{ err error }
+
+func (r rootCheckoutRefusal) Error() string { return r.err.Error() }
+func (r rootCheckoutRefusal) Unwrap() error { return r.err }
+
+// isRootCheckoutRefusal reports whether err came from verifyRootCreateCheckout.
+func isRootCheckoutRefusal(err error) bool {
+	var refusal rootCheckoutRefusal
+	return errors.As(err, &refusal)
+}
 
 // verifyRootCreateCheckout re-proves that the checkout at a registry-backed
 // candidate's bound path still carries its project's marker, and returns the
@@ -94,6 +150,15 @@ func verifyRootCreateCheckout(identity *resolvedProjectRoot) error {
 	if identity == nil {
 		return nil
 	}
+	if err := rootCheckoutIdentityError(identity); err != nil {
+		return rootCheckoutRefusal{err: err}
+	}
+	return nil
+}
+
+// rootCheckoutIdentityError is verifyRootCreateCheckout's judgment, split out so
+// the refusal wrapper is applied in exactly one place.
+func rootCheckoutIdentityError(identity *resolvedProjectRoot) error {
 	matches, err := config.ProjectCheckoutMatches(identity.root, identity.checkoutID)
 	if err != nil {
 		return fmt.Errorf("the checkout marker for project %s at %s could not be read, so the checkout there cannot be proven to be the registered one; not starting its root agent until the marker is readable again: %w", identity.projectID, identity.root, err)

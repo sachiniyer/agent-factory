@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -413,21 +412,18 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			m.rootEnsureSucceeded(st)
 			return
 		}
-	}
-
-	// THE CREATE BOUNDARY (#3366). Everything below either destroys daemon-owned
-	// state or starts an autonomous agent in a checkout, so this is where a
-	// registry-backed candidate re-proves that the checkout at its bound path is
-	// still the project's own — below adopt-first, so a live root costs no
-	// marker read on the one-second poll cadence, and above the reap, so a
-	// refusal cannot cost the dead record the heal carries state from. The full
-	// placement rationale is verifyRootCreateCheckout's, next to what it gates.
-	if err := verifyRootCreateCheckout(identity); err != nil {
-		m.rootEnsureFailed(stateKey, st, err)
-		return
-	}
-
-	if inst != nil {
+		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
+		// adopt-first, so a live root costs no marker read on the one-second
+		// poll cadence; above the reap, so a refusal cannot delete the record
+		// that holds the conversation (#2616) and tab roster (#2628) the heal
+		// carries. It is deliberately NOT the proof the create runs on — the
+		// reap below does blocking work, so createVerifiedRoot re-proves after
+		// it (#3366 review). The full rationale is verifyRootCreateCheckout's,
+		// next to what it gates.
+		if err := verifyRootCreateCheckout(identity); err != nil {
+			m.rootEnsureFailed(stateKey, st, err)
+			return
+		}
 		// An Archived root (#1028) is inert — no tmux — so it must NOT be
 		// adopted as live; fall through to reap-and-recreate like Dead/Lost so
 		// the always-ensured root comes back. In practice ArchiveSession
@@ -522,8 +518,8 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
 	}
-	data, err := m.CreateSession(context.Background(), req)
-	if err != nil && req.resumeConversation.HasID() {
+	data, err := m.createVerifiedRoot(identity, req)
+	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
 		// can no longer resume (cleared history, a transcript store the agent no
 		// longer has) makes the resumed command exit at startup — and since the
@@ -545,15 +541,15 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 					workspace, req.resumeConversation.ID, err, state.Resume.ID)
 				req.resumeConversation = state.Resume
 				carried.conversation = state.Resume
-				data, err = m.CreateSession(context.Background(), req)
+				data, err = m.createVerifiedRoot(identity, req)
 			}
 		}
 	}
-	if err != nil && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
 		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
-		data, err = m.CreateSession(context.Background(), req)
+		data, err = m.createVerifiedRoot(identity, req)
 	}
 	if err != nil {
 		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))

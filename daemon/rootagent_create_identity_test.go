@@ -163,6 +163,56 @@ func TestSingletonRootHealRefusesSwappedCheckoutWithoutReaping(t *testing.T) {
 	}
 }
 
+// TestRootCreateReprovesTheCheckoutAfterTheReap closes the window the review
+// found (#3711 P1). The pre-reap check protects the record, but it is not the
+// proof the create runs on: between the two sits real blocking work — the
+// reap's tmux teardown, editor shutdown and record delete, then a
+// transcript-store scan — and a swap landing in there used to reach
+// CreateSession on a checkout that had passed a check taken before any of it.
+// The hook stands in for that elapsed work.
+func TestRootCreateReprovesTheCheckoutAfterTheReap(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	registerEnabledRootProject(t, repoPath, "/opt/midpass")
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	if first == nil {
+		t.Fatalf("root instance missing after the first ensure")
+	}
+	first.SetStatusForTest(session.Dead)
+
+	// The checkout is the project's own when the pre-reap check reads it, and a
+	// stranger's by the time the create runs.
+	swapped := false
+	rootCreateVerifyHookForTest = func() {
+		if swapped {
+			return
+		}
+		swapped = true
+		swapCheckoutForStrangersClone(t, repoPath)
+	}
+	t.Cleanup(func() { rootCreateVerifyHookForTest = nil })
+	warnings := captureRootEnsureWarnings(t)
+
+	manager.EnsureRootAgents()
+
+	if !swapped {
+		t.Fatalf("the create never went through createVerifiedRoot — a create path that bypasses it is unverified by construction")
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("a swap landing after the pre-reap check must still be refused at the create, got %d creates", len(*seen))
+	}
+	if logged := warnings.String(); !strings.Contains(logged, "a different clone may be reusing the path") {
+		t.Fatalf("the refusal must be the identity one, not an incidental create failure, got: %s", logged)
+	}
+}
+
 // TestLiveRootAdoptedDespiteSwappedCheckout pins the other half of the
 // placement: adopt-first is untouched. A live root is the root agent whatever
 // is at the path, and the check sits BELOW that early return — which is also
