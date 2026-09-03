@@ -494,6 +494,19 @@ type Manager struct {
 	// any goroutine — including the ones a Manager leaves running past the test
 	// that made it, which is the case that started #3787.
 	warnLog *stdlog.Logger
+
+	// infoLog and errorLog are the same seam at the other two levels (#3797).
+	// They are here because the contamination never had anything to do with the
+	// LEVEL: `contains(logs, "giving up")` reads a process-global sink whether
+	// the message was a warning, an info line or an error, and the strings these
+	// tests match on are emitted from more than one owner — "giving up" from both
+	// (*Manager).lostRestoreFailed and (*taskWatcher).run, "restored after" from
+	// both (*Manager).restoreLostSession and a package-level helper.
+	//
+	// Same lifetime rule as warnLog: set at construction, never mutated, read
+	// lock-free.
+	infoLog  *stdlog.Logger
+	errorLog *stdlog.Logger
 }
 
 // warn returns the logger this Manager's warnings go to. Nil-safe on both the
@@ -507,24 +520,57 @@ func (m *Manager) warn() *stdlog.Logger {
 	return warnLoggerOr(m.warnLog)
 }
 
-// warnLoggerOr resolves an optional per-Manager warning logger. It exists
-// separately from warn() for the one caller that needs it before a Manager
-// exists: the root-agent snapshot is built inside the constructor, and its
-// warnings are the ones #3787's race report actually names.
-func warnLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+// info returns the logger this Manager's INFO lines go to (#3797), nil-safe on
+// both the receiver and the field.
+func (m *Manager) info() *stdlog.Logger {
+	if m == nil {
+		return log.InfoLog
+	}
+	return infoLoggerOr(m.infoLog)
+}
+
+// err returns the logger this Manager's ERROR lines go to (#3797), nil-safe on
+// both the receiver and the field.
+func (m *Manager) err() *stdlog.Logger {
+	if m == nil {
+		return log.ErrorLog
+	}
+	return errorLoggerOr(m.errorLog)
+}
+
+// The three resolvers below exist separately from the accessors for the callers
+// that need them before a Manager exists: the root-agent snapshot is built
+// inside the constructor, and its diagnostics are the ones #3787's race report
+// actually names. loggerOr carries the nil rule once so the three cannot drift.
+func loggerOr(logger, fallback *stdlog.Logger) *stdlog.Logger {
 	if logger == nil {
-		return log.WarningLog
+		return fallback
 	}
 	return logger
+}
+
+func warnLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+	return loggerOr(logger, log.WarningLog)
+}
+
+func infoLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+	return loggerOr(logger, log.InfoLog)
+}
+
+func errorLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+	return loggerOr(logger, log.ErrorLog)
 }
 
 // managerOptions carries construction-time seams. Everything here has a
 // production default, and production passes the zero value: these exist so a
 // test can scope to one Manager what the daemon keeps process-global.
 type managerOptions struct {
-	// warnLog routes this Manager's warnings away from log.WarningLog. Only
-	// tests set it; see newManagerCapturingWarnings.
-	warnLog *stdlog.Logger
+	// warnLog, infoLog and errorLog route this Manager's diagnostics away from
+	// the process-global sinks. Only tests set them; see
+	// newManagerCapturingWarnings and newManagerCapturingLogs.
+	warnLog  *stdlog.Logger
+	infoLog  *stdlog.Logger
+	errorLog *stdlog.Logger
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -606,10 +652,12 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
-	rootAgentLayers := buildRootAgentSnapshot(warnLoggerOr(opts.warnLog), cfg)
+	rootAgentLayers := buildRootAgentSnapshot(warnLoggerOr(opts.warnLog), errorLoggerOr(opts.errorLog), cfg)
 	mgr := &Manager{
 		cfg:                       cfg,
 		warnLog:                   opts.warnLog,
+		infoLog:                   opts.infoLog,
+		errorLog:                  opts.errorLog,
 		previewSecret:             previewSecret,
 		previewOrigins:            newPreviewOriginRegistry(),
 		editorOriginSecret:        editorSecret,

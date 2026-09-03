@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -188,7 +187,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		// already rejected by PrepareAgentSwap before teardown; this is the narrow
 		// runtime/infrastructure failure path.
 		if rbErr := instance.RevertHandoff(entry); rbErr != nil {
-			log.ErrorLog.Printf("handoff %q: swap failed (%v) AND the record could not be reverted (%v); "+
+			m.err().Printf("handoff %q: swap failed (%v) AND the record could not be reverted (%v); "+
 				"the session's recorded agent may not match its running one", req.Title, swapErr, rbErr)
 		}
 		_ = instance.Transition(session.AbortHandoff())
@@ -255,7 +254,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := m.deliverHandoffMission(delivery); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	log.InfoLog.Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
+	m.info().Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
 
 	return HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}, nil
 }

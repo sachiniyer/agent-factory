@@ -312,16 +312,17 @@ func TestShutdownJoinsAnInFlightRootCreateAndSaysSo(t *testing.T) {
 	writePersonalRootAgent(t, project.ID, "enabled = true")
 	stall := stallRepoResolutionFor(t, rootRepo)
 
-	manager, err := NewManager(config.DefaultConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	// This Manager's own INFO log (#3797): the shutdown-join line asserted below
+	// is emitted by (*Manager).waitRootAgentCreatesForShutdown, so reading a
+	// shared sink would let another Manager's shutdown satisfy it.
+	manager, ownLogs := newManagerCapturingLogs(t, config.DefaultConfig())
 	t.Cleanup(func() {
 		stall.unblock()
 		manager.waitRootAgentCreates()
 	})
 
-	logs := captureInfo(t)
+	logs := ownLogs.info
+	logs.Reset()
 
 	manager.EnsureRootAgents()
 	stall.awaitEntries(t, 1, "the ensure pass never launched the create this shutdown must join")

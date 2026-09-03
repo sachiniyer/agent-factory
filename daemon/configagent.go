@@ -423,7 +423,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 					return fail(fmt.Errorf("config agent: spawn cancelled while awaiting the briefing receipt: %w", err))
 				}
 				if errors.Is(err, session.ErrPromptReceiptNotObserved) {
-					log.InfoLog.Printf(
+					m.info().Printf(
 						"config agent: %s briefing receipt was not observed within %s (%v)",
 						sessionName, configAgentPromptReceiptTimeout, err,
 					)
@@ -445,7 +445,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							return
 						}
 						if lateErr == nil {
-							log.InfoLog.Printf(
+							m.info().Printf(
 								"config agent: %s briefing receipt confirmed after the initial %s window",
 								sessionName, configAgentPromptReceiptTimeout,
 							)
@@ -474,7 +474,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 			}
 		}
 	}
-	log.InfoLog.Printf("config agent: started %s in %s on socket %q (agent %q)", sessionName, home, socketPath, agent)
+	m.info().Printf("config agent: started %s in %s on socket %q (agent %q)", sessionName, home, socketPath, agent)
 	return sessionName, socketPath, nil
 }
 

@@ -477,7 +477,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			st.suppressLogged = true
 			m.mu.Unlock()
 			if logSuppression {
-				log.InfoLog.Printf("root agent for %s was explicitly killed; honoring the stop, will re-create it in ~%s (config is the source of truth for an always-on root — remove it from root_agents to keep it down)", workspace, rootKillHealDelay)
+				m.info().Printf("root agent for %s was explicitly killed; honoring the stop, will re-create it in ~%s (config is the source of truth for an always-on root — remove it from root_agents to keep it down)", workspace, rootKillHealDelay)
 			}
 			return
 		}
@@ -489,7 +489,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		delete(m.rootKilledAt, repo.ID)
 		st.suppressLogged = false
 		m.mu.Unlock()
-		log.InfoLog.Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", workspace)
+		m.info().Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", workspace)
 	}
 
 	if inst != nil {
@@ -715,7 +715,7 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	if rootEnsureShouldEscalate(st) {
 		st.escalated = true
 		st.escalatedPersistent = rootEnsureCauseIsEstablished(st)
-		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
+		m.err().Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
 		return
 	}
 	m.warn().Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)

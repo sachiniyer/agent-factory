@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -291,7 +290,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// recreates (#1794).
 	switch m.remoteSandboxLiveness(instance) {
 	case probeAlive:
-		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
+		m.info().Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
 		// Both of these are per-runtime state and both are filed under the session's

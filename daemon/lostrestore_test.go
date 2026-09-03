@@ -355,7 +355,11 @@ func (failPtyFactory) Close() {}
 // high-visibility ERROR with the diagnostic context and does not repeat it on
 // the next retry.
 func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	// This Manager's own error log (#3797). The assertion below COUNTS, which a
+	// shared sink breaks in both directions: another Manager's diagnostic reads
+	// as a broken once-only guard, and a once-only guard that genuinely stopped
+	// working can be masked by which Manager emitted what.
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	zeroRestoreBackoff(t)
 
 	worktreePath := filepath.Join(testguard.CanonicalTempDir(t), "repo-vanished")
@@ -402,7 +406,7 @@ func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 	manager.instances[daemonInstanceKey(repoID, "vanished")] = inst
 	manager.mu.Unlock()
 
-	buf := captureErrors(t)
+	buf := ownLogs.errors
 
 	manager.RestoreLostSessions()
 	manager.RestoreLostSessions()

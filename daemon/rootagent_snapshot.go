@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The start-of-day root-agent snapshot (#2216 Phase 6) and its builders,
@@ -86,11 +85,13 @@ type reconcileOwedEntry struct {
 	proven bool
 }
 
-// warn is where this snapshot's warnings go: the constructing Manager's logger,
-// or the process-global one (#3787 part 2). The snapshot is built INSIDE
-// newManagerShellWithOptions, before a Manager exists, so it takes the logger as
-// a parameter rather than reaching for a receiver it does not have.
-func buildRootAgentSnapshot(warn *stdlog.Logger, cfg *config.Config) rootAgentSnapshot {
+// warn and errs are where this snapshot's diagnostics go: the constructing
+// Manager's loggers, or the process-global ones (#3787 part 2, #3797). The
+// snapshot is built INSIDE newManagerShellWithOptions, before a Manager exists,
+// so it takes them as parameters rather than reaching for a receiver it does not
+// have — and the fail-closed ERROR here is asserted on, so a global would let
+// that assertion read a sink any Manager writes into.
+func buildRootAgentSnapshot(warn, errs *stdlog.Logger, cfg *config.Config) rootAgentSnapshot {
 	snap := rootAgentSnapshot{
 		global:             config.GlobalRootAgentLayer(cfg),
 		personal:           map[string]*config.RootAgentLayer{},
@@ -124,7 +125,7 @@ func buildRootAgentSnapshot(warn *stdlog.Logger, cfg *config.Config) rootAgentSn
 		if dir, dirErr := config.ProjectRegistryDir(); dirErr == nil {
 			registry = dir
 		}
-		log.ErrorLog.Printf("root agent snapshot: cannot enumerate the project registry (%s); failing closed — no root agents will be started or healed until the registry is readable again (re-checked on the ensure cadence): %v", registry, err)
+		errs.Printf("root agent snapshot: cannot enumerate the project registry (%s); failing closed — no root agents will be started or healed until the registry is readable again (re-checked on the ensure cadence): %v", registry, err)
 		snap.registryUnreadable = true
 		return snap
 	}
