@@ -2959,8 +2959,23 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
       })
       .map((comment) => comment.in_reply_to_id),
   );
+  // A top-level Codex review comment is live until somebody ANSWERS it, and where
+  // its thread currently points is deliberately no part of that test. GitHub
+  // nulls `line` once a push moves the code a thread was anchored to, and a
+  // rebase, a re-indent, or a fix to the NEIGHBOURING line does that exactly as
+  // readily as the fix itself; nothing mechanical tells "addressed" from "moved
+  // past", so reading an outdated thread as clear drops findings that nobody ever
+  // looked at. #3687 and #3688 both merged that way on #3669 (#3689). This is the
+  // rule #3676 landed for issue-comment artifacts, applied to inline threads: a
+  // push clears nothing by itself, only an answer does.
+  //
+  // An outdated thread that WAS answered still clears, through the same
+  // resolvedByAllowedReply set as a non-outdated one — including the ordinary
+  // happy path where the push carrying the fix is what outdated the thread. The
+  // cost of this rule is therefore one reply on the moved-past case and nothing
+  // at all on the path lanes already follow.
   const isLiveFinding = (comment) =>
-    comment.user?.login === CODEX_REVIEWER && !comment.in_reply_to_id && comment.line != null;
+    comment.user?.login === CODEX_REVIEWER && !comment.in_reply_to_id;
   const unresolvedFindings = reviewComments.filter(
     (comment) => isLiveFinding(comment) && !resolvedByAllowedReply.has(comment.id),
   );

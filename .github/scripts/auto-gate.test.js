@@ -2926,12 +2926,64 @@ test("a clean exact-head verdict cannot override live Codex findings", async () 
   assert.match(result.reasons.join("\n"), /1 unresolved live Codex inline finding/);
 });
 
-test("a stale Codex finding with a null line does not block", async () => {
+// #3669's exact shape: Codex raised a wrong docs sentence inline, a later push
+// moved the line, and the gate read the outdated thread as clear and merged it
+// unanswered — twice (#3687, #3688). A thread's location says nothing about
+// whether its finding was addressed, so it is not part of the live test (#3689).
+test("an outdated Codex finding nobody answered still blocks", async () => {
   const result = await evaluateGate({
-    reviewComments: [codexFinding({ id: 10, line: null })],
+    reviewComments: [outdatedCodexFinding({ id: 10 })],
   });
 
-  assert.equal(result.shouldMerge, true);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /1 unresolved live Codex inline finding/);
+});
+
+test("a threaded ACCEPTED clears an outdated finding", async () => {
+  const result = await evaluateGate({
+    reviewComments: [
+      outdatedCodexFinding({ id: 10 }),
+      // A reply on an outdated thread is outdated too: `line` is null on both.
+      findingReply({ id: 11, inReplyToId: 10, body: "ACCEPTED — the sentence is right.", line: null }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+// The happy path this rule has to leave alone: the lane answered the thread, and
+// the push that carried the fix is what outdated it. Blocking here would make
+// every correctly handled finding un-mergeable.
+test("an outdated finding answered before the push that outdated it passes", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:18:00Z",
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+    reviewComments: [
+      outdatedCodexFinding({ id: 10, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — reworded.", line: null }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+// A thread whose line still resolves is unaffected in either direction: it
+// blocked unanswered before this change and it still does, and a marker still
+// clears it.
+test("a non-outdated finding behaves exactly as it did", async () => {
+  const unanswered = await evaluateGate({
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+  assert.equal(unanswered.shouldMerge, false);
+  assert.match(unanswered.reasons.join("\n"), /1 unresolved live Codex inline finding/);
+
+  const answered = await evaluateGate({
+    reviewComments: [
+      codexFinding({ id: 10, line: 32 }),
+      findingReply({ id: 11, inReplyToId: 10, body: "ACCEPTED — intentional." }),
+    ],
+  });
+  assert.equal(answered.shouldMerge, true, answered.reasons.join("\n"));
 });
 
 test("an allowed author resolves a live finding only with an explicit marker", async () => {
@@ -6423,23 +6475,31 @@ function codexReview(sha, summary = "Here are some suggestions.", timestamp = "2
   };
 }
 
-function codexFinding({ id, line, createdAt = "2026-07-09T01:15:00Z" }) {
+function codexFinding({ id, line, createdAt = "2026-07-09T01:15:00Z", body = "P1: this needs attention" }) {
   return {
     id,
     user: { login: "chatgpt-codex-connector[bot]" },
-    body: "P1: this needs attention",
+    body,
     created_at: createdAt,
     line,
   };
 }
 
-function findingReply({ id, inReplyToId, body }) {
+// A thread a later push OUTDATED, as GitHub reports it: `line` goes null while
+// `original_line` keeps where the finding was filed. The finding underneath is
+// untouched, and a rebase or a fix to the neighbouring line produces this shape
+// just as readily as the fix itself does (#3689).
+function outdatedCodexFinding({ id, createdAt = "2026-07-09T01:15:00Z", body = "P2: this needs attention" }) {
+  return { ...codexFinding({ id, line: null, createdAt, body }), original_line: 17 };
+}
+
+function findingReply({ id, inReplyToId, body, line = 32 }) {
   return {
     id,
     in_reply_to_id: inReplyToId,
     user: { login: "sachiniyer" },
     body,
     created_at: "2026-07-09T01:16:00Z",
-    line: 32,
+    line,
   };
 }
