@@ -344,17 +344,33 @@ func TestArchiveHookWaitsForALauncherThatHasNotRegisteredItsScope(t *testing.T) 
 	t.Setenv(autostartSystemdMarker, autostartUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
 
-	const hold = 2 * time.Second
-	startStubHookLauncher(t, prefix+"-g0-0.scope", "sleep 2")
+	// The launcher is held by the test, not by a timer inside the stub: a stub
+	// that sleeps starts its own clock before the test can observe it, so an
+	// "at least N seconds" assertion is short by that gap and flakes.
+	gate := filepath.Join(t.TempDir(), "release")
+	startStubHookLauncher(t, prefix+"-g0-0.scope", fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
 
 	marker := filepath.Join(t.TempDir(), "hook-ran")
 	writeOnArchiveCommand(t, "touch "+marker)
-	start := time.Now()
-	require.NoError(t, runOnArchiveHook(hookCtx))
-	elapsed := time.Since(start)
+	done := make(chan error, 1)
+	go func() { done <- runOnArchiveHook(hookCtx) }()
 
+	// At a moment when the launcher is definitely still alive, the archive hook
+	// must not have run — the caller relocates the worktree straight after it
+	// returns, into which that launcher is about to exec (#3667).
+	select {
+	case err := <-done:
+		t.Fatalf("the archive hook completed (%v) while a systemd-run for this session was still live and unregistered", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	require.NoFileExists(t, marker, "the archive hook ran while an unregistered launcher for this session was still live")
+
+	require.NoError(t, os.WriteFile(gate, nil, 0o600))
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(60 * time.Second):
+		t.Fatal("runOnArchiveHook never returned after its launcher exited")
+	}
 	require.FileExists(t, marker, "the hook must actually have run, or this test proves nothing")
-	require.GreaterOrEqual(t, elapsed, hold,
-		"the archive hook ran while a systemd-run for this session was still live and unregistered; "+
-			"the caller relocates the worktree straight afterwards, into which that launcher is about to exec (#3667)")
 }

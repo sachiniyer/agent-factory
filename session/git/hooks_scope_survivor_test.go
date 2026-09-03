@@ -317,19 +317,35 @@ func startStubHookLauncher(t *testing.T, unit, body string) {
 func TestRebuildPathWaitsForALauncherThatHasNotRegisteredItsScope(t *testing.T) {
 	installSurvivorSystemctl(t, "exit 0\n") // the manager lists nothing: this IS the window
 	const prefix = "af-hook-sess3667"
-	const hold = 2 * time.Second
-	startStubHookLauncher(t, prefix+"-g0-0.scope", "sleep 2")
+	// Held by the test rather than by a timer in the stub: the stub starts its
+	// own clock before the test can observe it, so an "at least N seconds"
+	// assertion is short by that gap and flakes (measured in CI at 1.987s
+	// against a 2s floor).
+	gate := filepath.Join(t.TempDir(), "release")
+	startStubHookLauncher(t, prefix+"-g0-0.scope", fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
 
 	gw := worktreeWithRecordedScope(t, prefix)
-	start := time.Now()
-	err := gw.cancelAndWaitHooks()
-	elapsed := time.Since(start)
+	done := make(chan error, 1)
+	go func() { done <- gw.cancelAndWaitHooks() }()
 
-	if err != nil {
-		t.Fatalf("cancelAndWaitHooks refused after the launcher was gone: %v", err)
+	// The claim as an observation: at a moment when the launcher is definitely
+	// still alive, the rebuild path has not been allowed through.
+	select {
+	case err := <-done:
+		t.Fatalf("the rebuild path proceeded (%v) while a systemd-run for %s-* was live and unregistered; "+
+			"the manager's silence was read as proof no hook survives, and the tree is about to be rebuilt under one (#3667)", err, prefix)
+	case <-time.After(500 * time.Millisecond):
 	}
-	if elapsed < hold {
-		t.Fatalf("the rebuild path proceeded after %s while a systemd-run for %s-* was live and unregistered; "+
-			"the manager's silence was read as proof no hook survives, and the tree is about to be rebuilt under one (#3667)", elapsed, prefix)
+
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatalf("release the stub launcher: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cancelAndWaitHooks refused after the launcher was gone: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("cancelAndWaitHooks never returned after its launcher exited")
 	}
 }

@@ -88,19 +88,23 @@ func startStubHookLauncher(t *testing.T, program, unit, body string) int {
 func TestStopHookScopesWaitsForALauncherThatHasNotRegisteredItsScope(t *testing.T) {
 	installSystemctlShim(t, "exit 0\n") // the manager lists nothing: this IS the window
 	prefix := HookScopeUnitPrefix("s3667")
-	const hold = 2 * time.Second
-	startStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g0", 0), "sleep 2")
+	release := holdStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g0", 0))
 
-	start := time.Now()
-	err := StopHookScopes(prefix)
-	elapsed := time.Since(start)
+	done := make(chan error, 1)
+	go func() { done <- StopHookScopes(prefix) }()
 
-	if err != nil {
-		t.Fatalf("StopHookScopes refused after the launcher was gone: %v", err)
+	// The claim, stated as an observation rather than as arithmetic: at a moment
+	// when the launcher is definitely still alive, the sweep has not returned.
+	select {
+	case err := <-done:
+		t.Fatalf("StopHookScopes returned (%v) while a systemd-run for %s-* was still live and unregistered; "+
+			"the caller then rebuilds or moves the tree the hook is about to be exec'd into (#3667)", err, prefix)
+	case <-time.After(stillBlockedWindow):
 	}
-	if elapsed < hold {
-		t.Fatalf("StopHookScopes reported success after %s while a systemd-run for %s-* was still live and unregistered; "+
-			"the caller then rebuilds or moves the tree the hook is about to be exec'd into (#3667)", elapsed, prefix)
+
+	release()
+	if err := waitForSweep(t, done); err != nil {
+		t.Fatalf("StopHookScopes refused after the launcher was gone: %v", err)
 	}
 }
 
@@ -127,7 +131,10 @@ func TestAForeignLauncherIsNotAdopted(t *testing.T) {
 	if err := StopHookScopes(ours); err != nil {
 		t.Fatalf("StopHookScopes refused because of another session's launcher: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	// Well under the settle budget, and well over the cost of the sweep itself:
+	// the /proc scan measures ~100ms on a box at load 55, and what this rules out
+	// is a wait, not a slow scan.
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("StopHookScopes waited %s on a launcher that was never ours", elapsed)
 	}
 
@@ -237,15 +244,19 @@ if [ -f '`+stopped+`' ]; then exit 0; fi
 printf '%s\n' '`+unit+` loaded active running Hook'
 exit 0
 `)
-	const hold = 2 * time.Second
-	startStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g1", 0), "sleep 2")
+	release := holdStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g1", 0))
 
-	start := time.Now()
-	if err := StopHookScopes(prefix); err != nil {
-		t.Fatalf("StopHookScopes: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- StopHookScopes(prefix) }()
+	select {
+	case err := <-done:
+		t.Fatalf("StopHookScopes returned (%v) before the unregistered launcher was gone", err)
+	case <-time.After(stillBlockedWindow):
 	}
-	if elapsed := time.Since(start); elapsed < hold {
-		t.Fatalf("StopHookScopes returned after %s, before the unregistered launcher was gone", elapsed)
+
+	release()
+	if err := waitForSweep(t, done); err != nil {
+		t.Fatalf("StopHookScopes: %v", err)
 	}
 	log, err := os.ReadFile(logPath)
 	if err != nil {
@@ -253,6 +264,48 @@ exit 0
 	}
 	if !strings.Contains(string(log), "stop -- "+unit) {
 		t.Fatalf("the registered scope was never stopped:\n%s", log)
+	}
+}
+
+// stillBlockedWindow is how long a test watches a sweep that must NOT have
+// returned. Before the fix these returned in single-digit milliseconds, so this
+// is ~100x the margin — and it can never be too SHORT for a correct
+// implementation, which cannot finish at all while its launcher is held.
+const stillBlockedWindow = 500 * time.Millisecond
+
+// holdStubHookLauncher starts a stub launcher that holds until the returned
+// function releases it, and is the reason none of these tests race a timer.
+//
+// An earlier draft had the stub `sleep 2` and asserted the sweep took at least
+// 2s. That is unsound: the stub starts its own clock BEFORE the test can observe
+// it, so the sweep legitimately finishes a few milliseconds short of the wall
+// time the test measured — 1.987s against a 2s floor, which is exactly how it
+// failed in CI. A release the test performs itself has no such gap.
+func holdStubHookLauncher(t *testing.T, program, unit string) (release func()) {
+	t.Helper()
+	gate := filepath.Join(t.TempDir(), "release")
+	// `sleep 1` rather than a fractional or busy loop: portable to any POSIX sh,
+	// and the wait for the release below is generous enough to absorb it.
+	startStubHookLauncher(t, program, unit, fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
+	return func() {
+		t.Helper()
+		if err := os.WriteFile(gate, nil, 0o600); err != nil {
+			t.Fatalf("release the stub launcher: %v", err)
+		}
+	}
+}
+
+// waitForSweep collects the sweep's result once the launcher has been released.
+// The bound is generous on purpose: it is not the property under test, only a
+// guard against hanging the suite.
+func waitForSweep(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(60 * time.Second):
+		t.Fatal("the sweep never returned after its launcher exited")
+		return nil
 	}
 }
 

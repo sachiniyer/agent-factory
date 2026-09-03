@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"sort"
 	"syscall"
 )
@@ -18,15 +19,33 @@ import (
 // refusal the same way.
 var ErrNoArgv = errors.New("proctree: process has no argv")
 
-// scanSnapshot and scanArgv are the reads ProcessesMatchingArgv makes, indirected
-// so a test can reproduce the two failures that matter and cannot otherwise be
-// staged on a live /proc: a process table that cannot be READ, and an argv the
-// kernel refuses. Both must arrive as errors rather than as an absence, and a
-// scan that got them wrong would be indistinguishable from a healthy one.
+// scanSnapshot, scanArgv and scanUID are the reads ProcessesMatchingArgv makes,
+// indirected so a test can reproduce the failures that matter and cannot
+// otherwise be staged on a live /proc: a process table that cannot be READ, an
+// argv the kernel refuses, and the ownership that decides whether that refusal
+// is about us. A scan that got any of them wrong would be indistinguishable from
+// a healthy one — the hidepid=1 case in particular looks perfectly fine on every
+// machine that is not mounted that way.
 var (
 	scanSnapshot = Snapshot
 	scanArgv     = readArgv
+	scanUID      = readUID
 )
+
+// ArgvUnreadableError reports the one process whose argv could not be read and
+// therefore failed a whole scan. The PID is carried rather than only formatted
+// into the message so a caller — or a test asserting WHICH refusals are allowed
+// to fail a scan — can ask about that process instead of parsing prose.
+type ArgvUnreadableError struct {
+	PID int
+	Err error
+}
+
+func (e *ArgvUnreadableError) Error() string {
+	return fmt.Sprintf("cannot read the argv of pid %d: %v", e.PID, e.Err)
+}
+
+func (e *ArgvUnreadableError) Unwrap() error { return e.Err }
 
 // ProcessArgv pairs a matched process with the argv it matched ON, so a caller
 // can act on the arguments it recognised without a second read — which would
@@ -57,15 +76,42 @@ type ProcessArgv struct {
 // and "it has nothing to classify" are both answers. Anything else — a refusal,
 // a malformed read — fails the whole scan.
 //
+// # Whose refusal counts
+//
+// That refusal rule is scoped by OWNERSHIP, and the scoping is not a softening
+// of it. A process owned by another uid cannot be a child this process spawned,
+// so being refused its argv says nothing about anything we are looking for —
+// while failing the scan on it would be catastrophic on the machines where it
+// happens. A procfs mounted hidepid=1 refuses every OTHER user's
+// /proc/<pid>/cmdline, so an unscoped rule would fail on the first foreign pid
+// and make every caller refuse, permanently, on every retry, on a shared box
+// that may hold no launcher at all. A guard whose failure mode is permanent is
+// worse than the hazard it prevents.
+//
+// Darwin has the same shape with different spelling and needs no special mount:
+// XNU answers kern.procargs2 for another user's process with EINVAL — not
+// EPERM — so there this is the ordinary case rather than the exotic one. That is
+// why the rule is written against OWNERSHIP and not against a list of errno
+// values, which differ by platform and by kernel version.
+//
+// A refusal on a process running as US still fails the scan: that one could be
+// the thing we are looking for. So does one whose owner cannot be read at all —
+// "I could not tell whether it is ours" is a third answer, and it is not the
+// negative.
+//
 // # Platforms
 //
-// On Linux /proc/<pid>/cmdline is world-readable, so the only routine per-pid
-// failure is the process exiting mid-scan, and this returns a complete answer.
-// On darwin the kernel withholds KERN_PROCARGS2 for foreign uids and for
-// code-signing-restricted processes, so a scan of the whole table normally
-// reports UNKNOWN rather than a partial answer. That is the honest result and
-// it is deliberate: the one caller today is Linux-gated, and a future darwin
-// caller must handle the error rather than read a truncated list as complete.
+// On an ordinary Linux mount /proc/<pid>/cmdline is world-readable, so the only
+// routine per-pid failure is the process exiting mid-scan and this returns a
+// complete answer. Under hidepid=1, and on darwin — where XNU withholds
+// KERN_PROCARGS2 from foreign uids as a matter of course — the answer is
+// complete for everything this process could own and silent about the rest,
+// which is the most that can honestly be said there.
+//
+// What remains reportable on both is a refusal about a process that COULD be
+// ours: a same-uid target that darwin's code-signing restrictions cover, or one
+// whose ownership could not be read. Those come back as *ArgvUnreadableError,
+// and a caller must handle it rather than read a truncated list as complete.
 func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error) {
 	if match == nil {
 		return nil, errors.New("proctree: ProcessesMatchingArgv needs a match function")
@@ -85,7 +131,13 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 			// that no longer exists; it can never invent one.
 			continue
 		default:
-			return nil, fmt.Errorf("cannot read the argv of pid %d: %w", pid, err)
+			// Not ours, so its refusal is not evidence about us. Ownership is
+			// read from /proc/<pid> itself, which hidepid=1 still discloses —
+			// it restricts the directory's CONTENTS, not who owns it.
+			if uid, known := scanUID(pid); known && uid != os.Getuid() {
+				continue
+			}
+			return nil, &ArgvUnreadableError{PID: pid, Err: err}
 		}
 		if match(argv) {
 			matched = append(matched, ProcessArgv{Process: process, Argv: argv})
