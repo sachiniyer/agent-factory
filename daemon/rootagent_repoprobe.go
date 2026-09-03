@@ -66,25 +66,91 @@ func repoResolveClaim(subject, path string, err error) string {
 // alternative is suppressing a live unrelated project, which is worse.
 //
 // A DIRECT tombstone at a canonical identity is released only by the round-15
-// proven mismatch, and what is left there is not this issue's. Two different
-// repositories main-rooted at the same path hash to the same canonical id, so
-// an occupant arriving after re-attribution removed the unresolved record still
-// has no release path — identity REUSE at a reused path, which is #3611's
-// territory rather than the derived-fallback namespacing #3530 delivers.
+// proven mismatch, which #3611 made conditional on that mismatch still being
+// current — see deletedClaimDisproven. Two different repositories main-rooted at
+// the same path hash to the same canonical id, and the residue of that is
+// unchanged by either issue: an occupant arriving after re-attribution already
+// removed the unresolved record has no record to be disproven by, so it has no
+// release path at all. Identity REUSE at a reused path, filed under #3599
+// option 2 (key the gate on something other than the first-resolved identity),
+// and the conservative direction while it stands.
 func (m *Manager) rootDeletionTombstoneApplies(layers *rootAgentSnapshot, repoID string) bool {
-	if claimant, ok := m.deletedRootRepos[repoID]; ok && !deletedClaimDisproven(layers, repoID, claimant) {
+	if claimant, ok := m.deletedRootRepos[repoID]; ok && !deletedClaimDisproven(layers, repoID, claimant, m.rootHealPassSeq) {
 		return true
 	}
 	return false
 }
 
+// rootIdentityProofPassTolerance is how many heal passes old a probe's identity
+// verdict may be and still count as CURRENT evidence for RELEASING a deletion
+// tombstone: the pass that established it, or the one before.
+//
+// One pass of slack rather than zero, and it is the publish order that needs it
+// (#3611). A pass establishes its verdict in the consume phase and the caller
+// publishes the healed snapshot afterwards, so the first readers to see a
+// verdict from pass N are typically running in pass N+1 — the ensure sweep in
+// the same tick reads it at N, a verdict request arriving between ticks reads it
+// at N+1. Zero tolerance would discard evidence for being exactly as old as the
+// snapshot carrying it.
+//
+// It is expressed in PASSES, not seconds, because that is the cadence the
+// evidence is renewed on: one pass is one heal cadence, whatever the poll
+// interval is set to and however the tests drive it.
+const rootIdentityProofPassTolerance = 1
+
+// identityProofIsCurrent reports whether this record's identity verdict was
+// established by a probe result in heal pass `pass` or the one before it.
+//
+// An unestablished verdict (identityPass zero) is never current — it is the
+// UNKNOWN state, and a consumer that needs current evidence gets "no", not a
+// pass. A mark from the FUTURE is not current either: it cannot arise from the
+// single writer, and the alternative on unsigned arithmetic is an underflow
+// that would read as freshly proven forever.
+func (r unresolvedProjectRecord) identityProofIsCurrent(pass uint64) bool {
+	if r.identityPass == 0 || pass < r.identityPass {
+		return false
+	}
+	return pass-r.identityPass <= rootIdentityProofPassTolerance
+}
+
 // deletedClaimDisproven reports whether the checkout that now owns repoID is
 // PROVEN not to be the one whose delete left the tombstone — the only thing
 // that may release it, since availability at an identity is not identity.
-func deletedClaimDisproven(layers *rootAgentSnapshot, repoID, claimant string) bool {
+//
+// "Proven" carries a freshness requirement since #3611, and the requirement is
+// this consumer's alone. identityMismatch is the last OBSERVATION, not a
+// standing fact, and for a main-root recording the recorded identity is also
+// any occupant's real ID — so one repo id covers the deleted project, the clone
+// that displaced it, and the original checkout coming back. A tombstone
+// released on a mismatch nobody has re-proved acts on whichever of those is at
+// the path now: the occupant leaves during the settled probe's backoff, the
+// deleted project's own checkout returns, and the still-standing mismatch keeps
+// releasing the tombstone that is the only thing suppressing its root.
+//
+// Re-prove before release, therefore, and hold when the proof cannot be
+// re-established: an identity that is merely unknown right now is not a
+// disproof, and holding a tombstone at worst delays a live occupant's root by a
+// probe cadence, while releasing one wrongly recreates a project the user
+// deleted. The other consumers of the same flag are deliberately untouched —
+// preservation across an evidence-free retry (#3299 review id 3910519842) wants
+// it kept until SUPERSEDED, which is a different tolerance on the same
+// evidence, not a different answer.
+//
+// The cost of the freshness rule, stated rather than hidden: round 15's release
+// now happens in the passes that follow a proof rather than throughout the
+// probe's backoff. That is enough for the occupant's root, because the ensure
+// sweep runs in the same tick as the pass that published the proof and a root,
+// once created, is not torn down by a tombstone reapplying — but a create that
+// FAILS may find the evidence stale when its own retry comes due, and then
+// waits for the next proof. Both curves are rootEnsureBackoffFor, so the wait
+// is bounded by the same cadence rather than by anything new.
+func deletedClaimDisproven(layers *rootAgentSnapshot, repoID, claimant string, pass uint64) bool {
 	if claimant == "" {
 		return false
 	}
 	record, ok := layers.unresolvedRoots[repoID]
-	return ok && record.identityMismatch && record.projectID == claimant
+	if !ok || !record.identityMismatch || record.projectID != claimant {
+		return false
+	}
+	return record.identityProofIsCurrent(pass)
 }

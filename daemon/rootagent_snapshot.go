@@ -230,6 +230,29 @@ type unresolvedProjectRecord struct {
 	// path rather than fixing marker readability (#3299 review round 12).
 	// The fail-closed gating is markerUnreadable's; this only words it.
 	pathVanished bool
+	// identityPass is the heal pass whose probe result last ESTABLISHED the
+	// three flags above, and it is what makes them datable (#3611). Zero means
+	// no probe result has ever established them — the boot builder files a
+	// record with no verdict at all, and a registry-recovery rebuild replaces
+	// every record with a fresh one.
+	//
+	// It exists because one field is asked for two different things and both
+	// asks are right. Preservation wants the last verdict kept UNTIL
+	// SUPERSEDED: an evidence-free retry may not clear a proven mismatch,
+	// because that mismatch is the only thing keeping a dead project's personal
+	// layer off the different clone now at its path (#3299 review id
+	// 3910519842). Release wants the same verdict only while it is CURRENT: a
+	// tombstone released on a mismatch nobody has re-proved acts on whatever
+	// checkout is at the path now, which may be the deleted project's own one
+	// come back. Neither consumer can be fixed by another conditional on the
+	// flag; what was missing is freshness on the evidence, so each consumer can
+	// state its own tolerance against this mark.
+	//
+	// A PASS NUMBER rather than a timestamp, deliberately: it is monotonic, it
+	// needs no clock, and it lets a consumer say "verified in the current or
+	// previous pass" without inventing a duration constant that would then have
+	// to track the probe cadence.
+	identityPass uint64
 }
 
 // identityWriteFence supplies the predicate ReconcileProjectRepoID re-asks
