@@ -17,7 +17,9 @@ import (
 )
 
 func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing.T) {
-	warnings := captureWarnings(t)
+	// This Manager's own warnings, not the process's: the assertions below are
+	// about what THIS lifecycle run said (#3787 part 2).
+	manager, warnings := newBareManagerCapturingWarnings()
 
 	previousArchive := archiveSessionForLifecycle
 	archiveSessionForLifecycle = func(*Manager, ArchiveSessionRequest) error {
@@ -25,7 +27,6 @@ func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing
 	}
 	t.Cleanup(func() { archiveSessionForLifecycle = previousArchive })
 
-	manager := &Manager{}
 	manager.runTaskSessionLifecycle("repo", "session-id", "nightly", "task-id", task.OnCompleteArchive, nil)
 	assert.Contains(t, warnings.String(), "applied on_complete=archive")
 	assert.Contains(t, warnings.String(), "committed warning")

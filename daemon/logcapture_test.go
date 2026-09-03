@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
@@ -115,6 +116,48 @@ func silenceWarnings(t *testing.T) {
 	previous := aflog.WarningLog.Writer()
 	aflog.WarningLog.SetOutput(io.Discard)
 	t.Cleanup(func() { aflog.WarningLog.SetOutput(previous) })
+}
+
+// newManagerCapturingWarnings builds a Manager whose warnings go to a capture of
+// its OWN, and returns both (#3787 part 2).
+//
+// This is the helper an assertion about a specific Manager should use.
+// captureWarnings above reads the process-global sink, which every Manager in
+// the test binary — and every goroutine they leave running — writes into, so an
+// assertion on it can be satisfied by a warning the Manager under test never
+// emitted. Part 1 stopped that racing; only this stops it passing.
+//
+// The logger carries the global one's prefix and flags, so captured text is
+// formatted exactly as the shared capture formatted it and an assertion moved
+// onto this helper does not have to change what it matches.
+//
+// The options go through the CONSTRUCTOR because warnings fire from the
+// root-agent snapshot inside NewManager: a logger installed on the returned
+// Manager would miss the fail-closed warning the singleton tests assert on.
+func newManagerCapturingWarnings(t *testing.T, cfg *config.Config) (*Manager, *logCapture) {
+	t.Helper()
+	capture := &logCapture{}
+	manager, err := newManagerWithOptions(cfg, managerOptions{
+		warnLog: stdlog.New(capture, aflog.WarningLog.Prefix(), aflog.WarningLog.Flags()),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return manager, capture
+}
+
+// newBareManagerCapturingWarnings returns a zero-value Manager whose warnings go
+// to a capture of its own. For tests that drive ONE Manager method and need no
+// constructed state — building the struct literally is legitimate there, and
+// this keeps such a test's assertion scoped to its own Manager anyway.
+//
+// Set in the literal, like the constructor does, rather than assigned
+// afterwards: warnLog is read lock-free from whatever goroutine logs, so it must
+// be in place before the Manager is used or shared.
+func newBareManagerCapturingWarnings() (*Manager, *logCapture) {
+	capture := &logCapture{}
+	manager := &Manager{warnLog: stdlog.New(capture, aflog.WarningLog.Prefix(), aflog.WarningLog.Flags())}
+	return manager, capture
 }
 
 // TestLogCaptureSurvivesAForeignWriter is the #3787 regression, in the shape

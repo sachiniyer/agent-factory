@@ -440,7 +440,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		delete(m.lostRestoreStates, stateKey)
 		m.mu.Unlock()
 		if err := m.persistSettlement(repoID, key, inst); err != nil {
-			log.WarningLog.Printf("restore of lost session %q was confirmed alive but its healed state is not yet durable: %v", inst.Title, err)
+			m.warn().Printf("restore of lost session %q was confirmed alive but its healed state is not yet durable: %v", inst.Title, err)
 		}
 		return
 	case probeUnknown:
@@ -451,7 +451,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
 		m.mu.Unlock()
 		if logIt {
-			log.WarningLog.Printf("not re-provisioning lost remote session %q: could not determine whether its existing sandbox is gone; unreachable is not dead, and replacement could discard unpushed work", inst.Title)
+			m.warn().Printf("not re-provisioning lost remote session %q: could not determine whether its existing sandbox is gone; unreachable is not dead, and replacement could discard unpushed work", inst.Title)
 		}
 		return
 	case probeAbsent:
@@ -481,7 +481,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
 			m.mu.Unlock()
 			if logIt {
-				log.WarningLog.Printf("%v", err)
+				m.warn().Printf("%v", err)
 			}
 			return
 		}
@@ -502,7 +502,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// has to come from the recovery itself.
 	if err := inst.RecoverFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
-			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
+			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
 		}
 	}); err != nil {
 		// Persist the instance even on failure, matching the manual restore path
@@ -549,10 +549,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// to, which is what makes the retry the whole mitigation rather than a backup
 	// for one.
 	if perr := m.persistSettlement(repoID, key, inst); perr != nil {
-		log.WarningLog.Printf("restored lost session %q: %v", inst.Title, perr)
+		m.warn().Printf("restored lost session %q: %v", inst.Title, perr)
 	}
 	if report := inst.GetArchiveReport(); !report.Empty() {
-		log.WarningLog.Printf("restored lost session %q: %s", inst.Title, report.Warning("restore"))
+		m.warn().Printf("restored lost session %q: %s", inst.Title, report.Warning("restore"))
 	}
 	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
 	// window rather than clearing the retry state; see armRestoreConfirmation.
@@ -633,14 +633,14 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 		inst.SetLostRestoreFailure(attempts, err)
 		log.ErrorLog.Printf("restore of lost session %q (repo %s): giving up after %d attempts: %v", inst.Title, repoID, attempts, err)
 		if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
-			log.WarningLog.Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
+			m.warn().Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
 		}
 		return
 	}
 	backoff := lostRestoreBackoff(attempts)
 	st.nextAttempt = time.Now().Add(backoff)
 	m.mu.Unlock()
-	log.WarningLog.Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", inst.Title, attempts, backoff, err)
+	m.warn().Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", inst.Title, attempts, backoff, err)
 }
 
 func attemptNoun(attempts int) string {

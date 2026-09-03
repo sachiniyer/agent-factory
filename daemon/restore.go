@@ -323,7 +323,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		if err := requireDurableSandboxBranch(repoID, instance); err != nil {
 			return "", err
 		}
-		log.WarningLog.Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
+		m.warn().Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.
@@ -349,7 +349,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
 				return "", err
 			}
-			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
+			m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
 			break
 		}
 		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
@@ -369,7 +369,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// on success; the deferred EndRecoverFence above lowers it on failure.
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
+			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
 	}); err != nil {
 		// The fence stays up through the bookkeeping below and comes down in the
@@ -383,7 +383,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// prior best-effort behavior, logged with persistInstance's own wording.
 		persistErr := m.persistInstanceErr(repoID, instance)
 		if persistErr != nil {
-			log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+			m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 		}
 		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
 		// Recovery that rebuilt the missing worktree (and possibly recreated its

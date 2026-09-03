@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -80,7 +79,7 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 
 func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *session.Instance) {
 	if err := m.persistSettlement(repoID, daemonInstanceKey(repoID, title), instance); err != nil {
-		log.WarningLog.Printf("restored remote session %q with predecessor evidence cleared in memory but not yet on disk: %v", title, err)
+		m.warn().Printf("restored remote session %q with predecessor evidence cleared in memory but not yet on disk: %v", title, err)
 	}
 }
 
@@ -130,7 +129,7 @@ func (m *Manager) FlushOwedSettlements() {
 			continue
 		}
 		if err := m.flushOneOwedSettlement(entry); err != nil {
-			log.WarningLog.Printf("settlement retry for %q: %v", entry.instance.Title, err)
+			m.warn().Printf("settlement retry for %q: %v", entry.instance.Title, err)
 		}
 	}
 }

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -61,7 +60,7 @@ func (m *Manager) acknowledgeRootRecreate(instance *session.Instance) {
 		// The user would lose the warning until a restart reloaded the stale record.
 		// Restored, the next pane open tries the whole acknowledgement again.
 		instance.ReconcileRootRecreateContext(previous)
-		log.WarningLog.Printf("could not clear the re-create notice on session %q; leaving it set so the next pane open retries: %v", instance.Title, err)
+		m.warn().Printf("could not clear the re-create notice on session %q; leaving it set so the next pane open retries: %v", instance.Title, err)
 		return
 	}
 	// Announce the cleared row so every OTHER open client drops the note too — a

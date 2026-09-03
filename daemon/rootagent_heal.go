@@ -82,11 +82,11 @@ func (m *Manager) healRootAgentLayers() {
 		if projects, failures, strays, present, err := config.ListProjectsDetailed(); err == nil && present {
 			streak := m.observeRootHealRegistrySnapshot(projects)
 			if streak >= 2 {
-				logRegistryRecordProblems(failures, strays)
+				logRegistryRecordProblems(m.warn(), failures, strays)
 				// The RUNTIME rebuild, so it carries the fence (#3530 review id
 				// 3920258554): this path proves legacy rows while the daemon is
 				// serving, and a delete can hold the identity it would write.
-				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(projects, m.identityTransitionUnfenced)
+				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(m.warn(), projects, m.identityTransitionUnfenced)
 				verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
 				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
@@ -762,7 +762,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				// start would put it back under the invented id with its
 				// layers left behind. Leave everything where it is and let the
 				// next pass retry (#3530 review id 3914971915).
-				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; leaving the project under its provisional identity and retrying on the ensure cadence: %v", record.root, repo.ID, record.projectID, err)
+				m.warn().Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; leaving the project under its provisional identity and retrying on the ensure cadence: %v", record.root, repo.ID, record.projectID, err)
 				continue
 			case wrote:
 				log.InfoLog.Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)

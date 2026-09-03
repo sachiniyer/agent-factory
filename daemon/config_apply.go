@@ -269,7 +269,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	if old.RequireToken && !newCfg.RequireToken {
 		if n := m.sandboxTokens.revokeAll(); n > 0 {
 			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. NOTE: this does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
-			log.WarningLog.Printf("%s", warning)
+			m.warn().Printf("%s", warning)
 			result.Warnings = append(result.Warnings, warning)
 		}
 	}

@@ -180,7 +180,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		// live tmux session that vanishes from the tab list on restart. Carry the
 		// new tab's ID into rollback rather than assuming it is still the last slot.
 		if closeErr := instance.CloseTabByID(tab.ID); closeErr != nil {
-			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", title, closeErr)
+			m.warn().Printf("CreateTab %q: rolling back unpersisted tab failed: %v", title, closeErr)
 			// The rollback could not prove the spawned tmux session absent, so a
 			// live tab may survive with a cleanup handle retained in memory. That
 			// is a landed side effect, not an untouched failure (#3237): report it
@@ -343,14 +343,14 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 		// abandoned either — the commit persisted a cleanup handle for it, which the
 		// next daemon start sweeps and which reserves its name against a colliding
 		// spawn in the meantime (#2669).
-		log.WarningLog.Printf("CloseTab %q committed, but runtime teardown could not be confirmed; its tmux session is retained for cleanup: %v", name, committed.TeardownErr)
+		m.warn().Printf("CloseTab %q committed, but runtime teardown could not be confirmed; its tmux session is retained for cleanup: %v", name, committed.TeardownErr)
 	case committed.Settled != nil:
 		// Teardown confirmed the session is gone, so retire its cleanup handle on
 		// disk. Best-effort by design: a failed write only leaves a handle whose
 		// retry harmlessly re-kills an absent session, and turning that into a
 		// CloseTab error would report a fully completed close as failed.
 		if err := persistInstanceData(repoID, *committed.Settled); err != nil {
-			log.WarningLog.Printf("CloseTab %q completed, but clearing its tmux cleanup handle failed; the next daemon start will retry the (already finished) teardown: %v", name, err)
+			m.warn().Printf("CloseTab %q completed, but clearing its tmux cleanup handle failed; the next daemon start will retry the (already finished) teardown: %v", name, err)
 		}
 	}
 	return name, nil

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -274,7 +273,7 @@ func (m *Manager) RenameTab(req RenameTabRequest) (string, error) {
 		// and resolves back exactly; a surprise means the roster changed underneath
 		// us, which is worth a log line rather than a silent wrong name.
 		if got, rerr := instance.RenameTabByID(targetID, prevName); rerr != nil || got != prevName {
-			log.WarningLog.Printf("RenameTab %q: rolling back unpersisted rename of tab %q returned %q, %v", title, prevName, got, rerr)
+			m.warn().Printf("RenameTab %q: rolling back unpersisted rename of tab %q returned %q, %v", title, prevName, got, rerr)
 		}
 		return "", fmt.Errorf("failed to persist tab rename: %w", err)
 	}
@@ -336,7 +335,7 @@ func (m *Manager) ReorderTab(req ReorderTabRequest) (string, int, error) {
 		// Put the original order back (see the rollback note above). Moving the tab from its
 		// new index back to its old one is the exact inverse of the move above.
 		if rerr := instance.ReorderTabByID(targetID, idx); rerr != nil {
-			log.WarningLog.Printf("ReorderTab %q: rolling back unpersisted move of tab %q failed: %v", title, name, rerr)
+			m.warn().Printf("ReorderTab %q: rolling back unpersisted move of tab %q failed: %v", title, name, rerr)
 		}
 		return "", 0, fmt.Errorf("failed to persist tab reorder: %w", err)
 	}

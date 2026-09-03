@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -242,7 +241,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
 	if err != nil {
-		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
+		m.warn().Printf("daemon failed to persist status for %q: %v", instance.Title, err)
 	}
 }
 
@@ -549,7 +548,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		resetAt, _ := instance.LimitResetAt()
 		if rerr := instance.RespawnWithLiveBoundary(func() {
 			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-				log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
+				m.warn().Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
 			}
 		}); rerr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
@@ -615,7 +614,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// provenance is still memory-only.
 		settleErr = m.persistSettlement(repoID, key, instance)
 		if settleErr != nil {
-			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, settleErr)
+			m.warn().Printf("limit resume for %q: %v", instance.Title, settleErr)
 		}
 	}
 
@@ -633,7 +632,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// still order later pane churn against the attempt (#3162/#3168).
 		evidenceErr := m.persistSettlement(repoID, key, instance)
 		if evidenceErr != nil {
-			log.WarningLog.Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
+			m.warn().Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
 		} else {
 			// The successful evidence checkpoint persisted the whole respawn row too.
 			settleErr = nil
@@ -686,7 +685,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
 	if persistErr != nil {
-		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 	}
 	if settleErr != nil {
 		// The resume itself landed — the prompt was delivered and the limit lifted —

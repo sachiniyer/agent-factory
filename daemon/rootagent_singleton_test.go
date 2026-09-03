@@ -279,14 +279,12 @@ func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
 			writePersonalRootAgent(t, project.ID, "enabled = false")
 			tc.corrupt(t, project.ID)
 
-			// The fail-closed WARNING fires from the snapshot inside NewManager,
-			// so the capture goes in first (httpserver_test.go idiom).
-			warnings := captureWarnings(t)
-
-			manager, err := NewManager(tc.managerConfig(t, repoPath))
-			if err != nil {
-				t.Fatalf("NewManager: %v", err)
-			}
+			// The fail-closed WARNING fires from the snapshot inside NewManager, so
+			// the logger is installed by the CONSTRUCTOR rather than captured around
+			// it — and it is this Manager's own, not the process-global one, so the
+			// assertion below cannot be satisfied by a warning another test's
+			// Manager emitted (#3787 part 2).
+			manager, warnings := newManagerCapturingWarnings(t, tc.managerConfig(t, repoPath))
 			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != 0 {
