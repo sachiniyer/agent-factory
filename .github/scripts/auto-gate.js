@@ -110,8 +110,8 @@ const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_LIMIT_RULE = `A Codex usage-limit message counts as a review outage
 unless its scope clause names a job this repository has OBSERVED naming
 something other than review. An unobserved phrasing counts, because a false
-block during a real outage has no exit while a false degrade is a
-maintainer-review PASS a human still reads.`;
+block during a real outage has no exit while a false degrade leaves a
+maintainer-review exit a human can take.`;
 
 // Codex usage-limit detection, in three named pieces rather than one regex.
 // The rule these implement is CODEX_LIMIT_RULE above; what follows is why it
@@ -314,13 +314,12 @@ const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
 const MANUAL_MERGE_AUTHOR_REASON =
   "Auto Gate does not auto-merge PRs from this author; a maintainer must review and " +
   "merge manually.";
-// Read by a human deciding whether to merge, so it has to be impossible to
-// mistake for an approval: it names the degradation and says outright that no
-// review happened.
-const MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON =
-  "The Codex reviewer is usage-limited, so no verdict for this head can arrive; Auto Gate " +
-  "degraded to maintainer review. This PR has NOT been reviewed — a maintainer must review " +
-  "and merge it manually.";
+// The unmet item a usage-limit degradation leaves when nobody has reviewed. It
+// names the exit rather than the problem, because the problem — Codex is out of
+// quota — is not something anyone can act on, and the exit is.
+const AWAITING_MAINTAINER_REVIEW_REASON =
+  "awaiting maintainer review — post `## Review — approve` on this head; Codex is usage-limited " +
+  "so no verdict can arrive, and the gate merges once a maintainer has reviewed";
 const RETRY_DELAYS_MS = [250, 1000];
 // A merge that has already STARTED needs longer than a read retry to land.
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
@@ -839,10 +838,29 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // it does not waive it. What is left is the mechanical part the gate already
   // performs for every other passing PR, so it performs it here too.
   const approval = degradedForUnavailableReviewer ? codex.maintainerApproval : null;
-  if (degradedForUnavailableReviewer && !approval) {
-    manualMergeReasons.push(MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON);
-  }
-  if (approval) {
+  // One branch, mutually exclusive, because the two outcomes are one decision:
+  // an approved degraded head merges, an unapproved one blocks with the exit
+  // named. An earlier shape pushed the blocker under `&& !approval` and then
+  // cleared `reasons` in a separate `if (approval)` below — so the guard looked
+  // load-bearing while the clear was doing the work, and removing the guard
+  // changed nothing. Expressed once, there is nothing to keep in step.
+  if (!degradedForUnavailableReviewer) {
+    // Not degraded: nothing here applies.
+  } else if (!approval) {
+    // NOT a passing manual state (#3819). This used to publish a green decision
+    // saying, in words, "This PR has NOT been reviewed — a maintainer must review
+    // and merge it manually", which made the PR mergeable and left the review to
+    // a convention. #3760 merged on 2026-09-03 with zero reviews, zero review
+    // comments and no review events — only usage-limit refusals. 51 of the 52 PRs
+    // that hit this degradation in 24h carried review evidence; a convention with
+    // a 51/52 hit rate is a convention, not a gate.
+    //
+    // So it blocks, and the blocker names its own exit. That exit is per-item and
+    // reachable on every PR including an external one, because the maintainer can
+    // post the marker whether or not the author iterates — which is what the
+    // degradation's own design insists on: never a stop with no way out.
+    reasons.push(AWAITING_MAINTAINER_REVIEW_REASON);
+  } else {
     // The approval SATISFIES the one requirement the degradation was about, so
     // that reason leaves the unmet list.
     //
@@ -4322,6 +4340,7 @@ module.exports = {
     CODEX_REVIEW_RE,
     bodyNamesReference,
     codexArtifactBindsToHead,
+    AWAITING_MAINTAINER_REVIEW_REASON,
     approveParkedRuns,
     listParkedRuns,
     ensureValidationRun,

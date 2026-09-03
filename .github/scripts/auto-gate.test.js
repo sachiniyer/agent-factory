@@ -256,6 +256,32 @@ test("every document states the approval marker the gate actually matches", () =
   }
 });
 
+// The skill must state the rule the gate now enforces (#3819). Its prose said a
+// usage-limit reply "degrades it to a manual-only pass", which is exactly the
+// green state that let #3760 merge unreviewed — and a hand gate reading the old
+// rule would merge on the same basis the automated one no longer accepts.
+test("the skill states that a degraded pass needs an approval to go green", () => {
+  const skill = fs.readFileSync(GATE_PR_SKILL, "utf8");
+  const { AWAITING_MAINTAINER_REVIEW_REASON, MAINTAINER_APPROVAL_MARKER } = __test;
+
+  assert.ok(
+    skill.includes(MAINTAINER_APPROVAL_MARKER),
+    "the skill must spell the marker the gate matches",
+  );
+  // The exit's own words, so the document and the decision say the same thing.
+  const exitPhrase = AWAITING_MAINTAINER_REVIEW_REASON.split(";")[0].trim();
+  assert.ok(
+    skill.includes(exitPhrase),
+    `gate-pr.md must state the unmet item verbatim: ${JSON.stringify(exitPhrase)}`,
+  );
+  // …and must no longer describe the old green manual state.
+  assert.doesNotMatch(
+    skill,
+    /degrades it to a manual-only pass/,
+    "that is the pre-#3819 rule, and a hand gate following it merges unreviewed heads",
+  );
+});
+
 // The hand gate must read the decision the way the decision is written (#3800).
 //
 // The per-PR check is refreshed IN PLACE, so `started_at` stays pinned to the
@@ -319,7 +345,7 @@ test("every statement of the usage-limit rule says the same thing", () => {
   for (const half of [
     "has observed naming something other than review",
     "a false block during a real outage has no exit",
-    "a false degrade is a maintainer-review pass",
+    "a false degrade leaves a maintainer-review exit",
   ]) {
     assert.ok(rule.includes(half), `CODEX_LIMIT_RULE no longer states: ${half}`);
   }
@@ -3155,14 +3181,82 @@ test("a Codex rate-limit message never becomes a verdict", async () => {
 // unmergeable, because a usage-limited response was only ever cosmetic suffix
 // text on a reason that waits for a verdict that cannot arrive. Observed
 // usage-limited degrades to the existing manual-merge path; unknown does not.
-test("an observed usage-limited reviewer degrades to maintainer review instead of waiting forever", async () => {
+// #3819. Under the degradation the fixed-name decision went GREEN with no review
+// evidence of any kind, and #3760 merged unreviewed through it on 2026-09-03:
+// zero reviews, zero review comments, no review events — only five `@codex
+// review` nudges each answered with a usage-limit refusal.
+//
+// The check said so in words — "This PR has NOT been reviewed — a maintainer must
+// review and merge it manually" — while its conclusion was `success`, so the PR
+// was mergeable. 51 of the 52 PRs that hit this degradation in 24h carried
+// maintainer review evidence. A convention with a 51/52 hit rate is a convention,
+// not a gate.
+//
+// So the degraded pass is not green until a head-bound approval exists. The exit
+// is per-item and any maintainer can take it, on any PR including an external
+// one: post the marker on this head.
+test("the degraded pass is not green without a maintainer approval", async () => {
   const result = await evaluateGate({ issueComments: [codexRateLimit()] });
 
-  assert.equal(result.manualMergeRequired, true, "the gate must degrade, not wait");
-  assert.equal(result.shouldMerge, false, "degrading must never auto-merge");
-  assert.match(result.summary, /^PASS:/);
+  assert.equal(result.shouldMerge, false, "still never auto-merges without a review");
+  assert.notEqual(
+    result.manualMergeRequired,
+    true,
+    "and it must no longer be a PASSING manual-merge state a hand can act on",
+  );
+  assert.match(result.summary, /^BLOCKED:|^WAITING:/);
+  assert.match(
+    result.reasons.join("\n"),
+    /awaiting maintainer review — post `## Review — approve` on this head/,
+    `the unmet item must name the exit; got: ${result.reasons.join("; ")}`,
+  );
+
+  // …and the published check must not be green.
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+  assert.notEqual(
+    github.createdChecks[0].conclusion,
+    "success",
+    "the fixed-name decision must not be green with no review evidence (#3760)",
+  );
+});
+
+// The negative, and the exit: with the approval on this head the gate merges on
+// its own, exactly as #3796 made it. The manual-merge pass ceases to exist as a
+// green state a hand can act on — it becomes a merge the gate performs.
+test("the degraded pass with a head-bound approval still merges itself", async () => {
+  const result = await evaluateGate({
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `must merge on its own: ${result.reasons.join("; ")}`);
+  assert.equal(result.manualMergeRequired, false);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+test("an observed usage-limited reviewer names an exit instead of waiting forever", async () => {
+  // The subject is unchanged — silence must not become a permanent stop — but
+  // since #3819 the exit is "post the marker and the gate merges" rather than
+  // "the check goes green and a hand merges". The old form let #3760 land with no
+  // review at all.
+  const result = await evaluateGate({ issueComments: [codexRateLimit()] });
+
+  assert.equal(result.shouldMerge, false, "never auto-merges without a review");
   assert.match(result.summary, /usage-limited/);
-  assert.match(result.summary, /has NOT been reviewed/);
+  assert.match(
+    result.reasons.join("\n"),
+    /post `## Review — approve` on this head/,
+    "the blocker must carry its own exit — that is what stops it being a permanent stop",
+  );
 
   const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
   const report = await autoGate.reportDecision({
@@ -3173,9 +3267,12 @@ test("an observed usage-limited reviewer degrades to maintainer review instead o
     manual: false,
   });
 
-  assert.equal(report.state, "manual");
-  assert.equal(github.createdChecks[0].conclusion, "success");
-  assert.match(github.createdChecks[0].output.title, /usage-limited/);
+  assert.equal(report.state, "waiting", "no longer a green manual state (#3819)");
+  assert.notEqual(
+    github.createdChecks[0].conclusion,
+    "success",
+    "the decision must not be green with no review evidence",
+  );
 });
 
 // #3790. Under the degraded pass a maintainer already reviews by hand and merges
@@ -3277,10 +3374,12 @@ test("an approval that predates this head leaves the degraded pass manual", asyn
     ],
   });
 
-  assert.equal(result.manualMergeRequired, true, "a stale approval must not carry a new head");
-  assert.equal(result.shouldMerge, false);
-  assert.match(result.summary, /^PASS:/);
-  assert.match(result.summary, /has NOT been reviewed/);
+  assert.equal(result.shouldMerge, false, "a stale approval must not carry a new head");
+  assert.match(
+    result.reasons.join("\n"),
+    /post `## Review — approve` on this head/,
+    "…and the head still needs one, which is the exit named",
+  );
 });
 
 // The marker is FIXED and it anchors the first line. A comment that merely
@@ -3305,9 +3404,14 @@ test("only the fixed marker on the first line is an approval", async () => {
       issueComments: [codexRateLimit(), prComment("sachiniyer", body, "2026-07-09T01:30:00Z")],
     });
     assert.equal(
-      result.manualMergeRequired,
-      true,
+      result.shouldMerge,
+      false,
       `must not read as an approval: ${JSON.stringify(body.slice(0, 40))}`,
+    );
+    assert.match(
+      result.reasons.join("\n"),
+      /post `## Review — approve` on this head/,
+      "…so the head still awaits one",
     );
   }
 });
@@ -3321,7 +3425,8 @@ test("an approval marker from an unrelated author is not an approval", async () 
     ],
   });
 
-  assert.equal(result.manualMergeRequired, true);
+  assert.equal(result.shouldMerge, false, "an unrelated author's marker is not an approval");
+  assert.match(result.reasons.join("\n"), /post `## Review — approve` on this head/);
 });
 
 test("reviewer silence with no usage-limit evidence keeps blocking exactly as before", async () => {
@@ -3915,9 +4020,15 @@ test("the account-wide usage-limit wording degrades to maintainer review too", a
     issueComments: [codexRateLimit(CODEX_ARTIFACT_AT, CODEX_LIMIT_ACCOUNT)],
   });
 
-  assert.equal(result.manualMergeRequired, true, "the worse outage must not withdraw the exemption");
-  assert.equal(result.shouldMerge, false, "degrading never merges");
-  assert.match(result.summary, /usage-limited/);
+  // Recognised as an outage — which since #3819 shows as the awaiting-review
+  // blocker rather than a green manual pass. That item appears ONLY when the
+  // wording was recognised, so it is the discriminator this test needs.
+  assert.match(
+    result.reasons.join("\n"),
+    /post `## Review — approve` on this head/,
+    "the worse outage must still be recognised as one",
+  );
+  assert.equal(result.shouldMerge, false, "and it never merges without a review");
 });
 
 // The one combination that has no exit, asserted directly rather than left to be
@@ -3948,9 +4059,15 @@ test("an unobserved other-scope wording degrades rather than blocking", async ()
     issueComments: [codexRateLimit(CODEX_ARTIFACT_AT, CODEX_LIMIT_OTHER_SCOPE)],
   });
 
-  assert.equal(result.manualMergeRequired, true, "the accepted residual: it degrades");
-  assert.equal(result.shouldMerge, false, "degrading never merges — a human still reads it");
-  assert.match(result.summary, /usage-limited/);
+  // Counts as an outage — the accepted residual of #3743. Since #3819 that shows
+  // as the awaiting-review blocker rather than a green manual pass; the item
+  // appears only when the wording was recognised, which is what this pins.
+  assert.match(
+    result.reasons.join("\n"),
+    /post `## Review — approve` on this head/,
+    "the accepted residual: an unobserved scope still counts as an outage",
+  );
+  assert.equal(result.shouldMerge, false);
 });
 
 // …and the mechanism that would make it block is a list entry, not a code
@@ -4122,7 +4239,16 @@ test("the gate-pr skill's usage-limit filter mirrors the script's predicate", ()
   );
 });
 
-test("a usage-limited reviewer unblocks the aggregate without merging anything", async () => {
+// This test's premise is inverted by #3819, deliberately. It used to assert that
+// the degradation "unblocks the aggregate" — which is precisely how #3760 merged
+// with no review: green aggregate, mergeable PR, review left to a convention.
+//
+// The reason the aggregate was unblocked at all was #3378: a permanent red on
+// master is a stop on the whole repository. That still holds, and is still
+// answered — but by an EXIT rather than by a green light. The blocker names what
+// to post, anyone with the marker can post it, and the gate merges on its own
+// afterwards. A stop with a one-comment exit is not a permanent stop.
+test("a usage-limited reviewer leaves the aggregate red, with the exit named", async () => {
   const github = fakeGateGithub({ nativeAutoMergeEnabled: true, issueComments: [codexRateLimit()] });
 
   const transaction = await autoGate.processAggregateHead({
@@ -4134,15 +4260,36 @@ test("a usage-limited reviewer unblocks the aggregate without merging anything",
     mergeEnabled: true,
   });
 
-  assert.equal(transaction.state, "manual");
-  assert.equal(transaction.aggregate.ok, true, "the aggregate must stop sitting red");
-  assert.equal(github.mergedWith, null, "degrading must never merge");
-  assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  assert.notEqual(transaction.aggregate.ok, true, "no review, no green (#3760)");
+  assert.equal(github.mergedWith, null, "and nothing merges");
   const exactDecision = github.createdChecks.find(
     (check) => check.name === decisionName(1465, HEAD_SHA),
   );
-  assert.equal(exactDecision.conclusion, "success");
-  assert.match(exactDecision.output.summary, /has NOT been reviewed/);
+  assert.notEqual(exactDecision.conclusion, "success");
+  assert.match(exactDecision.output.summary, /post `## Review — approve` on this head/);
+});
+
+// …and the exit works: with the approval on this head the aggregate goes green
+// and the gate merges, so the block is one comment deep, not a wall.
+test("the same head with a maintainer approval goes green and merges", async () => {
+  const github = fakeGateGithub({
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.aggregate.ok, true, "the approval is the exit");
+  assert.ok(github.mergedWith, "and the gate merges it itself, as #3796 made it");
 });
 
 test("a usage-limited reviewer does not excuse an exact-head verdict carrying a finding", async () => {
