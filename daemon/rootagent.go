@@ -198,13 +198,38 @@ func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
 	return false
 }
 
+// legacyRootAgentForRepoContext is the verdict path's entry into the legacy
+// lookup. A package var so a test can drive the unanswered case this bound
+// exists for; production assigns it once.
+var legacyRootAgentForRepoContext = config.LegacyRootAgentForRepoContext
+
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
 // resolves to repoID, or nil if none does. Resolved per call (not from the
 // snapshot dedup set) to preserve the legacy contract that a path pointing at a
 // not-yet-cloned repo starts applying the moment the repo appears.
-func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig {
-	entry, _ := config.LegacyRootAgentForRepo(m.cfg, repoID)
-	return entry
+//
+// The error is the UNKNOWN answer, and callers must not collapse it into nil:
+// nil means "no entry names this repo", which the verdict turns into "add a
+// root_agents entry" — advice that is wrong, and unfixable by the user, when
+// the entry is already there and a probe simply did not answer.
+func (m *Manager) legacyRootAgentForRepo(repoID string) (*config.RootAgentConfig, error) {
+	// ONE budget for the WHOLE lookup, not one per key, and the lock is the
+	// reason. Two of the three consumers call this while holding taskTargetMu,
+	// and #3361 already states the rule for that lock: "a stalled mount must
+	// not be walked while taskTargetMu is held". A per-key budget would make
+	// the hold N x the budget, growing with a user's config; this makes it one
+	// budget however many keys there are.
+	//
+	// The cost, stated: one stalled key can exhaust the budget before a later
+	// key is reached, so a whole lookup goes UNKNOWN where a per-key budget
+	// might have found a definite answer further down the list. That direction
+	// is fail-closed and honest, and it is the same shape as #3247's
+	// registry-wide fail-closed — one unknowable input, every consumer
+	// refusing, rather than one unknowable input and a lock nobody can take.
+	ctx, cancel := context.WithTimeout(context.Background(), rootLegacyRepoProbeTimeout)
+	defer cancel()
+	entry, _, err := legacyRootAgentForRepoContext(ctx, m.cfg, repoID)
+	return entry, err
 }
 
 // EnsureRootAgents runs one ensure pass over every repo that resolves to an
@@ -253,7 +278,7 @@ func (m *Manager) EnsureRootAgents() {
 	if len(layers.projectRoots) > 0 {
 		repoIDs := make([]string, 0, len(layers.projectRoots))
 		for repoID := range layers.projectRoots {
-			if layers.legacyRepoIDs[repoID] {
+			if layers.legacy.covers(repoID) {
 				continue
 			}
 			repoIDs = append(repoIDs, repoID)
@@ -294,11 +319,20 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 }
 
 // rootLegacyRepoProbeTimeout bounds every repository resolution the legacy
-// root_agents machinery performs on the instance poll goroutine: the sweep's
-// own, on every non-backed-off tick (#3757), and the dedup-set recompute the
-// heal pass runs on every published heal (#3782 item 1). One budget rather
-// than two, because it is one goroutine, one purpose, and one asymmetry — and
-// a second knob would be a second thing to get wrong.
+// root_agents machinery performs where a caller cannot afford to wait forever:
+//
+//   - the ensure sweep, on the instance poll goroutine, every non-backed-off
+//     tick (#3757);
+//   - the dedup-set recompute the heal pass runs on every published heal, and
+//     its retry for a path that has not answered yet (#3782 items 1 and 2);
+//   - the start-of-day snapshot (#3782 item 2);
+//   - the admission verdict's lookup, on the RPC goroutine and under
+//     taskTargetMu for two of its three consumers (#3782 item 4).
+//
+// ONE budget, not one per site. The goroutines differ and that is not the
+// reason they share it — the reason is that every one of them asks git the same
+// question with the same asymmetry, and a second knob would be a second thing
+// to get wrong and to drift.
 //
 // 2s, matching rootHealProbeGrace — its sibling on the same goroutine for the
 // same purpose — and the value repoGitWaitDelay documents as "what every other

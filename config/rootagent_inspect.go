@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -305,18 +306,51 @@ func ProjectFailClosedRootAgentLeaf(parent ResolvedValue, keyPath string) (Resol
 // repoID (and the matched key), or nil. Keys are checked in sorted order so the
 // inspection surface, daemon lookup, and sorted ensure pass share one stable
 // winner when two spellings resolve to the same repo.
+//
+// UNBOUNDED, and deliberately: this is the entry point for the inspection
+// surface behind `af config get root_agent --explain`, where a human typed the
+// command and can interrupt it, and where a wrong answer is worse than a slow
+// one. It drops the context variant's third return because a caller with no
+// deadline cannot be told anything by it that it could act on. Callers that
+// cannot wait — the daemon's admission verdict — take
+// LegacyRootAgentForRepoContext and MUST read that error (#3782 item 4).
 func LegacyRootAgentForRepo(global *Config, repoID string) (*RootAgentConfig, string) {
+	entry, key, _ := LegacyRootAgentForRepoContext(context.Background(), global, repoID)
+	return entry, key
+}
+
+// LegacyRootAgentForRepoContext is LegacyRootAgentForRepo under a caller-owned
+// deadline, with one extra return that exists because the nil answer is
+// ambiguous without it.
+//
+// "No entry names this repo" is a FINDING when every key was resolved and none
+// matched. When a key's probe never answered, it is merely what could be
+// established before the budget ran out — and the two are not interchangeable:
+// an empty entry means ENABLED, so reporting nil tells a consumer that no layer
+// enables a repo whose opt-in may have been sitting in root_agents the whole
+// time. That is the misreport #3264 added the recorded-root fallback to
+// prevent, re-entered through a deadline.
+//
+// So the error is returned only when it could still MATTER: a key whose probe
+// went unanswered AND whose path-derived identity did not match repoID either.
+// A key that matched through the fallback answered the question, and a key that
+// resolved to some other repo answered it too. Errors.Is(err,
+// ErrRepoProbeUnanswered) is the test; the entry and key are always nil and ""
+// when it is non-nil, because a lookup that could not complete has no winner.
+func LegacyRootAgentForRepoContext(ctx context.Context, global *Config, repoID string) (*RootAgentConfig, string, error) {
 	keys := make([]string, 0, len(global.RootAgents))
 	for key := range global.RootAgents {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	unanswered := false
 	for _, key := range keys {
 		expanded := ExpandTilde(key)
-		if repo, err := RepoFromPath(expanded); err == nil {
+		repo, err := RepoFromPathContext(ctx, expanded)
+		if err == nil {
 			if repo.ID == repoID {
 				entry := global.RootAgents[key]
-				return &entry, key
+				return &entry, key, nil
 			}
 			continue
 		}
@@ -331,10 +365,20 @@ func LegacyRootAgentForRepo(global *Config, repoID string) (*RootAgentConfig, st
 		// sat in root_agents the whole time (#3264 review).
 		if RepoIDFromRoot(filepath.Clean(expanded)) == repoID {
 			entry := global.RootAgents[key]
-			return &entry, key
+			return &entry, key, nil
+		}
+		if RepoProbeUnanswered(err) {
+			// This key might name repoID and might not; the fallback above
+			// only settles it for a MAIN-ROOTED checkout. Keep looking — a
+			// later key may answer definitively and win — but remember that a
+			// nil result can no longer be reported as a finding.
+			unanswered = true
 		}
 	}
-	return nil, ""
+	if unanswered {
+		return nil, "", fmt.Errorf("could not establish whether a legacy root agent is configured for repository %s: %w", repoID, ErrRepoProbeUnanswered)
+	}
+	return nil, "", nil
 }
 
 func rootAgentCandidateForLayer(inputs RootAgentInputs, source RootAgentSource) *RootAgentCandidate {

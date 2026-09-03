@@ -413,7 +413,7 @@ func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
 	manager.ensureRootAgentsAndWait()
 	manager.ensureRootAgentsAndWait()
 
-	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
+	if !manager.rootAgentLayers.Load().legacy.ids[rid] {
 		t.Fatalf("the healed snapshot must recompute the legacy dedup set for a path that resolved after boot")
 	}
 	if len(*seen) != 1 {
@@ -511,7 +511,7 @@ func TestRootAgentPersonalHealRecomputesLegacyDedup(t *testing.T) {
 	writePersonalRootAgent(t, project.ID, "enabled = true")
 	manager.ensureRootAgentsAndWait()
 
-	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
+	if !manager.rootAgentLayers.Load().legacy.ids[rid] {
 		t.Fatalf("a personal-config heal must also recompute the legacy dedup set for a path that resolved after boot")
 	}
 	if len(*seen) != 1 {
