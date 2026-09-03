@@ -64,7 +64,8 @@ every statement of it to agree (#3744):
 > than review. An unobserved phrasing counts, because a false block during a real
 > outage has no exit while a false degrade is a maintainer-review PASS a human
 > still reads.
- Auto Gate disables any pending GitHub-native auto-merge
+
+Auto Gate disables any pending GitHub-native auto-merge
 request before publishing that pass. Review and review-comment workflows can be
 read-only for fork pull requests; if one cannot update the decision, run Auto
 Gate manually by PR number from the base repository. The `pull_request_target`
