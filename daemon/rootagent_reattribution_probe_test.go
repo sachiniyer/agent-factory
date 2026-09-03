@@ -1,11 +1,15 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -304,7 +308,7 @@ func TestForeignIdentityClassifiedBeforePublishing(t *testing.T) {
 		t.Fatalf("a recorded root that is not its repository's identity root must classify as foreign: %+v", probe)
 	}
 	if markerRead {
-		t.Fatalf("a deferred identity must not have its marker read — that read is unbounded and would gate a repository this scope does not attribute")
+		t.Fatalf("a deferred identity must not have its marker read — that read waits on the recorded path and would gate a repository this scope does not attribute")
 	}
 	if c := probe.candidate.Load(); c != nil {
 		t.Fatalf("a deferred identity must not be published as a candidate (%s would then be gated through another path)", c.ID)
@@ -312,4 +316,204 @@ func TestForeignIdentityClassifiedBeforePublishing(t *testing.T) {
 	if probe.repo != nil {
 		t.Fatalf("a deferred identity must not be bound as this probe's repo: %+v", probe.repo)
 	}
+}
+
+// TestStalledMarkerReadIsBoundedAndFailsClosed is the #3599 regression.
+//
+// The probe publishes the recorded root's identity as its candidate — gating
+// that repository fail-closed — and THEN reads the checkout marker. That read
+// forks git and had no deadline, so a path that flips to another repository
+// mid-read left the flipped-to one ungated for as long as the read took: a
+// legacy root_agents entry reaching it through a second worktree could start
+// its root off the lower-precedence layers while the personal enabled = false
+// still sat under the derived ID. The re-resolution added for review id
+// 3787592555 rebinds the gate to whatever is at the path now — but it cannot
+// run until the stalled call returns.
+//
+// Two halves, one claim: the wedged read ENDS, and what it ends as is a
+// question that went unanswered — never a verdict about the checkout.
+// Bounding it does not close the flip window (that is #3599 option 2, still
+// filed); it converts "ungated indefinitely" into "ungated for at most one
+// step's budget".
+func TestStalledMarkerReadIsBoundedAndFailsClosed(t *testing.T) {
+	t.Run("the gate follows the repository now at the path", func(t *testing.T) {
+		recorded, other := reattributionProbeRepos(t)
+		wedgeTheMarkerRead(t)
+		withRootReattributionProbeStepTimeout(t, 400*time.Millisecond)
+
+		// The flip, in the window the probe itself opens: the moment the wedged
+		// read gives up, the recorded path becomes a linked worktree of ANOTHER
+		// repository, whose identity is that repo's main root and therefore not
+		// this pathname's hash. Held open by the hook rather than raced against
+		// the deadline, so this pins the classification and not the scheduler.
+		rootReattributionProbeHookForTest = func(root string) {
+			if err := os.RemoveAll(root); err != nil {
+				t.Errorf("remove the original checkout: %v", err)
+				return
+			}
+			if out, err := exec.Command("git", "-C", other, "worktree", "add", root).CombinedOutput(); err != nil {
+				t.Errorf("flip the recorded path to a worktree of %s: %v: %s", other, err, out)
+			}
+		}
+		t.Cleanup(func() { rootReattributionProbeHookForTest = nil })
+
+		probe := runBoundedProbe(t, recorded)
+		wantID := repoID(t, other)
+		if c := probe.candidate.Load(); c == nil || c.ID != wantID {
+			got := "<nil>"
+			if c != nil {
+				got = c.ID
+			}
+			t.Fatalf("after the bounded read the gate must follow the repository now at "+
+				"the path: candidate %s, want %s — leaving it on the first resolution is "+
+				"the fail-open a legacy entry reaching that repo through another worktree "+
+				"walks through (#3599)", got, wantID)
+		}
+		if probe.repo == nil || probe.repo.ID != wantID {
+			t.Fatalf("the verdict must be bound to the identity that was actually verified: %+v", probe.repo)
+		}
+		if !probe.markerUnreadable {
+			t.Fatalf("a read the deadline killed asked nothing, so the identity is "+
+				"unknowable and must stay fail-closed: %+v", probe)
+		}
+		if probe.matches || probe.mismatch {
+			t.Fatalf("a killed probe is not a verdict about the checkout (#3500): %+v", probe)
+		}
+	})
+
+	t.Run("an unchanged path is unknowable, never a proven mismatch", func(t *testing.T) {
+		// Nothing flips here, so the classification has nowhere to hide behind
+		// the identity-change branch: the ONLY thing this probe learned is that
+		// its marker read was killed. Settling that as a mismatch would release
+		// the repository the read contradicts and prescribe a rebind for a
+		// checkout nobody has actually looked at (#3500's line).
+		recorded, _ := reattributionProbeRepos(t)
+		wedgeTheMarkerRead(t)
+		withRootReattributionProbeStepTimeout(t, 400*time.Millisecond)
+
+		probe := runBoundedProbe(t, recorded)
+		if !probe.markerUnreadable {
+			t.Fatalf("a marker read the deadline killed must land on the 'could not ask' "+
+				"side: %+v", probe)
+		}
+		if probe.mismatch {
+			t.Fatalf("a killed read is not 'git answered no' — a mismatch here releases the " +
+				"gate and tells the user to rebind a checkout that was never read (#3500)")
+		}
+		if probe.matches || probe.vanished {
+			t.Fatalf("nor is it a match or a disappearance: %+v", probe)
+		}
+		if c := probe.candidate.Load(); c == nil || c.ID != config.RepoIDForRecordedRoot(recorded) {
+			t.Fatalf("the recorded root's own identity must stay gated while its marker is unknowable: %+v", c)
+		}
+	})
+}
+
+// reattributionProbeRepos builds the two checkouts these subtests flip between:
+// a recorded root that is its own identity root, and another repository whose
+// main root can host a linked worktree.
+func reattributionProbeRepos(t *testing.T) (recorded, other string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	parent := testguard.CanonicalTempDir(t)
+	recorded = filepath.Join(parent, "repo")
+	other = filepath.Join(parent, "other")
+	for _, root := range []string{recorded, other} {
+		if err := exec.Command("git", "init", root).Run(); err != nil {
+			t.Fatalf("git init %s: %v", root, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"-C", other, "config", "user.email", "t@t"},
+		{"-C", other, "config", "user.name", "t"},
+		{"-C", other, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	return recorded, other
+}
+
+// wedgeTheMarkerRead puts a git shim on PATH that never returns for exactly the
+// marker read. `--show-toplevel` and `--git-common-dir` in ONE argv is unique to
+// the binding resolution that read runs; the probe's own resolution and
+// re-resolution ask for them separately, so those still answer through real git.
+func wedgeTheMarkerRead(t *testing.T) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("look up git: %v", err)
+	}
+	binDir := t.TempDir()
+	pidFile := filepath.Join(binDir, "shim.pids")
+	reapProbeShimChildren(t, pidFile)
+	script := fmt.Sprintf(`#!/bin/sh
+top=0
+common=0
+for a in "$@"; do
+  [ "$a" = "--show-toplevel" ] && top=1
+  [ "$a" = "--git-common-dir" ] && common=1
+done
+if [ "$top" = 1 ] && [ "$common" = 1 ]; then
+  # Backgrounded with its pid recorded: killing the shim shell does not kill
+  # its foreground child, and a shared box must not accumulate them.
+  sleep 60 &
+  echo $! >> '%s'
+  wait
+  exit 0
+fi
+exec '%s' "$@"
+`, pidFile, realGit)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// runBoundedProbe runs one probe against root and fails the test if it does not
+// finish — which is the pre-#3599 behaviour: the wedged read never returned, so
+// the gate never moved.
+func runBoundedProbe(t *testing.T, root string) *rootReattributionProbe {
+	t.Helper()
+	probe := &rootReattributionProbe{done: make(chan struct{})}
+	go runRootReattributionProbe(probe, unresolvedProjectRecord{
+		root: root, projectID: "prj_test", checkoutID: "chk_absent",
+	})
+	select {
+	case <-probe.done:
+		return probe
+	case <-time.After(10 * time.Second):
+		t.Fatal("every git step in the probe must be bounded: an unbounded marker read " +
+			"holds the recorded root's identity gated and any repository the path " +
+			"flipped to UNGATED for the whole of the stall (#3599)")
+		return nil
+	}
+}
+
+// reapProbeShimChildren kills every pid the git shim recorded. The shim's
+// sleeps outlive the git process on purpose — that is the stall under test —
+// and exec kills only the shell it started, never the shell's children.
+func reapProbeShimChildren(t *testing.T, pidFile string) {
+	t.Helper()
+	t.Cleanup(func() {
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		for _, field := range strings.Fields(string(raw)) {
+			if pid, convErr := strconv.Atoi(field); convErr == nil && pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+}
+
+// withRootReattributionProbeStepTimeout drives the production budget for one
+// test and restores it after.
+func withRootReattributionProbeStepTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := rootReattributionProbeStepTimeout
+	rootReattributionProbeStepTimeout = d
+	t.Cleanup(func() { rootReattributionProbeStepTimeout = prev })
 }

@@ -414,7 +414,24 @@ func validateStoredProjectPath(field, path string) error {
 	return nil
 }
 
+// resolveProjectBinding resolves a path to its project binding with no deadline
+// of its own — the shape the admission paths (register, rebind, selector
+// resolution) want, exactly as RepoFromPath is for repository identity.
 func resolveProjectBinding(path string) (projectBinding, error) {
+	return resolveProjectBindingContext(context.Background(), path)
+}
+
+// resolveProjectBindingContext is resolveProjectBinding for callers that
+// promised a budget (#3599). Resolving a binding forks git several times — two
+// probes of its own, plus every probe the identity-root resolution runs — and
+// the daemon's re-attribution probe runs it against a path that may be wedged
+// on a stale mount while a repository it has already gated waits on the answer.
+// Those callers need the probes to end when their deadline does.
+//
+// Each probe's drain allowance comes from that same deadline (#3594) rather
+// than from a second constant here: a caller that promised 400ms may be late by
+// another 400ms, never dragged toward the 2s default.
+func resolveProjectBindingContext(ctx context.Context, path string) (projectBinding, error) {
 	abs, err := ResolveUserPath(path)
 	if err != nil {
 		return projectBinding{}, fmt.Errorf("resolve project path %q: %w", path, err)
@@ -431,14 +448,17 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 		return projectBinding{}, fmt.Errorf("project path %q is not a directory", resolved)
 	}
 
-	commonCmd := exec.Command("git", "-C", resolved, "rev-parse", "--show-toplevel", "--git-common-dir")
+	commonCmd := exec.CommandContext(ctx, "git", "-C", resolved, "rev-parse", "--show-toplevel", "--git-common-dir")
+	commonCmd.WaitDelay = repoProbeWaitDelay(ctx)
 	commonOut, err := commonCmd.Output()
 	if err != nil {
 		// Classified where the child ran (#3504): this resolver runs its own
 		// probes, so without this the sentinel never reaches
 		// ResolveProjectSelector and a killed git is still reported to the user
-		// as "not inside a git repository".
-		return projectBinding{}, fmt.Errorf("resolve git common directory: %w", markUnansweredProbe(context.Background(), err))
+		// as "not inside a git repository". The caller's ctx, not a fresh
+		// Background: a probe its deadline killed says so in the chain instead
+		// of surfacing as an opaque "signal: killed" (#3517, #3599).
+		return projectBinding{}, fmt.Errorf("resolve git common directory: %w", markUnansweredProbe(ctx, err))
 	}
 	commonParts := strings.SplitN(trimGitOutputLine(commonOut), "\n", 2)
 	if len(commonParts) != 2 {
@@ -459,10 +479,11 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	if err != nil {
 		return projectBinding{}, fmt.Errorf("resolve git common directory: %w", err)
 	}
-	bareCmd := exec.Command("git", "--git-dir", commonDir, "rev-parse", "--is-bare-repository")
+	bareCmd := exec.CommandContext(ctx, "git", "--git-dir", commonDir, "rev-parse", "--is-bare-repository")
+	bareCmd.WaitDelay = repoProbeWaitDelay(ctx)
 	bareOut, err := bareCmd.Output()
 	if err != nil {
-		return projectBinding{}, fmt.Errorf("inspect git common directory: %w", markUnansweredProbe(context.Background(), err))
+		return projectBinding{}, fmt.Errorf("inspect git common directory: %w", markUnansweredProbe(ctx, err))
 	}
 	bare := strings.TrimSpace(string(bareOut))
 	if bare != "true" && bare != "false" {
@@ -474,7 +495,7 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	}
 	checkoutRoot := worktreeRoot
 	if bare == "false" {
-		checkoutRoot, err = resolveMainRepoRoot("-C", resolved)
+		checkoutRoot, err = resolveMainRepoRootContext(ctx, "-C", resolved)
 		if err != nil {
 			return projectBinding{}, fmt.Errorf("project path %q is not inside a git checkout: %w", resolved, err)
 		}
@@ -590,6 +611,10 @@ func storedProjectMarkerPath(root string) (string, bool, error) {
 }
 
 func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
+	return projectRootHasCheckoutIDContext(context.Background(), root, checkoutID)
+}
+
+func projectRootHasCheckoutIDContext(ctx context.Context, root, checkoutID string) (bool, error) {
 	info, statErr := os.Stat(root)
 	// Same rule as storedProjectMarkerPath above: a root that resolves to nothing
 	// carries no marker, and saying so is what lets a moved checkout re-register
@@ -603,10 +628,17 @@ func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
 	if !info.IsDir() {
 		return false, nil
 	}
-	binding, err := resolveProjectBinding(root)
+	binding, err := resolveProjectBindingContext(ctx, root)
 	if err != nil {
 		// A caller-owned directory may legitimately reuse a moved checkout's
 		// old path. With no .git entry it cannot carry this checkout marker.
+		//
+		// This shortcut survives an UNANSWERED probe (#3599) because it does not
+		// rest on one: the Lstat is independent evidence, and a registered
+		// project's root always has a .git entry — resolveProjectBinding refuses
+		// a bare repository, which is the one repository shape without one. Every
+		// other failure, a killed probe included, propagates as an error, so a
+		// caller cannot read "we could not ask git" as "the marker is not there".
 		if _, statErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(statErr, os.ErrNotExist) {
 			return false, nil
 		}
