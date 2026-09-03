@@ -87,6 +87,14 @@ Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
 
+**A base that moves between the compare and the merge waits; it does not red the
+run (#3808).** `PUT /pulls/N/merge` answers 405 `Base branch was modified` when
+another merge lands in the window the up-to-date compare cannot close. Nobody won
+that head and nothing merged, so it is not a concession — the gate reports it as
+its own refusal, invalidates the aggregate as it already did, and the next
+evaluation brings the head up to date. Conceding instead would exit success
+having merged nothing. Any other unclassified refusal still fails loudly.
+
 The hand gate in `.claude/skills/gate-pr.md` runs precisely where this one
 cannot — on a PR that changes `auto-gate.js`, since Auto Gate runs master's copy
 of the helper, and during a Codex outage. For finding artifacts that bind to no
