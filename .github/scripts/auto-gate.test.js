@@ -149,11 +149,6 @@ test("a review quoting the vendor phrase across a line wrap keeps its verdict", 
 
 // One rule, one wording, everywhere it is stated (#3744).
 //
-// A Codex usage-limit message counts as a review outage unless its scope clause
-// names a job this repository has OBSERVED naming something other than review.
-// An unobserved phrasing counts, because a false block during a real outage has
-// no exit while a false degrade is a maintainer-review PASS a human still reads.
-//
 // The usage-limit rule was written out in four places — twice in auto-gate.js
 // alone, plus the skill and .github/auto-gate.md — and the two copies inside one
 // file had ALREADY diverged ("Matching only the first" vs "Recognising only the
@@ -177,14 +172,35 @@ test("every statement of the usage-limit rule says the same thing", () => {
       .toLowerCase();
 
   const rule = normalise(CODEX_LIMIT_RULE);
-  assert.ok(rule.length > 80, "the canonical rule should be a statement, not a phrase");
 
-  for (const file of [
-    path.join(__dirname, "auto-gate.js"),
-    path.join(__dirname, "auto-gate.test.js"),
-    GATE_PR_SKILL,
-    AUTO_GATE_DOC,
+  // Both halves, named. `includes()` is a substring test, so SHORTENING the
+  // canonical silently narrows what is pinned everywhere — every document still
+  // contains the shorter text — and the half most likely to be dropped is the
+  // asymmetry, which is the half that decides the direction.
+  for (const half of [
+    "has observed naming something other than review",
+    "a false block during a real outage has no exit",
+    "a false degrade is a maintainer-review pass",
   ]) {
+    assert.ok(rule.includes(half), `CODEX_LIMIT_RULE no longer states: ${half}`);
+  }
+
+  // …and the rule must describe THIS gate, not just agree with itself. Four
+  // documents quoting each other can drift from the code as a set.
+  assert.equal(
+    __test.codexReportsReviewUsageLimit(CODEX_LIMIT_OTHER_SCOPE),
+    true,
+    "the rule says an unobserved phrasing counts; the predicate must agree",
+  );
+
+  // Deliberately NOT this file. A loop that reads the file it lives in is
+  // satisfied by a copy that exists only to satisfy it — five statements for a
+  // change titled "stated once". These two are the documents a maintainer reads
+  // away from the code; auto-gate.js is where the canonical text lives.
+  for (const file of [path.join(__dirname, "auto-gate.js"), GATE_PR_SKILL, AUTO_GATE_DOC]) {
+    // Read separately, so a moved or renamed file fails with this test's
+    // guidance rather than an ENOENT stack trace from inside the assertion.
+    assert.ok(fs.existsSync(file), `${path.basename(file)} must exist to state the rule (#3744)`);
     assert.ok(
       normalise(fs.readFileSync(file, "utf8")).includes(rule),
       `${path.basename(file)} does not state the canonical usage-limit rule. It is CODEX_LIMIT_RULE ` +
@@ -204,6 +220,9 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
     path.join(__dirname, "auto-gate.js"),
     path.join(__dirname, "auto-gate.test.js"),
     GATE_PR_SKILL,
+    // Joined the list in #3744: it now has to carry usage-limit prose verbatim,
+    // which is exactly the condition this guard exists for.
+    AUTO_GATE_DOC,
   ]) {
     const text = fs.readFileSync(file, "utf8");
     const hit = text.match(CODEX_VERDICT_LIMIT_RE);

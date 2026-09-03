@@ -66,28 +66,31 @@ const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 // THE USAGE-LIMIT RULE, stated once (#3744).
 //
-// Every other statement of it — this file's own function comment, the gate-pr
-// skill, and .github/auto-gate.md — quotes this constant, and a test fails if
-// any of them stops saying it. The rule was written out four times before, twice
-// in this file alone, and those two copies had already drifted apart while every
-// test stayed green. The copy furthest from the code is the one a maintainer
-// reads before hand-merging, so it is the one that must not rot.
+// This declaration IS the statement — a template literal, so the text the tests
+// compare against is the text you are reading, with no concatenation seams
+// between them. An earlier draft built it from `+`-joined fragments, which meant
+// the definition did not satisfy its own pin and a prose copy four lines below
+// was doing the work: a file titled "stated once" that stated it twice.
+//
+// The documents that must quote it verbatim are `.claude/skills/gate-pr.md` and
+// `.github/auto-gate.md`, and a test fails when either stops saying it. The rule
+// was written out four times before, twice in this file alone, and those two
+// copies had already drifted apart while every test stayed green. The copy
+// furthest from the code is the one a maintainer reads before hand-merging, so
+// it is the one that must not rot.
 //
 // Quote it; do not paraphrase. Reflowing is free — the check normalises comment
-// markers, markdown emphasis and line wrapping — but changing what it says is
-// not.
-const CODEX_LIMIT_RULE =
-  "A Codex usage-limit message counts as a review outage unless its scope clause names a job " +
-  "this repository has OBSERVED naming something other than review. An unobserved phrasing " +
-  "counts, because a false block during a real outage has no exit while a false degrade is a " +
-  "maintainer-review PASS a human still reads.";
+// markers, blockquote prefixes, markdown emphasis and line wrapping — but
+// changing what it says is not.
+const CODEX_LIMIT_RULE = `A Codex usage-limit message counts as a review outage
+unless its scope clause names a job this repository has OBSERVED naming
+something other than review. An unobserved phrasing counts, because a false
+block during a real outage has no exit while a false degrade is a
+maintainer-review PASS a human still reads.`;
 
 // Codex usage-limit detection, in three named pieces rather than one regex.
-//
-// A Codex usage-limit message counts as a review outage unless its scope clause
-// names a job this repository has OBSERVED naming something other than review.
-// An unobserved phrasing counts, because a false block during a real outage has
-// no exit while a false degrade is a maintainer-review PASS a human still reads.
+// The rule these implement is CODEX_LIMIT_RULE above; what follows is why it
+// points that way.
 //
 // Codex emits at least two wordings for the same condition — "…usage limits for
 // code reviews." and a bare "…usage limits." — and both appeared on #3712 within
@@ -153,9 +156,10 @@ const CODEX_LIMIT_OTHER_JOB_PHRASES = [];
 
 // Whether a body is Codex saying REVIEW capacity is exhausted.
 //
-// Implements CODEX_LIMIT_RULE — see the constant for the rule and why it points
-// this way. The history is there too; it is not repeated here, because the copy
-// that used to sit in this comment had already drifted from the one above it.
+// Implements CODEX_LIMIT_RULE. The rule is on that constant; the #3728/#3743
+// history behind it is on the "Codex usage-limit detection" comment above the
+// patterns. Neither is repeated here — the copy that used to sit in this comment
+// had already drifted from the one above it, which is what #3744 was about.
 //
 // The residual this leaves — an unobserved other-scope wording degrades to
 // maintainer review until it is observed and added to

@@ -577,8 +577,10 @@ is a pass**:
   > still reads.
 
   Four attempts to classify the clause by grammar each leaked one way or the
-  other, which is why the list holds no inference; the residual is documented on
-  #3743.
+  other — a false block during a real outage is the #3728 defect — which is why
+  the list holds no inference. The residual: an unobserved other-scope wording
+  degrades to maintainer review until it is observed and added to the list.
+  Documented and accepted on #3743.
   Practically: if the latest Codex artifact is a usage-limit message of any
   phrasing, treat the reviewer as unavailable — the same answer the gate gives.
 
@@ -593,7 +595,7 @@ is a pass**:
 
   For the same reason, do not write the literal phrase out in these files.
   `auto-gate.js` elides it, `auto-gate.test.js` splits it across a
-  concatenation, and a test fails if any of the three regains it.
+  concatenation, and a test fails if any of the four regains it.
 
 Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
 fresh usage-limit reply degrades it to a manual-only pass that still does not
