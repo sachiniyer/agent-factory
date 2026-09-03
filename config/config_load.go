@@ -313,13 +313,23 @@ var convertRaceHookForTest func()
 // best-effort — a failure is logged, not fatal.
 func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
 	var result *Config
-	lockErr := WithFollowedFileLock(tomlPath, func() error {
+	lockErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		if convertRaceHookForTest != nil {
 			convertRaceHookForTest()
 		}
 		// The winner of a concurrent conversion already wrote config.toml.
 		// (Our writes are atomic, so a non-empty config.toml here is complete.)
-		if td, err := os.ReadFile(tomlPath); err == nil {
+		// Read the LOCKED file: reopening the link would resolve it again, and a
+		// link that moved since acquisition would answer this question about a
+		// file the lock does not cover (#3688).
+		//
+		// Unlike the writers, this branch deliberately does NOT re-confirm and
+		// refuse. It is a LOAD — the value it produces is the config af starts
+		// on — and the rest of the load path reads through the link outside any
+		// lock, so refusing here would make a moved link the one arrangement
+		// that stops af from starting at all, over a window that opens once per
+		// install (#3696 review).
+		if td, err := os.ReadFile(locked.file); err == nil {
 			if !isEffectivelyEmptyToml(td) {
 				cfg, perr := parseLoadedConfigTOML(td, prettyTomlPath, tomlPath)
 				if perr != nil {
@@ -342,6 +352,18 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			// The racer renamed config.json to .bak (and its config.toml is
 			// gone/incomplete), or the file is an empty first-run stub — either
 			// way there is nothing to convert, so materialize fresh defaults.
+			//
+			// This one keeps the LINK path deliberately. It creates with
+			// O_CREATE|O_EXCL, which fails on a symlink rather than following
+			// it, so it can never write through the link; and the questions it
+			// asks — is something already at config.toml, is that something a
+			// link — are questions about the link itself, which the pinned
+			// target cannot answer.
+			//
+			// It does not confirm-and-refuse either, for the same reason as the
+			// winner branch above: what it returns is the config af STARTS on,
+			// not a report about what af changed. Every command outcome under
+			// this lock confirms; these two loads deliberately do not.
 			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
 			if mErr != nil {
 				return mErr
@@ -360,7 +382,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
-		if err := AtomicWriteFileFollowingLink(tomlPath, tomlBytes, 0644); err != nil {
+		if err := locked.write(tomlBytes, 0644); err != nil {
 			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
 		}
 

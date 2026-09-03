@@ -140,9 +140,9 @@ func UnsetGlobalConfigValue(key string) (*UnsetResult, error) {
 	prettyPath := prettyHomePath(path)
 
 	var result *UnsetResult
-	writeErr := WithFollowedFileLock(path, func() error {
+	writeErr := withFollowedFileLock(path, func(locked lockedTarget) error {
 		var err error
-		result, err = applyGlobalUnset(path, prettyPath, canonicalKey, alias)
+		result, err = applyGlobalUnset(locked, prettyPath, canonicalKey, alias)
 		return err
 	})
 	if writeErr != nil {
@@ -156,8 +156,11 @@ func UnsetGlobalConfigValue(key string) (*UnsetResult, error) {
 // value-drift guard below can be driven directly, with a canonicalKey and an
 // alias that name different settings — which is exactly the shape of the bug the
 // guard exists to catch: an edit that does not do what the command says it does.
-func applyGlobalUnset(path, prettyPath, canonicalKey string, alias configKeyAlias) (*UnsetResult, error) {
-	current, err := os.ReadFile(path)
+func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alias configKeyAlias) (*UnsetResult, error) {
+	// The read is of the locked file, and so is the write below: a config.toml
+	// that is a symlink must not be resolved a second time inside the lock
+	// (#3688).
+	current, err := os.ReadFile(locked.file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
@@ -165,7 +168,16 @@ func applyGlobalUnset(path, prettyPath, canonicalKey string, alias configKeyAlia
 	updated, groupedRemoved := deleteTOMLScalar(string(current), alias.section, alias.leaf)
 	updated, legacyRemoved := deleteTOMLScalar(updated, "", alias.legacy)
 	if !groupedRemoved && !legacyRemoved {
-		return &UnsetResult{Key: canonicalKey, Path: path, Removed: false}, nil
+		// "Nothing to remove" is a claim about a file, so it has to be a claim
+		// about the RIGHT file. Only the write path confirms otherwise, and a
+		// no-op takes it: a link retargeted to a config that does have the key
+		// would leave the user told it was already absent, which is the same
+		// silent wrong answer in the shape of a report rather than a lost
+		// update (#3696 review).
+		if err := locked.confirm(); err != nil {
+			return nil, err
+		}
+		return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: false}, nil
 	}
 	// Read after the no-op return above, for the same reason as its personal
 	// twin: nothing is being written, so nothing needs vouching for.
@@ -185,8 +197,8 @@ func applyGlobalUnset(path, prettyPath, canonicalKey string, alias configKeyAlia
 	if drift := configRewriteDrift(before, resulting, canonicalKey, SchemaVersionField); drift != "" {
 		return nil, fmt.Errorf("internal error: unsetting %s in %s would change %s (no changes written)", canonicalKey, prettyPath, drift)
 	}
-	if err := AtomicWriteFileFollowingLink(path, []byte(updated), 0o644); err != nil {
+	if err := locked.write([]byte(updated), 0o644); err != nil {
 		return nil, err
 	}
-	return &UnsetResult{Key: canonicalKey, Path: path, Removed: true, RequiresRestart: true}, nil
+	return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: true, RequiresRestart: true}, nil
 }

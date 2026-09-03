@@ -416,9 +416,9 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 		rawStructured: rawValue, clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
-	writeErr := WithFollowedFileLock(tomlPath, func() error {
+	writeErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		var err error
-		result, err = write.apply(tomlPath, prettyPath)
+		result, err = write.apply(locked, prettyPath)
 		return err
 	})
 	if writeErr != nil {
@@ -562,8 +562,12 @@ type scalarWrite struct {
 // into a snapshot of the other one, because parseConfigTOML has already
 // produced the exact config this write lands on. Whichever racer writes second
 // now sees the full pairing and warns.
-func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
-	current, err := os.ReadFile(tomlPath)
+func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, error) {
+	// Every byte read and written here is the file the caller's lock covers.
+	// Reading through the link instead would let a retarget between acquisition
+	// and write compute the edit against one file and land it on another
+	// (#3688); locked.link is only what the user is shown.
+	current, err := os.ReadFile(locked.file)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
@@ -607,7 +611,7 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 	// operator's setting. Grouped-only files stay grouped-only; no deprecated key
 	// is invented for a new install.
 	if alias, ok := configAliasForCanonical(w.key); ok {
-		if metadata, err := metadataForSource(current, tomlPath, FormatTOML); err == nil {
+		if metadata, err := metadataForSource(current, locked.link, FormatTOML); err == nil {
 			if _, present := metadata.shape[alias.legacy]; present {
 				if w.clear {
 					updated, _ = deleteTOMLScalar(updated, "", alias.legacy)
@@ -639,14 +643,14 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
 	}
-	if err := AtomicWriteFileFollowingLink(tomlPath, []byte(updated), 0644); err != nil {
+	if err := locked.write([]byte(updated), 0644); err != nil {
 		return nil, err
 	}
 	value := w.canonical
 	if w.structured {
 		value, _ = CurrentValue(resulting, w.key)
 	}
-	result := &SetResult{Key: w.key, Value: value, Path: tomlPath, RequiresRestart: true}
+	result := &SetResult{Key: w.key, Value: value, Path: locked.link, RequiresRestart: true}
 	if warn := exposureWarning(resulting, w.key); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}

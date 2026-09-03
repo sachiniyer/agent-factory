@@ -21,33 +21,56 @@ package config
 // added.
 func DeregisterRootAgentsForRepo(repoIDs ...string) ([]string, error) {
 	var removed []string
-	err := withGlobalConfigLock(func() error {
-		cfg, err := loadConfigLocked()
-		if err != nil {
-			return err
-		}
-		removed = nil
-		// One read-modify-write for EVERY identity: a re-attributed project
-		// carries two (real and derived recorded-path), and sweeping them as
-		// separate writes could remove one opt-in and then fail, breaking the
-		// caller's nothing-was-changed guarantee (#3299 review round 7).
-		for key := range cfg.RootAgents {
-			for _, repoID := range repoIDs {
-				if rootAgentKeyMatchesRepo(key, repoID) {
-					removed = append(removed, key)
-					break
-				}
-			}
-		}
-		if len(removed) == 0 {
-			return nil
-		}
-		for _, key := range removed {
-			delete(cfg.RootAgents, key)
-		}
-		return saveConfigLocked(cfg)
+	err := withGlobalConfigLock(func(locked lockedTarget) error {
+		var err error
+		removed, err = deregisterRootAgentsLocked(locked, repoIDs)
+		return err
 	})
 	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// deregisterRootAgentsLocked is the body above minus the lock, so it can be
+// driven against a pinned target directly — the shape applyGlobalUnset and
+// migrateConfigFile already have. Callers must hold the config file lock.
+func deregisterRootAgentsLocked(locked lockedTarget, repoIDs []string) ([]string, error) {
+	cfg, err := loadConfigLocked(locked)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	// One read-modify-write for EVERY identity: a re-attributed project
+	// carries two (real and derived recorded-path), and sweeping them as
+	// separate writes could remove one opt-in and then fail, breaking the
+	// caller's nothing-was-changed guarantee (#3299 review round 7).
+	for key := range cfg.RootAgents {
+		for _, repoID := range repoIDs {
+			if rootAgentKeyMatchesRepo(key, repoID) {
+				removed = append(removed, key)
+				break
+			}
+		}
+	}
+	if len(removed) == 0 {
+		// The nothing-to-remove answer has to be about the file this lock
+		// covers, and it is the one answer that never reaches the write that
+		// would say so. It is also the costliest to get wrong: DeleteProject
+		// reads nil here as "the durable cleanup succeeded" and goes on to
+		// delete the project, so an opt-in surviving in the config the link now
+		// names respawns that project on the next daemon start — the exact
+		// outcome its own error message promises cannot happen
+		// (daemon/deleteproject.go, #3696 review).
+		if err := locked.confirm(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	for _, key := range removed {
+		delete(cfg.RootAgents, key)
+	}
+	if err := saveConfigLocked(locked, cfg); err != nil {
 		return nil, err
 	}
 	return removed, nil

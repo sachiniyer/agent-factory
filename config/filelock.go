@@ -13,15 +13,87 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// TryWithFileLock is WithFileLock for callers that must not wait: it runs fn
-// under the same exclusive flock, but only if the lock is free right now.
-// It reports whether the lock was acquired; when it was not, fn never runs and
-// the caller should treat the work as already in hand elsewhere rather than
-// queue behind it. Use this on latency-sensitive paths (a user is waiting)
-// where duplicating another process's work is pointless — blocking there turns
-// a peer's slow operation into an unexplained hang of your own.
-// WithFollowedFileLock is WithFileLock for a path whose write FOLLOWS a symlink
-// — today only the global config, via AtomicWriteFileFollowingLink.
+// lockedTarget is the ONE resolution a followed-lock body may touch: the file
+// the lock is held on, plus the path the caller named.
+//
+// It exists because resolving more than once is the defect (#3688). The lock
+// resolves the link to decide which .lock to take; if the body then reads the
+// LINK and the writer resolves the LINK again, a link retargeted mid-operation
+// — stow, chezmoi, a branch switch in the dotfiles repo — points that read and
+// that write at a file the lock does not cover, while a peer af that resolved
+// after the move holds a different .lock over the very same file. That is the
+// "two different .lock files and no mutual exclusion" outcome the comment on
+// withFollowedFileLock says the design rules out, reached by a moving link
+// instead of by two static aliases.
+//
+// So the resolution is established once and then carried: file is what the body
+// reads and writes, and link is only what the user is shown, what the AF-home
+// hardening is judged against, and what the symlink notice names.
+//
+// The type is unexported ON PURPOSE, and so is withFollowedFileLock. Following a
+// link is a promise decided for the global config alone (#3660, #3672), and
+// TestFollowingWriterStaysInsideTheConfigPackage fences the exported writer by
+// name; a handle whose write method is reachable from another package would be
+// that fence with a hole in it. Here the follower cannot leave config/ at all.
+type lockedTarget struct {
+	// link is the path the caller asked for. It may be a symlink, and it is
+	// what results, messages and source provenance should name — the user
+	// arranged that path and does not think of their config by its target.
+	link string
+	// file is the file the lock covers. Read and write THIS one; nothing inside
+	// the critical section may re-derive it from link.
+	file string
+}
+
+// confirm reports that link still resolves to the file the lock was taken on,
+// and names both ends when it does not.
+//
+// Pinning is what makes the write CORRECT — it lands on the locked file
+// whatever the link does afterwards — and this is what makes a moved link LOUD
+// rather than silently rewriting a file the user has redirected away from. It
+// runs twice: on acquisition, because the resolve happens before a wait for the
+// lock that can be arbitrarily long, and again at the write, because the body's
+// read, parse and edit all happen in between.
+//
+// It is a guard, not the mechanism. Check-then-act is not atomic, so a link that
+// moves after the check still leaves the write landing on the locked file; that
+// outcome is the pinning's, and this only decides whether the user hears about
+// it.
+func (t lockedTarget) confirm() error {
+	current, err := resolveWriteTarget(t.link)
+	if err != nil {
+		return fmt.Errorf("%s no longer resolves to %s, the file af locked: %w", t.link, t.file, err)
+	}
+	if current == t.file {
+		return nil
+	}
+	// One wording for both call sites: this fires while queued for the lock and
+	// again mid-operation, so it says the link moved rather than guessing when.
+	return fmt.Errorf("%s moved while af was working on it: it now resolves to %s, "+
+		"but the lock this operation holds covers %s — nothing was written, because a peer af "+
+		"may be rewriting that other file under its own lock; re-run the command",
+		t.link, current, t.file)
+}
+
+// write replaces the locked file atomically. The bytes land on the pinned file;
+// link goes along only so the AF-home hardening and the one-line notice still
+// see the path the user named.
+func (t lockedTarget) write(data []byte, perm os.FileMode) error {
+	if err := t.confirm(); err != nil {
+		return err
+	}
+	return atomicWrite(t.link, t.file, data, perm)
+}
+
+// followedLockRaceHookForTest, when non-nil, runs after the target has been
+// pinned and before the wait for the lock begins — the window in which a peer's
+// stow or chezmoi run repoints the link while this process is queued behind
+// another af. Tests use it to drive that window deterministically, as
+// convertRaceHookForTest and materializeRaceHookForTest do for theirs.
+var followedLockRaceHookForTest func()
+
+// withFollowedFileLock is WithFileLock for a path whose write FOLLOWS a symlink
+// — today only the global config.
 //
 // The lock has to resolve because the write does, and the two must agree or the
 // lock stops meaning anything: once two aliases (two AF homes pointing at one
@@ -29,11 +101,16 @@ import (
 // unresolved path produces two different .lock files and no mutual exclusion
 // over the file both are rewriting (#3660 review).
 //
+// Agreeing once is not enough, which is why fn is handed a lockedTarget rather
+// than the path it passed in: everything the body reads and writes has to be
+// that same resolution, or a link that moves mid-operation reintroduces exactly
+// the disagreement above (#3688).
+//
 // It is deliberately NOT what plain WithFileLock does. A caller that does not
 // follow links writes a real file at its own path, so its lock belongs there —
 // and resolving would drop a .lock file into whatever directory the link points
 // at, which for a dotfiles repository is somebody's tracked working tree.
-func WithFollowedFileLock(path string, fn func() error) error {
+func withFollowedFileLock(path string, fn func(lockedTarget) error) error {
 	// Surface a broken link HERE rather than locking the unresolved path and
 	// letting the callback discover it. Callbacks read the file before they
 	// reach the writer, so a silent fallback turned the both-ends error this
@@ -43,9 +120,29 @@ func WithFollowedFileLock(path string, fn func() error) error {
 	if err != nil {
 		return err
 	}
-	return WithFileLock(target, fn)
+	locked := lockedTarget{link: path, file: target}
+	if followedLockRaceHookForTest != nil {
+		followedLockRaceHookForTest()
+	}
+	return WithFileLock(target, func() error {
+		// Waiting for the lock is unbounded, and the resolve above happened
+		// before the wait. Re-check before the body does any work — reading,
+		// parsing and editing a file the link no longer names is wasted at best
+		// and, if the result were written, wrong (#3688).
+		if err := locked.confirm(); err != nil {
+			return err
+		}
+		return fn(locked)
+	})
 }
 
+// TryWithFileLock is WithFileLock for callers that must not wait: it runs fn
+// under the same exclusive flock, but only if the lock is free right now.
+// It reports whether the lock was acquired; when it was not, fn never runs and
+// the caller should treat the work as already in hand elsewhere rather than
+// queue behind it. Use this on latency-sensitive paths (a user is waiting)
+// where duplicating another process's work is pointless — blocking there turns
+// a peer's slow operation into an unexplained hang of your own.
 func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
 	lockPath := path + ".lock"
 
@@ -216,7 +313,9 @@ func lockFileIsCurrent(f *os.File, lockPath string) (bool, error) {
 // and atomically renames it to path. This prevents partial writes from being
 // visible to readers.
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	return atomicWrite(path, data, perm, false)
+	// Its own path IS its target: this writer replaces the file at the path it
+	// was given, link or not.
+	return atomicWrite(path, path, data, perm)
 }
 
 // AtomicWriteFileFollowingLink is AtomicWriteFile for the one file af rewrites
@@ -234,37 +333,48 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 // Callers outside config/ are refused by
 // TestFollowingWriterStaysInsideTheConfigPackage rather than by the compiler,
 // so the promise cannot spread silently.
+//
+// Nothing in this package calls it today. Since #3688 every followed write
+// happens under withFollowedFileLock and goes through the resolution that lock
+// pinned, because resolving a second time inside a critical section is the bug
+// that issue is about. This is what a followed write looks like with no lock to
+// pin one — and it is the name TestFollowingWriterStaysInsideTheConfigPackage
+// fences the promise by, so it is also what keeps that fence pointed at
+// something.
 func AtomicWriteFileFollowingLink(path string, data []byte, perm os.FileMode) error {
-	return atomicWrite(path, data, perm, true)
+	target, err := resolveWriteTarget(path)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, target, data, perm)
 }
 
-func atomicWrite(path string, data []byte, perm os.FileMode, followLink bool) error {
-	// ensureStorageParent runs on the ORIGINAL path, before any link is
-	// resolved, and the order is load-bearing: secureAFHomeForPath hardens the
-	// AF home only when the write path is at or inside it, so resolving first
-	// would move the path outside the home and silently skip that hardening —
-	// for exactly the users who link their config into a dotfiles repo (#3660).
+// atomicWrite stages data beside target and renames it into place.
+//
+// It is always TOLD where the bytes go; it never decides. path is the caller's
+// own path — what the AF-home hardening is judged against and what a symlink
+// notice names — and target is the file being replaced. The two differ only
+// when a link is being followed, and whoever followed it did the resolving
+// (#3688).
+func atomicWrite(path, target string, data []byte, perm os.FileMode) error {
+	// ensureStorageParent runs on the ORIGINAL path rather than on target, and
+	// that is load-bearing: secureAFHomeForPath hardens the AF home only when
+	// the write path is at or inside it, so passing the resolved target would
+	// move the path outside the home and silently skip that hardening — for
+	// exactly the users who link their config into a dotfiles repo (#3660).
 	if err := ensureStorageParent(path); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", filepath.Dir(path), err)
 	}
 
-	target := path
-	if followLink {
-		resolved, err := resolveWriteTarget(path)
-		if err != nil {
-			return err
+	if target != path {
+		noticeSymlinkWrite(path, target)
+		// Do not widen the real file. Callers pass 0644 because that is the
+		// mode for a config af itself created; a target the user keeps at
+		// 0600 in their dotfiles is a deliberate choice about a file af is
+		// only rewriting, and following must not quietly relax it.
+		if info, statErr := os.Stat(target); statErr == nil {
+			perm = info.Mode().Perm()
 		}
-		if resolved != path {
-			noticeSymlinkWrite(path, resolved)
-			// Do not widen the real file. Callers pass 0644 because that is the
-			// mode for a config af itself created; a target the user keeps at
-			// 0600 in their dotfiles is a deliberate choice about a file af is
-			// only rewriting, and following must not quietly relax it.
-			if info, statErr := os.Stat(resolved); statErr == nil {
-				perm = info.Mode().Perm()
-			}
-		}
-		target = resolved
 	}
 	// The temp file lives in the TARGET's directory: os.Rename cannot cross
 	// filesystems, and a link into another mount is the whole point of the
