@@ -62,6 +62,31 @@ const CONCEDED_MERGE_REFUSALS = [
   // that is still open. It is the one shape that re-reads before concluding.
   { status: 405, pattern: /Merge already in progress/i, settling: true },
 ];
+// Merge refusals that mean "try again later", which is a DIFFERENT claim from the
+// list above and therefore a different list (#3808).
+//
+// CONCEDED_MERGE_REFUSALS says "another actor won this head, so exiting success
+// is honest" — and it proves that with a second read before conceding. This one
+// says "nobody won, and nothing merged": the base advanced between the
+// up-to-date compare and the merge write, so the head is now behind and the next
+// evaluation update-branches it. Folding this into the conceded list would make
+// that list's header mean two things at once, and would let a run exit success
+// having merged nothing — the outcome the merged-owner-unknown guard exists to
+// prevent.
+//
+// Observed on run 33753834599: #3799 merged at 12:12:27Z and this refusal
+// arrived 1.7s later for #3802, which stayed open. The comment above the
+// up-to-date compare already predicted this exact race and left open what the
+// losing run should do; this is that decision.
+const RETRYABLE_MERGE_REFUSALS = [
+  {
+    status: 405,
+    pattern: /Base branch was modified/i,
+    // The gate's own prefix, because `processAggregateHead` recognises it as
+    // ordinary waiting state — the same channel the behindBy path already uses.
+    reason: "base moved between the compare and the merge; the next evaluation brings the head up to date",
+  },
+];
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 // THE USAGE-LIMIT RULE, stated once (#3744).
@@ -2056,13 +2081,29 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
     throw new Error(`Refusing to merge PR #${prNumber}; ${reason}`);
   }
 
-  const response = await github.rest.pulls.merge({
-    owner,
-    repo,
-    pull_number: prNumber,
-    merge_method: "squash",
-    sha: gate.headSha,
-  });
+  let response;
+  try {
+    response = await github.rest.pulls.merge({
+      owner,
+      repo,
+      pull_number: prNumber,
+      merge_method: "squash",
+      sha: gate.headSha,
+    });
+  } catch (error) {
+    // A retryable refusal becomes the gate's OWN refusal message, so it travels
+    // the path a fresh refusal already travels — invalidate the aggregate, record
+    // the reason, wait. Rethrowing GitHub's wording instead is what reddened
+    // master: the catch upstream keys on this prefix, and only on this prefix.
+    const retryable = RETRYABLE_MERGE_REFUSALS.find(
+      (shape) =>
+        Number(error?.status) === shape.status && shape.pattern.test(String(error?.message || "")),
+    );
+    if (!retryable) {
+      throw error;
+    }
+    throw new Error(`Refusing to merge PR #${prNumber}; ${retryable.reason}`);
+  }
 
   core.notice(`Squash-merged PR #${prNumber}: ${response.data.sha}`);
   const postMergeErrors = [];
@@ -3895,6 +3936,7 @@ module.exports = {
   resolveTargets,
   __test: {
     CONCEDED_MERGE_REFUSALS,
+    RETRYABLE_MERGE_REFUSALS,
     deleteMergedHeadRef,
     parseSummaryRows,
     parseVerdictArtifact,

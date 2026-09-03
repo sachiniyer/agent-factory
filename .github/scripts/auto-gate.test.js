@@ -5286,6 +5286,56 @@ function mergeRefusal(message, status = 405) {
   return error;
 }
 
+// #3808. The fifth "a benign refusal reds master" shape, and the first that must
+// NOT concede.
+//
+// Run 33753834599: #3799 squash-merged at 12:12:27Z, and 1.7 seconds later this
+// run's `PUT /pulls/3802/merge` came back 405 `Base branch was modified`. The
+// shape is not in CONCEDED_MERGE_REFUSALS, so the HttpError rethrew and the
+// message was GitHub's rather than the gate's own `Refusing to merge PR #N;`
+// prefix — so `processAggregateHead`'s catch took the fatal branch and reddened
+// an Auto Gate run on master for an outcome that was already converging.
+//
+// It is WAITING, not a concession. #3802 stayed open: nobody won this head, and
+// exiting success having merged nothing is the failure mode the
+// `merged-owner-unknown` guard exists to prevent. The base moved, so the head is
+// now behind and the next evaluation update-branches it — which is exactly what
+// the `behindBy > 0` path already does.
+test("a base that moves between the compare and the merge waits instead of failing", async () => {
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Base branch was modified. Review and try the merge again."),
+    // The PR is still open and unmerged — nobody won it.
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a base advance must not red the master Auto Gate run");
+  assert.ok(
+    notices.some((notice) => /base moved between the compare and the merge/i.test(notice)),
+    `the wait must name the base advance; got: ${notices.join(" | ")}`,
+  );
+  assert.ok(!github.mergedWith, "nothing merged — nobody won this head");
+  // The aggregate invalidation that already ran must be unchanged.
+  assert.ok(
+    github.createdChecks.length > 0 || github.updatedChecks.length > 0,
+    "the aggregate is still invalidated on the way out",
+  );
+});
+
+// The negative that keeps the loud path loud: an unlisted 405 on a still-open PR
+// is still fatal. "Benign refusals are quiet" must not become "405s are quiet".
+test("an unlisted 405 on a still-open PR still fails the run", async () => {
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Something nobody has classified"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.notEqual(error, null, "an unclassified refusal must still red the run");
+});
+
 test("a merge already in progress is conceded once the winner has landed", async () => {
   // #3434 verbatim: the maintainer merged PR #3411 by hand while the gate was
   // mid-evaluation on the same head. The gate's merge write lost, and the losing
@@ -5457,14 +5507,19 @@ test("a merged-PR concession still turns the shared head non-green", async () =>
 test("a genuinely failed merge still invalidates the aggregate before propagating", async () => {
   // The concession skip must not weaken the loud path: an unconceded merge error
   // still turns the published aggregate non-green on its way out.
+  //
+  // The stand-in used to be "Base branch was modified", which #3808 classified as
+  // retryable — so it stopped being an example of an UNCLASSIFIED refusal. The
+  // subject of this test is the loud path, not that message, so the example moved
+  // rather than the assertion.
   const github = fakeGateGithub({
-    mergeError: mergeRefusal("Base branch was modified"),
+    mergeError: mergeRefusal("Something nobody has classified"),
     pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
   });
 
   const { error } = await runApplyGateStep({ github });
 
-  assert.match(error?.message || "", /Base branch was modified/);
+  assert.match(error?.message || "", /Something nobody has classified/);
   assert.ok(
     github.createdChecks
       .slice(1)
@@ -5550,14 +5605,16 @@ test("a live newer owner outranks merged evidence on a shared head", async () =>
 test("an unlisted merge refusal is never conceded, even on a merged PR", async () => {
   // The concession is granted on shape AND evidence. A refusal shape nobody has
   // audited must reach the loud path however healthy the PR looks.
+  //
+  // Stand-in changed for the same reason as above (#3808).
   const github = fakeGateGithub({
-    mergeError: mergeRefusal("Base branch was modified"),
+    mergeError: mergeRefusal("Something nobody has classified"),
     pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
   });
 
   const { error } = await runApplyGateStep({ github });
 
-  assert.match(error?.message || "", /Base branch was modified/);
+  assert.match(error?.message || "", /Something nobody has classified/);
   assert.equal(github.pullGetReads, 0, "an unlisted shape must not even be investigated");
 });
 
