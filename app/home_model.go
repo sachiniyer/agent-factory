@@ -318,7 +318,7 @@ type home struct {
 	// writes through daemon.SetGlobalConfigValue — the local control socket, or a
 	// local file write. It does not follow --daemon-url/AF_DAEMON_URL, which
 	// `af config set` has since #3679; see the ConfigPane doc in ui/config_pane.go
-	// for why routing the write alone would be worse than not routing it.
+	// for why routing the write alone would be worse than not routing it (#3708).
 	configPane *ui.ConfigPane
 	// menu displays the key hints inside the status bar (shared handle for
 	// SetState/keydown callers)
