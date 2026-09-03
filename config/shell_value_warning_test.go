@@ -250,12 +250,20 @@ func TestExecSeparatorWarning_RootAgentProgram(t *testing.T) {
 	})
 }
 
-// TestExecSeparatorWarning_DoesNotBlameTheFileForADetectedAlias pins the
+// TestExecSeparatorWarning_NamesTheShellAliasBehindADetectedValue pins the
 // attribution. DefaultConfig overlays af's probed claude command as
-// program_overrides.claude BEFORE any file is decoded, so a warning that named
-// the config path would send the operator to edit a key their file does not
-// contain — the `--` is in their shell alias.
-func TestExecSeparatorWarning_DoesNotBlameTheFileForADetectedAlias(t *testing.T) {
+// program_overrides.claude BEFORE any file is decoded, so the key can be absent
+// from the file the warning names and the `--` can live only in the operator's
+// ~/.zshrc — a message pointing solely at the config path would send them
+// looking for a key that is not there.
+//
+// It names BOTH, deliberately, because af cannot tell the two apart at this
+// point: `source.builtIn` reports that the value equals the default, not whether
+// the file also sets it, and materializeDefaultConfig WRITES the probed value
+// into config.toml — so on later loads the common case is that it is in both
+// places. Both are real fixes, and claiming either exclusively would be false
+// about half the time.
+func TestExecSeparatorWarning_NamesTheShellAliasBehindADetectedValue(t *testing.T) {
 	cfg := &Config{ProgramOverrides: map[string]string{"claude": "exec -- /opt/claude"}}
 	cfg.source.builtIn = &Config{ProgramOverrides: map[string]string{"claude": "exec -- /opt/claude"}}
 
@@ -264,15 +272,16 @@ func TestExecSeparatorWarning_DoesNotBlameTheFileForADetectedAlias(t *testing.T)
 	out := warnings.String()
 
 	assertExecSeparatorWarning(t, out, "program_overrides.claude")
-	assert.NotContains(t, out, "Config issue in",
-		"the key is not in the file, so the warning must not send the operator there")
-	assert.Contains(t, out, "shell alias", "it has to name where the value actually came from")
+	assert.Contains(t, out, "Config issue in ~/.agent-factory/config.toml",
+		"the file is always a real place to override the value")
+	assert.Contains(t, out, "check that alias too",
+		"and the alias is where it regenerates from, which the file alone would not tell them")
 }
 
-// TestExecSeparatorWarning_BlamesTheFileWhenTheFileSetIt is the other half: a
-// value that differs from the probed default DID come from the file, and the
-// path is exactly what the operator needs.
-func TestExecSeparatorWarning_BlamesTheFileWhenTheFileSetIt(t *testing.T) {
+// TestExecSeparatorWarning_OmitsTheAliasNoteWhenTheValueIsNotAfsProbe is the
+// other half: a value that differs from the probe has nothing to do with the
+// operator's alias, and sending them there would be a wild goose chase.
+func TestExecSeparatorWarning_OmitsTheAliasNoteWhenTheValueIsNotAfsProbe(t *testing.T) {
 	cfg := &Config{ProgramOverrides: map[string]string{"claude": "exec -- /usr/bin/claude"}}
 	cfg.source.builtIn = &Config{ProgramOverrides: map[string]string{"claude": "/opt/claude"}}
 
@@ -282,7 +291,7 @@ func TestExecSeparatorWarning_BlamesTheFileWhenTheFileSetIt(t *testing.T) {
 
 	assertExecSeparatorWarning(t, out, "program_overrides.claude")
 	assert.Contains(t, out, "Config issue in ~/.agent-factory/config.toml")
-	assert.NotContains(t, out, "shell alias")
+	assert.NotContains(t, out, "check that alias too")
 }
 
 // TestExecSeparatorWarning_SaysItOncePerSourceAndValue pins the memo. A config
@@ -362,6 +371,6 @@ func TestExecSeparatorWarning_FirstRunMaterializationIsInspected(t *testing.T) {
 
 	out := warnings.String()
 	assertExecSeparatorWarning(t, out, "program_overrides.claude")
-	assert.Contains(t, out, "shell alias",
-		"nothing here came from a file — the operator has to be sent to their alias")
+	assert.Contains(t, out, "check that alias too",
+		"nothing here came from a file yet — the alias is what regenerates it on every materialization")
 }

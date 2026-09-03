@@ -48,21 +48,32 @@ var warnedShellValueKeys = []string{
 	"sandbox.ssh",
 }
 
-// detectedClaudeOrigin is the origin phrase for the claude command af probes off
-// the operator's shell. It is NOT a config key: DefaultConfig overlays it as
-// program_overrides.claude before any file is decoded, so a warning that named
-// the config file would send the operator to edit a key their file does not
-// contain (the alias lives in their ~/.zshrc). Naming the real source is the
-// difference between an actionable warning and a wild goose chase.
-const detectedClaudeOrigin = "af's detected claude command (from your shell alias or PATH, not from this file)"
+// detectedClaudeNote is appended when a value still matches the claude command af
+// probes off the operator's shell. DefaultConfig overlays that probe as
+// program_overrides.claude BEFORE any file is decoded, so the key can be absent
+// from the file the warning names — the `--` is in their ~/.zshrc — and an
+// operator sent only to the config file would find nothing to edit.
+//
+// It is a NOTE rather than a replacement for the path, because af cannot tell the
+// two apart here: `source.builtIn` says the value equals the default, not whether
+// the file also sets it, and materializeDefaultConfig WRITES the probed value
+// into config.toml, so on every later load the common case is that it is in both
+// places at once. `validateConfig` has no access to the file's shape
+// (metadataForSource is computed in the parsers and never reaches it), so a
+// message claiming the key is absent would be false exactly as often as it was
+// true. Naming both places is the honest form, and both are real fixes: the file
+// value wins for this install, and the alias is what regenerates it.
+const detectedClaudeNote = " af also detects this command from your shell (an alias, or PATH), and the value here " +
+	"still matches what it detected — so check that alias too: while it carries the `--`, the next config af " +
+	"materializes will carry it again."
 
 // shellValue is one operator-authored value bound for `/bin/sh -c`, with the
-// config key that names it and — when it did not come from the file being
-// loaded — where it actually came from.
+// config key that names it and, when the value is also af's own probe result, a
+// note sending the operator to the shell alias behind it.
 type shellValue struct {
-	key    string
-	value  string
-	origin string
+	key   string
+	value string
+	note  string
 }
 
 // shellValueSet collects the values one config source hands to a shell. Each of
@@ -73,25 +84,25 @@ type shellValueSet []shellValue
 // add records one scalar value from the file being loaded. Empty values are
 // skipped rather than parsed: an unset key is not an operator's authored string.
 func (s *shellValueSet) add(key, value string) {
-	s.addFrom(key, value, "")
+	s.addNoted(key, value, "")
 }
 
-// addFrom records a value whose origin is NOT the file being loaded.
-func (s *shellValueSet) addFrom(key, value, origin string) {
+// addNoted records a value that carries an extra clause about where else it may
+// have come from.
+func (s *shellValueSet) addNoted(key, value, note string) {
 	if value == "" {
 		return
 	}
-	*s = append(*s, shellValue{key: key, value: value, origin: origin})
+	*s = append(*s, shellValue{key: key, value: value, note: note})
 }
 
 // addMap records a `section.<leaf>` map such as program_overrides. builtIn, when
-// non-nil, is the defaults snapshot the file was decoded onto: a leaf whose value
-// is still exactly the default did not come from this file, so it is attributed
-// to origin instead of to the path.
-func (s *shellValueSet) addMap(section string, values, builtIn map[string]string, origin string) {
+// non-nil, is the defaults snapshot the file was decoded onto: a leaf still equal
+// to it is also af's own probe result, which earns the note.
+func (s *shellValueSet) addMap(section string, values, builtIn map[string]string, note string) {
 	for leaf, value := range values {
 		if builtIn != nil && builtIn[leaf] == value {
-			s.addFrom(section+"."+leaf, value, origin)
+			s.addNoted(section+"."+leaf, value, note)
 			continue
 		}
 		s.add(section+"."+leaf, value)
@@ -132,9 +143,6 @@ func (s shellValueSet) warnExecSeparator(prettyPath string) {
 	sort.Slice(affected, func(i, j int) bool { return affected[i].key < affected[j].key })
 	for _, value := range affected {
 		lead := fmt.Sprintf("Config issue in %s: %s", prettyPath, value.key)
-		if value.origin != "" {
-			lead = fmt.Sprintf("%s, which af resolves as %s,", value.origin, value.key)
-		}
 		// Once per (source, key, value). A config load is not a rare event — the
 		// daemon issues ~10 per session-create, and `af config set` re-parses the
 		// file twice around its own write — and #2496 already paid for the
@@ -150,8 +158,8 @@ func (s shellValueSet) warnExecSeparator(prettyPath string) {
 				"`--`: af runs the same command written `exec <program> …`. This is a warning, not an error — "+
 				"bash (/bin/sh on macOS), busybox ash and zsh in sh mode all accept the separator, so the value "+
 				"is correct as written on those shells, and a docker or ssh backend runs it on another machine's "+
-				"shell entirely",
-			lead)
+				"shell entirely.%s",
+			lead, value.note)
 	}
 }
 
@@ -166,7 +174,7 @@ func warnGlobalShellValues(config *Config, prettyConfigPath string) {
 		overrideDefaults = config.source.builtIn.ProgramOverrides
 	}
 	values := shellValueSet{}
-	values.addMap("program_overrides", config.ProgramOverrides, overrideDefaults, detectedClaudeOrigin)
+	values.addMap("program_overrides", config.ProgramOverrides, overrideDefaults, detectedClaudeNote)
 	values.add("on_archive_command", config.OnArchiveCommand)
 	values.add("sandbox.ssh", config.SandboxSSH)
 	values.add("root_agent.program", config.RootAgent.Program)
