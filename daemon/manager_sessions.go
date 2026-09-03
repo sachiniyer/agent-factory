@@ -6,7 +6,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -32,7 +31,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	if err != nil {
 		return session.InstanceData{}, err
 	}
-	log.InfoLog.Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
+	m.info().Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
 	// Canonicalize to the resolved session's title so the killsInFlight key,
 	// storage delete, and event all key off the identity we actually resolved
 	// (by id), not the request's title. req is a value copy, so this is local.
@@ -112,7 +111,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 
 	stage.set("checking instance identity")
 	if m.currentInstanceReplaced(key, instance, targetID) {
-		log.InfoLog.Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
+		m.info().Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
 	}
 	// Admission belongs before the commit point and before AgentServer.Kill closes
@@ -355,7 +354,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		return resolved, &mutationCommittedError{err: fmt.Errorf("failed to delete instance from storage: %w", err)}
 	}
 	if !deleted {
-		log.InfoLog.Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)
+		m.info().Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)
 		return resolved, nil
 	}
 
@@ -374,7 +373,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		// unconfigured repos (harmless — the loop never visits them — and it
 		// keeps kill-vs-config-change ordering race-free).
 		m.rootKilledAt[repoID] = nowFunc()
-		log.InfoLog.Printf("root agent for repo %s killed by user; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+		m.info().Printf("root agent for repo %s killed by user; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
 	return resolved, nil

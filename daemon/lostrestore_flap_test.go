@@ -66,12 +66,14 @@ func TestRestoreLostSessions_OneAnswerIsNotSustainedLiveness(t *testing.T) {
 // the counter resets, Recover is called once per pass forever, and no give-up ever
 // fires.
 func TestRestoreLostSessions_FlapAfterBriefLivenessReachesGiveUp(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	info, errors := captureInfo(t), captureErrors(t)
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	info, errors := ownLogs.info, ownLogs.errors
 
 	// Every pass that spawns is followed by exactly ONE answering poll and then the
 	// agent's exit. Passes that only record the death leave the row Lost and are

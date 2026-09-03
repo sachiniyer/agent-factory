@@ -77,9 +77,9 @@ func stallLegacyVerdictLookup(t *testing.T, repoID string) (release func()) {
 // resolves legacy paths on the same budget.
 func unansweredVerdictBudget(t *testing.T) {
 	t.Helper()
-	prev := rootLegacyRepoProbeTimeout
-	rootLegacyRepoProbeTimeout = time.Nanosecond
-	t.Cleanup(func() { rootLegacyRepoProbeTimeout = prev })
+	prev := rootRepoProbeBudget
+	rootRepoProbeBudget = time.Nanosecond
+	t.Cleanup(func() { rootRepoProbeBudget = prev })
 }
 
 // unknowableLegacyConfig is the shape that makes the answer genuinely unknown,
@@ -222,7 +222,7 @@ func TestUnansweredLegacyLookupRefusesRatherThanReportUnconfigured(t *testing.T)
 	// #1122's shape, and the boundary of the claim: with the budget restored the
 	// very next call answers, so the refusal is transient and needs no config
 	// change to clear.
-	rootLegacyRepoProbeTimeout = 2 * time.Second
+	rootRepoProbeBudget = 2 * time.Second
 	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentWillMaterialize {
 		t.Fatalf("the verdict must heal once the probe answers again, got reason %d", got)
 	}

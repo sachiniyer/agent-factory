@@ -4,7 +4,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -354,7 +353,7 @@ func (m *Manager) settleRemoteProbeFailure(
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
 			return
 		}
-		log.InfoLog.Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
+		m.info().Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
 		return
 	case probeAbsent, probeAnsweredDead:
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {

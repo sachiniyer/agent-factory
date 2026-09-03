@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -291,5 +290,5 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 		m.warn().Printf("task %s: could not %s session %q after its run finished: %v", taskID, verb, title, err)
 		return
 	}
-	log.InfoLog.Printf("task %s: applied on_complete=%s to session %q after its run finished", taskID, verb, title)
+	m.info().Printf("task %s: applied on_complete=%s to session %q after its run finished", taskID, verb, title)
 }

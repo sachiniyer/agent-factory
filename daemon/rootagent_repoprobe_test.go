@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,15 +68,16 @@ func captureRootEnsureLogs(t *testing.T) (warnings, errors *logCapture) {
 func TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	path := t.TempDir()
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	// Shim git only once the manager exists, so nothing but the ensure pass
 	// under test sees an unanswerable probe.
 	_ = installUnanswerableGit(t)
-	warnings, _ := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	warnings := ownLogs.warnings
+	warnings.Reset()
 	manager.ensureRootAgentsAndWait()
 
 	got := warnings.String()
@@ -96,12 +98,13 @@ func TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository(t *testing.T)
 func TestRootEnsureStillNarratesAnAnsweredRefusalAsAPathFailure(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	path := t.TempDir() // a real directory, and really not a git repository
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
-	warnings, _ := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	warnings := ownLogs.warnings
+	warnings.Reset()
 	manager.ensureRootAgentsAndWait()
 
 	got := warnings.String()
@@ -128,13 +131,14 @@ func TestRootEnsureEscalationDoesNotAssertPersistenceFromUnansweredProbes(t *tes
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir()
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	_ = installUnanswerableGit(t)
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
 		manager.ensureRootAgentsAndWait()
 	}
@@ -171,12 +175,13 @@ func TestRootEnsureEscalationStillAssertsPersistenceForAnsweredFailures(t *testi
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir()
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
 		manager.ensureRootAgentsAndWait()
 	}
@@ -196,8 +201,13 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 	project := config.Project{ID: "prj_0123456789abcdef0123456789abcdef", Root: t.TempDir()}
 
 	_ = installUnanswerableGit(t)
-	warnings, _ := captureRootEnsureLogs(t)
-	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers(log.WarningLog, []config.Project{project}, nil)
+	// This test calls the package-level layer builder directly, so there is no
+	// Manager to own the log — it hands the builder a sink of its own instead,
+	// which is the same ownership the routed callers get (#3797).
+	warnings := &logCapture{}
+	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers(
+		stdlog.New(warnings, log.WarningLog.Prefix(), log.WarningLog.Flags()),
+		[]config.Project{project}, nil)
 
 	got := warnings.String()
 	if strings.Contains(got, "does not resolve to a git repository") {
@@ -239,13 +249,14 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir() // a real directory, and really not a git repository
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	letGitAnswer := installUnanswerableGit(t)
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
 		manager.ensureRootAgentsAndWait()
 	}
@@ -305,13 +316,14 @@ func TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade(t *t
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir() // a real directory, and really not a git repository
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	letGitAnswer := installUnanswerableGit(t)
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 
 	// One short of the threshold, all unanswered; then git answers, and that
 	// single real error is what crosses it.

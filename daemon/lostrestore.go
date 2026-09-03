@@ -2,13 +2,13 @@ package daemon
 
 import (
 	"errors"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -236,7 +236,7 @@ func (m *Manager) RestoreLostSessions() {
 	}
 	m.mu.Unlock()
 	for _, healed := range restored {
-		logLostRestoreSuccess(healed.instance.Title, healed.repoID, healed.attempts)
+		logLostRestoreSuccess(m.info(), healed.instance.Title, healed.repoID, healed.attempts)
 	}
 
 	// Stable order so multi-session recovery after an outage is deterministic
@@ -374,7 +374,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	if confirmedPriorAttempts > 0 {
 		// The replacement was observed alive, then died in a later poll. Close that
 		// successful episode before this tick starts a genuinely new one.
-		logLostRestoreSuccess(inst.Title, repoID, confirmedPriorAttempts)
+		logLostRestoreSuccess(m.info(), inst.Title, repoID, confirmedPriorAttempts)
 	}
 	if diedBeforeConfirm {
 		m.lostRestoreFailed(key, repoID, st, inst, deathErr)
@@ -390,7 +390,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		st.remoteLogged = true
 		m.mu.Unlock()
 		if logIt {
-			log.InfoLog.Printf("session %q is Lost but remote; not auto-restoring (reconnect is not supported) — kill it to clear the row", inst.Title)
+			m.info().Printf("session %q is Lost but remote; not auto-restoring (reconnect is not supported) — kill it to clear the row", inst.Title)
 		}
 		return
 	}
@@ -428,7 +428,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// wedged remote cannot stall the poll loop here either.
 	switch m.remoteSandboxLiveness(inst) {
 	case probeAlive:
-		log.InfoLog.Printf("restore of lost session %q (repo %s): restored after 0 attempts; its existing remote sandbox answered alive, so the Lost mark was cleared without re-provisioning", inst.Title, repoID)
+		m.info().Printf("restore of lost session %q (repo %s): restored after 0 attempts; its existing remote sandbox answered alive, so the Lost mark was cleared without re-provisioning", inst.Title, repoID)
 		_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
 		inst.ClearLostRestoreFailure()
 		// Clear before the persist, same ordering rule as the recovery path below:
@@ -557,7 +557,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
 	// window rather than clearing the retry state; see armRestoreConfirmation.
 	attempt := m.armRestoreConfirmation(repoID, inst)
-	log.InfoLog.Printf("restore of lost session %q (repo %s) started attempt %d: agent re-spawned; awaiting liveness confirmation", inst.Title, repoID, attempt)
+	m.info().Printf("restore of lost session %q (repo %s) started attempt %d: agent re-spawned; awaiting liveness confirmation", inst.Title, repoID, attempt)
 }
 
 // armRestoreConfirmation marks a session whose recovery spawn just RETURNED SUCCESS
@@ -631,7 +631,7 @@ func (m *Manager) lostRestoreFailed(key, repoID string, st *lostRestoreState, in
 		m.mu.Unlock()
 
 		inst.SetLostRestoreFailure(attempts, err)
-		log.ErrorLog.Printf("restore of lost session %q (repo %s): giving up after %d attempts: %v", inst.Title, repoID, attempts, err)
+		m.err().Printf("restore of lost session %q (repo %s): giving up after %d attempts: %v", inst.Title, repoID, attempts, err)
 		if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
 			m.warn().Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
 		}
@@ -650,8 +650,12 @@ func attemptNoun(attempts int) string {
 	return "attempts"
 }
 
-func logLostRestoreSuccess(title, repoID string, attempts int) {
-	log.InfoLog.Printf("restore of lost session %q (repo %s): restored after %d %s", title, repoID, attempts, attemptNoun(attempts))
+// info is the restoring Manager's INFO logger. This helper is package-level and
+// its message ("restored after") is asserted on, so leaving it reaching for the
+// global would let those assertions read a sink any Manager writes into — the
+// #3795 trap, one level down (#3797).
+func logLostRestoreSuccess(info *stdlog.Logger, title, repoID string, attempts int) {
+	info.Printf("restore of lost session %q (repo %s): restored after %d %s", title, repoID, attempts, attemptNoun(attempts))
 }
 
 func lostRestoreBackoff(attempt int) time.Duration {
@@ -741,7 +745,7 @@ func (m *Manager) logVanishedWorktreeOnce(repoID string, st *lostRestoreState, i
 	teardownIntent := userKilled || teardownInFlight || op == session.OpKilling || op == session.OpArchiving
 	classification := classifyMissingWorktree(diag.WorktreeRegistrationKnown, diag.WorktreeRegistered, teardownIntent)
 
-	log.ErrorLog.Printf(
+	m.err().Printf(
 		"WORKTREE_MISSING_DETECTED classification=%q title=%q instance_id=%q repo_id=%q repo_path=%q worktree_path=%q branch=%q liveness=%q status=%q started=%t user_killed=%t kill_in_flight=%t in_flight_op=%d external_worktree=%t branch_created_by_us=%t observed_at=%q parent_path=%q parent_exists=%t parent_stat_error=%q repo_exists=%t repo_stat_error=%q git_worktree_registered=%q git_worktree_list_error=%q branch_exists=%q branch_probe_error=%q recover_error=%q",
 		classification,
 		inst.Title,

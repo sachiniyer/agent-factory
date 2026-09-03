@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -135,13 +134,13 @@ func (m *Manager) noteKillRetryFailure(key, title string, err error) {
 
 	switch {
 	case retired && escalate:
-		log.ErrorLog.Printf("finishing kill of %q: this cleanup cannot be completed by retrying it, so af has stopped trying "+
+		m.err().Printf("finishing kill of %q: this cleanup cannot be completed by retrying it, so af has stopped trying "+
 			"after %d attempt(s). The record is KEPT so nothing is silently orphaned — resolve the cause and restart the daemon, "+
 			"or kill the session again to retry: %v", title, failures, err)
 	case retired:
 		// Already reported; stay silent rather than repeat it.
 	case escalate:
-		log.ErrorLog.Printf("finishing kill of %q failed %d consecutive times; the cause looks persistent — "+
+		m.err().Printf("finishing kill of %q failed %d consecutive times; the cause looks persistent — "+
 			"retrying every %s: %v", title, failures, session.CleanupRetrySettledInterval(), err)
 	default:
 		m.warn().Printf("finishing kill of %q: not deleting the record yet (retrying): %v", title, err)
@@ -276,7 +275,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		return
 	}
 	if !deleted {
-		log.InfoLog.Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
+		m.info().Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
 		return
 	}
 	m.forgetKillRetry(key)
@@ -297,7 +296,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		// and re-arming here is what the surviving intent is owed. Still only a
 		// delay — the loop self-heals a configured root afterwards (#1223).
 		m.rootKilledAt[repoID] = nowFunc()
-		log.InfoLog.Printf("root agent for repo %s: finished an interrupted user kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+		m.info().Printf("root agent for repo %s: finished an interrupted user kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
 	if removed {
