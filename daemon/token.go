@@ -29,9 +29,9 @@ import (
 //     both generate, racing to persist different tokens. The lock makes the
 //     first caller win and later callers observe its token, so every caller
 //     agrees.
-//   - The write is atomic (config.AtomicWriteFile: temp file + rename). Before
-//     this, writeToken used os.WriteFile (O_TRUNC), so a rotation left a window
-//     where the file was truncated-but-not-yet-rewritten. The withAuth gate
+//   - The write is atomic (config.AtomicWriteFileRefusingLink: temp file +
+//     rename). Before this, writeToken used os.WriteFile (O_TRUNC), so a
+//     rotation left a window where the file was truncated-but-not-yet-rewritten. The withAuth gate
 //     re-reads the token per request (authorize → expectedToken → LoadToken), so
 //     a request landing in that window saw an empty file, LoadToken errored, and
 //     the gate failed closed => a spurious 401 (#1722). An atomic rename lets a
@@ -73,13 +73,20 @@ func generateToken() (string, error) {
 
 // writeToken persists tok to path atomically with 0600 permissions, creating
 // the parent af home directory if needed. It writes to a temp file and renames
-// it into place (config.AtomicWriteFile), so a concurrent reader never observes
-// a truncated/empty token file mid-write (the #1722 rotation-401 window).
-// AtomicWriteFile applies perm exactly via tmp.Chmod, so the token lands 0600
+// it into place (config.AtomicWriteFileRefusingLink), so a concurrent reader never
+// observes a truncated/empty token file mid-write (the #1722 rotation-401 window).
+// The writer applies perm exactly via tmp.Chmod, so the token lands 0600
 // regardless of the process umask, and it MkdirAll's the parent dir itself —
 // no separate MkdirAll/Chmod needed.
+//
+// It REFUSES a symlinked path (#3672). af mints this file and owns it, and the
+// 0600 mode is the whole of the local auth model: following a link would apply
+// af's secret and af's mode to a file somebody else chose, and replacing one
+// would silently discard their arrangement while `af token rotate` kept writing
+// past it. Neither is something the token file ever promised, so it fails closed
+// and names both ends.
 func writeToken(path, tok string) error {
-	if err := config.AtomicWriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
+	if err := config.AtomicWriteFileRefusingLink(path, []byte(tok+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write token: %w", err)
 	}
 	return nil

@@ -574,15 +574,15 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 // TestAtomicWriteFileDoesNotFollowLinksByDefault is the counterpart guarantee,
 // and the reason following is a separate function rather than a flag.
 //
-// af's own managed files — the bearer token, autostart units, the task store —
-// go through the plain writer, and #3672's caller table depends on their
-// semantics being unchanged. The concrete case there: daemon/autostart.go writes
-// a unit with AtomicWriteFile and cleans up with os.Remove of the SAME path, so
-// a writer that silently followed would leave the cleanup unlinking a link whose
-// content had gone somewhere else.
+// Replacing the link is what os.Rename does on its own, and it stays the
+// behaviour of the plain writer for every caller that took neither of the other
+// two answers — config's own state, TUI state, the project registry (#3672
+// decided the af-managed group; anything it did not name keeps this).
 //
 // This is the behaviour that a follow-by-default AtomicWriteFile broke, which is
-// why it is pinned rather than assumed.
+// why it is pinned rather than assumed. The callers that must NOT reach it —
+// af's own managed files — now use AtomicWriteFileRefusingLink and are pinned in
+// atomicwrite_refuse_symlink_test.go and beside each caller.
 func TestAtomicWriteFileDoesNotFollowLinksByDefault(t *testing.T) {
 	dir := t.TempDir()
 	elsewhere := t.TempDir()

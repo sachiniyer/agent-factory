@@ -541,8 +541,18 @@ func (q *eventQueue) resetCursorBeforeFreshAppendLocked() error {
 	if q.pending != 0 || q.offset != 0 || q.size != 0 {
 		return nil
 	}
+	// Refuse a symlinked cursor BEFORE the removal seam, not inside the write
+	// fallback below (#3672 review). This path runs with no prior cursor write,
+	// so the remove SUCCEEDS on a link — unlinking the very arrangement
+	// persistCursorValueLocked refuses to write through, and never reaching the
+	// refusing writer at all. The check cannot live in q.remove: production
+	// wires that to os.Remove and tests replace it wholesale.
+	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return err
+	}
 	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
-		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+		// Refuses a link, like persistCursorValueLocked (#3672).
+		if resetErr := config.AtomicWriteFileRefusingLink(q.curPath, []byte("0"), 0644); resetErr != nil {
 			return fmt.Errorf("failed to reset stale event-queue cursor before enqueue: remove failed: %v; reset failed: %w", err, resetErr)
 		}
 		log.WarningLog.Printf("watch task %s: failed to remove stale event-queue cursor before enqueue; reset it to 0: %v", q.taskID, err)
@@ -686,11 +696,20 @@ func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 // jsonl file is gone; otherwise a later append can make already-delivered bytes
 // look pending and silently lose the appended event (#1433).
 func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
+	// Same refusal as the fresh-append reset, and checked before ANY removal so
+	// a refused teardown does not drop the jsonl and then stop (#3672 review).
+	// Draining the last event reaches here whether or not a cursor write
+	// happened first, so the removal seam would otherwise unlink a link the
+	// cursor's writer refuses to write through.
+	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return false, err
+	}
 	if err := q.remove(q.path); err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
 	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
-		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+		// Refuses a link, like persistCursorValueLocked (#3672).
+		if resetErr := config.AtomicWriteFileRefusingLink(q.curPath, []byte("0"), 0644); resetErr != nil {
 			q.offset, q.size = 0, 0
 			return false, fmt.Errorf("failed to reset drained event-queue cursor: remove failed: %v; reset failed: %w", err, resetErr)
 		}
@@ -732,8 +751,8 @@ func (q *eventQueue) compactLocked() error {
 	if err := q.persistCursorValueLocked(0); err != nil {
 		return err
 	}
-	// AtomicWriteFile's directory sync is intentionally best-effort for its
-	// general callers. Compaction needs a stronger cross-file guarantee: cursor
+	// The shared atomic writer's directory sync is intentionally best-effort for
+	// its general callers. Compaction needs a stronger cross-file guarantee: cursor
 	// 0 must be durable before the shortened queue can become durable, or a
 	// crash could pair the new queue with the old nonzero cursor and skip events.
 	// Fence it before creating the compact temp so this sync cannot also persist
@@ -851,6 +870,13 @@ func (q *eventQueue) persistCursorLocked() error {
 // persistCursorValueLocked durably writes an explicit cursor value. Compaction
 // uses it to record the post-rewrite offset (0) BEFORE the rename that shrinks
 // the file (#1537). Callers hold q.mu.
+//
+// The cursor REFUSES a symlinked path (#3672). It is a byte offset into the
+// jsonl file beside it — a pair af creates, advances and deletes together — so
+// the two must stay in the same directory: following a link would leave the
+// queue's own compaction (which fsyncs the cursor's directory before renaming
+// the queue file) fencing the wrong directory, and replacing one would discard
+// an arrangement nobody has a reason to have made.
 func (q *eventQueue) persistCursorValueLocked(off int64) error {
-	return config.AtomicWriteFile(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
+	return config.AtomicWriteFileRefusingLink(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
 }

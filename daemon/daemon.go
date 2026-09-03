@@ -709,24 +709,33 @@ func daemonPIDFilePath() (string, error) {
 // writeDaemonPIDFile atomically writes the current process's PID to the daemon
 // PID file with mode 0600. Used by RunDaemon so callers (StopDaemon, the
 // SIGTERM fallback in RequestShutdown) can locate and signal this daemon.
+//
+// It REFUSES a symlinked path (#3672). The PID file is af's own liveness
+// bookkeeping at a path af chose, written on start and deleted on teardown, so
+// a link there is neither af's to write through nor af's to replace — the same
+// answer the bearer token and the autostart unit take.
 func writeDaemonPIDFile() error {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
 }
 
 // removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
 // already harmless (a stale file is fine — readers verify cmdline) and
 // permission errors only occur in pathological setups. Logs at warning level
 // rather than failing the daemon teardown.
+//
+// It refuses a symlinked path because the write above refuses one: af cannot
+// have written this file through a link, so unlinking one on teardown would
+// delete an arrangement af never touched (#3672).
 func removeDaemonPIDFile() {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := config.RemoveFileRefusingLink(path); err != nil && !os.IsNotExist(err) {
 		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
 	}
 }

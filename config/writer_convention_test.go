@@ -70,6 +70,17 @@ type writerExemption struct {
 	reason string
 }
 
+// approvedWriters are the shared writers a config-package caller may reach disk
+// through. There are THREE now, one per answer to "what does a write do when its
+// destination is a symlink" (#3672), and the scan below names them so a rename
+// that left one behind fails here rather than quietly shrinking the convention
+// to whatever still compiles.
+var approvedWriters = map[string]string{
+	"AtomicWriteFile":              "REPLACE the link — os.Rename's own behaviour, and the unchanged default",
+	"AtomicWriteFileFollowingLink": "FOLLOW the link — the global config (#3660) and the task store (#3672)",
+	"AtomicWriteFileRefusingLink":  "REFUSE the link, naming both ends — af's own managed files (#3672)",
+}
+
 // TestEveryConfigWriterGoesThroughAtomicWriteFile pins the convention that is
 // the only thing holding this package's writers together.
 //
@@ -80,8 +91,8 @@ type writerExemption struct {
 // and AF-home hardening that helper also provides.
 //
 // So the scan is the guard. It parses every non-test file in the package and
-// fails on any disk-writing call that is neither AtomicWriteFile nor a listed
-// exemption.
+// fails on any disk-writing call that is none of the approvedWriters and not a
+// listed exemption.
 func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 	// Calls that put FILE CONTENT on disk or move a file into place.
 	// os.Create/WriteFile are the ones a new writer reaches for by habit; the
@@ -107,6 +118,7 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 	require.NoError(t, err)
 
 	seen := map[string]int{}
+	declared := map[string]bool{}
 	var offenders []string
 	for _, entry := range entries {
 		name := entry.Name()
@@ -139,6 +151,9 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 			enclosing := ""
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name != nil {
 				enclosing = fn.Name.Name
+				if fn.Recv == nil {
+					declared[fn.Name.Name] = true
+				}
 			}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
@@ -175,12 +190,22 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 		}
 	}
 
+	// The three approved writers must actually be here. Without this the scan
+	// would keep passing after one was renamed or deleted — describing a
+	// convention with a hole in it, which is worse than no scan at all.
+	for name, answer := range approvedWriters {
+		assert.True(t, declared[name],
+			"approvedWriters names %s (%s) but this package declares no such function; "+
+				"if it was renamed, rename it here and re-read every caller's decision (#3672)",
+			name, answer)
+	}
+
 	assert.Empty(t, offenders,
-		"these calls write to disk without going through AtomicWriteFile (or its "+
-			"AtomicWriteFileFollowingLink variant).\n"+
-			"A config writer must use it — that is where symlink following (#3660), atomicity, and "+
-			"AF-home hardening live, and adding a writer that skips it silently reacquires all three bugs.\n"+
-			"If a call genuinely cannot use it, add it to writerConventionExemptions with the reason.")
+		"these calls write to disk without going through one of the three shared writers "+
+			"(AtomicWriteFile, AtomicWriteFileFollowingLink, AtomicWriteFileRefusingLink).\n"+
+			"A config writer must use one — that is where symlink policy (#3660, #3672), atomicity, and "+
+			"AF-home hardening live, and adding a writer that skips them silently reacquires all three bugs.\n"+
+			"If a call genuinely cannot use one, add it to writerConventionExemptions with the reason.")
 
 	// A stale exemption is its own defect: it makes the list look considered
 	// while describing code that no longer exists, and the next reader trusts it.
@@ -196,21 +221,38 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 	assert.FileExists(t, filepath.Join(".", "filelock.go"))
 }
 
-// TestFollowingWriterStaysInsideTheConfigPackage is the fence that keeps the
-// symlink-following promise scoped to the file it was decided for.
+// followingWriterPackages are the packages allowed to call the symlink-FOLLOWING
+// writer, each with the reason its file is the user's rather than af's.
 //
-// AtomicWriteFileFollowingLink exists for the GLOBAL CONFIG: the one file af
-// rewrites on the user's behalf rather than owns, where a link into a dotfiles
-// repository is the user's arrangement and every editor writes through it
-// (#3660). af's own managed files — the bearer token, autostart units, the task
-// store, skills, plugins — deliberately keep the plain writer, because "write
-// through whatever this points at" is a stronger promise than any of them asked
-// for, and #3672 records that as a per-caller decision still to be made rather
-// than a default to inherit.
+// The list is the fence, so a line here is the whole of the permission and the
+// reason is what the next reader is owed. Do not add one to make a caller
+// compile.
+var followingWriterPackages = map[string]string{
+	"config": "the global config.toml — the file the variant was decided for (#3660): " +
+		"a link into a dotfiles repository is the user's arrangement, and every editor writes through it",
+	"task": "tasks.json — the one USER-AUTHORED store in the af home (#3672). People write it by " +
+		"hand, so a user may reasonably keep it in dotfiles the way they keep config.toml, and af " +
+		"rewriting the target rather than replacing the link is what that arrangement means. This is a " +
+		"second package, not a weakening: af's own managed files went the other way in the same " +
+		"decision, to AtomicWriteFileRefusingLink",
+}
+
+// TestFollowingWriterStaysInsideTheConfigPackage is the fence that keeps the
+// symlink-following promise scoped to the files it was decided for.
+//
+// AtomicWriteFileFollowingLink exists for content af rewrites on the USER's
+// behalf rather than owns: the global config (#3660) and the task store
+// (#3672). af's own managed files — the bearer token, the PID file, autostart
+// units, the editor-origin secret, the VS Code owner record, the upgrade
+// interlock, the auto-update cache, the event-queue cursor, skills and plugins —
+// refuse a link
+// outright (AtomicWriteFileRefusingLink), because "write through whatever this
+// points at" is a stronger promise than any of them offered and replacing a link
+// silently is not what anyone asked for either.
 //
 // Nothing in the language stops a caller elsewhere from picking the follow
 // variant because it sounds safer. This does: the promise spreads only by
-// someone editing this list and saying why.
+// someone editing followingWriterPackages and saying why.
 func TestFollowingWriterStaysInsideTheConfigPackage(t *testing.T) {
 	const followingWriter = "AtomicWriteFileFollowingLink"
 
@@ -239,8 +281,11 @@ func TestFollowingWriterStaysInsideTheConfigPackage(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		// The config package is where the variant lives and is used.
-		if filepath.Dir(path) == filepath.Join(root, "config") {
+		// A permitted package, named with its reason above. Matched on the
+		// DIRECTORY, not on a path prefix: "config" must not silently cover a
+		// future config/subpkg/ that never took the decision.
+		if _, permitted := followingWriterPackages[filepath.Base(filepath.Dir(path))]; permitted &&
+			filepath.Dir(filepath.Dir(path)) == root {
 			return nil
 		}
 		data, readErr := os.ReadFile(path)
@@ -256,9 +301,11 @@ func TestFollowingWriterStaysInsideTheConfigPackage(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, outside,
-		"%s follows a symlink, and that promise was decided for the global config only (#3660, #3672).\n"+
-			"A caller outside config/ writes a file af manages, where following a link changes semantics "+
-			"nobody asked for — daemon/autostart.go, for one, cleans up with os.Remove of the SAME path it "+
-			"wrote, so a followed write would leave the cleanup unlinking a link whose content went elsewhere.\n"+
-			"Use AtomicWriteFile, or take the decision on #3672 first.", followingWriter)
+		"%s follows a symlink, and that promise was decided for the global config (#3660) and the task "+
+			"store (#3672) only — see followingWriterPackages for the reason each was allowed.\n"+
+			"Everything else in the af home is a file af MANAGES, where following a link is a promise the "+
+			"caller never made: daemon/autostart.go, for one, writes a unit and later removes it, so a "+
+			"followed write would leave the cleanup unlinking a link whose content went elsewhere.\n"+
+			"Use AtomicWriteFileRefusingLink for an af-managed file, AtomicWriteFile for the unchanged "+
+			"replace semantics, or take the decision on #3672 first.", followingWriter)
 }
