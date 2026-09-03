@@ -232,9 +232,9 @@ func TestTimedOutLegacyRootProbeIsUnknownNotARefusal(t *testing.T) {
 
 	warnings := captureWarnings(t)
 
-	prevTimeout := rootLegacyRepoProbeTimeout
-	rootLegacyRepoProbeTimeout = time.Nanosecond
-	t.Cleanup(func() { rootLegacyRepoProbeTimeout = prevTimeout })
+	prevTimeout := rootRepoProbeBudget
+	rootRepoProbeBudget = time.Nanosecond
+	t.Cleanup(func() { rootRepoProbeBudget = prevTimeout })
 
 	manager.ensureRootAgentsAndWait()
 
@@ -278,7 +278,7 @@ func TestTimedOutLegacyRootProbeIsUnknownNotARefusal(t *testing.T) {
 
 	// #1122: retry-forever. With the budget restored and the backoff elapsed,
 	// the very next pass heals the candidate rather than staying refused.
-	rootLegacyRepoProbeTimeout = prevTimeout
+	rootRepoProbeBudget = prevTimeout
 	manager.mu.Lock()
 	st.nextAttempt = time.Time{}
 	manager.mu.Unlock()

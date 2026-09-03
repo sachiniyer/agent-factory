@@ -673,6 +673,11 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			record.identityMismatch = probe.mismatch
 			record.markerUnreadable = probe.markerUnreadable
 			record.pathVanished = probe.vanished
+			// A probe RESULT establishes what the boot resolution could not,
+			// so the boot-time "nobody answered" no longer holds — clearing it
+			// here is what keeps a stale flag from wording a verdict whose
+			// cause has since been established (#3793).
+			record.rootProbeUnanswered = false
 			record.identityPass = pass
 			healed.unresolvedRoots[derivedID] = record
 			// A COMPLETED negative outcome is a normal failed read: it feeds

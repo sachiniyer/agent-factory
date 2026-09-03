@@ -226,7 +226,7 @@ func (m *Manager) legacyRootAgentForRepo(repoID string) (*config.RootAgentConfig
 	// is fail-closed and honest, and it is the same shape as #3247's
 	// registry-wide fail-closed — one unknowable input, every consumer
 	// refusing, rather than one unknowable input and a lock nobody can take.
-	ctx, cancel := context.WithTimeout(context.Background(), rootLegacyRepoProbeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
 	defer cancel()
 	entry, _, err := legacyRootAgentForRepoContext(ctx, m.cfg, repoID)
 	return entry, err
@@ -318,21 +318,23 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 	m.ensureResolvedRoot(path, st, repo, resolution, nil)
 }
 
-// rootLegacyRepoProbeTimeout bounds every repository resolution the legacy
-// root_agents machinery performs where a caller cannot afford to wait forever:
+// rootRepoProbeBudget bounds every repository resolution the root-agent
+// machinery performs where a caller cannot afford to wait forever:
 //
-//   - the ensure sweep, on the instance poll goroutine, every non-backed-off
-//     tick (#3757);
+//   - the legacy root_agents sweep, on the instance poll goroutine, every
+//     non-backed-off tick (#3757);
 //   - the dedup-set recompute the heal pass runs on every published heal, and
 //     its retry for a path that has not answered yet (#3782 items 1 and 2);
-//   - the start-of-day snapshot (#3782 item 2);
-//   - the admission verdict's lookup, on the RPC goroutine and under
-//     taskTargetMu for two of its three consumers (#3782 item 4).
+//   - the start-of-day snapshot, for both the legacy keys and every registered
+//     project's recorded root (#3782 item 2, #3793);
+//   - the admission verdict's legacy lookup, on the RPC goroutine and under
+//     taskTargetMu (#3782 item 4).
 //
-// ONE budget, not one per site. The goroutines differ and that is not the
-// reason they share it — the reason is that every one of them asks git the same
-// question with the same asymmetry, and a second knob would be a second thing
-// to get wrong and to drift.
+// ONE budget, not one per site, and the name says repo rather than legacy
+// because it stopped being the legacy sweep's alone. Same goroutines are not
+// the reason — they differ — the reason is that every one of them is asking
+// git the same question with the same asymmetry, and a second knob would be a
+// second thing to get wrong and to drift.
 //
 // 2s, matching rootHealProbeGrace — its sibling on the same goroutine for the
 // same purpose — and the value repoGitWaitDelay documents as "what every other
@@ -355,7 +357,7 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 //
 // A package var so tests can drive both sides of the bound; production never
 // reassigns it.
-var rootLegacyRepoProbeTimeout = 2 * time.Second
+var rootRepoProbeBudget = 2 * time.Second
 
 // legacyRootRepoFromPath resolves one root_agents path for the ensure sweep,
 // under the caller's context. A package var so a test can drive the stalled-path
@@ -383,7 +385,7 @@ var legacyRootRepoFromPath = config.RepoFromPathContext
 // (#1122). A live root on that repo is untouched throughout — the sweep never
 // reaches the code that could touch it.
 func resolveLegacyRootRepo(path string) (*config.RepoContext, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), rootLegacyRepoProbeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
 	defer cancel()
 	return legacyRootRepoFromPath(ctx, config.ExpandTilde(path))
 }
