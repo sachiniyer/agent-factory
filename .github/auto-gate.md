@@ -54,7 +54,18 @@ other until it is answered in-thread (#3689).
 
 The same manual-only pass applies when the Codex reviewer is observed to be
 usage-limited against the head — no verdict can arrive in that case, so the
-gate degrades to maintainer review rather than wait indefinitely. Auto Gate disables any pending GitHub-native auto-merge
+gate degrades to maintainer review rather than wait indefinitely. What counts as
+that observation is one rule, stated once as `CODEX_LIMIT_RULE` in
+`.github/scripts/auto-gate.js` and quoted here verbatim because a test requires
+every statement of it to agree (#3744):
+
+> A Codex usage-limit message counts as a review outage unless its
+> scope clause names a job this repository has OBSERVED naming something other
+> than review. An unobserved phrasing counts, because a false block during a real
+> outage has no exit while a false degrade is a maintainer-review PASS a human
+> still reads.
+
+Auto Gate disables any pending GitHub-native auto-merge
 request before publishing that pass. Review and review-comment workflows can be
 read-only for fork pull requests; if one cannot update the decision, run Auto
 Gate manually by PR number from the base repository. The `pull_request_target`
