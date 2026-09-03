@@ -46,6 +46,14 @@ after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
 path, because a finding is the only unmet requirement an external PR's reviewer
 can answer per item.
 
+The hand gate in `.claude/skills/gate-pr.md` runs precisely where this one
+cannot — on a PR that changes `auto-gate.js`, since Auto Gate runs master's copy
+of the helper, and during a Codex outage. For finding artifacts that bind to no
+head, that gate now CALLS `unansweredFindingArtifacts` from this script rather
+than restating the rule in jq: the restatement had drifted, and the shape that
+merged #3656 passed the hand gate for months after this script started blocking
+it (#3773). A test runs the skill's recipe and fails if the two disagree.
+
 A push never clears an inline finding by itself, and where the thread currently
 points is no part of the test. Moving the code a thread was anchored to only
 marks that thread outdated, which a rebase or a fix to the neighbouring line does
