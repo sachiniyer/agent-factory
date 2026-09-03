@@ -176,10 +176,7 @@ var projectRootRepoFromPath = config.RepoFromPathContext
 // budget PLUS its own instead of one budget covering both, and left the step
 // uncancellable halfway through. One context, one deadline, one cancellation.
 func resolveProjectRoot(root string) (*config.RepoContext, context.Context, context.CancelFunc, error) {
-	// RED (#3793): no deadline. This is config.RepoFromPath's own context, so
-	// one registered checkout on a stalled mount wedges NewManager and the
-	// daemon serves no session on the box at all.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
 	repo, err := projectRootRepoFromPath(ctx, root)
 	return repo, ctx, cancel, err
 }
@@ -533,10 +530,7 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 			repoRoot = p.Root
 			unresolvedRoots[repoID] = unresolvedProjectRecord{
 				root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID,
-				// RED (#3793): the distinction is not carried, so an
-				// unanswered probe reads as "the path does not resolve" and
-				// the verdict tells the user their checkout is gone.
-				rootProbeUnanswered: false,
+				rootProbeUnanswered: config.RepoProbeUnanswered(repoErr),
 			}
 			// The claim is split at the resolution boundary (#3500): a probe
 			// git never answered is a subprocess outcome, not a verdict on the
