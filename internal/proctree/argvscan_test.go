@@ -15,6 +15,13 @@ func stubScan(t *testing.T, snap func() (map[int]Process, error), argv func(int)
 	previousSnapshot, previousArgv := scanSnapshot, scanArgv
 	t.Cleanup(func() { scanSnapshot, scanArgv = previousSnapshot, previousArgv })
 	scanSnapshot, scanArgv = snap, argv
+	// The identity oracle is defaulted here, not left to each test, because
+	// forgetting it does not look like a mistake: a test with FAKE pids would
+	// quietly consult the HOST process table, and pids like 11 and 44 exist on a
+	// developer box while being absent in a minimal container. Both refusal tests
+	// passed here and failed there for that reason (#3695 review) — a test that
+	// passes for the host's reasons rather than the code's.
+	stubScanIdentity(t, nil)
 }
 
 // stubScanUID stands in for the kernel's ownership answer. A pid absent from
@@ -30,18 +37,26 @@ func stubScanUID(t *testing.T, owners map[int]int) {
 	}
 }
 
-// stubScanLookup stands in for the second oracle — the one that says whether a
-// process whose refusal we could not attribute is still THERE. A pid mapped to
-// an error reports that failure; any other pid reports a live process.
-func stubScanLookup(t *testing.T, absent map[int]error) {
+// identityAnswer is what the identity oracle says about one process: still the
+// same instance, departed, or unrevalidatable. Three answers, because two would
+// collapse "it is gone" into "I could not check".
+type identityAnswer struct {
+	same bool
+	err  error
+}
+
+// stubScanIdentity stands in for the oracle that says whether the process a
+// refusal named is still the SAME instance. A pid without an entry is still
+// itself, which is what stubScan defaults every test to.
+func stubScanIdentity(t *testing.T, answers map[int]identityAnswer) {
 	t.Helper()
-	previous := scanLookup
-	t.Cleanup(func() { scanLookup = previous })
-	scanLookup = func(pid int) (Process, error) {
-		if err, ok := absent[pid]; ok {
-			return Process{}, err
+	previous := scanIdentity
+	t.Cleanup(func() { scanIdentity = previous })
+	scanIdentity = func(p Process) (bool, error) {
+		if answer, ok := answers[p.PID]; ok {
+			return answer.same, answer.err
 		}
-		return Process{PID: pid, StartID: uint64(pid)}, nil
+		return true, nil
 	}
 }
 
@@ -91,7 +106,7 @@ func TestProcessesMatchingArgvFindsALiveProcessByItsArgv(t *testing.T) {
 		// reported here too. That is the right direction to be wrong in: it
 		// costs a rerun, where the reverse costs the platform's coverage
 		// silently.
-		if _, lookupErr := Lookup(unreadable.PID); isGone(lookupErr) {
+		if same, identityErr := SameIdentity(Process{PID: unreadable.PID}); identityErr == nil && !same {
 			t.Fatalf("the scan reported pid %d as a refusal it could not attribute, but that process is GONE; "+
 				"an exit mid-scan is a fact to skip on, not a refusal to fail on — and reported as a refusal it "+
 				"turns this test into a permanent skip that reads like a pass (#3693): %v", unreadable.PID, err)
@@ -275,21 +290,22 @@ func TestAProcessThatExitedMidScanIsNotARefusal(t *testing.T) {
 	}
 	match := func(argv []string) bool { return argv[0] == "systemd-run" }
 
-	// Both ways a departed process is reported, on either platform: darwin's
-	// kern.proc.pid finds no entry (ErrProcessExited), Linux's /proc entry is
-	// already gone. Ownership is unreadable in both — that is the whole trap.
-	for name, departed := range map[string]error{
-		"exited, reported by the process oracle": ErrProcessExited,
-		"its /proc entry already removed":        &fs.PathError{Op: "open", Path: "/proc/45/stat", Err: syscall.ENOENT},
+	// Both ways the snapshotted instance can be gone by the time we ask. The
+	// second is not a variation on the first: the PID still answers, to a
+	// DIFFERENT process, and "something is there" is not "the one we were
+	// refused is there" (#3695 review).
+	for name, answer := range map[string]identityAnswer{
+		"it exited": {same: false},
+		"its pid was recycled onto another process": {same: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			stubScan(t, fixedSnapshot(target, dead), darwinEINVAL)
 			stubScanUID(t, map[int]int{target: os.Getuid()})
-			stubScanLookup(t, map[int]error{dead: departed})
+			stubScanIdentity(t, map[int]identityAnswer{dead: answer})
 
 			matched, err := ProcessesMatchingArgv(match)
 			if err != nil {
-				t.Fatalf("a process that had already EXITED failed the whole scan; on darwin that errno is also how a dead pid answers, so an ordinary mid-scan exit takes the scan down and every caller refuses: %v", err)
+				t.Fatalf("a process that had already departed failed the whole scan; on darwin that errno is also how a dead pid answers, so an ordinary mid-scan exit takes the scan down and every caller refuses: %v", err)
 			}
 			if len(matched) != 1 || matched[0].Process.PID != target {
 				t.Fatalf("matches = %v, want just the live launcher", matched)
@@ -297,13 +313,25 @@ func TestAProcessThatExitedMidScanIsNotARefusal(t *testing.T) {
 		})
 	}
 
+	// And an identity that could not be REVALIDATED is the third answer: not
+	// proof the process departed, so it must not buy a skip.
+	t.Run("identity could not be revalidated", func(t *testing.T) {
+		stubScan(t, fixedSnapshot(target, dead), darwinEINVAL)
+		stubScanUID(t, map[int]int{target: os.Getuid()})
+		stubScanIdentity(t, map[int]identityAnswer{dead: {err: errors.New("cannot revalidate pid 45 identity")}})
+
+		if _, err := ProcessesMatchingArgv(match); err == nil {
+			t.Fatal("an identity the scan could not revalidate was treated as proof the process had departed; that is the failed read reading as an absence again")
+		}
+	})
+
 	// And the discrimination has to be real in the other direction: a process
 	// still PRESENT whose ownership cannot be read is not gone, and skipping it
 	// would be inventing the fact this whole rule exists to avoid.
 	t.Run("still present but unattributable", func(t *testing.T) {
 		stubScan(t, fixedSnapshot(target, dead), darwinEINVAL)
 		stubScanUID(t, map[int]int{target: os.Getuid()})
-		stubScanLookup(t, nil) // every pid is still there
+		// Every pid is still itself: stubScan's default.
 
 		var unreadable *ArgvUnreadableError
 		_, err := ProcessesMatchingArgv(match)
@@ -328,7 +356,6 @@ func TestAProcessThatExitedMidScanIsNotARefusal(t *testing.T) {
 	t.Run("still present and ours", func(t *testing.T) {
 		stubScan(t, fixedSnapshot(target, dead), darwinEINVAL)
 		stubScanUID(t, map[int]int{target: os.Getuid(), dead: os.Getuid()})
-		stubScanLookup(t, nil)
 
 		var unreadable *ArgvUnreadableError
 		_, err := ProcessesMatchingArgv(match)

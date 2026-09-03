@@ -30,7 +30,7 @@ var (
 	scanSnapshot = Snapshot
 	scanArgv     = readArgv
 	scanUID      = readUID
-	scanLookup   = Lookup
+	scanIdentity = SameIdentity
 )
 
 // ArgvUnreadableError reports the one process whose argv could not be read and
@@ -121,12 +121,16 @@ func isGone(err error) bool {
 // negative.
 //
 // Before either of those becomes a failure, though, a second oracle is asked
-// whether the process is still THERE. Darwin needs it: kern.procargs2 answers
-// EINVAL for a departed process exactly as it does for a foreign one, and
-// kern.proc.pid then has no ownership to report either, so a process that
-// merely exited mid-scan looks identical to one we are being refused. Its
-// absence is a fact, and it is read as one rather than inferred from an
-// errno — a process still present stays a failure (#3693).
+// whether the snapshotted process is still THERE. Darwin needs it:
+// kern.procargs2 answers EINVAL for a departed process exactly as it does for a
+// foreign one, and kern.proc.pid then has no ownership to report either, so a
+// process that merely exited mid-scan looks identical to one we are being
+// refused. Its absence is a fact, and it is read as one rather than inferred
+// from an errno — a process still present stays a failure (#3693).
+//
+// That question is asked about the process INSTANCE, not the number: a PID that
+// has been recycled onto something else answers "gone" for the one we were
+// refused, which is the truth about it (#3695 review).
 //
 // # Platforms
 //
@@ -173,9 +177,18 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 			// foreign one does, and its ownership is unreadable for the same
 			// reason it is unreadable for anything that no longer exists.
 			//
-			// "Gone" is established POSITIVELY here, never assumed from the
-			// refusal: a process that is still present stays a failure.
-			if _, lookupErr := scanLookup(pid); isGone(lookupErr) {
+			// SameIdentity rather than a bare existence check, because a PID is
+			// not an identity: the snapshotted process can exit and its number be
+			// reused before this line runs, and "some process answers to 45" is
+			// not "the one we were refused is still there". It compares the start
+			// stamp, so a recycled PID reports the original instance as departed —
+			// the (pid, StartID) pairing this package uses everywhere it is about
+			// to act on a process.
+			//
+			// "Gone" is established POSITIVELY: only a definitive false skips.
+			// An identity that could not be revalidated is UNKNOWN and still
+			// fails, as does a process that is still itself.
+			if same, identityErr := scanIdentity(process); identityErr == nil && !same {
 				continue
 			}
 			return nil, &ArgvUnreadableError{PID: pid, Err: err, OwnedByUs: known}
