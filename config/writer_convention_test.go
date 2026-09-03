@@ -64,7 +64,7 @@ var writerConventionExemptions = map[string]writerExemption{
 	// existed for then refused, and it must delete THAT file: os.Remove would
 	// resolve the path afresh and, after a retarget, take out an unrelated
 	// backup in a directory this operation never locked (#3697 review).
-	"filelock.go:removeSibling:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "undoes the pinned handle's own backup, inside the directory it was written in; a path-based remove could delete a different directory's file"},
+	"followedlock.go:removeSibling:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "undoes the pinned handle's own backup, inside the directory it was written in; a path-based remove could delete a different directory's file"},
 }
 
 // writerExemption records how many calls of that kind the function is allowed
