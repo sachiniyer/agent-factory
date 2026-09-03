@@ -101,6 +101,19 @@ func TestBuildProjectListBareCloneKeepsLinkedWorkspace(t *testing.T) {
 	assert.True(t, rows[0].Active)
 }
 
+// TestBuildProjectListCachesResolvedPathsAcrossPolls pins the cache the 750ms
+// sidebar poll leans on: a path that has resolved once is not probed again
+// while its resolution is fresh.
+//
+// The probe is observed through the budget ledger (#3720), not through a
+// wrapper `git` on PATH that appended a byte to a marker file. That marker was
+// a fact about the RUNNER rather than about the resolver: the wrapper's own
+// /bin/sh had to be scheduled inside the path's 150ms window for the byte to
+// exist at all, and a loaded macOS runner cancels the probe first — so the
+// test read "the probe was never issued" off a file its own setup had raced
+// (#3761, the shape #3710 → #3720 already removed from the sibling test). A
+// granted budget IS the probe being issued, recorded by the poll that issued
+// it, whether or not the fork won.
 func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
 	h := newTestHome(t)
 	repoRoot := initTestGitRepo(t)
@@ -109,27 +122,51 @@ func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
 	cachedRoot := initTestGitRepo(t)
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{cachedRoot: {}}
 
-	realGit, err := exec.LookPath("git")
-	require.NoError(t, err)
-	binDir := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "git-probes")
-	wrapper := filepath.Join(binDir, "git")
-	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nprintf x >> \"$AF_GIT_PROBE_MARKER\"\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
-	t.Setenv("AF_GIT_PROBE_MARKER", marker)
-	t.Setenv("AF_REAL_GIT", realGit)
-	t.Setenv("PATH", binDir)
+	poll := func() (budgeted []string, cachedAt time.Time, cached bool) {
+		t.Helper()
+		_, degraded, budgets := h.buildProjectListFromCounted(nil)
+		require.False(t, degraded)
+		for _, budget := range budgets {
+			budgeted = append(budgeted, budget.path)
+		}
+		resolution, ok := h.projectPathResolutions[cachedRoot]
+		return budgeted, resolution.resolvedAt, ok
+	}
 
-	_, degraded := h.buildProjectListFrom(nil)
-	require.False(t, degraded)
-	first, err := os.ReadFile(marker)
-	require.NoError(t, err)
-	require.NotEmpty(t, first)
-
-	_, degraded = h.buildProjectListFrom(nil)
-	require.False(t, degraded)
-	second, err := os.ReadFile(marker)
-	require.NoError(t, err)
-	assert.Len(t, second, len(first), "a successful path resolution must survive the 750ms project poll")
+	// The property is about a PAIR of polls, and reaching the pair is not the
+	// property. Two things stop a loaded runner from reaching it, and neither
+	// is the cache failing: a first poll whose probe loses its own window
+	// caches nothing for the second poll to reuse, and a stall longer than the
+	// TTL between the two expires the entry before the second poll reads it.
+	// Those two retry; every other outcome is asserted.
+	var first, second []string
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		budgeted, cachedAt, cached := poll()
+		if !cached {
+			require.True(t, time.Now().Before(deadline),
+				"no poll ever cached a resolution for %s: either every probe lost its own %s window, "+
+					"or a successful resolution is no longer cached at all", cachedRoot, projectPathScanTimeout)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		first = budgeted
+		second, _, _ = poll()
+		// time.Since is read AFTER the second poll, so it can only overstate
+		// the age that poll itself compared against the TTL: under the TTL
+		// here proves the entry was live when the poll ran, which makes a
+		// budget it opened anyway the defect rather than the clock.
+		if len(second) > 0 && time.Since(cachedAt) >= projectPathResolutionTTL {
+			require.True(t, time.Now().Before(deadline),
+				"every pair of polls straddled the %s resolution TTL", projectPathResolutionTTL)
+			continue
+		}
+		break
+	}
+	require.Contains(t, first, cachedRoot,
+		"an uncached path must be probed under a budget of its own before anything can be cached for it")
+	assert.Empty(t, second,
+		"a successful path resolution must survive the 750ms project poll, leaving the next one nothing to probe: %v", second)
 }
 
 func TestBuildProjectListUsesKnownActiveIdentityAfterProbeBudgetExpires(t *testing.T) {
