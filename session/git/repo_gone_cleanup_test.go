@@ -13,6 +13,15 @@ import (
 	"time"
 )
 
+// deadlineObservationBudget bounds every wait in this file for a result that a
+// deadline is already producing. Each of those waits sits behind a handshake
+// that has already happened, so it is a hang detector rather than a budget the
+// work has to fit inside: the ceiling only has to clear whatever scheduling
+// delay a loaded runner can impose, and 250ms did not clear it on macOS
+// (#3759). Nothing races these waits — where something did, the sequencing was
+// fixed instead of the ceiling widened.
+const deadlineObservationBudget = 10 * time.Second
+
 func repoGoneCleanupClaim(t *testing.T) (*GitWorktree, RelocationClaim, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -122,7 +131,7 @@ func TestCleanupClaimedRepoGone_RetainedTreeDeletionSharesDeadline(t *testing.T)
 	var observed result
 	select {
 	case observed = <-done:
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(deadlineObservationBudget):
 		close(release)
 		<-done
 		t.Fatal("retained-tree deletion ran outside the repo-gone cleanup deadline")
@@ -387,10 +396,12 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 	previousRemove := repoGoneRemoveDirectory
 	previousTimeout := repoGoneCleanupTimeout
 	blocked := make(chan struct{})
+	started := make(chan struct{})
 	workerFinished := make(chan struct{})
 	repoGoneCleanupTimeout = 25 * time.Millisecond
 	repoGoneRemoveDirectory = func(string, pathIdentity, string, func(string) error) error {
 		defer close(workerFinished)
+		close(started)
 		<-blocked
 		return nil
 	}
@@ -408,11 +419,15 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 		state, err := gw.CleanupClaimedRepoGone(claim)
 		done <- result{state: state, err: err}
 	}()
+	// Wait for the deletion worker to be blocked before timing the deadline, so
+	// the ceiling below bounds only the deadline firing and not the goroutine
+	// getting scheduled in the first place.
+	<-started
 
 	var got result
 	select {
 	case got = <-done:
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(deadlineObservationBudget):
 		close(blocked)
 		<-done
 		t.Fatal("repo-gone recursive deletion ignored its hard caller deadline")
@@ -474,10 +489,12 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	gw.PreserveRelocationClaim(claim)
 	previousProbe := repoGoneOriginProbe
 	previousTimeout := relocationIdentityTimeout
+	probeStarted := make(chan struct{})
 	probeFinished := make(chan struct{})
 	relocationIdentityTimeout = 25 * time.Millisecond
 	repoGoneOriginProbe = func(ctx context.Context, _ *GitWorktree) error {
 		defer close(probeFinished)
+		close(probeStarted)
 		<-ctx.Done()
 		return ErrRepoGone
 	}
@@ -490,6 +507,9 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	go func() {
 		done <- gw.ValidateRelocationCleanupAdmission()
 	}()
+	// The probe is running before the deadline is timed, so the ceiling below
+	// bounds only the deadline firing.
+	<-probeStarted
 
 	select {
 	case err := <-done:
@@ -497,7 +517,7 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("repo recheck deadline must refuse admission: %v", err)
 		}
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(deadlineObservationBudget):
 		t.Fatal("repo-gone origin recheck ignored its hard caller deadline")
 	}
 	recovery, retained := gw.GetRelocationRecovery()
@@ -506,54 +526,119 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	}
 }
 
+// TestValidateRelocationCleanupAdmission_DeadlineCancelsOriginProbeProcess
+// proves the admission deadline tears down the Git process the origin probe
+// spawned, not merely the Go call waiting on it.
+//
+// The ordering here is the point. The stand-in Git records its pid so the test
+// can watch that process die, and that recording must not race the very
+// cancellation under test: arm the deadline first and a stand-in slow to reach
+// its first write is killed before it writes, so the setup assertion fails
+// while the property it sets up is perfectly healthy (#3759). So the probe is
+// started with no deadline attached to it, the pid is read off a probe that is
+// genuinely in flight, and only then does an admission call join that flight
+// and arm the deadline that has to cancel it.
 func TestValidateRelocationCleanupAdmission_DeadlineCancelsOriginProbeProcess(t *testing.T) {
-	gw, claim, _ := repoGoneCleanupClaim(t)
-	gw.PreserveRelocationClaim(claim)
-	repoPath := gw.GetRepoPath()
-	if err := os.MkdirAll(repoPath, 0o755); err != nil {
-		t.Fatalf("recreate origin pathname: %v", err)
-	}
+	// A stand-in that stalls before its first write is exactly what the old
+	// ordering could not survive; both profiles must identify the process.
+	for _, standIn := range []struct {
+		name  string
+		stall time.Duration
+	}{
+		{name: "immediate"},
+		{name: "stalled startup", stall: 200 * time.Millisecond},
+	} {
+		t.Run(standIn.name, func(t *testing.T) {
+			gw, claim, _ := repoGoneCleanupClaim(t)
+			gw.PreserveRelocationClaim(claim)
+			repoPath := gw.GetRepoPath()
+			if err := os.MkdirAll(repoPath, 0o755); err != nil {
+				t.Fatalf("recreate origin pathname: %v", err)
+			}
 
-	binDir := t.TempDir()
-	pidPath := filepath.Join(binDir, "probe.pid")
-	gitPath := filepath.Join(binDir, "git")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$$\" > %q\nexec /bin/sleep 60\n", pidPath)
-	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write blocking git probe: %v", err)
-	}
-	t.Setenv("PATH", binDir)
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 25 * time.Millisecond
-	t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
+			binDir := t.TempDir()
+			pidPath := filepath.Join(binDir, "probe.pid")
+			gitPath := filepath.Join(binDir, "git")
+			// PATH is this directory and nothing else, so every command the
+			// stand-in runs has to be absolute — a bare `sleep` is silently not
+			// found and the stall profile degrades into the immediate one.
+			stall := ""
+			if standIn.stall > 0 {
+				stall = fmt.Sprintf("/bin/sleep %.3f\n", standIn.stall.Seconds())
+			}
+			script := fmt.Sprintf(
+				"#!/bin/sh\n%sprintf '%%s' \"$$\" > %q\nexec /bin/sleep 60\n",
+				stall, pidPath,
+			)
+			if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+				t.Fatalf("write blocking git probe: %v", err)
+			}
+			t.Setenv("PATH", binDir)
+			previousTimeout := relocationIdentityTimeout
+			relocationIdentityTimeout = 25 * time.Millisecond
+			t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
 
-	err := gw.ValidateRelocationCleanupAdmission()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("blocking origin probe must hit its admission deadline: %v", err)
-	}
-	if !waitForFile(t, pidPath, 250*time.Millisecond) {
-		t.Fatal("blocking git probe never recorded its process id")
-	}
-	var pid int
-	rawPID, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatalf("read blocking git probe pid: %v", err)
-	}
-	if _, err := fmt.Sscanf(string(rawPID), "%d", &pid); err != nil {
-		t.Fatalf("parse blocking git probe pid %q: %v", rawPID, err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	})
+			// No deadline is attached to this call, so nothing can cancel the
+			// stand-in while it starts up and records its pid.
+			spawned := time.Now()
+			flight, err := startRepoGoneOriginProbe(gw)
+			if err != nil {
+				t.Fatalf("start blocking origin probe: %v", err)
+			}
+			if !waitForFile(t, pidPath, deadlineObservationBudget) {
+				t.Fatal("blocking git probe never recorded its process id")
+			}
+			// The stall is the whole point of the second profile, and a stall
+			// that quietly did not happen would leave it a duplicate of the
+			// first. Recording sooner than the stall means the stand-in never
+			// slept.
+			if recorded := time.Since(spawned); recorded < standIn.stall {
+				t.Fatalf(
+					"stand-in recorded its pid after %s, sooner than its %s startup stall: "+
+						"the stall never ran, so this profile is not exercising a slow probe",
+					recorded, standIn.stall,
+				)
+			}
+			rawPID, err := os.ReadFile(pidPath)
+			if err != nil {
+				t.Fatalf("read blocking git probe pid: %v", err)
+			}
+			var pid int
+			if _, err := fmt.Sscanf(string(rawPID), "%d", &pid); err != nil {
+				t.Fatalf("parse blocking git probe pid %q: %v", rawPID, err)
+			}
+			t.Cleanup(func() {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			})
 
-	deadline := time.Now().Add(250 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
-			return
-		}
-		time.Sleep(time.Millisecond)
+			// Only now is a deadline armed, against a probe already running and
+			// already identified. Admission joins that flight, so the timeout it
+			// reaches is the production one that cancels the shared probe.
+			if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("blocking origin probe must hit its admission deadline: %v", err)
+			}
+			deadline := time.Now().Add(deadlineObservationBudget)
+			for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+				if time.Now().After(deadline) {
+					t.Fatalf("origin probe process %d survived after the admission deadline returned", pid)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			select {
+			case <-flight.done:
+			case <-time.After(deadlineObservationBudget):
+				t.Fatal("the cancelled origin probe never returned")
+			}
+			recovery, retained := gw.GetRelocationRecovery()
+			if !retained || recovery.State != RelocationRecoveryCleanupReady || !recovery.IdentityKnown {
+				t.Fatalf(
+					"cancelling the origin probe lost cleanup authorization; retained=%v recovery=%+v",
+					retained, recovery,
+				)
+			}
+		})
 	}
-	t.Fatalf("origin probe process %d survived after the admission deadline returned", pid)
 }
 
 func TestValidateRelocationCleanupAdmission_DeadlineReusesOriginProbeFence(t *testing.T) {
