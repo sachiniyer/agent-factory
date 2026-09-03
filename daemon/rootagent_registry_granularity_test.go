@@ -76,7 +76,7 @@ func TestEnsureRootAgentsIgnoresStrayRegistryFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewManager: %v", err)
 			}
-			manager.EnsureRootAgents()
+			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != tc.wantCreates {
 				t.Fatalf("want %d creates with a stray registry file, got %d — a stray hides nothing and must not change any root-agent outcome", tc.wantCreates, len(*seen))
@@ -120,7 +120,7 @@ func TestEnsureRootAgentsSuppressesOnlyTheCorruptRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("want exactly the healthy project's root, got %d creates — one corrupt record must suppress only its own project", len(*seen))
@@ -149,7 +149,7 @@ func TestEnsureRootAgentsCorruptRecordKeepsLegacyOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("the legacy opt-in must survive its project's corrupt record (the accepted #3297 residue), got %d creates", len(*seen))

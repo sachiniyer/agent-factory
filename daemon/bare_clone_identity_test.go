@@ -215,7 +215,7 @@ func TestEnsureRootAgentsCreatesRootAtBareCloneWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("enabled bare-clone worktree project got %d creates, want 1", len(*seen))

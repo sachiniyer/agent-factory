@@ -49,7 +49,7 @@ func TestRootDeliveryNamesTheCreateBoundaryMismatch(t *testing.T) {
 	rid := repoID(t, repoPath)
 	swapCheckoutForStrangersClone(t, repoPath)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("the swapped checkout must be refused at the create boundary, got %d creates", len(*seen))
 	}
@@ -114,14 +114,14 @@ func TestCreateBoundaryRefusalClearsWhenTheOriginalCheckoutReturns(t *testing.T)
 	rid := repoID(t, repoPath)
 	restore := swapCheckoutForStrangersClone(t, repoPath)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	refused := manager.rootAgentMaterializeVerdictFor(rid)
 	if refused.reason != rootAgentProjectUnresolved || !refused.rootIdentityMismatch {
 		t.Fatalf("the standing refusal must reach the verdict, got reason %d (mismatch=%v)", refused.reason, refused.rootIdentityMismatch)
 	}
 
 	restore()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("the registered checkout is back and carries its marker, so the root must be created, got %d creates", len(*seen))
@@ -165,7 +165,7 @@ func TestCreateBoundaryUnreadableMarkerVerdictPrescribesNoRebind(t *testing.T) {
 		t.Skip("environment does not enforce file permission bits; the unreadable fixture cannot exist here")
 	}
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	verdict := manager.rootAgentMaterializeVerdictFor(rid)
 	if verdict.reason != rootAgentProjectUnresolved || !verdict.rootMarkerUnreadable {
@@ -197,7 +197,7 @@ func TestCreateBoundaryRefusalAfterTheReapReachesTheVerdict(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	rid := repoID(t, repoPath)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after the first ensure")
@@ -219,7 +219,7 @@ func TestCreateBoundaryRefusalAfterTheReapReachesTheVerdict(t *testing.T) {
 	}
 	t.Cleanup(func() { rootCreateVerifyHookForTest = nil })
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if !swapped {
 		t.Fatalf("the create never went through createVerifiedRoot, so this pins nothing")
