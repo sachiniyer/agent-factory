@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -169,6 +170,11 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 // make successful absence impossible on hardened hosts. Within the captured
 // tree, unreadable or mismatched provenance is genuinely UNKNOWN and blocks
 // worktree deletion rather than being collapsed into "not ours".
+//
+// An EMPTY cohort — the blind vanished-session sweep, which captured no
+// predecessor to place anyone against — still refuses, but as ONE message rather
+// than a line per pid: there the pid/generation pairing is the operator's whole
+// decision procedure, and blindGenerationRefusal is what carries it (#3706).
 func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet) ([]proctree.Process, error) {
 	if len(candidates) == 0 {
 		return nil, nil
@@ -185,6 +191,7 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 	cleanHome := filepath.Clean(ownHome)
 	var owned []proctree.Process
 	var inspectErrs []error
+	var unplaceable []markedGeneration
 	for _, process := range candidates {
 		same, identityErr := proctree.SameIdentity(process)
 		if identityErr != nil {
@@ -248,6 +255,27 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		}
 		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
 		switch {
+		case hasGeneration && generations.empty() && !selfChain[process.PID]:
+			// An EMPTY cohort is the blind vanished-session sweep (cleanup.go): it
+			// captured no predecessor, so it has nothing to place this generation
+			// against — a different statement from "outside a cohort I know", which
+			// is what the case below reports. Collected instead of refused one pid
+			// at a time so the refusal can be ONE message naming every unplaceable
+			// pid and the generation it carries: on this path that comparison is
+			// the operator's entire decision procedure, and it does not fit in a
+			// per-pid line (#3706). See blindGenerationRefusal.
+			//
+			// selfChain is excluded HERE rather than relied on below, because the
+			// check below runs AFTER this switch and would never be reached. A
+			// blind scan really can reach our own process: refreshOrphanCandidates
+			// walks the whole table for AF_SESSION matches with no self-exclusion,
+			// so an af invoked inside a pane of the session that then vanished
+			// carries that session's markers. Collecting it would print "safe to
+			// kill" at the running af — the exact footgun this message exists to
+			// avoid. It falls through to the case below instead, which refuses it
+			// with no advice attached, as it did before this message existed.
+			unplaceable = append(unplaceable, markedGeneration{pid: process.PID, generation: processGeneration})
+			continue
 		case hasGeneration && !generations.values[processGeneration]:
 			// Marker scans are filtered before they enter this bounded set. A
 			// different generation already present here may be a descendant that
@@ -269,7 +297,60 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		}
 		owned = append(owned, process)
 	}
+	if len(unplaceable) > 0 {
+		inspectErrs = append(inspectErrs, blindGenerationRefusal(sanitizedName, unplaceable))
+	}
 	return owned, errors.Join(inspectErrs...)
+}
+
+// markedGeneration is one live process carrying the vanished session's
+// AF_SESSION marker and this home's AF_HOME marker, plus a generation the sweep
+// has no captured predecessor to place it against.
+type markedGeneration struct {
+	pid        int
+	generation string
+}
+
+// blindGenerationRefusal is the message a blind vanished-session sweep leaves
+// behind, and on that path it is the whole explanation an operator gets (#3706).
+//
+// It deliberately does NOT say "kill these pids". The callers that still reach
+// the blind branch after #3700 — the background CleanupSessions sweep and
+// unlocked internal cleanup — hold no claim on this session's lifecycle, so they
+// cannot rule out that a marked process is a legitimate same-name REPLACEMENT
+// created while the sweep was running (#3309). A kill hint here would be a
+// footgun aimed at a healthy session, printed by a sweep that runs on its own.
+//
+// What it can do is hand over the comparison it is not allowed to make itself.
+// The generation each pid carries is already in hand; the other half — what the
+// LIVE session of that name carries — is one `show-environment` away, and the
+// two verdicts that follow from it are unambiguous. So the message names the
+// pids and their generations, gives that read, and states both outcomes.
+//
+// The suggested target is exactTarget's `=name:` form rather than a bare name on
+// purpose: tmux resolves a bare -t as a prefix match, so a pasted suggestion
+// could report a DIFFERENT session's generation — in the one message whose
+// answer decides what an operator kills.
+func blindGenerationRefusal(sanitizedName string, marked []markedGeneration) error {
+	named := make([]string, 0, len(marked))
+	for _, process := range marked {
+		named = append(named, fmt.Sprintf("pid %d (%s=%s)", process.pid, EnvMarkerGeneration, process.generation))
+	}
+	// sanitizedName preserves `%` by design, so it rides as an ARGUMENT and never
+	// gets spliced into the format string (#1211) — including inside the
+	// suggestions, which are built from pieces by shellsuggest.
+	return fmt.Errorf("marked processes outlived vanished tmux session %s carrying a generation this sweep"+
+		" has no captured predecessor to place: %s. Nothing was signalled and nothing was removed — this sweep holds"+
+		" no claim on that session name, so a marked process may be a live same-name replacement rather than a"+
+		" leftover of the vanished session, and it will not signal what it cannot attribute; it retries on every"+
+		" pass. To tell the two apart, compare each generation above against the one the live session of that name"+
+		" carries: %s. %s names the af session behind that tmux name, and each pid's own copy stays readable at"+
+		" /proc/<pid>/environ. A generation that matches the live session belongs to it — leave that pid alone."+
+		" A generation no live session claims is a leftover of the vanished session — that pid is safe to kill,"+
+		" and the next sweep then proceeds.",
+		sanitizedName, strings.Join(named, ", "),
+		shellsuggest.Command("tmux", "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerGeneration),
+		shellsuggest.Command("af", "sessions", "list", "--json"))
 }
 
 // orphanGenerationSet is the immutable cohort present when a vanished-session
