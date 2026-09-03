@@ -624,24 +624,18 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 // (#1029 PR 2).
 var ErrDaemonUnavailable = errors.New("daemon not available")
 
-// PreviewSession captures one session tab through the daemon's sole Preview
-// handler. Unlike ListTasksNoSpawn, previewing a live terminal is an active
-// read: it ensures the daemon is running and waits through daemon warm-up, just
-// like the other session control calls.
-func PreviewSession(req PreviewRequest) (content string, gone, tabGone bool, err error) {
-	resp, err := PreviewSessionSnapshot(req)
-	if err != nil {
-		return "", false, false, err
-	}
-	return resp.Content, resp.Gone, resp.TabGone, nil
-}
-
-// PreviewSessionSnapshot is PreviewSession returning the WHOLE response, mirroring
-// apiclient.PreviewSnapshot on the remote side.
+// PreviewSessionSnapshot captures one session tab through the daemon's sole
+// Preview handler and returns the WHOLE response, mirroring
+// apiclient.PreviewSnapshot on the remote side. Unlike ListTasksNoSpawn,
+// previewing a live terminal is an active read: it ensures the daemon is
+// running and waits through daemon warm-up, just like the other session control
+// calls.
 //
-// It exists because both transports already decode every field and only these
-// wrappers narrowed them away — so a caller that needs to know a capture was
-// partial (#3169) had no way to ask, on either path.
+// It returns everything because both transports already decode every field and
+// only the old narrowing wrappers threw them away — so a caller that needs to
+// know a capture was partial (#3169) had no way to ask, on either path. That
+// narrowing wrapper (PreviewSession) kept no callers once api/sessions.go moved
+// here, and #3734 removed it.
 func PreviewSessionSnapshot(req PreviewRequest) (PreviewResponse, error) {
 	var resp PreviewResponse
 	if err := callDaemon("Preview", req, &resp); err != nil {
@@ -735,12 +729,6 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 		return config.Project{}, err
 	}
 	return resp.Project, nil
-}
-
-// SendPrompt asks the daemon to send a prompt to an existing session.
-func SendPrompt(req SendPromptRequest) error {
-	_, err := SendPromptWithStatus(req)
-	return err
 }
 
 // SendPromptWithStatus asks the daemon to send a prompt and returns the

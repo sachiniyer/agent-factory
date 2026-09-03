@@ -170,12 +170,6 @@ func (g *GitWorktree) GetArchiveReport() ArchiveReport {
 	return g.archiveReport.Clone()
 }
 
-func (g *GitWorktree) setArchiveReport(report ArchiveReport) {
-	g.relocationMu.Lock()
-	g.replaceArchiveReportLocked(report)
-	g.relocationMu.Unlock()
-}
-
 // SetRepoGoneFinalizationCheckpoint installs the durable writer used by an
 // explicit kill while it owns this worktree's operation lock. The returned
 // restore function removes the process-local closure after teardown.

@@ -582,14 +582,6 @@ func RepoIDForRecordedRoot(recorded string) string {
 	return RepoIDFromRoot(filepath.Clean(recorded))
 }
 
-func repoContextFromRoot(root string) *RepoContext {
-	return &RepoContext{
-		Root:         root,
-		IdentityRoot: root,
-		ID:           RepoIDFromRoot(root),
-	}
-}
-
 func repoContextFromResolution(resolved repoRootResolution) *RepoContext {
 	root := resolved.identityRoot
 	if resolved.legacyIdentityRoot != "" {

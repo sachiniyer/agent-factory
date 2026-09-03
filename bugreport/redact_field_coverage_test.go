@@ -473,8 +473,8 @@ var reviewedMarshalerTypes = map[reflect.Type]reviewedMarshaler{
 	},
 }
 
-// isUnplantableScalar reports an element kind that json serializes but fill has
-// no way to plant readable text in. Refusing is the point: a numeric container
+// isScalarNumeric reports an element kind that json serializes but fill has no
+// way to plant readable text in. Refusing is the point: a numeric container
 // holding user text would otherwise sit in a zero-valued fixture no detection
 // pass can see.
 func isScalarNumeric(k reflect.Kind) bool {
@@ -486,16 +486,6 @@ func isScalarNumeric(k reflect.Kind) bool {
 		return true
 	}
 	return false
-}
-
-// isUnplantableScalar reports a SEQUENCE element kind that json serializes but
-// fill has no way to plant readable text in. uint8 and int32 are excluded
-// because a sequence of them is a text container this guard does plant —
-// []byte and []rune. Every other numeric kind, Uintptr included, must be
-// refused: `[]uintptr` marshals to plain integers that reconstruct code points
-// or packed bytes just as well (#3592 review).
-func isUnplantableScalar(k reflect.Kind) bool {
-	return isScalarNumeric(k) && k != reflect.Uint8 && k != reflect.Int32
 }
 
 // sentinelFiller plants a unique marker in every plantable field and records the
@@ -930,11 +920,13 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, f
 		}
 		f.recordContainer(v, path, marker)
 	// Reached only after the byte/rune PLANTING branches above declined, so the
-	// full scalar predicate applies here — not isUnplantableScalar, which
-	// deliberately exempts uint8/int32 because sequences of them ARE the text
-	// containers this guard plants. `[]*int32` is not one of those: it presents
-	// as Ptr, so it never took the rune branch, and exempting int32 here let it
-	// fall through to a silent recursion (#3592 review).
+	// FULL scalar predicate applies here. It must not be narrowed to exempt
+	// uint8/int32 on the grounds that sequences of them ARE the text containers
+	// this guard plants: `[]*int32` is not one of those — it presents as Ptr, so
+	// it never took the rune branch, and exempting int32 here let it fall
+	// through to a silent recursion (#3592 review). #3592 shipped that narrowed
+	// predicate as a separate isUnplantableScalar helper which this arm
+	// deliberately did not use; it was never called at all and #3734 removed it.
 	case isScalarNumeric(baseElem):
 		f.unsupported = append(f.unsupported,
 			fmt.Sprintf("%s (%s of %s cannot carry a text marker)", path, v.Kind(), v.Type().Elem()))

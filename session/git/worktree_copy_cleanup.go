@@ -504,10 +504,6 @@ func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, prote
 	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, false, nil)
 }
 
-func removeCopiedEntryRestoringName(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
-	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, true, nil)
-}
-
 func removeCopiedEntryRestoringNameWithCheckpoint(
 	directory *os.File,
 	path string,
