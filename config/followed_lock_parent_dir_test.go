@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"golang.org/x/sys/unix"
 )
 
 // retargetableHome stages the arrangement #3697 is about, and it is deliberately
@@ -229,4 +230,133 @@ func TestFollowedLockLeavesTheOrdinaryArrangementsAlone(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotZero(t, info.Mode()&os.ModeSymlink, "the home link survives as a link")
 	})
+}
+
+// TestFollowedLockReadsThroughThePinnedDirectory is the read half of #3697,
+// found by review on the first cut of this branch.
+//
+// Pinning the lock and the write is not enough on its own. A body still reached
+// its bytes by path, and under a symlinked home that path is the unresolved
+// alias — so a link moved away and moved BACK inside one operation feeds the
+// read-modify-write another directory's content and lands the result on the
+// locked file, with the confirm on either side of it seeing nothing wrong.
+func TestFollowedLockReadsThroughThePinnedDirectory(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+
+	t.Run("read answers the locked directory, not the one the path reaches now", func(t *testing.T) {
+		link, home, first, second := retargetableHome(t)
+		require.NoError(t, os.WriteFile(filepath.Join(first, TomlConfigFileName), []byte("schema_version = 1\nbranch_prefix = 'from-A/'\n"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(second, TomlConfigFileName), []byte("schema_version = 1\nbranch_prefix = 'from-B/'\n"), 0644))
+
+		require.NoError(t, withFollowedFileLock(link, func(target lockedTarget) error {
+			// Away…
+			retargetHome(t, home, second)
+			data, err := target.read()
+			require.NoError(t, err)
+			assert.Contains(t, string(data), "from-A/",
+				"the read must come from the directory this lock covers")
+			assert.NotContains(t, string(data), "from-B/",
+				"a link that moved must not be able to feed the body another directory's bytes")
+			// …and back, so every confirm still passes and nothing else notices.
+			retargetHome(t, home, first)
+			return nil
+		}))
+	})
+
+	t.Run("loadConfigLocked reads the locked directory too", func(t *testing.T) {
+		// The method is only worth having if the bodies use it. This drives a
+		// real call site rather than the helper.
+		link, home, first, second := retargetableHome(t)
+		require.NoError(t, os.WriteFile(filepath.Join(first, TomlConfigFileName), []byte("schema_version = 1\nbranch_prefix = 'from-A/'\n"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(second, TomlConfigFileName), []byte("schema_version = 1\nbranch_prefix = 'from-B/'\n"), 0644))
+
+		require.NoError(t, withFollowedFileLock(link, func(target lockedTarget) error {
+			retargetHome(t, home, second)
+			cfg, err := loadConfigLocked(target)
+			require.NoError(t, err)
+			assert.Equal(t, "from-A/", cfg.BranchPrefix,
+				"the config read under the lock is the one in the locked directory")
+			retargetHome(t, home, first)
+			return nil
+		}))
+	})
+}
+
+// TestMigrationBackupLandsInTheLockedDirectory is the third half of the same
+// principle, also from review: `af config migrate` writes a .bak beside the
+// config, and that write was still path-based.
+//
+// A retarget in the window between the confirm and the backup write sent the
+// copy into an unlocked directory, where it overwrote an existing .bak; the
+// config write then refused and the cleanup deleted that one. The user lost a
+// backup they had, to an operation whose error says nothing was written.
+func TestMigrationBackupLandsInTheLockedDirectory(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	link, home, first, second := retargetableHome(t)
+	require.NoError(t, os.WriteFile(filepath.Join(first, TomlConfigFileName),
+		[]byte("schema_version = 1\nlisten_addr = '0.0.0.0:8443'\n"), 0644))
+
+	// The backup B already holds, and the only copy of it.
+	precious := filepath.Join(second, TomlConfigFileName+".bak")
+	require.NoError(t, os.WriteFile(precious, []byte("schema_version = 1\n# do not lose me\n"), 0644))
+
+	migrateBackupRaceHookForTest = func() { retargetHome(t, home, second) }
+	t.Cleanup(func() { migrateBackupRaceHookForTest = nil })
+
+	err := withFollowedFileLock(link, func(target lockedTarget) error {
+		_, mErr := migrateConfigFile(target)
+		return mErr
+	})
+
+	require.Error(t, err, "the guarded config write must refuse once the directory has moved")
+	after, readErr := os.ReadFile(precious)
+	require.NoError(t, readErr, "the backup B already held is gone: a path-based backup write followed the "+
+		"moved link, landed on top of it, and the cleanup for our own failed write then deleted it")
+	assert.Equal(t, "schema_version = 1\n# do not lose me\n", string(after),
+		"a backup in a directory this operation never locked must survive untouched")
+	assert.Equal(t, []string{TomlConfigFileName, TomlConfigFileName + ".bak"}, entryNames(t, second),
+		"and nothing of ours is left behind there either")
+	assert.Equal(t, []string{TomlConfigFileName, TomlConfigFileName + ".lock"}, entryNames(t, first),
+		"the refusal says nothing was written, so our own backup is taken back out of the locked directory")
+}
+
+// TestFollowedLockDoesNotRequireAReadableConfigDirectory is the compatibility
+// half of the fd pin, and the one arrangement it could plausibly have broken.
+//
+// A path-based writer created its temp file, its lock and its rename with
+// write+execute on the directory alone; opening that directory O_RDONLY needs
+// read as well. A config directory deliberately kept unreadable — mode 0300 —
+// would have gone from working to failing every global config write.
+func TestFollowedLockDoesNotRequireAReadableConfigDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks, so the premise cannot be staged")
+	}
+	dir := filepath.Join(t.TempDir(), "unreadable")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	path := filepath.Join(dir, TomlConfigFileName)
+	require.NoError(t, os.WriteFile(path, []byte("schema_version = 1\n"), 0644))
+	require.NoError(t, os.Chmod(dir, 0o300))
+	// Registered after t.TempDir()'s own cleanup, so it runs BEFORE it (LIFO)
+	// and the temp directory can still be removed.
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	// Premise: the ordinary directory open really is refused here. Without this
+	// the test passes for the wrong reason on a filesystem or platform that
+	// does not enforce it.
+	if fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0); err == nil {
+		_ = unix.Close(fd)
+		t.Skip("this filesystem allows O_RDONLY on a 0300 directory, so there is nothing to fall back from")
+	}
+	if dirSearchOnlyFlag == 0 {
+		t.Skip("no execute-only directory open on this platform; the refusal path is asserted below instead")
+	}
+
+	require.NoError(t, withFollowedFileLock(path, func(target lockedTarget) error {
+		return target.write([]byte("schema_version = 1\nbranch_prefix = 'unreadable/'\n"), 0644)
+	}), "a write-and-search-only config directory worked before the pin and must keep working")
+
+	// Read it back through a handle of our own; the directory still cannot be listed.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "unreadable/")
 }

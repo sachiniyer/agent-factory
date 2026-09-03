@@ -58,6 +58,13 @@ var writerConventionExemptions = map[string]writerExemption{
 	// "fix" either of them to use it.
 	"atomicdir.go:atomicWriteInOpenDir:golang.org/x/sys/unix.Renameat": {calls: 1, reason: "the shared pinned-directory writer's rename, relative to a fd its caller opened under the policy that caller decided"},
 	"atomicdir.go:atomicWriteInOpenDir:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "the same writer's temp-file cleanup"},
+	// A DELETE, not a write, and it is here because the *at list catches it
+	// rather than because it puts content on disk. It removes the migration
+	// backup this same handle just wrote when the config write that backup
+	// existed for then refused, and it must delete THAT file: os.Remove would
+	// resolve the path afresh and, after a retarget, take out an unrelated
+	// backup in a directory this operation never locked (#3697 review).
+	"filelock.go:removeSibling:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "undoes the pinned handle's own backup, inside the directory it was written in; a path-based remove could delete a different directory's file"},
 }
 
 // writerExemption records how many calls of that kind the function is allowed

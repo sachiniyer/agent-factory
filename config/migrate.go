@@ -133,6 +133,12 @@ type UnmigratedKey struct {
 	Detail []string `json:"detail,omitempty"`
 }
 
+// migrateBackupRaceHookForTest, when non-nil, runs after the confirm and before
+// the backup is written — the window in which a retarget decides which
+// directory the .bak lands in. Tests use it to drive that window; it is the
+// backup's counterpart to migrateWriteRaceHookForTest below.
+var migrateBackupRaceHookForTest func()
+
 // migrateWriteRaceHookForTest, when non-nil, runs once the backup is on disk
 // and before the migrated config is written — the window in which a link
 // retarget makes the guarded write refuse with a backup already created. Tests
@@ -143,11 +149,12 @@ var migrateWriteRaceHookForTest func()
 // load precondition, so tests can drive it against a file directly.
 func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// Read the file the caller's lock covers, not the path it was reached
-	// through: a symlinked config.toml re-opened by its link is resolved again
-	// by the kernel, so a link that moved after acquisition would have this
-	// migration compute a rewrite from one file and land it on another (#3688).
+	// through: a path re-opened by name is resolved again by the kernel, so a
+	// config.toml link — or an AF home link above an ordinary one — that moved
+	// after acquisition would have this migration compute a rewrite from one
+	// file and land it on another (#3688, #3697).
 	prettyPath := prettyHomePath(locked.link)
-	raw, err := os.ReadFile(locked.file)
+	raw, err := locked.read()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
@@ -264,9 +271,11 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// config.toml is a symlink that is the target, not the link's directory:
 	// it is the copy a dotfiles `git status` will show, and putting it next to
 	// the link would scatter the two halves across two repositories (#3660).
-	// That target is the caller's pinned one — resolving the link again here
-	// could put the backup beside a file this migration never read (#3688).
-	backup, err := availableBackupPath(locked.file + ".bak")
+	// That target is the caller's pinned one, and both the availability check
+	// and the write below go through the directory the lock holds open —
+	// resolving a path again here could check one directory and write into
+	// another, over a backup somebody still needs (#3688, #3697).
+	backup, err := locked.availableBackupPath()
 	if err != nil {
 		return nil, err
 	}
@@ -277,8 +286,8 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// backup exists to be copied back over it, so a restore must not change
 	// them either (#3624 review).
 	mode := os.FileMode(0644)
-	if info, statErr := os.Stat(locked.file); statErr == nil {
-		mode = info.Mode().Perm()
+	if existing, statErr := locked.perm(); statErr == nil {
+		mode = existing
 	}
 	// Confirm BEFORE putting the backup on disk, not only inside the guarded
 	// write below. A refusal after the backup exists contradicts its own error
@@ -288,10 +297,15 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	if err := locked.confirm(); err != nil {
 		return nil, err
 	}
-	// The backup path is already derived from the RESOLVED config, and
-	// availableBackupPath only returns a path that does not exist — so there is
-	// no link to follow here and the plain writer says so.
-	if err := AtomicWriteFile(backup, raw, mode); err != nil {
+	if migrateBackupRaceHookForTest != nil {
+		migrateBackupRaceHookForTest()
+	}
+	// Into the directory the lock covers, by name. AtomicWriteFile would resolve
+	// the path afresh, so a home link repointed in the window between the
+	// confirm above and this line would put the backup in an unlocked directory
+	// — over an existing .bak there — and the cleanup below would then delete
+	// that one instead of ours (#3697 review).
+	if err := locked.writeSibling(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
 	if migrateWriteRaceHookForTest != nil {
@@ -303,7 +317,7 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		// step in it that mutates anything, so an error means the config is
 		// untouched and this backup copies a file nobody rewrote. Take it back
 		// out rather than leave a .bak the error says does not exist.
-		if rmErr := os.Remove(backup); rmErr != nil && !os.IsNotExist(rmErr) {
+		if rmErr := locked.removeSibling(backup); rmErr != nil && !os.IsNotExist(rmErr) {
 			log.WarningLog.Printf("migrate: could not remove the backup %s after the migration write failed: %v", prettyHomePath(backup), rmErr)
 		}
 		return nil, err

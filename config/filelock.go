@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -44,6 +45,9 @@ type lockedTarget struct {
 	// file is the file the lock covers. Read and write THIS one; nothing inside
 	// the critical section may re-derive it from link.
 	file string
+	// name is filepath.Base(file): how that file is spelled INSIDE dirFD, which
+	// is the only spelling any syscall in the critical section uses.
+	name string
 	// dir is filepath.Dir(file): the directory the lock file and the write both
 	// live in, spelled the way the caller reached it. Messages and the identity
 	// re-check use it; no write goes through it.
@@ -159,22 +163,91 @@ func (t lockedTarget) write(data []byte, perm os.FileMode) error {
 	if err := ensureStorageParent(t.link); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", filepath.Dir(t.link), err)
 	}
-	name := filepath.Base(t.file)
 	if t.file != t.link {
 		noticeSymlinkWrite(t.link, t.file)
 		// Do not widen the real file. Callers pass 0644 because that is the
 		// mode for a config af itself created; a target the user keeps at 0600
 		// in their dotfiles is a deliberate choice about a file af is only
 		// rewriting, and following must not quietly relax it.
-		var info unix.Stat_t
-		if err := unix.Fstatat(t.dirFD, name, &info, 0); err == nil {
-			perm = os.FileMode(info.Mode & 0o777)
+		if existing, err := t.perm(); err == nil {
+			perm = existing
 		}
 	}
 	if followedWriteRaceHookForTest != nil {
 		followedWriteRaceHookForTest()
 	}
-	return atomicWriteInOpenDir(t.dirFD, t.dir, name, data, perm)
+	return atomicWriteInOpenDir(t.dirFD, t.dir, t.name, data, perm)
+}
+
+// read returns the locked file's bytes, opened through the pinned directory.
+//
+// os.ReadFile(t.file) is NOT equivalent, and the difference is the read half of
+// #3697: under a symlinked AGENT_FACTORY_HOME with a regular config.toml,
+// t.file is still the unresolved alias, so the kernel resolves it afresh at
+// open time. A link moved to another directory and moved BACK before the write
+// would feed a read-modify-write somebody else's bytes and land the result on
+// the locked file, with every check on either side of it passing (#3697
+// review). Reading through the fd asks the directory this lock covers.
+//
+// Errors are wrapped as *os.PathError naming t.file so callers keep testing
+// them with os.IsNotExist, and so a message reads the way os.ReadFile's did.
+func (t lockedTarget) read() ([]byte, error) {
+	fd, err := unix.Openat(t.dirFD, t.name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: t.file, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), t.file)
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, &os.PathError{Op: "read", Path: t.file, Err: err}
+	}
+	return data, nil
+}
+
+// perm reports the locked file's current mode bits, asked of the pinned
+// directory. Callers use it to carry an existing file's mode onto a rewrite
+// rather than widening it to a fresh default.
+func (t lockedTarget) perm() (os.FileMode, error) {
+	var info unix.Stat_t
+	if err := unix.Fstatat(t.dirFD, t.name, &info, 0); err != nil {
+		return 0, &os.PathError{Op: "stat", Path: t.file, Err: err}
+	}
+	return os.FileMode(info.Mode & 0o777), nil
+}
+
+// availableBackupPath is availableBackupPath asked of the pinned directory: the
+// same never-overwrite-an-existing-backup rule, decided about the directory the
+// lock covers. Asking the path instead lets a retarget answer "free" about one
+// directory and then write into another, where that name is a backup somebody
+// still needs (#3697 review).
+func (t lockedTarget) availableBackupPath() (string, error) {
+	return availableBackupPathWith(t.file+".bak", t.siblingOccupied)
+}
+
+func (t lockedTarget) siblingOccupied(candidate string) bool {
+	var info unix.Stat_t
+	// AT_SYMLINK_NOFOLLOW for pathOccupied's reason: a dangling <config>.bak
+	// link is a filesystem entry the user made, and a name it holds is taken.
+	err := unix.Fstatat(t.dirFD, filepath.Base(candidate), &info, unix.AT_SYMLINK_NOFOLLOW)
+	return err == nil || !errors.Is(err, unix.ENOENT)
+}
+
+// writeSibling replaces a file beside the locked one — today only the migration
+// backup — inside the pinned directory. It takes the display path so callers
+// keep reporting the name the user will look for.
+func (t lockedTarget) writeSibling(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteInOpenDir(t.dirFD, t.dir, filepath.Base(path), data, perm)
+}
+
+// removeSibling deletes one, in the same directory writeSibling put it. A
+// caller that wrote a backup and then could not finish must take back THAT
+// backup, not whatever now sits at the same path in some other directory.
+func (t lockedTarget) removeSibling(path string) error {
+	if err := unix.Unlinkat(t.dirFD, filepath.Base(path), 0); err != nil {
+		return &os.PathError{Op: "remove", Path: path, Err: err}
+	}
+	return nil
 }
 
 // followedLockRaceHookForTest, when non-nil, runs after the target has been
@@ -263,9 +336,9 @@ func pinFollowedTarget(path string) (lockedTarget, func(), error) {
 		return lockedTarget{}, nil, fmt.Errorf("failed to create lock directory: %w", err)
 	}
 	dir := filepath.Dir(target)
-	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	dirFD, err := openPinnedDir(dir)
 	if err != nil {
-		return lockedTarget{}, nil, fmt.Errorf("failed to open the directory %s holding %s: %w", dir, path, err)
+		return lockedTarget{}, nil, err
 	}
 	// Only for naming that end in a refusal; the identity comparison uses the
 	// fd, so a directory that cannot be spelled resolvably is not a failure.
@@ -273,8 +346,37 @@ func pinFollowedTarget(path string) (lockedTarget, func(), error) {
 	if resolved, evalErr := filepath.EvalSymlinks(dir); evalErr == nil {
 		dirResolved = resolved
 	}
-	locked := lockedTarget{link: path, file: target, dir: dir, dirResolved: dirResolved, dirFD: dirFD}
+	locked := lockedTarget{link: path, file: target, name: filepath.Base(target), dir: dir, dirResolved: dirResolved, dirFD: dirFD}
 	return locked, func() { _ = unix.Close(dirFD) }, nil
+}
+
+// openPinnedDir holds a directory open for the critical section.
+//
+// The ordinary open needs READ permission on the directory, which a path-based
+// writer never did: it created its temp file, its lock and its rename with
+// write+execute alone. So a config directory deliberately kept unreadable —
+// mode 0300 — would have gone from working to failing every global config write
+// (#3697 review). Where the platform can open a directory execute-only that
+// costs nothing but the directory fsync, which such a directory could not have
+// had anyway; where it cannot, this refuses and says which permission to add,
+// because dropping back to an unpinned write would quietly reinstate the lost
+// update this whole change exists to remove.
+func openPinnedDir(dir string) (int, error) {
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err == nil {
+		return fd, nil
+	}
+	if errors.Is(err, unix.EACCES) {
+		if dirSearchOnlyFlag != 0 {
+			if searchFD, searchErr := unix.Open(dir, dirSearchOnlyFlag|unix.O_DIRECTORY|unix.O_CLOEXEC, 0); searchErr == nil {
+				return searchFD, nil
+			}
+		}
+		return -1, fmt.Errorf("failed to open the directory %s: %w — af holds it open for the whole "+
+			"config write so a moved symlink cannot redirect the bytes, which needs read permission on "+
+			"it (chmod u+r %s)", dir, err, dir)
+	}
+	return -1, fmt.Errorf("failed to open the directory %s: %w", dir, err)
 }
 
 // withLock is WithFileLock over the pinned directory: the same adjacent .lock
@@ -292,7 +394,7 @@ func pinFollowedTarget(path string) (lockedTarget, func(), error) {
 // removes the lock file between our open and our flock leaves us holding an
 // exclusive lock on an unlinked inode, which excludes nobody.
 func (t lockedTarget) withLock(fn func() error) error {
-	name := filepath.Base(t.file) + ".lock"
+	name := t.name + ".lock"
 	// Named by path in messages, because that is what the user can go look at.
 	lockPath := t.file + ".lock"
 
