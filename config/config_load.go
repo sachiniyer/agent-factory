@@ -313,13 +313,16 @@ var convertRaceHookForTest func()
 // best-effort — a failure is logged, not fatal.
 func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
 	var result *Config
-	lockErr := WithFollowedFileLock(tomlPath, func() error {
+	lockErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		if convertRaceHookForTest != nil {
 			convertRaceHookForTest()
 		}
 		// The winner of a concurrent conversion already wrote config.toml.
 		// (Our writes are atomic, so a non-empty config.toml here is complete.)
-		if td, err := os.ReadFile(tomlPath); err == nil {
+		// Read the LOCKED file: reopening the link would resolve it again, and a
+		// link that moved since acquisition would answer this question about a
+		// file the lock does not cover (#3688).
+		if td, err := os.ReadFile(locked.file); err == nil {
 			if !isEffectivelyEmptyToml(td) {
 				cfg, perr := parseLoadedConfigTOML(td, prettyTomlPath, tomlPath)
 				if perr != nil {
@@ -342,6 +345,13 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			// The racer renamed config.json to .bak (and its config.toml is
 			// gone/incomplete), or the file is an empty first-run stub — either
 			// way there is nothing to convert, so materialize fresh defaults.
+			//
+			// This one keeps the LINK path deliberately. It creates with
+			// O_CREATE|O_EXCL, which fails on a symlink rather than following
+			// it, so it can never write through the link; and the questions it
+			// asks — is something already at config.toml, is that something a
+			// link — are questions about the link itself, which the pinned
+			// target cannot answer.
 			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
 			if mErr != nil {
 				return mErr
@@ -360,7 +370,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
-		if err := AtomicWriteFileFollowingLink(tomlPath, tomlBytes, 0644); err != nil {
+		if err := locked.write(tomlBytes, 0644); err != nil {
 			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
 		}
 

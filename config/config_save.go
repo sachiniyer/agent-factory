@@ -35,7 +35,12 @@ func globalConfigTomlPath() (string, error) {
 // the open file description, so a second acquisition from the same process
 // blocks forever instead of recursing — so fn must never call LoadConfig.
 // Re-read the config inside fn with loadConfigLocked instead.
-func withGlobalConfigLock(fn func() error) error {
+//
+// fn is handed the file the lock actually covers. Pass it to loadConfigLocked
+// and saveConfigLocked rather than deriving a path again: config.toml may be a
+// symlink, and a body that re-resolves it can read and write a file this lock
+// does not hold (#3688).
+func withGlobalConfigLock(fn func(lockedTarget) error) error {
 	// Force any conversion/materialization to happen outside the lock, and
 	// fail early on a config that does not load rather than under the lock.
 	if _, err := LoadConfig(); err != nil {
@@ -45,7 +50,7 @@ func withGlobalConfigLock(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	return WithFollowedFileLock(tomlPath, fn)
+	return withFollowedFileLock(tomlPath, fn)
 }
 
 // loadConfigLocked re-reads config.toml from inside the config file lock
@@ -58,22 +63,23 @@ func withGlobalConfigLock(fn func() error) error {
 // and validated the file, so a config.toml that is missing or contentless here
 // means it was removed in the window between the two — the same pathological
 // case LoadConfig answers with defaults, answered the same way.
-func loadConfigLocked() (*Config, error) {
-	tomlPath, err := globalConfigTomlPath()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(tomlPath)
+//
+// The read is of the LOCKED file, not of the path it was reached through. A
+// symlinked config re-opened by its link would be resolved again by the kernel,
+// so a link that moved after acquisition would feed this sequence bytes from a
+// file the lock does not cover (#3688). What the user is shown stays the link.
+func loadConfigLocked(locked lockedTarget) (*Config, error) {
+	data, err := os.ReadFile(locked.file)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return DefaultConfig(), nil
 		}
-		return nil, fmt.Errorf("failed to read config file %s: %w", prettyHomePath(tomlPath), err)
+		return nil, fmt.Errorf("failed to read config file %s: %w", prettyHomePath(locked.link), err)
 	}
 	if isEffectivelyEmptyToml(data) {
 		return DefaultConfig(), nil
 	}
-	return parseLoadedConfigTOML(data, prettyHomePath(tomlPath), tomlPath)
+	return parseLoadedConfigTOML(data, prettyHomePath(locked.link), locked.link)
 }
 
 // saveConfigLocked saves the configuration to disk as config.toml WITHOUT
@@ -85,24 +91,17 @@ func loadConfigLocked() (*Config, error) {
 // It writes only the TOML file — the canonical global config since #1030:
 // writing config.json would resurrect the "both files exist" shadow state that
 // conversion exists to retire.
-func saveConfigLocked(config *Config) error {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return fmt.Errorf("failed to get config directory: %w", err)
-	}
-
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+func saveConfigLocked(locked lockedTarget, config *Config) error {
 	config.SchemaVersion = GlobalConfigSchemaVersion
 	data, err := marshalGlobalConfigTOML(config, config.source.shape)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	return AtomicWriteFileFollowingLink(tomlPath, data, 0644)
+	// The write goes to the file the caller's lock covers, and the writer
+	// creates (and hardens) the config directory on the way — the MkdirAll this
+	// function used to do itself, now that it no longer derives a path.
+	return locked.write(data, 0644)
 }
 
 // SaveConfig persists the whole global config under the config file lock, so a
@@ -127,7 +126,7 @@ func SaveConfig(config *Config) error {
 	if err != nil {
 		return err
 	}
-	return WithFollowedFileLock(tomlPath, func() error {
-		return saveConfigLocked(config)
+	return withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
+		return saveConfigLocked(locked, config)
 	})
 }

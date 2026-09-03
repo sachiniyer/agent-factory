@@ -21,8 +21,8 @@ package config
 // added.
 func DeregisterRootAgentsForRepo(repoIDs ...string) ([]string, error) {
 	var removed []string
-	err := withGlobalConfigLock(func() error {
-		cfg, err := loadConfigLocked()
+	err := withGlobalConfigLock(func(locked lockedTarget) error {
+		cfg, err := loadConfigLocked(locked)
 		if err != nil {
 			return err
 		}
@@ -45,7 +45,7 @@ func DeregisterRootAgentsForRepo(repoIDs ...string) ([]string, error) {
 		for _, key := range removed {
 			delete(cfg.RootAgents, key)
 		}
-		return saveConfigLocked(cfg)
+		return saveConfigLocked(locked, cfg)
 	})
 	if err != nil {
 		return nil, err

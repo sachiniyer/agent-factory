@@ -67,9 +67,9 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	}
 
 	var result *MigrationResult
-	if err := WithFollowedFileLock(tomlPath, func() error {
+	if err := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		var err error
-		result, err = migrateConfigFile(tomlPath)
+		result, err = migrateConfigFile(locked)
 		return err
 	}); err != nil {
 		return nil, err
@@ -133,9 +133,13 @@ type UnmigratedKey struct {
 
 // migrateConfigFile is MigrateGlobalConfig's body, minus the lock and the
 // load precondition, so tests can drive it against a file directly.
-func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
-	prettyPath := prettyHomePath(tomlPath)
-	raw, err := os.ReadFile(tomlPath)
+func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
+	// Read the file the caller's lock covers, not the path it was reached
+	// through: a symlinked config.toml re-opened by its link is resolved again
+	// by the kernel, so a link that moved after acquisition would have this
+	// migration compute a rewrite from one file and land it on another (#3688).
+	prettyPath := prettyHomePath(locked.link)
+	raw, err := os.ReadFile(locked.file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
@@ -145,7 +149,7 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	stripped := stripUTF8BOM(raw)
 	bom := string(raw[:len(raw)-len(stripped)])
 	before := string(stripped)
-	metadata, err := metadataForSource(raw, tomlPath, FormatTOML)
+	metadata, err := metadataForSource(raw, locked.link, FormatTOML)
 	if err != nil {
 		return nil, tomlParseError("config file "+prettyPath, err)
 	}
@@ -154,7 +158,7 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 		return nil, fmt.Errorf("refusing to migrate: the current config does not load: %w", err)
 	}
 
-	result := &MigrationResult{Path: tomlPath, Migrated: []MigratedKey{}}
+	result := &MigrationResult{Path: locked.link, Migrated: []MigratedKey{}}
 	content := before
 	for _, deprecation := range configDeprecations() {
 		if !deprecation.migratable() {
@@ -246,11 +250,9 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	// config.toml is a symlink that is the target, not the link's directory:
 	// it is the copy a dotfiles `git status` will show, and putting it next to
 	// the link would scatter the two halves across two repositories (#3660).
-	realPath, err := resolveWriteTarget(tomlPath)
-	if err != nil {
-		return nil, err
-	}
-	backup, err := availableBackupPath(realPath + ".bak")
+	// That target is the caller's pinned one — resolving the link again here
+	// could put the backup beside a file this migration never read (#3688).
+	backup, err := availableBackupPath(locked.file + ".bak")
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +263,7 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	// backup exists to be copied back over it, so a restore must not change
 	// them either (#3624 review).
 	mode := os.FileMode(0644)
-	if info, statErr := os.Stat(tomlPath); statErr == nil {
+	if info, statErr := os.Stat(locked.file); statErr == nil {
 		mode = info.Mode().Perm()
 	}
 	// The backup path is already derived from the RESOLVED config, and
@@ -270,7 +272,7 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if err := AtomicWriteFile(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
-	if err := AtomicWriteFileFollowingLink(tomlPath, []byte(bom+content), mode); err != nil {
+	if err := locked.write([]byte(bom+content), mode); err != nil {
 		return nil, err
 	}
 	result.Backup = backup

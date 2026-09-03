@@ -26,7 +26,7 @@ func TestSetRefusesARewriteThatChangesAnUnrelatedValue(t *testing.T) {
 	original := readFile(t, path)
 
 	w := scalarWrite{key: "on_archive_command", leaf: "branch_prefix", canonical: "clobbered", encoded: "'clobbered'"}
-	_, err := w.apply(path, prettyHomePath(path))
+	_, err := w.apply(pinnedTestTarget(path), prettyHomePath(path))
 
 	require.Error(t, err, "an edit that lands on the wrong key must be refused")
 	assert.Contains(t, err.Error(), "branch_prefix", "the refusal names the setting that would have moved")
@@ -78,7 +78,7 @@ func TestUnsetGlobalRefusesARemovalOfTheWrongLine(t *testing.T) {
 	original := readFile(t, path)
 
 	misaimed := configKeyAlias{canonical: "network.listen_addr", legacy: "branch_prefix", section: "network", leaf: "listen_addr"}
-	_, err := applyGlobalUnset(path, prettyHomePath(path), "network.listen_addr", misaimed)
+	_, err := applyGlobalUnset(pinnedTestTarget(path), prettyHomePath(path), "network.listen_addr", misaimed)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "branch_prefix")

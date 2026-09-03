@@ -43,6 +43,13 @@ func linkedConfigHome(t *testing.T, content string) (link, real string) {
 	return link, real
 }
 
+// pinnedTestTarget is the lockedTarget for a config that is a real file rather
+// than a link — the resolution withFollowedFileLock would have pinned for it.
+// Tests that drive a writer directly, below the lock, need one to hand it.
+func pinnedTestTarget(path string) lockedTarget {
+	return lockedTarget{link: path, file: path}
+}
+
 // assertWroteThroughLink is the shared verdict: the link survives as a link, and
 // the content landed in the file it points at.
 func assertWroteThroughLink(t *testing.T, link, real, wantSubstring string) {
@@ -284,7 +291,7 @@ func TestFollowedFileLockGuardsTheResolvedTarget(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- WithFollowedFileLock(link, func() error {
+		done <- withFollowedFileLock(link, func(lockedTarget) error {
 			close(held)
 			<-release
 			return nil
@@ -304,6 +311,129 @@ func TestFollowedFileLockGuardsTheResolvedTarget(t *testing.T) {
 	assert.FileExists(t, real+".lock")
 	assert.NoFileExists(t, link+".lock",
 		"and must not leave a lock file beside the link")
+}
+
+// TestFollowedLockPinsTheTargetItLocked is the moving-link half of the same
+// invariant (#3688).
+//
+// TestFollowedFileLockGuardsTheResolvedTarget above pins that the lock and the
+// write agree on ONE resolution. Nothing carried that resolution into the body:
+// the callback was handed the unresolved link, so its read re-resolved at open
+// time and AtomicWriteFileFollowingLink resolved a third time at the rename. A
+// link retargeted mid-operation — stow, chezmoi, a checkout in the dotfiles
+// repo — therefore sent the write to a file nothing had locked, and left two af
+// processes read-modify-writing one file while holding two different .lock
+// files. The lost update was silent: `af config set` reported success, its key
+// was in the file, and the peer's key was gone.
+func TestFollowedLockPinsTheTargetItLocked(t *testing.T) {
+	// retargetableLink stages the dotfiles shape with a second file to move the
+	// link to, and returns link, the file the link starts on, and that second
+	// file.
+	retargetableLink := func(t *testing.T) (link, locked, moved string) {
+		t.Helper()
+		dotfiles := t.TempDir()
+		locked = filepath.Join(dotfiles, "af-config.toml")
+		moved = filepath.Join(dotfiles, "af-config.other.toml")
+		require.NoError(t, os.WriteFile(locked, []byte("schema_version = 1\n# locked\n"), 0644))
+		require.NoError(t, os.WriteFile(moved, []byte("schema_version = 1\n# moved\n"), 0644))
+		link = filepath.Join(t.TempDir(), TomlConfigFileName)
+		require.NoError(t, os.Symlink(locked, link))
+		return link, locked, moved
+	}
+	// retarget repoints an existing link, the way `stow` or a branch switch in
+	// the dotfiles repo does.
+	retarget := func(t *testing.T, link, to string) {
+		t.Helper()
+		require.NoError(t, os.Remove(link))
+		require.NoError(t, os.Symlink(to, link))
+	}
+
+	t.Run("a retarget while queued for the lock refuses before the body runs", func(t *testing.T) {
+		// The resolve happens before the wait, and the wait is unbounded: a peer
+		// af can hold this lock for as long as its own operation takes, and the
+		// link can move in that window. Whoever comes out of the wait must find
+		// out before it reads, edits, or writes anything.
+		link, locked, moved := retargetableLink(t)
+
+		followedLockRaceHookForTest = func() { retarget(t, link, moved) }
+		t.Cleanup(func() { followedLockRaceHookForTest = nil })
+
+		ran := false
+		err := withFollowedFileLock(link, func(lockedTarget) error {
+			ran = true
+			return nil
+		})
+
+		require.Error(t, err)
+		assert.False(t, ran, "the body must not run against a file the link no longer names")
+		assert.Contains(t, err.Error(), link, "the refusal names the link")
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked), "the file the lock covers")
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved), "and the file the link now points at")
+	})
+
+	t.Run("a retarget between acquisition and the write cannot redirect the write", func(t *testing.T) {
+		link, locked, moved := retargetableLink(t)
+
+		err := withFollowedFileLock(link, func(target lockedTarget) error {
+			assert.Equal(t, pathutil.ResolveForCompare(locked), pathutil.ResolveForCompare(target.file),
+				"the body must be handed the file the lock covers, not the link")
+			retarget(t, link, moved)
+			return target.write([]byte("schema_version = 1\n# af wrote this\n"), 0644)
+		})
+
+		require.Error(t, err, "af must not write while the link names a file it holds no lock on")
+		assert.Contains(t, err.Error(), link, "the refusal names the link")
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(locked), "the file the lock covers")
+		assert.Contains(t, err.Error(), pathutil.ResolveForCompare(moved), "and the file the link now points at")
+
+		after, readErr := os.ReadFile(moved)
+		require.NoError(t, readErr)
+		assert.NotContains(t, string(after), "af wrote this",
+			"the write must never land on the file the link moved to — nothing holds a lock on it")
+		before, readErr := os.ReadFile(locked)
+		require.NoError(t, readErr)
+		assert.NotContains(t, string(before), "af wrote this",
+			"and a refused write leaves the locked file alone too")
+	})
+
+	t.Run("a retargeted link cannot leave two holders rewriting one file", func(t *testing.T) {
+		link, _, moved := retargetableLink(t)
+
+		held := make(chan struct{})
+		release := make(chan struct{})
+		first := make(chan error, 1)
+		go func() {
+			first <- withFollowedFileLock(link, func(target lockedTarget) error {
+				close(held)
+				<-release
+				return target.write([]byte("schema_version = 1\nbranch_prefix = 'first/'\n"), 0644)
+			})
+		}()
+		<-held
+
+		// The link moves while the first holder is inside its critical section.
+		// A peer af now resolves to the new target and takes THAT file's .lock —
+		// a different lock file — so it gets all the way in. Nothing here can
+		// stop that; what must not happen is both of them rewriting one file.
+		retarget(t, link, moved)
+		require.NoError(t, withFollowedFileLock(link, func(target lockedTarget) error {
+			return target.write([]byte("schema_version = 1\nbranch_prefix = 'second/'\n"), 0644)
+		}), "the peer holds the lock on the file it resolved, and is entitled to write it")
+
+		close(release)
+		firstErr := <-first
+		require.Error(t, firstErr,
+			"the holder whose lock no longer covers the link must refuse rather than write past a peer")
+		assert.Contains(t, firstErr.Error(), link)
+		assert.Contains(t, firstErr.Error(), pathutil.ResolveForCompare(moved))
+
+		got, readErr := os.ReadFile(moved)
+		require.NoError(t, readErr)
+		assert.Contains(t, string(got), "second/", "the peer's write is the one that landed")
+		assert.NotContains(t, string(got), "first/",
+			"two processes holding two different .lock files must not both rewrite one file — "+
+				"that is the lost update this pinning exists to prevent")
+	})
 }
 
 // TestAtomicWriteFileDoesNotFollowLinksByDefault is the counterpart guarantee,
@@ -404,7 +534,7 @@ func TestStartupDoesNotDestroyOrIgnoreASymlinkedConfig(t *testing.T) {
 		require.NoError(t, os.Symlink(missing, link))
 
 		ran := false
-		err := WithFollowedFileLock(link, func() error {
+		err := withFollowedFileLock(link, func(lockedTarget) error {
 			ran = true
 			return nil
 		})
