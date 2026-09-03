@@ -90,6 +90,12 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	// handle available. RunningDaemonProcess() is the gate for the same reason it
 	// is in session/git: only that process creates these scopes, and only it is
 	// guaranteed a reachable user manager.
+	//
+	// The same call also covers the survivor that has no scope YET — a launcher
+	// caught between systemd-run's execve and its StartTransientUnit reply, which
+	// the manager cannot report because the unit does not exist. That needs no
+	// separate mechanism here: StopHookScopes consults the process table beside
+	// the manager and waits the launcher out (#3667).
 	scopePrefix := ""
 	if systemdunit.RunningDaemonProcess() {
 		scopePrefix = systemdunit.HookScopeUnitPrefix(hookCtx.sessionID)

@@ -14,10 +14,10 @@ import (
 	"time"
 )
 
-// requireRealUserManager gates the two tests below on a reachable systemd user
-// manager. Unlike integration's #2284 lifecycle test they need no ephemeral
-// runner and never touch agent-factory-daemon.service: every unit they create
-// is a throwaway af3650-<pid>-* name they also remove.
+// requireRealUserManager gates the real-systemd tests below on a reachable
+// systemd user manager. Unlike integration's #2284 lifecycle test they need no
+// ephemeral runner and never touch agent-factory-daemon.service: every unit they
+// create carries this process's pid in its name and is removed on the way out.
 func requireRealUserManager(t *testing.T) {
 	t.Helper()
 	if os.Getenv("AF_SYSTEMD_LIFECYCLE_TEST") != "1" {
@@ -228,5 +228,57 @@ func TestStopHookScopesKillsATermIgnoringSurvivorWithinTheBound(t *testing.T) {
 	remaining, err := RunningHookScopes(prefix)
 	if err != nil || len(remaining) != 0 {
 		t.Fatalf("scopes still listed after the stop: %v (err %v)", remaining, err)
+	}
+}
+
+// The two oracles have to HAND OFF, and only a real systemd-run can prove it.
+//
+// RunningHookLaunchers keys on argv, and `systemd-run --scope` EXECs: the moment
+// the scope exists, that argv is gone and the process is the hook shell instead.
+// The stubbed tests cannot see that transition — they hold a process that never
+// execs — so this is where the assumption underneath the whole design is
+// checked. If argv survived the exec, every sweep for a session with a RUNNING
+// hook would find a "launcher" that can never register, wait out the settle
+// budget and then refuse: a rebuild wedged by the fix for #3667 rather than by
+// the defect.
+func TestTheLauncherOracleReleasesAScopeOnceItIsRegistered(t *testing.T) {
+	requireRealUserManager(t)
+	claimDaemon(t)
+
+	prefix := HookScopeUnitPrefix(fmt.Sprintf("handoff-%d", os.Getpid()))
+	unit := HookScopeUnit(prefix, "g0", 0)
+	t.Cleanup(func() { stopUnit(unit) })
+	pidFile := filepath.Join(t.TempDir(), "hook.pid")
+	_, reaped := startSleeper(t, NewUnboundScopeCommand(unit, "sh", "-c",
+		fmt.Sprintf("printf '%%s' \"$$\" > %q; sleep 120", pidFile)), pidFile)
+	waitForUnitState(t, unit, "active", 15*time.Second)
+
+	launchers, err := RunningHookLaunchers(prefix)
+	if err != nil {
+		t.Fatalf("RunningHookLaunchers: %v", err)
+	}
+	if len(launchers) != 0 {
+		t.Fatalf("a hook that already HAS its scope was still reported as an unregistered launcher (%+v); "+
+			"every sweep for a session with a running hook would wait out the settle budget and then refuse", launchers)
+	}
+	units, err := RunningHookScopes(prefix)
+	if err != nil || len(units) != 1 || units[0] != unit {
+		t.Fatalf("the scope oracle did not pick the hook up after the launcher released it: %v (err %v)", units, err)
+	}
+
+	// And the sweep completes on the scope's own terms rather than on the
+	// launcher timeout, which is the observable difference between the two.
+	start := time.Now()
+	if err := StopHookScopes(prefix); err != nil {
+		t.Fatalf("StopHookScopes: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= hookLauncherSettleTimeout {
+		t.Fatalf("the sweep spent %s, at or past the launcher settle budget of %s: it was waiting for a launcher that had already handed off",
+			elapsed, hookLauncherSettleTimeout)
+	}
+	select {
+	case <-reaped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("StopHookScopes reported success while the hook was still running")
 	}
 }

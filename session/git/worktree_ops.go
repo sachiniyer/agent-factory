@@ -232,6 +232,13 @@ func (g *GitWorktree) hookScopePrefixes() []string {
 // the manager and the hook inside it keep running. Proceeding there would hand
 // the rebuild a tree a live hook is still writing to, which is the one outcome
 // this ordering exists to prevent.
+//
+// The manager's "none" is not a clean bill of health either, for the same reason
+// in a different shape: a survivor caught between systemd-run's execve and its
+// StartTransientUnit reply has no unit yet. StopHookScopes therefore reads the
+// process table beside the manager and waits such a launcher out (#3667); an
+// unreadable process table is UNKNOWN and refuses here exactly as a lost bus
+// does.
 func (g *GitWorktree) stopSurvivingHookScopes() error {
 	prefixes := g.hookScopePrefixes()
 	if len(prefixes) == 0 {

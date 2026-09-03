@@ -6,8 +6,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -246,5 +249,103 @@ func TestCancelAndJoinHooksEndsTheRunBeforeTheNextCommand(t *testing.T) {
 	}
 	if _, err := os.Stat(second); err == nil {
 		t.Fatal("the run advanced to the next command after cancellation; a fresh hook would start into a tree the caller is about to rebuild or move")
+	}
+}
+
+// startStubHookLauncher starts a live process that looks EXACTLY like a
+// systemd-run which has not registered its scope yet: argv[0] is systemd-run and
+// its argv carries --unit=<unit>.
+//
+// It is a stub and not a real systemd-run on purpose. The window under test is
+// the sub-second interval between systemd-run's execve and its
+// StartTransientUnit reply; a test that tried to catch a real launcher inside it
+// would be a coin flip about whether the defect was even reachable on that run.
+//
+// The argv[0] spoof reproduces production rather than faking it: exec.Command
+// sets Args[0] to the NAME it was given, so the real launcher reports
+// argv[0]="systemd-run" in /proc/<pid>/cmdline for the same reason this does.
+func startStubHookLauncher(t *testing.T, unit, body string) {
+	t.Helper()
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatalf("no sh to build a stub launcher from: %v", err)
+	}
+	pidFile := filepath.Join(t.TempDir(), "launcher.pid")
+	cmd := &exec.Cmd{
+		Path: shell,
+		Args: []string{
+			"systemd-run", "-c", fmt.Sprintf("printf '%%s' \"$$\" > %q; %s", pidFile, body),
+			"--user", "--scope", "--quiet", "--collect", "--unit=" + unit, "--", "sh", "-c", "make dev_install",
+		},
+		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start stub launcher: %v", err)
+	}
+	reaped := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(reaped)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-reaped
+	})
+	// Until execve completes the child's /proc entry still carries the TEST
+	// binary's argv, so the sweep must not start before the pid file appears.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			if pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw))); convErr == nil && pid > 0 {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("stub launcher never published its pid to %s", pidFile)
+}
+
+// #3667, at the place the hazard lands. A daemon dies between systemd-run's
+// execve and its StartTransientUnit reply, so its replacement sweeps a prefix
+// whose unit DOES NOT EXIST YET and gets an empty answer from the manager. That
+// answer is not proof of anything: the launcher is alive, and the moment it
+// registers it execs the operator's command with the cwd this path is about to
+// rebuild or move.
+//
+// The launcher exits on its own here, so the claim is that the rebuild path
+// WAITED for it — not that it refuses forever.
+func TestRebuildPathWaitsForALauncherThatHasNotRegisteredItsScope(t *testing.T) {
+	installSurvivorSystemctl(t, "exit 0\n") // the manager lists nothing: this IS the window
+	const prefix = "af-hook-sess3667"
+	// Held by the test rather than by a timer in the stub: the stub starts its
+	// own clock before the test can observe it, so an "at least N seconds"
+	// assertion is short by that gap and flakes (measured in CI at 1.987s
+	// against a 2s floor).
+	gate := filepath.Join(t.TempDir(), "release")
+	startStubHookLauncher(t, prefix+"-g0-0.scope", fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
+
+	gw := worktreeWithRecordedScope(t, prefix)
+	done := make(chan error, 1)
+	go func() { done <- gw.cancelAndWaitHooks() }()
+
+	// The claim as an observation: at a moment when the launcher is definitely
+	// still alive, the rebuild path has not been allowed through.
+	select {
+	case err := <-done:
+		t.Fatalf("the rebuild path proceeded (%v) while a systemd-run for %s-* was live and unregistered; "+
+			"the manager's silence was read as proof no hook survives, and the tree is about to be rebuilt under one (#3667)", err, prefix)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatalf("release the stub launcher: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cancelAndWaitHooks refused after the launcher was gone: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("cancelAndWaitHooks never returned after its launcher exited")
 	}
 }

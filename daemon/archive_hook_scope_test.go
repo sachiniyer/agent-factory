@@ -1,12 +1,16 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -272,4 +276,101 @@ func TestArchiveDoesNotRelocateWhenTheHookScopeCannotBeStopped(t *testing.T) {
 	require.Error(t, err, "the worktree was relocated while a hook descendant may still have been writing to it")
 	require.ErrorIs(t, err, session.ErrHookTeardownUnconfirmed)
 	require.DirExists(t, srcPath, "the worktree moved despite the refusal")
+}
+
+// startStubHookLauncher starts a live process that looks EXACTLY like a
+// systemd-run which has not registered its scope yet: argv[0] is systemd-run and
+// its argv carries --unit=<unit>.
+//
+// A stub rather than a real launcher on purpose — the window under test is the
+// interval between systemd-run's execve and its StartTransientUnit reply, and a
+// test that tried to catch a real one inside it would be a coin flip about
+// whether the defect was reachable on that run. The argv[0] spoof reproduces
+// production rather than faking it: exec.Command sets Args[0] to the NAME it was
+// given, so the real launcher reports argv[0]="systemd-run" for the same reason.
+func startStubHookLauncher(t *testing.T, unit, body string) {
+	t.Helper()
+	shell, err := exec.LookPath("sh")
+	require.NoError(t, err, "no sh to build a stub launcher from")
+	pidFile := filepath.Join(t.TempDir(), "launcher.pid")
+	cmd := &exec.Cmd{
+		Path: shell,
+		Args: []string{
+			"systemd-run", "-c", fmt.Sprintf("printf '%%s' \"$$\" > %q; %s", pidFile, body),
+			"--user", "--scope", "--quiet", "--collect", "--unit=" + unit, "--", "sh", "-c", "make dev_install",
+		},
+		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
+	}
+	require.NoError(t, cmd.Start())
+	reaped := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(reaped)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-reaped
+	})
+	// Until execve completes the child's /proc entry still carries the TEST
+	// binary's argv, so the sweep must not start before the pid file appears.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, readErr := os.ReadFile(pidFile); readErr == nil && strings.TrimSpace(string(raw)) != "" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("stub launcher never published its pid to %s", pidFile)
+}
+
+// #3667 on the archive path. Archive MOVES the tree, so the survivor sweep here
+// is the #2770 ordering across the restart boundary — and the unit oracle is
+// silent for the whole interval between a launcher's execve and its
+// StartTransientUnit reply. A daemon that died in that window left the launcher
+// alive and unscoped; its replacement must not read the manager's empty answer
+// as proof that the tree is free to move.
+//
+// The archive path needs no separate mechanism for this: its sweep is the same
+// StopHookScopes the rebuild path calls, so the second oracle arrives with it.
+// This pins that it actually does.
+func TestArchiveHookWaitsForALauncherThatHasNotRegisteredItsScope(t *testing.T) {
+	requireLinuxScopes(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	hookCtx := archiveHookContext(t)
+	hookCtx.sessionID = fmt.Sprintf("launcher-%d", os.Getpid())
+	prefix := systemdunit.HookScopeUnitPrefix(hookCtx.sessionID)
+	// The manager lists nothing — that silence IS the window.
+	installArchiveHookScopeShimWithSystemctl(t, "exit 0\n", filepath.Join(t.TempDir(), "systemctl.log"))
+	t.Setenv(autostartSystemdMarker, autostartUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+
+	// The launcher is held by the test, not by a timer inside the stub: a stub
+	// that sleeps starts its own clock before the test can observe it, so an
+	// "at least N seconds" assertion is short by that gap and flakes.
+	gate := filepath.Join(t.TempDir(), "release")
+	startStubHookLauncher(t, prefix+"-g0-0.scope", fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
+
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	writeOnArchiveCommand(t, "touch "+marker)
+	done := make(chan error, 1)
+	go func() { done <- runOnArchiveHook(hookCtx) }()
+
+	// At a moment when the launcher is definitely still alive, the archive hook
+	// must not have run — the caller relocates the worktree straight after it
+	// returns, into which that launcher is about to exec (#3667).
+	select {
+	case err := <-done:
+		t.Fatalf("the archive hook completed (%v) while a systemd-run for this session was still live and unregistered", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	require.NoFileExists(t, marker, "the archive hook ran while an unregistered launcher for this session was still live")
+
+	require.NoError(t, os.WriteFile(gate, nil, 0o600))
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(60 * time.Second):
+		t.Fatal("runOnArchiveHook never returned after its launcher exited")
+	}
+	require.FileExists(t, marker, "the hook must actually have run, or this test proves nothing")
 }
