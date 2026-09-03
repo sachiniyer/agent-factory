@@ -1,11 +1,9 @@
 package config
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,7 +13,6 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
-	"github.com/sachiniyer/agent-factory/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -467,71 +464,26 @@ func inRepoConfigWriteTarget(repoRoot, path string) (string, string, error) {
 	return resolvedDir, filepath.Base(path), nil
 }
 
+// atomicWriteFileInDirNoFollow writes an in-repo config file through a
+// directory fd opened O_NOFOLLOW.
+//
+// The refusal is the point, and it is the opposite of the global config's
+// policy on purpose: inRepoConfigWriteTarget has already established that this
+// directory is inside the repository, and O_NOFOLLOW is what makes that
+// containment hold at the moment of the write rather than merely at the moment
+// of the check. A parent-dir link swapped in afterwards fails the open instead
+// of redirecting the bytes out of the repo. atomicWriteInOpenDir does the
+// writing from there; the global config reaches the same body through an open
+// that DOES follow links, because a symlinked AF home is the user's own
+// arrangement (#3697).
 func atomicWriteFileInDirNoFollow(dir, name string, data []byte, perm os.FileMode) error {
-	if name == "" || filepath.Base(name) != name {
-		return fmt.Errorf("invalid in-repo config file name %q", name)
-	}
 	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return fmt.Errorf("failed to open in-repo config directory %s without following symlinks: %w", prettyHomePath(dir), err)
 	}
 	defer unix.Close(dirFD)
 
-	tmp, tmpName, err := createTempFileInOpenDir(dirFD, name)
-	if err != nil {
-		return err
-	}
-	success := false
-	defer func() {
-		if !success {
-			_ = unix.Unlinkat(dirFD, tmpName, 0)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("failed to chmod temp file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("failed to sync temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
-
-	if err := unix.Renameat(dirFD, tmpName, dirFD, name); err != nil {
-		return fmt.Errorf("failed to rename temp file to %s: %w", filepath.Join(dir, name), err)
-	}
-	success = true
-
-	if err := unix.Fsync(dirFD); err != nil {
-		log.WarningLog.Printf("AtomicWriteFile: failed to fsync directory %s after rename of %s: %v", dir, filepath.Join(dir, name), err)
-	}
-	return nil
-}
-
-func createTempFileInOpenDir(dirFD int, base string) (*os.File, string, error) {
-	for range 32 {
-		var suffix [8]byte
-		if _, err := rand.Read(suffix[:]); err != nil {
-			return nil, "", fmt.Errorf("failed to generate temp file name: %w", err)
-		}
-		name := "." + base + ".tmp." + hex.EncodeToString(suffix[:])
-		fd, err := unix.Openat(dirFD, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0600)
-		if err == nil {
-			return os.NewFile(uintptr(fd), name), name, nil
-		}
-		if errors.Is(err, unix.EEXIST) {
-			continue
-		}
-		return nil, "", fmt.Errorf("failed to create temp file: %w", err)
-	}
-	return nil, "", fmt.Errorf("failed to create temp file: exhausted random names")
+	return atomicWriteInOpenDir(dirFD, dir, name, data, perm)
 }
 
 // SaveInRepoPostWorktreeCommands writes the given post-worktree commands into
