@@ -65,7 +65,14 @@ func stallLegacyRootResolution(t *testing.T, repoPath string) (release func()) {
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			// Through PRODUCTION'S OWN classifier, not a hand-written error.
+			// config.RepoFromPathContext runs every failure through
+			// markUnansweredProbe, so a deadline-killed probe carries
+			// ErrRepoProbeUnanswered — and a stand-in that returned a bare
+			// ctx.Err() instead is classified as a VERDICT about the path,
+			// which is the opposite answer. Measured: the boot latch read
+			// empty because of exactly that (#3782 item 2).
+			return nil, config.ClassifyGitProbeError(ctx, ctx.Err())
 		case <-released:
 			return prev(ctx, path)
 		}

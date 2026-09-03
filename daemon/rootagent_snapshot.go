@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	stdlog "log"
+	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -57,15 +58,11 @@ type rootAgentSnapshot struct {
 	// failed after the proof was established, or the PROOF itself could not be
 	// established (a marker read that timed out or was unreadable).
 	reconcileOwed map[string]reconcileOwedEntry
-	legacyRepoIDs map[string]bool
-	// legacyRepoIDByPath is the per-root_agents-path provenance of
-	// legacyRepoIDs: the repo ID each configured path last RESOLVED to. It
-	// exists so a later recompute can tell an UNKNOWN resolution from an
-	// ABSENT one (#3782 item 1) — the set alone cannot, because a path whose
-	// probe never answered has no repo ID to look itself up by. Rebuilt in
-	// the same statement as legacyRepoIDs, by the one function that derives
-	// both, so the two cannot drift.
-	legacyRepoIDByPath map[string]string
+	// legacy is the singleton sweep's dedup view of the legacy root_agents
+	// map, and the provenance a later recompute needs to tell an UNKNOWN
+	// resolution from an ABSENT one. One value rather than four loose maps
+	// because they have one invariant between them and one producer.
+	legacy             legacyRepoDedup
 	registryUnreadable bool
 }
 
@@ -101,16 +98,18 @@ func buildRootAgentSnapshot(warn, errs *stdlog.Logger, cfg *config.Config) rootA
 		personalUnreadable: map[string]string{},
 		projectRoots:       map[string]resolvedProjectRoot{},
 		unresolvedRoots:    map[string]unresolvedProjectRecord{},
-		legacyRepoIDs:      map[string]bool{},
 	}
 
-	// The UNBOUNDED entry point, deliberately, and only here. Bounding a
-	// boot-time probe is a decision about what a daemon START owes an operator
-	// whose configured checkout sits on a dead mount — refusing to start takes
-	// every other session on the box with it — and that is #3782 item 2, not
-	// this change. The heal recompute below it is on the poll goroutine and
-	// takes the bounded one.
-	snap.legacyRepoIDs, snap.legacyRepoIDByPath = legacyRepoIDSet(cfg, unboundedLegacyRootRepo, nil)
+	// BOUNDED, on the same budget as the poll goroutine's (#3782 item 2). A
+	// daemon that refuses to start because one configured checkout sits on a
+	// stalled mount takes every other session on the box with it — every
+	// status refresh, every Lost recovery, every scheduled task, for a repo
+	// that may have no live sessions at all. Refusing to start is not the
+	// honest outcome; starting degraded and saying so is, and what says so is
+	// the unknown latch: the candidate proves nothing, is covered
+	// provisionally so it cannot read as absent, and is re-attempted by the
+	// heal pass until it answers.
+	snap.legacy = legacyRepoIDSet(cfg, resolveLegacyRootRepo, legacyRepoDedup{})
 
 	projects, failures, strays, _, err := config.ListProjectsDetailed()
 	if err != nil {
@@ -150,66 +149,123 @@ func recordFailureDirectoryIDs(failures []config.ProjectRecordFailure) []string 
 	return ids
 }
 
-// legacyRepoResolver resolves one root_agents key to its repository. The two
-// callers of legacyRepoIDSet sit on different lifecycles — daemon start and the
-// instance poll goroutine — so the entry point is the caller's to choose rather
-// than the function's to assume.
+// legacyRepoResolver resolves one root_agents key to its repository.
+//
+// Production has exactly ONE of these — resolveLegacyRootRepo, the bounded
+// entry point — at both of legacyRepoIDSet's call sites, which is the whole
+// point of #3782 items 1 and 2: daemon start and the instance poll goroutine
+// are different lifecycles with the same answer. It stays a parameter because
+// the four outcomes this function classifies (resolved, verdict, unanswered
+// with provenance, unanswered without) cannot all be produced by pointing a
+// real probe at a real checkout, and a classifier whose branches are only
+// reachable during an outage is one nothing ever checks.
 type legacyRepoResolver func(path string) (*config.RepoContext, error)
 
-// unboundedLegacyRootRepo is config.RepoFromPath behind the legacy sweep's tilde
-// expansion: context.Background(), which is literally what config.RepoFromPath
-// passes its context-taking twin. Routed through the same legacyRootRepoFromPath
-// seam as the bounded resolver so a test can stall one configured path at either
-// call site without a process-global `git` shim on PATH.
-func unboundedLegacyRootRepo(path string) (*config.RepoContext, error) {
-	return legacyRootRepoFromPath(context.Background(), config.ExpandTilde(path))
+// legacyRepoDedup is what the singleton sweep needs to know about the legacy
+// root_agents map: which repos it already covers, and — because a probe can
+// fail to answer at all — which of those answers are proven and which are
+// standing in for an unknown.
+//
+// THE ONE RULE ALL FOUR MAPS SERVE: an unknown must never read as absent. A
+// repo missing from the dedup set is one the singleton sweep will visit, and
+// ensureSingletonRootAgent resolves with a nil legacy layer — so a probe that
+// merely failed to answer would start the root WITHOUT the root_agents entry
+// the user wrote, which is #3315's double-visit reached through a deadline.
+type legacyRepoDedup struct {
+	// ids are the repo IDs a probe RESOLVED, this pass or a previous one.
+	ids map[string]bool
+	// byPath is the per-path provenance of ids: the repo ID each configured
+	// path last resolved to. The set alone cannot carry an unknown forward,
+	// because a path whose probe never answered has no repo ID to look itself
+	// up by.
+	byPath map[string]string
+	// unknownIDs are PROVISIONAL: the identity a main-rooted checkout at an
+	// unanswered path WOULD have, for a path that has never resolved, so a
+	// first-probe timeout still dedups the repo it most likely names.
+	//
+	// The idiom is config.LegacyRootAgentForRepo's own — it answers the same
+	// question about an unresolvable key by comparing RepoIDFromRoot of the
+	// key against the repo id — and so is the limit: repo.ID is
+	// RepoIDFromRoot(IdentityRoot), so this matches exactly when the path IS
+	// the identity root. A LINKED WORKTREE's path hashes to nothing real,
+	// which is a miss, not a mismatch: no repository has a linked worktree
+	// path as its identity root, so a wrong guess can never suppress an
+	// unrelated project — it just fails to cover this one until the probe
+	// answers.
+	unknownIDs map[string]bool
+	// unknownPaths are the root_agents keys whose probe did not answer. It is
+	// the LATCH: while it is non-empty the heal pass re-attempts exactly those
+	// resolutions on its backoff cadence, so "unknown" is a state the snapshot
+	// leaves, not one it keeps for the life of the daemon (#1122's
+	// retry-forever, applied to the dedup set rather than to the create).
+	unknownPaths map[string]bool
+}
+
+// covers reports whether the legacy root_agents map already accounts for
+// repoID, so the singleton sweep must not visit it. Proven or provisional: the
+// point of the provisional half is that an unanswered probe is not permission
+// to ensure the repo under a layer stack that omits its legacy entry.
+func (d legacyRepoDedup) covers(repoID string) bool {
+	return d.ids[repoID] || d.unknownIDs[repoID]
 }
 
 // legacyRepoIDSet resolves each root_agents path to its repo ID for the
-// singleton sweep's dedup set, returning that set and the per-path resolutions
-// it was derived from. A not-yet-cloned legacy path is normal (#1122): the
-// per-path ensure sweep retries it, and it is simply not part of the dedup set
-// until it resolves — while it does not resolve it cannot collide with a
+// singleton sweep's dedup set. A not-yet-cloned legacy path is normal (#1122):
+// the per-path ensure sweep retries it, and it is simply not part of the dedup
+// set until it resolves — while it does not resolve it cannot collide with a
 // registered project that did. Shared by the start-of-day builder and the
 // registry heal, which must RECOMPUTE it (#3315 review): a legacy path that
 // resolved only after boot would otherwise be missing from the healed
 // snapshot's dedup set, letting the singleton sweep double-visit its repo
 // behind a failing legacy attempt.
 //
-// previous is the last recompute's per-path resolutions, and it is what keeps
-// the bound from re-entering that same #3315 double-visit through a timeout. An
-// unanswered probe is UNKNOWN, and AN UNKNOWN MUST NEVER READ AS ABSENT: git
-// answering "not a repository" is a verdict about the path and may drop the
-// entry, but a probe that never answered establishes nothing, so the repo ID the
-// path last resolved to stands until a probe answers. Dropping it instead would
-// mean one stalled mount silently un-dedups a repo whose root_agents opt-in has
-// been sitting there all along — #3500's rule (never convert "could not
-// establish" into a verdict), applied to a set membership rather than a log
-// line.
-func legacyRepoIDSet(cfg *config.Config, resolve legacyRepoResolver, previous map[string]string) (map[string]bool, map[string]string) {
-	ids := map[string]bool{}
-	byPath := map[string]string{}
+// previous is the last pass's result, and it is what keeps a bound from
+// re-entering that same #3315 double-visit through a timeout. An unanswered
+// probe is UNKNOWN, and AN UNKNOWN MUST NEVER READ AS ABSENT: git answering
+// "not a repository" is a verdict about the path and may drop the entry, but a
+// probe that never answered establishes nothing, so the repo ID the path last
+// resolved to stands — and where there is none to stand, the provisional
+// identity does. Dropping it instead would mean one stalled mount silently
+// un-dedups a repo whose root_agents opt-in has been sitting there all along —
+// #3500's rule (never convert "could not establish" into a verdict), applied to
+// a set membership rather than a log line.
+func legacyRepoIDSet(cfg *config.Config, resolve legacyRepoResolver, previous legacyRepoDedup) legacyRepoDedup {
+	next := legacyRepoDedup{
+		ids:          map[string]bool{},
+		byPath:       map[string]string{},
+		unknownIDs:   map[string]bool{},
+		unknownPaths: map[string]bool{},
+	}
 	for path := range cfg.RootAgents {
 		repo, err := resolve(path)
 		switch {
 		case err == nil:
-			ids[repo.ID] = true
-			byPath[path] = repo.ID
+			next.ids[repo.ID] = true
+			next.byPath[path] = repo.ID
 		case !config.RepoProbeUnanswered(err):
 			// A VERDICT. git ran and answered that the path is not a
 			// repository right now — #1122's not-yet-cloned entry, or a
 			// checkout that went away — and a verdict about the path may drop
 			// the entry, exactly as it always has.
-		case previous[path] != "":
+		case previous.byPath[path] != "":
 			// UNKNOWN. Nothing was established, so the last resolution stands.
-			ids[previous[path]] = true
-			byPath[path] = previous[path]
+			next.ids[previous.byPath[path]] = true
+			next.byPath[path] = previous.byPath[path]
 		default:
-			// UNKNOWN, and nothing to stand: this path has never resolved, so
-			// it was never in the set to begin with.
+			// UNKNOWN, with nothing proven to stand. The provisional identity
+			// covers the repo this path most likely names, so a first probe
+			// that times out cannot read as absent.
+			if id := config.RepoIDFromRoot(filepath.Clean(config.ExpandTilde(path))); id != "" {
+				next.unknownIDs[id] = true
+			}
+		}
+		// Latched either way an unknown lands, so the heal pass keeps
+		// re-attempting exactly this resolution until it answers.
+		if err != nil && config.RepoProbeUnanswered(err) {
+			next.unknownPaths[path] = true
 		}
 	}
-	return ids, byPath
+	return next
 }
 
 // logRegistryRecordProblems names each registry record the snapshot had to
