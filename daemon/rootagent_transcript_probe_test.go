@@ -141,7 +141,6 @@ func TestTimedOutTranscriptInspectionIsNotAMissingTranscript(t *testing.T) {
 	rootClaudeTranscriptInspectBudget = 50 * time.Millisecond
 	t.Cleanup(func() { rootClaudeTranscriptInspectBudget = prev })
 	release, started := stallTranscriptInspection(t)
-	t.Cleanup(release)
 
 	manager.mu.Lock()
 	st := manager.rootEnsureStateForLocked(repoPath)
@@ -152,6 +151,18 @@ func TestTimedOutTranscriptInspectionIsNotAMissingTranscript(t *testing.T) {
 		defer close(done)
 		manager.refreshRootClaudeConversation(rid, daemonInstanceKey(rid, session.RootSessionTitle), repoPath, inst, st)
 	}()
+	// Registered AFTER the stall's own cleanup, so LIFO runs this first: the
+	// seam is a package var, and restoring it while a wedged caller is still
+	// reading it is a data race — measured on the fail-first run, where the
+	// verdict below hit t.Fatal with the inspection still inside the stall.
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("the inspecting goroutine never returned after the stall was released")
+		}
+	})
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):

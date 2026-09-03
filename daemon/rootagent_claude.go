@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
@@ -131,16 +132,31 @@ func (m *Manager) inspectRootClaudeTranscript(st *rootEnsureState, program, repo
 		state session.ClaudeProjectConversationState
 		err   error
 	}
-	// RED (#3782 item 3): run it on the poll goroutine and wait forever, which
-	// is what master does — one stalled transcript store stops RefreshStatuses,
-	// RestoreLostSessions and the settlement retries for every session on the
-	// box.
-	result := inspection{}
-	result.state, result.err = inspectClaudeProjectConversations(program, repoRoot, recorded)
-	m.mu.Lock()
-	st.claudeTranscriptInspecting = false
-	m.mu.Unlock()
-	return result.state, true, result.err
+	// BUFFERED, so an abandoned inspection can deliver and exit rather than
+	// parking forever on a send nobody will receive — the leak a bound of this
+	// shape introduces if the channel is unbuffered.
+	done := make(chan inspection, 1)
+	go func() {
+		state, err := inspectClaudeProjectConversations(program, repoRoot, recorded)
+		m.mu.Lock()
+		st.claudeTranscriptInspecting = false
+		m.mu.Unlock()
+		done <- inspection{state: state, err: err}
+	}()
+
+	timer := time.NewTimer(rootClaudeTranscriptInspectBudget)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		return result.state, true, result.err
+	case <-timer.C:
+		// The read is still running and will finish whenever the store
+		// answers; its result is dropped. Deliberately not consumed on a later
+		// tick: the next interval re-reads, a store that has come back answers
+		// promptly, and a stale answer about a transcript store is worth less
+		// than the machinery to carry it.
+		return session.ClaudeProjectConversationState{}, false, nil
+	}
 }
 
 func (m *Manager) rootClaudeTranscriptInspectionDue(st *rootEnsureState) bool {
