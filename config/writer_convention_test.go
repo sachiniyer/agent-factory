@@ -36,8 +36,8 @@ var writerConventionExemptions = map[string]writerExemption{
 	"filelock.go:TryWithFileLock:os.OpenFile":             {calls: 1, reason: "lock file, not config content"},
 	"filelock.go:WithFileLockTimeout:os.OpenFile":         {calls: 1, reason: "lock file, not config content"},
 	"filelock.go:WithFileLock:os.OpenFile":                {calls: 1, reason: "lock file, not config content"},
-	"filelock.go:atomicWrite:os.CreateTemp":               {calls: 1, reason: "the shared writer's own temp file"},
-	"filelock.go:atomicWrite:os.Rename":                   {calls: 1, reason: "the shared writer's own rename"},
+	"atomicwrite.go:atomicWrite:os.CreateTemp":            {calls: 1, reason: "the shared writer's own temp file"},
+	"atomicwrite.go:atomicWrite:os.Rename":                {calls: 1, reason: "the shared writer's own rename"},
 	"project_registry.go:writeNewProjectRecord:os.Rename": {calls: 1, reason: "publishes a staged project DIRECTORY into place; the metadata FILE inside it was already written with AtomicWriteFile, and a directory rename has no content to follow a link with"},
 	// The directory-pinned writer is the deliberate ASYMMETRY, not an oversight,
 	// and BOTH of this package's pinned writers reach disk through this one
