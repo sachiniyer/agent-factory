@@ -395,11 +395,11 @@ pointing at one).`,
 			return jsonError(err)
 		}
 
-		// Fail fast on the reserved root-agent title (#1106) before any
-		// daemon round trip. The authoritative gate lives in the daemon's
-		// reserveCreate; this mirrors its message for a snappier CLI error.
-		if session.IsReservedTitle(createTitle) {
-			return jsonError(fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", createTitle))
+		// Fail fast on the reserved root-agent title (#1106) before any daemon
+		// round trip, through the daemon's own refusal rather than a copy of its
+		// message: what is reserved is the derived tmux name, not the spelling (#3732).
+		if err := session.ReservedTitleRefusal(createTitle); err != nil {
+			return jsonError(err)
 		}
 
 		// Best-effort per-repo pre-check to fail fast on duplicate titles

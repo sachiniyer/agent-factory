@@ -354,6 +354,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	if err := manager.lifecycle.markReady(); err != nil {
 		close(stopCh)
 		wg.Wait()
+		manager.waitRootAgentCreatesForShutdown()
 		return fmt.Errorf("failed to mark daemon ready: %w", err)
 	}
 	log.InfoLog.Printf("daemon ready")
@@ -392,6 +393,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// Stop the goroutines so we don't race.
 	close(stopCh)
 	wg.Wait()
+	// The poll loop is out, so no further root-agent create can be launched; wait
+	// for one that already is (#3721). JOINED, never cancelled — a create torn
+	// down mid-provision is the half-created session the always-ensure loop has no
+	// way to reconcile — and BEFORE the final SaveInstances below, so a create
+	// that lands late is persisted rather than overwritten by a save that predates
+	// it. This is also what the poll goroutine's own wg.Wait did while the create
+	// still ran on it.
+	manager.waitRootAgentCreatesForShutdown()
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under

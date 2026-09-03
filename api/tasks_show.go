@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 
@@ -50,7 +51,13 @@ var tasksShowCmd = &cobra.Command{
 		"the current directory's project. Outside a git repository there is no " +
 		"project context and the id resolves globally.\n\n" +
 		"Pass --json for the same record `af tasks get` returns, in the {data,error} " +
-		"envelope.",
+		"envelope.\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the task is read from that daemon, a " +
+		"Daemon row names it beside the project path, and the schedule verdict is " +
+		"the one the DAEMON derived — a cron expression is evaluated in the " +
+		"scheduler's timezone, and re-deriving it here would answer in this " +
+		"terminal's. There is no project context against a remote daemon, so the id " +
+		"resolves across its projects and --repo is refused.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -67,7 +74,7 @@ var tasksShowCmd = &cobra.Command{
 		if err != nil {
 			return jsonError(err)
 		}
-		t, err := getTaskByID(args[0])
+		t, err := getTaskByID("af tasks show", args[0])
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get task: %w", err))
 		}
@@ -80,14 +87,20 @@ var tasksShowCmd = &cobra.Command{
 		if envelopeOutput {
 			return jsonOut(t)
 		}
-		renderTaskShow(cmd.OutOrStdout(), *t, time.Now())
+		renderTaskShow(cmd.OutOrStdout(), *t, time.Now(), apiclient.RemoteTargetURL())
 		return nil
 	},
 }
 
 // renderTaskShow writes the human view. now is passed rather than read so the
 // oldest-missed line is derived against the same instant a test pins.
-func renderTaskShow(w io.Writer, t task.Task, now time.Time) {
+//
+// daemonURL is the remote daemon this record came from, or "" for the local one
+// (#3730). It does two things: it names the host beside the project path, since
+// a path alone reads as this machine's whichever machine it is a path on, and it
+// switches the schedule verdict from a client-side derivation to the record's
+// own — see describeScheduleHealth.
+func renderTaskShow(w io.Writer, t task.Task, now time.Time, daemonURL string) {
 	name := t.Name
 	if name == "" {
 		name = "(unnamed)"
@@ -116,8 +129,9 @@ func renderTaskShow(w io.Writer, t task.Task, now time.Time) {
 		row("Next run", t.NextRunAt.Format(showTimeFormat))
 	}
 	row("Last run", describeLastRun(t))
-	row("Schedule", describeScheduleHealth(t, now))
+	row("Schedule", describeScheduleHealth(t, now, daemonURL != ""))
 	row("Project", t.ProjectPath)
+	row("Daemon", daemonURL)
 	row("Program", t.Program)
 	row("Target", t.TargetSession)
 
@@ -174,7 +188,19 @@ func describeLastRun(t task.Task) string {
 }
 
 // describeScheduleHealth is the overdue verdict with the evidence behind it.
-func describeScheduleHealth(t task.Task, now time.Time) string {
+//
+// remote says the record came from another host, and it changes WHO derives the
+// verdict. Every branch below re-derives from the record and a clock, which is
+// right for a local record and wrong for a remote one: the derivation normalizes
+// to now.Location() so that it agrees with the scheduler that will actually fire
+// the task (see task.deriveScheduleHealth), and against a remote daemon the
+// scheduler's location is the DAEMON's, not this terminal's. A laptop in UTC
+// asking a box in PDT about a midnight cron would otherwise report a verdict
+// seven hours out — a confident answer about the wrong machine, which is the
+// class of bug #3730 is (and #3627 raised on this exact function). So for a
+// remote record the verdict is read off the record, where the daemon's own
+// LoadTasks already put it.
+func describeScheduleHealth(t task.Task, now time.Time, remote bool) string {
 	if t.IsWatch() {
 		return ""
 	}
@@ -187,6 +213,9 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	// (#3623 review).
 	if !t.Enabled {
 		return ""
+	}
+	if remote {
+		return describeRecordedScheduleHealth(t)
 	}
 	// Every shape of "the scheduler cannot fire this" comes from the SHARED
 	// classifier, so this page cannot disagree with the verdict it is rendering —
@@ -235,4 +264,53 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	}
 	return fmt.Sprintf("overdue · missed %s · oldest missed %s",
 		missed, health.OldestMissedAt.Format(showTimeFormat))
+}
+
+// describeRecordedScheduleHealth renders the verdict the DAEMON derived, carried
+// on the record it sent (task.Task's read-time-derived fields). It is the remote
+// half of describeScheduleHealth.
+//
+// It says strictly less than the local rendering, and every omission is a fact
+// this client does not have rather than a rendering choice:
+//
+//   - The invalid-expression case does not quote the parse error. Naming it
+//     needs task.ParseCron, and re-parsing here would be the same re-derivation
+//     this branch exists to avoid — a client and a daemon on different releases
+//     can disagree about which expressions parse, and then the page would
+//     contradict the verdict it is rendering.
+//   - "overdue" names no oldest-missed instant. ScheduleHealth.OldestMissedAt is
+//     the one derived field that does NOT ride the record, so there is nothing to
+//     print; inventing one from this terminal's clock is the seven-hours-out
+//     answer above. The count still rides the record, cap flag and all.
+func describeRecordedScheduleHealth(t task.Task) string {
+	if t.Unschedulable {
+		switch t.UnschedulableReason {
+		case task.ReasonNoTrigger:
+			return "this task has no trigger, so nothing will ever run it"
+		case task.ReasonInvalidExpression:
+			return "cron expression is invalid, so nothing is scheduled (as reported by the daemon)"
+		case task.ReasonNoOccurrence:
+			return "the scheduler cannot derive a next run from this expression " +
+				"(it matches no date within its five-year horizon), so the task will not fire"
+		default:
+			// A reason this build does not know is still a verdict the daemon
+			// reached. Report it rather than dropping to "on schedule", which
+			// would turn a newer daemon's finding into a clean bill of health.
+			return "the daemon reports this task cannot be scheduled: " + t.UnschedulableReason
+		}
+	}
+	if t.Unassessable {
+		return "cannot be assessed — no lateness could be measured from this record's history against its schedule"
+	}
+	if !t.Overdue {
+		return "on schedule"
+	}
+	if t.MissedOccurrences <= 0 {
+		return "overdue"
+	}
+	missed := fmt.Sprintf("%d", t.MissedOccurrences)
+	if t.MissedOccurrencesCapped {
+		missed = fmt.Sprintf("%d or more", t.MissedOccurrences)
+	}
+	return "overdue · missed " + missed
 }

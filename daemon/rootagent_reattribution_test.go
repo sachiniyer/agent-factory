@@ -44,7 +44,7 @@ func TestEnsureRootAgentsReattributesResolvedRootMidRun(t *testing.T) {
 		t.Fatalf("restore repo dir: %v", err)
 	}
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a recorded root that resolves again must be ensured this run, got %d creates — restart-to-recover is the residue #3299 closes", len(*seen))
@@ -83,7 +83,7 @@ func TestEnsureRootAgentsKeepsSwappedCloneUnresolved(t *testing.T) {
 		t.Fatalf("git init swapped clone: %v", err)
 	}
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("a marker-less checkout at the recorded path must not inherit the project's root agent, got %d creates", len(*seen))
@@ -127,7 +127,7 @@ func TestReattributionBoundsStalledProbes(t *testing.T) {
 
 	finished := make(chan struct{})
 	go func() {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 		close(finished)
 	}()
 	select {
@@ -175,7 +175,7 @@ func TestReattributionDiscardsStaleProbeResult(t *testing.T) {
 	manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoPath))] = stale
 	manager.mu.Unlock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("a stale probe result must be discarded, not published — the checkout it verified is gone; got %d creates", len(*seen))
@@ -239,7 +239,7 @@ func TestMarkerReadFailureIsNotAMismatch(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(markers[0], 0o644) })
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("an unverifiable checkout must not be re-attributed, got %d creates", len(*seen))
@@ -285,7 +285,7 @@ func TestProbeConsumedDespitePersonalBackoff(t *testing.T) {
 	manager.rootHealNextAttempt = time.Now().Add(5 * time.Minute)
 	manager.mu.Unlock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("re-attribution must run ungated by the registry/personal backoff clock, got %d creates", len(*seen))
@@ -319,7 +319,7 @@ func TestInflightProbeLeavesPersonalCadenceAlone(t *testing.T) {
 
 	// Pass 1 attempts the still-broken personal config and must land its
 	// NEXT attempt on the failure backoff, stalled sibling or not.
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	manager.mu.Lock()
 	next := manager.rootHealNextAttempt
@@ -364,7 +364,7 @@ func TestLegacyFailsClosedWhileAttributionPending(t *testing.T) {
 	manager.rootHealProbes[realID] = stuck
 	manager.mu.Unlock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("the legacy sweep must fail closed while identity verification is in flight, got %d creates", len(*seen))
@@ -393,7 +393,7 @@ func TestNegativeProbeFeedsBackoffNotHotLoop(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	// The path stays absent: the probe completes negative within the pass.
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	manager.mu.Lock()
 	probe := manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoPath))]
@@ -452,7 +452,7 @@ func TestUnreadableMarkerFailsLegacyClosed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(markers[0], 0o644) })
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("an unverifiable checkout must fail the legacy entry closed, got %d creates — the personal layer under the derived ID may hold enabled=false", len(*seen))
@@ -514,7 +514,7 @@ func TestStalledSiblingDoesNotHotLoopNegatives(t *testing.T) {
 	manager.mu.Unlock()
 
 	// Pass 1: the absent sibling's probe completes negative and must settle.
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	manager.mu.Lock()
 	probe := manager.rootHealProbes[absentID]
 	failures := manager.rootHealProbeFailures[absentID]
@@ -528,7 +528,7 @@ func TestStalledSiblingDoesNotHotLoopNegatives(t *testing.T) {
 	manager.mu.Lock()
 	manager.rootHealNextAttempt = time.Time{}
 	manager.mu.Unlock()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	manager.mu.Lock()
 	same := manager.rootHealProbes[absentID] == probe
 	failures = manager.rootHealProbeFailures[absentID]
@@ -568,8 +568,8 @@ func TestAbsenceStrikesStaySpacedAcrossSiblingHeals(t *testing.T) {
 	}
 	writePersonalRootAgent(t, projectB.ID, "enabled = false")
 
-	manager.EnsureRootAgents() // pass 1: A strike 1, B heals, clock resets to now
-	manager.EnsureRootAgents() // pass 2, one tick later: A's observation must be IGNORED
+	manager.ensureRootAgentsAndWait() // pass 1: A strike 1, B heals, clock resets to now
+	manager.ensureRootAgentsAndWait() // pass 2, one tick later: A's observation must be IGNORED
 
 	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoA)).reason; got != rootAgentPersonalUnreadable {
 		t.Fatalf("two unspaced ENOENT observations are one flap — the fail-closed latch must hold, got reason %d", got)
@@ -607,7 +607,7 @@ func TestVanishedMidVerificationReportsPathRemedy(t *testing.T) {
 	manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoPath))] = vanished
 	manager.mu.Unlock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	verdict := manager.rootAgentMaterializeVerdictFor(realID)
 	if verdict.reason != rootAgentProjectUnresolved || !verdict.rootPathVanished {
@@ -649,8 +649,8 @@ func TestSwappedCloneDoesNotInheritPersonalLayer(t *testing.T) {
 		t.Fatalf("git init swapped clone: %v", err)
 	}
 
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	for _, opts := range *seen {
 		if opts.Program == "/opt/dead-claim" {
@@ -685,8 +685,8 @@ func TestMismatchReleasesDeadClaimsUnreadableLatch(t *testing.T) {
 		t.Fatalf("git init swapped clone: %v", err)
 	}
 
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a proven mismatch must release the dead claim's unreadable latch for the occupant's legacy opt-in, got %d creates", len(*seen))
@@ -741,8 +741,8 @@ func TestSameIDUnreadableMarkerFailsClosed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(markers[0], 0o644) })
 
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("an unverifiable same-ID checkout must fail closed against the legacy entry, got %d creates", len(*seen))
@@ -800,7 +800,8 @@ func TestForeignIdentityRootIsReattributed(t *testing.T) {
 		t.Fatalf("restore parent: %v", err)
 	}
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a foreign-identity recorded root must now be re-attributed and ensured this run, got %d creates", len(*seen))
@@ -873,7 +874,7 @@ func TestInconclusiveRetryKeepsAProvenMismatch(t *testing.T) {
 	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
 		t.Fatalf("git init occupant: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	occupantID := repoID(t, repoPath)
 	record, ok := manager.rootAgentLayers.Load().unresolvedRoots[occupantID]
@@ -894,7 +895,7 @@ func TestInconclusiveRetryKeepsAProvenMismatch(t *testing.T) {
 	manager.rootHealProbeFailures[occupantID] = 0
 	manager.mu.Unlock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	after, ok := manager.rootAgentLayers.Load().unresolvedRoots[occupantID]
 	if !ok || !after.identityMismatch {
@@ -905,7 +906,7 @@ func TestInconclusiveRetryKeepsAProvenMismatch(t *testing.T) {
 	if err := os.Rename(hidden+".again", repoPath); err != nil {
 		t.Fatalf("restore occupant: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != createsAfterProof {
 		t.Fatalf("the disproven checkout must not get the dead project's root, got %d creates (was %d)", len(*seen), createsAfterProof)
 	}

@@ -46,8 +46,8 @@ func TestDisproofReleasesSamePathTombstone(t *testing.T) {
 		t.Fatalf("git init occupant: %v", err)
 	}
 
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("the proven-different occupant's legacy opt-in must be released from the dead claimant's tombstone, got %d creates", len(*seen))
@@ -88,7 +88,7 @@ func TestOccupantDeleteKeepsItsOwnTombstone(t *testing.T) {
 	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
 		t.Fatalf("git init occupant: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	occupantID := repoID(t, repoPath)
 	record, ok := manager.rootAgentLayers.Load().unresolvedRoots[occupantID]
@@ -160,7 +160,7 @@ func TestUnprovenOccupantIsNotClaimed(t *testing.T) {
 
 	// Let the probe publish the mismatch it was always going to publish, and
 	// confirm the occupant's own deletion survives it.
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	manager.mu.Lock()
 	applies := manager.rootDeletionTombstoneApplies(manager.rootAgentLayers.Load(), occupantID)
 	manager.mu.Unlock()

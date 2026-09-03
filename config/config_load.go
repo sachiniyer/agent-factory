@@ -458,6 +458,13 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 
 	defaultCfg := DefaultConfig()
 	defaultCfg.source.builtIn = snapshotConfig(defaultCfg)
+	// This path writes the defaults and returns them WITHOUT going through
+	// validateConfig, so the first load after a first run is the one load that
+	// would otherwise say nothing about a probed claude alias carrying `exec --`
+	// (#3566 review). Everything here came from the defaults, so the value also
+	// matches af's probe and the warning carries its "check that alias too" note
+	// alongside the path of the file it is about to create.
+	warnGlobalShellValues(defaultCfg, prettyTomlPath)
 	created, saveErr := writeConfigIfMissing(tomlPath, defaultCfg)
 	if saveErr != nil {
 		log.WarningLog.Printf("failed to save default config: %v", saveErr)

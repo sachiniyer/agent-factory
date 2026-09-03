@@ -932,7 +932,9 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// identity from a post-absence marker scan: the first process it finds may be
 	// a same-named replacement. In that case inspect only to distinguish harmless
 	// foreign-home processes from a local or unattributable occupant, then refuse
-	// without signalling anything (#3309 review).
+	// without signalling anything (#3309 review). markedOrphanProcesses renders
+	// that refusal through blindGenerationRefusal, which names the unplaceable
+	// pids and the read that tells a leftover from a replacement (#3706).
 	if generations.empty() {
 		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
 		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations)

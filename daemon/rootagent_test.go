@@ -86,7 +86,7 @@ func TestEnsureRootAgentsCreatesInPlaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("expected 1 create, got %d", len(*seen))
@@ -123,7 +123,7 @@ func TestEnsureRootAgentsHonorsProfileOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("expected 1 create, got %d", len(*seen))
@@ -184,7 +184,7 @@ func TestEnsureRootAgentsAdoptsLiveRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial create, got %d", len(*seen))
 	}
@@ -195,7 +195,7 @@ func TestEnsureRootAgentsAdoptsLiveRoot(t *testing.T) {
 
 	for _, status := range []session.Status{session.Running, session.Ready, session.Loading} {
 		first.SetStatusForTest(status)
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 		if len(*seen) != 1 {
 			t.Fatalf("ensure over a live root (status %v) must be a no-op, got %d creates", status, len(*seen))
 		}
@@ -216,14 +216,14 @@ func TestEnsureRootAgentsHealsDeadRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
 	first.SetStatusForTest(session.Dead)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 2 {
 		t.Fatalf("expected a re-create after the root went Dead, got %d creates", len(*seen))
@@ -272,14 +272,14 @@ func TestEnsureRootAgentsHealsLostRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 2 {
 		t.Fatalf("expected a re-create after the root went Lost, got %d creates", len(*seen))
@@ -310,14 +310,14 @@ func TestEnsureRootAgentsDoesNotAdoptArchivedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
 	first.SetStatusForTest(session.Archived)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 2 {
 		t.Fatalf("expected a re-create after the root went Archived (never adopted), got %d creates", len(*seen))
@@ -360,7 +360,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial create, got %d", len(*seen))
 	}
@@ -375,8 +375,8 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 
 	// Inside the grace window: the kill is honored, no re-create.
 	clock = base.Add(rootKillHealDelay - time.Second)
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("ensure must honor the kill inside the grace window, got %d creates", len(*seen))
 	}
@@ -387,7 +387,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	// Grace window elapsed: a still-configured root self-heals — NO daemon
 	// restart, unlike the pre-fix behavior.
 	clock = base.Add(rootKillHealDelay + time.Second)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("configured root must self-heal after the grace window without a daemon restart, got %d creates", len(*seen))
 	}
@@ -403,7 +403,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	if stillKilled {
 		t.Fatalf("kill tombstone must be cleared after self-heal")
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("healed root must be adopted, not re-created, got %d creates", len(*seen))
 	}
@@ -431,7 +431,7 @@ func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial create, got %d", len(*seen))
 	}
@@ -454,8 +454,8 @@ func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
 	// Inside the grace window the user's stop is honored, exactly as it is when
 	// KillSession runs to completion uninterrupted.
 	clock = base.Add(rootKillHealDelay - time.Second)
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("a crash-recovered root kill must honor the grace window, got %d creates", len(*seen))
 	}
@@ -466,7 +466,7 @@ func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
 	// ...and still self-heals once the window elapses: an explicit kill delays
 	// re-creation, it is never a permanent stop (#1223).
 	clock = base.Add(rootKillHealDelay + time.Second)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("configured root must self-heal after the grace window, got %d creates", len(*seen))
 	}
@@ -488,7 +488,7 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial root create, got %d", len(*seen))
 	}
@@ -590,7 +590,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial root create, got %d", len(*seen))
 	}
@@ -608,7 +608,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	opLock := manager.opLockFor(key)
 	opLock.Lock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("busy reap skip must not create another root, got %d creates", len(*seen))
 	}
@@ -626,7 +626,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	}
 
 	opLock.Unlock()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("next tick after lock release must heal immediately, got %d creates", len(*seen))
 	}
@@ -670,8 +670,8 @@ func TestEnsureRootAgentsDoesNotHealUnconfiguredRoot(t *testing.T) {
 
 	// Well past the grace window, the unconfigured repo is still never visited.
 	clock = base.Add(rootKillHealDelay + time.Hour)
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("ensure must never create a root for a repo absent from root_agents, got %d creates", len(*seen))
 	}
@@ -705,7 +705,7 @@ func TestEnsureRootAgentsKeepsRetryingAndHeals(t *testing.T) {
 
 	attempts := rootEnsureEscalationThreshold + 3
 	for i := 0; i < attempts; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	manager.mu.Lock()
@@ -730,7 +730,7 @@ func TestEnsureRootAgentsKeepsRetryingAndHeals(t *testing.T) {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if findRootInstance(t, manager, badPath) == nil {
 		t.Fatalf("first ensure pass after the cause cleared must create the root without a daemon restart")
@@ -759,9 +759,9 @@ func TestEnsureRootAgentsBacksOffBetweenFailures(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	manager.mu.Lock()
 	st := manager.rootEnsureStates[badPath]
@@ -941,7 +941,7 @@ func TestDeliverPromptSendsIntoEnsuredRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	status, err := manager.DeliverPrompt(DeliverPromptRequest{
 		Title:    session.RootSessionTitle,
@@ -954,4 +954,23 @@ func TestDeliverPromptSendsIntoEnsuredRoot(t *testing.T) {
 	if status != "sent" {
 		t.Fatalf("expected status \"sent\" into the live root, got %q", status)
 	}
+}
+
+// ensureRootAgentsAndWait runs one ensure pass and joins the creates it
+// launched.
+//
+// Since #3721 a root (re-)create runs on its own goroutine, so a test asserting
+// on the create's OUTCOME — the session it registered, the options it handed
+// session.NewInstance, the retry state it recorded — has to join it first. That
+// join is also the happens-before edge those reads need: without it, reading the
+// recording backend's slice while a create goroutine may still append to it is a
+// data race.
+//
+// Deliberately a test helper rather than a synchronous mode on the production
+// call: a code path only tests take is not the path being tested. The passes
+// that must NOT join — the ones asserting the sweep does not wait — call
+// EnsureRootAgents directly.
+func (m *Manager) ensureRootAgentsAndWait() {
+	m.EnsureRootAgents()
+	m.waitRootAgentCreates()
 }

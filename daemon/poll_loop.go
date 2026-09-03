@@ -35,12 +35,19 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 
 			// Always-ensure the root agent for repos opted in via root_agents
 			// (#1106). Runs after RefreshStatuses so a root whose tmux died is
-			// marked Dead and healed in the same tick; the loop body runs once
-			// before the first ticker wait, so the first ensure happens right
-			// after the restore. A (re-)create blocks this poll briefly while
-			// the session starts — acceptable for a rare, backoff-throttled
-			// event. root_agents is read from the daemon's startup config;
-			// changing it takes effect on the next daemon restart.
+			// marked Dead and its heal STARTED in the same tick; the loop body
+			// runs once before the first ticker wait, so the first ensure
+			// happens right after the restore. root_agents is read from the
+			// daemon's startup config; changing it takes effect on the next
+			// daemon restart.
+			//
+			// This pass never blocks on a (re-)create. It used to, priced here
+			// as "briefly, for a rare backoff-throttled event" — true of a
+			// healthy filesystem, and with no upper bound on a stalled one,
+			// since a create's first act is an unbounded `git rev-parse` on the
+			// configured repo. One unreachable checkout therefore stopped every
+			// pass below this line for every session on the box. Since #3721 the
+			// create runs on its own goroutine and this pass only launches it.
 			manager.EnsureRootAgents()
 
 			// Best-effort restore of Lost sessions (#1108): the general form

@@ -92,7 +92,7 @@ func TestSingletonRootCreateRefusesSwappedCheckout(t *testing.T) {
 	swapCheckoutForStrangersClone(t, repoPath)
 	warnings := captureRootEnsureWarnings(t)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("a create must re-prove the bound path's checkout, not trust the boot binding; got %d creates into a clone that carries no marker for project %s", len(*seen), project.ID)
@@ -125,7 +125,7 @@ func TestSingletonRootHealRefusesSwappedCheckoutWithoutReaping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after the first ensure")
@@ -140,7 +140,7 @@ func TestSingletonRootHealRefusesSwappedCheckoutWithoutReaping(t *testing.T) {
 	first.SetStatusForTest(session.Dead)
 	swapCheckoutForStrangersClone(t, repoPath)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a heal must re-prove the checkout before re-creating, got %d creates", len(*seen))
@@ -180,7 +180,7 @@ func TestRootCreateReprovesTheCheckoutAfterTheReap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after the first ensure")
@@ -200,7 +200,7 @@ func TestRootCreateReprovesTheCheckoutAfterTheReap(t *testing.T) {
 	t.Cleanup(func() { rootCreateVerifyHookForTest = nil })
 	warnings := captureRootEnsureWarnings(t)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if !swapped {
 		t.Fatalf("the create never went through createVerifiedRoot — a create path that bypasses it is unverified by construction")
@@ -236,14 +236,14 @@ func TestLiveRootAdoptedDespiteSwappedCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after the first ensure")
 	}
 
 	swapCheckoutForStrangersClone(t, repoPath)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a live root must be adopted, not re-created, got %d creates", len(*seen))
@@ -275,13 +275,13 @@ func TestSingletonRootCreateResumesWhenOriginalCheckoutReturns(t *testing.T) {
 	}
 	restore := swapCheckoutForStrangersClone(t, repoPath)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("the swapped checkout must be refused, got %d creates", len(*seen))
 	}
 
 	restore()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("the registered checkout is back and carries its marker; the root must be created without a daemon restart, got %d creates", len(*seen))
@@ -320,7 +320,7 @@ func TestSingletonRootCreateHoldsAnUnreadableMarker(t *testing.T) {
 	}
 	warnings := captureRootEnsureWarnings(t)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("an unprovable checkout must not get the project's autonomous root, got %d creates", len(*seen))
@@ -355,7 +355,7 @@ func TestSingletonRootCreateNamesAGoneRecordedRoot(t *testing.T) {
 	}
 	warnings := captureRootEnsureWarnings(t)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("there is no checkout at the bound path; nothing may be created, got %d creates", len(*seen))
@@ -388,7 +388,7 @@ func TestLegacyRootAgentCreateIsNotGatedByCheckoutIdentity(t *testing.T) {
 	}
 	swapCheckoutForStrangersClone(t, repoPath)
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("the #3366 gate is scoped to registry-backed creates; a legacy root_agents path must behave exactly as it did before, got %d creates", len(*seen))
