@@ -142,29 +142,7 @@ func remoteConfigWriteError(client *apiclient.Client, name, route string, err er
 		"%s cannot change config on the daemon at %s: that daemon (%s) does not serve the %s route. "+
 			"Nothing was written — af never falls back to writing this machine's config for a remote target. "+
 			"Upgrade the daemon, or run %s on the daemon host",
-		name, apiclient.RemoteTargetURL(), remoteDaemonVersion(client), route, name)
-}
-
-// remoteDaemonVersion asks the targeted daemon what version it is, for the
-// refusal above. It runs only on that refusal path, never on a successful write,
-// so the happy path stays one round trip.
-//
-// All three answers are stated as facts about the daemon rather than collapsed
-// into "unknown". An empty Version from a RESPONDING daemon is itself positive
-// evidence (see daemon.PingResponse.Version): the field rides Ping since #1044,
-// so a daemon that omits it is older than that — which is consistent with, and
-// further narrows, the missing route. A health probe that fails outright is a
-// different fact again and is reported as one.
-func remoteDaemonVersion(client *apiclient.Client) string {
-	health, err := client.Health(context.Background())
-	switch {
-	case err != nil:
-		return fmt.Sprintf("its version could not be read: %v", err)
-	case health.Version == "":
-		return "it reports no version, so it predates version reporting"
-	default:
-		return "version " + health.Version
-	}
+		name, apiclient.RemoteTargetURL(), client.DaemonVersionPhrase(context.Background()), route, name)
 }
 
 // configWriteLocation renders WHERE a config write landed, for the success line.
