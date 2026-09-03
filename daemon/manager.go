@@ -222,6 +222,15 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
+	// rootCreateRefusals holds each repo's standing create-boundary identity
+	// refusal (#3714): the outcome class of the most recent identity proof at
+	// a root create, and when it was taken. Keyed by REPO ID — the key
+	// rootAgentMaterializeVerdictFor asks with, and the one key two
+	// root_agents spellings of a single repository share — rather than by
+	// rootEnsureStates' candidate key. Guarded by mu, and written from the
+	// create boundary rather than from the poll goroutine as such, so #3721's
+	// off-poll create writes it unchanged.
+	rootCreateRefusals map[string]rootCreateRefusal
 	// rootAgentLayers is the root-agent configuration snapshot every resolution
 	// reads (#2216 Phase 6): the global [root_agent] layer, each registered
 	// project's personal layer and resolved root, the fail-closed unknowns
@@ -530,6 +539,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		aliveObservations:         make(map[string]uint64),
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
+		rootCreateRefusals:        make(map[string]rootCreateRefusal),
 		rootKilledAt:              make(map[string]time.Time),
 		deletedRootRepos:          make(map[string]string),
 		killsInFlight:             make(map[string]struct{}),

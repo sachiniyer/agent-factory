@@ -46,11 +46,11 @@ import (
 //
 // A nil identity (the legacy root_agents path) verifies nothing, so this is a
 // plain CreateSession there.
-func (m *Manager) createVerifiedRoot(identity *resolvedProjectRoot, req CreateSessionRequest) (session.InstanceData, error) {
+func (m *Manager) createVerifiedRoot(repoID string, identity *resolvedProjectRoot, req CreateSessionRequest) (session.InstanceData, error) {
 	if rootCreateVerifyHookForTest != nil {
 		rootCreateVerifyHookForTest()
 	}
-	if err := verifyRootCreateCheckout(identity); err != nil {
+	if err := m.proveRootCreateCheckout(repoID, identity); err != nil {
 		return session.InstanceData{}, err
 	}
 	return m.CreateSession(context.Background(), req)
@@ -70,15 +70,33 @@ var rootCreateVerifyHookForTest func()
 // CreateSession failure that IS a refusal must not be retried as if a
 // conversation had failed to resume, or one swap would produce three refusals
 // and a log that blames the agent's history for a checkout problem.
-type rootCheckoutRefusal struct{ err error }
+//
+// It carries the outcome class alongside the message because the per-repo
+// refusal record the verdict reads (#3714) needs the judgment in a form it can
+// switch on, and the judgment is made here — deriving it back out of the
+// message would be a second, drifting classifier.
+type rootCheckoutRefusal struct {
+	err   error
+	class rootCreateRefusalClass
+}
 
 func (r rootCheckoutRefusal) Error() string { return r.err.Error() }
 func (r rootCheckoutRefusal) Unwrap() error { return r.err }
 
+// rootCheckoutRefusalClassOf reports whether err came from
+// verifyRootCreateCheckout and, if so, which outcome it was.
+func rootCheckoutRefusalClassOf(err error) (rootCreateRefusalClass, bool) {
+	var refusal rootCheckoutRefusal
+	if errors.As(err, &refusal) {
+		return refusal.class, true
+	}
+	return rootCreateRefusalNone, false
+}
+
 // isRootCheckoutRefusal reports whether err came from verifyRootCreateCheckout.
 func isRootCheckoutRefusal(err error) bool {
-	var refusal rootCheckoutRefusal
-	return errors.As(err, &refusal)
+	_, ok := rootCheckoutRefusalClassOf(err)
+	return ok
 }
 
 // verifyRootCreateCheckout re-proves that the checkout at a registry-backed
@@ -138,33 +156,36 @@ func isRootCheckoutRefusal(err error) bool {
 // or a marker that becomes readable again — heals with no restart. That is the
 // same always-on contract every other ensure failure honors (#1122).
 //
-// Which is also why it stays out of rootAgentMaterializeVerdictFor. That
-// verdict is snapshot-derived and answers "does policy allow this root" — a
-// deletion, a fail-closed unknown, a disable, a project that never resolved.
-// No retryable per-attempt ensure failure is a cause there today (a legacy
-// root_agents path pointing at a not-yet-cloned repo reads as will-materialize
-// while its sweep fails every tick), and this one is the same shape. Making a
-// DURABLE mismatch legible on that surface is worth doing, but it needs
-// per-repo refusal state the verdict can read, which is its own slice.
+// It is now also legible to rootAgentMaterializeVerdictFor, which #3714 gave a
+// per-repo record of this outcome to read. The verdict stays snapshot-derived
+// for every OTHER question — a deletion, a fail-closed unknown, a disable, a
+// project that never resolved — and no other retryable per-attempt ensure
+// failure became a cause there: a legacy root_agents path pointing at a
+// not-yet-cloned repo still reads as will-materialize while its sweep fails
+// every tick (#1122). What earned this one a place is durability. The record
+// is kept by proveRootCreateCheckout, which wraps every call to this function.
 func verifyRootCreateCheckout(identity *resolvedProjectRoot) error {
 	if identity == nil {
 		return nil
 	}
-	if err := rootCheckoutIdentityError(identity); err != nil {
-		return rootCheckoutRefusal{err: err}
+	if class, err := rootCheckoutIdentityError(identity); err != nil {
+		return rootCheckoutRefusal{err: err, class: class}
 	}
 	return nil
 }
 
 // rootCheckoutIdentityError is verifyRootCreateCheckout's judgment, split out so
-// the refusal wrapper is applied in exactly one place.
-func rootCheckoutIdentityError(identity *resolvedProjectRoot) error {
+// the refusal wrapper is applied in exactly one place. Each negative outcome
+// names its own class beside its own wording, so the two are decided together
+// and a later reader cannot pair a remedy with the wrong cause; a proof returns
+// rootCreateRefusalNone rather than a class it does not have.
+func rootCheckoutIdentityError(identity *resolvedProjectRoot) (rootCreateRefusalClass, error) {
 	matches, err := config.ProjectCheckoutMatches(identity.root, identity.checkoutID)
 	if err != nil {
-		return fmt.Errorf("the checkout marker for project %s at %s could not be read, so the checkout there cannot be proven to be the registered one; not starting its root agent until the marker is readable again: %w", identity.projectID, identity.root, err)
+		return rootCreateRefusalMarkerUnreadable, fmt.Errorf("the checkout marker for project %s at %s could not be read, so the checkout there cannot be proven to be the registered one; not starting its root agent until the marker is readable again: %w", identity.projectID, identity.root, err)
 	}
 	if matches {
-		return nil
+		return rootCreateRefusalNone, nil
 	}
 	// config.ProjectCheckoutMatches answers a determinately-absent root with a
 	// plain false, so "no marker" covers two situations that read very
@@ -173,7 +194,7 @@ func rootCheckoutIdentityError(identity *resolvedProjectRoot) error {
 	// uses; an ambiguous stat proves nothing, so it falls through to the
 	// mismatch wording rather than claiming the path is gone.
 	if absent, statErr := recordRootAbsent(identity.root); statErr == nil && absent {
-		return fmt.Errorf("the recorded root %s of project %s is gone, so there is no registered checkout to start its root agent in; bring the path back, or run `af projects rebind %s <path>` if the checkout moved", identity.root, identity.projectID, identity.projectID)
+		return rootCreateRefusalRootGone, fmt.Errorf("the recorded root %s of project %s is gone, so there is no registered checkout to start its root agent in; bring the path back, or run `af projects rebind %s <path>` if the checkout moved", identity.root, identity.projectID, identity.projectID)
 	}
-	return fmt.Errorf("the checkout at %s does not carry project %s's marker %s — a different clone may be reusing the path, so its root agent is not started there (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", identity.root, identity.projectID, identity.checkoutID, identity.projectID)
+	return rootCreateRefusalMismatch, fmt.Errorf("the checkout at %s does not carry project %s's marker %s — a different clone may be reusing the path, so its root agent is not started there (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", identity.root, identity.projectID, identity.checkoutID, identity.projectID)
 }
