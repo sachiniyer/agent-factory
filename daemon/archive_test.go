@@ -589,10 +589,13 @@ func TestArchiveSession_RejectsWhenOperationInFlight(t *testing.T) {
 }
 
 // TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely is the
-// #2641 regression across every archive/restore path that registers in
-// killsInFlight before acquiring the per-session operation lock. A wedged peer
-// may delay these operations, but it must not make the session undeletable for
-// the daemon's lifetime.
+// #2641 regression across every archive/restore path that waits for the
+// per-session operation lock. A wedged peer may delay these operations, but it
+// must not make the session undeletable for the daemon's lifetime.
+//
+// All three used to register in killsInFlight BEFORE that wait; since #3600
+// (restore) and #3715 (archive) none of them do, which is why the helper below
+// asks the stronger question.
 //
 // PRE-FIX: each case misses the deadline below because it waits in opLock.Lock.
 func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *testing.T) {
