@@ -143,7 +143,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		m.mu.Unlock()
 	}()
 
-	opLock, err := m.lockSessionOperationWithin(key, "archive", req.Title)
+	opLock, _, err := m.lockSessionOperationWithin(key, "archive", req.Title)
 	if err != nil {
 		return "", session.InstanceData{}, err
 	}
@@ -548,10 +548,12 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 // record and render again, #1809); shell/process tabs were dropped at archive
 // time. Returns the restored worktree path.
 //
-// Concurrency mirrors ArchiveSession/KillSession (killsInFlight + op-lock). On a
-// repo-gone failure the archive is left intact with an actionable error; on a
-// re-spawn failure the worktree is already back in place and the instance is
-// left Lost so the #1108 restore loop heals it.
+// Concurrency uses the same two gates as ArchiveSession/KillSession — the
+// killsInFlight claim and the per-session op-lock — but in the opposite ORDER:
+// the lock is taken first, so the claim is never held across the wait for it
+// (#3600). On a repo-gone failure the archive is left intact with an actionable
+// error; on a re-spawn failure the worktree is already back in place and the
+// instance is left Lost so the #1108 restore loop heals it.
 func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.InstanceData, error) {
 	instance, repoID, title, resolvedID, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
@@ -576,11 +578,12 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 
 	key := daemonInstanceKey(repoID, req.Title)
 
-	// Registered BEFORE the claim so LIFO runs it LAST — after opLock.Unlock and
-	// after releaseRestoreOperation (the #3597 ordering). The claim is what actually
-	// refuses Kill, so lowering the fence while killsInFlight is still set would
-	// publish a row saying can_kill=true that the admission gate would still refuse.
-	// Released last, the busy projection covers exactly the claim's interval.
+	// Registered BEFORE both the lock and the claim so LIFO runs it LAST — after
+	// releaseRestoreOperation and after opLock.Unlock (the #3597 ordering). The
+	// claim is what actually refuses Kill, so lowering the fence while
+	// killsInFlight is still set would publish a row saying can_kill=true that the
+	// admission gate would still refuse. Released last, the busy projection covers
+	// exactly the claim's interval.
 	//
 	// fenceRaised is ownership, not bookkeeping: the returns above the raise include
 	// a claim that FAILED because another restore holds it, and that restore may well
@@ -597,16 +600,26 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		}
 	}()
 
-	if err := m.claimRestoreOperation(repoID, key, req.Title); err != nil {
-		return "", err
-	}
-	defer m.releaseRestoreOperation(key)
-
-	opLock, err := m.lockSessionOperationWithin(key, "restore", req.Title)
+	// Op-lock BEFORE the claim, the #3600 order — see restoreLostOrDeadSession for
+	// the full argument, which applies verbatim here because both routes share
+	// claimRestoreOperation and therefore shared its window. Claiming first held
+	// killsInFlight across a wait bounded at opLockTimeout (30s) while the row sat
+	// at {LiveArchived, OpNone}, and canKillFor never consults liveness — so an
+	// archived row advertised a Kill that the admission gate would only refuse with
+	// "an operation is already in progress". Taking the lock first makes the claim
+	// and the fence raise adjacent, so no observer sees the row claimed-but-unfenced
+	// and the wait itself holds nothing.
+	beforeRestoreOperationLock()
+	opLock, waited, err := m.lockSessionOperationWithin(key, "restore", req.Title)
 	if err != nil {
 		return "", err
 	}
 	defer opLock.Unlock()
+
+	if err := m.claimRestoreOperation(repoID, key, req.Title, waited); err != nil {
+		return "", err
+	}
+	defer m.releaseRestoreOperation(key)
 
 	// Re-verify under the op-lock (findSession released m.mu).
 	m.mu.Lock()

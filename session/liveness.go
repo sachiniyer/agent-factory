@@ -179,10 +179,11 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStat
 // gesture. The same is already true of OpCreating/OpReplacing/teardown above.
 //
 // A restoring row is excluded for the symmetrical reason and a sharper one: the
-// daemon takes that same per-session operation lock for the whole restore
-// (claimRestoreOperation sets killsInFlight in daemon/restore.go), so a Kill
-// pressed during it is rejected at the ADMISSION gate — before BeginKill is ever
-// reached — with "kill already in progress for session X"
+// daemon holds that same per-session operation lock for the whole restore, and
+// claimRestoreOperation registers killsInFlight the moment it has that lock
+// (daemon/restore.go), so a Kill pressed during it is rejected at the ADMISSION
+// gate — before BeginKill is ever reached — with "kill already in progress for
+// session X"
 // (daemon/manager_sessions.go). That message does not match the user's mental
 // model: they started a restore, not a kill, yet the error implies a prior kill.
 // Kill never gets a chance to supersede the op, so advertising it promises an

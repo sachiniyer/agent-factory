@@ -3,25 +3,39 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// beforeRestoreOperationLock fires immediately before either manual restore path
+// waits for the session's per-session operation lock. No-op in production; the
+// #3600 tests substitute a blocking stand-in so they can assert what the daemon
+// advertises and admits while a restore is parked in front of that lock.
+var beforeRestoreOperationLock = func() {}
+
 // claimRestoreOperation makes restore admission atomic with DeleteProject's
 // per-repo lifecycle fence. If restore wins, killsInFlight makes deletion see
 // the session even while an archived row has not yet entered OpRestoring. If
 // deletion wins, projectDeletes refuses the restore before any state/worktree
 // mutation. The legacy killsInFlight name covers all exclusive lifecycle ops.
-func (m *Manager) claimRestoreOperation(repoID, key, title string) error {
+//
+// Both callers hold the session's operation lock by the time they get here
+// (#3600), which is what makes the claim adjacent to the fence raise that
+// follows it. The atomicity above is unchanged — this still runs under m.mu and
+// still reads projectDeletes there — but it is now decided at the END of a wait
+// that may have taken up to opLockTimeout, so `waited` is folded into the
+// refusals. A delay that says nothing about itself reads as a hang.
+func (m *Manager) claimRestoreOperation(repoID, key, title string, waited time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, deleting := m.projectDeletes[repoID]; deleting {
-		return fmt.Errorf("cannot restore session %q: project %s is being deleted; retry after deletion finishes", title, repoID)
+		return fmt.Errorf("cannot restore session %q%s: project %s is being deleted; retry after deletion finishes", title, afterOpLockWait(waited), repoID)
 	}
 	if _, busy := m.killsInFlight[key]; busy {
-		return fmt.Errorf("an operation is already in progress for session %q", title)
+		return fmt.Errorf("an operation is already in progress for session %q%s", title, afterOpLockWait(waited))
 	}
 	if m.restoresInFlight == nil {
 		m.restoresInFlight = make(map[string]struct{})
@@ -29,6 +43,17 @@ func (m *Manager) claimRestoreOperation(repoID, key, title string) error {
 	m.killsInFlight[key] = struct{}{}
 	m.restoresInFlight[key] = struct{}{}
 	return nil
+}
+
+// afterOpLockWait renders the operation-lock wait a restore refusal was decided
+// after. Empty when the lock was uncontended, so the ordinary refusal keeps the
+// wording it has always had — lockWithin reports zero only for an acquisition
+// nobody was ahead of, never for a rounded-down real wait.
+func afterOpLockWait(waited time.Duration) string {
+	if waited <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" after waiting %s for another operation on it to finish", waited.Round(time.Millisecond))
 }
 
 func (m *Manager) releaseRestoreOperation(key string) {
@@ -81,8 +106,8 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 
 	key := daemonInstanceKey(repoID, title)
 
-	// Registered BEFORE the claim so LIFO runs it LAST — after opLock.Unlock and
-	// after releaseRestoreOperation (Codex on #3597).
+	// Registered BEFORE both the lock and the claim so LIFO runs it LAST — after
+	// releaseRestoreOperation and after opLock.Unlock (Codex on #3597).
 	//
 	// Order matters because the claim is what actually refuses Kill. Lowering the
 	// fence while killsInFlight is still set publishes a row saying can_kill=true to
@@ -106,16 +131,55 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		}
 	}()
 
-	if err := m.claimRestoreOperation(repoID, key, title); err != nil {
-		return "", err
-	}
-	defer m.releaseRestoreOperation(key)
-
-	opLock, err := m.lockSessionOperationWithin(key, "restore", title)
+	// The op-lock is taken BEFORE the claim, and that order is the whole of #3600.
+	//
+	// Claiming first put killsInFlight up for the length of this wait — up to
+	// opLockTimeout (30s), and the holder in front is routinely the automatic
+	// Lost-restore loop, which owns this same lock across its own UNFENCED
+	// probe/preserve phase (lostrestore.go, bounded at sandboxPushTimeout). From
+	// the claim onward a Kill is refused at the admission gate with "kill already
+	// in progress" — about an operation the user never started — while the row sat
+	// at {LiveLost, OpNone} and canKillFor, which reads the op axis alone, went on
+	// advertising that Kill. #3597 made the fence coextensive with the claim from
+	// this line onward; the wait in FRONT of it was the remainder.
+	//
+	// Raising the fence earlier is the fix that cannot be taken: BeginRecoverFence
+	// validates RuntimeActionRecoverLost, which requires OpNone, so a manual
+	// restore that fenced ahead of the wait would make the automatic loop's own
+	// raise REFUSE — charging a failure against that session's #1108 backoff
+	// episode for a session that was not failing. Projecting a second "claimed but
+	// not yet fenced" axis is the other rejected direction: the TUI rebuilds an
+	// Instance through session.FromInstanceData and recomputes CanKill from the op
+	// axis, so a projection-side fix either leaves TUI and web disagreeing or
+	// requires making the derived InstanceData.CanKill authoritative on rebuild —
+	// which storage.go's scrub exists to forbid.
+	//
+	// Taking the lock first removes the window instead of hiding it: the claim and
+	// the raise become adjacent, so the row genuinely reaches OpRestoring before
+	// any observer can see it claimed-but-unfenced, and during the wait itself it
+	// is honestly unclaimed — the Kill it advertises is admitted, and bounded by
+	// whoever really holds the lock.
+	//
+	// Nothing about that inverts a lock order. The canonical one is
+	// target-before-op (#2006), and no restore path takes a target lock at all;
+	// m.mu is never held across an op-lock acquisition, and holding the op-lock
+	// while briefly taking m.mu is what every re-verify below this line already
+	// does. The claim's atomicity with DeleteProject's projectDeletes fence is
+	// preserved because the claim still reads that fence under m.mu — it just
+	// reads it after the wait. What changed is which side of a delete race
+	// refuses: a delete that STARTS during the wait now proceeds and this restore
+	// refuses (naming the wait), where before the delete was the one turned away.
+	beforeRestoreOperationLock()
+	opLock, waited, err := m.lockSessionOperationWithin(key, "restore", title)
 	if err != nil {
 		return "", err
 	}
 	defer opLock.Unlock()
+
+	if err := m.claimRestoreOperation(repoID, key, title, waited); err != nil {
+		return "", err
+	}
+	defer m.releaseRestoreOperation(key)
 
 	m.mu.Lock()
 	current := m.instances[key]
