@@ -314,8 +314,11 @@ type home struct {
 	// (stateHooks)
 	hooksPane *ui.HooksPane
 	// configPane is the global config editor, hosted as an overlay
-	// (stateConfigEditor). It renders from the config manifest and writes
-	// through daemon.SetGlobalConfigValue — the same path `af config set` uses.
+	// (stateConfigEditor). It renders from THIS machine's config manifest and
+	// writes through daemon.SetGlobalConfigValue — the local control socket, or a
+	// local file write. It does not follow --daemon-url/AF_DAEMON_URL, which
+	// `af config set` has since #3679; see the ConfigPane doc in ui/config_pane.go
+	// for why routing the write alone would be worse than not routing it (#3708).
 	configPane *ui.ConfigPane
 	// menu displays the key hints inside the status bar (shared handle for
 	// SetState/keydown callers)

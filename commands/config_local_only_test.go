@@ -13,21 +13,22 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// Every `af config` verb must REFUSE a remote-daemon target rather than answer
-// about this machine (#3661, #3679). --daemon-url and AF_DAEMON_URL are
-// persistent root flags, so cobra advertises them under every subcommand, and
-// none of these six ever opens a client. Before this, each accepted the target
-// and silently dropped it: `af config validate --daemon-url http://box:8443`
-// printed a confident verdict about the caller's own laptop, `af config migrate`
-// let them believe it had rewritten the remote host's file, and `set`/`unset`
-// printed a success line naming a local path for a change they believed they had
-// made remotely.
+// An `af config` verb that can only ever answer about the machine it runs on
+// must REFUSE a remote-daemon target rather than answer anyway (#3661, #3679).
+// --daemon-url and AF_DAEMON_URL are persistent root flags, so cobra advertises
+// them under every subcommand, and these paths never open a client. Before this,
+// each accepted the target and silently dropped it: `af config validate
+// --daemon-url http://box:8443` printed a confident verdict about the caller's
+// own laptop, and `af config migrate` let them believe it had rewritten the
+// remote host's file.
+//
+// The four read/rewrite verbs are local-only outright. `set` and `unset` are
+// local-only only in their `--project` form; their GLOBAL form routes to the
+// targeted daemon (#3679) and is covered in config_remote_write_test.go.
 //
 // Every case is driven through the real root command so the actual persistent
 // flag is parsed, and every verb is asserted on both routes — the flag and the
-// env var, the same misreading arriving by a different road. The two write verbs
-// add both scopes on top of that; see their block for which assertion carries
-// the weight in each.
+// env var, the same misreading arriving by a different road.
 
 // forceLocalDaemonTarget scrubs the remote-daemon target for the whole package
 // test binary and returns a restore. TestMain calls it.
@@ -248,24 +249,26 @@ func TestConfigMigrateRefusesARemoteDaemonTarget(t *testing.T) {
 	}
 }
 
-// The two WRITE verbs refuse on the same seam (#3679). They were left out of the
-// first pass because #3661 recorded `af config set` as the verb that genuinely
-// follows the flag — it does not. `daemon.SetGlobalConfigValue` dials
-// DaemonSocketPath(), the LOCAL unix socket, and falls back to writing the local
-// file, so a remote target ends in `set default_program = codex in
-// ~/.agent-factory/config.toml`: a success line naming a path on the wrong
-// machine. On a mutating verb that is strictly worse than the read verbs.
+// The two WRITE verbs keep the refusal on their `--project` form only (#3679).
 //
-// Both scopes are asserted, because the guard has to sit ABOVE the branch — one
-// placed inside the global branch would leave `--project` writing unchecked.
-// What separates the two scopes is which assertion carries the weight:
+// Their GLOBAL form no longer refuses: it routes to the targeted daemon's
+// admission-gated write, which is the feature this guard was always additive
+// with respect to — see config_remote_write_test.go, which owns that half and
+// asserts the caller's own config.toml stays untouched throughout. What is left
+// here is the sub-path no routing can reach: `--project` writes a registered
+// project's machine-local override, a personal file on THIS machine that no
+// remote daemon owns.
 //
-//   global   the seeded file is the oracle. Without the guard the command
-//            SUCCEEDS and rewrites it, so "unchanged" is the whole proof.
-//   project  the MESSAGE is the oracle. `--project` needs a registered project,
-//            so an unguarded run errors on its own ("… is not a registered
-//            project"); pinning the local-only wording is what distinguishes a
-//            guard that fired from a branch that merely failed later.
+// That is also why the guard moved INTO the branch. Above it, it would refuse
+// the global write the daemon is willing to serve.
+//
+// The MESSAGE is the oracle for both cases, not the file. `--project` needs a
+// registered project (a bare `git init` is not enough — measured), so an
+// unguarded run errors on its own with "… is not a registered project"; pinning
+// the local-only wording is what distinguishes a guard that fired from a branch
+// that merely failed later. The unchanged-file assertion rides along as the
+// second half: a refusal that had materialized a config on its way to the error
+// would be a wrong-machine mutation in a quieter form.
 
 // seedGlobalConfig materializes a real global config in home by running one
 // unguarded write, and returns its bytes. It uses the command's own writer
@@ -305,59 +308,38 @@ func requireGlobalConfigUnchanged(t *testing.T, home string, want []byte) {
 	}
 }
 
-func TestConfigSetRefusesARemoteDaemonTarget(t *testing.T) {
+func TestConfigSetProjectRefusesARemoteDaemonTarget(t *testing.T) {
 	for _, route := range remoteTargetRoutes {
-		t.Run(route.name+"/global", func(t *testing.T) {
+		t.Run(route.name, func(t *testing.T) {
 			home := newConfigHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
 
-			out, _, err := runConfigCLI(t, withRoute(route.prefix, "set", "default_program", "codex")...)
-			requireLocalOnlyRefusal(t, err, "af config set")
-			// The silent lie this closes is the success line, so pin its absence too.
+			out, _, err := runConfigCLI(t, withRoute(route.prefix,
+				"set", "default_program", "codex", "--project", t.TempDir())...)
+			// Named with the flag, because that is what is local-only now — a
+			// refusal saying `af config set` is local-only would contradict the
+			// global form, which reaches the remote daemon.
+			requireLocalOnlyRefusal(t, err, "af config set --project")
 			if strings.Contains(out, "set default_program") {
 				t.Errorf("a refused set must not print a success line, got stdout: %q", out)
 			}
 			requireGlobalConfigUnchanged(t, home, nil)
 		})
-
-		t.Run(route.name+"/project", func(t *testing.T) {
-			home := newConfigHome(t)
-			t.Setenv("AF_DAEMON_URL", route.env)
-
-			_, _, err := runConfigCLI(t, withRoute(route.prefix,
-				"set", "default_program", "codex", "--project", t.TempDir())...)
-			requireLocalOnlyRefusal(t, err, "af config set")
-			requireGlobalConfigUnchanged(t, home, nil)
-		})
 	}
 }
 
-func TestConfigUnsetRefusesARemoteDaemonTarget(t *testing.T) {
-	// One of the three globally unsettable migrated backend settings, so the
-	// unguarded command would really clear something rather than refuse the key.
-	const unsettable = "ssh.host_key_verification"
-
+func TestConfigUnsetProjectRefusesARemoteDaemonTarget(t *testing.T) {
 	for _, route := range remoteTargetRoutes {
-		t.Run(route.name+"/global", func(t *testing.T) {
+		t.Run(route.name, func(t *testing.T) {
 			home := newConfigHome(t)
-			seeded := seedGlobalConfig(t, home, "set", unsettable, "accept-new")
 			t.Setenv("AF_DAEMON_URL", route.env)
 
-			out, _, err := runConfigCLI(t, withRoute(route.prefix, "unset", unsettable)...)
-			requireLocalOnlyRefusal(t, err, "af config unset")
+			out, _, err := runConfigCLI(t, withRoute(route.prefix,
+				"unset", "default_program", "--project", t.TempDir())...)
+			requireLocalOnlyRefusal(t, err, "af config unset --project")
 			if strings.Contains(out, "cleared") {
 				t.Errorf("a refused unset must not print a success line, got stdout: %q", out)
 			}
-			requireGlobalConfigUnchanged(t, home, seeded)
-		})
-
-		t.Run(route.name+"/project", func(t *testing.T) {
-			home := newConfigHome(t)
-			t.Setenv("AF_DAEMON_URL", route.env)
-
-			_, _, err := runConfigCLI(t, withRoute(route.prefix,
-				"unset", "default_program", "--project", t.TempDir())...)
-			requireLocalOnlyRefusal(t, err, "af config unset")
 			requireGlobalConfigUnchanged(t, home, nil)
 		})
 	}

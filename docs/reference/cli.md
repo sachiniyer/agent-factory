@@ -826,9 +826,13 @@ Examples:
   af config set default_program codex --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo
 
-Local-only: it writes the config on the machine it runs on, so
---daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
-host to change that host.
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global write is sent
+to THAT daemon's admission-gated write — the same one the web config form posts
+to — and the success line names the daemon it landed on. It is never silently
+applied to this machine instead: a daemon too old to serve the route is refused,
+not written around. --project is the exception and stays local-only, because it
+writes a registered project's machine-local override file, which no remote daemon
+owns.
 
 ```
 af config set <key> <value> [flags]
@@ -866,9 +870,11 @@ conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
 there is nothing to clear.
 
-Local-only: it writes the config on the machine it runs on, so
---daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
-host to change that host.
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global form is sent
+to THAT daemon's admission-gated write, like 'af config set'; a daemon too old to
+serve the route is refused rather than written around, so a remote unset never
+quietly clears a key on this machine instead. --project stays local-only — the
+override file it clears is this machine's.
 
 ```
 af config unset <key> [flags]
