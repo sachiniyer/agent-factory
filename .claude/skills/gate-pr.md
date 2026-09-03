@@ -229,7 +229,7 @@ jq -s --arg head "$HEAD" '
   add
   | map(select(.user.login == "chatgpt-codex-connector[bot]"))
   | map(select((.body // "") | test("\\bCodex Review\\b"; "i")))
-  | map(select((.body // "") | test("reached your Codex usage limits?\\b"; "i") | not))
+  | map(select((.body // "") | test("reached your Codex usage limits for code reviews"; "i") | not))
   | map(select((.body // "")
       | capture("(?:\\*\\*Reviewed commit:\\*\\*|Reviewed commit:)\\s*`(?<sha>[0-9a-f]{7,40})`"; "i")
       | .sha | ascii_downcase as $rc
@@ -555,13 +555,22 @@ is a pass**:
 - **A usage-limit comment.** Codex sends at least two wordings for this, and
   they mean the same thing: `You have reached your Codex usage limits for code
   reviews.` and a bare `You have reached your Codex usage limits.` — the second
-  reads as the account-wide limit, i.e. the WORSE outage. Match the stem
-  (`reached your Codex usage limits?\b`), never the scope clause; matching only
-  the long form is #3728, which withdrew the reviewer-unavailable exemption
-  during the more severe outage. Step 2 filters both out, and so does
-  `parseReviewedCommit` in `auto-gate.js`. A message saying the reviewer
-  declined to look is the opposite of a clean verdict, and it is the one most
-  likely to be misread as "Codex responded".
+  reads as the account-wide limit, i.e. the WORSE outage. Treat BOTH as "no
+  review happened". A message saying the reviewer declined to look is the
+  opposite of a clean verdict, and it is the one most likely to be misread as
+  "Codex responded".
+
+  **Two patterns, on purpose** (#3728). Detecting the OUTAGE uses the stem
+  `reached your Codex usage limits?\b`, because matching only the long form
+  withdrew the reviewer-unavailable exemption during the more severe outage.
+  Deciding a body is DISQUALIFIED from being a verdict — step 2's filter above,
+  and `parseReviewedCommit` in `auto-gate.js` — keeps the long wording. Both
+  reach that test only on a body already carrying the `Codex Review` marker,
+  which a real limit message never has, so the stem would buy nothing there and
+  would cost something real: a review that merely QUOTES the stem (every review
+  of `auto-gate.js` does) would stop counting as a verdict while also not
+  degrading — `Codex has not reviewed head <sha>` about a head it just reviewed,
+  with no exit.
 
 Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
 fresh usage-limit reply degrades it to a manual-only pass that still does not

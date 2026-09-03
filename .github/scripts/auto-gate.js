@@ -78,7 +78,28 @@ const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 // a review, not an outage, and reviewing this very file produces one. Keep that
 // conjunct load-bearing — it, not the narrowness of this pattern, is what stops
 // a false degradation.
+//
+// This is the OUTAGE detector, and it is deliberately NOT the pattern that
+// decides what counts as a verdict — see CODEX_VERDICT_LIMIT_RE below.
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits?\b/i;
+// The narrow pattern, kept narrow ON PURPOSE, for the one question the wide stem
+// must not answer: "is this body disqualified from being a verdict?"
+//
+// parseReviewedCommit only ever reaches this test on a body that ALREADY carries
+// the `Codex Review` marker, and a genuine usage-limit message carries no such
+// marker — it short-circuits and returns null whatever this pattern says. So
+// widening HERE cannot help a real outage message; it can only change the answer
+// for bodies that are actually reviews.
+//
+// And that change is a harm. A review that QUOTES the wide stem — which every
+// review of this very file does, since the stem is written a few lines up — would
+// stop parsing as a verdict, while `!looksLikeReviewArtifact` simultaneously
+// denies it the degradation. The gate then reports "Codex has not reviewed head
+// <sha> yet" about a head Codex just reviewed, with no reachable exit: the
+// remedy is "wait for a review", and every re-review reproduces it. That is the
+// #3728 defect re-created one function over, so the exclusion keeps the wording
+// that a real limit message actually uses.
+const CODEX_VERDICT_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // The second artifact shape. Codex emits the prose line above when a review is
@@ -3196,7 +3217,7 @@ async function evaluateCodex({
 }
 
 function parseReviewedCommit(body) {
-  if (!CODEX_REVIEW_RE.test(body) || CODEX_RATE_LIMIT_RE.test(body)) {
+  if (!CODEX_REVIEW_RE.test(body) || CODEX_VERDICT_LIMIT_RE.test(body)) {
     return null;
   }
   return body.match(REVIEWED_COMMIT_RE)?.[1]?.toLowerCase() || null;
@@ -3531,6 +3552,7 @@ module.exports = {
     acknowledgementIsAnswerable,
     headCurrentSinceTime,
     CODEX_RATE_LIMIT_RE,
+    CODEX_VERDICT_LIMIT_RE,
     bodyNamesReference,
     codexArtifactBindsToHead,
     codexArtifactStatesItsCommit,
