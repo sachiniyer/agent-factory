@@ -220,6 +220,10 @@ func TestTimedOutLegacyRootProbeIsUnknownNotARefusal(t *testing.T) {
 	// A live, adopted root for that repo: what a refusal would be able to damage.
 	live := registerStarted(t, manager, rid, repoPath, session.RootSessionTitle,
 		session.NewFakeBackend(), true, session.Running)
+	// Registering it went through the recording backend, so the count below is a
+	// baseline to grow from rather than a zero to assert. Read here, before any
+	// ensure pass, so nothing can be appending to it concurrently.
+	createsBefore := len(*seen)
 
 	var warnings bytes.Buffer
 	prevWarning := log.WarningLog.Writer()
@@ -240,8 +244,8 @@ func TestTimedOutLegacyRootProbeIsUnknownNotARefusal(t *testing.T) {
 	if findRootInstance(t, manager, repoPath) != live {
 		t.Fatal("the live root's record was replaced by a pass whose probe never answered")
 	}
-	if len(*seen) != 0 {
-		t.Fatalf("an unanswered probe must create nothing, got %d creates", len(*seen))
+	if got := len(*seen) - createsBefore; got != 0 {
+		t.Fatalf("an unanswered probe must create nothing, got %d new creates", got)
 	}
 
 	// It was recorded as UNKNOWN, not as a verdict, and it backed off.
@@ -287,5 +291,8 @@ func TestTimedOutLegacyRootProbeIsUnknownNotARefusal(t *testing.T) {
 	}
 	if got := live.GetStatus(); got != session.Running {
 		t.Fatalf("the healed pass must adopt the live root, not replace it; status = %v", got)
+	}
+	if got := len(*seen) - createsBefore; got != 0 {
+		t.Fatalf("the healed pass must ADOPT the live root, not create beside it, got %d new creates", got)
 	}
 }
