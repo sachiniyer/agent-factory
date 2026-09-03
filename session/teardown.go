@@ -215,13 +215,12 @@ func TeardownStateUnknown(err error) bool {
 // entry points (which hold this session's op-lock unbroken for their entire
 // call while the instance still owns its (repo, title) map slot, ruling out a
 // same-name replacement appearing mid-teardown) AND from unlocked internal
-// cleanup — a setup-error
-// defer killing an instance before it is even registered is one real example —
-// which cannot make that claim. Passing true from the wrong caller would let a
-// trusted scan adopt a genuine replacement's generation and reap it: exactly
-// the #3309 regression the guard exists to prevent. See
-// Instance.KillTrustingOwnLifecycleLock and daemon/archive.go's archiveTeardown
-// for the only two callers allowed to pass true.
+// cleanup — a setup-error defer killing an instance before it is even
+// registered is one real example — which cannot make that claim. Passing true
+// from the wrong caller would let a trusted scan adopt a genuine replacement's
+// generation and reap it: exactly the #3309 regression the guard exists to
+// prevent. See Instance.KillTrustingOwnLifecycleLock and daemon/archive.go's
+// archiveTeardown for the only two methods allowed to pass true.
 func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string, trustLiveGeneration bool) (teardownState, bool, error) {
 	// A session that provably never created a pane has no liveness to establish,
 	// so it is KNOWN without asking tmux — which matters because the machines

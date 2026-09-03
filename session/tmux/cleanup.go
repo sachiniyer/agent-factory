@@ -893,9 +893,9 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 // trustLiveGeneration (#3413) lets a caller that holds this session's exclusive
 // lifecycle lock for its ENTIRE sweep — archive, kill and the root-agent reap,
 // via closeTabForDestructiveTeardown; see Instance.KillTrustingOwnLifecycleLock
-// for the roster — seed the generation cohort from whatever the
-// live marker scan finds, instead of failing closed on an empty one. Every other
-// caller (this package's own background CleanupSessions sweep included) passes
+// for the roster — seed the generation cohort from whatever the live marker
+// scan finds, instead of failing closed on an empty one. Every other caller
+// (this package's own background CleanupSessions sweep included) passes
 // false and keeps the strict #3309 refusal: see reapVanishedSessionProcessCohort.
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error, trustLiveGeneration bool) error {
 	return reapVanishedSessionProcessCohort(match, ownHome, candidates, captureErr,

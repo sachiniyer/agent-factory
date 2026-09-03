@@ -272,9 +272,9 @@ func (t *TmuxSession) CloseAndWaitForPaneExitReportingBlindness() (PaneState, bo
 // closeTabForDestructiveTeardown while holding this session's op-lock unbroken,
 // with the instance still occupying its (repo, title) map slot — so no other
 // daemon-created instance can mint a same-named replacement mid-call, and a
-// foreign af HOME is excluded before the
-// generation check ever runs regardless. With #3309's actual risk structurally
-// ruled out here, a vanished session whose live processes carry a NEWER
+// foreign af HOME is excluded before the generation check ever runs
+// regardless. With #3309's actual risk structurally ruled out here, a
+// vanished session whose live processes carry a NEWER
 // generation than any captured predecessor (a session that flapped through a
 // restore while its teardown was starting) is reapable instead of being refused
 // forever behind a guard built for callers with no such guarantee. Every other
