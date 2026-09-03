@@ -351,3 +351,108 @@ func TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade(t *t
 		t.Fatalf("a mixed first escalation must stay eligible for the upgrade, got: %q", got)
 	}
 }
+
+// TestDeletedClaimDisprovenRequiresCurrentEvidence pins #3611's release rule at
+// the predicate itself, including the states the end-to-end fixtures above
+// cannot reach: a mismatch no probe pass ever established, and a mark from a
+// pass that has not happened. Both are UNKNOWN, and unknown holds the tombstone.
+func TestDeletedClaimDisprovenRequiresCurrentEvidence(t *testing.T) {
+	const (
+		repo     = "abcdef012345"
+		claimant = "project-1"
+	)
+	layersWith := func(record unresolvedProjectRecord) *rootAgentSnapshot {
+		return &rootAgentSnapshot{unresolvedRoots: map[string]unresolvedProjectRecord{repo: record}}
+	}
+	mismatchAt := func(pass uint64) unresolvedProjectRecord {
+		return unresolvedProjectRecord{projectID: claimant, identityMismatch: true, identityPass: pass}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		layers   *rootAgentSnapshot
+		claimant string
+		pass     uint64
+		want     bool
+		why      string
+	}{
+		{
+			name:     "proven this pass releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: claimant,
+			pass:     7,
+			want:     true,
+			why:      "a mismatch established by the pass now asking is the round-15 release",
+		},
+		{
+			name:     "proven last pass still releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: claimant,
+			pass:     8,
+			want:     true,
+			why:      "the snapshot carrying a pass-N verdict is first read in pass N+1; discarding it there would release nothing, ever",
+		},
+		{
+			name:     "proven two passes ago is stale",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: claimant,
+			pass:     9,
+			want:     false,
+			why:      "nothing re-proved this mismatch, and the checkout at the path may be the deleted project's own (#3611)",
+		},
+		{
+			name:     "never established never releases",
+			layers:   layersWith(unresolvedProjectRecord{projectID: claimant, identityMismatch: true}),
+			claimant: claimant,
+			pass:     1,
+			want:     false,
+			why:      "a flag no probe result ever dated is unknown, not disproof",
+		},
+		{
+			name:     "a mark from the future never releases",
+			layers:   layersWith(mismatchAt(9)),
+			claimant: claimant,
+			pass:     7,
+			want:     false,
+			why:      "unsigned arithmetic would otherwise underflow into freshly-proven-forever",
+		},
+		{
+			name:     "another project's mismatch never releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: "project-2",
+			pass:     7,
+			want:     false,
+			why:      "only the disproven claimant's own tombstone may be released (#3299 review round 15)",
+		},
+		{
+			name:     "an unattributed tombstone never releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: "",
+			pass:     7,
+			want:     false,
+			why:      "an occupant-safe delete records no claimant, and nothing may release what nothing claims",
+		},
+		{
+			name:     "no record never releases",
+			layers:   &rootAgentSnapshot{unresolvedRoots: map[string]unresolvedProjectRecord{}},
+			claimant: claimant,
+			pass:     7,
+			want:     false,
+			why:      "with no unresolved record there is no evidence at all",
+		},
+		{
+			name:     "a resolved-again record never releases",
+			layers:   layersWith(unresolvedProjectRecord{projectID: claimant, identityPass: 7}),
+			claimant: claimant,
+			pass:     7,
+			want:     false,
+			why:      "a current probe result that is not a mismatch disproves nothing",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deletedClaimDisproven(tc.layers, repo, tc.claimant, tc.pass); got != tc.want {
+				t.Fatalf("deletedClaimDisproven = %v, want %v: %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}
