@@ -702,7 +702,24 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				// its fence in between, the promotion would even succeed,
 				// retiring the probe and leaving the record to revert to its
 				// provisional identity on the next start.
-				log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but a delete holds that identity, so it was not recorded; leaving the record unresolved for a later pass", record.root, repo.ID)
+				//
+				// And the work is CONSUMED, not postponed (#3530 review id
+				// 3920441888). Keeping the proof would have the next pass write
+				// the identity and promote the row the moment the fence
+				// cleared — resurrecting the project the delete just removed,
+				// on evidence gathered before it ran. The delete owns this
+				// identity's outcome; a transition into it is abandoned, and a
+				// LATER pass re-derives one from scratch if the checkout is
+				// still there to prove it.
+				settledProbe := probe
+				settles = append(settles, func() {
+					m.mu.Lock()
+					settledProbe.settled = true
+					settledProbe.retryAt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealProbeFailures[derivedID] + 1))
+					m.rootHealProbeFailures[derivedID]++
+					m.mu.Unlock()
+				})
+				log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but a delete holds that identity, so it was not recorded; abandoning this transition — a later pass re-derives one if the checkout is still there to prove it", record.root, repo.ID)
 				continue
 			case err != nil:
 				// The durable write is what makes the promotion survive a

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -95,7 +96,17 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 			changed = true
 		}
 		wrote, err := config.ReconcileProjectRepoID(projectID, owed.repoID, m.identityTransitionUnfenced(owed.repoID, owed.repoID))
-		if err != nil {
+		switch {
+		case errors.Is(err, config.ErrIdentityWriteDeclined):
+			// CONSUMED rather than retried (#3530 review id 3920441888): a
+			// delete holds this identity, and keeping the entry would write it
+			// the moment that fence cleared — on a proof taken before the
+			// delete ran. A later pass re-derives one if the project is still
+			// there to prove it.
+			changed = true
+			log.InfoLog.Printf("root agent snapshot: project %s's identity %s is held by a delete; abandoning the pending write rather than retrying it after the delete finishes", projectID, owed.repoID)
+			continue
+		case err != nil:
 			remaining[projectID] = owed
 			continue
 		}

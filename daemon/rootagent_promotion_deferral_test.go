@@ -1159,6 +1159,22 @@ func TestDeclinedWriteLeavesTheRecordUnresolved(t *testing.T) {
 	if _, published := layers.projectRoots[realID]; published {
 		t.Fatalf("nothing may be published under %s on the strength of a write that did not happen", realID)
 	}
+
+	// The work is CONSUMED, not postponed (#3530 review id 3920441888): with
+	// the fence gone, a retained proof would write the identity and promote the
+	// row on the very next pass — resurrecting what the delete removed, on
+	// evidence gathered before it ran.
+	manager.mu.Lock()
+	probe := manager.rootHealProbes[derivedID]
+	settled := probe != nil && probe.settled
+	manager.mu.Unlock()
+	if probe != nil && !settled {
+		t.Fatalf("a vetoed transition must be abandoned rather than left ready to fire the moment the delete finishes")
+	}
+	manager.EnsureRootAgents()
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("and the next pass must not complete it either, got %q", recorded)
+	}
 }
 
 // TestRegistryRecoveryReconciliationRespectsTheFence pins #3530 review id
