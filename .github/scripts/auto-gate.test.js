@@ -1255,7 +1255,6 @@ test("a PR that joins the head after evaluation stops the PASS", async () => {
       conclusion: "success",
       externalId: decisionExternalId(2048, HEAD_SHA),
     }),
-    created_at: "2026-07-09T01:12:00Z",
     started_at: "2026-07-09T01:12:00Z",
     completed_at: "2026-07-09T01:12:00Z",
   };
@@ -6856,6 +6855,105 @@ test("a newer transaction owning the head concedes a refused merge", async () =>
   assert.notEqual(stale?.reason, "newer-owner");
 });
 
+// #3831. #3828 converted the FILTER above to `latestRunTime`; the sort that
+// picks the winner out of it stayed a hand-rolled copy keyed on `created_at` —
+// the field #3827 measured a check run never carries. `Date.parse("")` is NaN
+// and `NaN || 0` is 0, so its primary key was 0 for every pair and the id
+// tiebreaker did all of the work. Ids are monotonic, so the answer it gave was
+// usually right; it was right by accident.
+//
+// The two keys diverge on exactly this input, and nothing in the suite built it:
+// every other newer-owner fixture supplies ONE qualifying candidate, so the
+// comparator never ran a real comparison. A generation's stamp is `completed_at`
+// first, so a generation that starts earlier and finishes LATER is the newer
+// owner while holding the LOWER id — the ordinary outcome when a slow generation
+// overlaps a fast one on a shared head.
+//
+// Blast radius is the message, not the decision: the concede/don't-concede call
+// comes from the filter. But an operator reading that message during a race is
+// being pointed at a check run, and it has to be the one that owns the head.
+test("the newer owner named is the newest generation, not the highest id", async () => {
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Repository rule violations found"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+  const ownedAggregateCheck = {
+    id: 100,
+    started_at: "2026-07-09T00:55:00Z",
+    completed_at: "2026-07-09T01:00:00Z",
+  };
+  // Two generations of ONE aggregate check, so they are identical but for their
+  // id, their stamps, and the URL the message quotes. The title in particular is
+  // the same string on both — it is the aggregate's fixed WAITING title, and the
+  // filter matches on it — so the URL is the only thing that can tell an
+  // operator which generation they were pointed at.
+  const waiting = {
+    name: "Auto Gate decision",
+    external_id: aggregateExternalId(HEAD_SHA),
+    app: { id: ACTIONS_APP_ID },
+    conclusion: "failure",
+    output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+  };
+  // Started first, finished last: the newest generation on the head, holding the
+  // LOWER of the two ids.
+  const slowest = {
+    ...waiting,
+    id: 109,
+    started_at: "2026-07-09T01:05:00Z",
+    completed_at: "2026-07-09T01:30:00Z",
+    html_url: "https://example.invalid/checks/109",
+  };
+  // Started later, finished first. Higher id, older generation — and the one the
+  // `created_at` comparator named, because its id tiebreak was the only live key.
+  const quickest = {
+    ...waiting,
+    id: 500,
+    started_at: "2026-07-09T01:08:00Z",
+    completed_at: "2026-07-09T01:10:00Z",
+    html_url: "https://example.invalid/checks/500",
+  };
+  assert.ok(Number(slowest.id) < Number(quickest.id), "the newer generation must hold the lower id");
+
+  const concede = async () =>
+    autoGate.resolveMergeRefusal({
+      github,
+      error: mergeRefusal("Repository rule violations found"),
+      options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+      ownedAggregateCheck,
+    });
+
+  // Anti-vacuity, and behavioural rather than asserted: presented ALONE, each
+  // candidate is a newer owner that names itself. Without this the pair below
+  // would still pass if `quickest` had silently stopped clearing the filter —
+  // the assertion would be measuring a one-candidate list again, which is the
+  // hole that let this ship.
+  github.paginate = async () => [slowest];
+  assert.match((await concede()).message, /checks\/109/, "the slow generation alone is a newer owner");
+  github.paginate = async () => [quickest];
+  assert.match((await concede()).message, /checks\/500/, "the quick generation alone is too");
+
+  // Both, so the comparator is what decides.
+  github.paginate = async () => [slowest, quickest];
+  const concession = await concede();
+  assert.equal(concession.reason, "newer-owner");
+  assert.match(
+    concession.message,
+    /is newer Auto Gate check https:\/\/example\.invalid\/checks\/109/,
+    "the concession must name the newest generation, not the highest id (#3831)",
+  );
+  assert.doesNotMatch(
+    concession.message,
+    /checks\/500/,
+    "the older generation must not be named as the head's owner",
+  );
+
+  // Arrival order must not decide it either: `listForRef` promises no ordering,
+  // and a comparator is only doing its job if the answer survives the input
+  // being handed over the other way round.
+  github.paginate = async () => [quickest, slowest];
+  assert.match((await concede()).message, /is newer Auto Gate check https:\/\/example\.invalid\/checks\/109/);
+});
+
 test("an unknown owned generation concedes nothing", async () => {
   // Fail-closed on the unknown. Reading a missing generation stamp as zero would
   // make every check on the head — this transaction's own included — look like a
@@ -8839,7 +8937,6 @@ function checkRun({
     app: { id: appId, slug: appSlug },
     status,
     conclusion,
-    created_at: "2026-07-09T01:05:00Z",
     started_at: "2026-07-09T01:06:00Z",
     completed_at: status === "completed" ? "2026-07-09T01:10:00Z" : null,
   };
