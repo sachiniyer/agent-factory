@@ -362,6 +362,41 @@ open with the hint back to `backend` and no `✓`. Then finish a create on a bac
 the repo CAN use and confirm the session actually comes up there: the round trip is
 the whole point and no marker stands in for it.
 
+The account field (#3844) is the fourth, and it needs a **wider** terminal still:
+its hint sheds first, below 112 columns. Register an account on the daemon host
+before driving it (`af accounts add claude <name>`), or the field will correctly
+report that there is nothing to pick:
+
+```bash
+af_boot                                       # 112 cols or wider
+af_ensure_nav; af_focus_tree
+af_send n; af_wait_for 'account'              # the field is advertised
+af_send C-o; af_wait_for 'Select claude account'   # the title names the AGENT
+af_wait_for 'Ambient identity'                # first row is the pre-#3844 default
+af_send Escape; af_wait_for 'submit name'     # esc backs out of the field only
+af_send C-o; af_send Down; af_send Enter      # pick a registered account
+af_wait_for 'account ✓'                       # hint confirms a scoped create
+af_send Tab; af_send Down; af_send Enter      # change the program…
+af_wait_for 'submit name'
+```
+
+The last two lines are the load-bearing leg. An account belongs to ONE agent, so
+changing the program must drop the pick: the hint has to go back to `account` with
+no `✓`, and reopening the field must list the NEW agent's accounts. Then finish the
+create and confirm the session actually runs as that account — `af sessions list
+--json` reports it on the session's `account` field, and a session the daemon
+created WITHOUT the account raises an error naming both identities rather than
+reporting the one you picked. That last case is version skew and only an old daemon
+produces it; the marker to look for is the phrase `did not apply account`.
+
+`scripts/tui-3844-scenario.sh` automates every leg above except that final create:
+the sandbox points `claude` at a bash stand-in, and the account boundary refuses to
+launch an agent whose command it cannot prove is a direct invocation of that agent.
+The scenario turns that into evidence rather than skipping it — the refusal comes
+from the daemon and NAMES THE ACCOUNT, which is only possible if the picked value
+rode `CreateSessionRequest.Account` across the wire. A session that actually RUNS
+as the account needs a real agent binary, which is why that step stays here.
+
 `enter newline` is the overlay's own hint row, used as the marker rather than
 its `Initial prompt` title: the status-bar hint underneath says `initial
 prompt` too, so the title alone cannot tell "field open" from "field

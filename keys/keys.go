@@ -164,6 +164,25 @@ const (
 	// the form's keys while it is open.
 	KeySetBackend
 	KeyEditBackend
+
+	// KeySetAccount and KeyEditAccount are the two faces of the naming form's
+	// account field (#3844): which of the agent's registered credential accounts
+	// the session runs as, listed from the daemon's own ListAccounts registry.
+	// Same display-only swap as KeySetBackend/KeyEditBackend — the picker is
+	// modal, so the status bar is the only place that can confirm a session is
+	// being created on a non-ambient identity before Enter.
+	//
+	// ctrl+o, not the mnemonic ctrl+a: ctrl+a is the most common tmux prefix
+	// REBIND (every screen refugee sets `set -g prefix C-a`), so for those users
+	// the multiplexer would swallow it and the field would be unreachable — the
+	// same argument that kept the backend field off tmux's default ctrl+b. ctrl+u
+	// is already af's own scroll_up. That leaves "o": unbound in af, claimed by no
+	// tmux binding outside the prefix, and none of the terminal's signal or
+	// flow-control keys (ctrl+c/d/z/s/q/\). Like ctrl+r it is deliberately NOT
+	// added to reservedKeys — a [keys] table may still bind ctrl+o everywhere
+	// outside this modal form.
+	KeySetAccount
+	KeyEditAccount
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -278,6 +297,8 @@ var specs = []spec{
 	{name: KeyEditPrompt, keys: []string{"shift+tab"}, desc: "initial prompt ✓"},
 	{name: KeySetBackend, keys: []string{"ctrl+r"}, desc: "backend"},
 	{name: KeyEditBackend, keys: []string{"ctrl+r"}, desc: "backend ✓"},
+	{name: KeySetAccount, keys: []string{"ctrl+o"}, desc: "account"},
+	{name: KeyEditAccount, keys: []string{"ctrl+o"}, desc: "account ✓"},
 	{name: KeyCancelName, keys: []string{"esc"}, desc: "cancel"},
 }
 

@@ -324,11 +324,21 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 		{title: "Managing:", rows: []helpRow{
 			{helpKey(keys.KeyNew), "Create a new session"},
 			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
-			// The naming form's three optional fields, named here because its own
+			// The naming form's four optional fields, named here because its own
 			// status-bar hints shed by terminal width (ui/menu.go hintDropOrder): on a
 			// narrow bar this is the only surface that still advertises them.
-			{helpKey(keys.KeyChangeProgram) + " / " + helpKey(keys.KeySetPrompt) + " / " + helpKey(keys.KeySetBackend),
-				"While naming a new session: pick its agent / initial prompt / backend"},
+			//
+			// Slash-joined in PAIRS with a space between them, which is not decoration:
+			// the key column is sized to the widest key across every section and capped
+			// (#3629), so at 80x24 it is 13 usable cells — exactly what "tab/shift+tab"
+			// and "ctrl+r/ctrl+o" each occupy. Written " / " throughout, the account
+			// field's arrival would add a fourth wrapped line to this row, and the
+			// general help is at its 5-page budget at that size with nothing to spare
+			// (TestGeneralHelpReadsInFarFewerPagesAt80x24). Two clean lines instead of
+			// three, and one line at any width that fits the row.
+			{helpKey(keys.KeyChangeProgram) + "/" + helpKey(keys.KeySetPrompt) + " " +
+				helpKey(keys.KeySetBackend) + "/" + helpKey(keys.KeySetAccount),
+				"While naming a new session: pick its agent / initial prompt / backend / account"},
 			{helpKey(keys.KeySwitchProject), "Switch to another project (repo) in place"},
 			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one, r runs one)"},
 			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},

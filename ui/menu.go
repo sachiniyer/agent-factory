@@ -106,6 +106,11 @@ type Menu struct {
 	// StateNewInstance. False for the repo default, which is not a choice the user
 	// needs confirmed — it is what every create did before the field existed.
 	namingHasBackend bool
+	// namingHasAccount: the session being named is scoped to one of the agent's
+	// registered credential accounts (#3844), so the account hint renders its "✓"
+	// variant. Only meaningful in StateNewInstance. False for the ambient
+	// identity, which is what every create did before the field existed.
+	namingHasAccount bool
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
@@ -120,13 +125,14 @@ type Menu struct {
 
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 
-// newInstanceMenuOptions are the naming-form hints. The third and fourth slots
-// are the form's optional fields — the initial prompt (#1936) and the backend
-// (#1933) — and each swaps its verb once the field holds a non-default value;
-// newInstanceOptions picks the variants, mirroring the archive/restore swap in
-// addInstanceOptions.
+// newInstanceMenuOptions are the naming-form hints. The third, fourth and fifth
+// slots are the form's optional fields — the initial prompt (#1936), the backend
+// (#1933) and the account (#3844) — and each swaps its verb once the field holds
+// a non-default value; newInstanceOptions picks the variants, mirroring the
+// archive/restore swap in addInstanceOptions.
 var newInstanceMenuOptions = []keys.KeyName{
-	keys.KeySubmitName, keys.KeyChangeProgram, keys.KeySetPrompt, keys.KeySetBackend, keys.KeyCancelName,
+	keys.KeySubmitName, keys.KeyChangeProgram, keys.KeySetPrompt, keys.KeySetBackend,
+	keys.KeySetAccount, keys.KeyCancelName,
 }
 
 // automationsMenuOptions are the status-bar hints while the in-rail
@@ -356,10 +362,12 @@ func (m *Menu) updateOptions() {
 // newInstanceOptions returns the naming-form hints with each optional field's slot
 // reading "… ✓" once that field holds a non-default value: "initial prompt ✓" once
 // the pending prompt holds text (#1936), "backend ✓" once a backend other than the
-// repo default is picked (#1933). Both overlays are modal, so the status bar is the
-// only surface that can tell the user what is attached before they press Enter.
+// repo default is picked (#1933), "account ✓" once the create is scoped to a
+// registered account rather than the ambient identity (#3844). Every one of those
+// overlays is modal, so the status bar is the only surface that can tell the user
+// what is attached before they press Enter.
 func (m *Menu) newInstanceOptions() []keys.KeyName {
-	if !m.namingHasPrompt && !m.namingHasBackend {
+	if !m.namingHasPrompt && !m.namingHasBackend && !m.namingHasAccount {
 		return newInstanceMenuOptions
 	}
 	opts := make([]keys.KeyName, len(newInstanceMenuOptions))
@@ -370,6 +378,9 @@ func (m *Menu) newInstanceOptions() []keys.KeyName {
 		}
 		if name == keys.KeySetBackend && m.namingHasBackend {
 			opts[i] = keys.KeyEditBackend
+		}
+		if name == keys.KeySetAccount && m.namingHasAccount {
+			opts[i] = keys.KeyEditAccount
 		}
 	}
 	return opts
@@ -395,6 +406,20 @@ func (m *Menu) SetNamingBackend(picked bool) {
 		return
 	}
 	m.namingHasBackend = picked
+	m.updateOptions()
+}
+
+// SetNamingAccount records whether the session being named is scoped to a
+// registered credential account (rather than the ambient identity), and rebuilds
+// the hints if that changed. Same purpose as the two above, and the stakes are
+// higher: the account field decides WHICH identity's quota the session spends,
+// and its picker is modal, so this bar is the only thing that says so before
+// Enter (#3844).
+func (m *Menu) SetNamingAccount(picked bool) {
+	if m.namingHasAccount == picked {
+		return
+	}
+	m.namingHasAccount = picked
 	m.updateOptions()
 }
 
@@ -600,15 +625,20 @@ func centerStart(box, content int) int {
 // than losing the way out of the form. Submit/change-program/cancel stay absent
 // — those are the form's three load-bearing verbs.
 //
-// #1933's backend hint took the same row to ~91 cells, so it sheds BEFORE the
+// #1933's backend hint took the same row to 95 cells, so it sheds BEFORE the
 // prompt hint — deliberately, and not because it matters less in the abstract.
 // An 80-column bar can advertise exactly one of the two, #1936 committed that it
 // would be the prompt (TestMenuNewInstanceDropsPromptHintBeforeTheWayOut pins the
 // 80-column case), and taking an affordance away from users who already have it is
 // worse than a new field arriving unadvertised at that one width. The field itself
-// still works when its hint is shed, and the help overlay names all three fields
+// still works when its hint is shed, and the help overlay names every field
 // at every width so the narrow case is not a dead end.
+//
+// #3844's account hint takes the row to 112 and sheds FIRST, by the same rule
+// applied once more: it is the newest of the optional fields, so shedding it is
+// the only drop that takes nothing away from a user who already had it.
 var hintDropOrder = [][]keys.KeyName{
+	{keys.KeySetAccount, keys.KeyEditAccount},
 	{keys.KeySetBackend, keys.KeyEditBackend},
 	{keys.KeySetPrompt, keys.KeyEditPrompt},
 	{keys.KeyShiftUp, keys.KeyShiftDown},
