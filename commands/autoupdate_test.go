@@ -65,6 +65,10 @@ func TestMain(m *testing.M) {
 	// been initialized. Initialize once for the whole package test binary.
 	aflog.Initialize(false)
 	code := m.Run()
+	// The ssh-relay tests build af once for the whole package (afTestBinary), so
+	// its temp directory is a package-lifetime resource and this is the only
+	// place that can remove it (#3842).
+	removeAFTestBinary()
 	aflog.Close()
 	restoreDaemonTarget()
 	restoreHome()

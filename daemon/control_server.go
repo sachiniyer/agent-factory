@@ -797,7 +797,7 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+	if err := requireDaemonHomePresent("daemon control socket", socketPath); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(socketPath)

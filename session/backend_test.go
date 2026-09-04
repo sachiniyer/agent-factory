@@ -47,6 +47,10 @@ func TestMain(m *testing.M) {
 	restoreTmux := testguard.SandboxTmux()
 	log.Initialize(false)
 	code := m.Run()
+	// The ssh ProxyCommand tests build af once for the whole package
+	// (afRelayBinary), so its temp directory is a package-lifetime resource and
+	// this is the only place that can remove it (#3842).
+	removeAFRelayBinary()
 	log.Close()
 	restoreTmux()
 	restoreHome()

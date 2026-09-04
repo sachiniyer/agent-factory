@@ -81,7 +81,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+	if err := requireDaemonHomePresent("daemon HTTP socket", socketPath); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(socketPath)
