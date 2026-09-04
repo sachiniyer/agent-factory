@@ -31,10 +31,14 @@ import (
 //   - stderr appends to ~/.agent-factory/logs/task-<id>.log, size-capped by
 //     the same log_max_size_mb/log_max_backups rotation as the main log (#1062)
 //   - env: AF_TASK_ID, AF_TASK_NAME, AF_PROJECT_PATH
-//   - exit 0 = intentional stop (status "stopped"; re-armed by the next
-//     reload or re-enable); non-zero = restart with exponential backoff
+//   - exit 0 = intentional stop (status "stopped"); non-zero = restart with
+//     exponential backoff
 //   - ≥5 non-zero exits within 10 minutes = crash loop (status "errored",
-//     restarts stop until the next reload)
+//     restarts stop)
+//   - both stops are DURABLE: only a gesture naming this task re-arms it —
+//     `af tasks restart <id>`, an enable/disable or watch_cmd/project_path/name
+//     edit of this task, a full reload, or a daemon start. A write to some
+//     other task does not (#3837, see watcher_reconcile.go)
 //   - events above 10/min per task are dropped with a logged warning
 //   - a failed delivery queues the event durably and a stop-aware drainer
 //     replays the backlog in order — before newer live events — once
@@ -158,116 +162,6 @@ func newWatcherSupervisor() *watcherSupervisor {
 		drainBaseBackoff: watcherDrainBaseBackoff,
 		drainMaxBackoff:  watcherDrainMaxBackoff,
 		queueMaxAge:      watcherQueueMaxAge,
-	}
-}
-
-// Reload re-reads tasks.json and reconciles the running watcher set: enabled
-// watch tasks without a live watcher are started — including ones whose
-// script previously exited or crash-looped, so a reload (or re-enable) is the
-// re-arm path. Watchers whose task was disabled or removed are stopped, and a
-// watcher whose process-defining fields changed is restarted with the new
-// config. Delivery-only fields (prompt, target_session, program) are not part
-// of that signature: deliverWatchEvent re-loads the task per event, so editing
-// them takes effect without killing a long-lived watch script.
-func (s *watcherSupervisor) Reload() error {
-	tasks, err := s.loadTasks()
-	if err != nil {
-		return err
-	}
-	return s.reloadSnapshot(tasks, tasks)
-}
-
-// reloadSnapshot reconciles runnable watchers from armed while using allTasks
-// only as the authoritative inventory for orphan-queue cleanup. A lifecycle-
-// unsafe task can therefore remain unarmed without being mistaken for deleted.
-func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
-	desired := make(map[string]task.Task)
-	for _, t := range armed {
-		if !t.Enabled || !t.IsWatch() {
-			continue
-		}
-		// The ID flows into the stderr log path; reject hand-edited IDs the
-		// same way RunTask does before any filesystem path is built.
-		if err := task.ValidateTaskID(t.ID); err != nil {
-			log.WarningLog.Printf("not watching task with invalid id %q: %v", t.ID, err)
-			continue
-		}
-		// Duplicate IDs in a hand-edited store: watch the FIRST occurrence, which
-		// is what the cron scheduler already does (#855). A map assignment quietly
-		// kept the LAST instead, so the two subsystems disagreed about which row a
-		// duplicated ID meant — and nothing anywhere said a row had been skipped.
-		if _, dup := desired[t.ID]; dup {
-			log.WarningLog.Printf("duplicate task ID %q in tasks.json, watching only its first occurrence", t.ID)
-			continue
-		}
-		desired[t.ID] = t
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopped {
-		return fmt.Errorf("watch task supervisor is shutting down")
-	}
-
-	var stale []*taskWatcher
-	for id, w := range s.watchers {
-		t, ok := desired[id]
-		if ok && watcherSignature(t) == w.sig && !w.finished() {
-			continue
-		}
-		stale = append(stale, w)
-		delete(s.watchers, id)
-	}
-	// Wait for stale watchers to die before starting replacements so two
-	// processes for the same task never overlap. Bounded by stopGrace via
-	// the per-watcher SIGKILL escalation.
-	stopWatchers(stale)
-
-	for id, t := range desired {
-		if _, running := s.watchers[id]; running {
-			continue
-		}
-		w := s.newTaskWatcher(t)
-		s.watchers[id] = w
-		go w.run()
-	}
-	s.armed = true
-
-	// Queue files for tasks that no longer exist at all are removed — a
-	// deleted task's backlog must not replay into a recreated namesake. A
-	// merely-disabled task keeps its backlog for re-enable (#1129). Runs after
-	// stopWatchers so no stale drainer is mid-replay on a file being removed.
-	s.cleanOrphanQueues(allTasks)
-	return nil
-}
-
-// cleanOrphanQueues removes event-queue files whose task ID is absent from
-// tasks.json entirely.
-func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task) {
-	dir, err := s.queueDir()
-	if err != nil {
-		return
-	}
-	known := make(map[string]struct{}, len(tasks))
-	for _, t := range tasks {
-		known[t.ID] = struct{}{}
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		name := e.Name()
-		id := strings.TrimSuffix(strings.TrimSuffix(name, ".jsonl"), ".cursor")
-		if id == name { // neither suffix matched
-			continue
-		}
-		if _, ok := known[id]; ok {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
-			log.WarningLog.Printf("failed to remove orphan event-queue file %s: %v", name, err)
-		}
 	}
 }
 
@@ -442,7 +336,9 @@ func (w *taskWatcher) run() {
 		}
 
 		if runErr == nil {
-			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until the next reload or re-enable", w.taskID)
+			// The condition, stated so an operator can act on it: this stop
+			// holds until something names THIS task (#3837).
+			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts", w.taskID, w.taskID)
 			w.sup.setStatus(w.taskID, "stopped")
 			return
 		}
@@ -470,7 +366,7 @@ func (w *taskWatcher) run() {
 		}
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
-			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until the next reload or re-enable%s", w.taskID, len(failures), w.sup.crashWindow, runErr, tail.logSuffix())
+			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
 			w.sup.setStatus(w.taskID, failureSummary(runErr, tail))
 			return
 		}

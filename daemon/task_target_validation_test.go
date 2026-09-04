@@ -209,7 +209,7 @@ func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
 
 	scheduler := newTaskScheduler()
 	scheduler.controlMu.Lock()
-	refused, reloadErr := reloadTaskAutomation(manager, scheduler, watchers)
+	refused, reloadErr := reloadTaskAutomation(manager, scheduler, watchers, everyWatchTask())
 	scheduler.controlMu.Unlock()
 	require.NoError(t, reloadErr)
 	require.NotEmpty(t, refused, "unsafe task must be refused instead of armed")

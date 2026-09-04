@@ -78,7 +78,7 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 	}
 	// A hand-edited store can hold two rows with the same ID, and both subsystems
 	// arm only the FIRST (see taskScheduler.reloadTasks and
-	// watcherSupervisor.reloadSnapshot). An ID-keyed lookup alone would hand the
+	// watcherSupervisor.reconcile). An ID-keyed lookup alone would hand the
 	// surviving entry to every matching row, so a skipped duplicate — a different
 	// expression that will never execute — would report armed, with the other
 	// row's next_run_at. At most one row per ID can be armed, and it is the first.

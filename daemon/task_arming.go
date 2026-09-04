@@ -23,7 +23,11 @@ type taskArmingSnapshot struct {
 // validation, the returned snapshot, and the eventual scheduler/watch reload
 // are one lifecycle decision. Unsafe tasks are excluded and returned as loud
 // refusals; one stale relationship must not suppress unrelated automation.
-func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
+//
+// scope is the watcher reconcile the caller is about to run. It changes nothing
+// about which tasks are safe — it decides only whose REFUSAL this reload is
+// entitled to record or retire (see recordsArmingVerdictFor).
+func (m *Manager) persistedTasksForArming(scope watchScope) (taskArmingSnapshot, error) {
 	tasks, bindingUpdates, err := task.LoadTasksWithStableRepoBindingUpdates()
 	if err != nil {
 		return taskArmingSnapshot{}, fmt.Errorf("could not load and stabilize task bindings: %w", err)
@@ -33,12 +37,15 @@ func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
 		all: tasks, safe: make([]task.Task, 0, len(tasks)), bindingUpdates: bindingUpdates,
 	}
 	for _, candidate := range tasks {
+		recordsVerdict := recordsArmingVerdictFor(candidate, scope)
 		target := task.CanonicalTargetSession(candidate.TargetSession)
 		if candidate.Enabled && target != "" {
 			validation := m.prepareTaskTargetValidation(candidate.RepoID, target, true)
 			if err := m.validateEnabledTaskTarget(candidate, validation); err != nil {
 				snapshot.refused = append(snapshot.refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
-				m.recordArmingStatus(candidate, notArmedStatus(err))
+				if recordsVerdict {
+					m.recordArmingStatus(candidate, notArmedStatus(err))
+				}
 				continue
 			}
 		}
@@ -46,7 +53,9 @@ func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
 		// way a previous not-armed refusal no longer describes it — including the
 		// repair of DROPPING the target, which turns the task into an ordinary
 		// cron/watch task and never reaches the validation above.
-		m.clearStaleNotArmedStatus(candidate)
+		if recordsVerdict {
+			m.clearStaleNotArmedStatus(candidate)
+		}
 		snapshot.safe = append(snapshot.safe, candidate)
 	}
 	return snapshot, nil
@@ -59,7 +68,7 @@ func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
 func armTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor) error {
 	scheduler.controlMu.Lock()
 	defer scheduler.controlMu.Unlock()
-	refused, err := reloadTaskAutomation(manager, scheduler, watchers)
+	refused, err := reloadTaskAutomation(manager, scheduler, watchers, everyWatchTask())
 	if err != nil {
 		return err
 	}
@@ -71,10 +80,15 @@ func armTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *wat
 // write, archive, restore, or project deletion cannot cross the validation-to-
 // arm interval. Unsafe legacy rows stay enabled on disk for explicit repair but
 // are absent from both live subsystems, while unrelated safe tasks still arm.
-func reloadTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor) ([]error, error) {
+//
+// The cron half is always reloaded whole: a cron entry holds no supervision
+// state to lose, so rebuilding it costs nothing. The watch half is reconciled
+// within scope, because a running (or deliberately stopped) watch process is
+// exactly the state a re-read would throw away (#3837).
+func reloadTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor, scope watchScope) ([]error, error) {
 	manager.taskTargetMu.Lock()
 	defer manager.taskTargetMu.Unlock()
-	snapshot, err := manager.persistedTasksForArming()
+	snapshot, err := manager.persistedTasksForArming(scope)
 	if err != nil {
 		return nil, err
 	}
@@ -85,11 +99,24 @@ func reloadTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *
 		return nil, err
 	}
 	if watchers != nil {
-		if err := watchers.reloadSnapshot(snapshot.safe, snapshot.all); err != nil {
+		if err := watchers.reconcile(snapshot.safe, snapshot.all, scope); err != nil {
 			return nil, err
 		}
 	}
 	return snapshot.refused, nil
+}
+
+// recordsArmingVerdictFor reports whether this reload may write or clear the
+// arming refusal on a task's own status.
+//
+// A cron task always may: the scheduler is rebuilt whole every time, so the
+// verdict this reload reached is the one now in force. A watch task may only
+// when the reconcile actually covers it. Outside the scope this reload starts
+// and stops nothing, so retiring a refusal would announce a repair that has not
+// happened, and writing one would claim a watcher it just left running is down
+// (#3837). The next full re-arm records the verdict along with the action.
+func recordsArmingVerdictFor(t task.Task, scope watchScope) bool {
+	return !t.IsWatch() || scope.covers(t.ID)
 }
 
 // taskRepoIDForValidation mirrors task.AddTaskChecked's bind-time identity

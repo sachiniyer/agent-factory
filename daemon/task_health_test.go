@@ -118,7 +118,7 @@ func TestWatchTaskArming(t *testing.T) {
 	assert.Equal(t, task.ArmingUnknown, supervisor.armingFor(w1),
 		"before the first reload nothing has been observed")
 
-	require.NoError(t, supervisor.reloadSnapshot(nil, nil))
+	require.NoError(t, supervisor.reconcile(nil, nil, everyWatchTask()))
 	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(w1),
 		"after a reload that did not include it, the task is genuinely not armed")
 }
@@ -267,7 +267,7 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 
 	first := watchTask("dupe0002", "printf 'first\\n'; sleep 30", dir)
 	second := watchTask("dupe0002", "printf 'second\\n'; sleep 30", dir)
-	require.NoError(t, supervisor.reloadSnapshot([]task.Task{first, second}, []task.Task{first, second}))
+	require.NoError(t, supervisor.reconcile([]task.Task{first, second}, []task.Task{first, second}, everyWatchTask()))
 
 	supervisor.mu.Lock()
 	w := supervisor.watchers["dupe0002"]
@@ -416,7 +416,7 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	t.Cleanup(supervisor.Stop)
 
 	before := watchTask("stalew01", "printf 'a\\n'; sleep 30", dir)
-	require.NoError(t, supervisor.reloadSnapshot([]task.Task{before}, []task.Task{before}))
+	require.NoError(t, supervisor.reconcile([]task.Task{before}, []task.Task{before}, everyWatchTask()))
 	require.Equal(t, task.ArmingArmed, supervisor.armingFor(before),
 		"precondition: the running watcher is this definition's")
 
@@ -451,7 +451,7 @@ func TestWatchArming_DuringShutdownIsUnknown(t *testing.T) {
 	supervisor.setStatus = func(string, string) {}
 
 	watch := watchTask("shutdown", "printf 'a\\n'; sleep 30", dir)
-	require.NoError(t, supervisor.reloadSnapshot([]task.Task{watch}, []task.Task{watch}))
+	require.NoError(t, supervisor.reconcile([]task.Task{watch}, []task.Task{watch}, everyWatchTask()))
 	require.Equal(t, task.ArmingArmed, supervisor.armingFor(watch), "precondition: armed")
 
 	supervisor.Stop()
