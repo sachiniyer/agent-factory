@@ -273,6 +273,22 @@ func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBacken
 	return resp, nil
 }
 
+// AccountLogin opens an agent's own login flow in a bare tmux session scoped to
+// one account, registering the account if needed. HTTP twin of AccountLogin.
+//
+// The response names a tmux session and socket on the DAEMON'S host, which is
+// the honest shape of the thing: the flow runs where the credential directory
+// is. A client on another machine can read the outcome through this; it cannot
+// attach to the pane, and `af accounts login` refuses a remote daemon for that
+// reason rather than pretending otherwise.
+func (c *Client) AccountLogin(agent, name string) (daemon.AccountLoginResponse, error) {
+	var resp daemon.AccountLoginResponse
+	if err := c.call("AccountLogin", daemon.AccountLoginRequest{Agent: agent, Name: name}, &resp); err != nil {
+		return daemon.AccountLoginResponse{}, err
+	}
+	return resp, nil
+}
+
 // There is deliberately no ListProjects here. The web reads the registry over HTTP
 // (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
 // but the two GO consumers read it in-process: the TUI's switcher union

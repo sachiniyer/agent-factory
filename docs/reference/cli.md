@@ -12,6 +12,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af accounts`](#af-accounts) — Manage per-session agent credential directories
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
+- [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
@@ -140,16 +141,23 @@ agent CLI treats as its home. af never reads, stores, or forwards the credential
 itself — it decides which directory a session sees, and the agent's own login
 flow puts the material there.
 
-add creates that directory and prints its path · list shows what is registered.
-Register an account, then log in with the agent pointed at that directory:
+add creates that directory and prints its path · login runs the agent's own login
+flow against it · list shows what is registered.
 
-  af accounts add codex work
+  af accounts login codex work
+
+That one command registers the account if needed, starts codex's own login in a
+tmux session scoped to it, hands you the terminal for the browser or device-code
+step, and afterwards reports whether the account holds a credential — read from
+the agent's own credential file, by checking that it exists.
+
+You can still do it by hand, and af runs exactly these:
+
   CODEX_HOME=$(af accounts add codex work) codex login
-
-  af accounts add gemini work
+  CLAUDE_CONFIG_DIR=$(af accounts add claude work) claude auth login
   GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
 
-Those two variables do not have the same shape, and mixing them up is the easy
+Those variables do not all have the same shape, and mixing them up is the easy
 mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.
 GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it, so the account
 directory af prints holds the credential at <dir>/.gemini/gemini-credentials.json.
@@ -183,6 +191,7 @@ af accounts
 
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
+- [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 
 **Global flags**
 
@@ -240,6 +249,60 @@ af accounts list [agent] [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--json` |  | Output the {data,error} JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts login
+
+Log in to an agent account by running the agent's own login flow
+
+Run the agent's own login command against an account's credential directory.
+
+af registers the account if it does not exist yet, asks the daemon to start the
+agent's login flow in a tmux session scoped to that account, and hands you the
+terminal so you can complete the browser or device-code step. When the flow ends,
+af reports whether the account holds a credential — read from the agent's own
+credential file, by checking that it exists, never by reading it.
+
+  af accounts login codex work
+  af accounts login claude personal
+
+af never reads, stores, or forwards the credential. It sets one variable and runs
+the agent's own flow:
+
+  claude → claude auth login · codex → codex login · gemini → gemini
+
+The login pane gets exactly the environment an account-scoped session gets: the
+account's directory injected, and every other identity-bearing variable for that
+agent REMOVED. The removal is what makes the login land in the account you asked
+for — an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
+directory, so without it the CLI could report success against that key's identity
+while the account directory stayed empty.
+
+It removes identity, not environment: proxies, private CA roots and your git and
+SSH configuration are passed through as always. If the login needs something else
+— DISPLAY or BROWSER, on a host with a browser to open — add it to
+session_env_passthrough.
+
+The flow runs on the daemon's host, where the credential directory is. With
+--no-attach af prints the tmux session to attach to instead of taking your
+terminal.
+
+```
+af accounts login <agent> <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+| `--no-attach` |  | Start the login flow and print how to attach instead of taking this terminal |
 
 **Global flags**
 

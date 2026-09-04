@@ -831,6 +831,21 @@ func TriggerTask(id string, expect task.ProjectExpectation) error {
 	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id, Expect: expect}, &resp)
 }
 
+// AccountLogin asks the daemon to open an agent's own login flow in a bare tmux
+// session scoped to one account, registering the account if it does not exist.
+//
+// callDaemon carries the warm-up retry and EnsureDaemon, so running the verb on
+// a box whose daemon is not up yet starts it and waits rather than failing —
+// which matters here because a login is often the very first thing a new install
+// does.
+func AccountLogin(req AccountLoginRequest) (AccountLoginResponse, error) {
+	var resp AccountLoginResponse
+	if err := callDaemon("AccountLogin", req, &resp); err != nil {
+		return AccountLoginResponse{}, err
+	}
+	return resp, nil
+}
+
 // SpawnConfigAgent asks the daemon to start a config agent in a bare tmux session
 // and returns the session name AND the absolute socket path to attach to.
 // callDaemon carries the warm-up retry, so pressing the hotkey while the daemon

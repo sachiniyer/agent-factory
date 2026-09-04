@@ -87,16 +87,23 @@ agent CLI treats as its home. af never reads, stores, or forwards the credential
 itself — it decides which directory a session sees, and the agent's own login
 flow puts the material there.
 
-add creates that directory and prints its path · list shows what is registered.
-Register an account, then log in with the agent pointed at that directory:
+add creates that directory and prints its path · login runs the agent's own login
+flow against it · list shows what is registered.
 
-  af accounts add codex work
+  af accounts login codex work
+
+That one command registers the account if needed, starts codex's own login in a
+tmux session scoped to it, hands you the terminal for the browser or device-code
+step, and afterwards reports whether the account holds a credential — read from
+the agent's own credential file, by checking that it exists.
+
+You can still do it by hand, and af runs exactly these:
+
   CODEX_HOME=$(af accounts add codex work) codex login
-
-  af accounts add gemini work
+  CLAUDE_CONFIG_DIR=$(af accounts add claude work) claude auth login
   GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
 
-Those two variables do not have the same shape, and mixing them up is the easy
+Those variables do not all have the same shape, and mixing them up is the easy
 mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.
 GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it, so the account
 directory af prints holds the credential at <dir>/.gemini/gemini-credentials.json.
@@ -255,9 +262,17 @@ same directory and touches nothing inside it.`,
 		// An agent with no known invocation gets no printed command rather than a
 		// guessed one — a next step that does not run reads as a broken account
 		// (#3057 review).
-		if words, ok := agentaccount.LoginCommand(agent); ok {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Log in with that account before using it:\n  %s=%s %s %s\n",
-				configVar, config.ShellQuotePath(dir), agent, strings.Join(words, " "))
+		//
+		// The af verb goes FIRST, because since #3384 it is the thing that actually
+		// runs this — it registers, scopes, subtracts the ambient identity and
+		// verifies the result, where a pasted command does only the first half. The
+		// literal invocation stays underneath rather than being replaced: it is what
+		// af runs, and an operator who can see it does not have to trust a sentence
+		// about it.
+		if program, err := agentaccount.LoginProgram(agent); err == nil {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"Log in to it with:\n  af accounts login %s %s\nwhich runs %s with %s=%s.\n",
+				agent, name, program, configVar, config.ShellQuotePath(dir))
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Log in with %s's own login flow, with %s set to %s.\n",
 				agent, configVar, config.ShellQuotePath(dir))

@@ -328,8 +328,18 @@ func TestLoginCommand_IsPerAgentAndNotGuessed(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []string{"login"}, codex)
 
-	// An unknown agent yields nothing rather than a guess.
-	_, ok = LoginCommand("gemini")
+	// gemini is the case that makes "no words" and "no flow" different answers.
+	// Verified against gemini 0.51.0 on 2026-09-04: `gemini --help` lists mcp,
+	// extensions, skills, hooks, gemma and the default query command, and no
+	// login or auth among them — its sign-in is the picker the bare CLI raises on
+	// a credential-less home, which is the invocation `af accounts add gemini`
+	// has printed since #3609. So it reports KNOWN with an empty word list.
+	gemini, ok := LoginCommand("gemini")
+	require.True(t, ok, "gemini's login flow is the bare CLI, which is a known invocation")
+	require.Empty(t, gemini, "gemini takes no login subcommand")
+
+	// An agent off the account roster yields nothing rather than a guess.
+	_, ok = LoginCommand("amp")
 	require.False(t, ok, "an agent with no verified login command must report none, not a guess")
 }
 

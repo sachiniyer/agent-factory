@@ -39,16 +39,26 @@ var nameRule = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 // printed next step does not run is worse than no guidance: the operator
 // concludes the account is broken, when the only thing wrong was af's sentence.
 //
-// Verified 2026-08-07:
-//   - `claude auth --help` lists `login  Sign in to your Anthropic account`,
-//     and `login` is absent from `claude --help`'s command list.
-//   - `codex --help` lists `login  Manage login` at the top level.
+// Verified 2026-08-07, re-verified 2026-09-04 against the installed CLIs before
+// af started RUNNING these rather than printing them (#3384):
+//   - claude 2.1.260: `claude auth --help` lists `login  Sign in to your
+//     Anthropic account`, and `login` is absent from `claude --help`.
+//   - codex-cli 0.152.1: `codex --help` lists `login  Manage login` at the top
+//     level.
+//   - gemini 0.51.0: there is NO login or auth subcommand — `gemini --help`
+//     lists only mcp, extensions, skills, hooks, gemma and the default query
+//     command. Its sign-in is the interactive picker the bare CLI raises on a
+//     home with no credentials, which is why its entry is EMPTY rather than
+//     absent: empty means "run the agent itself", absent means "af knows of no
+//     flow", and the two must not collapse. `af accounts add gemini` has printed
+//     exactly this invocation since #3609.
 //
 // An agent added to accountConfigVars without an entry here gets no printed
 // command rather than a guessed one (#3057 review).
 var loginCommands = map[string][]string{
 	"claude": {"auth", "login"},
 	"codex":  {"login"},
+	"gemini": {},
 }
 
 // LoginCommand returns the agent's login invocation words, and whether one is

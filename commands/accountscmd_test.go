@@ -44,6 +44,21 @@ func TestAccountsHelpDoesNotAssertRefusingBackendLocation(t *testing.T) {
 	}
 }
 
+// accountsTestDaemonURL is the remote-daemon target runAccountsHere pins for the
+// duration of one case. Empty — the default — means "this host", which is what
+// every case except the remote-refusal ones wants. Set it with
+// withAccountsRemoteDaemon.
+var accountsTestDaemonURL string
+
+// withAccountsRemoteDaemon makes the accounts commands see a remote daemon
+// target for one case, and puts it back afterwards.
+func withAccountsRemoteDaemon(t *testing.T, url string) {
+	t.Helper()
+	prev := accountsTestDaemonURL
+	accountsTestDaemonURL = url
+	t.Cleanup(func() { accountsTestDaemonURL = prev })
+}
+
 // runAccounts drives `af accounts …` through the real root command and returns
 // what the caller would see on each stream.
 //
@@ -70,12 +85,16 @@ func runAccountsInHome(t *testing.T, home string, args ...string) (stdout, stder
 
 func runAccountsHere(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	// --daemon-url / AF_DAEMON_URL makes both subcommands refuse (they write the
+	// --daemon-url / AF_DAEMON_URL makes every subcommand refuse (they act on the
 	// LOCAL home), so an ambient value on the developer's box would turn every
-	// case below into the remote-target refusal.
-	t.Setenv("AF_DAEMON_URL", "")
+	// case below into the remote-target refusal. It is PINNED rather than merely
+	// left alone, in both spellings, because either one is enough to trip it.
+	//
+	// accountsTestDaemonURL is how a case that wants the refusal asks for it:
+	// setting the environment before calling in cannot work, since this pins it.
+	t.Setenv("AF_DAEMON_URL", accountsTestDaemonURL)
 	prevFlagURL := apiclient.FlagDaemonURL
-	apiclient.FlagDaemonURL = ""
+	apiclient.FlagDaemonURL = accountsTestDaemonURL
 
 	prevJSON := accountsJSONFlag
 	accountsJSONFlag = false
@@ -114,9 +133,14 @@ func runAccountsHere(t *testing.T, args ...string) (stdout, stderr string, err e
 // without this a case that passes --json would leak into the next one.
 func resetAccountsJSONFlags() {
 	for _, cmd := range accountsCmd.Commands() {
-		if flag := cmd.Flags().Lookup("json"); flag != nil {
-			_ = flag.Value.Set("false")
-			flag.Changed = false
+		// Every bound boolean, not just --json: `login` also binds --no-attach, and
+		// cobra keeps flag values and Changed across Execute calls, so a leaked
+		// --no-attach would silently decide a later case's branch.
+		for _, name := range []string{"json", "no-attach"} {
+			if flag := cmd.Flags().Lookup(name); flag != nil {
+				_ = flag.Value.Set("false")
+				flag.Changed = false
+			}
 		}
 	}
 }
