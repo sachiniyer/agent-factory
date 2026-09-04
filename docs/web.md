@@ -498,6 +498,14 @@ registered per agent, and the controls to register another. It is rendered here
 for convenience but writes no config key — see
 [`af accounts`](reference/cli.md#af-accounts).
 
+A registered account is then *selectable* on the **New session** form: its
+**Account** field lists the accounts belonging to the agent that form's **Program**
+names, so changing the program changes the list (claude's `work` and codex's `work`
+are different identities in different registries). Leaving it on **Ambient
+identity** sends no account, which is what every create did before the field
+existed. An account with no credential in it yet is listed, labelled, and still
+selectable — it is usually the one you just made.
+
 ---
 
 ## Web tabs

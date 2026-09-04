@@ -610,16 +610,16 @@
         "pointer": "ui/config_pane_accounts.go accountsSection (list + register); app/account_login.go loadAccountsIntoPane, handleAccountRegister; app/account_picker.go openAccountPicker (ctrl+o on the naming form) -> app/session_control.go CreateSessionRequest.Account"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/accounts.ts renderAccountsSection (list + register); web/src/index.ts doRegisterAccount, accountsRefetcher"
+        "status": "yes",
+        "pointer": "web/src/accounts.ts renderAccountsSection (list + register); web/src/index.ts doRegisterAccount, accountsRefetcher; web/src/account_scope.ts accountChoices -> web/src/modals.ts newSessionModal's Account field -> web/src/api.ts createSession body.account"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/accountscmd.go accountsAddCmd, accountsListCmd; api/sessions.go --account; internal/sessionenv/account_scope.go"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#3844",
-      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones. #3844 closed the TUI's remaining half: the naming form has an account field (ctrl+o) whose rows are the daemon's own ListAccounts registry, narrowed to the agent the form's program runs as, and the choice rides CreateSessionRequest.Account — the field `af sessions create --account` fills. The web stays partial for exactly the half the TUI just closed: its new-session modal still cannot SELECT an account, which is why the verdict stays real-gap, now against #3844."
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have."
     },
     {
       "id": "session.archive",
@@ -2354,9 +2354,6 @@
         },
         "force_remote": {
           "gap": "session.create.opt.remote"
-        },
-        "account": {
-          "gap": "session.accounts"
         }
       },
       "CreateTab": {

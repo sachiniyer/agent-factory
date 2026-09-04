@@ -106,6 +106,51 @@ test("createSession omits backend when the field is absent altogether", async ()
   assert.equal("backend" in cap.body, false, "an undefined backend is the same 'let the repo decide' as an empty one");
 });
 
+// The account-on-create contract (#3844), the same shape one level over. The
+// daemon has accepted `account` since #3051 and the web never sent it, so a session
+// could only be scoped to a credential identity from the CLI.
+
+for (const account of ["work", "personal"]) {
+  test(`createSession sends account=${account} when the user picks it`, async () => {
+    const cap = stubFetch();
+    await createSession(createInput({ account }), "tok");
+
+    assert.equal(cap.body.account, account, "an explicit choice must reach the daemon verbatim, as `af sessions create --account` does");
+  });
+}
+
+test("createSession omits account entirely when the user left it on the ambient identity", async () => {
+  // Same subtlety as the backend default, with a sharper edge: an account name sent
+  // on every create would pin every session to whichever identity the form happened
+  // to resolve, and an account name that does not exist is a refused create. Absent
+  // is the only encoding of "run as the agent's own login".
+  const cap = stubFetch();
+  await createSession(createInput({ account: "" }), "tok");
+
+  assert.equal("account" in cap.body, false, "no choice must send NO account key");
+});
+
+test("createSession omits account when the field is absent altogether", async () => {
+  const cap = stubFetch();
+  await createSession(createInput(), "tok");
+
+  assert.equal("account" in cap.body, false, "an undefined account is the same ambient identity as an empty one");
+});
+
+// The standing constraint of the accounts epic (#3388): no credential material
+// crosses this transport, in either direction. An account is a DIRECTORY NAME, so
+// the create body may gain that one string and nothing else.
+test("a scoped create carries a name and nothing else new", async () => {
+  const cap = stubFetch();
+  await createSession(createInput({ account: "work" }), "tok");
+
+  assert.deepEqual(
+    Object.keys(cap.body).sort(),
+    ["account", "program", "prompt", "repo_path", "title_base"],
+    "the account field adds a name to the request and nothing that could carry a secret",
+  );
+});
+
 test("listBackends asks the daemon for the picked repo's catalog", async () => {
   const cap = stubFetch();
   await listBackends("/repos/af", "tok");

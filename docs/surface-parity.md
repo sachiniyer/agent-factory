@@ -42,10 +42,10 @@ audit (#1937) found gaps pointing in every direction:
   ([#3844](https://github.com/sachiniyer/agent-factory/issues/3844)). Both UIs
   could already register an account and log into it (#3385), so the flow they
   walked a user through ended at a terminal. The TUI's naming form now has an
-  account field on `ctrl+o`, reading the daemon's own `ListAccounts` registry and
-  narrowing it to the agent the form's program runs as — an account belongs to one
-  agent, so a picker showing every account would be offering guaranteed failures.
-  The web half is still open.
+  account field on `ctrl+o` and the web's new-session modal an Account picker, each
+  reading the daemon's own `ListAccounts` registry and narrowing it to the agent
+  that surface's program selection runs as — an account belongs to one agent, so a
+  picker showing every account would be offering guaranteed failures.
 
 The sharpest way to hold this: on `CreateSession`, **no surface is a superset of
 another**. All three accept different subsets of the same `CreateSession`
@@ -58,7 +58,7 @@ the web does.
 | Initial prompt | yes | yes | yes |
 | Backend (docker/ssh/hook) | yes | partial | yes |
 | Force-remote (hook) | yes | partial | yes |
-| Account (`--account`) | yes | **no** | yes |
+| Account (`--account`) | yes | yes | yes |
 | In-place (`--here`) | **no** | **no** | yes |
 
 The web's two `partial` cells are not missing controls: the browser sends

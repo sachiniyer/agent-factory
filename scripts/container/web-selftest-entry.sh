@@ -280,6 +280,20 @@ wait_for_listener() {
     exit 1
 }
 
+# --- credential accounts for the create form's account picker (#3844) -------
+# Registered BEFORE the daemon starts, because they are a directory tree under the
+# throwaway home and `af accounts add` reads that home directly — no daemon
+# involved. Two states, so the picker has both to render: one with the artifact
+# claude's own login would leave and one without.
+#
+# NOTHING HERE IS CREDENTIAL MATERIAL. An account is a directory af creates and
+# hands to the agent; `logged_in` is a stat of a path af never opens, so an
+# empty-of-secrets `{}` is exactly as much as this fixture needs to make one row
+# report "logged in" and the other "not logged in".
+"$BIN" accounts add claude web-signed-in >/dev/null
+"$BIN" accounts add claude web-registered >/dev/null
+printf '{}\n' >"$HOME_DIR/accounts/claude/web-signed-in/.credentials.json"
+
 echo ">>> starting af daemon (listen_addr=$LISTEN) ..."
 start_daemon
 WEBTAB_SERVER_PID=""
