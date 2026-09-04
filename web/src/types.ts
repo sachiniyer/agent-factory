@@ -130,6 +130,15 @@ export interface SessionData {
    *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
    *  when unknowable. */
   current_agent?: string;
+  /** The credential account this session's agent runs as (#3051), or absent for
+   *  the ambient identity. It is a DIRECTORY NAME in the daemon host's account
+   *  registry and never carries credential material.
+   *
+   *  The create path reads it back to check that the daemon applied the account
+   *  that was picked (#3844): a daemon predating account support drops the field
+   *  silently, and a UI reporting an identity the session does not have is the
+   *  exact failure the feature exists to prevent. */
+  account?: string;
   /** Daemon-owned reserved-root decision (#2513): true for the always-on root
    *  agent. The web pins root to the top of the rail and draws the demarcation rule
    *  by CONSUMING this decision (session.IsReservedTitle, projected) rather than

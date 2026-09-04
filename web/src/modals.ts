@@ -17,10 +17,20 @@
 // policy holds.
 
 import type { CreateSessionInput, DirectoryListing } from "./api.js";
+import {
+  AMBIENT_ACCOUNT,
+  type AccountChoice,
+  accountAgentFor,
+  accountAgentSupported,
+  accountChoices,
+  accountNotice,
+  accountSelectable,
+} from "./account_scope.js";
 import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, backendNotice, backendSelectable } from "./backends.js";
 import { type DirectoryPickerHandle, directoryPicker } from "./dirpicker.js";
 import { h } from "./dom.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, handoffAgentChoices, programChoices } from "./programs.js";
+import type { AccountsResponse } from "./types.js";
 
 /** A live modal: its root element plus in-place patch controls index.ts drives
  *  around the async submit. close() removes it from the DOM. */
@@ -119,10 +129,10 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
   });
 }
 
-/** The new-session modal: title, project picker, program, backend, and initial
- *  prompt. Projects are the distinct repo roots derived from the current sessions
- *  (like the TUI's zero-config picker). onSubmit fires with the collected form
- *  values.
+/** The new-session modal: title, project picker, program, backend, account, and
+ *  initial prompt. Projects are the distinct repo roots derived from the current
+ *  sessions (like the TUI's zero-config picker). onSubmit fires with the collected
+ *  form values.
  *
  *  loadBackends fetches the picked project's backend catalog (#1933), and
  *  loadPrograms the agent catalog (#1970). Both are passed in rather than imported
@@ -130,7 +140,15 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
  *  the project changes: each catalog's default is a per-repo fact, so the choices
  *  must follow the project picker. If either rejects, its field degrades to "repo
  *  default" alone — the exact behavior before these fields existed, so a catalog
- *  failure can never block a create. */
+ *  failure can never block a create.
+ *
+ *  loadAccounts fetches the daemon host's credential-account registry (#3844).
+ *  Unlike the other two it is NOT per-project — accounts live in the daemon's home,
+ *  not in a repo — so it is fetched once on open. What IS per-selection is which
+ *  slice of it applies: an account belongs to one agent, so the offered rows follow
+ *  the PROGRAM field, and the resolution of a "repo default" program comes from the
+ *  program catalog. A rejection degrades that field to the ambient identity alone,
+ *  which is what every create did before it existed. */
 export function newSessionModal(
   projects: string[],
   defaultProject: string | null,
@@ -139,6 +157,7 @@ export function newSessionModal(
     onCancel: () => void;
     loadBackends: (repoPath: string) => Promise<BackendCatalog>;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    loadAccounts: () => Promise<AccountsResponse>;
     // #2470: fetch a random, readable session name from the daemon (the wordlist
     // is Go-only) to show as shadow text; an empty submit adopts it.
     suggestName: () => Promise<string>;
@@ -198,6 +217,26 @@ export function newSessionModal(
   backendHint.setAttribute("role", "status");
 
   let choices: BackendChoice[] = backendChoices(null);
+
+  // The account field (#3844): which of the agent's registered credential accounts
+  // the session runs as. Its options come from the daemon's ListAccounts registry,
+  // never from a list here, so an account registered a second ago is offered with
+  // no change to the web.
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "Account");
+  const accountHint = h("p", { class: "af-modal-hint" });
+  // Announced for the same reason the backend hint is: the reason a choice is
+  // unusable — or the fact that one has no credential yet — must reach a screen
+  // reader, not only sighted users scanning under the select.
+  accountHint.setAttribute("role", "status");
+
+  // The registry as the daemon reports it, and the agent slice currently offered.
+  // null until the fetch lands (or forever, if it fails), which renders the ambient
+  // identity alone — the pre-#3844 behavior.
+  let accounts: AccountsResponse | null = null;
+  let programCatalog: ProgramCatalog | null = null;
+  let accountRows: AccountChoice[] = accountChoices(null, "");
+
   // Mirrors the chrome's busy flag. An async availability refresh can land at ANY
   // time — including mid-submit — and it must never be the thing that decides
   // whether Create is clickable.
@@ -212,7 +251,11 @@ export function newSessionModal(
   // A bare `confirmBtn.disabled = …` anywhere else silently drops the other two.
   const syncSubmitState = (): void => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
-    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+    accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    confirmBtn.disabled = busy
+      || projects.length === 0
+      || !backendSelectable(choices, backendSelect.value)
+      || !accountSelectable(accountRows, accountSelect.value);
   };
 
   // Route the chrome's setBusy through the same writer. index.ts drives busy around
@@ -239,6 +282,31 @@ export function newSessionModal(
 
   backendSelect.addEventListener("change", syncSubmitState);
 
+  /** Rebuilds the account options for the agent the PROGRAM field currently names.
+   *
+   *  The previous pick is deliberately NOT carried across an agent change, which is
+   *  where this differs from the backend and program fields above. Those re-select a
+   *  prior value when it is still offered; an account name that survives into another
+   *  agent's registry is a DIFFERENT IDENTITY with the same spelling, and silently
+   *  keeping it is the exact outcome this feature exists to prevent. Same agent, same
+   *  pick; different agent, back to the ambient identity. */
+  const renderAccounts = (): void => {
+    const agent = accountAgentFor(programSelect.value, programCatalog);
+    const previous = accountSelect.value;
+    const previousAgent = accountRows[0]?.agent ?? "";
+    accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
+    accountSelect.replaceChildren();
+    for (const choice of accountRows) {
+      accountSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    const keep = agent === previousAgent && accountRows.some((c) => c.value === previous);
+    accountSelect.value = keep ? previous : AMBIENT_ACCOUNT;
+    syncSubmitState();
+  };
+
+  accountSelect.addEventListener("change", syncSubmitState);
+  programSelect.addEventListener("change", renderAccounts);
+
   const renderPrograms = (): void => {
     const previous = programSelect.value;
     programSelect.replaceChildren();
@@ -248,6 +316,11 @@ export function newSessionModal(
     // Same rule as the backend picker: keep the user's pick across a project switch
     // when it is still offered, else fall back to the repo default, which always is.
     programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+    // The account list is scoped to whichever agent the program now names, so it is
+    // rebuilt here rather than only on a user change: a project switch that moves
+    // the repo default from claude to codex changes the registry without anyone
+    // touching the account field.
+    renderAccounts();
   };
 
   // A per-load token: a slow catalog for the project the user just left must not
@@ -266,6 +339,7 @@ export function newSessionModal(
         if (seq !== loadSeq) {
           return;
         }
+        programCatalog = catalog;
         programs = programChoices(catalog);
         renderPrograms();
       })
@@ -276,6 +350,7 @@ export function newSessionModal(
         // Degrade to "repo default" only — the same contract as the backend field:
         // an unreachable catalog costs the user the choice, never the session, since
         // sending no program is exactly what "repo default" means on the wire.
+        programCatalog = null;
         programs = programChoices(null);
         renderPrograms();
       });
@@ -316,12 +391,31 @@ export function newSessionModal(
     field("Program", programSelect),
     field("Backend", backendSelect),
     backendHint,
+    field("Account", accountSelect),
+    accountHint,
     field("Prompt", promptArea),
   );
 
   renderPrograms();
   renderChoices();
+  renderAccounts();
   loadCatalogsFor(projectSelect.value);
+
+  // The account registry is the DAEMON HOST's, not a repo's, so it is asked for once
+  // on open — like the name suggestion below and unlike the two per-project catalogs
+  // above. A failure is silent by design: the field keeps the ambient identity alone,
+  // which is what every create did before this field existed, so an unreachable
+  // registry costs the user the choice and never the session.
+  void callbacks
+    .loadAccounts()
+    .then((registry) => {
+      accounts = registry;
+      renderAccounts();
+    })
+    .catch(() => {
+      accounts = null;
+      renderAccounts();
+    });
 
   // Ask for the autocreate name once, on open. Repo-agnostic (the daemon avoids
   // every live title), so it needs no re-fetch on a project change. A failure is
@@ -363,6 +457,9 @@ export function newSessionModal(
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
+      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
+      // `account` entirely and the session runs on the agent's own login (#3844).
+      account: accountSelect.value,
     });
   });
 

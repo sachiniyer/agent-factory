@@ -5283,6 +5283,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // that proves the whole chain — enum → RPC → rendered options — through a real
     // daemon; the unit tests either side of it both stub their counterpart.
     const backendSelect = modal.locator('select[aria-label="Backend"]');
+    const programSelect = modal.locator('select[aria-label="Program"]');
     await expect(backendSelect).toBeVisible();
     // Populated asynchronously, so wait for the daemon's answer rather than the
     // "repo default"-only placeholder the field is built with.
@@ -5307,19 +5308,68 @@ test.describe("create → kill (one session, two flows)", () => {
     // failure this issue is about. The reason is the daemon's own text, so this also
     // proves the CLI and the web say the same thing.
     await backendSelect.selectOption("docker");
-    await expect(modal.locator(".af-modal-hint")).toHaveText(/docker\.image/);
+    // .first(): the form grew a second hint under the account field (#3844), so an
+    // unqualified locator now matches two elements and strict mode fails.
+    await expect(modal.locator(".af-modal-hint").first()).toHaveText(/docker\.image/);
     await expect(modal.locator("button.af-primary")).toBeDisabled();
 
     // The repo's versioned remote_hooks config is available, and the option names
     // its launcher while retaining "hook" as the submitted CLI/config key.
     await backendSelect.selectOption("hook");
-    await expect(modal.locator(".af-modal-hint")).toHaveText("");
+    await expect(modal.locator(".af-modal-hint").first()).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
     // Back to the repo default: the notice clears, Create is live again, and the
     // submit below sends NO backend — so this create stays local.
     await backendSelect.selectOption("");
-    await expect(modal.locator(".af-modal-hint")).toHaveText("");
+    await expect(modal.locator(".af-modal-hint").first()).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
+    // #3844 end-to-end: the account picker is populated by the DAEMON (ListAccounts
+    // against its own home), not by a list in the web. Like the backend block above,
+    // this is the only test that proves the whole chain — registry → RPC → rendered
+    // options — through a real daemon; the unit tests either side of it stub their
+    // counterpart.
+    const accountSelect = modal.locator('select[aria-label="Account"]');
+    const accountHint = modal.locator(".af-modal-hint").nth(1);
+    await expect(accountSelect).toBeVisible();
+    // Populated asynchronously, so wait for the daemon's answer rather than the
+    // ambient-identity-only placeholder the field is built with. The entry script
+    // registered two claude accounts, one holding the artifact claude's login would
+    // leave and one not — and the row says which is which, before any click.
+    await expect(accountSelect.locator("option")).toHaveText(
+      [
+        "Ambient identity (the agent's own login)",
+        "web-registered — not logged in",
+        "web-signed-in",
+      ],
+      { timeout: 30_000 },
+    );
+    // A registered-but-not-logged-in account is a legitimate choice — it is the one
+    // someone picks right after creating it in the Config view — so it says what is
+    // missing and leaves Create live. Hiding it, or blocking on it, would both be
+    // wrong.
+    await accountSelect.selectOption("web-registered");
+    await expect(accountHint).toHaveText(/no claude credential yet/);
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
+    // An account belongs to ONE agent, so changing the program drops the pick rather
+    // than carrying a claude account name into another agent's registry, where the
+    // same spelling is a different identity. codex has no registered accounts here,
+    // so the honest list is the ambient row alone.
+    await programSelect.selectOption("codex");
+    await expect(accountSelect.locator("option")).toHaveText(["Ambient identity (the agent's own login)"]);
+    await expect(accountSelect).toHaveValue("");
+    await expect(accountHint).toHaveText("");
+
+    // Back to "Repo default", which the daemon reported resolves to claude: the
+    // accounts return, so the repo-default program resolves its agent through the
+    // catalog rather than being treated as no agent at all. The submit below leaves
+    // the field on the ambient identity, so `account` is omitted entirely and this
+    // create runs on the fake agent's own environment.
+    await programSelect.selectOption("");
+    await expect(accountSelect.locator("option")).toHaveCount(3, { timeout: 30_000 });
+    await expect(accountSelect).toHaveValue("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
     // Title is required; the project picker defaults to the scoped project (redesign
