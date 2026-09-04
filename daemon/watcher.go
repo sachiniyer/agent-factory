@@ -865,7 +865,9 @@ func watcherLogPath(taskID string) (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(configDir, "logs")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// Runs on every watcher restart, so on a plain MkdirAll a crash-looping watch
+	// task alone kept a deleted home alive indefinitely (#3845).
+	if err := config.MkdirAllUnderAFHome(dir, 0755); err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, "task-"+taskID+".log"), nil

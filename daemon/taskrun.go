@@ -247,7 +247,9 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 		return fmt.Errorf("failed to get config directory: %w", err)
 	}
 	lockDir := filepath.Join(configDir, "locks")
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
+	// Every cron fire lands here, which is exactly the loop #1093 kept alive for
+	// 23 days against a home that no longer existed (#3845).
+	if err := config.MkdirAllUnderAFHome(lockDir, 0755); err != nil {
 		return fmt.Errorf("failed to create lock directory: %w", err)
 	}
 	lockPath := filepath.Join(lockDir, "task-"+taskID+".lock")

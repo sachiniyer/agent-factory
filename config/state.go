@@ -143,7 +143,10 @@ func SaveState(state *State) error {
 		return fmt.Errorf("failed to get config directory: %w", err)
 	}
 
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	// MkdirAllUnderAFHome, not os.MkdirAll: this runs BEFORE the lock, so on a
+	// plain MkdirAll it was the first thing to re-create a deleted home and the
+	// ensureStorageParent guard behind it never got a say (#3845).
+	if err := MkdirAllUnderAFHome(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -180,7 +183,8 @@ func TrySaveState(state *State) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to get config directory: %w", err)
 	}
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	// See SaveState: ahead of the lock, so it needs the #3845 guard itself.
+	if err := MkdirAllUnderAFHome(configDir, 0755); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
