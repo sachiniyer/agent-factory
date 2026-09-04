@@ -135,6 +135,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	}
 	defer lock.release()
 
+	// The home exists now — acquireHomeLock just created it — so latch it, and no
+	// write this daemon makes can re-create the directory once it is deleted
+	// (#3845). The other half of the same self-check, watchDaemonHome, is started
+	// after the restore below. Released on the way out so an in-process daemon
+	// (the tests in this package) leaves no refusal behind for the next one.
+	releaseHomeLatch := latchDaemonHomePresent()
+	defer releaseHomeLatch()
+
 	// Shell only — no restore yet, so the bind below happens within
 	// milliseconds of process start.
 	manager, err := newManagerShellForDaemon(cfg, upgradeTransactionID)
@@ -419,54 +427,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil
-}
-
-// homeCheckInterval is how often watchDaemonHome verifies the daemon's own AF
-// home directory still exists. A package var so tests can shorten it.
-var homeCheckInterval = 60 * time.Second
-
-// homeMissingChecksToExit is how many consecutive missing observations
-// watchDaemonHome requires before declaring the home deleted. Requiring two
-// keeps a single transient stat blip from taking down a healthy daemon.
-const homeMissingChecksToExit = 2
-
-// watchDaemonHome periodically stats homeDir and closes homeGone once the
-// directory has been missing for homeMissingChecksToExit consecutive checks,
-// signaling RunDaemon to shut down (#1093). Only a definite ENOENT counts as
-// missing: any other stat error (EACCES, EIO) leaves the directory's fate
-// unknown, and a false-positive shutdown of a healthy daemon is worse than
-// letting an abandoned one linger until the next check. The daemon's binary
-// path is deliberately NOT checked — upgrades replace the binary while the
-// daemon legitimately keeps running.
-func watchDaemonHome(homeDir string, stopCh <-chan struct{}, homeGone chan<- struct{}) {
-	ticker := time.NewTicker(homeCheckInterval)
-	defer ticker.Stop()
-	misses := 0
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-ticker.C:
-		}
-		var exit bool
-		if misses, exit = applyHomeCheck(homeDir, misses); exit {
-			log.WarningLog.Printf("agent-factory home %s no longer exists; shutting down abandoned daemon", homeDir)
-			close(homeGone)
-			return
-		}
-	}
-}
-
-// applyHomeCheck folds one stat of homeDir into the running consecutive-miss
-// counter and reports whether the exit threshold was reached. A present home
-// (or an indeterminate stat error) resets the counter — only an unbroken run
-// of definite ENOENTs counts as a deletion.
-func applyHomeCheck(homeDir string, misses int) (int, bool) {
-	if _, err := os.Stat(homeDir); err == nil || !os.IsNotExist(err) {
-		return 0, false
-	}
-	misses++
-	return misses, misses >= homeMissingChecksToExit
 }
 
 // refreshDaemonInstances materializes the daemon's in-memory instance map from

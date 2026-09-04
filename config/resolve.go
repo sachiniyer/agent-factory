@@ -458,7 +458,7 @@ func logInRepoConfigLoaded(repoID, repoRoot string, inRepo *InRepoConfig, raw []
 		return
 	}
 	log.InfoLog.Printf("loaded in-repo config for %s: %s (sha256 %s)", repoRoot, strings.Join(fields, ", "), hash[:8])
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := MkdirAllUnderAFHome(dir, 0755); err != nil {
 		log.WarningLog.Printf("failed to create repo state dir %s: %v", dir, err)
 		return
 	}

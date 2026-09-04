@@ -141,7 +141,11 @@ func eventQueueDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(configDir, "events")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// The residue #3845 was filed on: a watcher reload re-created the whole home
+	// through this one MkdirAll, and the home came back holding nothing but
+	// events/. Guarded, so an abandoned daemon loses its queue instead of its
+	// self-check.
+	if err := config.MkdirAllUnderAFHome(dir, 0755); err != nil {
 		return "", err
 	}
 	return dir, nil

@@ -438,7 +438,7 @@ func writeSchemaMigrationBackup(path string, raw []byte, fromVersion int, perm o
 }
 
 func writeFileExclusive(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := MkdirAllUnderAFHome(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)

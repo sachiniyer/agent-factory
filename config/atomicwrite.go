@@ -295,7 +295,17 @@ func atomicWrite(path, target string, data []byte, perm os.FileMode) error {
 // plugin files). When path is inside the AF home, it first secures that root.
 // Creating a descendant with MkdirAll(0755) can then never accidentally create
 // the default secret-bearing home world-readable (#2197).
+//
+// It is the seam EVERY atomic write and every file lock passes through, which is
+// why the #3845 precondition sits here: a daemon whose home was deleted used to
+// re-create it on its next state write, because MkdirAll creates the home as an
+// ancestor of whatever it was asked for. The check is FIRST — ahead of
+// secureAFHomeForPath, which has an os.MkdirAll of the home of its own — so a
+// refused write leaves the filesystem exactly as it found it.
 func ensureStorageParent(path string) error {
+	if err := requireObservedAFHomePresent(path); err != nil {
+		return err
+	}
 	if err := secureAFHomeForPath(path); err != nil {
 		return err
 	}
