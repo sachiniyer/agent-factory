@@ -54,6 +54,11 @@ const (
 	// daemon's ListBackends catalog. Like stateSelectProgram and statePromptInput
 	// it is a sub-state of stateNew — closing it returns to naming.
 	stateSelectBackend
+	// stateSelectAccount is the state when the account field of the naming form is
+	// open (#3844): which of the agent's registered credential accounts the session
+	// runs as, listed from the daemon's own ListAccounts registry. A sub-state of
+	// stateNew like stateSelectBackend beside it — closing it returns to naming.
+	stateSelectAccount
 	// stateJumpTab is the unbounded jump-to-tab prompt (#3021). Its own state rather
 	// than statePromptInput's because that one belongs to the naming form and returns
 	// to stateNew when it closes; this returns to stateDefault. Both drive the same

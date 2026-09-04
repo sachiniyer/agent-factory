@@ -20,7 +20,19 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if shouldClose {
 		if m.selectionOverlay.IsSubmitted() {
 			idx := m.selectionOverlay.GetSelectedIndex()
-			m.pendingProgram = tmux.SupportedPrograms[idx]
+			picked := tmux.SupportedPrograms[idx]
+			if picked != m.pendingProgram {
+				// An account belongs to ONE agent — claude's "work" and codex's "work"
+				// are different identities in different registries — so a program change
+				// invalidates whatever the account field holds (#3844). Dropping it is
+				// the only safe answer: keeping it would send a name the new agent's
+				// registry does not have (a failed create, at best), and silently
+				// re-resolving it against that registry would put the session on an
+				// identity the user never picked, which is the outcome this whole field
+				// exists to prevent.
+				m.clearPendingAccount()
+			}
+			m.pendingProgram = picked
 		}
 		m.selectionOverlay = nil
 		m.state = stateNew
