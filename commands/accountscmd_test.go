@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -320,8 +322,8 @@ func TestAccountsAddGeminiIsAPlainRegistration(t *testing.T) {
 
 // `af accounts list` marks only the rows a session cannot be scoped to. With the
 // roster and the launch proof agreeing, that is none of them — every row keeps the
-// three columns a script reads, and the JSON says so explicitly rather than by
-// omission.
+// four columns a script reads (agent, name, dir, and the login state #3384 added),
+// and the JSON says so explicitly rather than by omission.
 func TestAccountsListMarksNothingWhileTheRosterAgrees(t *testing.T) {
 	home := t.TempDir()
 	for _, agent := range []string{"gemini", "codex"} {
@@ -335,8 +337,14 @@ func TestAccountsListMarksNothingWhileTheRosterAgrees(t *testing.T) {
 		t.Fatalf("list failed: %v", err)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
-		if fields := strings.Split(line, "\t"); len(fields) != 3 {
-			t.Fatalf("every row must keep exactly three columns while nothing is registration-only: %q", line)
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 {
+			t.Fatalf("every row must keep exactly four columns while nothing is registration-only: %q", line)
+		}
+		// The three a script already read stay in their positions; the state is the
+		// appended one, and it must SAY something rather than be blank.
+		if fields[3] != "not logged in" {
+			t.Fatalf("a registered-but-empty account must report its state, not a blank column: %q", line)
 		}
 	}
 	if strings.Contains(strings.ToLower(stderr), sessionenv.AccountRegistrationOnlyMarker) {
@@ -360,10 +368,57 @@ func TestAccountsListMarksNothingWhileTheRosterAgrees(t *testing.T) {
 			t.Fatalf("%s/%s must be registration_only:false: %q", entry.Agent, entry.Name, jsonOut)
 		}
 	}
-	// The field is EMITTED, not omitted — an automation caller needs the difference
-	// between "false" and "this af is too old to say".
-	if !strings.Contains(jsonOut, "\"registration_only\"") {
-		t.Fatalf("registration_only must be present even when false: %q", jsonOut)
+	// Both booleans are EMITTED, not omitted — an automation caller needs the
+	// difference between "false" and "this af is too old to say", and an omitted
+	// false is the same bytes as a missing field.
+	for _, field := range []string{"\"registration_only\"", "\"logged_in\""} {
+		if !strings.Contains(jsonOut, field) {
+			t.Fatalf("%s must be present even when false: %q", field, jsonOut)
+		}
+	}
+	for _, entry := range entries {
+		if entry.LoggedIn {
+			t.Fatalf("%s/%s was registered and never logged in: %q", entry.Agent, entry.Name, jsonOut)
+		}
+	}
+}
+
+// The logged-in column is read from the AGENT's own credential file, so an
+// account that holds one reports it and an account beside it that does not still
+// reports the truth about itself.
+func TestAccountsListReportsLoginStatePerAccount(t *testing.T) {
+	home := t.TempDir()
+	for _, name := range []string{"empty", "signed-in"} {
+		if _, _, err := runAccountsInHome(t, home, "add", "codex", name); err != nil {
+			t.Fatalf("add codex %s failed: %v", name, err)
+		}
+	}
+	dir, err := agentaccount.Dir(home, "codex", "signed-in")
+	if err != nil {
+		t.Fatalf("resolve account dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write the agent's credential artifact: %v", err)
+	}
+
+	stdout, _, err := runAccountsInHome(t, home, "list")
+	if err != nil {
+		t.Fatalf("list failed: %v", err)
+	}
+	for _, want := range []string{"empty\t", "not logged in", "signed-in\t"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("listing is missing %q:\n%s", want, stdout)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		fields := strings.Split(line, "\t")
+		wantState := "not logged in"
+		if fields[1] == "signed-in" {
+			wantState = "logged in"
+		}
+		if fields[3] != wantState {
+			t.Fatalf("account %q reports state %q, want %q", fields[1], fields[3], wantState)
+		}
 	}
 }
 

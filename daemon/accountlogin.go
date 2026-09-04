@@ -3,8 +3,11 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/accountlogin"
 )
 
@@ -60,5 +63,103 @@ func (m *Manager) AccountLogin(ctx context.Context, req AccountLoginRequest) (Ac
 		Finished:    login.Finished,
 		LoggedIn:    login.LoggedIn,
 		Notices:     login.Notices,
+	}, nil
+}
+
+// ListAccounts reports the registered accounts on this host with their
+// logged-in state, and the roster an account can be created in.
+//
+// The UIs read this rather than the filesystem, which is the point of it
+// existing: the accounts live in the DAEMON's agent-factory home, and a web
+// client is usually not on that machine at all. `af accounts list` still reads
+// the home directly — it refuses a remote daemon for the same reason — so the
+// two answer from the same package and the same AccountEntry shape.
+//
+// A logged-in probe is a stat per account, so listing is cheap enough to be the
+// UI's refresh. It reads no credential.
+func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return ListAccountsResponse{}, fmt.Errorf("accounts: cannot resolve the agent-factory home: %w", err)
+	}
+	agents := sessionenv.AccountAgents()
+	if req.Agent != "" {
+		if _, ok := sessionenv.SupportsAccounts(req.Agent); !ok {
+			return ListAccountsResponse{}, fmt.Errorf("%w: %s (supported: %s)",
+				agentaccount.ErrUnsupportedAgent, req.Agent, sessionenv.AccountAgentsSummary())
+		}
+		agents = []string{req.Agent}
+	}
+	// Entries is a non-nil empty slice, never nil: it crosses the wire as JSON,
+	// and `null` where a client expects a list is a different value from `[]` in
+	// every language reading it.
+	entries := []AccountEntry{}
+	for _, agent := range agents {
+		names, err := agentaccount.List(home, agent)
+		if err != nil {
+			return ListAccountsResponse{}, err
+		}
+		registrationOnly := sessionenv.AccountRegistrationOnly(agent)
+		for _, name := range names {
+			entry, err := accountEntryFor(home, agent, name, registrationOnly)
+			if err != nil {
+				return ListAccountsResponse{}, err
+			}
+			entries = append(entries, entry)
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Agent != entries[j].Agent {
+			return entries[i].Agent < entries[j].Agent
+		}
+		return entries[i].Name < entries[j].Name
+	})
+	// The FULL roster, not the filtered one: a client renders its register form
+	// from this, and narrowing it to the agent that was queried would make the
+	// form offer one agent because the list happened to be filtered.
+	return ListAccountsResponse{Entries: entries, Agents: sessionenv.AccountAgents()}, nil
+}
+
+// RegisterAccount creates an account's credential directory without logging in.
+//
+// It is the other half of the UI's story. `af accounts login` registers on the
+// way past, which is right for a CLI where the two are one gesture, but a form
+// that lists accounts needs to be able to ADD one and leave it empty — the
+// operator may be creating it now and signing in on the machine with the browser
+// later.
+func (m *Manager) RegisterAccount(req RegisterAccountRequest) (RegisterAccountResponse, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return RegisterAccountResponse{}, fmt.Errorf("accounts: cannot resolve the agent-factory home: %w", err)
+	}
+	dir, err := agentaccount.Register(home, req.Agent, req.Name)
+	if err != nil {
+		return RegisterAccountResponse{}, err
+	}
+	notices, err := agentaccount.CheckLoginPreconditions(req.Agent, dir)
+	if err != nil {
+		return RegisterAccountResponse{}, err
+	}
+	entry, err := accountEntryFor(home, req.Agent, req.Name, sessionenv.AccountRegistrationOnly(req.Agent))
+	if err != nil {
+		return RegisterAccountResponse{}, err
+	}
+	return RegisterAccountResponse{Entry: entry, Notices: notices}, nil
+}
+
+// accountEntryFor builds one entry, resolving the directory and probing the
+// artifact through the same helpers every other surface uses.
+func accountEntryFor(home, agent, name string, registrationOnly bool) (AccountEntry, error) {
+	dir, err := agentaccount.Dir(home, agent, name)
+	if err != nil {
+		return AccountEntry{}, err
+	}
+	loggedIn, err := agentaccount.LoggedIn(home, agent, name)
+	if err != nil {
+		return AccountEntry{}, err
+	}
+	return AccountEntry{
+		Agent: agent, Name: name, Dir: dir,
+		RegistrationOnly: registrationOnly, LoggedIn: loggedIn,
 	}, nil
 }

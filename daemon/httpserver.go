@@ -201,6 +201,15 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux.HandleFunc("GET /v1/config-assistant/stream", cs.configAssistantStreamHandler)
 	mux.HandleFunc("DELETE /v1/config-assistant", cs.configAssistantDeleteHandler)
 
+	// The account-login stream (#3385): the same bare-session PTY WebSocket for a
+	// login pane, which likewise has no Instance. It DOES take an account in the
+	// query — the daemon maps it to a pane its own supervisor spawned, so the only
+	// sessions reachable are login panes this daemon started — and it is a stream,
+	// not an RPC mirror, so it registers here beside its sibling rather than in the
+	// httpRoutes catalog. The spawn and the account reads are RPCs (AccountLogin,
+	// ListAccounts, RegisterAccount) and live in the catalog with everything else.
+	mux.HandleFunc("GET /v1/account-login/stream", cs.accountLoginStreamHandler)
+
 	// The web-tab preview credential (#1856 step 2): an authenticated control-plane
 	// client fetches the preview origin's ephemeral token here, then delivers it to
 	// the preview iframe (step 3). Internal, not an `af api` RPC — like the stream

@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
@@ -32,24 +33,16 @@ import (
 // matching `af config` and `af token`.
 var accountsJSONFlag bool
 
-// accountEntry is one registered account. The directory is included because it
-// is the thing the operator has to point the agent's login flow at, so omitting
-// it would make the JSON strictly less useful than the human output.
-type accountEntry struct {
-	Agent string `json:"agent"`
-	Name  string `json:"name"`
-	Dir   string `json:"dir"`
-	// RegistrationOnly is true while the agent is on the account roster but a
-	// session cannot be scoped to one of its accounts yet — af has verified that
-	// the agent's credential root relocates, not that the account boundary can
-	// prove how af launches it.
-	//
-	// It is always emitted, never omitempty. An automation caller reading this to
-	// decide whether to start a session needs the difference between "false" and
-	// "this af is too old to say", and an omitted false is the same bytes as a
-	// missing field (#3609 review).
-	RegistrationOnly bool `json:"registration_only"`
-}
+// accountEntry is one registered account, and it is daemon.AccountEntry rather
+// than a struct of this package's own.
+//
+// `af accounts list` reads the LOCAL agent-factory home — it refuses a remote
+// daemon — so no daemon is involved in producing these bytes. The type is shared
+// anyway, because the daemon's ListAccounts (#3385) reports the same accounts to
+// the TUI and the web, and two structs with the same field names are how a CLI
+// and a UI end up disagreeing about whether an account is logged in. One
+// definition cannot drift from itself.
+type accountEntry = daemon.AccountEntry
 
 // accountsFlagError routes a flag-parse failure through the same {data,error}
 // envelope as every other failure in this group.
@@ -241,7 +234,15 @@ same directory and touches nothing inside it.`,
 			return jsonWrapError(cmd, accountsJSONFlag, err)
 		}
 
-		entry := accountEntry{Agent: agent, Name: name, Dir: dir}
+		// The freshly registered account, including whether it already holds a
+		// credential: `add` is idempotent, so this is routinely run against an
+		// account that is already logged in, and reporting logged_in:false there
+		// would be a claim rather than an omission.
+		loggedIn, err := agentaccount.LoggedIn(home, agent, name)
+		if err != nil {
+			return jsonWrapError(cmd, accountsJSONFlag, err)
+		}
+		entry := accountEntry{Agent: agent, Name: name, Dir: dir, LoggedIn: loggedIn}
 		if accountsJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entry))
 		}
@@ -347,8 +348,13 @@ than accepting a selection that would silently do nothing.`,
 				if err != nil {
 					return jsonWrapError(cmd, accountsJSONFlag, err)
 				}
+				loggedIn, err := agentaccount.LoggedIn(home, agent, name)
+				if err != nil {
+					return jsonWrapError(cmd, accountsJSONFlag, err)
+				}
 				entries = append(entries, accountEntry{
-					Agent: agent, Name: name, Dir: dir, RegistrationOnly: registrationOnly,
+					Agent: agent, Name: name, Dir: dir,
+					RegistrationOnly: registrationOnly, LoggedIn: loggedIn,
 				})
 			}
 		}
@@ -372,7 +378,11 @@ than accepting a selection that would silently do nothing.`,
 		// registration-only row grows one.
 		noted := make(map[string]struct{}, len(entries))
 		for _, entry := range entries {
-			row := fmt.Sprintf("%s\t%s\t%s", entry.Agent, entry.Name, entry.Dir)
+			// The three fields a script already reads keep their positions, and the
+			// state is APPENDED — the same rule the registration-only marker followed
+			// when it was added as a fourth column (#3609).
+			row := fmt.Sprintf("%s\t%s\t%s\t%s", entry.Agent, entry.Name, entry.Dir,
+				accountLoginStateLabel(entry.LoggedIn))
 			if entry.RegistrationOnly {
 				row += "\t" + sessionenv.AccountRegistrationOnlyMarker
 			}
@@ -400,4 +410,18 @@ func init() {
 	accountsCmd.SetFlagErrorFunc(accountsFlagError)
 	accountsCmd.AddCommand(accountsAddCmd)
 	accountsCmd.AddCommand(accountsListCmd)
+}
+
+// accountLoginStateLabel renders an account's logged-in state for the human
+// listing.
+//
+// "logged in" is a claim about a FILE, not about a session: af reports that the
+// agent's own credential is present in the account directory, by stat. It cannot
+// say the credential still works — a revoked or expired one is still a file —
+// and the wording stays on the side af can actually establish.
+func accountLoginStateLabel(loggedIn bool) string {
+	if loggedIn {
+		return "logged in"
+	}
+	return "not logged in"
 }

@@ -77,6 +77,12 @@ type ConfigPane struct {
 	// inventing a second writer.
 	save func(key, value string) (result *config.SetResult, notice string, err error)
 
+	// accounts is the Accounts section (#3385): agent identities, rendered below
+	// the config tiers and visibly not config rows. It is a separate struct rather
+	// than more fields here because it is a separate domain — nothing in it goes
+	// through the config write path — and config_pane_accounts.go holds all of it.
+	accounts accountsSection
+
 	// assistantRequested is set when the user presses the assistant key in normal
 	// mode. The pane cannot spawn the config agent itself — that is a daemon round
 	// trip owned by the app package — so it records the intent and the app reads it
@@ -92,6 +98,10 @@ type ConfigPane struct {
 type configRow struct {
 	heading string
 	entry   *config.ConfigEntry
+	// account is set for a row of the Accounts section (#3385) — an agent
+	// identity, not a config key. Exactly one of heading, entry and account is
+	// meaningful on any row.
+	account *AccountRow
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
@@ -101,7 +111,7 @@ type configRow struct {
 // restore the class #3345 explicitly removed, while a local-write fallback
 // would bypass the running daemon's lifecycle admission gate.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil
+	return r.entry != nil || r.account != nil
 }
 
 var (
@@ -160,7 +170,10 @@ func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
 //
 // The app asks before root-routing the configured quit key: while a value is
 // being typed, "q" is a character, not an exit. See handleStateConfigEditor.
-func (c *ConfigPane) IsEditing() bool { return c.editing }
+// It reports the ACCOUNT name field too (#3385): that field takes arbitrary
+// runes, and "q" in an account name must be a character rather than an exit for
+// exactly the same reason it is in a config value.
+func (c *ConfigPane) IsEditing() bool { return c.editing || c.accounts.registering }
 
 // SetFocus focuses the pane. Dropping focus is how the overlay closes (the app
 // notices and returns to stateDefault), so it also abandons any in-progress
@@ -170,6 +183,9 @@ func (c *ConfigPane) SetFocus(focus bool) {
 	c.hasFocus = focus
 	if !focus {
 		c.cancelEdit()
+		c.cancelRegister()
+		c.accounts.status = ""
+		c.accounts.statusIsError = false
 		c.clearStatus()
 		// A pending request is consumed the moment the app opens the assistant, so
 		// one that survives to a close was never taken (the pane was dismissed
@@ -211,6 +227,9 @@ func (c *ConfigPane) rebuildRows() {
 			c.rows = append(c.rows, configRow{entry: &entry})
 		}
 	}
+	// Accounts last: the config keys are what this overlay is for, and a
+	// credential section above them would push them off the first screen.
+	c.appendAccountRows()
 	c.clampSelection()
 }
 
@@ -269,6 +288,18 @@ func (c *ConfigPane) selectedEntry() *config.ConfigEntry {
 func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	if c.editing {
 		return c.handleEditKey(msg)
+	}
+	// The account name field takes runes before anything else reads them, for the
+	// same reason the value field does: "a" is a character here, not the advanced
+	// toggle, and "C" is a character, not the assistant.
+	if c.accounts.registering {
+		return c.handleRegisterKey(msg)
+	}
+	// An account row answers enter itself — with a login or a register field —
+	// rather than falling through to beginEdit, which would open a config value
+	// editor over a row that has no config key.
+	if c.handleAccountKey(msg) {
+		return true
 	}
 	switch msg.String() {
 	case "esc":
@@ -485,11 +516,28 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 	selStart, selEnd = -1, -1
 	for i, row := range c.rows {
 		start := len(lines)
-		if row.entry == nil {
-			lines = append(lines, configHeadingStyle.Render(strings.ToUpper(row.heading)))
-		} else {
+		switch {
+		case row.account != nil:
+			rendered := c.renderAccountRow(i, *row.account)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.entry != nil:
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		default:
+			lines = append(lines, configHeadingStyle.Render(strings.ToUpper(row.heading)))
+			if row.heading == accountsHeading {
+				// What these rows are, said once under the heading — see
+				// accountsHeadingNote.
+				lines = append(lines, strings.Split(
+					strings.TrimSuffix(c.wrapIndented(accountsHeadingNote, configHintStyle), "\n"), "\n")...)
+				// The Accounts heading is also the only one that can be followed by a
+				// failure instead of rows: an empty section reads as "you have no
+				// accounts", which is a different thing from "af could not look".
+				if c.accounts.unavailable != "" {
+					lines = append(lines, strings.Split(
+						strings.TrimSuffix(c.renderAccountsUnavailable(), "\n"), "\n")...)
+				}
+			}
 		}
 		if i == c.selectedIdx {
 			selStart, selEnd = start, len(lines)
@@ -625,6 +673,15 @@ func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {
 // banner: a user who sets a value and looks away has been told exactly when they
 // were in a position to act on it.
 func (c *ConfigPane) renderStatus() string {
+	// The account outcome wins the line while it is set: it is the newer event,
+	// and it is the one the user is waiting on — a register that was refused, or
+	// the report from a login that just handed the terminal back.
+	if c.accounts.status != "" {
+		if c.accounts.statusIsError {
+			return c.wrap(c.accounts.status, configErrorStyle)
+		}
+		return c.wrap(c.accounts.status, configOKStyle)
+	}
 	if c.status == "" {
 		return ""
 	}
@@ -661,6 +718,24 @@ func (c *ConfigPane) renderHints() string {
 		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
 			{text: "↵ save", drop: 1},
 			{text: "esc cancel"},
+		})) + "\n"
+	}
+	if c.accounts.registering {
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↵ register", drop: 1},
+			{text: "esc cancel"},
+		})) + "\n"
+	}
+	if account := c.selectedAccount(); account != nil {
+		verb := "↵ log in"
+		if account.Register {
+			verb = "↵ register"
+		}
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↑/↓ move", drop: 2},
+			{text: verb, drop: 3},
+			{text: "C assistant", drop: 4},
+			{text: "esc close"},
 		})) + "\n"
 	}
 	advanced := "a show advanced"

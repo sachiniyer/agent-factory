@@ -588,39 +588,38 @@
       "id": "session.account-login",
       "title": "Log in to an agent account by running the agent's own login flow",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/config_pane_accounts.go AccountRequestLogin; app/account_login.go handleAccountLogin, enterAccountLogin"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/accounts.ts renderAccountRow login button; web/src/account_login_overlay.ts openAccountLogin; web/src/index.ts doOpenAccountLogin"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/accountslogincmd.go accountsLoginCmd; daemon/accountlogin.go Manager.AccountLogin; session/accountlogin/accountlogin.go Supervisor.Start"
       },
-      "verdict": "real-gap",
-      "issue": "#3385",
-      "notes": "af runs the agent's OWN login command (claude auth login / codex login / gemini) in a bare tmux session scoped to one account: the account's credential directory injected, every ambient identity variable for that agent removed. af never reads, stores, or forwards the credential. CLI-only today; #3385 puts the same verb behind a button in the TUI config tab and the web, driving this daemon route rather than reimplementing the flow."
+      "verdict": "parity",
+      "notes": "af runs the agent's OWN login command (claude auth login / codex login / gemini) in a bare tmux session scoped to one account: the account's credential directory injected, every ambient identity variable for that agent removed. af never reads, stores, or forwards the credential. All three surfaces drive the same daemon verb rather than reimplementing an interactive flow, and they differ only in how they reach the pane: the CLI and the TUI hand it the terminal with tmux attach-session, while the web streams it over /v1/account-login/stream because the login child runs on the daemon host and the browser is usually elsewhere (#3385)."
     },
     {
       "id": "session.accounts",
       "title": "Register and select per-session agent credential accounts",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "partial",
+        "pointer": "ui/config_pane_accounts.go accountsSection (list + register); app/account_login.go loadAccountsIntoPane, handleAccountRegister"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "partial",
+        "pointer": "web/src/accounts.ts renderAccountsSection (list + register); web/src/index.ts doRegisterAccount, accountsRefetcher"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/accountscmd.go:67 accountsAddCmd, :148 accountsListCmd; api/sessions.go --account; internal/sessionenv/account_scope.go"
+        "pointer": "commands/accountscmd.go accountsAddCmd, accountsListCmd; api/sessions.go --account; internal/sessionenv/account_scope.go"
       },
       "verdict": "real-gap",
       "issue": "#3051",
-      "notes": "Registration, listing and per-session SELECTION are CLI-only (#3051). An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. TUI and web cannot yet choose an account, which is why both are no and the verdict stays real-gap."
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones, so both are partial rather than no. What neither can do yet is SELECT an account when creating a session — the --account half — which is why the verdict stays real-gap against #3051."
     },
     {
       "id": "session.archive",
@@ -1622,11 +1621,13 @@
       "POST /v1/GetTheme": "theme.apply",
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
+      "POST /v1/ListAccounts": "session.accounts",
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListDirectory": "project.browse",
       "POST /v1/ListProjects": "project.list",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
       "POST /v1/RefreshPRInfo": "session.pr.set",
       "POST /v1/RemoveTask": "task.remove",
@@ -1698,6 +1699,9 @@
       "up": "tui.navigation"
     },
     "web_rpcs": {
+      "AccountLogin": "session.account-login",
+      "ListAccounts": "session.accounts",
+      "RegisterAccount": "session.accounts",
       "AddTask": "task.add",
       "ArchiveSession": "session.archive",
       "CloseTab": "session.tab.close",
@@ -2323,6 +2327,11 @@
       }
     },
     "web_rpcs": {
+      "ListAccounts": {
+        "agent": {
+          "ok": "The web section lists EVERY agent's accounts at once — it renders one group per agent and a register form under each — so it never narrows the read. The filter exists for `af accounts list <agent>`, where a caller asked for one agent; a UI that sent it would have to decide which agent the operator meant before showing them the list they came for."
+        }
+      },
       "Snapshot": {
         "created_after": {
           "ok": "Deliberate: the web snapshot is the authoritative navigation rail. An age-filtered snapshot would make older sessions look deleted and remove their interactive lifecycle controls."

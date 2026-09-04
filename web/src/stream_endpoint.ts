@@ -76,3 +76,34 @@ export function configAssistantStreamEndpoint(): StreamEndpoint {
     },
   };
 }
+
+/**
+ * accountLoginStreamEndpoint addresses the login pane the daemon owns for one
+ * account (#3385) — the bare tmux session running that agent's own login command.
+ *
+ * Unlike the config assistant's, this URL DOES carry an address: an agent and an
+ * account name. It is not a tmux session name, and the distinction is the whole
+ * safety argument — the daemon maps the account to a pane its own supervisor
+ * spawned, so the only sessions reachable through the route are login panes this
+ * daemon started, and an account with no flow running answers 404 rather than
+ * resolving to anything.
+ *
+ * It is an agent composer: the flow is interactive, and the operator is typing
+ * into the agent's own prompts.
+ */
+export function accountLoginStreamEndpoint(agent: string, name: string): StreamEndpoint {
+  return {
+    composerNewline: true,
+    url(token, since) {
+      const base = `${wsScheme()}//${window.location.host}/v1/account-login/stream`;
+      const params = new URLSearchParams();
+      params.set("access_token", token);
+      params.set("agent", agent);
+      params.set("name", name);
+      if (since !== null) {
+        params.set("since", since.toString());
+      }
+      return `${base}?${params.toString()}`;
+    },
+  };
+}

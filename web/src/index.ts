@@ -37,6 +37,9 @@ import {
   suggestSessionName,
   listTasks,
   setConfigValue,
+  listAccounts,
+  registerAccount as registerAccountRPC,
+  startAccountLogin,
   loadToken,
   probeAuthRequired,
   probeToken,
@@ -51,6 +54,8 @@ import {
   updateTask,
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
+import { emptyAccountsState } from "./accounts.js";
+import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
 import { eventRequestsPaletteRefresh, EventStream, type EventStreamStatus } from "./events.js";
 import {
@@ -133,6 +138,7 @@ const store = new Store<AppState>({
   config: [],
   configPath: "",
   configStatus: null,
+  accounts: emptyAccountsState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -226,6 +232,10 @@ let modal: ModalHandle | null = null;
 // so any overlay-open or teardown path reaps it — an orphaned controller would keep a
 // hidden terminal streaming and never fire its close-time DELETE.
 let configAssistant: ConfigAssistantController | null = null;
+// The open account-login overlay (#3385), tracked for the same reason: an orphaned
+// controller would keep streaming a login pane in a removed overlay and never fire
+// its close-time account refresh.
+let accountLogin: AccountLoginController | null = null;
 
 // The appbar's "Install app" affordance (feat: PWA). Built ONCE here, for the same
 // reason termHost and modalHost are: rerender() drops `shell` on logout and builds a
@@ -564,6 +574,10 @@ function switchView(view: View): void {
   }
   if (view === "config") {
     refreshConfig();
+    // The accounts read rides with the config read for the same reason: the
+    // section shows them as they are NOW, including an account registered from
+    // the CLI or logged in from the TUI since this tab was opened.
+    refreshAccounts();
   }
 }
 
@@ -1284,6 +1298,115 @@ function refreshConfig(): void {
   configRefetcher.refresh();
 }
 
+/** The accounts read (#3385), fenced like the config read and for the same
+ *  reason: entering the view fetches, and every account action refetches, so an
+ *  older response can otherwise land after a newer one and redisplay the state a
+ *  login just changed (#3659).
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error: the config
+ *  view is still useful when the accounts cannot be read, and an empty section
+ *  would read as "you have no accounts" — a different thing, needing a different
+ *  action, from "af could not look". */
+const accountsRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listAccounts,
+  commit: (resp) => {
+    store.set({
+      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "" },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ accounts: { ...store.get().accounts, error: errorText(err) } });
+  },
+});
+
+function refreshAccounts(): void {
+  accountsRefetcher.refresh();
+}
+
+/** Records the outcome of an account action on the row that produced it. */
+function setAccountStatus(agent: string, name: string, message: string, error: boolean): void {
+  store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
+}
+
+/** Creates an account's credential directory (#3385).
+ *
+ *  The name goes to the daemon unvalidated BY DESIGN, exactly as a config value
+ *  does: agentaccount.ValidateName, the case-collision rule and the agent roster
+ *  all live where the directory is created, so a refusal comes back in the
+ *  daemon's own words and is shown verbatim. A second copy of those rules in the
+ *  browser is how a UI comes to accept a name the writer rejects.
+ *
+ *  A register failure is recorded against an EMPTY account name, which is what the
+ *  register form matches on: the name it was for is already gone from the input. */
+function doRegisterAccount(agent: string, name: string): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void registerAccountRPC(agent, name, tok)
+    .then((resp) => {
+      const notices = resp.notices?.length ? ` · ${resp.notices.join(" · ")}` : "";
+      setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
+      refreshAccounts();
+    })
+    .catch((err: unknown) => {
+      setAccountStatus(agent, "", errorText(err), true);
+    });
+}
+
+/** Runs the agent's own login flow for an account on the daemon host and opens its
+ *  pane here (#3384/#3385).
+ *
+ *  The spawn happens BEFORE the overlay, so a refusal the operator must see — an
+ *  agent with no verified login flow, the codex keyring collapse, a missing binary
+ *  — lands on the account's own row rather than behind an overlay that opens onto
+ *  an error. A flow that finished without needing a terminal likewise reports on
+ *  the row: there is no pane to watch, and that is a real outcome rather than a
+ *  failure.
+ *
+ *  On close the accounts are re-read: the login's whole point is a state change
+ *  the section has to reflect, and it is read from the AGENT's own credential
+ *  file rather than from what the browser believes happened. */
+function doOpenAccountLogin(agent: string, name: string): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  setAccountStatus(agent, name, `Starting the ${agent} login…`, false);
+  void startAccountLogin(agent, name, tok)
+    .then((login) => {
+      if (login.finished || login.session_name === "") {
+        const copy = loginWithoutPaneCopy(login);
+        setAccountStatus(agent, name, `${copy.status} · ${copy.detail}`, !login.logged_in);
+        refreshAccounts();
+        return;
+      }
+      const notices = login.notices?.length ? ` · ${login.notices.join(" · ")}` : "";
+      setAccountStatus(agent, name, `Running ${login.program}${notices}`, false);
+      closeModal();
+      closeAccountLogin();
+      accountLogin = openAccountLogin({
+        token: tok,
+        mountHost: modalHost,
+        login,
+        onClosed: () => {
+          accountLogin = null;
+          refreshAccounts();
+        },
+      });
+    })
+    .catch((err: unknown) => {
+      setAccountStatus(agent, name, errorText(err), true);
+    });
+}
+
+/** Closes any open login overlay. One at a time, like the assistant. */
+function closeAccountLogin(): void {
+  accountLogin?.close();
+  accountLogin = null;
+}
+
 /** Writes one config key and reports the outcome.
  *
  *  The value goes to the daemon unvalidated BY DESIGN: it hands it to the same
@@ -1730,6 +1853,8 @@ const actions = {
   switchView,
   setConfigValue: applyConfigValue,
   openConfigAssistant: doOpenConfigAssistant,
+  registerAccount: doRegisterAccount,
+  openAccountLogin: doOpenAccountLogin,
   switchProject,
   setStatusFilter,
   resetStatusFilter,

@@ -26,6 +26,13 @@
 // Patched in place like the rest of the shell and CSP-safe (createElement +
 // addEventListener via the shared h() helper, no innerHTML with markup).
 
+import {
+  ACCOUNT_INPUT_ATTR,
+  type AccountActions,
+  type AccountsState,
+  emptyAccountsState,
+  renderAccountsSection,
+} from "./accounts.js";
 import { h } from "./dom.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 import { rebuildKeepingScroll } from "./scrollkeep.js";
@@ -44,6 +51,11 @@ export interface ConfigActions {
    *  TUI's config-agent takeover. The shell owns the token and the modal host, so
    *  the pane only reports the intent. */
   openAssistant: () => void;
+  /** The Accounts section's two verbs (#3385). They are NOT config writes and do
+   *  not go through `save`: an account is a credential directory on the daemon
+   *  host, not a settable key, and routing them through the config writer would
+   *  be the category error #3385 asks this surface to avoid. */
+  accounts: AccountActions;
 }
 
 /** The outcome of the last save, as the shell learned it from the daemon. */
@@ -203,6 +215,9 @@ export class ConfigPane {
   private entries: ConfigEntry[] = [];
   private path = "";
   private status: ConfigStatus | null = null;
+  /** The Accounts section's data (#3385). It is rendered by this view but is not
+   *  config: see accounts.ts. */
+  private accounts: AccountsState = emptyAccountsState();
   private showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -216,6 +231,7 @@ export class ConfigPane {
 
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
+  private lastAccounts: AccountsState | null = null;
 
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
@@ -224,15 +240,17 @@ export class ConfigPane {
 
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null): void {
-    if (this.lastEntries === entries && this.lastStatus === status) {
+  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null, accounts: AccountsState): void {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
     this.lastEntries = entries;
     this.lastStatus = status;
+    this.lastAccounts = accounts;
     this.entries = entries;
     this.path = path;
     this.status = status;
+    this.accounts = accounts;
     // A save closes the field it came from: the value is committed, and leaving
     // it open would invite a second write of the same thing.
     if (status && !status.error && status.key === this.editing) {
@@ -260,6 +278,17 @@ export class ConfigPane {
    */
   private rerenderKeepingUserState(): void {
     const active = document.activeElement;
+    // The account register fields (#3385) are rebuilt like everything else, and
+    // they hold a name the user is part-way through typing. Capturing every
+    // field's text — not only the focused one — is what keeps a refresh landing
+    // from another action (a register elsewhere, a login closing) from eating a
+    // draft the user never submitted.
+    const accountDrafts = this.readAccountDrafts();
+    const focusedAccount =
+      active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
+    const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : null;
     const wasEditing = this.editingInput !== null && active === this.editingInput;
     // Both ends, not just the start: a rebuild landing while text is SELECTED would
     // otherwise silently collapse the selection the user was about to overwrite.
@@ -275,6 +304,7 @@ export class ConfigPane {
     // case — a user who wheels the pane while a field still holds focus is exactly the
     // reader this change exists for, and a plain focus() would yank them back to the
     // field the moment a save or an external refresh landed.
+    this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -282,7 +312,45 @@ export class ConfigPane {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (focusedAccount !== null) {
+      const field = this.accountInput(focusedAccount);
+      // preventScroll for the same reason as above: focus() would otherwise undo
+      // the offset rebuildKeepingScroll just restored.
+      field?.focus({ preventScroll: true });
+      if (field && accountCaret?.start != null) {
+        field.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
+      }
     }
+  }
+
+  /** Every register field's current text, keyed by agent. */
+  private readAccountDrafts(): Map<string, string> {
+    const drafts = new Map<string, string>();
+    for (const field of this.el.querySelectorAll<HTMLInputElement>(`input[${ACCOUNT_INPUT_ATTR}]`)) {
+      const agent = field.getAttribute(ACCOUNT_INPUT_ATTR);
+      if (agent !== null && field.value !== "") {
+        drafts.set(agent, field.value);
+      }
+    }
+    return drafts;
+  }
+
+  /** Puts them back on the freshly rendered fields. An agent whose row is gone —
+   *  a roster that shrank between renders — simply drops its draft; there is no
+   *  field left to hold it. */
+  private restoreAccountDrafts(drafts: Map<string, string>): void {
+    for (const [agent, value] of drafts) {
+      const field = this.accountInput(agent);
+      if (field) {
+        field.value = value;
+      }
+    }
+  }
+
+  private accountInput(agent: string): HTMLInputElement | null {
+    return this.el.querySelector<HTMLInputElement>(
+      `input[${ACCOUNT_INPUT_ATTR}="${CSS.escape(agent)}"]`,
+    );
   }
 
   private render(): void {
@@ -353,7 +421,13 @@ export class ConfigPane {
               "No settings are available — use Configure with assistant or check the daemon connection.",
             ),
           ];
-    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...content));
+    // Accounts LAST: the config keys are what this view is for, and a credential
+    // section above them would push them below the fold.
+    this.el.replaceChildren(
+      head,
+      h("div", { class: "af-config-list" }, ...content),
+      renderAccountsSection(this.accounts, this.actions.accounts),
+    );
   }
 
   /** One key: its name, purpose, control, and — when it is the row just written

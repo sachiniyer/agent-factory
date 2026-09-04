@@ -373,6 +373,32 @@ func (s *controlServer) SpawnConfigAgent(req SpawnConfigAgentRequest, resp *Spaw
 	return nil
 }
 
+// ListAccounts reports the registered accounts on this host with their
+// logged-in state. A read, so no mutation admission gate.
+func (s *controlServer) ListAccounts(req ListAccountsRequest, resp *ListAccountsResponse) error {
+	out, err := s.manager.ListAccounts(req)
+	if err != nil {
+		return err
+	}
+	*resp = out
+	return nil
+}
+
+// RegisterAccount creates an account's credential directory without logging in.
+// It writes to the daemon host's agent-factory home, so it is behind the same
+// mutation admission gate as every other write.
+func (s *controlServer) RegisterAccount(req RegisterAccountRequest, resp *RegisterAccountResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	out, err := s.manager.RegisterAccount(req)
+	if err != nil {
+		return err
+	}
+	*resp = out
+	return nil
+}
+
 // AccountLogin opens an agent's own login flow in a bare tmux session scoped to
 // one account, and returns what a client needs to attach to it.
 //

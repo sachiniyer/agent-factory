@@ -56,6 +56,8 @@ var goSurfaces = map[string][]string{
 // check, so this registry cannot silently fall behind the code.
 var auditedRequests = map[string]reflect.Type{
 	"AccountLoginRequest":     reflect.TypeOf(daemon.AccountLoginRequest{}),
+	"ListAccountsRequest":     reflect.TypeOf(daemon.ListAccountsRequest{}),
+	"RegisterAccountRequest":  reflect.TypeOf(daemon.RegisterAccountRequest{}),
 	"AddTaskRequest":          reflect.TypeOf(daemon.AddTaskRequest{}),
 	"ApplyConfigRequest":      reflect.TypeOf(daemon.ApplyConfigRequest{}),
 	"ApplyThemeRequest":       reflect.TypeOf(daemon.ApplyThemeRequest{}),

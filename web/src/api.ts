@@ -28,8 +28,11 @@
 import type { BackendCatalog } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
+  AccountLoginResponse,
+  AccountsResponse,
   ConfigResponse,
   ConfigSetResponse,
+  RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
   SnapshotResponse,
@@ -1098,4 +1101,38 @@ export async function reapConfigAssistant(token: string): Promise<void> {
       envelopeErrorCode(env?.error),
     );
   }
+}
+
+// --- accounts (#3384/#3385) -------------------------------------------------
+//
+// An account is a DIRECTORY on the daemon host that an agent CLI treats as its
+// home. Nothing below carries credential material in either direction, and
+// nothing may be added that does: af points one variable at a directory and runs
+// the agent's own login flow there. A design in which the browser POSTs a token
+// to the daemon is out of scope by the epic's standing constraint (#3388).
+
+/** Lists the accounts registered on the DAEMON's host with their logged-in
+ *  state, plus the agents an account can be registered for. */
+export async function listAccounts(token: string): Promise<AccountsResponse> {
+  const resp = await af<AccountsResponse>("ListAccounts", {}, token);
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [] };
+}
+
+/** Creates an account's credential directory without logging in. Idempotent.
+ *
+ *  Throws ApiError carrying the daemon's own refusal — the name rule, the
+ *  case-collision rule, the agent roster — which the form shows verbatim rather
+ *  than substituting its own wording, for the same reason config does. */
+export async function registerAccount(agent: string, name: string, token: string): Promise<RegisterAccountResponse> {
+  return af<RegisterAccountResponse>("RegisterAccount", { agent, name }, token);
+}
+
+/** Opens the agent's own login flow for an account in a tmux session on the
+ *  daemon host, registering the account if it does not exist yet.
+ *
+ *  It returns as soon as the pane is running: the flow is an interactive OAuth or
+ *  device-code step only a human can finish, so the caller streams the pane
+ *  (accountLoginStreamEndpoint) rather than awaiting a result. */
+export async function startAccountLogin(agent: string, name: string, token: string): Promise<AccountLoginResponse> {
+  return af<AccountLoginResponse>("AccountLogin", { agent, name }, token);
 }

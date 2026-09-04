@@ -326,6 +326,20 @@ var httpRoutes = []HTTPRoute{
 	// host, which is exactly the authority the sandbox credential withholds.
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/ListAccounts",
+		Description: "List the agent accounts registered in the daemon host's agent-factory home, each with its logged-in state (read from the presence of the agent's own credential file, never its contents), plus the agents an account can be registered for.",
+		requestType: reflect.TypeOf(ListAccountsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListAccounts) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RegisterAccount",
+		Description: "Create an agent account's credential directory on the daemon host without logging in — idempotent, and the register half of the accounts UI. Log in to it with AccountLogin.",
+		requestType: reflect.TypeOf(RegisterAccountRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterAccount) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/AccountLogin",
 		Description: "Open an agent's OWN login flow (claude auth login / codex login / gemini) in a bare tmux session scoped to one registered account: the account's credential directory injected, every ambient identity variable removed. Registers the account if it does not exist. Returns the tmux session and socket to attach to, and the account's logged-in state read from the agent's own credential file. af never reads, stores, or forwards the credential.",
 		requestType: reflect.TypeOf(AccountLoginRequest{}),

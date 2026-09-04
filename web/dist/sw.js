@@ -68,7 +68,7 @@
 // than the af version on purpose: CI bumps main.go's version without rebuilding
 // web/dist, so a version stamp would desync the committed bundle from its own cache
 // name. The hash changes when — and only when — the shell bytes change.
-const VERSION = "99fd847f03e6";
+const VERSION = "08d8c520b8e2";
 const CACHE = `af-shell-${VERSION}`;
 
 /** The exact same-origin SUB-RESOURCE paths this worker will handle. Anything absent

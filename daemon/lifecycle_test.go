@@ -261,6 +261,17 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// retry; an admitted one leaves an interactive pane attached to a daemon that
 	// may be about to be rolled back.
 	"AccountLogin": blockedDuringProbation,
+	// RegisterAccount writes a directory into the daemon host's agent-factory home
+	// (#3385), which is a mutation of the candidate under validation like any other
+	// write.
+	"RegisterAccount": blockedDuringProbation,
+	// ListAccounts is a read: a directory listing plus a stat per account, no
+	// manager state and nothing an upgrade window is protecting. It sits with
+	// ListProjects and ListDirectory for the same reason — the accounts section a
+	// client builds out of it must not have to wait on a probation it has no stake
+	// in, and a section that cannot read reports "af could not look", which is a
+	// worse answer than the true one.
+	"ListAccounts": allowedDuringProbation,
 	"TriggerTask":  blockedDuringProbation,
 	"UpdateTask":   blockedDuringProbation,
 	// ApplyConfig was allowed during probation on the reasoning that a blocked
