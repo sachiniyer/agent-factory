@@ -293,6 +293,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The naming form's backend field asked the daemon which backends this repo
 		// can use (#1933); open the picker over the answer, if the form is still open.
 		return m.handleBackendCatalog(msg)
+	case accountRegistryMsg:
+		// The naming form's account field asked the daemon which credential accounts
+		// it holds (#3844); open the picker over the answer, if the form is still
+		// open ON THE SAME PROGRAM — see handleAccountRegistry.
+		return m.handleAccountRegistry(msg)
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -360,11 +365,23 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !swapped && started.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 			m.store.RegisterRepoForInstance(started)
 		}
+		// Version skew on the account field (#3844 constraint 5): a daemon predating
+		// account support drops it silently, and the row is about to be shown — and
+		// reported by every later surface — as the session the user asked for. Raised
+		// AFTER the row is in the store on purpose: the session EXISTS, so the message
+		// names it as something to remove rather than pretending the create failed.
+		// Batched into whichever return path runs below, including the one for a user
+		// who has navigated away: a wrong identity is not a message to skip because
+		// the user is looking elsewhere.
+		var accountSkew tea.Cmd
+		if err := accountSkewRefusal(msg.account, started); err != nil {
+			accountSkew = m.handleError(err)
+		}
 		if !userStillWatching {
 			// User moved on — update status silently and keep their current
 			// focus. The instance flips from Loading to Running in the
 			// sidebar on its own.
-			return m, tea.Batch(tea.WindowSize(), m.selectionChanged())
+			return m, tea.Batch(accountSkew, tea.WindowSize(), m.selectionChanged())
 		}
 
 		m.menu.SetState(ui.StateDefault)
@@ -377,6 +394,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initialPaneOpened = true
 			m.openPaneWindow(started, 0)
 			m.relayout()
+		}
+		if accountSkew != nil {
+			// The create succeeded, on the WRONG identity. The start-help modal would
+			// cover the message saying so — and it explains how to work in a session
+			// the user has just been told to remove — so the refusal takes the screen
+			// instead. The pane above is still opened: the session is real, and seeing
+			// it is how the user confirms what it is running as.
+			return m, tea.Batch(accountSkew, tea.WindowSize(), m.selectionChanged())
 		}
 		m.showHelpScreen(helpStart(started), nil)
 
@@ -416,6 +441,12 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			name = keys.KeySetBackend
 			if m.pendingBackend != repoDefaultBackend {
 				name = keys.KeyEditBackend
+			}
+		case "ctrl+o":
+			// Same swap for the account hint (#3844).
+			name = keys.KeySetAccount
+			if m.pendingAccount != ambientAccount {
+				name = keys.KeyEditAccount
 			}
 		case "esc":
 			name = keys.KeyCancelName
@@ -502,6 +533,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateSelectHandoffAgent(msg)
 	case stateSelectBackend:
 		return m.handleStateSelectBackend(msg)
+	case stateSelectAccount:
+		return m.handleStateSelectAccount(msg)
 	case stateHooks:
 		return m.handleStateHooks(msg)
 	case stateTasks:

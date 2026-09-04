@@ -136,6 +136,28 @@ func TestGeneralHelpNavigationMatchesBindings(t *testing.T) {
 	}
 }
 
+// TestGeneralHelpNamesEveryNamingFormField pins the one surface that advertises
+// the naming form's optional fields at EVERY width. The status bar sheds them by
+// terminal width (ui/menu.go hintDropOrder) and the account field (#3844) sheds
+// first, so on a narrow terminal this row is the only place a user can discover
+// that a session's credential account is choosable at all. A shipped capability
+// nobody can find is the failure this guards.
+func TestGeneralHelpNamesEveryNamingFormField(t *testing.T) {
+	content := helpTypeGeneral{}.toContent()
+
+	for _, want := range []string{
+		helpKey(keys.KeyChangeProgram),
+		helpKey(keys.KeySetPrompt),
+		helpKey(keys.KeySetBackend),
+		helpKey(keys.KeySetAccount),
+		"initial prompt / backend / account",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("the general help must name the naming form's %q field; got:\n%s", want, content)
+		}
+	}
+}
+
 // TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys removed — remote (hook)
 // backends now have full local parity including TabManagement, so the
 // instance-start help advertises the same t/w/1-9 tab keys for remote as for
@@ -437,16 +459,17 @@ func TestGeneralHelpWrappedDescriptionsStayOutOfKeyColumnAt80x24(t *testing.T) {
 
 // TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow is #3629. The key column
 // was sized to the widest key across ALL sections with no cap, and the help has
-// exactly one wide key — "tab / shift+tab / ctrl+r", 24 cells — against ~30 rows
-// of 1-6. At 80x24 (overlay 48 wide, contentWidth 44) it took 26 of the 44
-// content columns and left 16 for every description.
+// exactly one wide key — the naming form's field row, 27 cells since #3844 added
+// its account field to it — against ~30 rows of 1-6. At 80x24 (overlay 48 wide,
+// contentWidth 44) it took 29 of the 44 content columns and left 13 for every
+// description.
 func TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow(t *testing.T) {
 	// contentWidth at 80x24: layoutTextOverlay sets the overlay to 80*0.6 = 48,
 	// textWidth() subtracts 2*textOverlayHorizontalPadding.
 	narrow := 44
-	// The real distribution: the 24-cell outlier, then the widest ordinary key
+	// The real distribution: the 27-cell outlier, then the widest ordinary key
 	// ("ctrl+u/ctrl+d", 13), then the rest.
-	widths := []int{24, 13, 9, 8, 6, 6, 5, 1, 1, 1}
+	widths := []int{27, 13, 9, 8, 6, 6, 5, 1, 1, 1}
 
 	got := helpKeyColumnWidth(widths, narrow)
 	require.LessOrEqual(t, got, int(float64(narrow)*helpKeyColumnFraction),
@@ -460,9 +483,9 @@ func TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow(t *testing.T) {
 	require.Equal(t, 27, desc)
 
 	// Wide terminals are untouched: at 200x50 contentWidth is 116, the cap is 46,
-	// and the natural 26 is far below it.
+	// and the natural 29 is far below it.
 	wide := 116
-	require.Equal(t, 26, helpKeyColumnWidth(widths, wide),
+	require.Equal(t, 29, helpKeyColumnWidth(widths, wide),
 		"the cap must be inert where the layout already reads correctly")
 }
 
@@ -472,7 +495,8 @@ func TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow(t *testing.T) {
 func TestHelpKeyColumnWrapsOnlyTheOutlier(t *testing.T) {
 	narrow := 44
 	sections := []helpSection{{title: "Managing:", rows: []helpRow{
-		{"tab / shift+tab / ctrl+r", "While naming a new session: pick its agent / initial prompt / backend"},
+		{"tab/shift+tab ctrl+r/ctrl+o",
+			"While naming a new session: pick its agent / initial prompt / backend / account"},
 		{"ctrl+u/ctrl+d", "Scroll the current tab preview (navigation mode only)"},
 		{"n", "Create a new session"},
 	}}}
@@ -492,7 +516,7 @@ func TestHelpKeyColumnWrapsOnlyTheOutlier(t *testing.T) {
 
 	require.Contains(t, ordinaryRow, "Scroll the current tab",
 		"the widest ORDINARY key must still fit its column on one line, beside its description")
-	require.NotContains(t, wideRow, "ctrl+r",
+	require.NotContains(t, wideRow, "ctrl+o",
 		"the over-cap key must wrap inside its own column rather than widen everyone's")
 	// The 2 cells past the widest key are a GUTTER: a wrapped key must not spend
 	// them, or the row reads "tab / shift+tab- While naming…" — the key colliding

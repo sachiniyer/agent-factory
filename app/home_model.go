@@ -396,6 +396,15 @@ type home struct {
 	// so an untouched field keeps today's behavior byte-identical. Reset by
 	// startNewInstance so a cancelled create cannot leak a backend into the next.
 	pendingBackend string
+	// pendingAccount tracks the credential account picked during naming (#3844).
+	// "" means "the ambient identity", which is what CreateSessionRequest.Account
+	// omits on — the same default `af sessions create` gets with no --account, so
+	// an untouched field keeps today's behaviour byte-identical. It is CLEARED
+	// whenever the program changes, because an account belongs to one agent:
+	// claude's "work" and codex's "work" are different identities in different
+	// registries. Reset by startNewInstance so a cancelled create cannot leak an
+	// identity into the next one.
+	pendingAccount string
 	// pendingForceRemote records that this naming flow began with `N` (new remote)
 	// rather than `n`. It used to be read back off the naming placeholder's
 	// capabilities, which only worked because the placeholder was PROVISIONED with
@@ -410,6 +419,11 @@ type home struct {
 	// built from the daemon's response (plus a leading "repo default" row), so the
 	// overlay's index cannot be mapped back through any local enum.
 	backendPickerChoices []backendChoice
+	// accountPickerChoices is the option list the open account picker is showing,
+	// held alongside the overlay for the same reason backendPickerChoices is: the
+	// rows are built from the daemon's registry (plus a leading "ambient identity"
+	// row), so the overlay's index cannot be mapped back through any local list.
+	accountPickerChoices []accountChoice
 
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server

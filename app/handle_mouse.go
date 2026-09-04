@@ -642,6 +642,17 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.selectionOverlay.SetSelectedIndex(idx)
 			return m.handleStateSelectBackend(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// And the account picker (#3844) — the same overlay a fourth time, so the same
+	// click routing. A list that answers the keyboard and ignores the mouse is the
+	// #1819 class.
+	case stateSelectAccount:
+		if m.selectionOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.selectionOverlay.SetSelectedIndex(idx)
+			return m.handleStateSelectAccount(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateSearch:
 		if m.searchOverlay == nil {
 			return m, nil
@@ -765,6 +776,9 @@ func keyMsgFromString(s string) (tea.KeyMsg, bool) {
 	// click and does nothing.
 	case "ctrl+r":
 		return tea.KeyMsg{Type: tea.KeyCtrlR}, true
+	// The account hint (#3844), for the same reason.
+	case "ctrl+o":
+		return tea.KeyMsg{Type: tea.KeyCtrlO}, true
 	case "ctrl+]":
 		return tea.KeyMsg{Type: tea.KeyCtrlCloseBracket}, true
 	}

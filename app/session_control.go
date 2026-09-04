@@ -109,7 +109,12 @@ type sessionStartRequest struct {
 	// over ForceRemote in the daemon (session/instance_factory.go
 	// resolveBackendKind), which is why the TUI can offer the whole catalog
 	// through one field while `N` keeps its hook-only shortcut.
-	Backend     string
+	Backend string
+	// Account is the credential account picked in the naming form's account field
+	// (#3844), or "" for the ambient identity — the same default `af sessions
+	// create` applies with no --account. It is a directory name in the DAEMON's
+	// account registry and never carries credential material.
+	Account     string
 	ForceRemote bool
 }
 
@@ -124,6 +129,7 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 			Program:     req.Program,
 			Prompt:      req.Prompt,
 			Backend:     req.Backend,
+			Account:     req.Account,
 			ForceRemote: req.ForceRemote,
 		})
 		return e

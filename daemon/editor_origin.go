@@ -80,7 +80,7 @@ func ensureEditorOriginSecret() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("create editor-origin secret directory: %w", err)
 	}
 	var resolved string

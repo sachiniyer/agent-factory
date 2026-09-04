@@ -35,6 +35,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.pendingAccount = ""
 		m.pendingForceRemote = false
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -171,6 +172,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// on the loop, clear it with the rest of the naming state.
 		backend := m.pendingBackend
 		m.pendingBackend = ""
+		// And for the ctrl+o account field (#3844), on the loop for the same reason.
+		account := m.pendingAccount
+		m.pendingAccount = ""
 		// And for `N`. It is read from the model, not from instance.Capabilities(),
 		// because the placeholder no longer resolves a runtime to carry it (#2599) —
 		// this is the value that keeps a remote create remote.
@@ -202,7 +206,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// `af sessions create --backend` fills. Empty means "resolve from
 				// the repo's config", so an untouched field is byte-identical to
 				// every create before this field existed.
-				Backend:     backend,
+				Backend: backend,
+				// The credential account picked in the naming form's ctrl+o field
+				// (#3844), forwarded verbatim as CreateSessionRequest.Account — the
+				// field `af sessions create --account` fills. Empty means "the ambient
+				// identity", so an untouched field is byte-identical to every create
+				// before this field existed.
+				Account:     account,
 				ForceRemote: forceRemote,
 			}
 			started, err := start(instance, req)
@@ -210,6 +220,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				instance: instance,
 				started:  started,
 				err:      err,
+				// Carried so the completion handler can compare it with the account
+				// the daemon reports on the session it created (#3844 constraint 5).
+				// Read off the request rather than the model: by the time this lands
+				// the form has been reset, and a later create may hold a different one.
+				account: account,
 			}
 		}
 
@@ -243,6 +258,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// keypress starts a fetch and the overlay opens when it lands — see
 		// openBackendPicker.
 		return m.openBackendPicker()
+	case tea.KeyCtrlO:
+		// Open the account field (#3844). Same async shape as the backend field: the
+		// registry lives in the DAEMON's home, so the keypress starts a fetch and the
+		// overlay opens when it lands — see openAccountPicker.
+		return m.openAccountPicker()
 	case tea.KeyRunes:
 		// Bracketed paste arrives as ONE KeyRunes message and may contain
 		// newlines or other control runes. Titles are sidebar rows, so keep only
@@ -288,6 +308,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.pendingAccount = ""
 		m.pendingForceRemote = false
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -330,6 +351,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
+	m.pendingAccount = ""
 	m.pendingForceRemote = false
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
@@ -409,6 +431,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.state = stateNew
 	m.menu.SetNamingHasPrompt(false)
 	m.menu.SetNamingBackend(false)
+	m.menu.SetNamingAccount(false)
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
 }

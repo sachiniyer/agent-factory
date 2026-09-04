@@ -312,6 +312,95 @@ func TestMenuNewInstanceBackendHintSwapsAndDoesNotAlias(t *testing.T) {
 	}
 }
 
+// TestMenuNewInstanceAccountHintSwapsAndDoesNotAlias is the #3844 twin of the two
+// tests above. Three swaps now share one copy of the options slice, so the same
+// two failures are back in play: a swap written in place leaks a "✓" into every
+// later naming form, and a swap that rebuilds from the shared slice undoes its
+// siblings.
+func TestMenuNewInstanceAccountHintSwapsAndDoesNotAlias(t *testing.T) {
+	m := NewMenu()
+	m.SetState(StateNewInstance)
+	m.SetSize(140, 1)
+
+	if out := m.String(); !strings.Contains(out, "account") {
+		t.Fatalf("new-instance footer missing the account hint:\n%s", out)
+	}
+	if out := m.String(); strings.Contains(out, "account ✓") {
+		t.Fatalf("an unpicked account must not be marked as attached:\n%s", out)
+	}
+
+	m.SetNamingAccount(true)
+	if out := m.String(); !strings.Contains(out, "account ✓") {
+		t.Fatalf("footer must mark a session scoped to a credential account:\n%s", out)
+	}
+
+	// All three optional fields marked at once: no swap may drop another.
+	m.SetNamingHasPrompt(true)
+	m.SetNamingBackend(true)
+	out := m.String()
+	for _, want := range []string{"account ✓", "backend ✓", "initial prompt ✓"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("every field hint must survive together, missing %q:\n%s", want, out)
+		}
+	}
+
+	fresh := NewMenu()
+	fresh.SetState(StateNewInstance)
+	fresh.SetSize(140, 1)
+	if out := fresh.String(); strings.Contains(out, "account ✓") {
+		t.Fatalf("the account-hint swap leaked into the shared options slice:\n%s", out)
+	}
+}
+
+// TestMenuNewInstanceShedsAccountHintFirst pins where #3844's hint sits in the
+// drop list. Six hints take the naming row to 112 cells, so it has to shed
+// somewhere — and it sheds FIRST, ahead of the backend hint the same rule put
+// ahead of the prompt hint: it is the newest optional field, so dropping it is the
+// only drop that takes nothing away from a user who already had it. The field
+// still WORKS at every width, and the help overlay names it whatever the bar can
+// fit.
+func TestMenuNewInstanceShedsAccountHintFirst(t *testing.T) {
+	for _, tc := range []struct {
+		width                                int
+		wantAccount, wantBackend, wantPrompt bool
+	}{
+		{200, true, true, true},
+		{112, true, true, true},
+		{110, false, true, true},
+		{95, false, true, true},
+		{88, false, false, true},
+		{70, false, false, false},
+	} {
+		m := NewMenu()
+		m.SetState(StateNewInstance)
+		m.SetSize(tc.width, 1)
+		out := m.String()
+
+		for _, probe := range []struct {
+			label string
+			want  bool
+		}{
+			{"account", tc.wantAccount},
+			{"backend", tc.wantBackend},
+			{"initial prompt", tc.wantPrompt},
+		} {
+			if got := strings.Contains(out, probe.label); got != probe.want {
+				t.Fatalf("width %d: %s hint present=%v, want %v:\n%s", tc.width, probe.label, got, probe.want, out)
+			}
+		}
+		for _, want := range []string{"enter submit name", "tab change program", "esc cancel"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("width %d dropped the load-bearing hint %q:\n%s", tc.width, want, out)
+			}
+		}
+		for i, line := range strings.Split(out, "\n") {
+			if got := lipgloss.Width(line); got > tc.width {
+				t.Fatalf("width %d: hint row line %d is %d cells wide:\n%s", tc.width, i, got, out)
+			}
+		}
+	}
+}
+
 // TestMenuNewInstanceShedsBackendHintBeforeThePromptHint pins the shed ORDER the
 // #1933 hint forced. Five hints take the naming row to ~92 cells, so an
 // 80-column bar can advertise exactly one of the two optional fields, and #1936

@@ -606,8 +606,8 @@
       "id": "session.accounts",
       "title": "Register and select per-session agent credential accounts",
       "tui": {
-        "status": "partial",
-        "pointer": "ui/config_pane_accounts.go accountsSection (list + register); app/account_login.go loadAccountsIntoPane, handleAccountRegister"
+        "status": "yes",
+        "pointer": "ui/config_pane_accounts.go accountsSection (list + register); app/account_login.go loadAccountsIntoPane, handleAccountRegister; app/account_picker.go openAccountPicker (ctrl+o on the naming form) -> app/session_control.go CreateSessionRequest.Account"
       },
       "web": {
         "status": "partial",
@@ -618,8 +618,8 @@
         "pointer": "commands/accountscmd.go accountsAddCmd, accountsListCmd; api/sessions.go --account; internal/sessionenv/account_scope.go"
       },
       "verdict": "real-gap",
-      "issue": "#3051",
-      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones, so both are partial rather than no. What neither can do yet is SELECT an account when creating a session — the --account half — which is why the verdict stays real-gap against #3051."
+      "issue": "#3844",
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones. #3844 closed the TUI's remaining half: the naming form has an account field (ctrl+o) whose rows are the daemon's own ListAccounts registry, narrowed to the agent the form's program runs as, and the choice rides CreateSessionRequest.Account — the field `af sessions create --account` fills. The web stays partial for exactly the half the TUI just closed: its new-session modal still cannot SELECT an account, which is why the verdict stays real-gap, now against #3844."
     },
     {
       "id": "session.archive",
@@ -1657,6 +1657,8 @@
       "down": "tui.navigation",
       "error_details": "tui.navigation",
       "expand": "tui.navigation",
+      "fixed:account": "session.accounts",
+      "fixed:account ✓": "session.accounts",
       "fixed:backend": "session.create.opt.backend",
       "fixed:backend ✓": "session.create.opt.backend",
       "fixed:cancel": "session.create",
@@ -2004,9 +2006,6 @@
         "tui": {
           "in_place": {
             "gap": "session.create.opt.inplace"
-          },
-          "account": {
-            "gap": "session.accounts"
           }
         }
       },
