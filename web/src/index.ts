@@ -55,6 +55,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
 import { emptyAccountsState } from "./accounts.js";
+import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
 import { eventRequestsPaletteRefresh, EventStream, type EventStreamStatus } from "./events.js";
@@ -119,7 +120,7 @@ import {
   type KillableSession,
   type NewTabKind,
 } from "./ui.js";
-import type { SessionData, TaskData, WireEvent } from "./types.js";
+import type { AccountsResponse, SessionData, TaskData, WireEvent } from "./types.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -194,6 +195,11 @@ let hasDaemonPalette = false;
  *  to the repo default rather than blocking its form. */
 const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
   token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
+/** The create form's account registry (#3844). Not per-project — accounts live in
+ *  the DAEMON's home, not in a repo — so unlike the two catalogs beside it this
+ *  takes no path and the modal asks once on open. */
+const loadCreateAccounts = (): Promise<AccountsResponse> =>
+  token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token);
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
@@ -711,6 +717,9 @@ function newSession(): void {
       loadBackends: (repoPath: string) => (token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token)),
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
+      // The credential-account registry (#3844): the daemon owns it, and it lives
+      // on the daemon's host rather than in any repo, so this takes no path.
+      loadAccounts: loadCreateAccounts,
       // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
       // the web asks rather than generating a name of its own.
       suggestName: () => (token === null ? Promise.reject(new Error("not authorized")) : suggestSessionName(token)),
@@ -727,6 +736,7 @@ function newSession(): void {
         // the daemon's session.updated OpCreating projection.
         m.setBusy(true);
         closeModal();
+        const requestedAccount = values.account ?? "";
         void createSession(values, tok)
           .then((created) => {
             // Upsert the created row AND select it in one update, so it opens
@@ -743,6 +753,21 @@ function newSession(): void {
               // would stream ?tab=<n> for a tab this session doesn't have. This is
               // the same invariant moveSelection enforces for the keyboard path.
               store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
+            }
+            // Version skew on the account field (#3844): a daemon predating account
+            // support drops it silently, and the row just selected is about to be
+            // shown — and reported by every later surface — as the session the user
+            // asked for. Checked against what came BACK, because the daemon is the
+            // authority on what it stored, and SURFACED rather than thrown: the
+            // session exists, so the message names it as something to remove instead
+            // of implying the create failed.
+            //
+            // It runs AFTER the upsert, not before, because the store.set above
+            // carries `tabError: null` — raising the notice first would have it
+            // cleared by the very update that puts the wrongly-scoped row on screen.
+            const skew = accountSkewMessage(requestedAccount, created);
+            if (skew !== "") {
+              surfaceTabError(new Error(skew));
             }
           })
           .catch((e) => {

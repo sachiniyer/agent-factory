@@ -6282,6 +6282,10 @@ async function createSession(input, token2) {
   if (backend !== "") {
     body.backend = backend;
   }
+  const account = (input.account ?? "").trim();
+  if (account !== "") {
+    body.account = account;
+  }
   const resp = await af("CreateSession", body, token2);
   if (resp.warning) {
     throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
@@ -6967,6 +6971,81 @@ var ConfigPane = class {
     return h("div", { class: "af-config-control" }, input, save);
   }
 };
+
+// src/account_scope.ts
+var AMBIENT_ACCOUNT = "";
+function accountAgentFor(program, catalog) {
+  const picked = program.trim();
+  if (picked !== "") {
+    return picked;
+  }
+  return catalog?.default ?? "";
+}
+function accountAgentSupported(accounts, agent) {
+  if (accounts === null || agent === "") {
+    return false;
+  }
+  return accounts.agents.includes(agent);
+}
+function accountChoices(accounts, agent) {
+  const choices = [
+    { value: AMBIENT_ACCOUNT, label: "Ambient identity (the agent's own login)", agent, blocked: "", note: "" }
+  ];
+  if (accounts === null || agent === "") {
+    return choices;
+  }
+  for (const entry of accounts.entries) {
+    if (entry.agent !== agent) {
+      continue;
+    }
+    const marks = [];
+    if (entry.registration_only) {
+      marks.push("registration only");
+    }
+    if (!entry.logged_in) {
+      marks.push("not logged in");
+    }
+    choices.push({
+      value: entry.name,
+      label: marks.length === 0 ? entry.name : `${entry.name} \u2014 ${marks.join(" \xB7 ")}`,
+      agent: entry.agent,
+      // The daemon is the authority on this state: `registration_only` is computed
+      // by the build that owns the registry, which may be newer than this client,
+      // so the flag is trusted and only the wording is written here. The canonical
+      // sentence lives in Go (internal/sessionenv AccountRegistrationOnlyReason)
+      // and does not cross the wire; this says the same thing in the same terms,
+      // and both are driven by the one flag.
+      blocked: entry.registration_only ? `A session cannot be scoped to a ${entry.agent} account yet \u2014 af has not verified that the account boundary can prove how it launches ${entry.agent}, so it refuses rather than risk starting the session on the ambient identity. Registering and logging in work today.` : "",
+      note: entry.logged_in ? "" : `${entry.name} has no ${entry.agent} credential yet \u2014 the session will run as it until you log in from the Config view.`
+    });
+  }
+  return choices;
+}
+function accountNotice(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  if (choice === void 0) {
+    return "";
+  }
+  return choice.blocked !== "" ? choice.blocked : choice.note;
+}
+function accountSelectable(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 || choice.blocked === "";
+}
+function accountSkewMessage(requested, created) {
+  const want = requested.trim();
+  if (want === AMBIENT_ACCOUNT) {
+    return "";
+  }
+  const got = (created.account ?? "").trim();
+  if (got === want) {
+    return "";
+  }
+  if (got === "") {
+    return `Session "${created.title}" was created but the daemon did not apply account "${want}" \u2014 it is running on the ambient identity. The running daemon predates account support; upgrade it, then kill this session and create it again.`;
+  }
+  return `Session "${created.title}" was created but the daemon applied account "${got}", not the "${want}" that was picked \u2014 it is running as an identity you did not choose. Kill this session and create it again.`;
+}
 
 // src/stream_endpoint.ts
 function wsScheme() {
@@ -10120,10 +10199,19 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const backendHint = h("p", { class: "af-modal-hint" });
   backendHint.setAttribute("role", "status");
   let choices = backendChoices(null);
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "Account");
+  const accountHint = h("p", { class: "af-modal-hint" });
+  accountHint.setAttribute("role", "status");
+  let accounts = null;
+  let programCatalog = null;
+  let accountRows = accountChoices(null, "");
+  let accountAgent = "";
   let busy = false;
   const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
-    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+    accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value);
   };
   const chromeSetBusy = handle.setBusy.bind(handle);
   handle.setBusy = (b) => {
@@ -10141,6 +10229,21 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     syncSubmitState();
   };
   backendSelect.addEventListener("change", syncSubmitState);
+  const renderAccounts = () => {
+    const agent = accountAgentFor(programSelect.value, programCatalog);
+    const previous = accountSelect.value;
+    const sameAgent = agent === accountAgent;
+    accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
+    accountAgent = agent;
+    accountSelect.replaceChildren();
+    for (const choice of accountRows) {
+      accountSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    accountSelect.value = sameAgent && accountRows.some((c) => c.value === previous) ? previous : AMBIENT_ACCOUNT;
+    syncSubmitState();
+  };
+  accountSelect.addEventListener("change", syncSubmitState);
+  programSelect.addEventListener("change", renderAccounts);
   const renderPrograms = () => {
     const previous = programSelect.value;
     programSelect.replaceChildren();
@@ -10148,6 +10251,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       programSelect.append(h("option", { value: choice.value }, choice.label));
     }
     programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+    renderAccounts();
   };
   let loadSeq = 0;
   const loadCatalogsFor = (repoPath) => {
@@ -10156,12 +10260,14 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       if (seq !== loadSeq) {
         return;
       }
+      programCatalog = catalog;
       programs = programChoices(catalog);
       renderPrograms();
     }).catch(() => {
       if (seq !== loadSeq) {
         return;
       }
+      programCatalog = null;
       programs = programChoices(null);
       renderPrograms();
     });
@@ -10193,11 +10299,21 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     field("Program", programSelect),
     field("Backend", backendSelect),
     backendHint,
+    field("Account", accountSelect),
+    accountHint,
     field("Prompt", promptArea)
   );
   renderPrograms();
   renderChoices();
+  renderAccounts();
   loadCatalogsFor(projectSelect.value);
+  void callbacks.loadAccounts().then((registry) => {
+    accounts = registry;
+    renderAccounts();
+  }).catch(() => {
+    accounts = null;
+    renderAccounts();
+  });
   void callbacks.suggestName().then((name) => {
     if (name !== "") {
       suggestedName = name;
@@ -10225,7 +10341,10 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       prompt: promptArea.value,
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
-      backend: backendSelect.value
+      backend: backendSelect.value,
+      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
+      // `account` entirely and the session runs on the agent's own login (#3844).
+      account: accountSelect.value
     });
   });
   queueMicrotask(() => titleInput.focus());
@@ -15417,6 +15536,7 @@ var PALETTE_RETRY_MS = 1e3;
 var paletteRetryTimer = null;
 var hasDaemonPalette = false;
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
+var loadCreateAccounts = () => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token);
 var resyncTimer = null;
 var sessionEventGeneration = 0;
 var resyncRequestGeneration = 0;
@@ -15709,6 +15829,9 @@ function newSession() {
       loadBackends: (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token),
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
+      // The credential-account registry (#3844): the daemon owns it, and it lives
+      // on the daemon's host rather than in any repo, so this takes no path.
+      loadAccounts: loadCreateAccounts,
       // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
       // the web asks rather than generating a name of its own.
       suggestName: () => token === null ? Promise.reject(new Error("not authorized")) : suggestSessionName(token),
@@ -15721,10 +15844,15 @@ function newSession() {
         clearTabError();
         m.setBusy(true);
         closeModal();
+        const requestedAccount = values.account ?? "";
         void createSession(values, tok).then((created) => {
           if (created.id) {
             const sessions = upsertSession(store.get().sessions, created);
             store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
+          }
+          const skew = accountSkewMessage(requestedAccount, created);
+          if (skew !== "") {
+            surfaceTabError(new Error(skew));
           }
         }).catch((e) => {
           requestResync();

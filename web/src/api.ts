@@ -347,6 +347,11 @@ export interface CreateSessionInput {
    *  choose, and createSession then sends NO backend so the repo's own config
    *  decides. */
   backend?: string;
+  /** The credential account the session's agent runs as (#3844) — a name from
+   *  ListAccounts, mirroring `af sessions create --account`. Empty means the user
+   *  did not choose, and createSession then sends NO account so the session runs
+   *  on the ambient identity. It is a directory name, never credential material. */
+  account?: string;
 }
 
 /** Lists the runtimes a session in this repo can be created on, whether the repo's
@@ -395,6 +400,14 @@ export async function createSession(input: CreateSessionInput, token: string): P
   const backend = (input.backend ?? "").trim();
   if (backend !== "") {
     body.backend = backend;
+  }
+  // `account` is sent ONLY when the user picked one, for the same reason: absent is
+  // the only way to mean "the ambient identity", and an account name sent on every
+  // create would pin every session to whichever identity the form happened to
+  // resolve (#3844).
+  const account = (input.account ?? "").trim();
+  if (account !== "") {
+    body.account = account;
   }
   const resp = await af<{ instance: SessionData; warning?: string }>("CreateSession", body, token);
   if (resp.warning) {
