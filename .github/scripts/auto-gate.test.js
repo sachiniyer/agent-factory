@@ -10,7 +10,9 @@ const { __test } = autoGate;
 const HEAD_SHA = "0a5393dd71ddbbf66486d31939728f9947c843bb";
 const OTHER_SHA = "da0a05ea3b9036a12f67a3b3877d16dd0dac893d";
 const ACTIONS_APP_ID = 15368;
-const CHECK_CREATED_AT = "2026-07-09T01:11:00Z";
+// A check run's generation stamp. Named for `started_at`, which is the field the
+// API returns — `created_at` is not part of the check-run resource (#3827).
+const CHECK_GENERATION_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
 const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
 const AUTO_GATE_DOC = path.join(__dirname, "..", "auto-gate.md");
@@ -6480,17 +6482,118 @@ test("every conceded refusal shape is conceded only against a proven winner", as
     const conceded = await runApplyGateStep({ github: winner });
     assert.equal(conceded.error, null, `${message} must be conceded when the PR is merged`);
 
+    // With nothing proven, the outcome comes from the TABLE, not from this test:
+    // a shape that declares what its unproven case means waits (#3827), and every
+    // other shape stays loud. Reading it off `shape` is what stops the two
+    // drifting — a new entry is covered the moment it is added.
     const nobody = fakeGateGithub({
       mergeError: mergeRefusal(message, shape.status),
       pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
     });
-    const loud = await runApplyGateStep({ github: nobody });
-    assert.match(
-      loud.error?.message || "",
-      new RegExp(message),
-      `${message} must stay loud when nothing won the head`,
-    );
+    const unproven = await runApplyGateStep({ github: nobody });
+    if (shape.unprovenReason) {
+      assert.equal(
+        unproven.error,
+        null,
+        `${message} declares an unproven meaning, so it must not red the run`,
+      );
+      assert.match(unproven.notices.join("\n"), new RegExp(`Refusing to merge PR #1465; ${shape.unprovenReason.split("(")[0].trim()}`));
+      assert.equal(nobody.mergedWith, null, `${message} must merge nothing while waiting`);
+    } else {
+      assert.match(
+        unproven.error?.message || "",
+        new RegExp(message),
+        `${message} must stay loud when nothing won the head`,
+      );
+    }
   }
+});
+
+// #3827. Two Auto Gate runs evaluated one head at once: run B's pre-lane
+// invalidation flipped the fixed aggregate non-green while run A's serialized
+// lane was between publishing PASS and calling merge, so A's `PUT /pulls/N/merge`
+// came back 405 `Repository rule violations found` — "Required status check
+// \"Auto Gate decision\" is failing". Nothing had merged yet (B merged twenty
+// seconds later), so the concession stayed loud and the master run went red.
+//
+// The generation the fencing reads is the SHAPE THE API RETURNS, and a check run
+// has no `created_at`. Measured on the incident head: all twenty `Auto Gate
+// decision` generations on 577d6386 carry `started_at` and `completed_at`, and
+// not one carries `created_at` — the field name this predicate was written
+// against. So `Date.parse(undefined)` was NaN, the guard read it as "unknown
+// generation", and the newer-owner branch could never fire in production however
+// clearly another transaction owned the head. Every fixture supplied
+// `created_at`, so the suite proved a shape GitHub never sends.
+test("a newer owner is recognised in the shape the API actually returns", async () => {
+  const github = fakeGateGithub({});
+  // No `created_at` anywhere — this is the real check-run shape.
+  const owned = { id: 100918422866, started_at: "2026-09-04T05:08:43Z", completed_at: "2026-09-04T05:08:43Z" };
+  const newer = {
+    id: 100918445579,
+    started_at: "2026-09-04T05:08:51Z",
+    completed_at: "2026-09-04T05:08:51Z",
+    name: "Auto Gate decision",
+    external_id: aggregateExternalId(HEAD_SHA),
+    app: { id: ACTIONS_APP_ID },
+    conclusion: "failure",
+    output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+    html_url: "https://example.invalid/checks/100918445579",
+  };
+  github.rest.pulls.get = async () => ({ data: { merged: false, merge_commit_sha: null } });
+  github.paginate = async () => [newer];
+
+  const concession = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Repository rule violations found"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck: owned,
+  });
+
+  assert.equal(
+    concession?.reason,
+    "newer-owner",
+    "the incident's own generations must be read as a newer owner (#3827)",
+  );
+
+  // And generation order still decides. An OLDER check is not a winner, so this
+  // is no longer a concession — it falls through to the unproven wait, which
+  // leaves the aggregate red rather than claiming somebody else won.
+  github.paginate = async () => [{ ...newer, id: 1, started_at: "2026-09-04T05:08:35Z", completed_at: "2026-09-04T05:08:35Z" }];
+  const older = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Repository rule violations found"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck: owned,
+  });
+  assert.notEqual(older?.reason, "newer-owner", "an older generation must not concede");
+  assert.equal(older?.reason, "unproven-wait");
+});
+
+// …and when there is genuinely no winner to find, the same refusal is a WAIT
+// rather than an unhandled error. The ruleset refused because a required check
+// is not green; that is a state the next evaluation re-checks, not a defect in
+// this head. #3811 made the same call for `Base branch was modified`.
+test("a rule-violation refusal with no proven winner waits instead of reddening master", async () => {
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Repository rule violations found"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+
+  const { error, notices } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "the master Auto Gate run must not go red over a re-checkable state");
+  assert.equal(github.mergedWith, null, "and nothing merged");
+  assert.match(
+    notices.join("\n"),
+    /Refusing to merge PR #1465; a required check changed between the evaluation and the merge/,
+    "the decision must name the wait in the gate's own words",
+  );
+  assert.ok(
+    github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "a waiting outcome still leaves the aggregate non-green",
+  );
 });
 
 test("a live newer owner outranks merged evidence on a shared head", async () => {
@@ -6500,14 +6603,15 @@ test("a live newer owner outranks merged evidence on a shared head", async () =>
   // invalidation path and supersedes the active winner — the ownership theft the
   // newer-owner branch exists to avoid.
   const github = fakeGateGithub();
-  const ownedAggregateCheck = { id: 1, created_at: "2026-07-09T01:00:00Z" };
+  // The real check-run shape: `started_at`/`completed_at`, no `created_at` (#3827).
+  const ownedAggregateCheck = { id: 1, started_at: "2026-07-09T01:00:00Z" };
   github.rest.pulls.get = async () => ({
     data: { merged: true, merge_commit_sha: "winner-sha" },
   });
   github.paginate = async () => [
     {
       id: 2,
-      created_at: "2026-07-09T01:30:00Z",
+      started_at: "2026-07-09T01:30:00Z",
       name: "Auto Gate decision",
       external_id: aggregateExternalId(HEAD_SHA),
       app: { id: ACTIONS_APP_ID },
@@ -6636,10 +6740,10 @@ test("a newer transaction owning the head concedes a refused merge", async () =>
     mergeError: mergeRefusal("Repository rule violations found"),
     pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
   });
-  const ownedAggregateCheck = { id: 1, created_at: "2026-07-09T01:00:00Z" };
+  const ownedAggregateCheck = { id: 1, started_at: "2026-07-09T01:00:00Z" };
   const newer = {
     id: 2,
-    created_at: "2026-07-09T01:30:00Z",
+    started_at: "2026-07-09T01:30:00Z",
     name: "Auto Gate decision",
     external_id: aggregateExternalId(HEAD_SHA),
     app: { id: ACTIONS_APP_ID },
@@ -6659,29 +6763,28 @@ test("a newer transaction owning the head concedes a refused merge", async () =>
   assert.equal(concession.reason, "newer-owner");
   assert.match(concession.message, /is newer Auto Gate check https:\/\/example\.invalid\/checks\/2/);
 
-  // An OLDER check is not a winner: generation order is what makes this safe.
-  const older = { ...newer, id: 0, created_at: "2026-07-09T00:30:00Z" };
+  // An OLDER check is not a winner: generation order is what makes this safe. It
+  // is not a concession, so it takes the unproven wait instead (#3827).
+  const older = { ...newer, id: 0, started_at: "2026-07-09T00:30:00Z" };
   github.paginate = async () => [older];
-  assert.equal(
-    await autoGate.resolveMergeRefusal({
-      github,
-      error: mergeRefusal("Repository rule violations found"),
-      options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
-      ownedAggregateCheck,
-    }),
-    null,
-  );
+  const stale = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Repository rule violations found"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck,
+  });
+  assert.notEqual(stale?.reason, "newer-owner");
 });
 
 test("an unknown owned generation concedes nothing", async () => {
-  // Fail-closed on the unknown. Reading a missing created_at as generation zero
-  // would make every check on the head — this transaction's own included — look
-  // like a later owner, turning the safety check into a blanket concession.
+  // Fail-closed on the unknown. Reading a missing generation stamp as zero would
+  // make every check on the head — this transaction's own included — look like a
+  // later owner, turning the safety check into a blanket concession.
   const github = fakeGateGithub({});
   github.paginate = async () => [
     {
       id: 10000,
-      created_at: CHECK_CREATED_AT,
+      started_at: CHECK_GENERATION_AT,
       name: "Auto Gate decision",
       external_id: aggregateExternalId(HEAD_SHA),
       app: { id: ACTIONS_APP_ID },
@@ -6690,15 +6793,25 @@ test("an unknown owned generation concedes nothing", async () => {
     },
   ];
 
-  for (const owned of [null, { id: 1 }, { created_at: "2026-07-09T01:00:00Z" }, { id: 1, created_at: "nonsense" }]) {
-    assert.equal(
-      await autoGate.resolveMergeRefusal({
-        github,
-        error: mergeRefusal("Repository rule violations found"),
-        options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
-        ownedAggregateCheck: owned,
-      }),
-      null,
+  // `{ id: 1 }` is the shape that matters most: an owned check with no readable
+  // generation at all. The unproven wait may still fire — it writes nothing this
+  // run was not already going to write, and leaves the aggregate red — but a
+  // CONCESSION, which says another actor won, must not.
+  for (const owned of [
+    null,
+    { id: 1 },
+    { started_at: "2026-07-09T01:00:00Z" },
+    { id: 1, started_at: "nonsense" },
+  ]) {
+    const resolved = await autoGate.resolveMergeRefusal({
+      github,
+      error: mergeRefusal("Repository rule violations found"),
+      options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+      ownedAggregateCheck: owned,
+    });
+    assert.notEqual(
+      resolved?.reason,
+      "newer-owner",
       `an owned check of ${JSON.stringify(owned)} must not concede`,
     );
   }
@@ -7603,7 +7716,7 @@ function fakeGateGithub({
     // newer. Same stamp paginate() synthesizes below, so a transaction's own
     // check is not mistaken for a later transaction's.
     return {
-      data: { id: 10000 + github.createdChecks.length - 1, created_at: CHECK_CREATED_AT, ...options },
+      data: { id: 10000 + github.createdChecks.length - 1, created_at: CHECK_GENERATION_AT, ...options },
     };
   };
   const updateCheck = async function updateCheck(options) {
@@ -7637,7 +7750,7 @@ function fakeGateGithub({
     // An update returns the whole check run, id and original created_at included
     // — not a bare echo of the patch. Generation comparison reads both off it.
     return {
-      data: { id: options.check_run_id, created_at: CHECK_CREATED_AT, ...options },
+      data: { id: options.check_run_id, created_at: CHECK_GENERATION_AT, ...options },
     };
   };
   const responses = new Map([
@@ -7955,9 +8068,9 @@ function fakeGateGithub({
           ...github.createdChecks.map((created, index) => ({
             id: 10000 + index,
             app: { id: ACTIONS_APP_ID, slug: "github-actions" },
-            created_at: CHECK_CREATED_AT,
-            started_at: CHECK_CREATED_AT,
-            completed_at: CHECK_CREATED_AT,
+            created_at: CHECK_GENERATION_AT,
+            started_at: CHECK_GENERATION_AT,
+            completed_at: CHECK_GENERATION_AT,
             ...created,
           })),
         ];

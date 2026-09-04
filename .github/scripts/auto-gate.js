@@ -51,7 +51,27 @@ const AGGREGATE_WAITING_TITLE = "WAITING: refreshing every PR/head decision at t
 const CONCEDED_MERGE_REFUSALS = [
   // #3324: the ruleset refuses the write because a competing merge advanced
   // master past the required up-to-date check between evaluation and merge.
-  { status: 405, pattern: /Repository rule violations found/i },
+  //
+  // `unprovenReason` is what this shape means when NO winner can be proven, and
+  // it is a wait rather than a failure (#3827). The ruleset refused because a
+  // required check is not green at this instant — "Required status check \"Auto
+  // Gate decision\" is failing" — which is a state the next evaluation re-checks,
+  // not a defect in this head. Run 33839375109 died on exactly that: a second
+  // evaluation of the same head invalidated the aggregate between this run's PASS
+  // and its merge, nothing had merged yet, and the loud path reddened master over
+  // a race that resolved correctly twenty seconds later.
+  //
+  // This is NOT the RETRYABLE list below, and the difference is real: a shape
+  // there is never a concession, while this one is a concession whenever a winner
+  // IS proven. One shape, two outcomes, decided by evidence — so it stays here,
+  // where the evidence is gathered.
+  {
+    status: 405,
+    pattern: /Repository rule violations found/i,
+    unprovenReason:
+      "a required check changed between the evaluation and the merge (another evaluation of " +
+      "this head is likely in flight); the next evaluation re-checks",
+  },
   { status: 405, pattern: /not mergeable/i },
   // #3434: a merge for this PR is already in flight. #3379 made the maintainer
   // merge path a normal outcome rather than a rarity, so "a human merges while
@@ -2572,8 +2592,21 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
     // zero makes every check on the head — including the ones this very
     // transaction created — look like a later owner, i.e. concedes everything.
     // An unknown generation is not a proven loss.
-    const ownedCreatedAt = Date.parse(ownedAggregateCheck?.created_at || "");
-    if (!Number.isFinite(ownedCreatedAt) || !Number.isFinite(Number(ownedAggregateCheck?.id))) {
+    // The generation stamp, read from the fields a check run ACTUALLY carries.
+    //
+    // This asked for `created_at`, which the check-runs API does not return —
+    // measured on the #3827 head, where all twenty `Auto Gate decision`
+    // generations carry `started_at` and `completed_at` and not one carries
+    // `created_at`. So the parse was NaN, the guard below read it as "unknown
+    // generation", and this branch could never fire in production however plainly
+    // another transaction owned the head. Every fixture supplied the field, so the
+    // suite proved a shape GitHub never sends.
+    //
+    // `latestRunTime` is the reader the rest of this file already uses on check
+    // runs, and it prefers the fields that exist. Sharing it is the point: a
+    // second, divergent notion of "which generation is newer" is what rotted.
+    const ownedGeneration = latestRunTime(ownedAggregateCheck || {});
+    if (!ownedGeneration || !Number.isFinite(Number(ownedAggregateCheck?.id))) {
       return null;
     }
     const aggregateExternalId = `${AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX}${expectedHeadSha}`;
@@ -2607,10 +2640,10 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
     }
     const newerOwner = aggregateChecks
       .filter((check) => {
-        const createdAt = Date.parse(check.created_at || "") || 0;
+        const generation = latestRunTime(check);
         const newerGeneration =
-          createdAt > ownedCreatedAt ||
-          (createdAt === ownedCreatedAt && Number(check.id) > Number(ownedAggregateCheck.id));
+          generation > ownedGeneration ||
+          (generation === ownedGeneration && Number(check.id) > Number(ownedAggregateCheck.id));
         return (
           newerGeneration &&
           check.name === AUTO_GATE_DECISION_CHECK &&
@@ -2688,7 +2721,25 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
     return newerOwner;
   }
 
-  // No winner. The head is genuinely unmergeable and the run must stay loud.
+  // No winner — and for a shape that names what its unproven case MEANS, that is
+  // a wait rather than a failure (#3827). It becomes the gate's own refusal, so it
+  // travels the path a fresh refusal already travels: processAggregateHead keys on
+  // this prefix, invalidates the aggregate, records the reason, and waits. Nothing
+  // exits claiming a merge that did not happen — the state is `waiting`, not
+  // `conceded`, and the required check is left non-green.
+  //
+  // Not when ownership could not be READ, though. That is "no answer", not "no
+  // winner", and the waiting path writes a fresh invalidation on its way out —
+  // which is precisely what must not happen over a transaction this run failed to
+  // see (#3551). An unreadable owner stays loud, exactly as before.
+  if (refusal.unprovenReason && !error.autoGateOwnershipUnknown) {
+    return {
+      reason: "unproven-wait",
+      message: `Refusing to merge PR #${prNumber}; ${refusal.unprovenReason}`,
+    };
+  }
+
+  // The head is genuinely unmergeable and the run must stay loud.
   return null;
 }
 
@@ -4345,12 +4396,16 @@ function latestRunTime(run) {
   return parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0;
 }
 
+// Newest generation first. The timestamp comes from `latestRunTime`, which reads
+// the fields a check run carries — this sorted on `created_at`, which the API
+// never returns, so every comparison was 0 and the id tiebreaker below was doing
+// all of the work (#3827). Ids are monotonic, so the ordering it produced was
+// right; it was right by accident, and the next reader had no way to tell.
 function newestCheckGeneration(checkRuns) {
   return [...checkRuns].sort((left, right) => {
-    const createdDifference =
-      (parseTimestamp(right.created_at) || 0) - (parseTimestamp(left.created_at) || 0);
-    if (createdDifference !== 0) {
-      return createdDifference;
+    const generationDifference = latestRunTime(right) - latestRunTime(left);
+    if (generationDifference !== 0) {
+      return generationDifference;
     }
     return Number(right.id || 0) - Number(left.id || 0);
   })[0];
