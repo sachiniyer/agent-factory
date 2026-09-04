@@ -38,6 +38,23 @@ func getWorktreeDirectoryForRepoWithConfig(cfg *config.Config, repoPath string) 
 	return filepath.Dir(repoRoot), nil
 }
 
+// ensureWorktreeParent creates the directory a session worktree is provisioned
+// into, for every path that provisions one.
+//
+// MkdirAllUnderAFHome, not os.MkdirAll: under worktree_root=subdirectory the
+// worktree root is <af-home>/worktrees (see worktree.go), so a bare MkdirAll
+// re-creates the whole AF home as an ancestor on every provision — and it does
+// so on the SESSION-LAUNCH path, ahead of the create's persist, which is the
+// only write the #3845 latch would otherwise refuse. By the time that persist
+// runs the home is already back, applyHomeCheck's consecutive-miss counter is
+// cleared, and the abandoned daemon keeps firing schedules forever (#3850).
+//
+// It is an exact os.MkdirAll for the default sibling root, which is outside the
+// home, and for any other worktree_root a user configures there.
+func ensureWorktreeParent(worktreePath string) error {
+	return config.MkdirAllUnderAFHome(filepath.Dir(worktreePath), 0755)
+}
+
 // GitWorktree manages git worktree operations for a session
 type GitWorktree struct {
 	// relocationMu makes the persisted recovery record and the pathname it

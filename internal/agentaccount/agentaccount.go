@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/afhome"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -139,7 +140,14 @@ func Register(home, agent, name string) (string, error) {
 	// loser of the race is refused rather than silently joined to the winner's
 	// credentials. MkdirAll cannot do this: it treats an existing directory as
 	// success and reports nothing (#3057 review).
-	if err := os.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
+	//
+	// The PARENT, though, is still a MkdirAll, and afhome.MkdirAll rather than
+	// os.MkdirAll: this is <af-home>/accounts/<agent>, so
+	// MkdirAll re-creates the whole home as an ancestor. Register is reachable
+	// from the daemon's account routes (#3835), which is a daemon-owned write
+	// that runs nowhere near the atomic-write seam (#3850). Not config's
+	// re-export: this package deliberately depends on no heavy af package.
+	if err := afhome.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
 		return "", fmt.Errorf("create account directory %s: %w", dir, err)
 	}
 	// The RESERVATION is the serialization point, not the account directory.
@@ -260,7 +268,9 @@ const reservationDir = ".names"
 // merely deferred.
 func reserveName(home, agent, name string) (string, error) {
 	dir := filepath.Join(home, DirName, agent, reservationDir)
-	if err := os.MkdirAll(dir, dirMode); err != nil {
+	// Through the home guard for the same reason Register's own create is: this
+	// is <af-home>/accounts/<agent>/.names (#3850).
+	if err := afhome.MkdirAll(dir, dirMode); err != nil {
 		return "", fmt.Errorf("create account reservation directory %s: %w", dir, err)
 	}
 	// The reservation path gets the SAME ancestor check as the account directory.

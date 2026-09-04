@@ -81,10 +81,13 @@ func ensurePluginDir() (string, error) {
 	hooksDir := filepath.Join(pluginDir, "hooks")
 	manifestDir := filepath.Join(pluginDir, ".claude-plugin")
 
-	if err := os.MkdirAll(commandsDir, 0755); err != nil {
+	// MkdirAllUnderAFHome, not os.MkdirAll: this is <config-dir>/plugin, so
+	// MkdirAll would re-create the whole AF home as an ancestor — on EVERY claude
+	// launch, and before any write the #3845 latch could refuse (#3850).
+	if err := config.MkdirAllUnderAFHome(commandsDir, 0755); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(manifestDir, 0755); err != nil {
+	if err := config.MkdirAllUnderAFHome(manifestDir, 0755); err != nil {
 		return "", err
 	}
 

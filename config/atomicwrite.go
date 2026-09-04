@@ -300,8 +300,9 @@ func atomicWrite(path, target string, data []byte, perm os.FileMode) error {
 // why the #3845 precondition sits here: a daemon whose home was deleted used to
 // re-create it on its next state write, because MkdirAll creates the home as an
 // ancestor of whatever it was asked for. The check is FIRST — ahead of
-// secureAFHomeForPath, which has an os.MkdirAll of the home of its own — so a
-// refused write leaves the filesystem exactly as it found it.
+// secureAFHomeForPath, which creates the home itself — so a refused write leaves
+// the filesystem exactly as it found it. secureAFHomeForPath carries its own
+// guard as of #3850, because LoadConfig reaches it without passing through here.
 func ensureStorageParent(path string) error {
 	if err := requireObservedAFHomePresent(path); err != nil {
 		return err
@@ -342,7 +343,16 @@ func secureAFHomeForPath(path string) error {
 	info, statErr := os.Lstat(absHome)
 	created := false
 	if os.IsNotExist(statErr) {
-		if err := os.MkdirAll(absHome, 0o700); err != nil {
+		// MkdirAllUnderAFHome, not os.MkdirAll. ensureStorageParent guards this
+		// function for its OWN callers, but it is not the only caller: LoadConfig
+		// invokes secureAFHomeForPath directly (config_load.go), to repair a home
+		// left 0755 by an older af even when the load performs no write at all. A
+		// session create loads config per op, so on the launch path this MkdirAll
+		// ran ahead of every other one and put the home back before anything else
+		// could refuse it (#3850) — measured, not reasoned: the create's residue
+		// was config.toml, instances and plugin, and config.toml is what named
+		// this seam.
+		if err := MkdirAllUnderAFHome(absHome, 0o700); err != nil {
 			return fmt.Errorf("create AF home: %w", err)
 		}
 		// Reinspect after creation. Besides making chmod independent of umask,

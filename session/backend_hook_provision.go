@@ -121,7 +121,10 @@ func parseHookProvisionRecord(stdout string) (*hookProvisionRecord, bool, *hookS
 // Fails closed: a record with no key never reaches here, because the parse
 // rejects it.
 func hookProvisionKnownHosts(dir, host string, port int, hostKey string) (string, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// Through the home guard: hookProvisionSessionDir builds this from
+	// config.GetConfigDir, so it is inside the AF home and is created on the
+	// session-launch path, ahead of the create's persist (#3850).
+	if err := config.MkdirAllUnderAFHome(dir, 0o700); err != nil {
 		return "", fmt.Errorf("cannot create the per-session host-key directory %q: %w", dir, err)
 	}
 	path := filepath.Join(dir, HookHostsPinFileName)

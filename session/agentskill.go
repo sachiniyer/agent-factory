@@ -72,7 +72,12 @@ func writeAfMarkedFile(path, content string) (bool, error) {
 	} else if !os.IsNotExist(readErr) {
 		return false, readErr
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	// MkdirAllUnderAFHome, not os.MkdirAll: every af-owned skill/context file
+	// this writes lives under the AF home (aider/, opencode/, and the account-
+	// scoped roots), so MkdirAll re-creates the home as an ancestor on each
+	// launch, ahead of any guarded write (#3850). It is an exact os.MkdirAll for
+	// a path outside the home, which is what an agent's own config dir is.
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0755); err != nil {
 		return false, err
 	}
 	// Refuses a symlinked path (#3672). The marker check above is what decides

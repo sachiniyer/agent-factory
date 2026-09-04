@@ -31,7 +31,7 @@ func (g *GitWorktree) Setup() error {
 		return fmt.Errorf("failed to get worktree directory: empty worktree directory")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+	if err := ensureWorktreeParent(g.worktreePath); err != nil {
 		return err
 	}
 
@@ -68,7 +68,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	if strings.TrimSpace(g.branchName) == "" {
 		return fmt.Errorf("cannot rebuild worktree %s: branch name is empty", g.worktreePath)
 	}
-	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+	if err := ensureWorktreeParent(g.worktreePath); err != nil {
 		return err
 	}
 	if _, err := g.runGitCommand(g.repoPath, "show-ref", "--verify", fmt.Sprintf("refs/heads/%s", g.branchName)); err != nil {
@@ -107,7 +107,7 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 	if strings.TrimSpace(g.branchName) == "" {
 		return fmt.Errorf("cannot rebuild worktree %s: branch name is empty", g.worktreePath)
 	}
-	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+	if err := ensureWorktreeParent(g.worktreePath); err != nil {
 		return err
 	}
 	if _, err := g.runGitCommand(g.repoPath, "show-ref", "--verify", fmt.Sprintf("refs/heads/%s", g.branchName)); err == nil {
