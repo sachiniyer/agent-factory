@@ -122,7 +122,10 @@ func EnsureToken(path string) (string, error) {
 	// home, but bearer-token material must not rely on that path relationship.
 	// A legacy default home is tightened by WithFileLock after this MkdirAll,
 	// which cannot change an existing directory's mode on its own (#2197).
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	// MkdirAllUnderAFHome keeps that unchanged for a token path outside the home
+	// (it only ever refuses at or inside one) while closing the #3845 door for
+	// the default path, where filepath.Dir(path) IS the home.
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("create token directory: %w", err)
 	}
 	var resolved string
@@ -161,7 +164,8 @@ func EnsureToken(path string) (string, error) {
 func RotateToken(path string) (string, error) {
 	// Preserve EnsureToken's owner-only guarantee for arbitrary token paths;
 	// WithFileLock handles legacy permission repair inside AGENT_FACTORY_HOME.
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	// MkdirAllUnderAFHome for the reason EnsureToken gives (#3845).
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("create token directory: %w", err)
 	}
 	var resolved string
