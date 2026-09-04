@@ -6638,6 +6638,44 @@ test("the fake lists a check run as its updates left it", async () => {
   assert.match(aggregate[0].output.title, /^PASS:/);
 });
 
+// #3829. `evaluateAggregateFresh` re-evaluates the INPUTS to the aggregate; it
+// never reads the fixed-name check the ruleset actually enforces. That check is
+// invalidated OUTSIDE the head's serialized lane on purpose — so a newer event can
+// red it while an older transaction runs — which means it can be non-green at the
+// instant of the write while every input still passes. A merge issued then can
+// only come back 405 `Repository rule violations found`; run 33839375109 issued
+// exactly that one and reddened master.
+//
+// So the lane reads the published check and defers. One read turns a guaranteed
+// refusal into an ordinary wait, and a stale read costs nothing: waiting one
+// evaluation is what the refusal itself now produces (#3827).
+test("a lane defers when another evaluation has taken the head", async () => {
+  const github = fakeGateGithub({ newerAggregateAfterPass: true });
+
+  const { error, notices } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a re-checkable state must not red the run");
+  assert.equal(github.mergeAttempts, 0, "the doomed merge must never be attempted");
+  assert.equal(github.mergedWith, null);
+  assert.match(
+    notices.join("\n"),
+    /Refusing to merge PR #1465; the published fixed aggregate on [0-9a-f]{40} is failure/,
+    "and it defers in the gate's own words, so it travels the waiting path",
+  );
+});
+
+// The negative, and it is the one that matters: this check sits in front of every
+// merge the gate performs, so a green published aggregate must still merge.
+test("a green published aggregate still merges", async () => {
+  const github = fakeGateGithub({});
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null);
+  assert.ok(github.mergedWith, "the ordinary path must be untouched");
+  assert.equal(github.mergedWith.pull_number, 1465);
+});
+
 test("a live newer owner outranks merged evidence on a shared head", async () => {
   // Codex P1 (round 3): the two evidence paths are not mutually exclusive. A
   // shared head can have THIS PR merged while a newer transaction is mid-flight
@@ -7658,6 +7696,12 @@ function fakeGateGithub({
   nativeAutoMergeArmedAfterRead = false,
   // The disable mutation reports success and leaves auto-merge armed anyway.
   nativeAutoMergeStaysArmed = false,
+  // A second evaluation of this head takes the aggregate AFTER this lane published
+  // its PASS — the #3827 window, and the only one a pre-merge check can act on.
+  // Static injection cannot express it: a newer generation present from the start
+  // fails the publish precondition instead, so the lane never reaches the merge
+  // and the test would pass for the wrong reason.
+  newerAggregateAfterPass = false,
   isDraft = false,
   state = "OPEN",
   merged = false,
@@ -8147,7 +8191,26 @@ function fakeGateGithub({
           delete patch.repo;
           Object.assign(target, patch);
         }
-        return [...checkRuns, ...github.injectedCheckRuns, ...runs];
+        // AFTER the updates are applied: a PASS published by update is invisible
+        // to this test until it has been folded onto the run it addresses.
+        const takenAfterPass =
+          newerAggregateAfterPass &&
+          runs.some((run) => run.name === "Auto Gate decision" && run.conclusion === "success")
+            ? [
+                {
+                  id: 99999,
+                  name: "Auto Gate decision",
+                  external_id: aggregateExternalId(headSha),
+                  app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+                  status: "completed",
+                  conclusion: "failure",
+                  started_at: "2026-07-09T09:00:00Z",
+                  completed_at: "2026-07-09T09:00:00Z",
+                  output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+                },
+              ]
+            : [];
+        return [...checkRuns, ...github.injectedCheckRuns, ...runs, ...takenAfterPass];
       }
       if (fn === listPullRequestsAssociatedWithCommit) {
         github.associationReads += 1;

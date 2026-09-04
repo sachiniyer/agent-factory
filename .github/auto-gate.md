@@ -112,6 +112,15 @@ refusal, and the next evaluation re-checks. An unreadable ownership read is not
 "no winner" — that stays loud, because the waiting path writes and a blind write
 would supersede whichever transaction owns the head.
 
+**And the gate no longer issues that merge in the first place, when it can tell
+(#3829).** Immediately before the write it reads the published fixed aggregate —
+the check itself, not a fresh evaluation of what the check ought to say, which is
+a different question and cannot answer this one — and refuses with its own
+`Refusing to merge PR #N;` prefix when the newest generation is not `success`.
+Being a check-then-act it narrows the window rather than closing it; nothing can
+close it, because the merge API takes no conditional, so the classification above
+stays the backstop for whatever slips through.
+
 The evidence for "another transaction owns this head" is the newest published
 generation of the aggregate check, ordered by the timestamps a check run
 actually carries. A check run has **no `created_at`** — the resource exposes

@@ -1370,6 +1370,38 @@ async function establishPublishPreconditions(label, preconditions) {
   }
 }
 
+// The conclusion of the newest PUBLISHED generation of the fixed aggregate on this
+// head, or null when the head carries none.
+//
+// This reads the check the RULESET enforces, as the ruleset sees it. Every other
+// aggregate reader in this file re-derives what that check ought to say from its
+// inputs, which is a different question and cannot answer this one: the inputs can
+// all still pass while the published check is red, because it is invalidated
+// outside the head's serialized lane.
+async function publishedAggregateConclusion({ github, context, headSha }) {
+  const { owner, repo } = context.repo;
+  const identity = aggregateIdentity(headSha);
+  const checkRuns = await retryRead(`could not read the published aggregate at ${headSha}`, () =>
+    // No `filter`, matching assertStillOwnsAggregate below: the default returns
+    // the latest run per name, which is the generation this asks about.
+    github.paginate(github.rest.checks.listForRef, {
+      owner,
+      repo,
+      ref: headSha,
+      per_page: 100,
+    }),
+  );
+  const newest = newestCheckGeneration(
+    checkRuns.filter(
+      (run) =>
+        run.name === identity.checkName &&
+        run.external_id === identity.externalId &&
+        run.app?.id === GITHUB_ACTIONS_APP_ID,
+    ),
+  );
+  return newest ? newest.conclusion || "" : null;
+}
+
 // Re-establish that this transaction still owns the aggregate on this head.
 // Aggregate invalidation runs outside the head-keyed serialized lane, so a newer
 // event can take ownership at any moment — including during a write's backoff.
@@ -2425,6 +2457,38 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
       );
     }
     throw new Error(`Refusing to merge PR #${prNumber}; ${reason}`);
+  }
+
+  // Defer rather than race (#3829).
+  //
+  // The fresh aggregate evaluation above re-checks the INPUTS. It does not read
+  // the fixed-name check branch protection enforces, and that check is
+  // invalidated OUTSIDE this head's serialized lane by design — so a newer event
+  // can red it while this transaction is still running, between the PASS this
+  // lane published and the write below. A merge issued in that window can only
+  // come back 405 `Repository rule violations found`, which is how run
+  // 33839375109 reddened master (#3827).
+  //
+  // One read turns a guaranteed refusal into an ordinary wait. Being a
+  // check-then-act it narrows the window rather than closing it — nothing here
+  // can close it, since the API offers no conditional merge — and the #3827
+  // classification remains the backstop for what slips through. A stale read
+  // costs nothing either way: waiting one evaluation is the same outcome that
+  // classification produces, and the next evaluation re-checks.
+  //
+  // `null` means this head carries no aggregate at all, which is not this check's
+  // business: the gate's own `aggregate.ok` guard above already decides that.
+  const publishedAggregate = await publishedAggregateConclusion({
+    github,
+    context,
+    headSha: gate.headSha,
+  });
+  if (publishedAggregate !== null && publishedAggregate !== "success") {
+    throw new Error(
+      `Refusing to merge PR #${prNumber}; the published fixed aggregate on ${gate.headSha} is ` +
+        `${publishedAggregate || "not concluded"}, so another evaluation of this head has taken ` +
+        "it; the next evaluation re-checks",
+    );
   }
 
   let response;
