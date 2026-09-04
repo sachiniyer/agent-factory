@@ -253,12 +253,12 @@ screen — useful on a shared machine.
 
 ## A tour of the app
 
-The app is one screen with two top-level views, switched by the **view tabs** in
-the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
+The app is one screen with three top-level views, switched by the **view tabs** in
+the top bar or the `[` / `]` keys:
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Agent Factory   [ Sessions ]  Tasks           project ▾   Disconnect │  ← app bar
+│  Agent Factory   [ Sessions ]  Tasks  Config   project ▾   Disconnect │  ← app bar
 ├──────────────────────┬────────────────────────────────────────────────┤
 │ Sessions      3 ▼ +New│ fix-login-flow │ Agent │ Terminal │ + │  ← title + tabs
 │                       │ ┌────────────────────────────────────────────┐ │
@@ -272,8 +272,8 @@ the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
 └──────────────────────┴────────────────────────────────────────────────┘
 ```
 
-The **app bar** carries, left to right: the **Agent Factory** brand, the two
-**view tabs** (Sessions / Tasks), the **project switcher** (top-right; lists
+The **app bar** carries, left to right: the **Agent Factory** brand, the three
+**view tabs** (Sessions / Tasks / Config), the **project switcher** (top-right; lists
 every project with per-project session + working counts, and scopes the rail and
 Tasks view to the selected project), and **Disconnect**.
 
@@ -481,6 +481,22 @@ agent program. A cron task requires a prompt; a watch task requires its command
 (and may use `{{line}}` in the prompt to interpolate the matched line). This is the
 same contract as [`af tasks add`](tasks.md) — the daemon re-validates on submit, so
 a bad cron expression comes back as an inline error.
+
+### Config view
+
+The **Config** view edits your **global** config from the browser — the web
+counterpart of the TUI's config pane and [`af config set`](reference/cli.md#af-config-set).
+It lists the settings the daemon's manifest reports, grouped into tiers with the
+advanced ones folded behind a **Show N advanced settings** toggle, and names the
+`config.toml` it is writing. One row edits at a time: a write is per-key, exactly
+as `af config set` is, so there is no "save all" implying an atomicity the writer
+does not have. **Configure with assistant** opens the conversational config
+helper instead of the row editor.
+
+An **Accounts** section sits below the settings: the credential accounts
+registered per agent, and the controls to register another. It is rendered here
+for convenience but writes no config key — see
+[`af accounts`](reference/cli.md#af-accounts).
 
 ---
 
@@ -760,7 +776,7 @@ editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other ta
 | `1`–`9` | Switch to that tab of the selected session |
 | `t` | New shell tab in the worktree |
 | `w` | Close the active shell tab (tab 0, the agent, is unclosable) |
-| `[` / `]` | Cycle the top-level view (Sessions → Tasks) |
+| `[` / `]` | Cycle the top-level view (Sessions → Tasks → Config) |
 
 `[` / `]` work in every view; the rest are the Sessions view's session/tab keys.
 While a terminal is attached, **every** key flows to the agent — `Escape` included,
