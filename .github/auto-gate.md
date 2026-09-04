@@ -102,6 +102,22 @@ its own refusal, invalidates the aggregate as it already did, and the next
 evaluation brings the head up to date. Conceding instead would exit success
 having merged nothing. Any other unclassified refusal still fails loudly.
 
+**A required check that changes in that same window waits too, when nothing can
+be proven to have won (#3827).** `PUT /pulls/N/merge` answers 405 `Repository
+rule violations found` when the fixed aggregate is not green at the instant of
+the write — and it is invalidated outside the head's serialized lane on purpose,
+so a second evaluation of one head can flip it mid-transaction. With a winner
+proven that is still a concession (#3324); with none it is the gate's own
+refusal, and the next evaluation re-checks. An unreadable ownership read is not
+"no winner" — that stays loud, because the waiting path writes and a blind write
+would supersede whichever transaction owns the head.
+
+The evidence for "another transaction owns this head" is the newest published
+generation of the aggregate check, ordered by the timestamps a check run
+actually carries. A check run has **no `created_at`** — the resource exposes
+`started_at` and `completed_at` — so a generation comparison written against
+`created_at` silently compares nothing (#3827).
+
 The hand gate in `.claude/skills/gate-pr.md` runs precisely where this one
 cannot — on a PR that changes `auto-gate.js`, since Auto Gate runs master's copy
 of the helper, and during a Codex outage. For finding artifacts that bind to no
