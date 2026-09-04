@@ -585,6 +585,25 @@
       "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
     },
     {
+      "id": "session.account-login",
+      "title": "Log in to an agent account by running the agent's own login flow",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/accountslogincmd.go accountsLoginCmd; daemon/accountlogin.go Manager.AccountLogin; session/accountlogin/accountlogin.go Supervisor.Start"
+      },
+      "verdict": "real-gap",
+      "issue": "#3385",
+      "notes": "af runs the agent's OWN login command (claude auth login / codex login / gemini) in a bare tmux session scoped to one account: the account's credential directory injected, every ambient identity variable for that agent removed. af never reads, stores, or forwards the credential. CLI-only today; #3385 puts the same verb behind a button in the TUI config tab and the web, driving this daemon route rather than reimplementing the flow."
+    },
+    {
       "id": "session.accounts",
       "title": "Register and select per-session agent credential accounts",
       "tui": {
@@ -1522,6 +1541,7 @@
       "af": "meta.discovery",
       "af accounts add": "session.accounts",
       "af accounts list": "session.accounts",
+      "af accounts login": "session.account-login",
       "af agent-server": "meta.internal",
       "af api": "meta.discovery",
       "af bug-report": "install.bug-report",
@@ -1591,6 +1611,7 @@
     "routes": {
       "GET /v1/health": "-",
       "POST /v1/AddTask": "task.add",
+      "POST /v1/AccountLogin": "session.account-login",
       "POST /v1/ArchiveSession": "session.archive",
       "POST /v1/CloseTab": "session.tab.close",
       "POST /v1/CreateSession": "session.create",
@@ -1718,6 +1739,9 @@
       "af accounts add --json": "cli.json-envelope",
       "af accounts list --help": "meta.discovery",
       "af accounts list --json": "cli.json-envelope",
+      "af accounts login --help": "meta.discovery",
+      "af accounts login --json": "cli.json-envelope",
+      "af accounts login --no-attach": "session.account-login",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
       "af agent-server --program": "meta.internal",

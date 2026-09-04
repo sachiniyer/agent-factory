@@ -55,6 +55,7 @@ var goSurfaces = map[string][]string{
 // surface actually constructs; any type it finds that is missing here fails the
 // check, so this registry cannot silently fall behind the code.
 var auditedRequests = map[string]reflect.Type{
+	"AccountLoginRequest":     reflect.TypeOf(daemon.AccountLoginRequest{}),
 	"AddTaskRequest":          reflect.TypeOf(daemon.AddTaskRequest{}),
 	"ApplyConfigRequest":      reflect.TypeOf(daemon.ApplyConfigRequest{}),
 	"ApplyThemeRequest":       reflect.TypeOf(daemon.ApplyThemeRequest{}),
