@@ -48,6 +48,7 @@ jobs:
     outputs:
       targets: ${{ steps.evaluate.outputs.targets }}
       aggregate_heads: ${{ steps.evaluate.outputs.aggregate_heads }}
+      branch_sweep: ${{ steps.sweep.outputs.branch_sweep }}
     # One resolver handles every subscribed input change. It does not branch on
     # activity type: PR/review/comment events identify a PR, while check/status/
     # workflow-run events identify every exact (PR, head) pair at their SHA.
@@ -189,6 +190,51 @@ jobs:
                 return;
               }
               throw error;
+            }
+
+      # A keep decided inside a merge is correct when it is made and nothing ever
+      # revisits it, so the branch leaks the moment the reason for the keep goes
+      # away — #3847 was retargeted 89 seconds after its base merged (#3852).
+      #
+      # Here rather than in apply-gate: this job runs once for every subscribed
+      # event, including the runs where nothing merges, while apply-gate is a
+      # matrix over aggregate heads that does not run at all when none was
+      # invalidated and would sweep once per head when it does.
+      - name: Sweep kept head branches
+        id: sweep
+        # always(), because a gate run whose evaluation failed still has branches
+        # to prune and pruning them cannot make that evaluation any worse — and
+        # AUTO_GATE_ENABLED, because deleting a ref is the gate writing to this
+        # repository on its own, which is the thing that switch turns off. With
+        # it off nothing merges, so nothing new leaks either.
+        if: always() && vars.AUTO_GATE_ENABLED == 'true'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            if (!fs.existsSync(helperPath)) {
+              return;
+            }
+            const autoGate = require(helperPath);
+            // The workflow file takes effect before its default-branch helper on
+            // the landing run, exactly as the evaluate step above allows for.
+            if (typeof autoGate.sweepMergedHeadRefs !== "function") {
+              core.info("auto-gate helper on the default branch has no head-ref sweep yet.");
+              return;
+            }
+            try {
+              await autoGate.sweepMergedHeadRefs({ github, context, core });
+            } catch (error) {
+              // Pruning is housekeeping. Auto Gate red is this repo's highest-
+              // priority alarm and has to keep meaning "a merge decision went
+              // wrong"; a branch left on origin is visible in the next run's
+              // notice and costs nothing until then.
+              core.warning(
+                `Head-ref sweep failed: ${error && error.message ? error.message : error}`,
+              );
             }
 
   invalidate-gate:

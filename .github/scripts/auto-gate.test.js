@@ -7398,6 +7398,510 @@ test("a deletion failure never reds a merge that already landed", async () => {
   assert.equal(failing.mergedWith.sha, HEAD_SHA, "the merge still happened");
 });
 
+// ---------------------------------------------------------------------------
+// The kept-branch sweep (#3852). A keep decided inside a merge is correct when
+// it is made and has nothing that revisits it, so the branch leaks the moment
+// the reason for the keep goes away.
+// ---------------------------------------------------------------------------
+
+test("a merged head branch whose dependent was retargeted after the merge is swept", async () => {
+  // #3847, exactly: kept at 16:10:59 because #3849 was based on it, #3849
+  // retargeted onto master at 16:12:28, and the branch deletable-but-unreachable
+  // ever since — the merge path is the only route to the delete, and that PR is
+  // closed.
+  const dependents = { "siyer/fix-3603": [{ number: 3849 }] };
+  const github = fakeGateGithub({
+    dependentPullRequestsByBranch: dependents,
+    branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1465 }] })],
+  });
+  const core = fakeCore();
+
+  await autoGate.merge({ github, context: fakeContext(), core, prNumber: 1465 });
+  assert.deepEqual(github.deletedRefs, [], "keeping it while #3849 was based on it was correct");
+
+  // A sweep BEFORE the retarget still keeps it. The sweep re-asks the condition;
+  // it does not assume that reaching a branch means the block has cleared.
+  const held = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core });
+  assert.deepEqual(github.deletedRefs, []);
+  assert.deepEqual(
+    held.kept.map((entry) => entry.branch),
+    ["siyer/fix-3603"],
+  );
+
+  // #3849 is retargeted onto master. Nothing about #1465 changes.
+  dependents["siyer/fix-3603"] = [];
+
+  const swept = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core });
+
+  assert.deepEqual(github.deletedRefs, ["heads/siyer/fix-3603"]);
+  assert.deepEqual(swept.deleted, ["siyer/fix-3603"]);
+  assert.match(core.notices.at(-1), /deleted 1 \(siyer\/fix-3603\)/);
+  assert.equal(
+    core.outputs.branch_sweep,
+    swept.summary,
+    "a run that deleted a branch says so in its decision output",
+  );
+});
+
+test("the sweep keeps a merged head branch an open PR still uses, and names it", async () => {
+  const github = fakeGateGithub({
+    branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1465 }] })],
+    dependentPullRequestsByBranch: { "siyer/fix-3603": [{ number: 3849 }] },
+  });
+  const core = fakeCore();
+
+  const result = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core });
+
+  assert.deepEqual(github.deletedRefs, [], "deleting it would close #3849 and discard its review");
+  assert.deepEqual(result.deleted, []);
+  assert.deepEqual(result.kept, [
+    { branch: "siyer/fix-3603", reason: "open PR #3849 still uses it" },
+  ]);
+  assert.ok(
+    core.notices.includes("Keeping siyer/fix-3603: open PR #3849 still uses it."),
+    JSON.stringify(core.notices),
+  );
+
+  // The head-side shape too, which the base query alone cannot see: deleting it
+  // would leave that PR headless.
+  const sibling = fakeGateGithub({
+    branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1465 }] })],
+    siblingPullRequestsByBranch: { "siyer/fix-3603": [{ number: 4001 }] },
+  });
+  const kept = await autoGate.sweepMergedHeadRefs({
+    github: sibling,
+    context: fakeContext(),
+    core: fakeCore(),
+  });
+  assert.deepEqual(sibling.deletedRefs, []);
+  assert.deepEqual(kept.kept, [{ branch: "siyer/fix-3603", reason: "open PR #4001 still uses it" }]);
+  assert.deepEqual(
+    [...new Set(sibling.pullListQueries)].sort(),
+    ["base", "head"],
+    "both shapes must be asked about on the sweep path too",
+  );
+});
+
+test("the sweep keeps a merged head branch whose tip moved after the merge", async () => {
+  // Shape 1: it had already moved when the enumeration read it. Eleven of
+  // #3603's fifteen residue branches are this shape and it is permanent, so the
+  // filter is what stops them occupying the per-run cap forever.
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/fix-3603",
+        sha: OTHER_SHA,
+        pulls: [{ number: 1465, headRefOid: HEAD_SHA }],
+      }),
+    ],
+  });
+  const core = fakeCore();
+
+  const result = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core });
+
+  assert.deepEqual(github.deletedRefs, []);
+  assert.equal(result.moved, 1);
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(github.pullListQueries, [], "a branch that already moved costs no further read");
+
+  // Shape 2, and the load-bearing one: it moves BETWEEN the enumeration and the
+  // delete. Only the last read before the delete can catch that, and on a
+  // deferred re-check that window is hours wide rather than seconds — so the
+  // cheap enumeration comparison must not be allowed to stand in for it.
+  const raced = fakeGateGithub({
+    branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1465 }] })],
+    remoteRefShaByBranch: { "siyer/fix-3603": OTHER_SHA },
+  });
+  const racedCore = fakeCore();
+
+  const held = await autoGate.sweepMergedHeadRefs({
+    github: raced,
+    context: fakeContext(),
+    core: racedCore,
+  });
+
+  assert.deepEqual(raced.deletedRefs, [], "the pushed ref may be the only copy of that work");
+  assert.equal(held.moved, 0, "the enumeration saw it at the merged head; the fresh read did not");
+  assert.equal(held.candidates.length, 1);
+  assert.match(held.kept[0].reason, new RegExp(`it now points at ${OTHER_SHA}`));
+});
+
+test("the sweep never touches a cross-repository head", async () => {
+  // A fork's branch is not ours to delete and the token could not anyway — and a
+  // branch of the same NAME on this repository is still not the fork's, so the
+  // candidacy read carries the head repository rather than inferring it from the
+  // name matching something on origin.
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/fix-3603",
+        sha: HEAD_SHA,
+        pulls: [{ number: 1465, headRepository: "contributor/agent-factory" }],
+      }),
+      // A fork that has since been deleted reads as no head repository at all.
+      // Unknown must fail closed, exactly like the wrong answer.
+      sweepBranch({
+        name: "siyer/gone-fork",
+        sha: HEAD_SHA,
+        pulls: [{ number: 1466, headRepository: null }],
+      }),
+    ],
+  });
+
+  const result = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(github.deletedRefs, []);
+  assert.deepEqual(github.refReads, [], "a cross-repository head is not even inspected");
+
+  // The same fixture with this repository as the head DOES delete, so the
+  // assertions above pin the check rather than an inert path.
+  const ours = fakeGateGithub({
+    branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1465 }] })],
+  });
+  await autoGate.sweepMergedHeadRefs({ github: ours, context: fakeContext(), core: fakeCore() });
+  assert.deepEqual(ours.deletedRefs, ["heads/siyer/fix-3603"]);
+});
+
+test("the sweep honours its per-run cap and leaves the remainder for the next run", async () => {
+  const leaks = (count) =>
+    Array.from({ length: count }, (_, index) =>
+      sweepBranch({
+        name: `siyer/leak-${index}`,
+        sha: HEAD_SHA,
+        pulls: [{ number: 3000 + index, mergedAt: `2026-08-${String(index + 1).padStart(2, "0")}T00:00:00Z` }],
+      }),
+    );
+  const github = fakeGateGithub({ branchRefs: leaks(7) });
+  const core = fakeCore();
+
+  const first = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core,
+    limit: 3,
+  });
+  assert.deepEqual(
+    first.deleted,
+    ["siyer/leak-0", "siyer/leak-1", "siyer/leak-2"],
+    "oldest merge first, so a backlog drains in a definite order",
+  );
+  assert.equal(first.deferred, 4);
+  assert.match(core.notices.at(-1), /deferred 4/);
+
+  const second = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core,
+    limit: 3,
+  });
+  assert.deepEqual(second.deleted, ["siyer/leak-3", "siyer/leak-4", "siyer/leak-5"]);
+  assert.equal(second.deferred, 1);
+
+  const third = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core,
+    limit: 3,
+  });
+  assert.deepEqual(third.deleted, ["siyer/leak-6"]);
+  assert.equal(third.deferred, 0);
+  assert.equal(github.deletedRefs.length, 7, "the backlog drained across runs, not in one");
+
+  // And the default really is the documented constant — a caller that passes no
+  // limit must not turn out to be unbounded.
+  const uncapped = fakeGateGithub({ branchRefs: leaks(__test.BRANCH_SWEEP_CANDIDATE_LIMIT + 2) });
+  const defaulted = await autoGate.sweepMergedHeadRefs({
+    github: uncapped,
+    context: fakeContext(),
+    core: fakeCore(),
+  });
+  assert.equal(defaulted.deleted.length, __test.BRANCH_SWEEP_CANDIDATE_LIMIT);
+  assert.equal(defaulted.deferred, 2);
+});
+
+test("the merge path and the sweep prune through one helper", async () => {
+  // Not "both of them delete a branch" — that passes just as well with a second
+  // copy of the three conditions on the sweep side, and a second copy is the one
+  // that drifts. Replacing the helper once has to silence both paths.
+  const github = fakeGateGithub({
+    branchRefs: [sweepBranch({ name: "siyer/other-lane", sha: OTHER_SHA, pulls: [{ number: 1470 }] })],
+  });
+  const calls = [];
+  const real = __test.headRefPruner.deleteMergedHeadRef;
+  __test.headRefPruner.deleteMergedHeadRef = async (args) => {
+    calls.push({ branch: args.gate.headRefName, prNumber: args.prNumber });
+    return { branch: args.gate.headRefName, outcome: "kept", reason: "stubbed" };
+  };
+  try {
+    await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+    await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core: fakeCore() });
+  } finally {
+    __test.headRefPruner.deleteMergedHeadRef = real;
+  }
+
+  assert.deepEqual(calls, [
+    { branch: "siyer/fix-3603", prNumber: 1465 },
+    { branch: "siyer/other-lane", prNumber: 1470 },
+  ]);
+  assert.deepEqual(github.deletedRefs, [], "neither path carries a private copy of the conditions");
+});
+
+test("the sweep never considers the default branch or a protected one", async () => {
+  // master's protection here is a RULESET, and GraphQL answers null for both
+  // branchProtectionRule and refUpdateRule on it — measured against
+  // sachiniyer/agent-factory. A guard that consulted only classic protection
+  // would report the default branch unprotected, so the rule list is what
+  // decides, and the default branch is skipped by name on top of that.
+  const github = fakeGateGithub({
+    defaultBranchName: "master",
+    branchRefs: [
+      // No rules at all on the row: only the name keeps it out.
+      sweepBranch({ name: "master", sha: HEAD_SHA, pulls: [{ number: 1465 }] }),
+      sweepBranch({
+        name: "release",
+        sha: HEAD_SHA,
+        pulls: [{ number: 1466 }],
+        rules: ["REQUIRED_STATUS_CHECKS", __test.BRANCH_SWEEP_DELETION_RULE],
+      }),
+      sweepBranch({
+        name: "legacy",
+        sha: HEAD_SHA,
+        pulls: [{ number: 1467 }],
+        branchProtectionRule: { id: "BPR_kwDO" },
+      }),
+      // The rule list came back truncated. What was not read cannot be ruled out.
+      sweepBranch({
+        name: "unread-rules",
+        sha: HEAD_SHA,
+        pulls: [{ number: 1468 }],
+        rules: ["REQUIRED_STATUS_CHECKS"],
+        unreadRules: 1,
+      }),
+      // …and one ordinary branch, so the fixture is not inert.
+      sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1469 }] }),
+    ],
+  });
+
+  const result = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(
+    result.candidates.map((candidate) => candidate.branch),
+    ["siyer/fix-3603"],
+  );
+  assert.deepEqual(github.deletedRefs, ["heads/siyer/fix-3603"]);
+});
+
+test("a sweep that cannot read the default branch acts on nothing", async () => {
+  // A failed read is not an empty result. Without the default branch name the
+  // only thing keeping the sweep off master is the DELETION rule on its row, and
+  // a row that came back thin would then read as an ordinary deletable branch.
+  const github = fakeGateGithub({
+    defaultBranchName: "",
+    branchRefs: [
+      sweepBranch({ name: "master", sha: HEAD_SHA, pulls: [{ number: 1465 }] }),
+      sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1466 }] }),
+    ],
+  });
+  const core = fakeCore();
+
+  const result = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core });
+
+  assert.deepEqual(github.deletedRefs, [], "not even the ordinary branch is swept");
+  assert.deepEqual(result.candidates, []);
+  assert.match(result.summary, /acted on none · the enumeration did not name the default branch/);
+  assert.equal(core.outputs.branch_sweep, result.summary);
+  assert.ok(
+    core.warnings.some((warning) => /acted on nothing/.test(warning)),
+    JSON.stringify(core.warnings),
+  );
+
+  // The same fixture WITH a default branch name sweeps the ordinary branch and
+  // still leaves master alone, so the refusal above is not an inert path.
+  const named = fakeGateGithub({
+    defaultBranchName: "master",
+    branchRefs: [
+      sweepBranch({ name: "master", sha: HEAD_SHA, pulls: [{ number: 1465 }] }),
+      sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1466 }] }),
+    ],
+  });
+  await autoGate.sweepMergedHeadRefs({ github: named, context: fakeContext(), core: fakeCore() });
+  assert.deepEqual(named.deletedRefs, ["heads/siyer/fix-3603"]);
+});
+
+test("a branch whose rule list could not be read is treated as protected", async () => {
+  // Unknown is not "unprotected". The row arrives with no rules field at all —
+  // a partial GraphQL response, not an empty rule set.
+  const branch = sweepBranch({ name: "release", sha: HEAD_SHA, pulls: [{ number: 1465 }] });
+  delete branch.rules;
+  const github = fakeGateGithub({
+    branchRefs: [
+      branch,
+      sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1466 }] }),
+    ],
+  });
+
+  const result = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(
+    result.candidates.map((candidate) => candidate.branch),
+    ["siyer/fix-3603"],
+  );
+  assert.deepEqual(github.deletedRefs, ["heads/siyer/fix-3603"]);
+});
+
+test("the sweep never touches a branch with no merged pull request", async () => {
+  // #3603 drew this line and it still holds: a branch whose PR is MERGED is safe
+  // to prune, while a closed-unmerged PR or no PR at all may be the only copy of
+  // that work anywhere. The repo squash-merges, so ancestry cannot answer it.
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({ name: "siyer/abandoned", sha: HEAD_SHA, pulls: [{ number: 2978, merged: false }] }),
+      sweepBranch({ name: "siyer/never-had-a-pr", sha: HEAD_SHA }),
+    ],
+  });
+
+  const result = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(github.deletedRefs, []);
+  assert.deepEqual(github.refReads, []);
+});
+
+test("a branch merged more than once is judged against its most recent merge", async () => {
+  // Reopened and merged again, or re-used by a second PR. Keyed on the older
+  // merge, the tip comparison fails forever and the branch leaks behind a notice
+  // that reads like a deliberate keep.
+  const pulls = [
+    { number: 1465, mergedAt: "2026-09-04T16:10:59Z", headRefOid: HEAD_SHA },
+    { number: 1400, mergedAt: "2026-08-01T00:00:00Z", headRefOid: OTHER_SHA },
+  ];
+  // Arrival order must not decide it: associatedPullRequests promises an order
+  // this code does not depend on.
+  for (const nodes of [pulls, [...pulls].reverse()]) {
+    const github = fakeGateGithub({
+      branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: nodes })],
+    });
+    const result = await autoGate.sweepMergedHeadRefs({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+    });
+    assert.equal(result.candidates[0].prNumber, 1465);
+    assert.deepEqual(result.deleted, ["siyer/fix-3603"]);
+  }
+});
+
+test("one branch that cannot be pruned costs the others nothing, and the run nothing", async () => {
+  // The sweep runs beside a merge decision, and Auto Gate red is this repo's
+  // highest-priority alarm. A pruning failure is reported, never thrown.
+  const broken = new Error("ref service unavailable");
+  broken.status = 500;
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/leak-a",
+        sha: HEAD_SHA,
+        pulls: [{ number: 3001, mergedAt: "2026-09-01T00:00:00Z" }],
+      }),
+      sweepBranch({
+        name: "siyer/leak-b",
+        sha: HEAD_SHA,
+        pulls: [{ number: 3002, mergedAt: "2026-09-02T00:00:00Z" }],
+      }),
+    ],
+    // Both halves of the first candidate's condition (c); the second candidate's
+    // reads are unscripted and succeed.
+    readErrorsByFn: { listOpenPullRequests: [broken, broken] },
+  });
+  const core = fakeCore();
+
+  const result = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core });
+
+  assert.deepEqual(result.deleted, ["siyer/leak-b"]);
+  assert.deepEqual(
+    result.failed.map((entry) => entry.branch),
+    ["siyer/leak-a"],
+  );
+  assert.ok(
+    core.warnings.some((warning) => /could not prune siyer\/leak-a/.test(warning)),
+    JSON.stringify(core.warnings),
+  );
+  assert.match(core.notices.at(-1), /failed 1/);
+});
+
+test("a sweep that stops at its page cap says so", async () => {
+  // A sweep that quietly stopped looking is indistinguishable from a sweep that
+  // found nothing — the fabricated negative this repo keeps paying for.
+  const github = fakeGateGithub({
+    branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1465 }] })],
+    branchRefsAlwaysHaveNextPage: true,
+  });
+  const core = fakeCore();
+
+  const result = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core });
+
+  assert.equal(result.truncated, true);
+  assert.equal(github.branchSweepReads, __test.BRANCH_SWEEP_MAX_PAGES, "and it stops, rather than paging forever");
+  assert.ok(
+    core.warnings.some((warning) => /stopped at its page cap/.test(warning)),
+    JSON.stringify(core.warnings),
+  );
+
+  // A complete enumeration says nothing of the sort.
+  const whole = fakeGateGithub({
+    branchRefs: [sweepBranch({ name: "siyer/fix-3603", sha: HEAD_SHA, pulls: [{ number: 1465 }] })],
+  });
+  const wholeCore = fakeCore();
+  const complete = await autoGate.sweepMergedHeadRefs({
+    github: whole,
+    context: fakeContext(),
+    core: wholeCore,
+  });
+  assert.equal(complete.truncated, false);
+  assert.equal(whole.branchSweepReads, 1);
+  assert.deepEqual(wholeCore.warnings, []);
+});
+
+test("the gate runs the sweep once per run, whether or not anything merged", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+
+  // The resolver job, which every subscribed event reaches — NOT apply-gate,
+  // which is a per-aggregate-head matrix that does not run at all when nothing
+  // was invalidated, and would sweep once per head when it does.
+  const resolver = workflow.slice(
+    workflow.indexOf("  auto-gate:"),
+    workflow.indexOf("  invalidate-gate:"),
+  );
+  assert.match(resolver, /await autoGate\.sweepMergedHeadRefs\(\{/);
+  assert.doesNotMatch(
+    workflow.slice(workflow.indexOf("  invalidate-gate:")),
+    /sweepMergedHeadRefs/,
+    "one sweep per run, not one per aggregate head",
+  );
+  // Housekeeping must never red the gate, and must still run on a gate run whose
+  // evaluation failed — but deleting a ref is the gate writing to the repository
+  // on its own, so the switch that turns that off has to reach it.
+  assert.match(resolver, /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true'\n\s+uses: actions\/github-script/);
+  assert.match(resolver, /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
+});
+
 test("merge freshly refuses a shared head whose other PR is waiting", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -8097,6 +8601,23 @@ function fakeGateGithub({
   dependentPullRequests = [],
   // Open PRs whose HEAD is the merged branch, targeting some other base.
   siblingPullRequests = [],
+  // The same two, per branch, for the sweep — which asks about several branches
+  // in one pass and needs a different answer for each (#3852). A branch with no
+  // entry falls back to the two above, so every existing fixture is unaffected.
+  dependentPullRequestsByBranch = {},
+  siblingPullRequestsByBranch = {},
+  // The branch enumeration the sweep reads, as sweepBranch() rows. Empty by
+  // default: a fixture that never sweeps enumerates nothing.
+  branchRefs = [],
+  defaultBranchName = "master",
+  // Forces the enumeration to keep claiming another page, so the page cap is
+  // reachable without a fixture of 500 branches.
+  branchRefsAlwaysHaveNextPage = false,
+  branchSweepError = null,
+  // What heads/<branch> points at NOW, per branch — the read deleteMergedHeadRef
+  // makes for itself. Absent, the branch's enumerated tip answers, which is the
+  // ordinary case; present, it is the branch moving between the two reads.
+  remoteRefShaByBranch = {},
   readErrorsByFn = {},
   pullGetError = null,
   requestErrors = [],
@@ -8221,6 +8742,9 @@ function fakeGateGithub({
     mergedWith: null,
     refReads: [],
     pullListQueries: [],
+    pullListBranches: [],
+    branchSweepReads: 0,
+    branchRefs: [...branchRefs],
     deletedRefs: [],
     reviewCommentReads: 0,
     reviewCommentReadsByNumber: {},
@@ -8290,7 +8814,15 @@ function fakeGateGithub({
           if (refReadError) {
             throw refReadError;
           }
-          const sha = remoteRefSha === undefined ? headSha : remoteRefSha;
+          const name = String(ref).replace(/^heads\//, "");
+          const enumerated = github.branchRefs.find((branch) => branch.name === name);
+          const sha = Object.prototype.hasOwnProperty.call(remoteRefShaByBranch, name)
+            ? remoteRefShaByBranch[name]
+            : enumerated
+              ? enumerated.target.oid
+              : remoteRefSha === undefined
+                ? headSha
+                : remoteRefSha;
           if (sha === null) {
             const gone = new Error("Not Found");
             gone.status = 404;
@@ -8303,6 +8835,11 @@ function fakeGateGithub({
           if (deleteRefError) {
             throw deleteRefError;
           }
+          // A deleted branch is gone from the next enumeration too, which is what
+          // makes "the remainder drains on the next run" a property this fixture
+          // can actually demonstrate rather than assert.
+          const name = String(ref).replace(/^heads\//, "");
+          github.branchRefs = github.branchRefs.filter((branch) => branch.name !== name);
         },
       },
       issues: { listComments },
@@ -8387,6 +8924,31 @@ function fakeGateGithub({
       },
     },
     graphql: async (query, variables) => {
+      if (query.includes("query BranchSweepCandidates")) {
+        github.branchSweepReads += 1;
+        if (branchSweepError) {
+          throw branchSweepError;
+        }
+        // Paged the way the API pages, because the sweep's page cap is only
+        // reachable — and only meaningful — against something that really pages.
+        const size = Number(variables.branches || 100);
+        const start = Number(variables.cursor || 0);
+        const page = github.branchRefs.slice(start, start + size);
+        const hasNextPage =
+          branchRefsAlwaysHaveNextPage || start + size < github.branchRefs.length;
+        return {
+          repository: {
+            defaultBranchRef: { name: defaultBranchName },
+            refs: {
+              pageInfo: {
+                hasNextPage,
+                endCursor: hasNextPage ? String(start + size) : null,
+              },
+              nodes: page,
+            },
+          },
+        };
+      }
       if (query.includes("mutation DisablePullRequestAutoMerge")) {
         github.nativeAutoMergeDisableAttempts += 1;
         if (nativeAutoMergeDisableError) {
@@ -8581,7 +9143,14 @@ function fakeGateGithub({
       }
       if (fn === listOpenPullRequests) {
         github.pullListQueries.push(options.head ? "head" : "base");
-        return options.head ? siblingPullRequests : dependentPullRequests;
+        const branch = options.head
+          ? String(options.head).split(":").slice(1).join(":")
+          : String(options.base || "");
+        github.pullListBranches.push(branch);
+        if (options.head) {
+          return siblingPullRequestsByBranch[branch] || siblingPullRequests;
+        }
+        return dependentPullRequestsByBranch[branch] || dependentPullRequests;
       }
       if (fn === listFiles && pullRequestOverride.files) {
         return pullRequestOverride.files.map(pullRequestFile);
@@ -9120,6 +9689,43 @@ function selfContradictoryNotFound(nodeId = "PR_node_1465") {
   return error;
 }
 
+// One row of the branch enumeration the sweep reads (#3852). The GraphQL shape
+// is verbose and every sweep test needs several rows, so the fields that decide
+// anything — where the branch points now, and what merged out of it — are named
+// and the rest is filled in.
+function sweepBranch({
+  name,
+  sha,
+  pulls = [],
+  rules = [],
+  // Rules the repository has that this row does NOT carry, so a fixture can say
+  // "the rule list came back truncated" without listing twenty of them.
+  unreadRules = 0,
+  branchProtectionRule = null,
+}) {
+  return {
+    name,
+    target: { oid: sha },
+    branchProtectionRule,
+    rules: {
+      totalCount: rules.length + unreadRules,
+      nodes: rules.map((type) => ({ type })),
+    },
+    associatedPullRequests: {
+      totalCount: pulls.length,
+      nodes: pulls.map((pull) => ({
+        number: pull.number,
+        merged: pull.merged !== false,
+        mergedAt: pull.merged === false ? null : pull.mergedAt || "2026-09-04T16:10:59Z",
+        headRefOid: pull.headRefOid || sha,
+        headRepository: pull.headRepository === null
+          ? null
+          : { nameWithOwner: pull.headRepository || "sachiniyer/agent-factory" },
+      })),
+    },
+  };
+}
+
 function fakeContext(payload = {}) {
   return {
     repo: { owner: "sachiniyer", repo: "agent-factory" },
@@ -9129,12 +9735,22 @@ function fakeContext(payload = {}) {
 }
 
 function fakeCore() {
-  return {
-    info: () => {},
-    notice: () => {},
-    setOutput: () => {},
-    warning: () => {},
+  // Recording, not silent. The sweep's whole contract with a reader is the
+  // reason it prints beside each keep, and a core that swallowed those could
+  // only be tested on what it deleted (#3852).
+  const core = {
+    infos: [],
+    notices: [],
+    warnings: [],
+    outputs: {},
+    info: (message) => core.infos.push(String(message)),
+    notice: (message) => core.notices.push(String(message)),
+    setOutput: (name, value) => {
+      core.outputs[name] = value;
+    },
+    warning: (message) => core.warnings.push(String(message)),
   };
+  return core;
 }
 
 function happyCheckRuns() {
