@@ -831,6 +831,26 @@ func TriggerTask(id string, expect task.ProjectExpectation) error {
 	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id, Expect: expect}, &resp)
 }
 
+// ListAccounts reads the registered accounts and their logged-in state from the
+// daemon that owns them.
+func ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {
+	var resp ListAccountsResponse
+	if err := callDaemon("ListAccounts", req, &resp); err != nil {
+		return ListAccountsResponse{}, err
+	}
+	return resp, nil
+}
+
+// RegisterAccount creates an account's credential directory through the daemon,
+// without logging in.
+func RegisterAccount(req RegisterAccountRequest) (RegisterAccountResponse, error) {
+	var resp RegisterAccountResponse
+	if err := callDaemon("RegisterAccount", req, &resp); err != nil {
+		return RegisterAccountResponse{}, err
+	}
+	return resp, nil
+}
+
 // AccountLogin asks the daemon to open an agent's own login flow in a bare tmux
 // session scoped to one account, registering the account if it does not exist.
 //

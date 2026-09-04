@@ -242,6 +242,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleConfigAgentSpawned(msg)
 	case configAgentDoneMsg:
 		return m.handleConfigAgentDone(msg)
+	case accountLoginStartedMsg:
+		return m.handleAccountLoginStarted(msg)
+	case accountLoginDoneMsg:
+		return m.handleAccountLoginDone(msg)
 	case repaintAfterDetachMsg:
 		// Trigger an immediate repaint with whatever content is already
 		// cached on the panes (rendered when bubbletea's main loop calls

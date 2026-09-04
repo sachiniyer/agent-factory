@@ -3448,6 +3448,146 @@ button:disabled,
   padding: 0.3rem 0.45rem;
 }
 
+/* The Accounts section of the config view (#3385).
+ *
+ * It sits INSIDE the config view and must not read as part of it: an account is a
+ * credential directory on the daemon host, not a settable key, and a row styled
+ * like a config row would imply a setting that participates in the precedence
+ * chain. So the section takes a rule above it and its own heading, and its rows
+ * carry a STATE chip rather than a control. */
+.af-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-sp-2);
+  padding: var(--af-sp-3) var(--af-sp-4) var(--af-sp-6);
+  border-top: 1px solid var(--af-border);
+}
+
+.af-accounts-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.af-accounts-title {
+  font-size: var(--af-fs-sm);
+  font-weight: 600;
+  color: var(--af-text);
+}
+
+.af-accounts-note,
+.af-accounts-empty {
+  margin: 0;
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-muted);
+  line-height: 1.5;
+}
+
+.af-accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-sp-2);
+}
+
+/* The agent a run of rows belongs to. An account name is only unique within its
+ * agent's namespace, so the grouping is what makes a bare name unambiguous. */
+.af-accounts-agent {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+  margin-top: var(--af-sp-3);
+}
+
+.af-accounts-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--af-sp-3);
+  padding: var(--af-sp-2) 0;
+}
+
+.af-accounts-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.af-accounts-name {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+  color: var(--af-text);
+}
+
+/* The directory, not the credential. It is the thing an operator points a login
+ * flow at by hand, so it is worth showing — and it wraps rather than truncating,
+ * because a half-shown path is not one you can act on. */
+.af-accounts-dir {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* A static state, not an animated one (#1766): the section reports what a file
+ * shows, and a flow's progress is read in the login pane itself. */
+.af-accounts-state-on,
+.af-accounts-state-off {
+  font-size: var(--af-fs-xs);
+  font-weight: 600;
+}
+
+/* The same green the rail uses for a session that is ready for you, so a logged-in
+ * account reads as "this one is good to go" in the palette the shell already
+ * speaks — rather than introducing a second vocabulary for the same idea. */
+.af-accounts-state-on {
+  color: var(--af-status-needs-you);
+}
+
+.af-accounts-state-off {
+  color: var(--af-text-muted);
+}
+
+.af-accounts-input {
+  min-width: 0;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+}
+
+.af-accounts-echo,
+.af-accounts-error,
+.af-accounts-notice {
+  grid-column: 1 / -1;
+  font-size: var(--af-fs-xs);
+  padding: 0.15rem 0;
+  line-height: 1.5;
+}
+
+.af-accounts-echo {
+  color: var(--af-text-2);
+}
+
+.af-accounts-error {
+  color: var(--af-danger);
+}
+
+/* Not an error: the account exists and can be logged in; only SESSION scoping is
+ * pending for that agent. */
+.af-accounts-notice {
+  color: var(--af-accent-text);
+  background: var(--af-accent-subtle);
+  border-radius: var(--af-r-sm);
+  padding: 0.3rem 0.45rem;
+}
+
+/* The login overlay's explanation of what af is running, above the pane. */
+.af-assistant-note {
+  margin: 0 0 var(--af-sp-2);
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-muted);
+  line-height: 1.5;
+}
+
 /* One column on a narrow viewport: a 22rem control column beside a key would leave
  * neither readable. */
 @media (max-width: 40rem) {

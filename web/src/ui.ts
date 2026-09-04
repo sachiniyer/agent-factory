@@ -49,6 +49,7 @@ import {
   rowStatus,
   rowTitle,
 } from "./status.js";
+import type { AccountsState } from "./accounts.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
@@ -170,6 +171,14 @@ export interface AppState {
   /** the outcome of the last config write — the daemon's echo and restart notice,
    *  or the validator's message when it refused — or null when there is none. */
   configStatus: ConfigStatus | null;
+  /** the registered agent accounts with their logged-in state, the agents one can
+   *  be registered for, and the outcome of the last account action (#3385).
+   *
+   *  It rides in the config view's state because that is where the section is
+   *  rendered, and NOT in `config`: an account is a credential directory on the
+   *  daemon host, not a manifest key, and merging the two would be the category
+   *  error #3385 asks this surface to avoid. */
+  accounts: AccountsState;
   /** the persisted theme preference (redesign PR1): Auto follows the OS, Light/Dark
    *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
@@ -260,6 +269,13 @@ export interface Actions {
    *  close. The config pane only reports the intent; the shell owns the token and the
    *  modal host. */
   openConfigAssistant(): void;
+  /** Creates an agent account's credential directory on the daemon host (#3385).
+   *  Idempotent; the daemon holds the name rule and its refusal is shown verbatim. */
+  registerAccount(agent: string, name: string): void;
+  /** Runs the agent's OWN login flow for an account in a tmux session on the
+   *  daemon host and opens its pane here (#3384/#3385). af never reads, stores or
+   *  forwards the credential — it points one variable at a directory. */
+  openAccountLogin(agent: string, name: string): void;
   /** Renames the tab with the stable IDENTITY `id` (tabIdentity) to `name` (#1813):
    *  the commit of the bar's inline edit. Only offered for a RENAMEABLE tab (web /
    *  process — see isRenameableTab); index.ts resolves the identity to the tab's
@@ -1120,6 +1136,10 @@ export class AppShell {
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
+      accounts: {
+        register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
+        login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),
+      },
     });
     const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
 
@@ -1264,7 +1284,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

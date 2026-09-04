@@ -364,6 +364,10 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 		return m, m.handleError(err)
 	}
 	m.configPane.SetEntries(entries, location)
+	// The Accounts section (#3385), read on every open for the same reason the
+	// config is: an account registered from the CLI, or logged in from the web,
+	// since this TUI started must show as it is now rather than as af remembers.
+	m.loadAccountsIntoPane()
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor
@@ -392,6 +396,17 @@ func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.configPane.HandleKeyPress(msg)
+	// The Accounts section's verbs (#3385), taken BEFORE the focus check: a login
+	// drops focus as it asks — the overlay is closing so the takeover has a clean
+	// terminal — while a register keeps it, and reading the request first is what
+	// lets one branch serve both. Taking it consumes it, so one keypress is one
+	// login.
+	if cmd := m.handleAccountRequest(m.configPane.TakeAccountRequest()); cmd != nil {
+		if !m.configPane.HasFocus() {
+			m.state = stateDefault
+		}
+		return m, cmd
+	}
 	if !m.configPane.HasFocus() {
 		m.state = stateDefault
 		// The pane released focus. If that was the assistant button (C), open the

@@ -500,3 +500,58 @@ export interface ConfigSetResponse {
    *  they are. Optional: an older daemon does not send it. */
   listener_addr?: string;
 }
+
+/** daemon.AccountEntry — one registered agent account (#3384/#3385).
+ *
+ *  It never carries credential material. `dir` is the DIRECTORY af points the
+ *  agent's credential-root variable at, and `logged_in` is the presence of the
+ *  agent's own credential file inside it, read by stat. So `logged_in` means
+ *  "this account has an identity", not "this identity still works": only the
+ *  agent can say the latter, and af never opens the file to ask. */
+export interface AccountEntry {
+  agent: string;
+  name: string;
+  dir: string;
+  /** True while a session cannot yet be scoped to this agent's accounts —
+   *  registering and logging in still work. */
+  registration_only: boolean;
+  logged_in: boolean;
+}
+
+/** ListAccountsResponse (daemon/control_types_accounts.go).
+ *
+ *  `agents` is not derivable from `entries`: a fresh install has no accounts and
+ *  the register form still has to offer the agents one can be made for. */
+export interface AccountsResponse {
+  entries: AccountEntry[];
+  agents: string[];
+}
+
+/** RegisterAccountResponse (daemon/control_types_accounts.go). */
+export interface RegisterAccountResponse {
+  entry: AccountEntry;
+  /** What the agent's credential-root variable relocates, and anything af could
+   *  not verify about the directory. Never about a credential's contents. */
+  notices?: string[];
+}
+
+/** AccountLoginResponse (daemon/control_types_accounts.go). */
+export interface AccountLoginResponse {
+  agent: string;
+  name: string;
+  dir: string;
+  /** The exact invocation the pane runs — the agent's own login command — so the
+   *  UI can show what af is running rather than assert it. */
+  program: string;
+  /** The tmux session to attach to. EMPTY when `finished` is true: the flow ended
+   *  before af could hand over a terminal and there is nothing to watch. */
+  session_name: string;
+  socket_path: string;
+  /** True when this call joined a login flow that was already open. */
+  reused: boolean;
+  /** True when the agent's login command ran to completion before af could hand
+   *  over the terminal. */
+  finished: boolean;
+  logged_in: boolean;
+  notices?: string[];
+}

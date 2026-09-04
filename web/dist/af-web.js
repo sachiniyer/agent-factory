@@ -6493,6 +6493,16 @@ async function reapConfigAssistant(token2) {
     );
   }
 }
+async function listAccounts(token2) {
+  const resp = await af("ListAccounts", {}, token2);
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [] };
+}
+async function registerAccount(agent, name, token2) {
+  return af("RegisterAccount", { agent, name }, token2);
+}
+async function startAccountLogin(agent, name, token2) {
+  return af("AccountLogin", { agent, name }, token2);
+}
 
 // src/dom.ts
 function h(tag, props = {}, ...children) {
@@ -6508,6 +6518,125 @@ function h(tag, props = {}, ...children) {
     el2.append(child);
   }
   return el2;
+}
+
+// src/accounts.ts
+function emptyAccountsState() {
+  return { entries: [], agents: [], error: "", status: null };
+}
+var ACCOUNT_INPUT_ATTR = "data-account-input";
+var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential.";
+function renderAccountsSection(state, actions2) {
+  const section = h("section", { class: "af-accounts" });
+  section.setAttribute("aria-label", "Accounts");
+  const head = h(
+    "div",
+    { class: "af-accounts-head" },
+    h("span", { class: "af-accounts-title" }, "Accounts"),
+    h("span", { class: "af-view-count" }, String(state.entries.length))
+  );
+  section.append(head, h("p", { class: "af-accounts-note" }, ACCOUNTS_NOTE));
+  if (state.error !== "") {
+    section.append(
+      h("p", { class: "af-accounts-error", role: "alert" }, `Accounts could not be read: ${state.error}`)
+    );
+    return section;
+  }
+  if (state.agents.length === 0) {
+    section.append(
+      h(
+        "p",
+        { class: "af-accounts-empty" },
+        "This daemon reports no agents that support accounts."
+      )
+    );
+    return section;
+  }
+  const list = h("div", { class: "af-accounts-list" });
+  for (const agent of state.agents) {
+    const mine = state.entries.filter((e) => e.agent === agent);
+    list.append(h("div", { class: "af-accounts-agent" }, agent));
+    for (const entry of mine) {
+      list.append(renderAccountRow(entry, state.status, actions2));
+    }
+    list.append(renderRegisterRow(agent, state.status, actions2));
+  }
+  section.append(list);
+  return section;
+}
+function renderAccountRow(entry, status, actions2) {
+  const row = h("div", { class: "af-accounts-row" });
+  row.setAttribute("data-account", `${entry.agent}/${entry.name}`);
+  const stateLabel = entry.logged_in ? "Logged in" : "Not logged in";
+  row.append(
+    h(
+      "div",
+      { class: "af-accounts-label" },
+      h("span", { class: "af-accounts-name" }, entry.name),
+      // A claim about a FILE, not about a working identity: af answers it by stat
+      // and never opens the credential, so a revoked or expired one still reads as
+      // present. The copy says "logged in", never "valid".
+      h("span", { class: entry.logged_in ? "af-accounts-state-on" : "af-accounts-state-off" }, stateLabel),
+      h("span", { class: "af-accounts-dir" }, entry.dir)
+    )
+  );
+  const button = h(
+    "button",
+    { type: "button", class: "af-ghost af-accounts-login" },
+    entry.logged_in ? "Log in again" : "Log in"
+  );
+  button.addEventListener("click", () => actions2.login(entry.agent, entry.name));
+  row.append(button);
+  if (entry.registration_only) {
+    row.append(
+      h(
+        "div",
+        { class: "af-accounts-notice" },
+        `A session cannot be scoped to a ${entry.agent} account yet \u2014 registering and logging in work.`
+      )
+    );
+  }
+  appendStatus(row, status, entry.agent, entry.name);
+  return row;
+}
+function renderRegisterRow(agent, status, actions2) {
+  const row = h("div", { class: "af-accounts-row af-accounts-register" });
+  const input = h("input", {
+    type: "text",
+    class: "af-input af-accounts-input",
+    placeholder: `new ${agent} account name`
+  });
+  input.setAttribute("aria-label", `New ${agent} account name`);
+  input.setAttribute(ACCOUNT_INPUT_ATTR, agent);
+  const submit = () => {
+    const name = input.value.trim();
+    if (name === "") {
+      return;
+    }
+    actions2.register(agent, name);
+    input.value = "";
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  });
+  const button = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
+  button.addEventListener("click", submit);
+  row.append(h("div", { class: "af-accounts-label" }, input), button);
+  appendStatus(row, status, agent, "");
+  return row;
+}
+function appendStatus(row, status, agent, name) {
+  if (status === null || status.agent !== agent || status.name !== name) {
+    return;
+  }
+  if (status.error) {
+    row.append(h("div", { class: "af-accounts-error", role: "alert" }, status.message));
+    return;
+  }
+  row.append(h("div", { class: "af-accounts-echo" }, status.message));
 }
 
 // src/scrollkeep.ts
@@ -6586,6 +6715,9 @@ var ConfigPane = class {
   entries = [];
   path = "";
   status = null;
+  /** The Accounts section's data (#3385). It is rendered by this view but is not
+   *  config: see accounts.ts. */
+  accounts = emptyAccountsState();
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -6598,17 +6730,20 @@ var ConfigPane = class {
   advancedToggle = null;
   lastEntries = null;
   lastStatus = null;
+  lastAccounts = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status) {
-    if (this.lastEntries === entries && this.lastStatus === status) {
+  update(entries, path, status, accounts) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
     this.lastEntries = entries;
     this.lastStatus = status;
+    this.lastAccounts = accounts;
     this.entries = entries;
     this.path = path;
     this.status = status;
+    this.accounts = accounts;
     if (status && !status.error && status.key === this.editing) {
       this.editing = null;
       this.draft = "";
@@ -6633,11 +6768,15 @@ var ConfigPane = class {
    */
   rerenderKeepingUserState() {
     const active = document.activeElement;
+    const accountDrafts = this.readAccountDrafts();
+    const focusedAccount = active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
+    const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement ? { start: active.selectionStart, end: active.selectionEnd } : null;
     const wasEditing = this.editingInput !== null && active === this.editingInput;
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -6645,7 +6784,40 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (focusedAccount !== null) {
+      const field2 = this.accountInput(focusedAccount);
+      field2?.focus({ preventScroll: true });
+      if (field2 && accountCaret?.start != null) {
+        field2.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
+      }
     }
+  }
+  /** Every register field's current text, keyed by agent. */
+  readAccountDrafts() {
+    const drafts = /* @__PURE__ */ new Map();
+    for (const field2 of this.el.querySelectorAll(`input[${ACCOUNT_INPUT_ATTR}]`)) {
+      const agent = field2.getAttribute(ACCOUNT_INPUT_ATTR);
+      if (agent !== null && field2.value !== "") {
+        drafts.set(agent, field2.value);
+      }
+    }
+    return drafts;
+  }
+  /** Puts them back on the freshly rendered fields. An agent whose row is gone —
+   *  a roster that shrank between renders — simply drops its draft; there is no
+   *  field left to hold it. */
+  restoreAccountDrafts(drafts) {
+    for (const [agent, value] of drafts) {
+      const field2 = this.accountInput(agent);
+      if (field2) {
+        field2.value = value;
+      }
+    }
+  }
+  accountInput(agent) {
+    return this.el.querySelector(
+      `input[${ACCOUNT_INPUT_ATTR}="${CSS.escape(agent)}"]`
+    );
   }
   render() {
     this.editingInput = null;
@@ -6702,7 +6874,11 @@ var ConfigPane = class {
         "No settings are available \u2014 use Configure with assistant or check the daemon connection."
       )
     ];
-    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...content));
+    this.el.replaceChildren(
+      head,
+      h("div", { class: "af-config-list" }, ...content),
+      renderAccountsSection(this.accounts, this.actions.accounts)
+    );
   }
   /** One key: its name, purpose, control, and — when it is the row just written
    *  or just refused — the echo or the error. */
@@ -6822,6 +6998,22 @@ function configAssistantStreamEndpoint() {
       const base = `${wsScheme()}//${window.location.host}/v1/config-assistant/stream`;
       const params = new URLSearchParams();
       params.set("access_token", token2);
+      if (since !== null) {
+        params.set("since", since.toString());
+      }
+      return `${base}?${params.toString()}`;
+    }
+  };
+}
+function accountLoginStreamEndpoint(agent, name) {
+  return {
+    composerNewline: true,
+    url(token2, since) {
+      const base = `${wsScheme()}//${window.location.host}/v1/account-login/stream`;
+      const params = new URLSearchParams();
+      params.set("access_token", token2);
+      params.set("agent", agent);
+      params.set("name", name);
       if (since !== null) {
         params.set("since", since.toString());
       }
@@ -9002,6 +9194,100 @@ var AttachTerminal = class {
     }
   }
 };
+
+// src/account_login_overlay.ts
+function loginWithoutPaneCopy(login) {
+  if (login.logged_in) {
+    return {
+      status: "Logged in",
+      detail: `${login.agent}'s login flow finished without needing the terminal, and ${login.name} holds a credential.` + (login.notices?.length ? ` ${login.notices.join(" ")}` : "")
+    };
+  }
+  return {
+    status: "Not logged in",
+    detail: `The ${login.agent} login flow ended without leaving a credential in ${login.name}, so the account is registered but not logged in. Try again, or run \`af accounts login ${login.agent} ${login.name}\` on the daemon host.`
+  };
+}
+function openAccountLogin(opts) {
+  const { token: token2, mountHost, login, onClosed } = opts;
+  let closed = false;
+  let term = null;
+  const status = h("span", { class: "af-assistant-status" }, "Connecting\u2026");
+  status.setAttribute("role", "status");
+  const closeBtn = h("button", { type: "button", class: "af-ghost af-assistant-close" }, "\xD7");
+  closeBtn.setAttribute("aria-label", "Close");
+  const title = `${login.agent} \xB7 ${login.name}`;
+  const head = h(
+    "div",
+    { class: "af-assistant-head" },
+    h("span", { class: "af-assistant-title" }, title),
+    status,
+    closeBtn
+  );
+  const note = h(
+    "p",
+    { class: "af-assistant-note" },
+    `Running ${login.program} on the daemon host with this account's credential directory. af never reads the credential. Complete the sign-in here; a device code or URL opens in your own browser.`
+  );
+  const termHost2 = h("div", { class: "af-assistant-term" });
+  const body = h("div", { class: "af-assistant-body" }, note, termHost2);
+  const panel = h("div", { class: "af-assistant-panel" }, head, body);
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-label", `Log in to ${title}`);
+  const overlay = h("div", { class: "af-assistant-overlay" }, panel);
+  function close() {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    term?.dispose();
+    term = null;
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+    onClosed?.();
+  }
+  function onKey(e) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  }
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) {
+      close();
+    }
+  });
+  document.addEventListener("keydown", onKey);
+  mountHost.append(overlay);
+  term = new AttachTerminal(termHost2, token2, accountLoginStreamEndpoint(login.agent, login.name), {
+    onStatus: (s) => {
+      if (!closed) {
+        status.textContent = loginTerminalStatusCopy(s, login);
+      }
+    },
+    // One pane, and no session identity: there is no nav/attach mode to keep in
+    // sync the way a session split has, and no delivery-hold lease to take —
+    // a login pane is not a session, so nothing addresses it that way.
+    onFocusChange: () => {
+    }
+  });
+  term.focus();
+  return { close };
+}
+function loginTerminalStatusCopy(status, login) {
+  switch (status) {
+    case "connecting":
+      return "Connecting\u2026";
+    case "open":
+      return login.reused ? "Joined the running login" : "Live";
+    case "exited":
+      return "The login flow ended \u2014 close this to see the account's state";
+    default:
+      return "Reconnecting\u2026";
+  }
+}
 
 // src/config_assistant.ts
 var SPAWN_RETRY_LIMIT = 4;
@@ -13662,7 +13948,11 @@ var AppShell = class {
     });
     this.configPane = new ConfigPane({
       save: (key, value) => this.actions.setConfigValue(key, value),
-      openAssistant: () => this.actions.openConfigAssistant()
+      openAssistant: () => this.actions.openConfigAssistant(),
+      accounts: {
+        register: (agent, name) => this.actions.registerAccount(agent, name),
+        login: (agent, name) => this.actions.openAccountLogin(agent, name)
+      }
     });
     const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
     this.toast = h2("div", { class: "af-toast" });
@@ -13903,7 +14193,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -15092,6 +15382,7 @@ var store = new Store({
   config: [],
   configPath: "",
   configStatus: null,
+  accounts: emptyAccountsState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -15140,6 +15431,7 @@ var modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 var modal = null;
 var configAssistant = null;
+var accountLogin = null;
 var installAffordance = new InstallAffordance();
 var splitView = new SplitView(termHost, {
   onStatus: (s) => store.set({ termStatus: s }),
@@ -15339,6 +15631,7 @@ function switchView(view) {
   }
   if (view === "config") {
     refreshConfig();
+    refreshAccounts();
   }
 }
 function setStatusFilter(kind, on) {
@@ -15706,6 +15999,71 @@ var configRefetcher = createFencedRefetcher({
 function refreshConfig() {
   configRefetcher.refresh();
 }
+var accountsRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listAccounts,
+  commit: (resp) => {
+    store.set({
+      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "" }
+    });
+  },
+  onError: (err) => {
+    store.set({ accounts: { ...store.get().accounts, error: errorText(err) } });
+  }
+});
+function refreshAccounts() {
+  accountsRefetcher.refresh();
+}
+function setAccountStatus(agent, name, message, error) {
+  store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
+}
+function doRegisterAccount(agent, name) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void registerAccount(agent, name, tok).then((resp) => {
+    const notices = resp.notices?.length ? ` \xB7 ${resp.notices.join(" \xB7 ")}` : "";
+    setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
+    refreshAccounts();
+  }).catch((err) => {
+    setAccountStatus(agent, "", errorText(err), true);
+  });
+}
+function doOpenAccountLogin(agent, name) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  setAccountStatus(agent, name, `Starting the ${agent} login\u2026`, false);
+  void startAccountLogin(agent, name, tok).then((login) => {
+    if (login.finished || login.session_name === "") {
+      const copy = loginWithoutPaneCopy(login);
+      setAccountStatus(agent, name, `${copy.status} \xB7 ${copy.detail}`, !login.logged_in);
+      refreshAccounts();
+      return;
+    }
+    const notices = login.notices?.length ? ` \xB7 ${login.notices.join(" \xB7 ")}` : "";
+    setAccountStatus(agent, name, `Running ${login.program}${notices}`, false);
+    closeModal();
+    closeAccountLogin();
+    accountLogin = openAccountLogin({
+      token: tok,
+      mountHost: modalHost,
+      login,
+      onClosed: () => {
+        accountLogin = null;
+        refreshAccounts();
+      }
+    });
+  }).catch((err) => {
+    setAccountStatus(agent, name, errorText(err), true);
+  });
+}
+function closeAccountLogin() {
+  accountLogin?.close();
+  accountLogin = null;
+}
 var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
   const tok = token;
@@ -15978,6 +16336,8 @@ var actions = {
   switchView,
   setConfigValue: applyConfigValue,
   openConfigAssistant: doOpenConfigAssistant,
+  registerAccount: doRegisterAccount,
+  openAccountLogin: doOpenAccountLogin,
   switchProject,
   setStatusFilter,
   resetStatusFilter,

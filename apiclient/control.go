@@ -273,6 +273,26 @@ func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBacken
 	return resp, nil
 }
 
+// ListAccounts reads the daemon host's registered accounts and their logged-in
+// state. HTTP twin of ListAccounts.
+func (c *Client) ListAccounts(agent string) (daemon.ListAccountsResponse, error) {
+	var resp daemon.ListAccountsResponse
+	if err := c.call("ListAccounts", daemon.ListAccountsRequest{Agent: agent}, &resp); err != nil {
+		return daemon.ListAccountsResponse{}, err
+	}
+	return resp, nil
+}
+
+// RegisterAccount creates an account's credential directory on the daemon host
+// without logging in. HTTP twin of RegisterAccount.
+func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {
+	var resp daemon.RegisterAccountResponse
+	if err := c.call("RegisterAccount", daemon.RegisterAccountRequest{Agent: agent, Name: name}, &resp); err != nil {
+		return daemon.RegisterAccountResponse{}, err
+	}
+	return resp, nil
+}
+
 // AccountLogin opens an agent's own login flow in a bare tmux session scoped to
 // one account, registering the account if needed. HTTP twin of AccountLogin.
 //

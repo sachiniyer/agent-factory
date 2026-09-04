@@ -28,6 +28,7 @@ package accountlogin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -124,6 +126,15 @@ type Supervisor struct {
 
 	mu       sync.Mutex
 	sessions map[string]*tmux.TmuxSession
+	// streamers is the WebSocket data plane for a login pane, one per account,
+	// built on first subscribe and closed with the pane.
+	//
+	// It lives HERE rather than beside the routes that serve it because a streamer
+	// and the pane it reads are one lifetime: a capture goroutine left running
+	// against a torn-down pane is the #1632 leak, and the only way to be sure it
+	// cannot happen is for the thing that closes the pane to be the thing that
+	// closes the stream. Same map, same mutex, same Stop.
+	streamers map[string]*session.BareSessionStreamer
 	// stopped latches on teardown so a spawn racing shutdown cannot register a
 	// session nothing will ever reap.
 	stopped bool
@@ -131,7 +142,10 @@ type Supervisor struct {
 
 // New builds an empty supervisor.
 func New() *Supervisor {
-	return &Supervisor{sessions: make(map[string]*tmux.TmuxSession)}
+	return &Supervisor{
+		sessions:  make(map[string]*tmux.TmuxSession),
+		streamers: make(map[string]*session.BareSessionStreamer),
+	}
 }
 
 // key namespaces a login pane by ACCOUNT, which is what makes reuse correct:
@@ -204,7 +218,7 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 		Notices:  notices,
 	}
 
-	session := tmux.NewTmuxSession(agentaccount.LoginSessionName(req.Agent, req.Name), program)
+	pane := tmux.NewTmuxSession(agentaccount.LoginSessionName(req.Agent, req.Name), program)
 
 	// An open flow is JOINED, never duplicated. Two logins into one directory race
 	// over the same auth.json, and the second pane would be invisible to the
@@ -217,7 +231,7 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// and creating it would fail with "tmux session already exists" for a login
 	// that is sitting there waiting for its human. The name is derived from the
 	// account, so an existing one under it IS this account's flow.
-	if existing := s.adopt(req.Agent, req.Name, session); existing != nil {
+	if existing := s.adopt(req.Agent, req.Name, pane); existing != nil {
 		out := base
 		out.Reused = true
 		out.TmuxName = existing.SanitizedName()
@@ -225,7 +239,7 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 		return out, nil
 	}
 
-	if err := session.SetEnvPassthrough(req.Passthrough); err != nil {
+	if err := pane.SetEnvPassthrough(req.Passthrough); err != nil {
 		return Session{}, fmt.Errorf("invalid session environment pass-through for the login pane: %w", err)
 	}
 	// The ENVIRONMENT-ONLY form of the account boundary, which is the correct one
@@ -237,22 +251,22 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// process to the account, and refuse a command that would set an identity
 	// variable itself. The child shim still applies the FULL boundary — inject the
 	// account's root, remove every other identity — immediately before exec.
-	session.SetAccountEnvironmentForAgent(req.Agent, req.Name)
+	pane.SetAccountEnvironmentForAgent(req.Agent, req.Name)
 
 	// The account directory is the working directory: it is a real, durable,
 	// 0700 directory af created, outside any temp dir (codex refuses to create
 	// helper binaries under /tmp), and it is the directory the flow is about.
-	if err := session.Start(dir); err != nil {
+	if err := pane.Start(dir); err != nil {
 		return finishedOrFailed(req, base, err)
 	}
 	// The name tmux actually knows — sanitized, with the af_ prefix — not the one
 	// handed to NewTmuxSession. Returning the latter is what made the config
 	// agent's attach fail with "can't find session" (#2019).
-	name := session.SanitizedName()
-	if !s.track(req.Agent, req.Name, session) {
+	name := pane.SanitizedName()
+	if !s.track(req.Agent, req.Name, pane) {
 		// Shutting down: do not leak the pane we just made. No worktree exists, so
 		// pane state gates nothing destructive.
-		_, _ = session.Close()
+		_, _ = pane.Close()
 		return Session{}, fmt.Errorf("the agent-factory daemon is shutting down")
 	}
 
@@ -268,7 +282,7 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 
 	out := base
 	out.TmuxName = name
-	out.SocketPath = socketPath(ctx, session)
+	out.SocketPath = socketPath(ctx, pane)
 	return out, nil
 }
 
@@ -290,17 +304,17 @@ func (s *Supervisor) Live(agent, name string) bool {
 // the first one is still writing. An unknown answer keeps the session tracked.
 func (s *Supervisor) live(agent, name string) *tmux.TmuxSession {
 	s.mu.Lock()
-	session, tracked := s.sessions[key(agent, name)]
+	pane, tracked := s.sessions[key(agent, name)]
 	s.mu.Unlock()
 	if !tracked {
 		return nil
 	}
-	exists, known := session.ProbeSession()
+	exists, known := pane.ProbeSession()
 	if known && !exists {
-		s.forget(agent, name, session)
+		s.forget(agent, name, pane)
 		return nil
 	}
-	return session
+	return pane
 }
 
 // adopt returns the live login pane for this account, tracking a pane this
@@ -325,24 +339,25 @@ func (s *Supervisor) adopt(agent, name string, candidate *tmux.TmuxSession) *tmu
 	return candidate
 }
 
-func (s *Supervisor) track(agent, name string, session *tmux.TmuxSession) bool {
+func (s *Supervisor) track(agent, name string, pane *tmux.TmuxSession) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
 		return false
 	}
-	s.sessions[key(agent, name)] = session
+	s.sessions[key(agent, name)] = pane
 	return true
 }
 
 // forget drops a tracked entry only if it is STILL the one the caller observed.
 // A pane that ended while a second login was starting must not have the new
 // pane deleted out from under it by the old one's cleanup.
-func (s *Supervisor) forget(agent, name string, session *tmux.TmuxSession) {
+func (s *Supervisor) forget(agent, name string, pane *tmux.TmuxSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, ok := s.sessions[key(agent, name)]; ok && current == session {
+	if current, ok := s.sessions[key(agent, name)]; ok && current == pane {
 		delete(s.sessions, key(agent, name))
+		s.closeStreamerLocked(key(agent, name))
 	}
 }
 
@@ -351,15 +366,16 @@ func (s *Supervisor) forget(agent, name string, session *tmux.TmuxSession) {
 // reached it.
 func (s *Supervisor) Reap(agent, name string) error {
 	s.mu.Lock()
-	session, tracked := s.sessions[key(agent, name)]
+	pane, tracked := s.sessions[key(agent, name)]
 	delete(s.sessions, key(agent, name))
+	s.closeStreamerLocked(key(agent, name))
 	s.mu.Unlock()
 	if !tracked {
 		return nil
 	}
 	// Pane state ignored: a login pane has no worktree, so there is nothing
 	// destructive for it to gate.
-	if _, err := session.Close(); err != nil {
+	if _, err := pane.Close(); err != nil {
 		return fmt.Errorf("could not close the login pane for %s account %q: %w", agent, name, err)
 	}
 	return nil
@@ -371,22 +387,28 @@ func (s *Supervisor) Reap(agent, name string) error {
 func (s *Supervisor) Stop() {
 	s.mu.Lock()
 	s.stopped = true
-	sessions := make([]*tmux.TmuxSession, 0, len(s.sessions))
-	for _, session := range s.sessions {
-		sessions = append(sessions, session)
+	panes := make([]*tmux.TmuxSession, 0, len(s.sessions))
+	for _, pane := range s.sessions {
+		panes = append(panes, pane)
 	}
 	s.sessions = make(map[string]*tmux.TmuxSession)
+	// The streams FIRST, and while still holding the lock: each is a tmux
+	// pipe-pane capture goroutine reading the pane about to be torn down, and one
+	// left running against a dead pane is the #1632 leak.
+	for account := range s.streamers {
+		s.closeStreamerLocked(account)
+	}
 	s.mu.Unlock()
 
 	var wg sync.WaitGroup
-	for _, session := range sessions {
+	for _, pane := range panes {
 		wg.Add(1)
-		go func(session *tmux.TmuxSession) {
+		go func(pane *tmux.TmuxSession) {
 			defer wg.Done()
-			if _, err := session.Close(); err != nil {
+			if _, err := pane.Close(); err != nil {
 				log.WarningLog.Printf("account login: closing a login pane during shutdown failed: %v", err)
 			}
-		}(session)
+		}(pane)
 	}
 	wg.Wait()
 }
@@ -438,13 +460,69 @@ func finishedOrFailed(req Request, base Session, startErr error) (Session, error
 // own default socket when both sides share a TMUX_TMPDIR, which is the common
 // case, so this degrades to an empty path and lets that fall back rather than
 // failing a login that would otherwise attach fine (#2019).
-func socketPath(ctx context.Context, session *tmux.TmuxSession) string {
-	path, err := session.SocketPath(ctx)
+func socketPath(ctx context.Context, pane *tmux.TmuxSession) string {
+	path, err := pane.SocketPath(ctx)
 	if err != nil {
 		log.WarningLog.Printf(
 			"account login: could not resolve the tmux socket for %s (%v); an attach will fall back to the default socket",
-			session.SanitizedName(), err)
+			pane.SanitizedName(), err)
 		return ""
 	}
 	return path
+}
+
+// Streamer returns the WebSocket data plane for this account's login pane,
+// building it on first use.
+//
+// It exists because the web cannot attach the way the CLI and the TUI do. A
+// login pane has no Instance, so the normal PTY stream route — which resolves
+// its byte source through the daemon's instance map — cannot reach it, and
+// `tmux attach-session` is not something a browser can run. session's
+// BareSessionStreamer is the answer the config assistant already found for the
+// same shape (#2467): the broker fans bytes from a `tmux pipe-pane` capture,
+// which needs a tmux session and nothing else.
+//
+// A pane that is not live gets no streamer. Building one for a dead pane would
+// start a capture against a session that is gone and hand the caller a stream
+// that never speaks.
+func (s *Supervisor) Streamer(agent, name string) (*session.BareSessionStreamer, error) {
+	pane := s.live(agent, name)
+	if pane == nil {
+		return nil, fmt.Errorf("%w: no login flow is running for %s account %q", ErrNoLoginPane, agent, name)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return nil, fmt.Errorf("%w: the agent-factory daemon is shutting down", ErrNoLoginPane)
+	}
+	// Re-checked under the lock: live() released it, so a reap could have landed
+	// in between and the entry it dropped must not be recreated here.
+	if _, tracked := s.sessions[key(agent, name)]; !tracked {
+		return nil, fmt.Errorf("%w: the login flow for %s account %q ended", ErrNoLoginPane, agent, name)
+	}
+	streamer, ok := s.streamers[key(agent, name)]
+	if !ok {
+		streamer = session.NewBareSessionStreamer(pane)
+		s.streamers[key(agent, name)] = streamer
+	}
+	return streamer, nil
+}
+
+// ErrNoLoginPane reports that no login flow is running for an account. The
+// stream route maps it to 404, which is the browser terminal's settle-and-stop
+// signal — a login that has ENDED is not a transient drop to reconnect through.
+var ErrNoLoginPane = errors.New("no login pane")
+
+// closeStreamerLocked tears down one account's stream. Callers hold mu.
+//
+// Closing is what stops the pipe-pane capture goroutine. It runs wherever the
+// pane stops being ours — reap, an observed death, and shutdown — because a
+// capture outliving its pane is a goroutine nothing will ever close (#1632).
+func (s *Supervisor) closeStreamerLocked(account string) {
+	streamer, ok := s.streamers[account]
+	if !ok {
+		return
+	}
+	delete(s.streamers, account)
+	streamer.Close()
 }

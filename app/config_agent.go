@@ -233,6 +233,19 @@ func (m *home) enterConfigAgent(sessionName, socketPath string) tea.Cmd {
 //     only when the daemon could not resolve it, in which case the attach falls
 //     back to the default socket (Part 1 alone still fixes the reported bug).
 var execConfigAgentAttach = func(sessionName, socketPath string) *exec.Cmd {
+	return bareTmuxAttachCommand(sessionName, socketPath)
+}
+
+// bareTmuxAttachCommand is the shared builder behind every terminal handover to
+// a daemon-owned BARE tmux session — the config agent above, and the account
+// login pane (#3385).
+//
+// Shared rather than copied because both reasons above are properties of the
+// handover, not of the config agent: any second copy would be one $TMUX scrub
+// away from failing to nest, and one `-S` away from resolving the wrong socket.
+// The per-caller vars stay separate so a test can stub one takeover without
+// disabling the other.
+func bareTmuxAttachCommand(sessionName, socketPath string) *exec.Cmd {
 	args := make([]string, 0, 5)
 	if socketPath != "" {
 		args = append(args, "-S", socketPath)

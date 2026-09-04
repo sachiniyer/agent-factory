@@ -2585,6 +2585,107 @@ button:disabled,
   border-radius: var(--af-r-sm);
   padding: 0.3rem 0.45rem;
 }
+.af-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-sp-2);
+  padding: var(--af-sp-3) var(--af-sp-4) var(--af-sp-6);
+  border-top: 1px solid var(--af-border);
+}
+.af-accounts-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.af-accounts-title {
+  font-size: var(--af-fs-sm);
+  font-weight: 600;
+  color: var(--af-text);
+}
+.af-accounts-note,
+.af-accounts-empty {
+  margin: 0;
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-muted);
+  line-height: 1.5;
+}
+.af-accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-sp-2);
+}
+.af-accounts-agent {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+  margin-top: var(--af-sp-3);
+}
+.af-accounts-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--af-sp-3);
+  padding: var(--af-sp-2) 0;
+}
+.af-accounts-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.af-accounts-name {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+  color: var(--af-text);
+}
+.af-accounts-dir {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-muted);
+  overflow-wrap: anywhere;
+}
+.af-accounts-state-on,
+.af-accounts-state-off {
+  font-size: var(--af-fs-xs);
+  font-weight: 600;
+}
+.af-accounts-state-on {
+  color: var(--af-status-needs-you);
+}
+.af-accounts-state-off {
+  color: var(--af-text-muted);
+}
+.af-accounts-input {
+  min-width: 0;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+}
+.af-accounts-echo,
+.af-accounts-error,
+.af-accounts-notice {
+  grid-column: 1 / -1;
+  font-size: var(--af-fs-xs);
+  padding: 0.15rem 0;
+  line-height: 1.5;
+}
+.af-accounts-echo {
+  color: var(--af-text-2);
+}
+.af-accounts-error {
+  color: var(--af-danger);
+}
+.af-accounts-notice {
+  color: var(--af-accent-text);
+  background: var(--af-accent-subtle);
+  border-radius: var(--af-r-sm);
+  padding: 0.3rem 0.45rem;
+}
+.af-assistant-note {
+  margin: 0 0 var(--af-sp-2);
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-muted);
+  line-height: 1.5;
+}
 @media (max-width: 40rem) {
   .af-config-row {
     grid-template-columns: minmax(0, 1fr);
