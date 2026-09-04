@@ -6596,6 +6596,48 @@ test("a rule-violation refusal with no proven winner waits instead of reddening 
   );
 });
 
+// The fake is infrastructure, and this is the property the pre-merge check below
+// depends on (#3829). A check run is ONE resource: `PATCH` mutates the run, so
+// the next list returns what the update left. Listing only creates made a lane
+// that invalidated its aggregate and then published PASS by update read back as
+// still WAITING — so nothing that reads the PUBLISHED state of the fixed
+// aggregate could be tested against it, however correct the production code was.
+test("the fake lists a check run as its updates left it", async () => {
+  const github = fakeGateGithub({ checkRuns: [] });
+  const address = { owner: "sachiniyer", repo: "agent-factory" };
+  const created = await github.rest.checks.create({
+    ...address,
+    head_sha: HEAD_SHA,
+    name: "Auto Gate decision",
+    external_id: aggregateExternalId(HEAD_SHA),
+    status: "completed",
+    conclusion: "failure",
+    output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+  });
+  await github.rest.checks.update({
+    ...address,
+    check_run_id: created.data.id,
+    status: "completed",
+    conclusion: "success",
+    output: { title: "PASS: every open master PR at this commit passes Auto Gate" },
+  });
+
+  const listed = await github.paginate(github.rest.checks.listForRef, {
+    ...address,
+    ref: HEAD_SHA,
+  });
+  const aggregate = listed.filter((run) => run.name === "Auto Gate decision");
+
+  assert.equal(aggregate.length, 1, "an update is a mutation, not a new generation");
+  assert.equal(aggregate[0].id, created.data.id, "and it keeps the id it was created with");
+  assert.equal(
+    aggregate[0].conclusion,
+    "success",
+    "the list must report the conclusion the update left, not the one the create set",
+  );
+  assert.match(aggregate[0].output.title, /^PASS:/);
+});
+
 test("a live newer owner outranks merged evidence on a shared head", async () => {
   // Codex P1 (round 3): the two evidence paths are not mutually exclusive. A
   // shared head can have THIS PR merged while a newer transaction is mid-flight
@@ -7711,12 +7753,19 @@ function fakeGateGithub({
     }
     github.operations.push("check:create");
     github.createdChecks.push(options);
-    // created_at matters: generation comparison reads it off the check the
-    // transaction owns, and a response without one makes every other check look
-    // newer. Same stamp paginate() synthesizes below, so a transaction's own
-    // check is not mistaken for a later transaction's.
+    // The generation stamp matters: generation comparison reads it off the check
+    // the transaction owns, and a response without one makes every other check
+    // look newer. Same stamp paginate() synthesizes below, so a transaction's own
+    // check is not mistaken for a later transaction's — and the same FIELDS the
+    // API sends, which are `started_at`/`completed_at` and never `created_at`
+    // (#3827).
     return {
-      data: { id: 10000 + github.createdChecks.length - 1, created_at: CHECK_GENERATION_AT, ...options },
+      data: {
+        id: 10000 + github.createdChecks.length - 1,
+        started_at: CHECK_GENERATION_AT,
+        completed_at: CHECK_GENERATION_AT,
+        ...options,
+      },
     };
   };
   const updateCheck = async function updateCheck(options) {
@@ -7737,7 +7786,6 @@ function fakeGateGithub({
           app: { id: ACTIONS_APP_ID, slug: "github-actions" },
           status: "completed",
           conclusion: "failure",
-          created_at: "2026-07-09T09:00:00Z",
           started_at: "2026-07-09T09:00:00Z",
           completed_at: "2026-07-09T09:00:00Z",
           output: { title: "WAITING: refreshing every PR/head decision at this commit" },
@@ -7747,10 +7795,18 @@ function fakeGateGithub({
     }
     github.operations.push("check:update");
     github.updatedChecks.push(options);
-    // An update returns the whole check run, id and original created_at included
-    // — not a bare echo of the patch. Generation comparison reads both off it.
+    // An update returns the whole check run, not a bare echo of the patch — id and
+    // generation stamps included, which is what generation comparison reads off
+    // it. `started_at`/`completed_at` and no `created_at`, because that is the
+    // shape the API returns (#3827); a fake that hands back the phantom field is
+    // how the ordering bug stayed invisible for as long as it did.
     return {
-      data: { id: options.check_run_id, created_at: CHECK_GENERATION_AT, ...options },
+      data: {
+        id: options.check_run_id,
+        started_at: CHECK_GENERATION_AT,
+        completed_at: CHECK_GENERATION_AT,
+        ...options,
+      },
     };
   };
   const responses = new Map([
@@ -8062,18 +8118,36 @@ function fakeGateGithub({
       const pullRequestOverride = pullRequestsByNumber[number] || {};
       if (fn === listForRef) {
         github.checkListReads += 1;
-        return [
-          ...checkRuns,
-          ...github.injectedCheckRuns,
-          ...github.createdChecks.map((created, index) => ({
-            id: 10000 + index,
-            app: { id: ACTIONS_APP_ID, slug: "github-actions" },
-            created_at: CHECK_GENERATION_AT,
-            started_at: CHECK_GENERATION_AT,
-            completed_at: CHECK_GENERATION_AT,
-            ...created,
-          })),
-        ];
+        // Updates are APPLIED, not merely recorded (#3829).
+        //
+        // A check run is one resource: `PATCH /check-runs/{id}` mutates the run
+        // the lane created, so a later list returns the updated conclusion. This
+        // listed only creates, so a lane that invalidated its aggregate and then
+        // published PASS by update was listed as still WAITING — and any code
+        // that reads the PUBLISHED state of the fixed aggregate (rather than
+        // re-deriving what it ought to say) could not be tested against it at all.
+        const runs = github.createdChecks.map((created, index) => ({
+          id: 10000 + index,
+          app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+          started_at: CHECK_GENERATION_AT,
+          completed_at: CHECK_GENERATION_AT,
+          ...created,
+        }));
+        const byId = new Map(runs.map((run) => [run.id, run]));
+        // In call order, so the last write wins exactly as it does on the server.
+        for (const update of github.updatedChecks) {
+          const target = byId.get(update.check_run_id);
+          if (!target) {
+            continue;
+          }
+          const patch = { ...update };
+          // Addressing, not content: these name the run, they are not fields on it.
+          delete patch.check_run_id;
+          delete patch.owner;
+          delete patch.repo;
+          Object.assign(target, patch);
+        }
+        return [...checkRuns, ...github.injectedCheckRuns, ...runs];
       }
       if (fn === listPullRequestsAssociatedWithCommit) {
         github.associationReads += 1;
