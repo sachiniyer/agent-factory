@@ -200,9 +200,15 @@ func renderRows(r *Report, fixMode, verbose bool) []renderRow {
 // rows, one per directory, burying every other finding in the report. The
 // underlying Findings are untouched — --verbose still lists each home and --fix
 // still removes them one by one — only the default rendering collapses.
+//
+// dead-socket-home is here from the start, and by measurement rather than by
+// analogy: the box #3845 was filed from holds 9,894 directories under /tmp, and
+// the whole point of the row is a number the operator can watch go down.
+// leaked-daemon joins it because the same box carried three of those at once.
 func collapsibleFinding(check string) bool {
 	switch check {
-	case "orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home":
+	case "orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home",
+		checkLeakedDaemon, checkDeadSocketHome:
 		return true
 	default:
 		return false
@@ -217,7 +223,8 @@ func collapseProcessFindings(findings []Finding, fixMode bool) []renderRow {
 		}
 	}
 	var rows []renderRow
-	for _, check := range []string{"orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home"} {
+	for _, check := range []string{"orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home",
+		checkLeakedDaemon, checkDeadSocketHome} {
 		group := byCheck[check]
 		if len(group) == 0 {
 			continue
@@ -314,6 +321,10 @@ func collapsedProcessName(check string) string {
 		return "runaway-cpu"
 	case "stale-temp-home":
 		return "stale-temp-homes"
+	case checkLeakedDaemon:
+		return "leaked-daemons"
+	case checkDeadSocketHome:
+		return "dead-socket-homes"
 	default:
 		return check
 	}
@@ -385,6 +396,46 @@ func collapsedProcessDetail(check string, total, unproven, fixable, fixed, faile
 			parts = append(parts, fmt.Sprintf("%d removal failed", failed))
 		}
 		return strings.Join(parts, ", ")
+	case checkLeakedDaemon:
+		// "leaked" is a CONCLUSION, and most of this group's findings withhold
+		// it: a daemon whose binary was merely replaced is an upgrade, not
+		// debris, and one whose home is unreadable was never classified at all.
+		// The stale-temp-home row learned this the hard way (#3466) — asserting
+		// in the collapsed view what the detector refused to assert per item.
+		noun, nounPlural := "leaked af daemon", "leaked af daemons"
+		if unproven > 0 {
+			noun, nounPlural = "af daemon not running an installed binary", "af daemons not running an installed binary"
+		}
+		parts := []string{plural(total, noun, nounPlural)}
+		if fixable > 0 {
+			parts = append(parts, fmt.Sprintf("%d proven debris and safe to stop", fixable))
+		}
+		if unproven > 0 {
+			parts = append(parts, fmt.Sprintf("%d left alone (an upgrade, this home's own daemon, or unreadable)", unproven))
+		}
+		if fixMode && fixed > 0 {
+			parts = append(parts, fmt.Sprintf("%d stopped", fixed))
+		}
+		if failed > 0 {
+			parts = append(parts, fmt.Sprintf("%d stop failed", failed))
+		}
+		return strings.Join(parts, ", ")
+	case checkDeadSocketHome:
+		parts := []string{fmt.Sprintf("%s under the temp dir holding nothing but a dead daemon socket",
+			plural(total, "directory", "directories"))}
+		if fixable > 0 {
+			parts = append(parts, fmt.Sprintf("%d safe to remove", fixable))
+		}
+		if unproven > 0 {
+			parts = append(parts, fmt.Sprintf("%d that could not be assessed", unproven))
+		}
+		if fixMode && fixed > 0 {
+			parts = append(parts, fmt.Sprintf("%d removed", fixed))
+		}
+		if failed > 0 {
+			parts = append(parts, fmt.Sprintf("%d removal failed", failed))
+		}
+		return strings.Join(parts, ", ")
 	default:
 		return fmt.Sprintf("%s reported", plural(total, "finding", "findings"))
 	}
@@ -408,6 +459,16 @@ func collapsedProcessRemediation(check string, fixable int, fixMode bool) string
 			return "run `af doctor --fix` to remove the provably unused homes; rerun with `--verbose` to see each one"
 		}
 		return "rerun with `--verbose` to see each home; verify nothing is using the rest before removing them"
+	case checkLeakedDaemon:
+		if fixable > 0 && !fixMode {
+			return "run `af doctor --fix` to stop the ones proven to be debris; rerun with `--verbose` to see each"
+		}
+		return "rerun with `--verbose` to see each daemon; the rest are reported, not stopped"
+	case checkDeadSocketHome:
+		if fixable > 0 && !fixMode {
+			return "run `af doctor --fix` to remove them; rerun with `--verbose` to see each one"
+		}
+		return "rerun with `--verbose` to see each directory; verify nothing is using the rest before removing them"
 	default:
 		return "rerun with `--verbose` for details"
 	}

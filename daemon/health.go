@@ -218,6 +218,12 @@ func DaemonSocketNames() []string {
 // entry Health already speaks for and avoid reporting it twice.
 func ControlSocketName() string { return daemonSocketFileName }
 
+// HTTPSocketName is the file name of the HTTP/JSON socket. Exported alongside
+// ControlSocketName so `af doctor` can recognise a directory holding nothing but
+// this socket — the residue an abandoned daemon's bind used to leave behind
+// (#3842/#3845) — without spelling the name a second time.
+func HTTPSocketName() string { return daemonHTTPSocketFileName }
+
 // LooksLikeDaemonArgv reports whether argv names an agent-factory daemon
 // process (an `af`/`agent-factory` binary carrying a discrete --daemon flag).
 // It takes real argv elements (boundaries preserved) so a daemon installed

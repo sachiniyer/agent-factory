@@ -274,14 +274,26 @@ health, and remote-hook setup for the current repo when configured.
 
 `af doctor` is read-only by default: it reports orphaned processes left behind
 by dead sessions, processes pegging a CPU core inside live sessions, `af_` tmux
-sessions with no backing record, abandoned temp agent-factory homes, pinned
-remote host-key directories no session owns, and daemon problems (stale socket,
-stale pid file, a daemon still running a replaced binary). With `--fix` it kills
-orphans whose ancestry markers prove they came from a dead Agent Factory
-session, removes stale temp homes, and removes orphaned host-key pins, logging
-each action; anything it cannot verify is reported, never touched, and stays
-advisory rather than failing the run. Exits 1 only when an actionable
-condition remains — advisory warnings do not.
+sessions with no backing record, abandoned temp agent-factory homes, af daemons
+running a binary no install owns, temp directories holding nothing but a daemon
+socket nobody answers on, pinned remote host-key directories no session owns,
+and daemon problems (stale socket, stale pid file, a daemon still running a
+replaced binary). With `--fix` it kills orphans whose ancestry markers prove they
+came from a dead Agent Factory session, removes stale temp homes, stops daemons
+proven to be running a temp-dir binary, removes dead-socket directories, and
+removes orphaned host-key pins, logging each action; anything it cannot verify is
+reported, never touched, and stays advisory rather than failing the run. Exits 1
+only when an actionable condition remains — advisory warnings do not.
+
+The last two are the debris a test or debug run leaves behind (#3845). A daemon
+whose binary lives under the temp dir is not an install, and one that has been up
+past a grace window cannot belong to a test run that is still going, so `--fix`
+stops it — never the daemon serving this home, and never one whose home could not
+be read. A binary that is merely *missing* is reported rather than stopped:
+`af upgrade` replaces it in place, so every healthy daemon looks that way until
+it restarts. A directory holding nothing but a dead `daemon-http.sock` is removed
+with a plain rmdir rather than a recursive delete, so one that has gained
+anything since the scan fails instead of being swept up with it.
 
 When the repository you run it in configures a [remote-hook backend](remote-hooks.md),
 `af doctor` also validates that setup, so a misconfigured remote surfaces as a
