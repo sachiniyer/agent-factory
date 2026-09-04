@@ -236,6 +236,10 @@ export function newSessionModal(
   let accounts: AccountsResponse | null = null;
   let programCatalog: ProgramCatalog | null = null;
   let accountRows: AccountChoice[] = accountChoices(null, "");
+  // The agent the offered rows currently belong to. Tracked explicitly rather than
+  // read back off a row, because it is what decides whether a re-render may keep the
+  // user's pick — and that decision must not depend on the shape of the list.
+  let accountAgent = "";
 
   // Mirrors the chrome's busy flag. An async availability refresh can land at ANY
   // time — including mid-submit — and it must never be the thing that decides
@@ -293,14 +297,14 @@ export function newSessionModal(
   const renderAccounts = (): void => {
     const agent = accountAgentFor(programSelect.value, programCatalog);
     const previous = accountSelect.value;
-    const previousAgent = accountRows[0]?.agent ?? "";
+    const sameAgent = agent === accountAgent;
     accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
+    accountAgent = agent;
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
     }
-    const keep = agent === previousAgent && accountRows.some((c) => c.value === previous);
-    accountSelect.value = keep ? previous : AMBIENT_ACCOUNT;
+    accountSelect.value = sameAgent && accountRows.some((c) => c.value === previous) ? previous : AMBIENT_ACCOUNT;
     syncSubmitState();
   };
 

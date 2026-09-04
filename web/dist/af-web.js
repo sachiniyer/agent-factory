@@ -10206,6 +10206,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let accounts = null;
   let programCatalog = null;
   let accountRows = accountChoices(null, "");
+  let accountAgent = "";
   let busy = false;
   const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
@@ -10231,14 +10232,14 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const renderAccounts = () => {
     const agent = accountAgentFor(programSelect.value, programCatalog);
     const previous = accountSelect.value;
-    const previousAgent = accountRows[0]?.agent ?? "";
+    const sameAgent = agent === accountAgent;
     accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
+    accountAgent = agent;
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
     }
-    const keep = agent === previousAgent && accountRows.some((c) => c.value === previous);
-    accountSelect.value = keep ? previous : AMBIENT_ACCOUNT;
+    accountSelect.value = sameAgent && accountRows.some((c) => c.value === previous) ? previous : AMBIENT_ACCOUNT;
     syncSubmitState();
   };
   accountSelect.addEventListener("change", syncSubmitState);
