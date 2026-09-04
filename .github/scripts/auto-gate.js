@@ -2702,8 +2702,17 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
       error.autoGateOwnershipUnknown = formatError(readError);
       return null;
     }
-    const newerOwner = aggregateChecks
-      .filter((check) => {
+    // `newestCheckGeneration`, not a sort written out here again. #3828 fixed
+    // the filter above to read `latestRunTime` and left this pick as a copy of
+    // the pre-#3827 comparator, still keyed on `created_at` — so its primary key
+    // was `0 - 0` for every pair and the id tiebreak decided alone. Ids are
+    // monotonic, so it usually agreed with the helper; it agreed by accident,
+    // and diverged exactly when a generation finished later than one created
+    // after it (#3831). Sharing the helper is the whole point: one notion of
+    // "which generation is newer", so the filter and the pick cannot drift apart
+    // a second time.
+    const newerOwner = newestCheckGeneration(
+      aggregateChecks.filter((check) => {
         const generation = latestRunTime(check);
         const newerGeneration =
           generation > ownedGeneration ||
@@ -2716,12 +2725,8 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
           check.conclusion === "failure" &&
           check.output?.title?.startsWith(AGGREGATE_WAITING_TITLE)
         );
-      })
-      .sort((left, right) => {
-        const createdDifference =
-          (Date.parse(right.created_at || "") || 0) - (Date.parse(left.created_at || "") || 0);
-        return createdDifference || Number(right.id) - Number(left.id);
-      })[0];
+      }),
+    );
     if (!newerOwner) {
       return null;
     }
