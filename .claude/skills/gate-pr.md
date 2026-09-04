@@ -698,10 +698,23 @@ usage-limit reply blocks it too, with the unmet item
 > awaiting maintainer review — post `## Review — approve` on this head
 
 That is the whole exit, and anyone with the marker can take it on any PR,
-external ones included. Post it and the gate merges on its own (#3796); there is
-no longer a green manual-merge state for a hand to act on. The old rule left the
-review to a convention, and #3760 merged with zero reviews, zero review comments
-and no review events through exactly that gap.
+external ones included — it needs nothing from the author, which is why blocking
+on it is a gate rather than a stop with no way out. Post it and, on an allowlisted
+author's PR, the gate merges on its own (#3796); on anyone else's the PR was
+always maintainer-merged, so the marker restores the manual pass and you land it
+by hand. There is no longer a green manual-merge state for a hand to act on before
+the marker exists. The old rule left the review to a convention, and #3760 merged
+with zero reviews, zero review comments and no review events through exactly that
+gap.
+
+**Check that on an external PR by reading the blockers, not the unmet list.** The
+manual decision's conclusion is computed from `manualMergeBlockers` alone, and
+#3824 recorded the awaiting-review item only in `reasons` — so on external PRs the
+check kept going green with the verbatim title `PASS: reviewer usage-limited;
+maintainer review and manual merge required`, which is the string #3819 opened
+with as the defect (#3825). A BLOCKED manual decision names its first blocker in
+the title and lists every one of them, each with its own remedy, above the
+`Unmet automatic-merge requirements:` line.
 
 Either way the decision carries `Codex has not reviewed head <sha> yet`, and
 either way it will not merge for you. What to do:

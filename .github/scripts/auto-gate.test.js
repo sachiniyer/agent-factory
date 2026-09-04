@@ -3195,36 +3195,45 @@ test("a Codex rate-limit message never becomes a verdict", async () => {
 // So the degraded pass is not green until a head-bound approval exists. The exit
 // is per-item and any maintainer can take it, on any PR including an external
 // one: post the marker on this head.
+//
+// Driven against BOTH authors, because they reach the published conclusion by
+// different code and only one was covered. `manualMergeRequired` is set by the
+// author check and nothing else, so asserting it is false says nothing on an
+// allowed author's PR — it is structurally false there whatever the degradation
+// does — and #3824 shipped the external half broken underneath exactly that
+// assertion (#3825). What both paths owe is the same published conclusion.
 test("the degraded pass is not green without a maintainer approval", async () => {
-  const result = await evaluateGate({ issueComments: [codexRateLimit()] });
+  for (const author of ["sachiniyer", "detail-app"]) {
+    const result = await evaluateGate({ author, issueComments: [codexRateLimit()] });
 
-  assert.equal(result.shouldMerge, false, "still never auto-merges without a review");
-  assert.notEqual(
-    result.manualMergeRequired,
-    true,
-    "and it must no longer be a PASSING manual-merge state a hand can act on",
-  );
-  assert.match(result.summary, /^BLOCKED:|^WAITING:/);
-  assert.match(
-    result.reasons.join("\n"),
-    /awaiting maintainer review — post `## Review — approve` on this head/,
-    `the unmet item must name the exit; got: ${result.reasons.join("; ")}`,
-  );
+    assert.equal(result.shouldMerge, false, `still never auto-merges without a review: ${author}`);
+    assert.match(result.summary, /^BLOCKED:|^WAITING:/, `must not read as a pass: ${author}`);
+    assert.match(
+      result.reasons.join("\n"),
+      /awaiting maintainer review — post `## Review — approve` on this head/,
+      `the unmet item must name the exit; got: ${result.reasons.join("; ")}`,
+    );
 
-  // …and the published check must not be green.
-  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
-  await autoGate.reportDecision({
-    github,
-    context: fakeContext(),
-    core: fakeCore(),
-    result,
-    manual: false,
-  });
-  assert.notEqual(
-    github.createdChecks[0].conclusion,
-    "success",
-    "the fixed-name decision must not be green with no review evidence (#3760)",
-  );
+    // …and the published check must not be green, whichever path it took there.
+    const github = fakeGateGithub({ author, checkRuns: happyCheckRuns() });
+    const report = await autoGate.reportDecision({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      result,
+      manual: false,
+    });
+    assert.notEqual(
+      report.state,
+      "manual",
+      `a PASSING manual-merge state a hand can act on is what #3819 removed: ${author}`,
+    );
+    assert.notEqual(
+      github.createdChecks[0].conclusion,
+      "success",
+      `the fixed-name decision must not be green with no review evidence (#3760): ${author}`,
+    );
+  }
 });
 
 // The negative, and the exit: with the approval on this head the gate merges on
@@ -3241,6 +3250,117 @@ test("the degraded pass with a head-bound approval still merges itself", async (
   assert.equal(result.shouldMerge, true, `must merge on its own: ${result.reasons.join("; ")}`);
   assert.equal(result.manualMergeRequired, false);
   assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+// #3825. The blocker above was pushed into `reasons`, and the published check
+// reads `reasons` only on the auto-merge path: a non-allowed author takes the
+// manual path, whose conclusion is computed from `manualMergeBlockers` alone. So
+// the item was computed, dropped, and the check went green with the verbatim
+// title #3819 opened with — "PASS: reviewer usage-limited; maintainer review and
+// manual merge required". This is the issue's probe: one variable, the author.
+test("a usage-limit degradation blocks the manual decision for a non-allowed author", async () => {
+  const result = await evaluateGate({ author: "detail-app", issueComments: [codexRateLimit()] });
+
+  assert.equal(result.manualMergeRequired, true, "the PR is still maintainer-merged");
+  assert.equal(result.degradedForUnavailableReviewer, true, "and the degradation did fire");
+  assert.deepEqual(
+    result.manualMergeBlockers.map((blocker) => blocker.reason),
+    [__test.AWAITING_MAINTAINER_REVIEW_REASON],
+    "the awaiting-review item must block the manual path, not only the auto-merge one",
+  );
+  assert.match(result.summary, /^BLOCKED:/, "the decision must not read as a pass");
+  // The blocker is named ABOVE the advisory list with its own remedy, and is not
+  // repeated inside it — the #3558 separation, which exists because a hard
+  // blocker buried in the advisory list reads as one more maintainer's call on
+  // the way to a hand merge.
+  const [blocking, advisory] = result.summary.split("Unmet automatic-merge requirements:");
+  assert.match(blocking, /post `## Review — approve` on this head/);
+  assert.match(blocking, /whole first line of a PR comment/, "the remedy travels with it");
+  assert.ok(advisory, "the advisory section still carries what nobody can act on");
+  assert.match(advisory, /the latest Codex response was usage-limited/);
+  assert.doesNotMatch(advisory, /awaiting maintainer review/);
+
+  // …and the published decision, which is the thing a hand merge reads.
+  const github = fakeGateGithub({ author: "detail-app", checkRuns: happyCheckRuns() });
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(report.state, "manual-blocked");
+  assert.equal(
+    github.createdChecks[0].conclusion,
+    "failure",
+    "the manual path must not publish a green decision with no review evidence (#3819)",
+  );
+  assert.doesNotMatch(
+    github.createdChecks[0].output.title,
+    /^PASS:/,
+    "the exact title #3819 opened with must not come back on the external path",
+  );
+  assert.match(github.createdChecks[0].output.title, /awaiting maintainer review/);
+});
+
+// The required check a hand merge is gated on is the fixed-name aggregate, so
+// the block has to reach THERE — a per-PR conclusion alone leaves it unproven
+// where it bites.
+test("a usage-limit degradation keeps the aggregate red for a non-allowed author", async () => {
+  const github = fakeGateGithub({ author: "detail-app", issueComments: [codexRateLimit()] });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(github.mergedWith, null, "nothing may merge automatically either");
+  assert.equal(
+    transaction.aggregate.ok,
+    false,
+    "the required aggregate must stay red, or a hand merge is still allowed",
+  );
+});
+
+// The exit, on the path that needs it most: the maintainer posts the marker
+// without the author iterating, and the manual pass returns exactly as it was
+// before #3819 — findings-only, green, hand-merged. The block is per-item, so it
+// is a gate rather than a stop with no way out.
+test("a maintainer approval restores a non-allowed author's manual pass", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.manualMergeRequired, true, "the author still cannot auto-merge");
+  assert.equal(result.shouldMerge, false);
+  assert.deepEqual(result.manualMergeBlockers, [], "the approval answers the only blocker");
+  assert.match(result.summary, /^PASS:/);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+
+  const github = fakeGateGithub({ author: "detail-app", checkRuns: happyCheckRuns() });
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(report.state, "manual");
+  assert.equal(github.createdChecks[0].conclusion, "success");
+  assert.equal(
+    github.createdChecks[0].output.title,
+    "PASS: reviewer usage-limited; maintainer review and manual merge required",
+  );
 });
 
 test("an observed usage-limited reviewer names an exit instead of waiting forever", async () => {
@@ -6951,6 +7071,10 @@ test("a live finding keeps the required aggregate red for a non-allowed author",
   );
   assert.equal(exactDecision.conclusion, "failure");
   assert.match(exactDecision.output.title, /^BLOCKED:/);
+  // …and it names WHICH blocker. Since #3825 two kinds can hold this path and
+  // they take different actions, so a title that named neither would send the
+  // maintainer to the summary to find out which one it is.
+  assert.match(exactDecision.output.title, /1 unresolved live Codex inline finding/);
   assert.equal(
     transaction.aggregate.ok,
     false,
@@ -7039,9 +7163,13 @@ test("answering the finding restores the manual-merge pass for a non-allowed aut
   assert.match(result.summary, /^PASS:/);
 });
 
-// Scope: this blocks on FINDINGS, not on everything. A missing play-tested label
-// and an absent verdict are still notes on the manual path, exactly as before —
-// widening the block would have made every external PR unmergeable.
+// Scope: what blocks this path is what a maintainer can answer PER ITEM — a live
+// finding (#3558), and since #3825 an unreviewed usage-limit degradation, which
+// the approval marker clears without the author iterating. A missing play-tested
+// label and a merely ABSENT verdict are still notes, exactly as before: neither
+// has such an answer on a PR whose author does not iterate, and blocking on them
+// would make every external PR unmergeable. This fixture is silence rather than a
+// usage-limit reply, so no degradation fires and nothing is promoted.
 test("a non-allowed author's other unmet requirements stay notes, not blockers", async () => {
   const result = await evaluateGate({
     author: "detail-app",

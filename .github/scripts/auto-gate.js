@@ -317,9 +317,23 @@ const MANUAL_MERGE_AUTHOR_REASON =
 // The unmet item a usage-limit degradation leaves when nobody has reviewed. It
 // names the exit rather than the problem, because the problem — Codex is out of
 // quota — is not something anyone can act on, and the exit is.
+//
+// The tail says the approval CLEARS it rather than that the gate merges, because
+// this one string is published on both paths and only one of them merges: a PR
+// from a non-allowed author is maintainer-merged whatever the review says, so an
+// approval there restores the manual pass instead (#3825). The remedy below
+// carries that difference, since it is only ever rendered on the manual path.
 const AWAITING_MAINTAINER_REVIEW_REASON =
   "awaiting maintainer review — post `## Review — approve` on this head; Codex is usage-limited " +
-  "so no verdict can arrive, and the gate merges once a maintainer has reviewed";
+  "so no verdict can arrive, and a maintainer approval bound to this head clears it";
+// What a manual-merge blocker needs beyond its reason: who can post the marker,
+// and what posting it does on a path that never auto-merges. The reason names the
+// exit; this names the hand that can take it, which is the part that decides
+// whether the block is a gate or a stop with no way out.
+const AWAITING_MAINTAINER_REVIEW_REMEDY =
+  "an allowed author posts that marker as the whole first line of a PR comment, or leaves an " +
+  "APPROVED review — neither needs anything from the author; it binds to this head, so a push " +
+  "after it needs a fresh one, and on this path it restores the manual pass";
 const RETRY_DELAYS_MS = [250, 1000];
 // A merge that has already STARTED needs longer than a read retry to land.
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
@@ -838,6 +852,11 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // it does not waive it. What is left is the mechanical part the gate already
   // performs for every other passing PR, so it performs it here too.
   const approval = degradedForUnavailableReviewer ? codex.maintainerApproval : null;
+  // Named once and read twice: here, and again where the manual path assembles its
+  // blockers. #3824 named it nowhere and pushed only into `reasons`, which the
+  // manual path never reads — so on a non-allowed author's PR the item was
+  // computed, dropped, and the decision published green (#3825).
+  const awaitingMaintainerReview = degradedForUnavailableReviewer && !approval;
   // One branch, mutually exclusive, because the two outcomes are one decision:
   // an approved degraded head merges, an unapproved one blocks with the exit
   // named. An earlier shape pushed the blocker under `&& !approval` and then
@@ -846,7 +865,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // changed nothing. Expressed once, there is nothing to keep in step.
   if (!degradedForUnavailableReviewer) {
     // Not degraded: nothing here applies.
-  } else if (!approval) {
+  } else if (awaitingMaintainerReview) {
     // NOT a passing manual state (#3819). This used to publish a green decision
     // saying, in words, "This PR has NOT been reviewed — a maintainer must review
     // and merge it manually", which made the PR mergeable and left the review to
@@ -859,6 +878,10 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     // reachable on every PR including an external one, because the maintainer can
     // post the marker whether or not the author iterates — which is what the
     // degradation's own design insists on: never a stop with no way out.
+    //
+    // This push alone does NOT reach an external PR: the manual path's conclusion
+    // is computed from `manualMergeBlockers`, not from `reasons`, so the item joins
+    // that list below as well (#3825).
     reasons.push(AWAITING_MAINTAINER_REVIEW_REASON);
   } else {
     // The approval SATISFIES the one requirement the degradation was about, so
@@ -893,14 +916,36 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // PR, and the degradation above already refuses to let "the reviewer is down"
   // waive one — this is the same rule, applied to the branch that skipped it.
   //
-  // Findings ONLY. The other unmet requirements stay notes here, deliberately: a
-  // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack]
-  // reply the maintainer already posts, so blocking on one leaves an exit. A
-  // missing play-tested label or an absent verdict has no such per-item answer
-  // on a PR whose author does not iterate, and blocking on those would turn the
-  // manual path into a stop with no way out — the failure mode the reviewer
-  // degradation was written to avoid.
-  const manualMergeBlockers = manualMergeRequired ? codex.findingBlockers ?? [] : [];
+  // The test is PER-ITEM ANSWERABLE BY A MAINTAINER, not "is it a finding". A
+  // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack] reply
+  // the maintainer already posts, so blocking on one leaves an exit. A missing
+  // play-tested label or an absent verdict has no such answer on a PR whose author
+  // does not iterate, and blocking on those would turn the manual path into a stop
+  // with no way out — the failure mode the reviewer degradation was written to
+  // avoid. Those stay notes.
+  //
+  // An unreviewed usage-limit degradation passes that test, so it blocks here too
+  // (#3825). The maintainer clears it by posting the approval marker on this head,
+  // which needs nothing from the author — the same property that makes a finding
+  // safe to block on. #3824 recorded it in `reasons` alone, and since this list is
+  // what the manual conclusion is computed from, a non-allowed author's decision
+  // went green carrying the verbatim title #3819 opened with.
+  //
+  // The two kinds never coexist: the degradation requires every OTHER reason to be
+  // absent, and a live finding is a reason.
+  const manualMergeBlockers = manualMergeRequired
+    ? [
+        ...(codex.findingBlockers ?? []),
+        ...(awaitingMaintainerReview
+          ? [
+              {
+                reason: AWAITING_MAINTAINER_REVIEW_REASON,
+                remedy: AWAITING_MAINTAINER_REVIEW_REMEDY,
+              },
+            ]
+          : []),
+      ]
+    : [];
 
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
@@ -928,9 +973,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 // branch conflicts" — and the second is the one state a human must act on at once
 // and cannot fix by waiting (#3800). The reason itself lives in `reasons`, which
 // the summary already prints; this only lifts the first of them into the title.
-//
-// Truncated, because a check-run title is not a place for a sentence list, and
-// the summary carries the whole set immediately below.
 // The evaluation stamp's shape, named once because it is WRITTEN in one place and
 // READ in two more: the aggregate summarises each per-PR decision by quoting its
 // summary, and gate-pr.md tells an operator to read this line instead of
@@ -951,11 +993,33 @@ function decisionSummaryBody(summary) {
 }
 
 function firstUnmetRequirement(result) {
-  const first = (result.reasons || []).find((reason) => String(reason || "").trim() !== "");
-  if (!first) {
+  return titleFragment(
+    (result.reasons || []).find((reason) => String(reason || "").trim() !== ""),
+  );
+}
+
+// The same lift for a BLOCKED manual decision (#3825). That title used to be one
+// fixed sentence about live Codex findings, which stopped being true the moment
+// the awaiting-review item could block this path too — and the two kinds take
+// DIFFERENT actions: a threaded reply on a finding, the approval marker on an
+// awaiting-review item. A title naming neither sends the maintainer to the summary
+// to find out which, which is the #3800 read this file already rejected on the
+// auto-merge side.
+function firstManualMergeBlocker(result) {
+  return titleFragment(
+    (result.manualMergeBlockers || []).find(
+      (blocker) => String(blocker?.reason || "").trim() !== "",
+    )?.reason,
+  );
+}
+
+// Truncated, because a check-run title is not a place for a sentence list, and
+// the summary carries the whole set immediately below.
+function titleFragment(value) {
+  const text = String(value || "").trim();
+  if (text === "") {
     return "";
   }
-  const text = String(first).trim();
   return text.length > 90 ? `${text.slice(0, 89)}…` : text;
 }
 
@@ -1032,7 +1096,7 @@ async function reportDecision({ github, context, core, result, manual = false })
           ? result.degradedForUnavailableReviewer
             ? "PASS: reviewer usage-limited; maintainer review and manual merge required"
             : "PASS: maintainer review and manual merge required"
-          : "BLOCKED: a manual merge still requires every live Codex finding to be answered"
+          : `BLOCKED: ${firstManualMergeBlocker(result) || "a manual merge has an unanswered blocker"}`
         : result.shouldMerge
           ? "PASS: Auto Gate requirements are satisfied"
           : `WAITING: ${firstUnmetRequirement(result) || "Auto Gate requirements are not yet satisfied"}`;
@@ -4318,8 +4382,8 @@ function finish(core, setOutputs, result) {
     summary =
       blockers.length === 0
         ? `PASS: ${manual}${unmetSuffix}`
-        : `BLOCKED: ${manual} A manual merge still requires every live Codex finding to be ` +
-          `answered:\n- ${blocked}${unmetSuffix}`;
+        : `BLOCKED: ${manual} A manual merge is blocked until each of these is answered:` +
+          `\n- ${blocked}${unmetSuffix}`;
   } else {
     summary =
       result.reasons.length === 0
