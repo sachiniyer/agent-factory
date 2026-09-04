@@ -442,15 +442,15 @@ async function createCheckRun({
             ref: headSha,
             per_page: 100,
           });
-          const created = checkRuns
-            .filter(
+          const created = newestCheckGeneration(
+            checkRuns.filter(
               (run) =>
                 run.name === name &&
                 run.external_id === externalId &&
                 run.app?.id === GITHUB_ACTIONS_APP_ID &&
                 run.output?.text?.includes(marker),
-            )
-            .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+            ),
+          );
           if (!created) {
             const missing = new Error("the matching check run is not visible yet");
             missing.status = 503;
@@ -1085,14 +1085,14 @@ async function reportDecision({ github, context, core, result, manual = false })
       }),
     subject,
   );
-  const priorDecision = checkRuns
-    .filter(
+  const priorDecision = newestCheckGeneration(
+    checkRuns.filter(
       (run) =>
         run.name === identity.checkName &&
         run.external_id === identity.externalId &&
         run.app?.id === GITHUB_ACTIONS_APP_ID,
-    )
-    .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+    ),
+  );
   // A manual-merge PR passes the required check only while nothing the
   // maintainer must answer first is outstanding (#3558).
   const manualMergeBlockers = result.manualMergeBlockers || [];
@@ -1859,14 +1859,14 @@ async function evaluateAggregateDecision({ github, context, headSha }) {
   }
   for (const pull of pulls) {
     const identity = decisionIdentity(pull.number, sha);
-    const decision = checkRuns
-      .filter(
+    const decision = newestCheckGeneration(
+      checkRuns.filter(
         (run) =>
           run.name === identity.checkName &&
           run.external_id === identity.externalId &&
           run.app?.id === GITHUB_ACTIONS_APP_ID,
-      )
-      .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+      ),
+    );
     if (!decision) {
       blockers.push(
         `PR #${pull.number} at this commit has no exact PR/head Auto Gate decision; ` +
@@ -1950,14 +1950,14 @@ async function upsertAggregateCheck({
   const identity = aggregateIdentity(headSha);
   const prior = checkRunId
     ? { id: checkRunId }
-    : checkRuns
-        .filter(
+    : newestCheckGeneration(
+        checkRuns.filter(
           (run) =>
             run.name === identity.checkName &&
             run.external_id === identity.externalId &&
             run.app?.id === GITHUB_ACTIONS_APP_ID,
-        )
-        .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+        ),
+      );
   try {
     // Inside the retry, not outside it. A retried write sleeps and reissues, and
     // a precondition checked once before the helper is stale for every attempt
@@ -4465,11 +4465,27 @@ function latestRunTime(run) {
   return parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0;
 }
 
-// Newest generation first. The timestamp comes from `latestRunTime`, which reads
-// the fields a check run carries — this sorted on `created_at`, which the API
-// never returns, so every comparison was 0 and the id tiebreaker below was doing
-// all of the work (#3827). Ids are monotonic, so the ordering it produced was
-// right; it was right by accident, and the next reader had no way to tell.
+// Newest generation first, and THE one place this file answers that question.
+// Every "which generation is newer" pick goes through here — the ambiguous-create
+// recovery, both PATCH-target picks, the aggregate's per-PR decision, the
+// ownership reads, and the newer-owner concession — so there is no second
+// comparator to drift out of step with this one. Three did drift, in three
+// different ways, and each cost a PR: `created_at` in the fencing (#3827), the
+// copy of that comparator the fix left behind (#3831), and four sites that read
+// the right field but stopped before the tiebreak (#3833). Add a fifth spelling
+// and you are re-opening that sequence; call this instead.
+//
+// The timestamp comes from `latestRunTime`, which reads the fields a check run
+// carries — this sorted on `created_at`, which the API never returns, so every
+// comparison was 0 and the id tiebreaker below was doing all of the work (#3827).
+// Ids are monotonic, so the ordering it produced was right; it was right by
+// accident, and the next reader had no way to tell.
+//
+// The id tiebreak is not decoration either. Check-run timestamps are second
+// granularity, so two generations of one check on one head — created by racing
+// events — tie routinely. A comparator that stops at the timestamp returns 0 for
+// that pair, and a stable sort then yields whichever `listForRef` happened to
+// return first, an order the API does not document (#3833).
 function newestCheckGeneration(checkRuns) {
   return [...checkRuns].sort((left, right) => {
     const generationDifference = latestRunTime(right) - latestRunTime(left);
