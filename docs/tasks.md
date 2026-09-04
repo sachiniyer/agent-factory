@@ -75,9 +75,9 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
 - **Each newline-terminated stdout line is one event.** Lines over 64KB are truncated to the cap (the remainder is discarded with a logged note). Unterminated trailing output at exit is not an event. Silence is fine — a quiet watcher is healthy; there is no output timeout.
 - **stderr** appends to `~/.agent-factory/logs/task-<id>.log`, size-capped by the same `log_max_size_mb`/`log_max_backups` rotation as the main log. Use it for all logging — anything on stdout becomes an event.
 - **Environment**: the script receives `AF_TASK_ID`, `AF_TASK_NAME`, and `AF_PROJECT_PATH` on top of the daemon's environment.
-- **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until the next daemon start, task edit, re-enable, or explicit `af tasks restart <id>`.
+- **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until a gesture that names **this** task — see [Re-arming a stopped watcher](#re-arming-a-stopped-watcher).
 - **Non-zero exit = failure.** The script is restarted with exponential backoff, 1s doubling to a 5-minute cap. A run that stays healthy for 10 minutes resets the backoff.
-- **Crash-loop breaker**: 5 or more non-zero exits within 10 minutes set the status to `errored` and stop restarts. Re-arm by editing the task, toggling it, or restarting the daemon.
+- **Crash-loop breaker**: 5 or more non-zero exits within 10 minutes set the status to `errored` and stop restarts, again until a gesture that names this task — [Re-arming a stopped watcher](#re-arming-a-stopped-watcher).
 - **Rate limit**: at most 10 events per minute per task. Excess events are dropped — never silently: a warning is logged with a running drop counter. Rate-dropped events are not queued for replay (the limit is protective policy against a chatty script, not an outage signal). This is a limit on the event *rate*, and is independent of `max_concurrent_runs`, which bounds in-flight *sessions* and queues rather than drops — the two are never the binding constraint at the same time (see [Limiting concurrent sessions](#limiting-concurrent-sessions)).
 - **Prompt rendering**: an empty `prompt` delivers the raw line; otherwise `{{line}}` is substituted. An event whose rendered prompt is empty is dropped with an error log.
 - **Ordering**: deliveries are serialized per task in emission order. A slow delivery backpressures the script's stdout rather than reordering events, and replayed events (below) land before newer live ones.
@@ -86,6 +86,20 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
   - **At-least-once**: a daemon crash mid-replay redelivers at most one event. Prompts should tolerate a rare duplicate.
   - **Bounds**: at most 500 events / 256KB queued per task — overflow drops the *oldest* with a logged count; events older than **72h** are expired at replay time, also logged. Sources worth watching re-emit on their next poll, so scripts that poll should still track their own cursor (see `examples/tasks/gh-issue-poll.sh`).
   - **Disabled vs deleted**: a disabled task keeps its backlog and replays it on re-enable; a deleted task's queue is removed.
+
+### Re-arming a stopped watcher
+
+Both terminal states — `stopped` (exit 0) and `errored` (crash-loop breaker) — are **durable**. Exactly these re-arm one:
+
+- `af tasks restart <id>` — the explicit, synchronous re-arm.
+- `af tasks update <id> --enabled true` (or a disable followed by an enable).
+- an edit to that task's `watch_cmd`, `project_path`, or `name` — a different process to run, so it starts.
+- a daemon start.
+- the daemon's `ReloadTasks` route, which re-arms every watch task at once (unadvertised; the TUI and CLI do not need it, since their writes reload in the same call).
+
+Nothing else does. In particular, **writing some other task does not re-arm it**: until #3837 every add/update/remove ran a store-wide reconcile that dropped stopped watchers and started fresh ones with their failure count and backoff chain reset, so on a box with routine task churn a permanently broken script spawned forever and its `errored` status flapped in and out of the TUI. Adding, editing or deleting an unrelated task now leaves a stopped watcher exactly where it stopped.
+
+An ordinary edit to the stopped task itself — `prompt`, `target_session`, `program` — is not a re-arm either; it patches the delivery fields the next event will use, and the watcher stays down.
 
 Edits to delivery fields (`prompt`, `target_session`, `program`) apply from the next event without restarting the script; edits to `watch_cmd`, `project_path`, or `name` restart it. Editing the contents of a script at the same `watch_cmd` path is intentionally not polled. Run `af tasks restart <id>` after that edit: the command synchronously stops and joins the old process group, then starts exactly one replacement from the current script. A disable update uses the same stop-and-join path, so a subsequent enable cannot overlap the old watcher.
 

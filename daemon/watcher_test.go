@@ -217,13 +217,14 @@ func TestWatcherBackoffAndCrashLoopBreaker(t *testing.T) {
 		t.Fatalf("five failing runs finished in %s; exponential backoff should make this take at least %s", elapsed, minimum)
 	}
 
-	// Errored watchers stay down until the next reload.
+	// Errored watchers stay down until something re-arms this task.
 	time.Sleep(150 * time.Millisecond)
 	if got := rec.eventsSnapshot(); len(got) != s.crashMaxExits {
 		t.Fatalf("watcher restarted after the breaker tripped: %v", got)
 	}
 
-	// A reload is the re-arm path for errored watchers.
+	// A full reload is one of the gestures that re-arms an errored watcher
+	// (#3837); an unrelated task write is not — see watcher_breaker_hold_test.go.
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload after errored: %v", err)
 	}
@@ -673,7 +674,7 @@ func TestWatcherFailureLogsIncludeOutputTail(t *testing.T) {
 	if got := warn.String(); !strings.Contains(got, "restarting in") || !strings.Contains(got, "last output:\n  "+wantLine) {
 		t.Fatalf("restart warning missing the output tail, got:\n%s", got)
 	}
-	if got := errBuf.String(); !strings.Contains(got, "giving up until the next reload or re-enable; last output:\n  "+wantLine) {
+	if got := errBuf.String(); !strings.Contains(got, "or the daemon restarts; last output:\n  "+wantLine) {
 		t.Fatalf("breaker message missing the output tail, got:\n%s", got)
 	}
 	statuses := rec.statusesSnapshot()

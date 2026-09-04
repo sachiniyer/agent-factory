@@ -108,7 +108,10 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 	// non-transactional scheduler/watch reload so other clients never remain
 	// stale when that follow-up fails.
 	s.manager.publishEvent(agentproto.EventTaskCreated, created)
-	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
+	// Scoped to the row just written (#3837). A create names its own task and
+	// nothing else, so it must not perform the store-wide re-arm that would
+	// resurrect every watcher another task's breaker had stopped for good.
+	if reloadErr := s.reloadTaskSchedulesLocked(oneWatchTask(created.ID, true)); reloadErr != nil {
 		// Returned as an ERROR, not through the envelope: net/rpc does not send
 		// the response body when a handler errors, and the HTTP route turns this
 		// into an error envelope carrying the shared committed code — which is
@@ -200,7 +203,12 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 	// outcome below and every other client still learns to refetch this value.
 	// The payload is the authoritative merged record, not the partial patch.
 	s.manager.publishEvent(agentproto.EventTaskUpdated, merged)
-	reloadErr := s.reloadTaskSchedulesLocked()
+	// Scoped to the row just written, and a re-arm of it only when the patch
+	// carried Enabled — the enable/disable IS the gesture that re-arms a watcher
+	// that stopped for good, while an ordinary edit (prompt, target) is not
+	// (#3837). A watch_cmd/project_path/name edit restarts the watcher either
+	// way: that is a signature change, not a re-arm.
+	reloadErr := s.reloadTaskSchedulesLocked(oneWatchTask(req.ID, req.Update.Enabled != nil))
 	if reloadErr == nil {
 		// Answer with the record as it now stands, arming included: a caller who
 		// just disabled a task learns that the disarm actually happened (#3623).
@@ -229,7 +237,9 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	// Removal is already durable at this point. Announce that commit even when
 	// the scheduler/watch reload cannot apply it in-process.
 	s.manager.publishEvent(agentproto.EventTaskRemoved, task.Task{ID: req.ID})
-	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
+	// Scoped to the row just written (#3837): stop this task's watcher and drop
+	// its event queue, leaving every other watcher exactly as it was.
+	if reloadErr := s.reloadTaskSchedulesLocked(oneWatchTask(req.ID, true)); reloadErr != nil {
 		// Returned as an ERROR, not through the envelope: net/rpc does not send
 		// the response body when a handler errors, and the HTTP route turns this
 		// into an error envelope carrying the shared committed code — which is

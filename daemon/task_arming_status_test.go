@@ -152,7 +152,7 @@ func TestClearStaleNotArmedStatus_ClearsWhenTheTargetIsDropped(t *testing.T) {
 	require.Empty(t, seeded.TargetSession, "seeded without a target: the dropped-target repair shape")
 
 	m := &Manager{}
-	snapshot, err := m.persistedTasksForArming()
+	snapshot, err := m.persistedTasksForArming(everyWatchTask())
 	require.NoError(t, err)
 	require.Empty(t, snapshot.refused)
 

@@ -104,11 +104,13 @@ func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *Resu
 }
 
 // reloadTaskSchedules re-arms the daemon's cron scheduler and watcher
-// supervisor from tasks.json. It is the shared refresh the ReloadTasks poke and
-// the task CRUD RPCs (Add/Update/RemoveTask) both invoke after a write, so one
-// daemon call owns both steps and no separate ReloadTasks poke is needed for
-// CRUD. The steps are not transactional: persistence happens first, and update
-// callers receive a machine-readable committed outcome if the refresh fails.
+// supervisor from tasks.json. It is the ReloadTasks poke's own entry point, and
+// the only FULL watcher re-arm reachable over the control plane: the task CRUD
+// RPCs (Add/Update/RemoveTask) share the locked half below but scope it to the
+// row they wrote, so one daemon call still owns both steps and no separate
+// ReloadTasks poke is needed for CRUD (#3837). The steps are not transactional:
+// persistence happens first, and update callers receive a machine-readable
+// committed outcome if the refresh fails.
 //
 // During warm-up (#829) the scheduler and watcher supervisor have not started
 // yet; RunDaemon reloads both from tasks.json right after the restore completes,
@@ -120,7 +122,7 @@ func (s *controlServer) reloadTaskSchedules() error {
 		return err
 	}
 	defer unlock()
-	return s.reloadTaskSchedulesLocked()
+	return s.reloadTaskSchedulesLocked(everyWatchTask())
 }
 
 func (s *controlServer) lockTaskControl() (func(), error) {
@@ -131,7 +133,10 @@ func (s *controlServer) lockTaskControl() (func(), error) {
 	return s.scheduler.controlMu.Unlock, nil
 }
 
-func (s *controlServer) reloadTaskSchedulesLocked() error {
+// scope is how much of the watcher supervisor this refresh may touch: the CRUD
+// callers name the one task they wrote, ReloadTasks and daemon start pass the
+// full re-arm. See watchScope (#3837).
+func (s *controlServer) reloadTaskSchedulesLocked(scope watchScope) error {
 	if s.scheduler == nil {
 		return fmt.Errorf("this daemon does not host a task scheduler")
 	}
@@ -139,7 +144,7 @@ func (s *controlServer) reloadTaskSchedulesLocked() error {
 		return nil
 	}
 	if s.manager != nil {
-		refused, err := reloadTaskAutomation(s.manager, s.scheduler, s.watchers)
+		refused, err := reloadTaskAutomation(s.manager, s.scheduler, s.watchers, scope)
 		if err != nil {
 			return err
 		}
@@ -153,7 +158,7 @@ func (s *controlServer) reloadTaskSchedulesLocked() error {
 	}
 	// Nil only in tests that exercise the scheduler alone.
 	if s.watchers != nil {
-		return s.watchers.Reload()
+		return s.watchers.ReloadScoped(scope)
 	}
 	return nil
 }
