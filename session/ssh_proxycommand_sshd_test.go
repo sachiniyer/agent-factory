@@ -318,9 +318,22 @@ func waitForListener(t *testing.T, port int) {
 // isolation. A shell stand-in would test the composition and none of that.
 var (
 	afRelayOnce sync.Once
+	afRelayDir  string
 	afRelayPath string
 	afRelayErr  error
 )
+
+// removeAFRelayBinary deletes the once-per-package build directory. TestMain
+// calls it, NOT t.Cleanup: afRelayOnce caches the build across every test in the
+// package, so a per-test cleanup would delete the binary the next test still
+// resolves to. Without it each `go test ./session/...` run left one more
+// /tmp/af-relay-bin* directory on the box — 284 of them by the time #3842
+// counted.
+func removeAFRelayBinary() {
+	if afRelayDir != "" {
+		_ = os.RemoveAll(afRelayDir)
+	}
+}
 
 func afRelayBinary(t *testing.T) string {
 	t.Helper()
@@ -334,6 +347,7 @@ func afRelayBinary(t *testing.T) string {
 			afRelayErr = err
 			return
 		}
+		afRelayDir = dir
 		out := filepath.Join(dir, "af")
 		build := exec.Command("go", "build", "-o", out, "github.com/sachiniyer/agent-factory")
 		build.Dir = ".."

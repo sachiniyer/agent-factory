@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -296,9 +298,14 @@ func newHarness(t *testing.T) *harness {
 		home: home,
 		repo: setupGitRepo(t),
 	}
+	// Registered AFTER SocketTempDir's own RemoveAll, so LIFO runs it BEFORE the
+	// home is deleted: stop the daemons, THEN remove the home. The other order is
+	// #3842 — the home vanished under a daemon that was still binding, its bind
+	// re-created the directory around a fresh socket, and the daemon then never
+	// saw the deletion it was supposed to self-terminate over.
 	t.Cleanup(func() {
 		h.cleanupSessions()
-		killDaemonFromHome(home)
+		stopDaemons(t, h.bin, home)
 	})
 	return h
 }
@@ -565,16 +572,121 @@ func readDaemonPID(t *testing.T, home string) int {
 	return pid
 }
 
-func killDaemonFromHome(home string) {
-	raw, err := os.ReadFile(filepath.Join(home, "daemon.pid"))
+// stopDaemons stops every af daemon this test spawned and returns only once
+// they are GONE — the reaper every daemon-spawning test in this package
+// registers, and the second half of #3842.
+//
+// It reaps by BINARY PATH, not by PID file. daemon.pid names exactly one daemon,
+// the last one to write it, and these tests deliberately start several:
+// TestDaemonLifecycleRecoversFromStaleSocketAndDeadDaemon starts three, and each
+// new daemon overwrites the entry naming its predecessor. The predecessors are
+// precisely the daemons that were found still running eleven days later, so a
+// reaper that follows the PID file cannot see the ones that leak. h.bin is a
+// per-run t.TempDir() path, so "every live process running THIS binary" names
+// this test's daemons and nothing else on the machine.
+//
+// daemon.StopOrphanDaemons is deliberately NOT used: it classifies any process
+// whose argv starts /tmp/Test… as a test binary and skips it (isTestBinaryArgs),
+// which is every daemon spawned from here.
+func stopDaemons(t *testing.T, bin, home string) {
+	t.Helper()
+	pids := daemonPIDsForBinary(bin)
+	// The PID file is the fallback for a box with no pgrep, where the sweep
+	// above finds nothing: it still reaps the one daemon it can name.
+	if pid, ok := daemonPIDFromHome(home); ok && !containsPID(pids, pid) {
+		pids = append(pids, pid)
+	}
+	for _, pid := range pids {
+		stopAndWait(t, pid)
+	}
+
+	// The post-condition, asserted rather than assumed: a daemon that outlives
+	// the test still holds its (deleted) home and keeps firing schedules.
+	deadline := time.Now().Add(10 * time.Second)
+	left := daemonPIDsForBinary(bin)
+	for len(left) > 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		left = daemonPIDsForBinary(bin)
+	}
+	if len(left) > 0 {
+		t.Errorf("af daemon(s) %v survived the test that spawned them (home %s, binary %s); "+
+			"a leaked daemon outlives its deleted home and keeps firing schedules (#3842)", left, home, bin)
+	}
+}
+
+// stopAndWait SIGTERMs pid, waits for it to actually exit, and escalates to
+// SIGKILL if it will not. Waiting is the point: a cleanup that signals and
+// returns races the home removal registered right behind it, which is how a
+// daemon ends up re-creating the directory it was told to die with.
+func stopAndWait(t *testing.T, pid int) {
+	t.Helper()
+	if pid <= 1 || !pidAlive(pid) {
+		return
+	}
+	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return
 	}
-	var pid int
-	if _, err := fmt.Sscanf(string(raw), "%d", &pid); err != nil {
+	_ = proc.Signal(syscall.SIGTERM)
+	if waitForExit(pid, 10*time.Second) {
 		return
 	}
-	killPID(pid)
+	_ = proc.Kill()
+	if !waitForExit(pid, 5*time.Second) {
+		t.Errorf("daemon pid %d did not exit after SIGTERM and SIGKILL", pid)
+	}
+}
+
+func waitForExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return !pidAlive(pid)
+}
+
+// daemonPIDsForBinary lists the live `<bin> --daemon` processes. An unavailable
+// or non-matching pgrep yields none, which is why stopDaemons keeps the PID-file
+// fallback rather than depending on this alone.
+func daemonPIDsForBinary(bin string) []int {
+	out, err := exec.Command("pgrep", "-f", regexp.QuoteMeta(bin)+" --daemon").Output()
+	if err != nil {
+		return nil // exit status 1 is pgrep's "no matches", which is the good case
+	}
+	var pids []int
+	self := os.Getpid()
+	for _, line := range strings.Fields(string(out)) {
+		pid, convErr := strconv.Atoi(line)
+		if convErr != nil || pid <= 1 || pid == self {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+func daemonPIDFromHome(home string) (int, bool) {
+	raw, err := os.ReadFile(filepath.Join(home, "daemon.pid"))
+	if err != nil {
+		return 0, false
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(raw), "%d", &pid); err != nil {
+		return 0, false
+	}
+	return pid, true
+}
+
+func containsPID(pids []int, want int) bool {
+	for _, pid := range pids {
+		if pid == want {
+			return true
+		}
+	}
+	return false
 }
 
 func killPID(pid int) {
