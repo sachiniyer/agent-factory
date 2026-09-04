@@ -13,6 +13,7 @@ const ACTIONS_APP_ID = 15368;
 // A check run's generation stamp. Named for `started_at`, which is the field the
 // API returns — `created_at` is not part of the check-run resource (#3827).
 const CHECK_GENERATION_AT = "2026-07-09T01:11:00Z";
+const AUTO_GATE_SCRIPT = path.join(__dirname, "auto-gate.js");
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
 const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
 const AUTO_GATE_DOC = path.join(__dirname, "..", "auto-gate.md");
@@ -1769,6 +1770,243 @@ test("an ambiguous aggregate create is reconciled without replaying the write", 
   assert.equal(github.checkListReads, 1);
   assert.equal(github.createdChecks.length, 1);
   assert.equal(github.createdChecks[0].conclusion, "failure");
+});
+
+// #3833. `newestCheckGeneration` sorts on `latestRunTime` and then breaks a tie
+// on the id. Four sites did the first half only — they read the right field and
+// stopped before the tiebreak — so on two generations with an EQUAL stamp their
+// comparator returned 0 for the deciding pair.
+//
+// `Array.prototype.sort` has been stable since ES2019, so a 0 leaves the pair in
+// input order and `[0]` is whatever `listForRef` happened to return first. The
+// checks API documents no ordering for that list, so the pick was not random but
+// it was unspecified — decided by response order rather than by generation. Ids
+// are monotonic, so the tiebreak is what makes it specified.
+//
+// A tie is not a corner. Check-run timestamps are ISO 8601 at SECOND
+// granularity, and these are generations of one check on one head created by
+// racing events; two landing inside the same second is ordinary.
+//
+// Each of the four decides something different, so each gets its own assertion
+// rather than one shared "the newest is picked". Every fixture below hands the
+// list over in the LOSING order — the lower id first — so a test that passes has
+// actually overridden response order rather than agreed with it.
+const TIE_AT = "2026-07-09T02:00:00Z";
+
+// `auto-gate.js:1869` — the highest-stakes of the four: the picked run's
+// `status`/`conclusion` is what decides whether an associated PR blocks the
+// aggregate, i.e. whether the head may merge.
+test("an equal-stamp tie in the aggregate's per-PR decision is broken by id, not by response order", async () => {
+  const identity = {
+    name: decisionName(1465, HEAD_SHA),
+    externalId: decisionExternalId(1465, HEAD_SHA),
+  };
+  // The older generation, and the one that blocks.
+  const superseded = {
+    ...checkRun({ id: 321, ...identity, conclusion: "failure" }),
+    started_at: TIE_AT,
+    completed_at: TIE_AT,
+    output: { summary: "WAITING: required check Build is missing" },
+  };
+  // The newer generation by id, and the one that passes.
+  const current = {
+    ...checkRun({ id: 322, ...identity, conclusion: "success" }),
+    started_at: TIE_AT,
+    completed_at: TIE_AT,
+  };
+  // The premise, asserted rather than assumed: this is a TIE test. If a later
+  // edit gave these two different stamps it would silently become an ordinary
+  // ordering test, which the unfixed comparator already passes.
+  assert.equal(superseded.completed_at, current.completed_at, "the two generations must tie");
+  assert.equal(superseded.started_at, current.started_at, "…on both stamps");
+  assert.ok(Number(superseded.id) < Number(current.id), "and the newer generation holds the higher id");
+
+  // Anti-vacuity: the losing generation really does block on its own, so a green
+  // aggregate below is the tiebreak working and not the blocker having quietly
+  // stopped applying.
+  const blocked = await autoGate.evaluateAggregateDecision({
+    github: fakeGateGithub({ checkRuns: [...happyCheckRuns(), superseded] }),
+    context: fakeContext(),
+    headSha: HEAD_SHA,
+  });
+  assert.equal(blocked.ok, false, "the superseded generation alone must block the aggregate");
+
+  // Losing order: the one that must NOT win is handed over first.
+  const github = fakeGateGithub({ checkRuns: [...happyCheckRuns(), superseded, current] });
+  const aggregate = await autoGate.evaluateAggregateDecision({
+    github,
+    context: fakeContext(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(
+    aggregate.ok,
+    true,
+    "the aggregate must read the newest generation of PR #1465's decision, not the first listed (#3833)",
+  );
+  assert.deepEqual(aggregate.blockers, [], "a superseded failure must not block the head");
+});
+
+// `auto-gate.js:1095` — `priorDecision`. Two jobs: it selects the NEVER_RAN
+// state, and its id is the `check_run_id` this transaction PATCHes, so a wrong
+// pick writes the new decision onto a superseded generation.
+test("an equal-stamp tie in the PR/head decision PATCHes the newest generation", async () => {
+  const identity = {
+    name: decisionName(1465, HEAD_SHA),
+    externalId: decisionExternalId(1465, HEAD_SHA),
+  };
+  const superseded = {
+    ...checkRun({ id: 321, ...identity, conclusion: "failure" }),
+    started_at: TIE_AT,
+    completed_at: TIE_AT,
+  };
+  const current = {
+    ...checkRun({ id: 322, ...identity, conclusion: "failure" }),
+    started_at: TIE_AT,
+    completed_at: TIE_AT,
+  };
+  assert.equal(superseded.completed_at, current.completed_at, "the two generations must tie");
+  const github = fakeGateGithub({ checkRuns: [...happyCheckRuns(), superseded, current] });
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "1465",
+      headSha: HEAD_SHA,
+      shouldMerge: false,
+      summary: "BLOCKED: waiting on review",
+    },
+  });
+
+  // Anti-vacuity for the state half: a prior decision WAS found, so this is the
+  // update path and not a NEVER_RAN create that would trivially satisfy the id
+  // assertion by never PATCHing at all.
+  assert.equal(report.priorDecision, true, "a prior decision must have been found");
+  assert.equal(github.createdChecks.length, 0, "…so nothing is created");
+  assert.equal(
+    github.updatedChecks[0].check_run_id,
+    322,
+    "the decision must be written onto the newest generation, not the first listed (#3833)",
+  );
+});
+
+// `auto-gate.js:1960` — `upsertAggregateCheck`'s `prior`, which decides which
+// aggregate check run is PATCHed rather than created.
+test("an equal-stamp tie in the aggregate check PATCHes the newest generation", async () => {
+  const aggregateRun = (id) => ({
+    ...checkRun({
+      id,
+      name: "Auto Gate decision",
+      externalId: aggregateExternalId(HEAD_SHA),
+      conclusion: "failure",
+    }),
+    started_at: TIE_AT,
+    completed_at: TIE_AT,
+    output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+  });
+  const superseded = aggregateRun(555);
+  const current = aggregateRun(556);
+  assert.equal(superseded.completed_at, current.completed_at, "the two generations must tie");
+  const github = fakeGateGithub({ checkRuns: [...happyCheckRuns(), superseded, current] });
+
+  const report = await autoGate.reportAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  // Anti-vacuity: the update path was taken at all. `created` here would mean no
+  // prior was found, and the id assertion would be vacuous.
+  assert.equal(report.writeState, "updated", "an existing aggregate must be updated, not recreated");
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(
+    github.updatedChecks[0].check_run_id,
+    556,
+    "the aggregate must be written onto the newest generation, not the first listed (#3833)",
+  );
+});
+
+// `auto-gate.js:453` — the ambiguous-create recovery. After a POST that failed
+// ambiguously, this answers "which check run did my POST actually create?", and
+// the id it returns is what every later write in the transaction targets.
+//
+// Its filter is the narrow one — it also requires the create marker in
+// `output.text` — so the tie has to be built from the marked run itself: the
+// fixture cannot name a marker it does not know, since `createCheckRun` mints a
+// fresh UUID per call.
+test("an equal-stamp tie in the ambiguous-create recovery targets the newest generation", async () => {
+  const error = new Error("fetch failed");
+  error.status = 500;
+  const github = fakeGateGithub({ checkCreateAcceptedErrors: [error] });
+
+  let twinned = 0;
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    const runs = await realPaginate(fn, options);
+    const marked = runs.filter((run) => run.output?.text?.includes("auto-gate-check-create:"));
+    if (marked.length !== 1) {
+      return runs;
+    }
+    // A second generation of the SAME create: same marker, same stamps, higher
+    // id — and appended, so the list arrives in the losing order.
+    twinned += 1;
+    return [...runs, { ...marked[0], id: marked[0].id + 1 }];
+  };
+
+  const invalidated = await autoGate.invalidateAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  // Anti-vacuity: the twin was actually built. Without this the assertion below
+  // would pass on a one-candidate list if the marker text ever changed shape.
+  assert.equal(twinned, 1, "the recovery must have seen exactly one marked create to twin");
+  assert.equal(invalidated.writeState, "created");
+  assert.equal(github.checkCreateAttempts, 1, "the ambiguous write must not be replayed");
+  assert.equal(
+    invalidated.checkRunId,
+    10001,
+    "the recovery must adopt the newest generation of its own create, not the first listed (#3833)",
+  );
+});
+
+// …and it stays at one. This is the #3744 move: state the rule once, and fail
+// when a copy stops saying it. Three separate PRs (#3827, #3831, #3833) were
+// spent on second spellings of "which check-run generation is newer", each of
+// which looked correct in review and diverged only on an input no fixture built.
+// A guard is cheaper than a fourth.
+test("newestCheckGeneration is the file's only generation comparator", () => {
+  const source = fs.readFileSync(AUTO_GATE_SCRIPT, "utf8");
+  const helperStart = source.indexOf("\nfunction newestCheckGeneration(");
+  assert.ok(helperStart > 0, "the helper must exist to be the single spelling");
+  const helperEnd = source.indexOf("\n}\n", helperStart);
+  assert.ok(helperEnd > helperStart, "the helper's body must be delimitable");
+
+  // A sort whose comparator reads a check run's generation stamp.
+  const comparator = /\.sort\([\s\S]{0,120}?latestRunTime/g;
+  const helper = source.slice(helperStart, helperEnd);
+  const outside = source.slice(0, helperStart) + source.slice(helperEnd);
+
+  // Anti-vacuity, and it is the whole test: the pattern must actually match the
+  // shape it is policing. A regex that matched nothing anywhere would pass the
+  // assertion below forever while policing nothing at all.
+  assert.equal(
+    helper.match(comparator)?.length,
+    1,
+    "the pattern must match the helper's own comparator, or it is policing nothing",
+  );
+
+  assert.deepEqual(
+    outside.match(comparator) || [],
+    [],
+    "a generation sort outside newestCheckGeneration is a second notion of 'newer'; " +
+      "call the helper instead, so its id tiebreak applies here too (#3833)",
+  );
 });
 
 test("a definitively rate-limited aggregate create retries the rejected write", async () => {
