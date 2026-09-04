@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/accountlogin"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -474,6 +475,13 @@ type Manager struct {
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.
 	configAgents *configAgentSupervisor
+	// accountLogins owns the bare tmux sessions spawned for `af accounts login`
+	// (#3384) — the same shape and the same ownership argument as configAgents: a
+	// login pane has no Instance, so nothing else in this process knows it exists,
+	// and a daemon that exits without reaping one leaves an orphan no future
+	// daemon can find. Its Stop() is wired into daemon teardown beside
+	// configAgents.Stop(). Immutable after construction; it carries its own mutex.
+	accountLogins *accountlogin.Supervisor
 	// configAssistants owns the single web config-assistant stream (#2467): the
 	// spawn-or-reuse singleton, its bare-session broker, and the last-detach grace
 	// reaper. Its stop() is wired into daemon teardown alongside configAgents.Stop().
@@ -652,6 +660,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
+	accountLogins := accountlogin.New()
 	rootAgentLayers := buildRootAgentSnapshot(warnLoggerOr(opts.warnLog), errorLoggerOr(opts.errorLog), cfg)
 	mgr := &Manager{
 		cfg:                       cfg,
@@ -702,6 +711,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		events:                    newEventsHub(),
 		vscode:                    vscode,
 		configAgents:              configAgents,
+		accountLogins:             accountLogins,
 	}
 	// Publish the start-of-day root-agent snapshot; healRootAgentLayers is the
 	// only later writer, and it republishes wholesale (#3264).

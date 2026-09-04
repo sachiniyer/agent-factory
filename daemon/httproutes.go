@@ -320,6 +320,18 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.refreshPRInfo) },
 	},
 
+	// Accounts (#3384). The login verb the CLI, the TUI config tab and the web all
+	// drive rather than each reimplementing an interactive flow (#3385). Not
+	// sandboxAllowed: it registers a directory and starts a process on the daemon
+	// host, which is exactly the authority the sandbox credential withholds.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/AccountLogin",
+		Description: "Open an agent's OWN login flow (claude auth login / codex login / gemini) in a bare tmux session scoped to one registered account: the account's credential directory injected, every ambient identity variable removed. Registers the account if it does not exist. Returns the tmux session and socket to attach to, and the account's logged-in state read from the agent's own credential file. af never reads, stores, or forwards the credential.",
+		requestType: reflect.TypeOf(AccountLoginRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AccountLogin) },
+	},
+
 	// Config. The read/write pair behind the web config editor; both are thin
 	// wrappers over the same config package calls the TUI and `af config set`
 	// make in-process, so the three surfaces cannot validate or write differently.

@@ -252,8 +252,17 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"UnsetConfigValue": blockedDuringProbation,
 	"SetPRInfo":        blockedDuringProbation,
 	"SpawnConfigAgent": blockedDuringProbation,
-	"TriggerTask":      blockedDuringProbation,
-	"UpdateTask":       blockedDuringProbation,
+	// AccountLogin registers a credential directory in the daemon host's
+	// agent-factory home and starts a process on it (#3384). Both halves are
+	// mutations of the very candidate an upgrade supervisor is mid-validation on,
+	// and the second one is a process that outlives the RPC — so it is blocked
+	// during probation like every other write, rather than admitted on the
+	// reasoning that a login is "the user's own business". A refusal here costs a
+	// retry; an admitted one leaves an interactive pane attached to a daemon that
+	// may be about to be rolled back.
+	"AccountLogin": blockedDuringProbation,
+	"TriggerTask":  blockedDuringProbation,
+	"UpdateTask":   blockedDuringProbation,
 	// ApplyConfig was allowed during probation on the reasoning that a blocked
 	// SetConfigValue kept the file from changing, so an apply could only re-read
 	// unchanged bytes. #3231 disproved the premise: pre-#3231 CLIs and hand-edits

@@ -167,6 +167,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// this repo has already been bitten by. Registered at construction so the
 	// warm-up exit paths (SIGTERM, the Shutdown RPC) cannot skip it.
 	defer manager.configAgents.Stop()
+	// And the login panes, for exactly the same reason (#3384). An account login
+	// is a bare tmux session with no Instance, so this is the only thing that
+	// knows it exists; a half-finished OAuth flow must die with the daemon that
+	// spawned it rather than sit on the tmux server forever.
+	defer manager.accountLogins.Stop()
 	// Tear the web config-assistant stream down before its tmux session is reaped
 	// above, so the clientless capture goroutine ends cleanly. stop() closes the
 	// streamer only; configAgents.Stop() owns killing the tmux (#2467). Deferred
