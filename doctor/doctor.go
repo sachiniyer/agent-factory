@@ -250,6 +250,12 @@ type Options struct {
 	// spawned fixtures represent already-durable leaks.
 	minProcessLeakAge time.Duration
 
+	// minLeakedDaemonAge is how long a daemon running from a temp-dir binary
+	// must have been up before --fix offers to stop it. Production uses
+	// leakedDaemonMinAge; tests shorten it, since a fixture spawned a
+	// millisecond ago stands for a daemon that has been up for eleven days.
+	minLeakedDaemonAge time.Duration
+
 	// snapshot overrides the process-table scan; tests inject a snapshot
 	// containing only their own spawned processes so a --fix run can never act
 	// on anything outside the test.
@@ -310,6 +316,24 @@ type scanContext struct {
 	// distinguishes "scanned, found none" from "not scanned yet".
 	daemons        []daemonProc
 	daemonsScanned bool
+	// The run's ONE listing of the temp dir, memoized by tempHomeCandidates.
+	// Both temp-dir checks read it (#3845), and a temp dir with thousands of
+	// entries must be listed once — and must present ONE picture to both.
+	tempSweep     tempHomeSweep
+	tempSweepDone bool
+	// The run's ONE index of live working directories, memoized by
+	// liveWorkingDirs (#3845). Read per candidate directory, so it must not be
+	// a process-table scan per candidate.
+	cwds        map[int]string
+	cwdsScanned bool
+	// The FIX pass's rechecks, taken once for the pass rather than once per
+	// removal (#3845). See fixTimeTmuxHomes for why once-per-pass keeps what the
+	// recheck is for while 626 removals × 16 tmux shell-outs does not.
+	fixTmuxHomes   map[string]bool
+	fixTmuxErr     error
+	fixTmuxScanned bool
+	fixCwds        map[int]string
+	fixCwdsScanned bool
 	// autostart scope memo (see autostartScope): whether the installed unit is
 	// this home's at all.
 	autostartServes    bool
@@ -350,6 +374,9 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.minProcessLeakAge == 0 {
 		o.minProcessLeakAge = processLeakMinAge
+	}
+	if o.minLeakedDaemonAge == 0 {
+		o.minLeakedDaemonAge = leakedDaemonMinAge
 	}
 	if o.snapshot == nil {
 		o.snapshot = proctree.Snapshot
@@ -452,6 +479,12 @@ func Run(opts Options) (*Report, error) {
 	checkLeakedTmuxSessions(ctx, report)
 	checkStaleTempHomes(ctx, report)
 	checkForeignDaemons(ctx, report)
+	// After checkForeignDaemons, which owns the daemon whose HOME is gone; these
+	// two own the daemon whose BINARY is not an install, and the directory a
+	// dead one left behind (#3845). Both read the temp-dir sweep the
+	// stale-temp-home check has already taken, through the same memo.
+	checkLeakedDaemonBinaries(ctx, report)
+	checkDeadSocketHomes(ctx, report)
 	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)
 	checkOrphanedHookHosts(ctx, report)

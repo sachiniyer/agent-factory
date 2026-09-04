@@ -84,7 +84,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		return
 	}
 
-	sweep := candidateTempHomes(tempDir, ctx.opts.MaxTempHomeCandidates)
+	sweep := ctx.tempHomeCandidates()
 	// Reported BEFORE the per-home findings, deliberately. This row is the
 	// caveat on every count below it, and a caveat printed after the thing it
 	// qualifies is a caveat most readers never reach.
@@ -164,6 +164,23 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 			Remediation: "verify nothing is using it, then `" + shellsuggest.Command("rm", "-rf", dir) + "`",
 		})
 	}
+}
+
+// tempHomeCandidates returns the run's ONE listing of the temp dir, computing it
+// at most once.
+//
+// Memoized for the reason ctx.tempHomeCandidates' siblings are (daemonProcs, the
+// tmux listing): two checks now read this sweep — the abandoned-home one and the
+// dead-socket one (#3845) — and a temp dir with 9,892 entries is not a directory
+// to list twice. More than cost: two listings are two different worlds, and a
+// run whose two temp-dir rows disagree about what is there is worse than either
+// answer alone.
+func (c *scanContext) tempHomeCandidates() tempHomeSweep {
+	if !c.tempSweepDone {
+		c.tempSweep = candidateTempHomes(filepath.Clean(c.opts.TempDir), c.opts.MaxTempHomeCandidates)
+		c.tempSweepDone = true
+	}
+	return c.tempSweep
 }
 
 // reportTempHomeSweepTruncation says out loud that the temp-home sweep did not
