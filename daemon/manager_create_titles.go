@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -574,6 +575,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 	// collapses to the taken base's branch, and the walk skips all 10,000 rungs
 	// under m.mu before failing (#2528). The bare base (i == 1) is unchanged.
 	boundedBase := git.BoundTitleForDisambiguation(baseTitle)
+	var skipped []heldRung
 	for i := 1; i <= 10000; i++ {
 		candidate := baseTitle
 		if i > 1 {
@@ -581,12 +583,14 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 		}
 		branch := m.branchForTitle(candidate)
 		if holder, held := heldBranches[branch]; held {
-			m.info().Printf("title %q derives branch %q, which the worktree at %s still has checked out; trying the next suffix",
-				candidate, branch, holder)
+			// Accumulated rather than logged per rung (#3838): the walk is the whole
+			// event, and every rung of it says the same thing.
+			skipped = append(skipped, heldRung{title: candidate, holder: holder})
 			continue
 		}
 		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData)
 		if err == nil {
+			m.logHeldSuffixWalkLocked(baseTitle, candidate, skipped)
 			return candidate, nil
 		}
 		// A check that could not RUN is not a taken candidate: no suffix would fare
@@ -596,5 +600,91 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("could not find an available title for %q", baseTitle)
+	return "", fmt.Errorf("could not find an available title for %q%s", baseTitle, heldRungDetail(skipped))
+}
+
+// heldRung is one suffix the title walk skipped because a registered worktree
+// already has that rung's derived branch checked out (#2091).
+type heldRung struct {
+	title  string
+	holder string
+}
+
+// logHeldSuffixWalkLocked reports a completed walk that skipped held rungs as
+// ONE line (#3838).
+//
+// It used to be one INFO line per rung, and the per-rung line carries nothing
+// after the first occurrence: a recurring task whose archived predecessors hold
+// 110+ consecutive suffixes re-logged its entire own history on every hourly
+// create. That was 89% of the daemon log on 2026-09-03 — 1.27 MB/day from one
+// message, growing linearly with archive depth. The log is size-capped and
+// rotated (#1059), so the harm is not unbounded growth but a diagnostic
+// retention window that collapses under a message with no information in it.
+//
+// The count and the two ends of the run are what survive, because the rungs are
+// consecutive: first and last bracket the range an operator would scan, and a
+// count that does not match the span between them is itself the signal that the
+// walk skipped something else. The individual holder paths are kept where they
+// are actually needed — in the error of a walk that FAILED (heldRungDetail).
+//
+// Silent when nothing was skipped: the uncontested create is the common case and
+// has nothing to report. Runs under m.mu with the rest of the walk.
+func (m *Manager) logHeldSuffixWalkLocked(base, chosen string, skipped []heldRung) {
+	switch len(skipped) {
+	case 0:
+	case 1:
+		m.info().Printf("title %q: skipped 1 suffix held by the worktree at %s; using %q",
+			base, skipped[0].holder, chosen)
+	default:
+		m.info().Printf("title %q: skipped %d suffixes held by existing worktrees (first %s, last %s); using %q",
+			base, len(skipped), skipped[0].holder, skipped[len(skipped)-1].holder, chosen)
+	}
+}
+
+// heldRungDetail names the holders for a walk that exhausted its rungs, as a
+// clause appended to the availability error (#3838).
+//
+// This is the case the per-rung lines existed for, and the one place the
+// individual paths earn their bytes: the walk found nothing, and "which
+// worktrees are in the way" is the only actionable thing left to say. A failure
+// is also rare and terminal, where a routine create is hourly — so the volume
+// argument that collapses the success path does not apply here.
+func heldRungDetail(skipped []heldRung) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d of the suffixes tried have their branches checked out by other worktrees: %s",
+		len(skipped), joinHeldRungs(skipped))
+}
+
+// heldRungListCap bounds that list. The walk is bounded at 10,000 rungs, so an
+// uncapped list is an error string of several hundred kilobytes — and a create
+// that fails here fails on every subsequent run, which would put the log volume
+// #3838 removes straight back, an order of magnitude larger. 500 is well above
+// any real archive depth (the deepest recurring task on the dev box holds ~113),
+// so the cap only bites in the pathological case it exists for; below it the
+// list is complete.
+const heldRungListCap = 500
+
+func joinHeldRungs(skipped []heldRung) string {
+	entry := func(rung heldRung) string { return fmt.Sprintf("%q at %s", rung.title, rung.holder) }
+	if len(skipped) <= heldRungListCap {
+		parts := make([]string, 0, len(skipped))
+		for _, rung := range skipped {
+			parts = append(parts, entry(rung))
+		}
+		return strings.Join(parts, " · ")
+	}
+	// Both ends, because they are what locates the run; the elision names how
+	// much it dropped so the list is never silently partial.
+	half := heldRungListCap / 2
+	parts := make([]string, 0, heldRungListCap+1)
+	for _, rung := range skipped[:half] {
+		parts = append(parts, entry(rung))
+	}
+	parts = append(parts, fmt.Sprintf("… %d more …", len(skipped)-2*half))
+	for _, rung := range skipped[len(skipped)-half:] {
+		parts = append(parts, entry(rung))
+	}
+	return strings.Join(parts, " · ")
 }
