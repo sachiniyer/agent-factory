@@ -208,3 +208,40 @@ advancing have no GitHub event here. Use the same manual PR-number dispatch to
 refresh that observational state. The destructive merge path still reevaluates
 the target PR, every other associated PR, and the association set immediately
 before its write.
+
+## Head-branch pruning
+
+`delete_branch_on_merge` does not fire for a `GITHUB_TOKEN` merge, so the gate
+deletes the head branch itself (#3603). Three conditions have to hold, and each
+one no-ops rather than failing — the merge has already landed, and no pruning
+problem is worth reporting it as a failure:
+
+- **(a)** the head repository is this repository — a fork's branch is not ours,
+  and the token could not delete it anyway;
+- **(c)** no open PR is based on the branch, and no open PR still has it as a
+  head — deleting it would close the first and leave the second headless;
+- **(b)**, last and immediately before the delete, the branch still points at the
+  commit that was merged. A lane that pushed after the merge keeps its branch:
+  that work is not in `master`, and the pushed ref may be its only copy. Neither
+  the REST ref API nor GraphQL's `deleteRef` accepts an expected OID, so ordering
+  is the only lever there is.
+
+Those conditions are correct when the merge asks them and nothing revisits the
+answer, so a branch kept for a reason that later disappears leaks forever
+(#3852): #3847 was the base of the open #3849, and #3849 was retargeted onto
+`master` 89 seconds after #3847 merged.
+
+The resolver job therefore runs a **sweep** on every gate run, including the runs
+where nothing merges. It enumerates every branch on the repository in one
+GraphQL query — name, tip, ruleset rules, and the pull requests whose head it is
+— and treats a branch as a candidate only when a merged PR of this repository has
+it as a head and its tip still equals that merge's head. The default branch, a
+protected branch, and a branch whose rule list could not be read in full are
+never candidates. Each candidate then goes through the same helper the merge path
+uses, so the three conditions have one home and get fresh reads. The pass is
+capped per run, so a backlog drains over several runs rather than making one run
+slow, and its one-line summary is the `branch_sweep` output of the resolver job.
+
+Deleting a ref is the gate writing to the repository on its own, so the sweep is
+gated on `AUTO_GATE_ENABLED` like the merge itself. With that switch off nothing
+merges, so nothing new leaks either.
