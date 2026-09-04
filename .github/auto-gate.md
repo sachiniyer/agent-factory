@@ -42,9 +42,16 @@ names it above the advisory list, with the recovery that actually clears **that*
 blocker: an unanswered finding takes a threaded `RESOLVED`, `ACCEPTED` or
 `[gate-ack]` reply, while one already marked `RESOLVED` needs a commit pushed
 after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
-`RESOLVED` cannot clear that one. Nothing else is promoted to a blocker on this
-path, because a finding is the only unmet requirement an external PR's reviewer
-can answer per item.
+`RESOLVED` cannot clear that one.
+
+**An unreviewed usage-limit degradation blocks that pass too** (#3825). The test
+is not "is it a finding" but "can a maintainer answer it per item, without the
+author iterating" — a finding takes a threaded reply, and a degradation takes the
+approval marker below, so both leave an exit. A missing play-tested label or a
+merely absent verdict has no such answer, so those stay advisory notes, and
+promoting them would make every external PR unmergeable. The two blockers never
+appear together: the degradation fires only when nothing else is unmet, and a live
+finding is something else unmet.
 
 A degraded pass plus a **maintainer approval bound to the head** rides the
 ordinary update-and-merge loop instead (#3790): the review requirement is
@@ -116,10 +123,16 @@ stays red with the unmet item
 
 > awaiting maintainer review — post `## Review — approve` on this head
 
-and a maintainer approval bound to the head clears it, after which the gate
-merges the PR itself. It used to publish a green manual-only pass instead, which
-made the PR mergeable while leaving the review to a convention — #3760 landed
-that way with no review of any kind.
+and a maintainer approval bound to the head clears it. On an allowlisted author's
+PR the gate then merges it itself; on any other author's the PR is a manual merge
+regardless, so the approval restores the manual pass and the maintainer lands it
+by hand. Either way the marker is what clears it, and either way the decision is
+red until someone posts one — including on external PRs, whose conclusion is
+computed from the blocker list rather than the unmet list (#3825). It used to
+publish a green manual-only pass instead, which made the PR mergeable while
+leaving the review to a convention — #3760 landed that way with no review of any
+kind, and #3824 closed that everywhere except the external path, which kept
+publishing the same green pass until #3825.
 
 What counts as that observation is one rule, stated once as `CODEX_LIMIT_RULE` in
 `.github/scripts/auto-gate.js` and quoted here verbatim because a test requires
