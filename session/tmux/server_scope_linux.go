@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/afhome"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
@@ -98,7 +99,12 @@ func ensureDedicatedServer(home string) error {
 		// spawn replaces it with the dedicated server below.
 		return nil
 	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	// afhome.MkdirAll, not os.MkdirAll: the argument IS the AF home, so this is
+	// the most direct resurrection there is — and it runs on any spawn where the
+	// dedicated server is not up, which is exactly the state the comment above
+	// describes after exit-empty retires it (#3850). afhome rather than
+	// config.MkdirAllUnderAFHome because config imports this package.
+	if err := afhome.MkdirAll(home, 0o700); err != nil {
 		return fmt.Errorf("create AF home for tmux server log: %w", err)
 	}
 	logPath := filepath.Join(home, dedicatedServerLogName)

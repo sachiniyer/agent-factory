@@ -255,7 +255,11 @@ func ensureKnownHostsFile(path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	// Through the home guard: with no ssh.known_hosts override this path is
+	// <af-home>/<sshKnownHostsFileName>, so its parent IS the home, and the
+	// store is prepared on every ssh-backend launch and teardown (#3850). An
+	// exact os.MkdirAll for a configured path outside the home, e.g. ~/.ssh.
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)

@@ -219,7 +219,11 @@ func checkOneProgram(field, agent, command string, report *Report) {
 }
 
 func writableDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Through the home guard: every caller passes the AF home or a directory
+	// inside it (#3850). `af doctor` is a CLI process and never arms the latch,
+	// so this is an exact os.MkdirAll — but see the note in app/detach_trace.go
+	// on why the routing is unconditional.
+	if err := config.MkdirAllUnderAFHome(dir, 0o755); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(dir, ".af-doctor-*")

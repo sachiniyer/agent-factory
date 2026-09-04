@@ -429,7 +429,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	if pathExists(dest) {
 		return unknownIfCutOff(fmt.Errorf("cannot relocate worktree: destination %s already exists", dest))
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+	if err := ensureWorktreeParent(dest); err != nil {
 		return unknownIfCutOff(fmt.Errorf("failed to create destination parent directory for %s: %w", dest, err))
 	}
 	useFallback, inspectErr := worktreeContainsSubmodules(g, src)
