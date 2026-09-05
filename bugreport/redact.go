@@ -512,6 +512,19 @@ var sensitiveJSONKeys = map[string]bool{
 	//     needs the typed record's titles.
 	"alternate_path": true, "archive_warning": true,
 	"name": true, "account": true, "program": true, "error": true,
+	// The usage-limit swap's account labels (#3127), mirrored here for the reason
+	// every entry above is: a record the typed decode REJECTS must never be less
+	// private than one it accepts. "account" already covers the label nested in
+	// each account_limit_observations entry, because that key is matched exactly
+	// wherever it appears; these two are the spellings it does not reach.
+	//
+	// pending_account_swap is dropped WHOLESALE rather than per-field, which is
+	// this path's rule for an object whose shape it could not parse — the same
+	// call remote_meta and the teardown union get. It costs nothing here: the
+	// marker replaces the VALUE and leaves the KEY, so "a committed swap was
+	// still awaiting delivery" survives for triage while the two labels and the
+	// resumable conversation id inside it do not.
+	"limit_account": true, "pending_account_swap": true,
 	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
 	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
 	// bundle in a form the closing text scrub cannot recognize as a path, a home
@@ -636,6 +649,43 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// invents one (#3588).
 	if d.Account != "" {
 		d.Account = redactedMarker
+	}
+	// Every other account LABEL in the row takes Account's trade, for Account's
+	// reason: they are the same user-picked strings, reached through the
+	// usage-limit swap (#3127) rather than through `--account`, and a bundle that
+	// redacted one spelling of an employer's name while printing three others
+	// would be worse than one that redacted none — it reads as if the policy had
+	// been applied.
+	//
+	// The marker keeps what triage actually needs. LimitAccount answers "which
+	// identity hit the wall", the pending pair answers "a move was committed and
+	// its delivery had not settled", and the observation list answers "how many
+	// identities were walled at once" — all of which survive as counts and
+	// presence. None of them needs the label to be readable.
+	if d.LimitAccount != "" {
+		d.LimitAccount = redactedMarker
+	}
+	if d.PendingAccountSwap != nil {
+		if d.PendingAccountSwap.From != "" {
+			d.PendingAccountSwap.From = redactedMarker
+		}
+		if d.PendingAccountSwap.To != "" {
+			d.PendingAccountSwap.To = redactedMarker
+		}
+		// The same provider conversation id AgentConversation.ID is cleared for,
+		// and cleared the same way rather than marked: it is a resumable handle,
+		// so its VALUE is the sensitive part and its presence is not worth
+		// reporting.
+		d.PendingAccountSwap.ConversationID = ""
+	}
+	// Agent beside it stays verbatim — it is the bounded agent enum, classified
+	// as such in verbatimInstanceFields, and it is what makes the redacted
+	// account labels legible as "two claude accounts" rather than two opaque
+	// markers.
+	for i := range d.AccountLimitObservations {
+		if d.AccountLimitObservations[i].Account != "" {
+			d.AccountLimitObservations[i].Account = redactedMarker
+		}
 	}
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker
