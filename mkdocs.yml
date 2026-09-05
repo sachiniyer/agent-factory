@@ -82,6 +82,8 @@ markdown_extensions:
 
 extra_css:
   - stylesheets/extra.css
+  - stylesheets/tokens.css
+  - stylesheets/style-guide.css
 
 extra:
   social:
@@ -173,5 +175,7 @@ nav:
       - Release notes: dev/release-notes.md
       - Daemon memory: dev/daemon-memory.md
       - Design notes:
+          - Interface design: design/interface-design.md
+          - Interface style guide: design/style-guide.md
           - TUI rewrite: design/tui-rewrite.md
           - Agent handoff: design/agent-handoff.md
