@@ -228,7 +228,15 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 	if name == "" {
 		return DefaultAccountSelection{}, DefaultAccountSelection{}
 	}
-	project = DefaultAccountSelection{Agent: agent, Name: name, Layer: SourceGlobal, Path: globalLayer.Path}
+	// The pre-trace attribution, used only if the trace below cannot be read. It is
+	// derived rather than assumed: a value that differs from the global snapshot —
+	// or is absent from it — did not come from the global layer, and guessing
+	// "global" there would print `af config set … ""`, a command that leaves the
+	// project's entry exactly where it is.
+	project = DefaultAccountSelection{Agent: agent, Name: name, Layer: SourceProjectPersonal}
+	if globalLayer.Name == name {
+		project.Layer, project.Path = SourceGlobal, globalLayer.Path
+	}
 	// The manifest resolves this key per agent (MergeMapByKey), so the trace
 	// attributes each entry on its own — which is exactly the granularity a
 	// message needs. A trace that cannot be read leaves the layer as the global
