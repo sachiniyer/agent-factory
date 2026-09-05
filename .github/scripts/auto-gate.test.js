@@ -3491,6 +3491,100 @@ test("the degraded pass with a head-bound approval still merges itself", async (
   assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
 });
 
+// #3900: PR #3893's empty review carried its quota answer in an inline reply.
+function inlineLimitFixture(overrides = {}) {
+  const reply = {
+    ...codexRateLimit("2026-07-09T01:20:00Z"),
+    id: 3941258257,
+    pull_request_review_id: 5122042163,
+    in_reply_to_id: 3941257907,
+    commit_id: HEAD_SHA,
+    ...overrides,
+  };
+  return {
+    headForcePushes: [{ createdAt: "2026-07-09T01:10:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [prComment("sachiniyer", "## Review — approve")],
+    reviews: [{
+      id: 5122042163,
+      user: reply.user,
+      state: "COMMENTED",
+      body: "",
+      commit_id: HEAD_SHA,
+      submitted_at: reply.created_at,
+    }],
+    reviewComments: [reply],
+  };
+}
+
+test("inline usage-limit reply permits an approved degraded PASS and names its id", async () => {
+  const result = await evaluateGate(inlineLimitFixture());
+  assert.equal(result.degradedForUnavailableReviewer, true);
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
+  assert.match([...result.notes, ...result.reasons].join("\n"), /3941258257/);
+});
+
+test("inline usage-limit reply must be created after headCurrentSince, even if edited later", async () => {
+  for (const created_at of ["2026-07-09T01:09:00Z", "2026-07-09T01:10:00Z"]) {
+    const result = await evaluateGate(inlineLimitFixture({ created_at }));
+    assert.equal(result.degradedForUnavailableReviewer, false);
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.reasons.join("\n"), /has not reviewed head/);
+    const report = await autoGate.reportDecision({
+      github: fakeGateGithub(), context: fakeContext(), core: fakeCore(), result, manual: false,
+    });
+    assert.equal(report.state, "waiting");
+  }
+});
+
+test("inline usage-limit evidence requires the reply's own head commit and Codex author", async () => {
+  for (const overrides of [{ commit_id: OTHER_SHA }, { user: { login: "someone-else" } }]) {
+    const result = await evaluateGate(inlineLimitFixture(overrides));
+    assert.equal(result.degradedForUnavailableReviewer, false);
+    assert.equal(result.shouldMerge, false);
+  }
+});
+
+test("finding-shaped inline usage-limit text is not an outage answer", async () => {
+  for (const overrides of [
+    { in_reply_to_id: undefined },
+    { body: "P1: detector quotes " + CODEX_LIMIT_CODE_REVIEWS },
+  ]) {
+    const result = await evaluateGate(inlineLimitFixture(overrides));
+    assert.equal(result.degradedForUnavailableReviewer, false);
+    assert.equal(result.shouldMerge, false);
+  }
+});
+
+test("an inline reply cannot supply a verdict or supersede a body finding", async () => {
+  const fixture = inlineLimitFixture({ body: codexVerdict(HEAD_SHA).body });
+  let result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  fixture.reviews = [codexReview(HEAD_SHA, "P1: fix this", "2026-07-09T01:15:00Z")];
+  result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /finding/);
+});
+
+test("a later review response supersedes inline quota evidence even without a verdict", async () => {
+  const fixture = inlineLimitFixture();
+  fixture.reviews.push({
+    user: { login: "chatgpt-codex-connector[bot]" }, body: "Review started.",
+    commit_id: HEAD_SHA, submitted_at: "2026-07-09T01:30:00Z",
+  });
+  const result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  assert.equal(result.degradedForUnavailableReviewer, false);
+});
+
+test("a later real verdict supersedes an inline usage-limit answer", async () => {
+  const fixture = inlineLimitFixture();
+  fixture.reviews.push(codexReview(HEAD_SHA, "Looks good.", "2026-07-09T01:30:00Z"));
+  const result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, true);
+  assert.equal(result.degradedForUnavailableReviewer, false);
+});
+
 // #3825. The blocker above was pushed into `reasons`, and the published check
 // reads `reasons` only on the auto-merge path: a non-allowed author takes the
 // manual path, whose conclusion is computed from `manualMergeBlockers` alone. So

@@ -159,6 +159,16 @@ leaving the review to a convention — #3760 landed that way with no review of a
 kind, and #3824 closed that everywhere except the external path, which kept
 publishing the same green pass until #3825.
 
+Usage-limit evidence includes Codex inline review replies (`in_reply_to_id` set),
+including replies carried by an empty `COMMENTED` review (#3900). The reply's
+`commit_id` must match the head, and its `created_at` must be strictly later than
+`headCurrentSince`; an edit cannot refresh an old answer. The latest artifact
+across issue comments, reviews and eligible replies wins (the reply wins a tie
+with its empty enclosing review), and a later real verdict supersedes the limit
+answer. The decision names the inline comment id. Replies do not supply verdicts
+or enter the body-finding artifact list, and finding-shaped text is not accepted
+as an inline outage answer. The existing finding predicates are unchanged.
+
 What counts as that observation is one rule, stated once as `CODEX_LIMIT_RULE` in
 `.github/scripts/auto-gate.js` and quoted here verbatim because a test requires
 every statement of it to agree (#3744):

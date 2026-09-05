@@ -4230,9 +4230,36 @@ async function evaluateCodex({
       }),
     subject,
   );
+  const reviewComments = await retryRead(
+    `could not read review comments for PR #${number}`,
+    () =>
+      github.paginate(github.rest.pulls.listReviewComments, {
+        owner,
+        repo,
+        pull_number: number,
+        per_page: 100,
+      }),
+    subject,
+  );
   const codexComments = comments.filter((comment) => comment.user?.login === CODEX_REVIEWER);
   const codexReviewArtifacts = [...codexComments, ...reviews]
     .filter((comment) => comment.user?.login === CODEX_REVIEWER)
+    .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
+  // Inline answers (#3900) are outage evidence only, never verdict/finding
+  // artifacts. Bind by GitHub's commit_id and use creation time even if edited.
+  const codexInlineReplies = reviewComments
+    .filter((comment) =>
+      comment.user?.login === CODEX_REVIEWER && comment.in_reply_to_id &&
+      String(comment.commit_id || "").toLowerCase() === String(sha).toLowerCase(),
+    )
+    .map((comment) => ({
+      ...comment,
+      updated_at: comment.created_at,
+      submitted_at: comment.created_at,
+    }));
+  // Replies precede their empty enclosing review on a timestamp tie: GitHub
+  // posts both in the same second. Later reviews still supersede the answer.
+  const codexUsageLimitArtifacts = [...codexInlineReplies, ...codexReviewArtifacts]
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
   // Both artifact shapes, each carrying its OWN time: the prose line's is its
   // comment's, the summary row's is the row's. Sorted by that rather than by
@@ -4251,11 +4278,12 @@ async function evaluateCodex({
     // of retryRead rather than reaching here, so an unreadable list can never be
     // mistaken for "no rate limit" — or for a rate limit.
     //
-    // Latest across issue comments AND reviews — the list is already sorted
+    // Latest across issue comments, reviews AND inline replies — already sorted
     // newest-first. Reading only issue comments would miss a review posted after
     // a quota message, which proves the reviewer answered again and therefore
     // that the quota message no longer describes the present.
-    const latestCodexArtifact = codexReviewArtifacts[0];
+    const latestCodexArtifact = codexUsageLimitArtifacts[0];
+    const isInlineReply = codexInlineReplies.includes(latestCodexArtifact);
     const latestCodexBody = latestCodexArtifact?.body || "";
     // The detector is an unanchored substring match, so a review that merely
     // QUOTES the usage-limit phrase trips it — reviewing this very gate is
@@ -4266,7 +4294,8 @@ async function evaluateCodex({
     // gate lands on "keep blocking" rather than on a false degradation.
     const looksLikeReviewArtifact =
       CODEX_REVIEW_RE.test(latestCodexBody) && REVIEWED_COMMIT_RE.test(latestCodexBody);
-    const rateLimited = codexReportsReviewUsageLimit(latestCodexBody) && !looksLikeReviewArtifact;
+    const rateLimited = codexReportsReviewUsageLimit(latestCodexBody) && !looksLikeReviewArtifact &&
+      !(isInlineReply && CODEX_BODY_FINDING_RE.test(latestCodexBody));
     // …and it has to be evidence about THIS head, on the same freshness rule the
     // verdict below is held to. A usage-limit answer only proves the reviewer was
     // out of quota when it answered; a head pushed after it may simply not have
@@ -4277,10 +4306,14 @@ async function evaluateCodex({
     const rateLimitTime = rateLimited ? reviewArtifactTime(latestCodexArtifact) : 0;
     reviewerUnavailable =
       rateLimited && headCurrentSince != null && rateLimitTime > headCurrentSince;
+    const inlineSource = isInlineReply ? ` (inline comment ${latestCodexArtifact.id})` : "";
+    if (reviewerUnavailable && isInlineReply) {
+      notes.push(`Codex usage-limit answer${inlineSource}`);
+    }
     const suffix = !rateLimited
       ? ""
       : reviewerUnavailable
-        ? "; the latest Codex response was usage-limited"
+        ? `; the latest Codex response was usage-limited${inlineSource}`
         : "; the latest Codex response was usage-limited but predates this head, so it is not " +
           "evidence about this head";
     // Split, because the two states need different actions from a reader: one
@@ -4422,17 +4455,6 @@ async function evaluateCodex({
     });
   }
 
-  const reviewComments = await retryRead(
-    `could not read review comments for PR #${number}`,
-    () =>
-      github.paginate(github.rest.pulls.listReviewComments, {
-        owner,
-        repo,
-        pull_number: number,
-        per_page: 100,
-      }),
-    subject,
-  );
   const resolvedByAllowedReply = new Set(
     reviewComments
       .filter((comment) => {
