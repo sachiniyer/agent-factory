@@ -1,4 +1,8 @@
-# Worktree-isolated agents
+# Sessions and worktrees
+
+For anyone who wants to know exactly what `af` does to their repository. After
+this page you will know what a session owns, how its branch and worktree are
+created and cleaned up, and the difference between archiving one and killing it.
 
 The core idea in Agent Factory is simple: **one agent, one git worktree, one
 branch.** Every session you create is a real, separate working tree of your
@@ -31,7 +35,7 @@ Because each session gets its own worktree:
 1. **Create.** You give a session a name (and optionally a starting prompt).
    `af` creates a branch (prefixed per your config, e.g. `af/`), adds a worktree
    for it (next to your repo by default; see `worktree_root` in
-   [configuration](../configuration.md) for the subdirectory option), and starts
+   [configuration](configuration.md) for the subdirectory option), and starts
    your chosen agent in that directory. Any configured post-worktree setup commands
    run first, so the agent starts in a ready environment.
 2. **Work.** The agent runs in its worktree. You watch it in the Agent tab,
@@ -54,14 +58,14 @@ already sitting in, on the branch you already have checked out. `af sessions
 create --here` (alias `--in-place`) does exactly that: the agent runs in the
 repo root at its current branch, **no worktree or branch is created**, and
 killing the session never removes your working tree or branch. This is also how
-the always-on [root agent](../configuration.md#root-agents-always-ensured)
+the always-on [root agent](configuration.md#root-agents-always-ensured)
 attaches to a repo.
 
 ## Local and remote
 
 Everything above describes **local** sessions — worktrees on the machine running
 `af`. Sessions can also run on a **remote** backend you define, through
-[remote hooks](../remote-hooks.md): your `launch_cmd` provisions a workspace and
+[remote hooks](remote-hooks.md): your `launch_cmd` provisions a workspace and
 exposes an `af agent-server`, while `delete_cmd` tears that workspace down. The
 session shows up in the same sidebar with the same Agent tab, attach, and kill
 experience. The worktree-isolation model is the same; only the machine changes.

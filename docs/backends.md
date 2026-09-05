@@ -1,5 +1,10 @@
 # Backends (runtimes)
 
+For anyone who wants a session's agent to run somewhere other than this machine.
+After this page you will know what each backend needs, how to point a repository
+at one, and what changes about tabs, archive, and restore when a session is
+off-box.
+
 A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much

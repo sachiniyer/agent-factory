@@ -1,5 +1,9 @@
 # Agent plugins
 
+For anyone who runs Codex, Claude Code, Gemini, or amp directly and wants it to be
+able to drive `af`. After this page you will have the `agent-factory` skill
+installed in your agent, so "run this in a background af session" works.
+
 `af` teaches every agent it launches how to drive the `af` CLI. Agent plugins
 hand that same knowledge to an agent `af` did **not** launch — a Codex or Claude
 Code session you started yourself, in any repo — so you can say "run this in a

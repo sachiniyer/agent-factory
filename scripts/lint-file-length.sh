@@ -90,7 +90,7 @@ for path in "${!CEIL[@]}"; do
 done
 
 if ((fail)); then
-	echo "file-length lint failed. See docs/file-length-lint.md" >&2
+	echo "file-length lint failed. See docs/dev/file-length-lint.md" >&2
 	exit 1
 fi
 

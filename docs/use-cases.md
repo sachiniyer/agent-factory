@@ -1,10 +1,13 @@
-# Use Cases
+# Use cases
+
+For anyone who has installed `af` and wants concrete things to do with it. Each
+section below is a workflow, shown from the TUI and from the CLI.
 
 Agent Factory is useful when you want coding agents to do real repository work
 in parallel, but you still want engineering control: isolated files, visible
 state, scripted operations, and normal review.
 
-## Parallel Bug Fixes
+## Parallel bug fixes
 
 Give each bug its own session from the TUI. Press **`n`**, name the task, submit
 the first session, then repeat for the next bug.
@@ -32,7 +35,7 @@ af sessions create --name fix-webhook-retry --prompt "Fix flaky webhook retries"
 af sessions create --name fix-export-timeout --prompt "Fix CSV export timeout"
 ```
 
-## Competing Implementations
+## Competing implementations
 
 For ambiguous work, run multiple approaches at once. Create one session per
 approach, then use the sidebar and Agent tab to compare how each attempt is
@@ -56,7 +59,7 @@ af sessions create --name search-index --prompt "Implement search with an index-
 Because each attempt is isolated, you can evaluate both without untangling
 mixed edits in one checkout.
 
-## Review And Follow-Up Loops
+## Review and follow-up loops
 
 Agent work rarely ends at the first answer. Use the TUI to inspect status, press
 **Enter** to interact with the selected session, then send the follow-up prompt
@@ -71,7 +74,7 @@ af sessions send-prompt fix-login-loop \
 
 The session keeps its branch, worktree, tabs, and terminal context.
 
-## Scheduled Triage
+## Scheduled triage
 
 Use the TUI task manager for recurring prompts. Press **`m`**, create a task,
 choose the cron trigger, and leave it enabled for the daemon to run.
@@ -99,7 +102,7 @@ af tasks add \
   --cron "0 9 * * 1-5"
 ```
 
-## Event-Driven Intake
+## Event-driven intake
 
 Use watch tasks when another system emits work. In the task manager, create a
 watch task and point it at the script that emits one event per stdout line.
@@ -129,7 +132,7 @@ af tasks add \
   --prompt "Investigate this CI failure: {{line}}"
 ```
 
-## Remote Machines
+## Remote machines
 
 Remote hooks let a repo define scripts for launching, listing, attaching to,
 and deleting sessions on another backend. Remote sessions appear in the same
@@ -138,7 +141,7 @@ TUI, with the same Agent tab and attach flow.
 This is useful when agents need a beefier machine, a specific network, or a
 remote development environment while you still want one local control surface.
 
-## Usage-Limit Recovery
+## Usage-limit recovery
 
 Claude, Codex, and Devin sessions can hit plan usage-limit windows. Agent Factory
 can mark those sessions with `[limit]`, preserve task runs as parked instead of
@@ -148,7 +151,7 @@ one, or a fixed retry interval where it does not.
 This is especially useful for unattended task runs: a limit wall becomes a
 pause, not a false failure.
 
-## Always-On Root Agent
+## Always-on root agent
 
 For repositories where you want a persistent in-place agent, configure a root
 agent. The daemon ensures the reserved `root` session is running at the repo
@@ -157,7 +160,7 @@ root and can recreate it after process loss.
 Use this only for repositories where an autonomous repo-root agent is
 intentional and trusted.
 
-## When To Reach For Something Else
+## When to reach for something else
 
 Agent Factory is intentionally terminal-native and git-first. Consider another
 center of gravity when:

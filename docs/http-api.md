@@ -1,4 +1,9 @@
-# `af` HTTP/JSON API reference
+# The HTTP API
+
+For anyone integrating with the daemon over HTTP rather than the CLI. After this
+page you will know the transport and socket path, how requests are authenticated,
+the response envelope every endpoint uses, and where the generated endpoint table
+lives.
 
 The Agent Factory daemon exposes a small JSON API — a 1:1 mirror of the session
 and task operations the `af` CLI performs — over a **local Unix socket**. It is
@@ -193,7 +198,7 @@ not list. They fall into three groups:
   `network.listen_addr`, and returns the ordinary 404 unknown-route envelope while
   it is off. Its handlers are `net/http/pprof`'s, mounted with the same `GET`-only
   method qualification the stdlib uses. See
-  [Profiling the daemon](daemon-memory.md#profiling-the-daemon).
+  [Profiling the daemon](dev/daemon-memory.md#profiling-the-daemon).
 
 **Response shapes.** These are not part of the generated request-field catalog,
 so they are documented here. `CreateSession` returns `{ "instance": <session> }`;

@@ -1,4 +1,4 @@
-# Release Notes
+# Release notes
 
 ## `af sessions list` now tells you what its numbers mean
 
@@ -16,7 +16,7 @@
 - One caveat worth knowing: `status` is the older single-axis value and cannot
   express a usage-limit wall — such a session reports `status_name: "ready"`
   while `liveness_name` says `limit-reached`. **Branch on `liveness_name`.** See
-  [HTTP API → session state names](http-api.md#session-state-names).
+  [HTTP API → session state names](../http-api.md#session-state-names).
 
 ## A remote hook can return an ssh host instead of an endpoint
 
@@ -52,7 +52,7 @@
 - Two things to expect: **existing editor state does not migrate** (it is the shared store
   being fixed, so layout and history start empty once), and this is **same-machine only** —
   a remote viewer keeps the shared-origin editor. See
-  [Web UI → per-tab preview origins](web.md#per-tab-preview-origins).
+  [Web UI → per-tab preview origins](../web.md#per-tab-preview-origins).
 
 ## Breaking: a remote hook's `launch_cmd` owns stdout
 
@@ -67,7 +67,7 @@
   and `echo "progress…" >&2`. **stderr is unchanged** and still takes anything,
   including output from a process the script backgrounds. A script that already
   keeps stdout clean needs no change. See [Migrating to an endpoint-only
-  stdout](remote-hooks.md#migrating-to-an-endpoint-only-stdout).
+  stdout](../remote-hooks.md#migrating-to-an-endpoint-only-stdout).
 - **Why it had to break.** af previously read the endpoint out of a stdout the
   docs let a tunnel share, which meant deciding per line whether a line was the
   record or a log — a question with no answer, since `[INVALID,` opening a log
@@ -115,7 +115,7 @@
   viewing remotely (Tailscale, SSH), the `ssh -L 8443:…` case where the browser's own
   address looks local but the daemon is not, and Safari, which does not resolve
   `*.localhost` at all. Nothing opens unless you set the key. See
-  [Web UI → per-tab preview origins](web.md#per-tab-preview-origins).
+  [Web UI → per-tab preview origins](../web.md#per-tab-preview-origins).
 
 ## Copying out of the web terminal
 
@@ -218,7 +218,7 @@ writes, stale flags, and stale API fields fail with that guidance instead of
 silently doing nothing.
 Configure approval behavior in the agent itself; the exact recipe for every
 supported agent is in [Agent approval
-behavior](configuration.md#agent-approval-behavior). Existing persisted session
+behavior](../configuration.md#agent-approval-behavior). Existing persisted session
 records carrying the old field still load, but the field is ignored and is not
 written back.
 
@@ -261,7 +261,7 @@ written back.
   `AWS_SHARED_CREDENTIALS_FILE` your setup uses). Aider is unaffected — its
   Azure entries are Azure OpenAI service keys, not cloud credentials.
 
-## Keymap Changes
+## Keymap changes
 
 - Default TUI keys changed to ergonomic lower-case (`a/m/y/e`,
   `ctrl+u/ctrl+d`); restore any previous binding by pinning it in `[keys]` in

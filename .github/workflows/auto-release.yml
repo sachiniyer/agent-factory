@@ -2,7 +2,7 @@ name: Auto Preview Release
 
 # Cuts a preview release (vX.Y.Z-preview-N, GitHub prerelease) off master
 # every 3 hours when there are new commits. Stable releases are cut manually
-# via stable-release.yml. See docs/release-process.md (#1041).
+# via stable-release.yml. See docs/dev/release-process.md (#1041).
 
 on:
   schedule:

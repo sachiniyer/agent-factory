@@ -532,7 +532,7 @@ export interface HandoffResult {
  *  live agent and starts another, so resolving a duplicate title across repos to
  *  the wrong session would tear down an unrelated agent. `brief` is deliberately
  *  not sent — the mission defaults to the session's stored prompt, and inline
- *  override is `af sessions handoff --brief`'s surface (see docs/surface-parity.md,
+ *  override is `af sessions handoff --brief`'s surface (see docs/dev/surface-parity.md,
  *  field_coverage HandoffSession.brief).
  *
  *  A failed handoff (not found, busy, unsupported backend, same agent) comes back

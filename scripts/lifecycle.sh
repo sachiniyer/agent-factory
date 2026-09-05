@@ -87,7 +87,7 @@ LC_DL="https://github.com/$LC_REPO_SLUG/releases/download"
 
 # INJECTIONS — deliberately break the machine to prove an assertion fires.
 # The gate's value is the bugs it catches NEXT, so it has to be shown catching
-# one now. See the PR body / docs/lifecycle-testing.md.
+# one now. See the PR body / docs/dev/lifecycle-testing.md.
 #
 #   skip-daemon-restart  swap the binary to N but never restart the daemon —
 #                        exactly the #1921 skew condition (new client, old

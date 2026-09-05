@@ -548,7 +548,7 @@ jobs:
           git diff --no-renames --name-only "$base" HEAD > changed-paths.txt
           node .github/scripts/web-selftest-scope.js changed-paths.txt >> "$GITHUB_OUTPUT"
 
-  # The web client's acceptance proof (#1592 Phase 5 PR6, docs/web-selftest.md),
+  # The web client's acceptance proof (#1592 Phase 5 PR6, docs/dev/web-selftest.md),
   # called as a reusable workflow so that Build can list it in `needs` — a job in
   # another workflow cannot be a `needs` dependency, and `needs` is the only way to
   # gate on anything but "Lint" and "Build" without a ruleset edit.
