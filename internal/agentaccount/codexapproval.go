@@ -44,6 +44,11 @@ func CodexApprovalWarning(name, dir string) string {
 	path := filepath.Join(dir, "config.toml")
 	_, doc, err := readCodexSettings(path)
 	if err == nil && doc != nil {
+		effective, reason := codexEffectiveSettings(doc)
+		if reason != "" {
+			return fmt.Sprintf("Codex account %q: approval_policy in %s could not be verified: %s. Check the selected profile before starting a session.", name, path, reason)
+		}
+		doc = effective
 		if policy, exists := doc["approval_policy"]; exists {
 			if validCodexApprovalPolicy(policy) {
 				return ""
@@ -51,11 +56,11 @@ func CodexApprovalWarning(name, dir string) string {
 			return fmt.Sprintf("Codex account %q: approval_policy in %s could not be verified (unsupported value or type); Codex may reject it at startup. %s Check the policy against your installed Codex version. Registration preserves existing keys and will not repair this value.", name, path, codexApprovalPolicyNotice)
 		}
 	}
-	reason := "has no top-level approval_policy"
+	reason := "has no effective approval_policy"
 	if err != nil || doc == nil {
 		reason = "could not be read or parsed to verify approval_policy"
 	}
-	return fmt.Sprintf("Codex account %q: %s %s; sessions can stop on Codex's approval picker. Set a top-level approval_policy in that file, or run `af accounts add codex %s` to seed missing runtime settings from ~/.codex/config.toml.", name, path, reason, name)
+	return fmt.Sprintf("Codex account %q: %s %s; sessions can stop on Codex's approval picker. Set approval_policy in that file or its selected profile, or run `af accounts add codex %s` to seed missing runtime settings from ~/.codex/config.toml.", name, path, reason, name)
 }
 
 // codexApprovalSeedValue excludes ignored fields from a validated granular map:

@@ -29,7 +29,7 @@ func readCodexSettings(path string) ([]byte, map[string]any, error) {
 		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var doc map[string]any
-	if err := toml.Unmarshal(data, &doc); err != nil {
+	if err := toml.Unmarshal(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), &doc); err != nil {
 		return data, nil, nil
 	}
 	return data, doc, nil
@@ -49,11 +49,16 @@ func answerCodexLoginPrompts(dir string) error {
 	if err != nil || ambient == nil {
 		return nil
 	}
-	if policy, exists := ambient["approval_policy"]; exists && !validCodexApprovalPolicy(policy) {
-		return nil // Refuse partial inheritance from an unverified policy.
-	}
-	if !codexHasRuntimeKeys(ambient) {
+	effective, reason := codexRuntimeSource(ambient)
+	if reason != "" {
 		return nil
+	}
+	if !codexHasRuntimeKeys(effective) {
+		return nil
+	}
+	accountEffective, accountReason := codexEffectiveSettings(account)
+	if accountReason != "" {
+		accountEffective = account
 	}
 	var prefix []byte
 	// Provider-specific models cannot be interpreted without provider configuration,
@@ -64,10 +69,10 @@ func answerCodexLoginPrompts(dir string) error {
 		if key == "model" && (ambientModelBlock != "" || accountModelBlock != "") {
 			continue
 		}
-		if _, exists := account[key]; exists {
+		if _, exists := accountEffective[key]; exists {
 			continue
 		}
-		value, exists := ambient[key]
+		value, exists := effective[key]
 		if !exists {
 			continue
 		}
@@ -82,16 +87,22 @@ func answerCodexLoginPrompts(dir string) error {
 		}
 		prefix = append(prefix, encoded...)
 	}
-	options, err := codexWorkspaceOptions(ambient, account)
-	if err != nil {
-		return err
+	if accountReason == "" {
+		options, err := codexWorkspaceOptions(effective, accountEffective)
+		if err != nil {
+			return err
+		}
+		prefix = append(prefix, options...)
 	}
-	prefix = append(prefix, options...)
 	if len(prefix) == 0 {
 		return nil
 	}
 	// Prepending avoids mistaking a header-looking line inside a multiline
 	// string for a table and guarantees all added keys are TOP LEVEL.
+	if bytes.HasPrefix(data, []byte("\xef\xbb\xbf")) {
+		prefix = append([]byte("\xef\xbb\xbf"), prefix...)
+		data = data[3:]
+	}
 	return writeAgentSettings(path, append(prefix, data...))
 }
 
@@ -100,6 +111,11 @@ func answerCodexLoginPrompts(dir string) error {
 // bytes without moving original top-level keys into a newly opened table scope.
 func codexWorkspaceOptions(ambient, account map[string]any) ([]byte, error) {
 	if mode, _ := ambient["sandbox_mode"].(string); mode != "workspace-write" {
+		return nil, nil
+	}
+	// A missing account mode is seeded from ambient in this same pass.
+	mode, exists := account["sandbox_mode"]
+	if accountMode, _ := mode.(string); exists && accountMode != "workspace-write" {
 		return nil, nil
 	}
 	if _, exists := account["sandbox_workspace_write"]; exists {
@@ -130,7 +146,7 @@ func encodeCodexSetting(key string, value any) ([]byte, error) {
 
 func codexHasRuntimeKeys(doc map[string]any) bool {
 	approval := validCodexApprovalPolicy(doc["approval_policy"])
-	_, sandbox := doc["sandbox_mode"].(string)
+	sandbox := validCodexSandboxMode(doc["sandbox_mode"])
 	return approval || sandbox
 }
 
@@ -140,7 +156,7 @@ func codexSettingsNotice(dir string) string {
 	if err != nil {
 		return fmt.Sprintf("Nothing was written to %s because ~/.codex/config.toml could not be read: cannot locate the home directory: %v", path, err)
 	}
-	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when neither document nor its selected profile has model_provider and selected profiles can be verified. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Approval policies are validated before seeding; an invalid ambient policy skips all seeding. Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
+	policy := fmt.Sprintf("Registration seeds missing approval_policy · sandbox_mode · model from the effective settings in %s into %s: the selected profile overrides root values. Existing keys stand, including selected-profile values. Models are not seeded across provider selections. Profiles and provider configuration are never copied. Workspace options are copied only for an effective workspace-write account. Unresolved ambient profiles or invalid approval/sandbox settings skip all seeding. Unparseable documents are left alone; credentials and project trust are never copied.", source, path)
 	_, ambient, err := readCodexSettings(source)
 	if err != nil {
 		return policy + " Nothing was written from the ambient file because it could not be read."
@@ -148,13 +164,14 @@ func codexSettingsNotice(dir string) string {
 	if ambient == nil {
 		return policy + " Nothing was written from the ambient file because it could not be parsed."
 	}
-	if policyValue, exists := ambient["approval_policy"]; exists && !validCodexApprovalPolicy(policyValue) {
-		return policy + " Nothing was written from the ambient file because approval_policy could not be verified. " + codexApprovalPolicyNotice
+	effective, reason := codexRuntimeSource(ambient)
+	if reason != "" {
+		return policy + " Nothing was written from the ambient file because " + strings.TrimSuffix(reason, ".") + "."
 	}
 	if reason := codexModelSeedBlockReason(ambient); reason != "" {
-		policy += " model not seeded: ~/.codex/config.toml " + reason + "."
+		policy += " model not seeded: ~/.codex/config.toml " + strings.TrimSuffix(reason, ".") + "."
 	}
-	if !codexHasRuntimeKeys(ambient) {
+	if !codexHasRuntimeKeys(effective) {
 		return policy + " Nothing was written from the ambient file because it is absent or has neither approval_policy nor sandbox_mode."
 	}
 	_, account, err := readCodexSettings(path)
@@ -162,7 +179,7 @@ func codexSettingsNotice(dir string) string {
 		return policy + " The account document could not be read or parsed and was left alone."
 	}
 	if reason := codexModelSeedBlockReason(account); reason != "" {
-		policy += " model not seeded: this account's config.toml " + reason + "."
+		policy += " model not seeded: this account's config.toml " + strings.TrimSuffix(reason, ".") + "."
 	}
 	var present []string
 	for _, key := range []string{"approval_policy", "sandbox_mode", "model", "sandbox_workspace_write"} {
