@@ -12,9 +12,14 @@ the agent CLI treats as its home. `af` never reads, stores, or forwards the
 credential itself: it decides which directory a session sees, and the agent's
 own login flow puts the material there.
 
-Install the agent you are logging into first: this example needs `codex` on
-your `PATH`, even if your sessions normally use another agent. Run it in an
-interactive terminal.
+Install the agent on the machine running the daemon first: this example needs
+`codex` on the **daemon's `PATH`**, even if your sessions normally use another
+agent. Finding it in your current shell is not enough if that shell's `PATH`
+changed after the daemon started. From a shell with the corrected `PATH`, run
+`af daemon restart`. If you use an installed autostart service, first rerun
+`af daemon install` from that shell to replace the service's captured `PATH`;
+restarting alone reuses that snapshot. Run the login command in an interactive
+terminal.
 
 ```bash
 af accounts login codex work   # register it, then run codex's own login in it

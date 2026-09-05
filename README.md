@@ -76,8 +76,11 @@ daemon serves the web client on loopback with no token and no login screen.
 Use a browser on the machine running `af`, then select a session in the rail to
 open its terminal. If the page does not load, run
 `af daemon status` and check the `tcp listener` address and whether it is bound;
-use that port if it differs from 8443. An empty `network.listen_addr` disables
-the web listener. See [Web client](docs/web.md) for configuration and remote access.
+open `http://` followed by the reported bound host and port, keeping any IPv6
+brackets. For a wildcard host, use `127.0.0.1` instead of `0.0.0.0`, or `[::1]`
+instead of `[::]`, when browsing on this machine; keep the reported port. An
+empty `network.listen_addr` disables the web listener. See [Web client](docs/web.md)
+for configuration and remote access.
 
 ## The mental model in five terms
 

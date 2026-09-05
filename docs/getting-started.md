@@ -113,9 +113,12 @@ default, on loopback, with no token and no login screen:
 Open that URL on the machine running `af`, then select your session in the rail
 to open its terminal. If the page does not load, run
 `af daemon status`: the `tcp listener` line gives the actual address and whether
-it is bound. Use its port if it differs from 8443. An empty global
-`network.listen_addr` disables the web listener; see [Web client](web.md) for
-configuration.
+it is bound. Open `http://` followed by that bound host and port (keeping any
+IPv6 brackets), for example `http://192.168.1.10:9000` for a listener bound to
+`192.168.1.10:9000`. For a wildcard host, use `127.0.0.1` instead of `0.0.0.0`,
+or `[::1]` instead of `[::]`, when browsing on this machine; keep the reported
+port. An empty global `network.listen_addr` disables the web listener; see
+[Web client](web.md) for configuration.
 
 You get the same session rail, live terminals, tabs, tasks, and config — plus
 things a terminal cannot do, like a VS Code tab rooted at a session's worktree.
