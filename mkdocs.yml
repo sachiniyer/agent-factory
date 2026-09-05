@@ -166,6 +166,7 @@ nav:
       - Lifecycle testing: dev/lifecycle-testing.md
       - Web client selftest: dev/web-selftest.md
       - Manual TUI testing: dev/tui-manual-testing.md
+      - Performance baselines: dev/perf-baselines.md
       - Surface parity: dev/surface-parity.md
       - File-length lint: dev/file-length-lint.md
       - Release process: dev/release-process.md

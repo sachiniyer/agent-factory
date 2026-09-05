@@ -1,9 +1,14 @@
 # Performance and visual baselines
 
 Issue #3908, part of #3906. Run `make perf-container`. The performance job
-runs on every PR and merge-group, including docs-only changes, and is a dependency
+runs for PRs touching `web/` (including Playwright configs and goldens), `app/`,
+`ui/`, `scripts/perf/`, or `scripts/container/`, and is a dependency
 of the required **Build** check. It uses the same 35-minute harness / 40-minute job
-limits as Web selftest. It builds the committed web bundle into `af`; the separate
+limits as Web selftest. The shared scope job computes both decisions from the
+same rename-safe diff, with a tested path list; docs-only and gate-only PRs skip
+performance successfully. Unknown diffs and merge-group events run it. The Web
+job owns the application typecheck and unit suite; perf compiles only its harness
+and tests its budget checker. It builds the committed web bundle into `af`; the separate
 Web job proves that bundle matches the TypeScript source.
 
 ## Isolation and fixture

@@ -105,8 +105,6 @@ if [ "${AF_PERF_MODE:-0}" = 1 ]; then
         export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
         npm ci --no-audit --no-fund
         npx tsc -p tsconfig.selftest.json
-        npm run typecheck
-        npm test
         node --test /work/scripts/perf/check.test.mjs
     )
 fi
