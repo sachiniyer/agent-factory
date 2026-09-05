@@ -30,6 +30,11 @@ func TestRegisterCodexEffectiveSettings(t *testing.T) {
 		{"invalid sandbox", "approval_policy = 'never'\nsandbox_mode = 'typo'\n", "", "", "sandbox_mode could not be verified", true},
 		{"invalid sandbox type", "sandbox_mode = 123\n", "", "", "sandbox_mode could not be verified", true},
 		{"invalid profile sandbox", "profile = 'work'\n" + root + "[profiles.work]\nsandbox_mode = 'typo'\n", "", "", "sandbox_mode could not be verified", true},
+		{"invalid workspace 0", "approval_policy = 'never'\nsandbox_mode = 'workspace-write'\n[sandbox_workspace_write]\nnetwork_access = 'yes'\n", "", "", "sandbox_workspace_write could not be verified", true},
+		{"invalid workspace 1", "approval_policy = 'never'\nsandbox_mode = 'workspace-write'\n[sandbox_workspace_write]\nwritable_roots = 'foo'\n", "", "", "sandbox_workspace_write could not be verified", true},
+		{"invalid workspace 2", "approval_policy = 'never'\nsandbox_mode = 'workspace-write'\n[sandbox_workspace_write]\nwritable_roots = [123]\n", "", "", "sandbox_workspace_write could not be verified", true},
+		{"invalid workspace 3", "approval_policy = 'never'\nsandbox_mode = 'workspace-write'\n[sandbox_workspace_write]\nexclude_tmpdir_env_var = 1\n", "", "", "sandbox_workspace_write could not be verified", true},
+		{"invalid workspace 4", "approval_policy = 'never'\nsandbox_mode = 'workspace-write'\n[sandbox_workspace_write]\nexclude_slash_tmp = 'false'\n", "", "", "sandbox_workspace_write could not be verified", true},
 		{"BOM preserved", "approval_policy = 'never'\n", bom + "# Keep\n[features]\nfast = true\n", bom + "approval_policy = 'never'\n# Keep\n[features]\nfast = true\n", "", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

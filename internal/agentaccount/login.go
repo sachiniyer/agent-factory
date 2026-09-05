@@ -190,8 +190,7 @@ const codexKeyringStore = "keyring"
 // honest report.
 func CheckLoginPreconditions(agent, dir string) ([]string, error) {
 	var notices []string
-	switch agent {
-	case "codex":
+	if agent == "codex" {
 		configPath := filepath.Join(dir, "config.toml")
 		store, read, err := codexCredentialStore(configPath)
 		switch {
@@ -210,6 +209,16 @@ func CheckLoginPreconditions(agent, dir string) ([]string, error) {
 				dir, codexCredentialStoreSetting, codexKeyringStore,
 				codexCredentialStoreSetting, configPath)
 		}
+	}
+	return append(notices, RegistrationNotices(agent, dir)...), nil
+}
+
+// RegistrationNotices explains account settings without enforcing login-only
+// preconditions. Both add and login use these same messages.
+func RegistrationNotices(agent, dir string) []string {
+	var notices []string
+	switch agent {
+	case "codex":
 		notices = append(notices, fmt.Sprintf(
 			"CODEX_HOME relocates codex's WHOLE home, not just its credentials: this account starts with no "+
 				"history and no skills of its own (they live under %s). That is a fresh identity, "+
@@ -236,7 +245,7 @@ func CheckLoginPreconditions(agent, dir string) ([]string, error) {
 			filepath.Join(dir, ".gemini", geminiSettingsFile),
 			filepath.Join(dir, ".gemini", geminiTrustedFoldersFile)))
 	}
-	return notices, nil
+	return notices
 }
 
 // codexCredentialStore reads ONE setting out of an account's codex config.

@@ -156,7 +156,7 @@ func codexSettingsNotice(dir string) string {
 	if err != nil {
 		return fmt.Sprintf("Nothing was written to %s because ~/.codex/config.toml could not be read: cannot locate the home directory: %v", path, err)
 	}
-	policy := fmt.Sprintf("Registration seeds missing approval_policy · sandbox_mode · model from the effective settings in %s into %s: the selected profile overrides root values. Existing keys stand, including selected-profile values. Models are not seeded across provider selections. Profiles and provider configuration are never copied. Workspace options are copied only for an effective workspace-write account. Unresolved ambient profiles or invalid approval/sandbox settings skip all seeding. Unparseable documents are left alone; credentials and project trust are never copied.", source, path)
+	policy := fmt.Sprintf("Registration seeds missing approval_policy · sandbox_mode · model from the effective settings in %s into %s: the selected profile overrides root values. Existing keys stand, including selected-profile values. Models are not seeded across provider selections. Profiles and provider configuration are never copied. Workspace options are copied only for an effective workspace-write account. Unresolved ambient profiles or invalid approval/sandbox settings (including active workspace options) skip all seeding. Unparseable documents are left alone; credentials and project trust are never copied.", source, path)
 	_, ambient, err := readCodexSettings(source)
 	if err != nil {
 		return policy + " Nothing was written from the ambient file because it could not be read."

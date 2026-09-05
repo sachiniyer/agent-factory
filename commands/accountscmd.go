@@ -254,11 +254,7 @@ settings may be seeded; notices explaining them are printed to stderr.`,
 		if err != nil {
 			return jsonWrapError(cmd, accountsJSONFlag, err)
 		}
-		notices, err := agentaccount.CheckLoginPreconditions(agent, dir)
-		if err != nil {
-			return jsonWrapError(cmd, accountsJSONFlag, err)
-		}
-		for _, notice := range notices {
+		for _, notice := range agentaccount.RegistrationNotices(agent, dir) {
 			fmt.Fprintln(cmd.ErrOrStderr(), notice)
 		}
 		entry := accountEntry{Agent: agent, Name: name, Dir: dir, LoggedIn: loggedIn}
