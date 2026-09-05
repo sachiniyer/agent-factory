@@ -50,6 +50,11 @@ type fakeClientlessChannel struct {
 	// stopDone, when non-nil, is signaled AFTER StopCapture has closed the writer,
 	// so a test can order an assertion strictly after the teardown's effect.
 	stopDone chan struct{}
+	// resizeErr, when non-nil, is what Resize returns instead of nil — the test
+	// stand-in for a `tmux resize-window` that failed. The call is still RECORDED,
+	// because a failing apply is still ATTEMPTED every frame and still returns its
+	// error to the caller; only the broker's logging of it changes (#3862).
+	resizeErr error
 	// snapshotErr, when non-nil, is what Snapshot returns instead of a screen — the
 	// test stand-in for a `tmux capture-pane` that fails (a pane that vanished under
 	// the exec). subscribe()'s repaint is BEST-EFFORT against exactly this: it queues
@@ -106,7 +111,7 @@ func (f *fakeClientlessChannel) Resize(rows, cols uint16) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resizes = append(f.resizes, [2]uint16{rows, cols})
-	return nil
+	return f.resizeErr
 }
 
 func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {

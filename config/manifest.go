@@ -589,6 +589,18 @@ var configManifest = []ManifestEntry{
 		Merge:      MergeTableByField,
 		Formats:    formatTOMLJSON,
 	},
+	{
+		Key:        "upgrade_clear_unverifiable_artifacts",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Let an upgrade set aside a binary staged beside af whose owning agent-factory home af cannot read · only for a leftover you have checked yourself; af already clears the ones it can attribute.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
 }
 
 // Manifest returns every user-facing GLOBAL config key in tier order. It keeps

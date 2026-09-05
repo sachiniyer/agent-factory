@@ -58,6 +58,12 @@ type Request struct {
 	// (sessionenv.commonNames), so the identity subtraction never costs an
 	// operator their network configuration; this is the escape hatch for the
 	// rest. The subtraction removes IDENTITY, not environment.
+	//
+	// Since #3854 it is also the OVERRIDE for af's browser-free login defaults.
+	// The pane sets BROWSER (claude) or NO_BROWSER (gemini) so the device-code
+	// path is the one that runs on a headless daemon host; naming either here
+	// keeps the operator's own value instead, for the host that really does have
+	// a browser worth opening.
 	Passthrough []string
 }
 
@@ -251,7 +257,12 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// process to the account, and refuse a command that would set an identity
 	// variable itself. The child shim still applies the FULL boundary — inject the
 	// account's root, remove every other identity — immediately before exec.
-	pane.SetAccountEnvironmentForAgent(req.Agent, req.Name)
+	//
+	// The LOGIN form of it, and the distinction is #3854's: this pane also gets
+	// the environment that makes the agent's own sign-in browser-free, which an
+	// account-scoped working session must not have. AFTER SetEnvPassthrough, so an
+	// operator who named one of those variables themselves keeps their value.
+	pane.SetAccountLoginForAgent(req.Agent, req.Name)
 
 	// The account directory is the working directory: it is a real, durable,
 	// 0700 directory af created, outside any temp dir (codex refuses to create

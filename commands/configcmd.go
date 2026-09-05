@@ -101,6 +101,7 @@ var globalConfigReadOrder = []string{
 	"worktree_root",
 	"detach_keys",
 	"update_channel",
+	"upgrade_clear_unverifiable_artifacts",
 	"vscode_server_binary",
 	"theme",
 	"root_agents",

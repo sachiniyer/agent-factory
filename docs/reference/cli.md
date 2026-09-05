@@ -147,15 +147,20 @@ flow against it · list shows what is registered.
   af accounts login codex work
 
 That one command registers the account if needed, starts codex's own login in a
-tmux session scoped to it, hands you the terminal for the browser or device-code
-step, and afterwards reports whether the account holds a credential — read from
-the agent's own credential file, by checking that it exists.
+tmux session scoped to it, hands you the terminal for the device-code step, and
+afterwards reports whether the account holds a credential — read from the agent's
+own credential file, by checking that it exists.
+
+Every login af runs is browser-free. The pane is on the daemon's host, which is
+usually headless and remote, so the flow that fits is the device code: the CLI
+prints a URL and a code, you sign in from whatever device you are holding, and
+the CLI polls. af selects it per agent — see af accounts login --help.
 
 You can still do it by hand, and af runs exactly these:
 
-  CODEX_HOME=$(af accounts add codex work) codex login
-  CLAUDE_CONFIG_DIR=$(af accounts add claude work) claude auth login
-  GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
+  CODEX_HOME=$(af accounts add codex work) codex login --device-auth
+  CLAUDE_CONFIG_DIR=$(af accounts add claude work) BROWSER=true claude auth login
+  GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini
 
 Those variables do not all have the same shape, and mixing them up is the easy
 mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.
@@ -265,9 +270,9 @@ Run the agent's own login command against an account's credential directory.
 
 af registers the account if it does not exist yet, asks the daemon to start the
 agent's login flow in a tmux session scoped to that account, and hands you the
-terminal so you can complete the browser or device-code step. When the flow ends,
-af reports whether the account holds a credential — read from the agent's own
-credential file, by checking that it exists, never by reading it.
+terminal so you can complete the device-code step. When the flow ends, af reports
+whether the account holds a credential — read from the agent's own credential
+file, by checking that it exists, never by reading it.
 
   af accounts login codex work
   af accounts login claude personal
@@ -275,7 +280,23 @@ credential file, by checking that it exists, never by reading it.
 af never reads, stores, or forwards the credential. It sets one variable and runs
 the agent's own flow:
 
-  claude → claude auth login · codex → codex login · gemini → gemini
+  claude → claude auth login · codex → codex login --device-auth · gemini → gemini
+
+The login is browser-free. The pane runs on the daemon's host, which is usually
+headless and remote, so a browser-callback sign-in there opens a browser nobody
+is sitting in front of, or waits for a redirect to that host's own localhost that
+your machine cannot reach. Every flow above prints a URL and waits for a code you
+paste back, and af selects that path per agent:
+
+  codex   codex login --device-auth prints a verification URL and a device code
+  gemini  the pane sets NO_BROWSER=true · gemini prints the URL and prompts
+          "Enter the authorization code: "
+  claude  claude has no such flag, so the pane sets BROWSER=true — a no-op opener
+          the CLI honours — and claude prints "If the browser didn't open, visit:"
+          with the URL, then "Paste code here if prompted > "
+
+Sign in on whatever device you are actually holding, then paste the code into the
+pane.
 
 The login pane gets exactly the environment an account-scoped session gets: the
 account's directory injected, and every other identity-bearing variable for that
@@ -287,7 +308,8 @@ while the account directory stayed empty.
 It removes identity, not environment: proxies, private CA roots and your git and
 SSH configuration are passed through as always. If the login needs something else
 — DISPLAY or BROWSER, on a host with a browser to open — add it to
-session_env_passthrough.
+session_env_passthrough. Naming BROWSER or NO_BROWSER there also overrides the
+browser-free defaults above; your value wins.
 
 The flow runs on the daemon's host, where the credential directory is. With
 --no-attach af prints the tmux session to attach to instead of taking your

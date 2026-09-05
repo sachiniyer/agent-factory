@@ -18,11 +18,12 @@
 // THE THING THE WEB HAS TO SOLVE THAT THE TUI DOES NOT. The login child runs on
 // the DAEMON host; the human is usually on a laptop over Tailscale. #3385 called
 // this the load-bearing design problem, and it is why the button does not "open a
-// browser": it opens the daemon-side pane in a terminal here, so a device-code or
-// paste-a-URL flow — what all three of these CLIs fall back to on a headless
-// host — is completed by the human reading the code and finishing it in their
-// OWN browser. A flow that insists on opening a browser on the server is one
-// nobody is sitting in front of, and that stays a `af accounts login` on the host.
+// browser": it opens the daemon-side pane in a terminal here, so the device-code
+// flow — which af SELECTS for all three CLIs since #3854 rather than hoping they
+// fall back to it on a headless host — is completed by the human reading the code
+// and finishing it in their OWN browser. A flow that insists on opening a browser
+// on the server is one nobody is sitting in front of, and that stays a
+// `af accounts login` on the host.
 //
 // CSP-safe like the rest of the client: createElement + addEventListener via h(),
 // no innerHTML with markup.
@@ -83,7 +84,8 @@ export const ACCOUNT_INPUT_ATTR = "data-account-input";
  *  first row can suggest these are settable keys. */
 const ACCOUNTS_NOTE =
   "Agent identities, not config keys. af runs the agent's own login flow against a directory " +
-  "and never reads, stores or forwards the credential.";
+  "and never reads, stores or forwards the credential. Signing in is a device code · the pane " +
+  "prints a URL, you finish it in your own browser.";
 
 /**
  * Renders the Accounts section into a single element the config view appends.

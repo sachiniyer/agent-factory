@@ -6530,7 +6530,7 @@ function emptyAccountsState() {
   return { entries: [], agents: [], error: "", status: null };
 }
 var ACCOUNT_INPUT_ATTR = "data-account-input";
-var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential.";
+var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential. Signing in is a device code \xB7 the pane prints a URL, you finish it in your own browser.";
 function renderAccountsSection(state, actions2) {
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
@@ -9343,7 +9343,7 @@ function openAccountLogin(opts) {
   const note = h(
     "p",
     { class: "af-assistant-note" },
-    `Running ${login.program} on the daemon host with this account's credential directory. af never reads the credential. Complete the sign-in here; a device code or URL opens in your own browser.`
+    `Running ${login.program} on the daemon host with this account's credential directory. af never reads the credential. The pane prints a URL and a device code \xB7 sign in on any device, then paste the code back here.`
   );
   const termHost2 = h("div", { class: "af-assistant-term" });
   const body = h("div", { class: "af-assistant-body" }, note, termHost2);

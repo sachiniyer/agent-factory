@@ -85,6 +85,10 @@ var settableKeySpecs = map[string]settableKeySpec{
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
 	"auto_update": {kind: cfgBool},
+	// The staged-artifact escape hatch (#3864). A plain bool: it only widens what
+	// an upgrade may set aside when it cannot read the owning home, and there is
+	// nothing in the value for a validator to catch.
+	"upgrade_clear_unverifiable_artifacts": {kind: cfgBool},
 	// The opt-in profiling endpoint (#3651). A plain bool: the daemon decides where
 	// it is served (unix socket only) and there is nothing here for a value to get
 	// wrong, so no validator.

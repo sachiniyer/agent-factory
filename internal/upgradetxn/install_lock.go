@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -397,45 +396,6 @@ func withExecutableLock(executablePath string, nonblocking bool, fn func() error
 		retErr = errors.Join(retErr, releaseFileLock(lock))
 	}()
 	return fn()
-}
-
-// foreignTransactionOver returns the id of a transaction other than selfID that
-// has staged a preserved-previous binary beside executable, or "" when none has.
-//
-// It exists because a transaction is home-scoped while the executable is not.
-// Two AF homes sharing one `af` binary each keep their own journal, each take
-// their own per-home lock, and neither can see the other's — so both could hold
-// an active transaction over the same file. The executable lock serialises the
-// act of publishing, not the lifetime of what was published.
-//
-// There is no registry of AF homes to consult and none is needed:
-// binaryArtifactPaths stages the preserved and candidate binaries next to the
-// executable, so its directory is the one place every home's transaction over
-// that binary is visible.
-//
-// Matched on the preserved-PREVIOUS artifact, because that is the rollback
-// input a second transaction would put at risk. Read with ReadDir and a literal
-// prefix rather than filepath.Glob: an executable whose name contains a glob
-// metacharacter would otherwise match the wrong set.
-func foreignTransactionOver(executable, selfID string) (string, error) {
-	dir := filepath.Dir(executable)
-	prefix := "." + filepath.Base(executable) + ".af-upgrade-"
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", fmt.Errorf("inspect %s for other upgrade transactions: %w", dir, err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".previous") {
-			continue
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".previous")
-		if id == "" || id == selfID {
-			continue
-		}
-		return id, nil
-	}
-	return "", nil
 }
 
 // hasExtendedACL reports whether the path carries a POSIX access ACL, which
