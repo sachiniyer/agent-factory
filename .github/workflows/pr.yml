@@ -676,8 +676,8 @@ jobs:
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
     #
-    # `skipped` is deliberately NOT a failure here: web-selftest skips whenever its
-    # scope job says the PR cannot reach the web client, and that is the normal
+    # `skipped` is deliberately NOT a failure here: web-selftest and perf skip
+    # whenever the scope job says the PR is outside their watched paths, a normal
     # answer on most PRs. A skipped *scope* job would be a different matter, but it
     # has no `if:` and so only skips when the run itself is going away.
     needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest, perf]

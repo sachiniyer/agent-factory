@@ -98,10 +98,13 @@ reason to move a budget.
 
 ## Demo stills and intentional redesigns
 
-`playwright.visual.config.ts` drives the **same six demo beats** as the recorder:
-dashboard, new-session, agent-tab, review, tasks and config-accounts, in light and
-dark. It omits video, conversion and video pacing. It waits for final stand-in
-output and a stable terminal before shooting. Goldens are committed under
+`playwright.visual.config.ts` drives the **same ten demo stills** as the recorder:
+dashboard, parallel-work, new-session, agent-tab, review, comparison-review,
+tasks, scheduled-triage, event-intake and config-accounts, in light and dark
+(20 goldens). It omits video, conversion and video pacing. It waits for final
+stand-in output, a stable terminal and the visible rail's settled `Needs you`
+states before shooting; completed terminal output alone precedes the daemon's
+idle observation on fast runners. Goldens are committed under
 `web/selftest/goldens`; missing goldens fail normally. Playwright pixel-diffs each
 stabilized image, permits **zero differing pixels** above its 0.2 per-pixel color
 distance threshold, and uploads actual/expected/diff images on failure.
@@ -110,6 +113,8 @@ The browser wall clock is fixed at 2000-01-01 so relative pane ages clamp to zer
 its timers still advance. Only nondeterministic regions are suppressed: terminal
 cursor and task schedule/next-run metadata (which depends on the daemon's current
 clock). The surrounding task rows, names, controls and layout remain checked.
+Metadata is hidden with screenshot-only CSS so it stays behind the task-form
+modal; a rectangle mask would paint over the new form stills' fields.
 The agent-tab still uses completed output in both themes, rather than racing an
 intermediate line as a video can. This gives intentional redesigns a stable oracle.
 

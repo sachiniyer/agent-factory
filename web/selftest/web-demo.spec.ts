@@ -148,10 +148,16 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
   if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
   const shot = async (name: string) => {
     if (visual) {
+      // A completed transcript precedes the daemon's idle observation. Fast CI
+      // can reach a still while rows still say Working; wait for the same
+      // observable settled state on every visible rail, including after resize.
+      if (await page.locator(".af-rail-list").isVisible()) {
+        const states = page.locator(".af-rail-list .af-operator-state");
+        await expect(states).toHaveText(Array(await states.count()).fill("Needs you"));
+      }
       await expect(page).toHaveScreenshot(`${name}${pass.suffix}.png`, {
         animations: "disabled", caret: "hide",
         stylePath: "./selftest/visual.css",
-        mask: [page.locator(".af-task-meta"), page.locator(".af-task-trigger")],
       });
     } else {
       await page.screenshot({ path: join(SHOT_DIR, `${name}${pass.suffix}.png`) });

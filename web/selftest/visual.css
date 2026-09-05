@@ -1,2 +1,5 @@
 /* The terminal cursor is not design evidence; its blink phase is nondeterministic. */
 .xterm-cursor { visibility: hidden !important; }
+/* Preserve layout, and keep suppression behind the task-form modal. A screenshot
+   mask paints above that modal and would conceal its meaningful form fields. */
+.af-task-meta, .af-task-trigger { visibility: hidden !important; }
