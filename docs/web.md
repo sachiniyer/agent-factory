@@ -134,7 +134,9 @@ show them on hover or keyboard focus. Each opens a confirmation:
 - **Archive** tears down the terminal and moves the worktree into the archive.
 - **Restore**, in the archive action's place on an archived row, moves the
   worktree back and respawns the agent. Reveal **Archived** in the filter first.
-- **Kill** permanently destroys the session and prunes its branch.
+- **Kill** permanently tears down the session and removes its record. It removes
+  Agent Factory-managed worktrees and deletes only branches created by Agent
+  Factory. In-place or external worktrees and pre-existing branches are preserved.
 
 Pending creation rows have no destructive actions. An action belongs to the row
 whose button you clicked, even when a different session is selected.
