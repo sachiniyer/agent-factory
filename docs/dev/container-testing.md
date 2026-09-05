@@ -1,5 +1,12 @@
 # Running tests safely on a shared box
 
+For contributors who need to run tests or play-tests without disturbing other
+sessions on a shared machine. This page explains the container boundary and
+the commands that use it.
+
+Read the [contributor overview](index.md) and the repository operating contract
+first. Then choose the focused harness below; CI owns routine full-suite runs.
+
 `af`'s test suite and play-tests drive **real tmux servers and real `af`
 daemons**. The tests themselves are hermetic (every tmux-touching package
 runs on a private tmux server via `internal/testguard`, so plain

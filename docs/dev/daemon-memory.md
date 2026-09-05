@@ -1,5 +1,12 @@
 # Daemon memory — sizing, and why `MemoryPeak` is not it
 
+For maintainers investigating daemon memory use or planning machine capacity.
+This page separates the daemon process from the agents counted in its service
+unit.
+
+Read [The daemon](../daemon.md) first for the process model, then follow the
+measurements below before interpreting a service manager’s memory peak.
+
 The Agent Factory daemon is a long-lived process, so sooner or later someone
 looks at what it costs. On Linux the obvious place to look is the systemd unit,
 which volunteers the answer in the journal every time it stops:

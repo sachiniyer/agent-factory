@@ -1,7 +1,8 @@
 # Use cases
 
 For anyone who has installed `af` and wants concrete things to do with it. Each
-section below is a workflow, shown from the TUI and from the CLI.
+section below is a workflow, shown from the web client and the CLI, with TUI
+shortcuts where useful. Start with the [web guide](web.md) for the controls.
 
 Agent Factory is useful when you want coding agents to do real repository work
 in parallel, but you still want engineering control: isolated files, visible
@@ -9,8 +10,9 @@ state, scripted operations, and normal review.
 
 ## Parallel bug fixes
 
-Give each bug its own session from the TUI. Press **`n`**, name the task, submit
-the first session, then repeat for the next bug.
+Give each bug its own session. In the web client, click **New session**, name
+the task and enter its prompt, then repeat for the next bug. In the TUI, press
+**`n`** to open the create form.
 
 <div class="af-visual-example" markdown>
 
@@ -19,7 +21,10 @@ the first session, then repeat for the next bug.
 - `fix-export-timeout`
 
 <figure markdown>
-![TUI screenshot showing parallel Agent Factory sessions](assets/tui/tui-sessions.svg)
+![Web client showing separate sessions for export, validation, and documentation work](assets/web/parallel-work.png#only-light)
+![Web client showing separate sessions for export, validation, and documentation work, dark theme](assets/web/parallel-work-dark.png#only-dark)
+<figcaption>The demo shows independent changes in the same project; use the same
+pattern for the three bug fixes above.</figcaption>
 </figure>
 
 </div>
@@ -76,8 +81,9 @@ The session keeps its branch, worktree, tabs, and terminal context.
 
 ## Scheduled triage
 
-Use the TUI task manager for recurring prompts. Press **`m`**, create a task,
-choose the cron trigger, and leave it enabled for the daemon to run.
+In the web client, open **Tasks** → **Add**, choose **Cron schedule**, and fill
+in the prompt and schedule. Save the task and leave it enabled for the daemon
+to run. In the TUI, press **`m`** to open the task manager.
 
 <div class="af-visual-example" markdown>
 
@@ -86,7 +92,9 @@ choose the cron trigger, and leave it enabled for the daemon to run.
 - Delivery: create a fresh session or target a persistent triage session
 
 <figure markdown>
-![TUI screenshot showing Agent Factory task automation state](assets/tui/tui-tasks.svg)
+![Web task form configured for weekday issue triage](assets/web/scheduled-triage.png#only-light)
+![Web task form configured for weekday issue triage, dark theme](assets/web/scheduled-triage-dark.png#only-dark)
+<figcaption>A triage task ready to create; the recorder does not submit it.</figcaption>
 </figure>
 
 </div>
@@ -104,8 +112,9 @@ af tasks add \
 
 ## Event-driven intake
 
-Use watch tasks when another system emits work. In the task manager, create a
-watch task and point it at the script that emits one event per stdout line.
+Use watch tasks when another system emits work. In the web client’s **Tasks**
+view, click **Add**, choose **Watch command**, and point it at the script that
+emits one event per stdout line.
 
 <div class="af-visual-example" markdown>
 
@@ -114,7 +123,9 @@ watch task and point it at the script that emits one event per stdout line.
 - Prompt: `Investigate this CI failure: {{line}}`
 
 <figure markdown>
-![TUI screenshot showing Agent Factory task automation state](assets/tui/tui-tasks.svg)
+![Web task form configured to turn CI failure events into prompts](assets/web/event-intake.png#only-light)
+![Web task form configured to turn CI failure events into prompts, dark theme](assets/web/event-intake-dark.png#only-dark)
+<figcaption>A watch task ready to create; the recorder does not start the watcher.</figcaption>
 </figure>
 
 </div>

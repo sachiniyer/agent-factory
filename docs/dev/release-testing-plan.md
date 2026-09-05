@@ -1,9 +1,12 @@
 # Release testing plan
 
-This checklist is the release gate for Agent Factory. It focuses on the
-behaviors that can lose user work or leave background resources behind:
-daemon coordination, tmux sessions, git worktrees, scheduled task runs,
-remote hooks, and release artifacts.
+For maintainers validating a release commit. This checklist focuses on
+behaviors that can lose user work or leave background resources behind: daemon
+coordination, sessions, worktrees, tasks, remote hooks, and artifacts.
+
+Read [Release process](release-process.md) for the channel you are shipping
+and [Container testing](container-testing.md) for safe execution boundaries.
+Then work through the gates below on the release commit.
 
 ## Automated release gate
 

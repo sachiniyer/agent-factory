@@ -1,5 +1,13 @@
 # Web client selftest
 
+For contributors changing the browser client and maintainers diagnosing its
+acceptance gate. This page explains what the Playwright selftest proves and
+how its daemon sandbox works.
+
+Read [Container testing](container-testing.md) first for safe execution rules,
+then the [web guide](../web.md) for the flows under test. To capture documentation
+media, follow [Demo assets](demo-assets.md).
+
 The **web-driver-selftest** is the acceptance proof for the embedded browser web
 client (`web/`, #1592 Phase 5) — the browser analogue of the
 [TUI driver selftest](tui-manual-testing.md). It drives the daemon's embedded
