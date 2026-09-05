@@ -113,4 +113,12 @@ against [sachiniyer/agent-factory](https://github.com/sachiniyer/agent-factory).
 The draft is never submitted for you: review it, attach the bundle, and click
 Submit yourself.
 
+Registered account labels (`af accounts list`) are redacted from **both** halves
+of the bundle — the `account` field on each session record, and the daemon log
+and config sections that name the same label as text — so a report is no less
+private through its log than through its records. Your own `agent-factory.log`
+is untouched; the labels come out when the bundle is built. If af cannot read the
+accounts registry it says so in the bundle's collection errors rather than
+shipping a bundle that only looks redacted.
+
 Include repro steps and expected vs. actual behaviour alongside it.

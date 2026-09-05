@@ -447,10 +447,15 @@ Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
 session prompts, task prompts, tab and session commands, tab names, account
-labels, remote metadata) are dropped; every directory the bundle names is
-replaced by the role it plays ([repo:N], [worktree:N], [af-home], ~) rather than
-by its own name, and your username by [user]; and known credential shapes are
-scrubbed wherever they appear. Perfect redaction is impossible — open the file
+labels, remote metadata) are dropped. A registered account label is replaced by
+the same marker everywhere it appears — the session records, and the daemon log
+and config sections that name it as text — so the report is no less private
+through its log than through its records; if the accounts registry cannot be
+read, the bundle says so in its collection errors instead of looking redacted
+when it is not. Every directory the bundle names is replaced by the role it plays
+([repo:N], [worktree:N], [af-home], ~) rather than by its own name, and your
+username by [user]; and known credential shapes are scrubbed wherever they
+appear. Perfect redaction is impossible — open the file
 and review it before sharing it publicly.
 
 Use --json to emit the structured manifest (wrapped in the shared {data,error}
