@@ -58,10 +58,10 @@ func answerCodexLoginPrompts(dir string) error {
 	var prefix []byte
 	// Provider-specific models cannot be interpreted without provider configuration,
 	// which must not cross account homes. Presence matters, regardless of value.
-	_, customProvider := ambient["model_provider"]
-	_, accountProvider := account["model_provider"]
+	ambientModelBlock := codexModelSeedBlockReason(ambient)
+	accountModelBlock := codexModelSeedBlockReason(account)
 	for _, key := range []string{"approval_policy", "sandbox_mode", "model"} {
-		if key == "model" && (customProvider || accountProvider) {
+		if key == "model" && (ambientModelBlock != "" || accountModelBlock != "") {
 			continue
 		}
 		if _, exists := account[key]; exists {
@@ -140,7 +140,7 @@ func codexSettingsNotice(dir string) string {
 	if err != nil {
 		return fmt.Sprintf("Nothing was written to %s because ~/.codex/config.toml could not be read: cannot locate the home directory: %v", path, err)
 	}
-	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when neither the ambient file nor the account has model_provider. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Approval policies are validated before seeding; an invalid ambient policy skips all seeding. Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
+	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when neither document nor its selected profile has model_provider and selected profiles can be verified. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Approval policies are validated before seeding; an invalid ambient policy skips all seeding. Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
 	_, ambient, err := readCodexSettings(source)
 	if err != nil {
 		return policy + " Nothing was written from the ambient file because it could not be read."
@@ -151,8 +151,8 @@ func codexSettingsNotice(dir string) string {
 	if policyValue, exists := ambient["approval_policy"]; exists && !validCodexApprovalPolicy(policyValue) {
 		return policy + " Nothing was written from the ambient file because approval_policy could not be verified. " + codexApprovalPolicyNotice
 	}
-	if _, customProvider := ambient["model_provider"]; customProvider {
-		policy += " model not seeded: ~/.codex/config.toml selects a custom model_provider."
+	if reason := codexModelSeedBlockReason(ambient); reason != "" {
+		policy += " model not seeded: ~/.codex/config.toml " + reason + "."
 	}
 	if !codexHasRuntimeKeys(ambient) {
 		return policy + " Nothing was written from the ambient file because it is absent or has neither approval_policy nor sandbox_mode."
@@ -161,8 +161,8 @@ func codexSettingsNotice(dir string) string {
 	if err != nil || account == nil {
 		return policy + " The account document could not be read or parsed and was left alone."
 	}
-	if _, accountProvider := account["model_provider"]; accountProvider {
-		policy += " model not seeded: this account's config.toml selects a custom model_provider."
+	if reason := codexModelSeedBlockReason(account); reason != "" {
+		policy += " model not seeded: this account's config.toml " + reason + "."
 	}
 	var present []string
 	for _, key := range []string{"approval_policy", "sandbox_mode", "model", "sandbox_workspace_write"} {
