@@ -314,3 +314,10 @@ contributors will always run plain `go test ./...` — both fine, because
 the in-tree isolation (`internal/testguard`, #1122/#1125) makes the tests
 themselves safe. The container is the belt-and-suspenders outer wall for
 shared dev boxes, not a substitute for hermetic tests.
+
+## Performance and visual regression
+
+`make perf-container` uses the Web selftest fence for three-run web/TUI metrics
+and pixel-diffs of all demo stills in both themes. See
+[perf-baselines.md](perf-baselines.md) for the synthetic 1,000-session fixture,
+committed numbers, CI margins, and the explicit golden-update command.

@@ -11,7 +11,7 @@
 	lifecycle-container lifecycle-selftest \
 	testbox-image testbox-clean testbox-selftest \
 	session-image \
-	lint-file-length docs web-build web-test web-selftest-container demo-assets
+	lint-file-length docs web-build web-test web-selftest-container perf-container demo-assets
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
@@ -246,3 +246,7 @@ web-selftest-container:
 # docs/dev/demo-assets.md.
 demo-assets:
 	scripts/testbox.sh web-demo
+
+# Three-sample performance budgets and the demo stills, inside the browser fence.
+perf-container:
+	scripts/testbox.sh perf

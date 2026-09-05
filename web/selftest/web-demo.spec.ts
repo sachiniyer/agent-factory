@@ -1,11 +1,12 @@
 // The web demo recorder (#3855 lane A) — the moving picture the README and the
 // docs home page lead with, produced by `make demo-assets`.
 //
-// It is NOT a gate, and it must never become one. It shares the self-test's
+// The paced video is not a gate. The still-only visual config (#3908) reuses
+// these same beats in CI, without video or pacing. It shares the self-test's
 // harness on purpose (the same container image, the same real af daemon on a
 // throwaway home, the same loopback tokenless browser) so what the docs show is
 // the product the self-test asserts on — but it is reached only through its own
-// config (playwright.demo.config.ts), CI never runs it, and nothing here is an
+// video config (playwright.demo.config.ts), and the recorder is not an
 // assertion about correctness. The `expect`s below are waits: they are how a
 // recorder knows a beat has actually landed before it takes the picture, and
 // the alternative — sleeping for a plausible duration — is what produces a
@@ -32,6 +33,8 @@ import { expect, type Browser, type Locator, type Page, test } from "@playwright
 import { join } from "node:path";
 import { openAfterInitialResync } from "./initial-resync.js";
 import { DEMO_VIEWPORT } from "./demo-viewport.js";
+
+const visual = process.env.AF_PERF_MODE === "1";
 
 const SHOT_DIR = required("AF_DEMO_SHOT_DIR");
 const VIDEO_DIR = required("AF_DEMO_VIDEO_DIR");
@@ -108,7 +111,7 @@ async function settleTerminal(page: Page, ms = 1_200): Promise<void> {
  * only pacing.
  */
 async function beat(page: Page, ms = 1_200): Promise<void> {
-  await page.waitForTimeout(ms);
+  if (!visual) await page.waitForTimeout(ms);
 }
 
 interface Pass {
@@ -134,11 +137,23 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     // asks for. Driving that rather than clicking the appbar toggle means both
     // passes show the DEFAULT setting, which is what a new user will see.
     colorScheme: pass.colorScheme,
-    recordVideo: pass.video ? { dir: VIDEO_DIR, size: DEMO_VIEWPORT } : undefined,
+    recordVideo: pass.video && !visual ? { dir: VIDEO_DIR, size: DEMO_VIEWPORT } : undefined,
   });
   const page = await context.newPage();
   const video = page.video();
-  const shot = (name: string) => page.screenshot({ path: join(SHOT_DIR, `${name}${pass.suffix}.png`) });
+  // Freeze wall-clock age labels only; timers and performance.now still advance.
+  if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
+  const shot = async (name: string) => {
+    if (visual) {
+      await expect(page).toHaveScreenshot(`${name}${pass.suffix}.png`, {
+        animations: "disabled", caret: "hide",
+        stylePath: "./selftest/visual.css",
+        mask: [page.locator(".af-task-meta"), page.locator(".af-task-trigger")],
+      });
+    } else {
+      await page.screenshot({ path: join(SHOT_DIR, `${name}${pass.suffix}.png`) });
+    }
+  };
 
   try {
     // --- 1. the dashboard --------------------------------------------------
@@ -176,10 +191,10 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
     await beat(page, 600);
-    await modal.locator('input[aria-label="Session title"]').pressSequentially(SESSION_NEW, { delay: 55 });
+    await modal.locator('input[aria-label="Session title"]').pressSequentially(SESSION_NEW, { delay: visual ? 0 : 55 });
     await beat(page, 400);
     await modal.locator('textarea[aria-label="Initial prompt"]').pressSequentially(NEW_SESSION_PROMPT, {
-      delay: 14,
+      delay: visual ? 0 : 14,
     });
     // The backend and account pickers are filled from the daemon, not from a
     // list in the browser. Waiting for the answer keeps the form in the frame
@@ -207,6 +222,7 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
       // Mid-transcript, so the still catches the agent working rather than done.
       await expect(page.locator(".af-term-host")).toContainText("running ./test.sh", { timeout: 90_000 });
     }
+    if (visual) await expect(page.locator(".af-term-host")).toContainText("review it like any branch");
     await settleTerminal(page);
     await beat(page, 900);
     await shot("agent-tab");
@@ -261,7 +277,7 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     await context.close();
   }
 
-  if (pass.video) {
+  if (pass.video && !visual) {
     // saveAs waits for the recording to be flushed, which only happens once the
     // context is closed — hence the ordering.
     await video?.saveAs(join(VIDEO_DIR, "demo-raw.webm"));

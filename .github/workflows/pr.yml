@@ -567,6 +567,24 @@ jobs:
     if: needs.web-selftest-scope.outputs.run == 'true'
     uses: ./.github/workflows/web-selftest.yml
 
+  perf:
+    name: Performance and visual baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: Recompute budgets and pixel-diff demo stills
+        timeout-minutes: 35
+        run: make perf-container
+      - name: Upload samples and visual diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baselines
+          path: web/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
   # We cross-compile and ship darwin/arm64 and darwin/amd64 binaries from
   # stable-release.yml, but every job in this repo ran on ubuntu — so no test had
   # ever executed on the OS we ship to. macOS-only defects reached users instead
@@ -656,7 +674,7 @@ jobs:
     # scope job says the PR cannot reach the web client, and that is the normal
     # answer on most PRs. A skipped *scope* job would be a different matter, but it
     # has no `if:` and so only skips when the run itself is going away.
-    needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest]
+    needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest, perf]
     if: always()
     steps:
       - name: Gate on the jobs this check stands in for
@@ -666,7 +684,7 @@ jobs:
           # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
           # parsed as subtraction, so the dotted form silently yields an empty string.
           echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }} registry-free=${{ needs['registry-free'].result }}"
-          echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }}"
+          echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }} perf=${{ needs.perf.result }}"
           exit 1
 
       - uses: actions/checkout@v6

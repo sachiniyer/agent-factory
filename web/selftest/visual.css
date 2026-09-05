@@ -1,0 +1,2 @@
+/* The terminal cursor is not design evidence; its blink phase is nondeterministic. */
+.xterm-cursor { visibility: hidden !important; }
