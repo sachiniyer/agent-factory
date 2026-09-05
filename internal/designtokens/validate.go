@@ -22,7 +22,11 @@ func validate(t Tokens) error {
 			return fmt.Errorf("invalid value %q", k)
 		}
 	}
-	for _, k := range []string{"font-ui", "font-mono", "type-caption", "type-body", "type-title", "type-display", "line-height", "weight-normal", "weight-strong", "space-0", "space-1", "space-2", "space-3", "space-4", "space-6", "space-8", "radius-none", "radius-control", "radius-dialog", "focus-width", "target-min", "motion-none", "motion-transition"} {
+	requiredMetrics := []string{"type-caption", "type-body", "type-heading", "type-title", "type-display", "space-1", "space-2", "space-3", "space-4", "radius-control", "radius-dialog"}
+	if len(t.Values) != len(requiredMetrics) {
+		return fmt.Errorf("keep the contract to five type steps, four spaces and two radii")
+	}
+	for _, k := range requiredMetrics {
 		if _, ok := t.Values[k]; !ok {
 			return fmt.Errorf("missing metric %q", k)
 		}
@@ -33,7 +37,7 @@ func validate(t Tokens) error {
 	}
 	for _, s := range t.States {
 		glyph, ok := expected[s.Name]
-		if !ok || s.Glyph != glyph || s.Label == "" {
+		if !ok || s.Glyph != glyph || s.Label == "" || s.Color != s.Name {
 			return fmt.Errorf("invalid state %q; preserve #1766 glyph contract", s.Name)
 		}
 		if _, ok = t.Colors[s.Color]; !ok {
@@ -41,27 +45,30 @@ func validate(t Tokens) error {
 		}
 		delete(expected, s.Name)
 	}
-	for _, k := range []string{"canvas", "surface", "raised", "selection", "ink", "muted", "accent", "on-accent", "border", "focus", "danger"} {
+	requiredColors := []string{"surface", "surface-raised", "ink", "ink-muted", "border", "accent", "running", "ready", "lost", "dead", "archived", "limit-reached"}
+	if len(t.Colors) != len(requiredColors) {
+		return fmt.Errorf("keep the contract to twelve colour roles")
+	}
+	for _, k := range requiredColors {
 		if _, ok := t.Colors[k]; !ok {
 			return fmt.Errorf("missing semantic color %q", k)
 		}
 	}
-	// Text must remain readable on every ordinary component surface, including
-	// selected rows. This also checks the small state labels, not just their dots.
-	for _, bg := range []string{"canvas", "surface", "raised", "selection"} {
-		for _, fg := range append([]string{"ink", "muted", "danger"}, stateColors(t)...) {
+	// These are the only two component backgrounds. Selection uses raised with
+	// an accent marker, not a separate fill or a computed custom palette.
+	for _, bg := range []string{"surface", "surface-raised"} {
+		for _, fg := range append([]string{"ink", "ink-muted", "accent"}, stateColors(t)...) {
 			if err := contrastPair(t, fg, bg, 4.5); err != nil {
 				return err
 			}
 		}
-		for _, fg := range []string{"border", "focus"} {
-			if err := contrastPair(t, fg, bg, 3); err != nil {
-				return err
-			}
+		if err := contrastPair(t, "border", bg, 3); err != nil {
+			return err
 		}
 	}
-	return contrastPair(t, "on-accent", "accent", 4.5)
+	return contrastPair(t, "surface", "accent", 4.5)
 }
+
 func stateColors(t Tokens) []string {
 	var out []string
 	for _, s := range t.States {

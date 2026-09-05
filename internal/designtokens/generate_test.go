@@ -71,11 +71,14 @@ func TestRejectInvalidContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*Tokens){
+		"extra colour":        func(v *Tokens) { v.Colors["selection"] = v.Colors["surface"] },
+		"extra metric":        func(v *Tokens) { v.Values["space-5"] = v.Values["space-4"] },
 		"missing metric":      func(v *Tokens) { delete(v.Values, "space-4") },
 		"running indicator":   func(v *Tokens) { v.States[0].Glyph = "●" },
 		"duplicate state":     func(v *Tokens) { v.States[1] = v.States[0] },
+		"wrong state color":   func(v *Tokens) { v.States[1].Color = "lost" },
 		"missing state color": func(v *Tokens) { v.States[0].Color = "absent" },
-		"unreadable ink":      func(v *Tokens) { v.Colors["ink"] = v.Colors["canvas"] },
+		"unreadable ink":      func(v *Tokens) { v.Colors["ink"] = v.Colors["surface"] },
 		"unsafe CSS":          func(v *Tokens) { v.Values["space-1"] = Value{CSS: "0; } body { color:red", Role: "bad"} },
 	} {
 		t.Run(name, func(t *testing.T) {

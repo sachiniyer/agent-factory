@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -86,9 +85,6 @@ func cssTokens(t Tokens) []byte {
 		for _, k := range keys(t.Values) {
 			fmt.Fprintf(&b, "  --af-%s: %s;\n", k, t.Values[k].CSS)
 		}
-		for _, s := range t.States {
-			fmt.Fprintf(&b, "  --af-glyph-%s: %s;\n", s.Name, strconv.Quote(s.Glyph))
-		}
 		b.WriteString("}\n")
 	}
 	return []byte(b.String())
@@ -117,19 +113,20 @@ func Colors() map[string]lipgloss.AdaptiveColor { return map[string]lipgloss.Ada
 		fmt.Fprintf(&b, "{Name: %q, Label: %q, Glyph: %q, Color: c[%q]},\n", s.Name, s.Label, s.Glyph, s.Color)
 	}
 	b.WriteString(`} }
-// Styles is a fresh lipgloss component foundation, deliberately not installed globally.
+// Styles prescribes component treatments. Only Light/Dark/System will be user choices;
+// these internal roles are not a palette customization API. Not installed until P5.
 func Styles() map[string]lipgloss.Style {
  c, m := Colors(), Metrics()
  border := func(rounded int) lipgloss.Border { if rounded == 1 { return lipgloss.RoundedBorder() }; return lipgloss.NormalBorder() }
- body := lipgloss.NewStyle().Foreground(c["ink"]).Background(c["canvas"])
+ body := lipgloss.NewStyle().Foreground(c["ink"]).Background(c["surface"])
  return map[string]lipgloss.Style{
  "body": body,
- "muted": body.Foreground(c["muted"]),
- "title": body.Bold(m["weight-strong"] == 1),
- "selected": body.Background(c["selection"]).Bold(m["weight-strong"] == 1),
- "focus": body.Border(border(m["radius-none"])).BorderForeground(c["focus"]),
- "dialog": body.Background(c["raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(m["space-0"], m["space-4"]),
- "error": body.Foreground(c["danger"]),
+ "muted": body.Foreground(c["ink-muted"]),
+ "title": body.Bold(true),
+ "selected": body.Background(c["surface-raised"]).Bold(true),
+ "focus": body.Border(lipgloss.NormalBorder()).BorderForeground(c["accent"]),
+ "dialog": body.Background(c["surface-raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(0, m["space-3"]),
+ "error": body.Foreground(c["dead"]),
  }
 }
 `)

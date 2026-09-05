@@ -12,52 +12,35 @@ type State struct {
 // Colors returns fresh semantic light/dark pairs; terminal capability resolution belongs to lipgloss.
 func Colors() map[string]lipgloss.AdaptiveColor {
 	return map[string]lipgloss.AdaptiveColor{
-		"accent":        {Light: "#2d6271", Dark: "#90c4d3"},
-		"archived":      {Light: "#4c566a", Dark: "#d8dee9"},
-		"border":        {Light: "#657084", Dark: "#a1aaba"},
-		"canvas":        {Light: "#d8dee9", Dark: "#2e3440"},
-		"danger":        {Light: "#883b43", Dark: "#e4c8cd"},
-		"dead":          {Light: "#883b43", Dark: "#e4c8cd"},
-		"focus":         {Light: "#2d6271", Dark: "#90c4d3"},
-		"ink":           {Light: "#2e3440", Dark: "#eceff4"},
-		"limit-reached": {Light: "#73436b", Dark: "#dbb9d5"},
-		"lost":          {Light: "#705014", Dark: "#ebcb8b"},
-		"muted":         {Light: "#4c566a", Dark: "#d8dee9"},
-		"on-accent":     {Light: "#eceff4", Dark: "#2e3440"},
-		"raised":        {Light: "#eceff4", Dark: "#434c5e"},
-		"ready":         {Light: "#405430", Dark: "#d5e2cc"},
-		"running":       {Light: "#4c566a", Dark: "#d8dee9"},
-		"selection":     {Light: "#c4d4de", Dark: "#3c505d"},
-		"surface":       {Light: "#e3e7ef", Dark: "#3b4252"},
+		"accent":         {Light: "#2d6271", Dark: "#90c4d3"},
+		"archived":       {Light: "#4c566a", Dark: "#d8dee9"},
+		"border":         {Light: "#657084", Dark: "#a1aaba"},
+		"dead":           {Light: "#883b43", Dark: "#e4c8cd"},
+		"ink":            {Light: "#2e3440", Dark: "#eceff4"},
+		"ink-muted":      {Light: "#4c566a", Dark: "#d8dee9"},
+		"limit-reached":  {Light: "#73436b", Dark: "#dbb9d5"},
+		"lost":           {Light: "#705014", Dark: "#ebcb8b"},
+		"ready":          {Light: "#405430", Dark: "#d5e2cc"},
+		"running":        {Light: "#4c566a", Dark: "#d8dee9"},
+		"surface":        {Light: "#d8dee9", Dark: "#2e3440"},
+		"surface-raised": {Light: "#eceff4", Dark: "#434c5e"},
 	}
 }
 
 // Metrics are terminal cells, rows or flags as documented in design/tokens.json.
 func Metrics() map[string]int {
 	return map[string]int{
-		"focus-width":       1,
-		"font-mono":         0,
-		"font-ui":           0,
-		"line-height":       1,
-		"motion-none":       0,
-		"motion-transition": 0,
-		"radius-control":    0,
-		"radius-dialog":     1,
-		"radius-none":       0,
-		"space-0":           0,
-		"space-1":           1,
-		"space-2":           1,
-		"space-3":           1,
-		"space-4":           2,
-		"space-6":           1,
-		"space-8":           2,
-		"target-min":        1,
-		"type-body":         1,
-		"type-caption":      1,
-		"type-display":      1,
-		"type-title":        1,
-		"weight-normal":     0,
-		"weight-strong":     1,
+		"radius-control": 0,
+		"radius-dialog":  1,
+		"space-1":        1,
+		"space-2":        1,
+		"space-3":        2,
+		"space-4":        1,
+		"type-body":      1,
+		"type-caption":   1,
+		"type-display":   1,
+		"type-heading":   1,
+		"type-title":     1,
 	}
 }
 func States() []State {
@@ -72,7 +55,8 @@ func States() []State {
 	}
 }
 
-// Styles is a fresh lipgloss component foundation, deliberately not installed globally.
+// Styles prescribes component treatments. Only Light/Dark/System will be user choices;
+// these internal roles are not a palette customization API. Not installed until P5.
 func Styles() map[string]lipgloss.Style {
 	c, m := Colors(), Metrics()
 	border := func(rounded int) lipgloss.Border {
@@ -81,14 +65,14 @@ func Styles() map[string]lipgloss.Style {
 		}
 		return lipgloss.NormalBorder()
 	}
-	body := lipgloss.NewStyle().Foreground(c["ink"]).Background(c["canvas"])
+	body := lipgloss.NewStyle().Foreground(c["ink"]).Background(c["surface"])
 	return map[string]lipgloss.Style{
 		"body":     body,
-		"muted":    body.Foreground(c["muted"]),
-		"title":    body.Bold(m["weight-strong"] == 1),
-		"selected": body.Background(c["selection"]).Bold(m["weight-strong"] == 1),
-		"focus":    body.Border(border(m["radius-none"])).BorderForeground(c["focus"]),
-		"dialog":   body.Background(c["raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(m["space-0"], m["space-4"]),
-		"error":    body.Foreground(c["danger"]),
+		"muted":    body.Foreground(c["ink-muted"]),
+		"title":    body.Bold(true),
+		"selected": body.Background(c["surface-raised"]).Bold(true),
+		"focus":    body.Border(lipgloss.NormalBorder()).BorderForeground(c["accent"]),
+		"dialog":   body.Background(c["surface-raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(0, m["space-3"]),
+		"error":    body.Foreground(c["dead"]),
 	}
 }
