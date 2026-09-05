@@ -69,16 +69,23 @@ func describeTargetTasks(tasks []task.Task) string {
 // instead of depending on a second Snapshot request (#2680). Its stable id still
 // prevents cross-repo title misrouting (#1592 Phase 5).
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
+	return m.archiveSessionGuarded(req, nil)
+}
+
+// archiveSessionGuarded is ArchiveSession with a sessionTeardownGuard evaluated
+// inside the archive fence. See sessionTeardownGuard; a nil guard is plain
+// ArchiveSession.
+func (m *Manager) archiveSessionGuarded(req ArchiveSessionRequest, guard sessionTeardownGuard) (string, session.InstanceData, error) {
 	m.taskTargetMu.Lock()
 	defer m.taskTargetMu.Unlock()
-	return m.archiveSession(req, nil)
+	return m.archiveSession(req, nil, guard)
 }
 
 // archiveSession performs ArchiveSession while taskTargetMu is already held.
 // DeleteProject uses it inside its wider, preflight-to-commit task transaction
 // and passes the project-wide target index it loaded once during preflight.
 // A nil taskTargets means the caller has not supplied a serialized snapshot.
-func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[string][]task.Task) (string, session.InstanceData, error) {
+func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[string][]task.Task, guard sessionTeardownGuard) (string, session.InstanceData, error) {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", session.InstanceData{}, err
@@ -210,6 +217,13 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		delete(m.killsInFlight, key)
 		m.mu.Unlock()
 	}()
+
+	// The caller's own precondition, asked with BOTH the op-lock and the claim
+	// held and before anything is torn down — the same placement the kill path
+	// uses, and the reason a stale decision cannot be acted on here (#3865).
+	if err := m.runSessionTeardownGuard(guard, key); err != nil {
+		return "", session.InstanceData{}, err
+	}
 
 	// An off-box session (docker/ssh/hook) archives by pushing its branch to origin
 	// and reaping the sandbox, not by relocating a worktree it does not have (#1592
