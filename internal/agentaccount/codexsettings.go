@@ -1,6 +1,7 @@
 package agentaccount
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,26 +41,25 @@ func answerCodexLoginPrompts(dir string) error {
 	if err != nil || account == nil {
 		return err
 	}
-	_, approval := account["approval_policy"]
-	_, sandbox := account["sandbox_mode"]
-	if approval && sandbox {
-		return nil
-	}
 	source, err := ambientCodexConfig()
 	if err != nil {
-		return err
+		return nil // Ambient defaults are optional; the login notice reports this.
 	}
 	_, ambient, err := readCodexSettings(source)
 	if err != nil || ambient == nil {
-		return err
+		return nil
 	}
 	if !codexHasRuntimeKeys(ambient) {
 		return nil
 	}
 	var prefix []byte
-	// Only scalar strings from this explicit allowlist can cross account homes.
-	// In particular, projects and credential-store/provider configuration cannot.
+	// Provider-specific models cannot be interpreted without provider configuration,
+	// which must not cross account homes. Presence matters, regardless of value.
+	_, customProvider := ambient["model_provider"]
 	for _, key := range []string{"approval_policy", "sandbox_mode", "model"} {
+		if key == "model" && customProvider {
+			continue
+		}
 		if _, exists := account[key]; exists {
 			continue
 		}
@@ -73,12 +73,44 @@ func answerCodexLoginPrompts(dir string) error {
 		}
 		prefix = append(prefix, encoded...)
 	}
+	options, err := codexWorkspaceOptions(ambient, account)
+	if err != nil {
+		return err
+	}
+	prefix = append(prefix, options...)
 	if len(prefix) == 0 {
 		return nil
 	}
 	// Prepending avoids mistaking a header-looking line inside a multiline
 	// string for a table and guarantees all added keys are TOP LEVEL.
 	return writeAgentSettings(path, append(prefix, data...))
+}
+
+// codexWorkspaceOptions copies only the known non-credential sandbox options.
+// Inline TOML keeps the table after the seeded scalar keys and before the original
+// bytes without moving original top-level keys into a newly opened table scope.
+func codexWorkspaceOptions(ambient, account map[string]any) ([]byte, error) {
+	if mode, _ := ambient["sandbox_mode"].(string); mode != "workspace-write" {
+		return nil, nil
+	}
+	if _, exists := account["sandbox_workspace_write"]; exists {
+		return nil, nil
+	}
+	table, ok := ambient["sandbox_workspace_write"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	options := make(map[string]any)
+	for _, key := range []string{"network_access", "writable_roots", "exclude_tmpdir_env_var", "exclude_slash_tmp"} {
+		if value, exists := table[key]; exists {
+			options[key] = value
+		}
+	}
+	var encoded bytes.Buffer
+	if err := toml.NewEncoder(&encoded).SetTablesInline(true).Encode(map[string]any{"sandbox_workspace_write": options}); err != nil {
+		return nil, fmt.Errorf("encode codex sandbox options: %w", err)
+	}
+	return encoded.Bytes(), nil
 }
 
 func codexHasRuntimeKeys(doc map[string]any) bool {
@@ -91,15 +123,18 @@ func codexSettingsNotice(dir string) string {
 	path := filepath.Join(dir, "config.toml")
 	source, err := ambientCodexConfig()
 	if err != nil {
-		return fmt.Sprintf("Codex runtime settings in %s were left alone: cannot locate ~/.codex/config.toml: %v", path, err)
+		return fmt.Sprintf("Nothing was written to %s because ~/.codex/config.toml could not be read: cannot locate the home directory: %v", path, err)
 	}
-	policy := fmt.Sprintf("Registration seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Existing keys stand; unparseable documents are left alone. Credentials and project trust are never copied.", source, path)
+	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when the ambient file has no model_provider. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
 	_, ambient, err := readCodexSettings(source)
 	if err != nil {
 		return policy + " Nothing was written from the ambient file because it could not be read."
 	}
 	if ambient == nil {
 		return policy + " Nothing was written from the ambient file because it could not be parsed."
+	}
+	if _, customProvider := ambient["model_provider"]; customProvider {
+		policy += " model not seeded: ~/.codex/config.toml selects a custom model_provider."
 	}
 	if !codexHasRuntimeKeys(ambient) {
 		return policy + " Nothing was written from the ambient file because it is absent or has neither approval_policy nor sandbox_mode."
@@ -109,7 +144,7 @@ func codexSettingsNotice(dir string) string {
 		return policy + " The account document could not be read or parsed and was left alone."
 	}
 	var present []string
-	for _, key := range []string{"approval_policy", "sandbox_mode", "model"} {
+	for _, key := range []string{"approval_policy", "sandbox_mode", "model", "sandbox_workspace_write"} {
 		if _, ok := account[key]; ok {
 			present = append(present, key+" is present")
 		}
