@@ -165,6 +165,12 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"internal/sessionenv/account_environment_builtins.go:unwrapIonice": {{
 		class: notAShell, note: "strings.HasPrefix(option, \"-c\") — ionice's scheduling-class flag, matched as text",
 	}},
+	"session/tmux/resume.go:codexGlobalOptionHasAttachedValue": {{
+		class: notAShell, note: "strings.HasPrefix(arg, \"-c\") — codex's --config short flag, matched as text",
+	}},
+	"session/tmux/resume.go:codexExecOptionHasAttachedValue": {{
+		class: notAShell, note: "the same, in `codex exec`'s own option grammar",
+	}},
 }
 
 func TestShellSites_EveryShellSiteIsClassified(t *testing.T) {

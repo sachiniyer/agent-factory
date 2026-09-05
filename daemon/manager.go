@@ -99,6 +99,11 @@ type Manager struct {
 	// config swap alone would not reach it. Read lock-free by the poll loop via
 	// Load().
 	limitDetector atomic.Pointer[task.LimitDetector]
+	// accountLimitMu serializes publication of live named-account limits with
+	// the final evidence read, runtime teardown, and durable identity commit of
+	// automatic account replacement. Manager.mu protects roster shape; it cannot
+	// cover per-instance liveness writes without inverting existing lock order.
+	accountLimitMu sync.Mutex
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For
 	// RunDaemon that includes the startup orphan sweep as well as instance restore,

@@ -103,9 +103,11 @@ af sessions create --name spike --account work
 
 `af` never reads, stores, or forwards the credential itself — it decides which
 directory the agent sees, and the agent's own login flow puts the material
-there. It also refuses an unproved fallback and never rotates accounts on its
-own. The TUI's naming form (`ctrl+o`) and the web client's new-session modal
-offer the same field.
+there. It also refuses an unproved fallback, and by default never rotates
+accounts on its own: switching identity after a usage limit is opt-in, and needs
+both `limit_auto_resume` and an explicit `limit_account_candidates` list. The
+TUI's naming form (`ctrl+o`) and the web client's new-session modal offer the
+same field.
 
 Full page: [Accounts and usage limits](usage-limits.md).
 

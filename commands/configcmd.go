@@ -107,6 +107,7 @@ var globalConfigReadOrder = []string{
 	"root_agents",
 	"root_agent",
 	"limit_auto_resume",
+	"limit_account_candidates",
 	"global_agent_skills",
 	"docker.mount_agent_credentials",
 	"ssh.host_key_verification",
@@ -491,6 +492,7 @@ Settable keys:
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
+  limit_account_candidates   comma-separated registered account names, or "" to disable account switching
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent

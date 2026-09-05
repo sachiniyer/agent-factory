@@ -420,6 +420,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "limit_account_candidates",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Registered account names a usage-limited session may switch to, in order · empty keeps waiting on the current identity; set globally or as a personal per-project override.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeListReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "global_agent_skills",
 		Type:       "bool",
 		Default:    "false",

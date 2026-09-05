@@ -645,6 +645,7 @@ func TestSetGlobalConfigValueNewlySettableKeys(t *testing.T) {
 		// Empty means PATH detection — also a real value.
 		{"vscode_server_binary", "", func(c *Config) any { return c.VSCodeServerBinary }},
 		{"limit_auto_resume", "true", func(c *Config) any { return c.LimitAutoResume }},
+		{"limit_account_candidates", "work,personal", func(c *Config) any { return strings.Join(c.LimitAccountCandidates, ",") }},
 		{"limit_retry_interval", "45m", func(c *Config) any { return c.LimitRetryInterval }},
 	}
 

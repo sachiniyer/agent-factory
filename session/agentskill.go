@@ -437,6 +437,24 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 	if i == nil {
 		return skillTarget{}
 	}
+	return resolveSkillTargetForAccount(i, program, strings.TrimSpace(i.Account))
+}
+
+// resolveSkillTargetForAccount is resolveSkillTarget for an account this session
+// has not committed yet.
+//
+// An account swap preflights the whole replacement launch — command, generated
+// args, and launch proof — BEFORE the identity is durable, so at that moment
+// i.Account still names the identity being replaced. Resolving the skill root
+// from it would write the af skill into the OLD account's directory and declare
+// a --plugin-dir the replacement pane will never read. The candidate name is the
+// only correct answer there, and it is passed rather than read for exactly the
+// reason the field cannot be written early: nothing may mutate the recorded
+// account until teardown has succeeded.
+func resolveSkillTargetForAccount(i *Instance, program, name string) skillTarget {
+	if i == nil {
+		return skillTarget{}
+	}
 	agent := tmux.DetectAgentFromCommand(program)
 	if agent == "" {
 		// An opaque command names no agent, so there is no per-agent skills base to
@@ -464,7 +482,7 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 		return skillTarget{unresolved: true}
 	}
 
-	name := strings.TrimSpace(i.Account)
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return skillTarget{}
 	}

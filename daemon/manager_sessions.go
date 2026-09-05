@@ -372,7 +372,13 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	stage.set("deleting record from storage")
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown, so this call site cannot be the one that forgets.
-	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr)
+	var evidence session.InstanceData
+	if instance != nil {
+		evidence = instance.ToInstanceData()
+	} else if data != nil {
+		evidence = *data
+	}
+	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr, evidence)
 	if err != nil {
 		if settledDescriptorGhostCleanup {
 			m.reconcileSettledGhostCleanup(repoID, req.Title, key, targetID)

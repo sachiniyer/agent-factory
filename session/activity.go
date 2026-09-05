@@ -165,6 +165,10 @@ type LifecycleView struct {
 	Status     Status
 	Started    bool
 	UserKilled bool
+	// PendingAccountSwap is a committed identity move whose replacement notice
+	// and task still have to land. Only the limit-resume action may consume it;
+	// competing archive/handoff/restore actions must leave that obligation intact.
+	PendingAccountSwap bool
 	// StartupStateUnknown is the retained-create fence: the launch may have
 	// succeeded under an identity af could not confirm, so no runtime or workspace
 	// action may infer ordinary LiveReady semantics from this view.
@@ -204,6 +208,7 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		Status:              i.statusLocked(),
 		Started:             i.started,
 		UserKilled:          i.userKilled,
+		PendingAccountSwap:  i.pendingAccountSwap != nil,
 		StartupStateUnknown: i.startupStateUnknown,
 		// The already-locked variant, NOT Capabilities(): the backend is mutable
 		// (a restore rebinds it in bindProvisionResult), so Capabilities() now

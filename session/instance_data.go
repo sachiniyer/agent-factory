@@ -30,7 +30,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:                   i.statusLocked(),
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
-		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled),
+		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil),
 		CanKill:                  canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:               i.canHandoffLocked(),
 		CurrentAgent:             i.currentAgentNameLocked(),
@@ -47,6 +47,9 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		UpdatedAt:                time.Now(),
 		Program:                  i.Program,
 		Account:                  i.Account,
+		AccountAutoSelected:      i.accountAutoSelected,
+		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
+		PendingAccountSwap:       cloneAccountSwapData(i.pendingAccountSwap),
 		Prompt:                   i.Prompt,
 		PendingHandoffMission:    i.pendingHandoffMission,
 		UserKilled:               i.userKilled,
@@ -84,6 +87,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// in-memory field lingers after ClearLimitReached but is never serialized.
 	if i.liveness == LiveLimitReached {
 		data.LimitResetAt = i.limitResetAt
+		data.LimitAccount = i.limitAccount
 	}
 
 	// Unlike the reset time above, this is NOT gated on a liveness: whether the run
@@ -268,6 +272,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
+	data = data.RestoreAccountSwapRollbackFence()
 	id := data.ID
 	if id == "" {
 		// Legacy records predate stable session identity. Materialized instances
@@ -282,6 +287,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// build restorable after an upgrade. A tombstoned record keeps its (Lost)
 	// status; the daemon finishes its teardown rather than restoring it.
 	liveness := livenessFromData(data)
+	limitAccount, accountLimitObservations := AccountLimitEvidenceFromData(data)
 	// Resolve the in-flight-op axis from the snapshot payload, falling back to
 	// the legacy status for old daemons/records. A persisted record is always
 	// settled (disk writers scrub this field and SaveInstances skips
@@ -316,6 +322,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
 		limitResetAt:             data.LimitResetAt,
+		limitAccount:             limitAccount,
+		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
@@ -328,6 +336,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		UpdatedAt:                data.UpdatedAt,
 		Program:                  data.Program,
 		Account:                  data.Account,
+		accountAutoSelected:      data.AccountAutoSelected,
+		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
 		Prompt:                   data.Prompt,
 		pendingHandoffMission:    data.PendingHandoffMission,
 		userKilled:               data.UserKilled,
@@ -506,6 +516,15 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// worktree and exact tmux binding above remain available for inspection and an
 	// explicit user kill, while the daemon status loop leaves the record alone.
 	if data.StartupStateUnknown {
+		return instance, nil
+	}
+
+	// An automatic account choice is durable before its replacement starts. Keep
+	// that crash-restored row inert but scheduler-eligible: status reconciliation
+	// must not turn an absent replacement into Lost and route it through ordinary
+	// conversation resume before the pending notice and task are delivered.
+	if data.PendingAccountSwap != nil {
+		instance.started = true
 		return instance, nil
 	}
 

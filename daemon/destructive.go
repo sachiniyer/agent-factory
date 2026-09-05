@@ -37,7 +37,7 @@ import (
 // quiet (false, nil): callers must not read a refusal as "nothing to delete". That
 // distinction is what arms reapDeadRoot's backoff and what makes KillSession report
 // something actionable rather than success.
-func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownErr error) (bool, error) {
+func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownErr error, evidence session.InstanceData) (bool, error) {
 	if session.TeardownStateUnknown(teardownErr) {
 		return false, fmt.Errorf("refusing to delete the record for session %q: its teardown did not complete safely, so its workspace is still on disk and this record is the only handle left on it: %w", title, teardownErr)
 	}
@@ -45,6 +45,10 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 		// The teardown TOLD us something went wrong, but not that the workspace's
 		// fate is unknown. The record may go; the error is the caller's to report.
 		m.warn().Printf("session %q: teardown reported an error that does not leave its workspace state unknown; deleting the record as normal: %v", title, teardownErr)
+	}
+	_, observations := session.AccountLimitEvidenceFromData(evidence)
+	if err := retainAccountLimitObservations(observations); err != nil {
+		return false, fmt.Errorf("retain account-limit evidence before deleting session %q: %w", title, err)
 	}
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {

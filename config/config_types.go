@@ -330,6 +330,14 @@ type Config struct {
 	// retry from PR2) and the scheduler does zero work. Deliberately GLOBAL-ONLY
 	// (it configures daemon behavior), like daemon_poll_interval.
 	LimitAutoResume bool `json:"limit_auto_resume" toml:"limit_auto_resume"`
+	// LimitAccountCandidates is the ordered, explicit set of registered account
+	// names the usage-limit scheduler may select when a session is blocked. An
+	// empty list (the default) disables account switching. The same names are
+	// resolved in the limited session's agent namespace, so a nonexistent account
+	// is skipped rather than reinterpreted. Admitted globally and from the
+	// machine-local personal-project layer, never checked-in repo config: a clone
+	// cannot opt the operator into changing identity or billing account.
+	LimitAccountCandidates []string `json:"limit_account_candidates,omitempty" toml:"limit_account_candidates,omitempty"`
 	// GlobalAgentSkills opts af into writing its "agent-factory" skill file
 	// into the USER'S GLOBAL per-agent config directories — codex's
 	// $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's

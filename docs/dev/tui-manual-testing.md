@@ -466,6 +466,42 @@ a session their repo did not ask for. The refusal has to come from the daemon
 and has to name the backend. `scripts/tui-2599-scenario.sh` automates all three
 legs (form opens, backend honored, `ctrl+r` → `local` still creates).
 
+### Usage-limit account switching (the #3127 class)
+
+`scripts/tui-3127-scenario.sh` drives the whole opt-in flow against a real
+daemon. It is not a TUI-rendering gate — the decision under test is the daemon's
+— but the driver is what makes it reachable: every unit test in `daemon/` and
+`session/` swaps a seam, and none of them proves a real daemon polling a real
+tmux pane reaches the decision at all.
+
+Two things about it are worth stealing for any account gate.
+
+**The stand-in has to be PROVABLE.** `configure-playtest-agent.sh` installs its
+bash stand-in as `af-playtest-standin`, and the account boundary refuses to scope
+a command it cannot prove is a direct invocation of the agent — so that default
+can never be account-scoped. This scenario installs its own at `$HOME/bin/claude`
+and, crucially, sets no `program_overrides` at all: `trustBase`
+(`session/program_resolution.go`) admits an override only when it is
+byte-for-byte af's own detected built-in, which here is the quoted path plus
+`--dangerously-skip-permissions`. Writing the bare path instead — the obvious
+thing — refuses every candidate with "could not be proven to be a direct claude
+invocation".
+
+**A successful swap is a TRANSIENT state.** Park, decide, tear down and replace
+takes about four seconds, so polling for `liveness_name=limit-reached` on the
+path that MOVES is a race the scenario loses. Assert the durable facts instead —
+`account`, `account_auto_selected`, and the daemon's own
+`auto-resumed limit-blocked session … on claude account "…"` line — and keep the
+limit-state assertion for the paths where af must NOT move, where the wall is
+where the session stays. The stand-in walls every identity except the swap
+target for exactly that reason.
+
+For "the replacement really runs as the account", ask the LIVE process rather
+than matching its startup line: enter the pane and echo `$CLAUDE_CONFIG_DIR`. A
+startup line proves what the process was told at exec; the echo proves what it
+still has — and the in-session switch notice is long enough to push that startup
+line out of the visible pane anyway.
+
 ### Tree / selection / focus changes (the #1156, #1084 class)
 
 ```bash
