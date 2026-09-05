@@ -222,6 +222,18 @@ func Register(home, agent, name string) (string, error) {
 	if err := os.Chmod(dir, dirMode); err != nil {
 		return "", fmt.Errorf("secure account directory %s: %w", dir, err)
 	}
+	// And LAST, the questions the agent's own login flow would otherwise ask
+	// about this directory, answered in the account's own settings (#3858).
+	//
+	// Here rather than in the login pane because registration is the moment af
+	// decides what this directory IS, and every route to a gemini account passes
+	// through it: `af accounts add`, `af accounts login`, and the daemon's
+	// account route all call Register. It is idempotent for the same reason the
+	// rest of Register is — it reads before it writes, and answers only what the
+	// account has not answered for itself.
+	if err := answerLoginPrompts(agent, dir); err != nil {
+		return "", err
+	}
 	return dir, nil
 }
 
