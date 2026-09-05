@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // captureInfoLog routes log.InfoLog into a buffer for the test's lifetime, so a
@@ -34,6 +35,10 @@ func newAutoResumeManager(t *testing.T, retryInterval string, alive bool, prompt
 	manager.cfg.LimitRetryInterval = retryInterval
 	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: alive}
 	inst := registerStarted(t, manager, repoID, repoPath, "limited", backend, true, session.Running)
+	// A started production session always has its Agent tab. Recovery metadata
+	// (notably a pending injected Claude id) is promoted into that durable tab,
+	// so a fixture without one exercises an impossible record and masks delivery.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
 	inst.Prompt = prompt
 	inst.SetLimitReached(resetAt)
 	return manager, repoID, inst, backend

@@ -110,6 +110,10 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
+	// limitAccount attributes the current limit after Account changes; empty means ambient.
+	limitAccount string
+	// accountLimitObservations keep named identity walls after liveness clears.
+	accountLimitObservations []AccountLimitObservationData
 	// agentModelChange is a live, projection-only diagnostic supplied by the
 	// running agent-server. It is mutex-protected and deliberately omitted from
 	// durable restore state; see AgentModelChange and InstanceData.ForStorage.
@@ -145,6 +149,12 @@ type Instance struct {
 	// spend the wrong quota while still displaying the account it was created
 	// with.
 	Account string `json:"account,omitempty"`
+	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
+	accountAutoSelected bool
+	// pendingAccountSwap survives until the replacement notice and task land.
+	pendingAccountSwap *AccountSwapData
+	// accountSwapLaunch is the admitted command, rebuilt before a post-restart retry.
+	accountSwapLaunch *accountSwapLaunchPlan
 	// Height is the height of the instance.
 	Height int
 	// Width is the width of the instance.

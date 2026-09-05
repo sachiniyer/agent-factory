@@ -272,6 +272,11 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
 	}
 	config.SessionEnvPassthrough = normalizedSessionEnv
+	normalizedCandidates, err := normalizeLimitAccountCandidates(config.LimitAccountCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
+	}
+	config.LimitAccountCandidates = normalizedCandidates
 
 	sanitizeLimitPatterns(config)
 	sanitizeThemeColors(config, prettyConfigPath)

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,6 +24,68 @@ func TestSetLimitReached(t *testing.T) {
 	got, ok := i.LimitResetAt()
 	require.True(t, ok)
 	require.True(t, got.Equal(reset))
+}
+
+func TestSetLimitReachedAttributesWallToAccountThatProducedIt(t *testing.T) {
+	i := &Instance{Account: "work", accountAutoSelected: true}
+	i.SetLimitReached(time.Time{})
+
+	account, ok := i.LimitAccount()
+	require.True(t, ok)
+	require.Equal(t, "work", account)
+
+	data := i.ToInstanceData()
+	require.Equal(t, "work", data.LimitAccount)
+	i.Account = "personal"
+	account, _ = i.LimitAccount()
+	require.Equal(t, "work", account)
+}
+
+func TestAccountLimitObservationSurvivesClearAndStorage(t *testing.T) {
+	reset := time.Date(2026, 8, 10, 17, 0, 0, 0, time.UTC)
+	i := &Instance{
+		Program: tmux.ProgramClaude, Account: "work", accountAutoSelected: true,
+	}
+	i.SetLimitReached(reset)
+	i.ClearLimitReached()
+
+	want := []AccountLimitObservationData{{
+		Agent: tmux.ProgramClaude, Account: "work", ResetAt: reset,
+	}}
+	require.Equal(t, want, i.AccountLimitObservations(),
+		"clearing current liveness must not make an exhausted identity eligible")
+
+	raw, err := json.Marshal(i.ToInstanceData().ForStorage())
+	require.NoError(t, err)
+	var stored InstanceData
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	require.Equal(t, want, stored.AccountLimitObservations,
+		"account limit evidence must survive the daemon restart boundary")
+}
+
+func TestAccountLimitObservationPreservesSafestReset(t *testing.T) {
+	earlier := time.Date(2026, 8, 10, 18, 0, 0, 0, time.UTC)
+	later := earlier.Add(7 * 24 * time.Hour)
+
+	t.Run("later reset is not shortened", func(t *testing.T) {
+		i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+		i.SetLimitReached(later)
+		i.ClearLimitReached()
+		i.SetLimitReached(earlier)
+
+		require.Equal(t, later, i.AccountLimitObservations()[0].ResetAt,
+			"a short-window wall must not erase a still-active longer quota wall")
+	})
+
+	t.Run("unknown reset dominates", func(t *testing.T) {
+		i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+		i.SetLimitReached(time.Time{})
+		i.ClearLimitReached()
+		i.SetLimitReached(later)
+
+		require.True(t, i.AccountLimitObservations()[0].ResetAt.IsZero(),
+			"a later timestamp cannot make an indefinite limit observation safe to reuse")
+	})
 }
 
 // TestSetLimitReached_NoResetTime: a banner with no parseable reset time still
@@ -74,6 +137,8 @@ func TestClearLimitReached(t *testing.T) {
 	require.False(t, i.LimitReached())
 	require.Equal(t, LiveRunning, i.GetLiveness())
 	_, ok := i.LimitResetAt()
+	require.False(t, ok)
+	_, ok = i.LimitAccount()
 	require.False(t, ok)
 
 	// No-op on a Ready instance.

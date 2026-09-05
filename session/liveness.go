@@ -143,9 +143,9 @@ func opIsTeardown(op InFlightOp) bool {
 // other settled row archives. Kill addressability is intentionally independent
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled bool) LifecycleAction {
+func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap bool) LifecycleAction {
 	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning ||
-		opIsTeardown(op) || startupStateUnknown || userKilled {
+		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -203,7 +203,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled)
+	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil)
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for
@@ -481,8 +481,9 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 // tabSpawnBlockedLocked reports the error, if any, forbidding a new tab spawn.
 // Caller holds i.mu. It reads the two axes directly (the #1195 structural fold of
 // the #1196 archive-orphan guard): a tab may not spawn into an archived session
-// (its worktree was moved away) or one with a teardown op in flight — an archive
-// (OpArchiving) or kill (OpKilling). The archive case is the load-bearing one:
+// (its worktree was moved away), one with a teardown op in flight — an archive
+// (OpArchiving) or kill (OpKilling) — or one whose durable account replacement
+// has not completed. The archive case is the load-bearing one:
 // ArchiveTeardown keeps started=true, so the #990 started-flag guard never fires
 // during archive; OpArchiving is the fence that started=true cannot provide.
 func (i *Instance) tabSpawnBlockedLocked() error {
@@ -491,6 +492,9 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	}
 	if i.inFlightOp == OpArchiving || i.inFlightOp == OpKilling {
 		return fmt.Errorf("cannot add a tab to a session that is being archived or removed; try again in a moment")
+	}
+	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
+		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
 	}
 	return nil
 }
@@ -546,8 +550,40 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	i.limitAccount = i.Account
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
+}
+
+func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time) {
+	if agent == "" || account == "" {
+		return
+	}
+	for idx := range i.accountLimitObservations {
+		observation := &i.accountLimitObservations[idx]
+		if observation.Agent == agent && observation.Account == account {
+			observation.ResetAt = RetainedAccountLimitReset(observation.ResetAt, resetAt)
+			return
+		}
+	}
+	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
+		Agent: agent, Account: account, ResetAt: resetAt,
+	})
+}
+
+// RetainedAccountLimitReset merges two negative quota observations without
+// making the account eligible sooner than either observation permits. An
+// unknown reset dominates because af has no expiry fact; otherwise the later
+// reset is the safer boundary.
+func RetainedAccountLimitReset(prior, observed time.Time) time.Time {
+	if prior.IsZero() || observed.IsZero() {
+		return time.Time{}
+	}
+	if observed.After(prior) {
+		return observed
+	}
+	return prior
 }
 
 // SetLimitResetAt records only the display-only reset time (#1146), leaving both
@@ -608,6 +644,7 @@ func (i *Instance) ClearLimitReached() {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveRunning
 	i.limitResetAt = time.Time{}
+	i.limitAccount = ""
 	// The epoch bump here is what a racing poll checks: it is the resume's
 	// completion point, so any limit re-detection made from content captured before
 	// it is stale by definition and must not land (#2135).
@@ -634,6 +671,27 @@ func (i *Instance) LimitResetAt() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return i.limitResetAt, true
+}
+
+// LimitAccount returns the account whose runtime produced the current limit
+// observation. Empty is the ambient identity; ok is false off the limit wall.
+func (i *Instance) LimitAccount() (account string, ok bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached {
+		return "", false
+	}
+	return i.limitAccount, true
+}
+
+// AccountLimitObservations returns durable named-identity quota evidence. It is
+// independent of the session's current liveness: a successful replacement
+// clears the live wall but cannot make the exhausted account eligible again.
+// The daemon owns expiry policy because it also owns the reset grace window.
+func (i *Instance) AccountLimitObservations() []AccountLimitObservationData {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return append([]AccountLimitObservationData(nil), i.accountLimitObservations...)
 }
 
 // livenessFromData resolves the liveness a persisted or snapshot record should

@@ -6,6 +6,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // respawn holds the shared re-spawn mechanics for Recover and Respawn: re-spawn
@@ -22,6 +23,20 @@ import (
 // PTY yet on this path) and the tmux refs are kept, so the next tick's retry
 // reconnects each tab by its exact persisted name.
 func (b *LocalBackend) respawn(i *Instance) error {
+	return b.respawnWithConversation(i, true, nil)
+}
+
+// respawnWithConversation is respawn with the two axes an account swap needs.
+//
+// resume=false starts a FRESH provider conversation instead of resuming the
+// recorded one: that conversation lives in the previous account's separate
+// credential home, so resuming it under the replacement identity would either
+// fail or read another account's history. prepared, when non-nil, is the launch
+// plan admission froze BEFORE the old runtime was stopped — command, generated
+// args and proof — so the command that was validated is byte-for-byte the
+// command that launches. The two travel together: a prepared plan always
+// launches fresh.
+func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepared *accountSwapLaunchPlan) error {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	gw := i.gitWorktree
@@ -53,6 +68,12 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	}
 	resolution := resolveLaunchProgramForInstance(i)
 	resolvedProgram := resolution.command
+	if prepared != nil {
+		// The base admission resolved and proved against, not a fresh resolve: a
+		// config change between preflight and teardown must not silently launch a
+		// command the account boundary never validated.
+		resolvedProgram = prepared.base
+	}
 	// The base for the generated-args declaration, pinned BEFORE any af rewrite.
 	// resolvedProgram is reassigned below when a fresh worktree rebuild forces the
 	// exact-resume command, and that rewrite is af's own — so declaring against the
@@ -72,6 +93,16 @@ func (b *LocalBackend) respawn(i *Instance) error {
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
 		if rebuildErr := gw.RebuildFromExistingBranch(); rebuildErr != nil {
+			if !resume {
+				// The fresh-rebuild fallback below is an EXACT-RESUME command, which
+				// is the one thing this path must not launch. Refuse instead: the
+				// swap's caller stops the replacement and retries the whole boundary.
+				return &WorktreeUnavailableError{
+					Title:        i.Title,
+					WorktreePath: workDir,
+					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %v)", err, rebuildErr),
+				}
+			}
 			exactProgram, ok := prepareExactResumeConversation(i, resolvedProgram)
 			if !ok {
 				return &WorktreeUnavailableError{
@@ -102,14 +133,22 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 	}
 
-	resumeProgram := prepareResumeConversation(i, resolvedProgram)
-	program := injectSystemPrompt(resumeProgram, resolveSkillTarget(i, resumeProgram))
-	setLaunchProgram(ts, program,
-		accountLaunchProof(declarationBase, program, resolution.trustBase))
+	program, proof := respawnLaunchProgram(
+		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
+	setLaunchProgram(ts, program, proof)
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
-	restoreResult, err := ts.RestoreWithResult(workDir)
+	// A fresh start owns the pane it creates, which is what RestoreRespawned
+	// means to finishRecoverTabFailure below: a later tab failure must close it
+	// rather than leave a replacement agent running with no siblings.
+	restoreResult := tmux.RestoreRespawned
+	var err error
+	if resume {
+		restoreResult, err = ts.RestoreWithResult(workDir)
+	} else {
+		err = ts.Start(workDir)
+	}
 	if err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)

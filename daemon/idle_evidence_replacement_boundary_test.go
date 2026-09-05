@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 type liveBeforeRecoverReturnBackend struct {
@@ -137,6 +138,55 @@ func TestLimitRespawnRetiresIdleEvidenceBeforeReplacementIsExposed(t *testing.T)
 
 	release()
 	require.NoError(t, <-done)
+}
+
+// Automatic account replacement reaches the same live boundary through its
+// fresh-conversation respawn. It must use the ordinary retirement mechanism,
+// rather than exposing the new identity with the limited predecessor's evidence
+// or growing a second account-swap-specific clear path.
+func TestAccountSwapRespawnRetiresIdleEvidenceBeforeReplacementIsExposed(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	manager.cfg.LimitAutoResume = true
+	backend := &liveBeforeRespawnReturnBackend{
+		limitResumeBackend: &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: false},
+		live:               make(chan struct{}),
+		release:            make(chan struct{}),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "account-swap-boundary", backend, true, session.Running)
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
+	inst.Prompt = "continue the task"
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	attemptedAt := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(backend.release) }) }
+	t.Cleanup(release)
+	done := make(chan struct{})
+	go func() {
+		manager.ResumeLimitedSessions()
+		close(done)
+	}()
+
+	select {
+	case <-backend.live:
+	case <-time.After(5 * time.Second):
+		t.Fatal("account replacement backend never became live")
+	}
+	rec := recordFor(t, repoID, inst.Title)
+	require.True(t, rec.LastPromptAttemptAt.IsZero(),
+		"account replacement became live while disk still carried the predecessor prompt attempt")
+	require.Empty(t, rec.LastPromptDeliveryStatus,
+		"account replacement became live while disk still carried the predecessor delivery verdict")
+	require.True(t, rec.LastPaneChurnAt.IsZero(),
+		"account replacement became live while disk still carried the predecessor pane churn")
+
+	release()
+	<-done
 }
 
 // A remote archive restore has already created a fresh runtime when it clears
