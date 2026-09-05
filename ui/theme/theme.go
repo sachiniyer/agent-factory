@@ -17,12 +17,12 @@ func Colors() map[string]lipgloss.AdaptiveColor {
 		"border":         {Light: "#657084", Dark: "#a1aaba"},
 		"dead":           {Light: "#883b43", Dark: "#e4c8cd"},
 		"ink":            {Light: "#2e3440", Dark: "#eceff4"},
-		"ink-muted":      {Light: "#4c566a", Dark: "#d8dee9"},
+		"ink-muted":      {Light: "#4c566a", Dark: "#b7c0ce"},
 		"limit-reached":  {Light: "#73436b", Dark: "#dbb9d5"},
 		"lost":           {Light: "#705014", Dark: "#ebcb8b"},
 		"ready":          {Light: "#405430", Dark: "#d5e2cc"},
 		"running":        {Light: "#4c566a", Dark: "#d8dee9"},
-		"surface":        {Light: "#d8dee9", Dark: "#2e3440"},
+		"surface":        {Light: "#f8f9fc", Dark: "#2e3440"},
 		"surface-raised": {Light: "#eceff4", Dark: "#434c5e"},
 	}
 }

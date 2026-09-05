@@ -11,7 +11,7 @@
   --af-lost: #705014;
   --af-ready: #405430;
   --af-running: #4c566a;
-  --af-surface: #d8dee9;
+  --af-surface: #f8f9fc;
   --af-surface-raised: #eceff4;
   --af-radius-control: 4px;
   --af-radius-dialog: 8px;
@@ -32,7 +32,7 @@
   --af-border: #a1aaba;
   --af-dead: #e4c8cd;
   --af-ink: #eceff4;
-  --af-ink-muted: #d8dee9;
+  --af-ink-muted: #b7c0ce;
   --af-limit-reached: #dbb9d5;
   --af-lost: #ebcb8b;
   --af-ready: #d5e2cc;

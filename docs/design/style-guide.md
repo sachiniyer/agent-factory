@@ -340,12 +340,12 @@ or step fails validation: revise a component rule before enlarging this contract
 <tr><td>border</td><td>#657084</td><td>#a1aaba</td><td>Unfocused control and pane outlines only; never a rule around every content row</td></tr>
 <tr><td>dead</td><td>#883b43</td><td>#e4c8cd</td><td>Dead glyph/label and failed-operation or destructive-confirmation text; never ordinary selection</td></tr>
 <tr><td>ink</td><td>#2e3440</td><td>#eceff4</td><td>All body text, names, headings, field labels and action labels</td></tr>
-<tr><td>ink-muted</td><td>#4c566a</td><td>#d8dee9</td><td>Secondary metadata only: path, timestamp and shortcut annotation; never body text or field labels</td></tr>
+<tr><td>ink-muted</td><td>#4c566a</td><td>#b7c0ce</td><td>Secondary metadata only: path, timestamp and shortcut annotation; never body text or field labels</td></tr>
 <tr><td>limit-reached</td><td>#73436b</td><td>#dbb9d5</td><td>Limit reached glyph and label only; no decorative purple</td></tr>
 <tr><td>lost</td><td>#705014</td><td>#ebcb8b</td><td>Lost glyph and label only; do not infer an error from a slow connection</td></tr>
 <tr><td>ready</td><td>#405430</td><td>#d5e2cc</td><td>Ready glyph and label only; green never means keyboard focus or generic success</td></tr>
 <tr><td>running</td><td>#4c566a</td><td>#d8dee9</td><td>Running state text only; no indicator, including in-flight operations</td></tr>
-<tr><td>surface</td><td>#d8dee9</td><td>#2e3440</td><td>Every page, rail, header and terminal chrome background; also text on the primary accent button</td></tr>
+<tr><td>surface</td><td>#f8f9fc</td><td>#2e3440</td><td>Every page, rail, header and terminal chrome background; also text on the primary accent button</td></tr>
 <tr><td>surface-raised</td><td>#eceff4</td><td>#434c5e</td><td>Dialogs, menus, inputs and selected rows only; never a second page background</td></tr>
 </tbody></table>
 <table><thead><tr><th>Metric</th><th>Web</th><th>TUI</th><th>Required use</th></tr></thead><tbody>
@@ -367,6 +367,10 @@ Body and state text meet 4.5:1 on both surfaces; control outlines meet 3:1. Prim
 buttons use accent with surface text at 4.5:1. No extra selection, on-accent, danger,
 hover, shadow or preview colour exists. Selected rows use surface-raised and an accent
 marker; failed-operation text reuses dead. Ink-muted is secondary metadata only.
+Ink-muted must differ from ink by at least 1.5:1 luminance contrast in both themes
+and remain lower-contrast than ink on both planes. A matching liveness colour needs
+a per-theme `sharesMuted` rationale in the source; running and archived share it
+intentionally in light only.
 Fonts, 400/600 weight, 1.5 web line height, 44px touch height and a 2px focus ring are
 fixed component rules, not more tokens. Indicators never animate. User-caused web
 disclosures may take at most 120ms; reduced motion and all TUI changes are immediate.

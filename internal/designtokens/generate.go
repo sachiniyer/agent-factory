@@ -13,7 +13,12 @@ import (
 	"strings"
 )
 
-type Color struct{ Light, Dark, Role string }
+type Color struct {
+	Light, Dark, Role string
+	// Per-theme rationale for a liveness role intentionally matching ink-muted.
+	// This is source metadata, not another token or an end-user override.
+	SharesMuted map[string]string `json:"sharesMuted,omitempty"`
+}
 type Value struct {
 	CSS  string
 	TUI  int

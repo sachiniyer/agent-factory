@@ -54,6 +54,9 @@ func validate(t Tokens) error {
 			return fmt.Errorf("missing semantic color %q", k)
 		}
 	}
+	if err := validateInkHierarchy(t); err != nil {
+		return err
+	}
 	// These are the only two component backgrounds. Selection uses raised with
 	// an accent marker, not a separate fill or a computed custom palette.
 	for _, bg := range []string{"surface", "surface-raised"} {

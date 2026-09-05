@@ -248,6 +248,17 @@ validation rejects extra roles and checks ink, ink-muted, accent and all state
 labels at 4.5:1 on both backgrounds, border at 3:1, and surface text on accent
 at 4.5:1. Agent-owned ANSI output is outside this shell contract.
 
+Light surface is near-white `#f8f9fc`; surface-raised remains the slightly darker
+`#eceff4` plane, with the existing border defining dialogs and controls. Dark
+planes keep their current order. Ink-muted must have **at least 1.5:1 luminance
+contrast against ink in both themes**, using `(Llighter + 0.05) / (Ldarker + 0.05)`;
+it must also have less contrast than ink against each background, while still
+meeting 4.5:1 readability. This is a product hierarchy floor, not a text-on-text
+accessibility claim. A liveness role equal to ink-muted requires a nonempty,
+per-theme `sharesMuted` rationale in the source. Missing or stale sharing marks
+fail generation. Running and archived intentionally share muted in light only;
+their labels/glyphs preserve meaning. This metadata adds no tokens or settings.
+
 | State | Fixed glyph | Required colour and meaning |
 | --- | --- | --- |
 | Running | Empty string | running text only; no indicator. In-flight operations and unset liveness also suppress the glyph. |

@@ -51,6 +51,10 @@ Body and state text meet 4.5:1 on both surfaces; control outlines meet 3:1. Prim
 buttons use accent with surface text at 4.5:1. No extra selection, on-accent, danger,
 hover, shadow or preview colour exists. Selected rows use surface-raised and an accent
 marker; failed-operation text reuses dead. Ink-muted is secondary metadata only.
+Ink-muted must differ from ink by at least 1.5:1 luminance contrast in both themes
+and remain lower-contrast than ink on both planes. A matching liveness colour needs
+a per-theme `sharesMuted` rationale in the source; running and archived share it
+intentionally in light only.
 Fonts, 400/600 weight, 1.5 web line height, 44px touch height and a 2px focus ring are
 fixed component rules, not more tokens. Indicators never animate. User-caused web
 disclosures may take at most 120ms; reduced motion and all TUI changes are immediate.
