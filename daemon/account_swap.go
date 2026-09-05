@@ -427,13 +427,50 @@ func (m *Manager) prepareRuntimeForAccountSwap(key string, instance *session.Ins
 }
 
 // stopVSCodeForAccountSwap confirms the daemon-owned editor is gone before the
-// credential boundary changes under it. New-swap admission already refuses a
-// session that has a VS Code tab (integrated login shells can override the
-// selected account from shell startup files), so this fires on the RECOVERY
-// path: a tab added between a committed swap and the daemon restart that
-// finishes it. The editor is stopped rather than rescoped — a later render
-// relaunches it — because af does not yet scope the daemon-owned editor to a
-// selected account at all (#3051 left that open for --account sessions too).
+// credential boundary changes under it.
+//
+// Since #3876 the editor IS account-scoped: vscodeAccountScopeForInstance
+// resolves the session's selected account and ensureServerForInstanceInScope
+// bakes it into the child's environ, comparing it on reuse so an editor still
+// holding the previous identity is dropped rather than served. Stopping is
+// therefore the right verb rather than a stand-in for a boundary af lacks: that
+// environ is fixed at exec, so there is no rescoping in place — the only way
+// onto the new account is a replacement, and the later render that starts one
+// now starts it scoped. What this call adds over the supervisor's own lazy
+// replacement is ORDER: the old identity's editor is conclusively gone before
+// the identity flips, not whenever someone next opens the tab.
+//
+// Whether the stop is ever REACHED is a separate question, and the honest
+// answer today is that it is a fail-closed belt with no known live route — kept
+// because what it guards is a credential boundary, not because a caller is
+// known to need it. Both doors into it are already shut:
+//
+//   - New swap: admitAccountSwap refuses a session that has a VS Code tab at
+//     all (an integrated login shell can override the selected account from a
+//     shell startup file — see the vscode_account_env.go file comment), and the
+//     whole resume holds the per-session op-lock CreateTab must take
+//     (archiveExclusiveTabLock), so no tab can appear between that refusal and
+//     the guard arming just after it.
+//   - Recovery: preflightAccountSwapCandidates → ValidateAccountSwap sets
+//     accountSwapLaunch, SelectAccountAutomatically sets pendingAccountSwap,
+//     and tabSpawnBlockedLocked refuses every spawn route while either is set.
+//     pendingAccountSwap is durable, so that guard survives into the daemon
+//     restart that finishes a committed swap — which closes, out of #3869
+//     itself, the "tab added between a committed swap and the restart" window
+//     an earlier version of this comment named as the reason this function
+//     fires.
+//
+// The appends that bypass tabSpawnBlockedLocked do not reopen it either:
+// restoreLocalTabs replays a persisted roster, which for a committed swap is the
+// one admission proved carried no VS Code tab; restoreCarriedTabs belongs to the
+// root-agent heal, and a reserved title is refused a limit resume outright; and
+// metadataTabsFrom stages TabNeedsMetadataOnly kinds only, while a VS Code tab
+// is TabNeedsLocalWorktreeRead.
+//
+// The early return is safe for the same reason the tab roster is the predicate:
+// an editor exists only for a session that still has a vscode tab, an invariant
+// CloseTab (stops it under that same op-lock) and stopVSCodeIfUnwanted (stops
+// one whose tab vanished mid-spawn) maintain from both ends.
 func (m *Manager) stopVSCodeForAccountSwap(key string, instance *session.Instance) error {
 	if !instanceHasVSCodeTab(instance) {
 		return nil
