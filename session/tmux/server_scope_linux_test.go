@@ -19,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 func TestNewTmuxServerCommandScopesDaemonUnitSpawn(t *testing.T) {
@@ -143,7 +144,7 @@ printf '%s\n' 'tmux 3.4'
 	restore := ConfigureDaemonServer(t.TempDir())
 	t.Cleanup(restore)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	oldWarningOut, oldWarningFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
 	log.WarningLog.SetOutput(&warnings)
 	log.WarningLog.SetFlags(0)

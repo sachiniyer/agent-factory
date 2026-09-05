@@ -1,10 +1,10 @@
 package ui
 
 import (
-	"bytes"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"os"
@@ -860,7 +860,7 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 
 	// Session vanishes externally; redirect ErrorLog so we can prove
 	// UpdateContent does not log anything at ERROR.
-	var errBuf bytes.Buffer
+	var errBuf logtest.Buffer
 	prev := log.ErrorLog.Writer()
 	log.ErrorLog.SetOutput(&errBuf)
 	defer log.ErrorLog.SetOutput(prev)

@@ -1,8 +1,6 @@
 package tmux
 
 import (
-	"bytes"
-	"sync"
 	"testing"
 	"time"
 
@@ -11,30 +9,8 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
-
-// reapLogBuffer is a mutex-guarded log sink. Close reaps in its OWN goroutine,
-// so the poll below reads these buffers while the reaper writes them through the
-// logger. log.Logger serializes its own writes but nothing guards a concurrent
-// READ, and a bytes.Buffer touched from two goroutines is a data race — caught
-// by -race on the macOS gate, not by an ordinary local run. Same shape as the
-// syncBuffer helpers in apiclient and daemon.
-type reapLogBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *reapLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *reapLogBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
 
 // captureReapLogs redirects the WARNING and INFO loggers into buffers for the
 // duration of the test and returns readers for both. Severity is the whole
@@ -42,7 +18,7 @@ func (b *reapLogBuffer) String() string {
 // moved from one that vanished.
 func captureReapLogs(t *testing.T) (warnings, infos func() string) {
 	t.Helper()
-	var warnBuf, infoBuf reapLogBuffer
+	var warnBuf, infoBuf logtest.Buffer
 	oldWarnOut, oldWarnFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
 	oldInfoOut, oldInfoFlags := log.InfoLog.Writer(), log.InfoLog.Flags()
 	log.WarningLog.SetOutput(&warnBuf)

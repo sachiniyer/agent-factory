@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // setupResolveTest gives the test a hermetic config home with an explicit
@@ -32,13 +32,13 @@ func setupResolveTest(t *testing.T, globalConfig string) string {
 // also clears the once-per-source removed-key memo (#2496) so a test observing
 // the warning log sees the notice fire regardless of whether an earlier test in
 // the same process already warned for the same source string.
-func captureLog(t *testing.T, logger **stdlog.Logger) *bytes.Buffer {
+func captureLog(t *testing.T, logger **stdlog.Logger) *logtest.Buffer {
 	t.Helper()
 	resetRemovedAutoYesWarnings()
 	resetLegacyRootAgentsWarnings()
 	resetConfigAliasWarnings()
 	resetShellValueWarnings()
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	old := *logger
 	*logger = stdlog.New(&buf, "", 0)
 	t.Cleanup(func() { *logger = old })

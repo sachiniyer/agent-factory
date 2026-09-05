@@ -40,8 +40,10 @@ const (
 // on callDaemon's implicit ensure to boot the daemon at cold start — spawning is
 // a lifecycle concern, independent of which transport the control calls take),
 // then the call rides daemon-http.sock. A package var so a future integration
-// test can point it at a fake without a real daemon; the unit suite stubs the
-// higher-level *ThroughDaemon seams instead, so this runs only in production.
+// test can point it at a fake without a real daemon. newTestHome stubs the
+// higher-level mutation and snapshot-fetch seams, including all-repos discovery,
+// so its incidental snapshot polls never reach this launcher. Tests exercising
+// this transport must explicitly replace it or provide an isolated daemon.
 var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 	// A remote target's daemon runs on another machine — EnsureDaemon would spawn
 	// a superfluous LOCAL daemon we never talk to, so skip it and dial the remote

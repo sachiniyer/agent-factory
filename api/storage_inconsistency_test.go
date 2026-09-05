@@ -1,13 +1,13 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -17,9 +17,9 @@ import (
 // the buffer (rather than teeing through the prior writer) because sibling
 // tests can leave WarningLog attached to a since-closed fd — io.MultiWriter
 // aborts on the first writer's error, which would swallow the captured output.
-func captureWarnings(t *testing.T) *bytes.Buffer {
+func captureWarnings(t *testing.T) *logtest.Buffer {
 	t.Helper()
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	prev := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(&buf)
 	t.Cleanup(func() { log.WarningLog.SetOutput(prev) })
