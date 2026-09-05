@@ -68,6 +68,10 @@ var allowedBareMkdirAll = map[string]struct {
 		"`af gen-docs <output-dir>` writes the committed reference pages to a " +
 			"directory named on argv; scripts/gen-docs.sh points it at docs/. A hidden " +
 			"dev/CI command, and its argument is never a home-derived path."},
+	"internal/designtokens/generate.go:Write": {1,
+		"The build-time design generator writes web/src, ui/theme and docs/ " +
+			"paths under the SOURCE CHECKOUT, derived from the module root by " +
+			"scripts/gen-docs.sh. Never a home-relative path."},
 	"commands/plugins_gen.go:writeAgentPlugins": {1,
 		"Writes generated plugin files into an af SOURCE CHECKOUT selected by " +
 			"--plugin-root, which the caller has already validated by reading its " +
