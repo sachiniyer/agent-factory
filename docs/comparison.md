@@ -5,6 +5,9 @@ hide:
 
 # Comparison
 
+For anyone weighing Agent Factory against the alternatives. After this page you
+will know which lane it is in and when to reach for something else.
+
 The agent-orchestration space is splitting into several shapes: terminal
 multiplexers, desktop worktree apps, kanban-style planning boards, cloud coding
 agents, built-in agent dashboards, and plain shell workflows. Agent Factory sits
@@ -15,7 +18,7 @@ This page is a map of tradeoffs, not a scorecard. The best choice depends on
 where you want the center of gravity to live: your terminal, a desktop app, a
 team board, a hosted cloud agent, or a manual shell setup.
 
-## Big Picture
+## The big picture
 
 <div class="af-table-wide" markdown>
 
@@ -32,7 +35,7 @@ team board, a hosted cloud agent, or a manual shell setup.
 
 </div>
 
-## Tool-By-Tool Table
+## Tool by tool
 
 <div class="af-table-wide" markdown>
 
@@ -65,7 +68,7 @@ team board, a hosted cloud agent, or a manual shell setup.
 
 </div>
 
-## Capability Matrix
+## Capability matrix
 
 <div class="af-table-wide" markdown>
 
@@ -83,7 +86,7 @@ team board, a hosted cloud agent, or a manual shell setup.
 
 </div>
 
-## When To Choose Agent Factory
+## When to choose Agent Factory
 
 Choose Agent Factory when your desired unit of work is:
 
@@ -100,7 +103,7 @@ It is a good fit when you want:
 - explicit archive, restore, kill, and usage-limit recovery behavior;
 - local and remote sessions under one repo-scoped view.
 
-## When To Choose Something Else
+## When to choose something else
 
 Choose **Herdr** or **Agent Deck** when the live terminal workspace itself is
 the product: persistent panes, fast switching, agent state, direct attach, and a
@@ -129,10 +132,10 @@ them isolated, supervised, and reviewable.
 Choose **tmux/Zellij + manual worktrees** when you want the fewest moving parts
 and are comfortable owning all lifecycle policy yourself.
 
-## Source Notes
+## Source notes
 
-- Agent Factory behavior is documented in [Worktree-isolated agents](concepts/worktree-agents.md),
-  [The daemon](concepts/daemon.md), [Tasks & automation](tasks.md),
+- Agent Factory behavior is documented in [Worktree-isolated agents](sessions.md),
+  [The daemon](daemon.md), [Tasks & automation](tasks.md),
   [Remote hooks](remote-hooks.md), the [CLI guide](cli.md), and the generated
   [CLI reference](reference/cli.md).
 - Terminal/orchestration tools: [Herdr](https://herdr.dev/),

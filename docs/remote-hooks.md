@@ -1,4 +1,8 @@
-# Remote Hooks (bring-your-own-provisioner backend)
+# Remote hooks (bring-your-own-provisioner backend)
+
+For operators whose infrastructure the built-in backends do not model. After this
+page you will be able to write the two scripts that let `af` run a session on
+anything you can provision.
 
 Agent Factory ships first-class off-box backends — [`docker`, `ssh`, and `sandbox`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 

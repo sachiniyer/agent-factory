@@ -1,4 +1,8 @@
-# CLI guide
+# The CLI
+
+For scripting `af` — from a shell, a CI job, or another agent. After this page you
+will know how a command picks its project, which groups emit JSON, and what each
+verb does.
 
 Everything the TUI does is also scriptable. The `af sessions` and `af tasks` command groups output JSON to stdout and errors to stderr, so they compose with `jq` and shell scripts. Pass `--json` to wrap output in a `{data, error}` envelope for structured error handling. The TUI and the CLI share the same state — you can mix them freely.
 

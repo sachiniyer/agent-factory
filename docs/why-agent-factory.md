@@ -1,5 +1,8 @@
 # Why Agent Factory
 
+For anyone deciding whether this is the right tool. After this page you will know
+the problem Agent Factory is built around and the opinions it holds.
+
 Coding agents changed the bottleneck. The hard part is no longer typing every
 line yourself; it is keeping multiple agent attempts isolated, observable, and
 reviewable without turning your development machine into a pile of stray
@@ -10,7 +13,7 @@ git work as quickly as possible.** A task starts as a prompt, runs in an
 isolated worktree, and comes back as a branch you can diff, test, review, merge,
 archive, or delete.
 
-## The Problem
+## The problem
 
 Running one agent in one shell is simple. Running five agents across the same
 repository is where the workflow starts to fray:
@@ -26,7 +29,7 @@ You can solve pieces of that with tmux, shell scripts, cron, and manual
 worktrees. Agent Factory packages the workflow into one terminal-native control
 plane.
 
-## The Agent Factory Bet
+## The Agent Factory bet
 
 <div class="grid cards" markdown>
 
@@ -74,7 +77,7 @@ plane.
 
 </div>
 
-## Where It Fits
+## Where it fits
 
 Use Agent Factory when you want a local, terminal-native workflow for many
 coding agents and you care about the path from prompt to reviewable branch.
@@ -92,7 +95,7 @@ for a whole team, an IDE-like inline diff editor, or a general-purpose terminal
 multiplexer for every shell on your machine. See the [comparison](comparison.md)
 for those tradeoffs.
 
-## Design Principles
+## Design principles
 
 - **Keep the user's repo understandable.** Branches, worktrees, and diffs should
   look like normal git artifacts.

@@ -11,7 +11,7 @@
 # `af daemon install` cannot work here and the supervision assertion (#4) is
 # SKIPped. That assertion only really runs on the CI runner, which has a real
 # systemd user manager. The skip is printed loudly in the summary — see
-# docs/lifecycle-testing.md.
+# docs/dev/lifecycle-testing.md.
 set -euo pipefail
 
 export AF_LIFECYCLE_WORKSPACE="${AF_LIFECYCLE_WORKSPACE:-$HOME/af-lifecycle}"

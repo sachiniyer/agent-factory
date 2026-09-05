@@ -11,7 +11,7 @@
 # to target it. `make tui-driver-selftest` handles all of this for you.)
 #
 # The container already solves ISOLATION (throwaway home, mock repo, private
-# tmux, pids/memory caps — scripts/testbox.sh + docs/container-testing.md).
+# tmux, pids/memory caps — scripts/testbox.sh + docs/dev/container-testing.md).
 # This library is the DRIVING + ASSERTION layer on top of it: the piece whose
 # absence caused the #1156 mis-drive (keys landing in a live pane as text)
 # and the #1155 hand-rolled-harness death.
@@ -26,7 +26,7 @@
 #     server. It never runs `tmux kill-server`; it only ever kills its OWN
 #     named driver session.
 #
-# See docs/tui-manual-testing.md for the interaction model and gate recipes.
+# See docs/dev/tui-manual-testing.md for the interaction model and gate recipes.
 
 # ----------------------------------------------------------------------------
 # Configuration (override via environment before sourcing / calling af_boot).

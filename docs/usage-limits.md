@@ -1,4 +1,51 @@
-# Usage limits
+# Accounts and usage limits
+
+For anyone running agents on a subscription plan. After this page you will know
+how to give a session its own credential identity, what happens when an agent
+hits its plan's ceiling, and the three ways out of that wall — retry, hand off,
+or resume automatically.
+
+## Accounts
+
+An **account** is one of an agent's logged-in identities, held as a directory
+the agent CLI treats as its home. `af` never reads, stores, or forwards the
+credential itself: it decides which directory a session sees, and the agent's
+own login flow puts the material there.
+
+```bash
+af accounts login codex work   # register it, then run codex's own login in it
+af accounts list               # what is registered, and whether it holds a credential
+```
+
+`af accounts login` registers the account if needed, starts the agent's own
+login flow in a tmux session scoped to it, hands you the terminal for the
+browser or device-code step, and afterwards reports whether the account holds a
+credential — read from the agent's own credential file, by checking that it
+exists. You can also do it by hand; `af accounts add` prints the directory and
+`af` runs exactly the same commands you would:
+
+```bash
+CODEX_HOME=$(af accounts add codex work) codex login
+CLAUDE_CONFIG_DIR=$(af accounts add claude work) claude auth login
+GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
+```
+
+Once an account exists, a session can be pinned to it:
+
+```bash
+af sessions create --name spike --account work
+```
+
+The TUI's naming form offers the same field on `ctrl+o`, and so does the web
+client's new-session modal. `af` refuses an unproved fallback and never rotates
+accounts on its own — a session either runs as the account you named or does not
+start. The full command surface is in
+[`af accounts`](reference/cli.md#af-accounts).
+
+Accounts are also what make the rest of this page actionable: a plan ceiling
+belongs to an identity, so a second account is one of the ways past one.
+
+## Usage limits
 
 Subscription-plan agents (`claude`, `codex`, `devin`) can hit a **plan
 usage-limit wall**: the CLI stops working and prints a banner like *"Claude usage

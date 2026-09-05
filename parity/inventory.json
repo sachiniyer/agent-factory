@@ -433,7 +433,7 @@
         "pointer": "commands/root.go:139,166,175; api/apicmd.go:25"
       },
       "verdict": "deliberate",
-      "notes": "af version/keys/debug/api are introspection verbs for humans and scripts at a shell, and cobra's built-in `af help` / `--help` / `--version` are the same class. The TUI's ? overlay covers the keys half for its own surface; the web has neither, since a GUI's affordances are the help. cobra adds the built-ins lazily at Execute() time, so the derivation inits them before walking — see docs/surface-parity.md."
+      "notes": "af version/keys/debug/api are introspection verbs for humans and scripts at a shell, and cobra's built-in `af help` / `--help` / `--version` are the same class. The TUI's ? overlay covers the keys half for its own surface; the web has neither, since a GUI's affordances are the help. cobra adds the built-ins lazily at Execute() time, so the derivation inits them before walking — see docs/dev/surface-parity.md."
     },
     {
       "id": "meta.internal",
@@ -692,7 +692,7 @@
       },
       "verdict": "real-gap",
       "issue": "#1933",
-      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/surface-parity.md 'reachable != user-settable'."
+      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/dev/surface-parity.md 'reachable != user-settable'."
     },
     {
       "id": "session.create.opt.inplace",
@@ -1471,7 +1471,7 @@
         "pointer": ""
       },
       "verdict": "deliberate",
-      "notes": "Navigation is per-surface chrome, not a product capability: each UI navigates its own layout idiomatically and a CLI has nothing to navigate. Deliberately NOT held to key-for-key parity — see docs/surface-parity.md."
+      "notes": "Navigation is per-surface chrome, not a product capability: each UI navigates its own layout idiomatically and a CLI has nothing to navigate. Deliberately NOT held to key-for-key parity — see docs/dev/surface-parity.md."
     },
     {
       "id": "tui.panes",
