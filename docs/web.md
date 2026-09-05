@@ -39,8 +39,11 @@ filesystem on the daemon's host: click directories to descend, **Up** for the
 parent, and **Home** for its home directory. **Use** on a git checkout fills
 **Repository path**; you can also type an absolute or `~`-prefixed path. Click
 **Add project** to register it. **Cancel** leaves it unchanged. The switcher's
-**Delete project** control asks for confirmation, archives its live sessions, and
-removes the registration while preserving the real repository.
+**Delete project** asks for confirmation, then archives ordinary live sessions
+(restorable) and tears down in-place or external-worktree sessions, including
+the root agent, removing their session records (not restorable). Those in-place
+worktrees, branches, and uncommitted changes stay where they are. It removes the
+project registration while preserving the real repository.
 
 The **rail** lists the selected project's sessions. Click a row to select it and
 attach its terminal. The main pane shows that session's title and tabs; a linked
