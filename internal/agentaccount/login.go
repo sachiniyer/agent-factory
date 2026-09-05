@@ -212,8 +212,9 @@ func CheckLoginPreconditions(agent, dir string) ([]string, error) {
 		}
 		notices = append(notices, fmt.Sprintf(
 			"CODEX_HOME relocates codex's WHOLE home, not just its credentials: this account starts with no "+
-				"history, no settings and no skills of its own (they live under %s). That is a fresh identity, "+
+				"history and no skills of its own (they live under %s). That is a fresh identity, "+
 				"not a broken codex.", dir))
+		notices = append(notices, codexSettingsNotice(dir))
 	case "claude":
 		notices = append(notices, fmt.Sprintf(
 			"CLAUDE_CONFIG_DIR relocates claude's whole config root: this account starts with no history and "+
