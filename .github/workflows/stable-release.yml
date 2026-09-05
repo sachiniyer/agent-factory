@@ -2,7 +2,7 @@ name: Stable Release
 
 # Manually cuts a stable release vX.Y.Z off master. The maintainer picks the
 # version (which digit to bump); previews then automatically rebase onto it
-# as vX.Y.(Z+1)-preview-N. See docs/release-process.md (#1041).
+# as vX.Y.(Z+1)-preview-N. See docs/dev/release-process.md (#1041).
 #
 # Job order is deliberate: validate and build are read-only, and every
 # mutation (main.go bump commit, tag push, release publish) happens in the

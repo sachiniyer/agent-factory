@@ -20,3 +20,7 @@ pymdown-extensions==11.0.1
 # older anchor_linenums crash on 2.19+ was a pymdownx bug, fixed by the
 # pymdown-extensions bump above — the two must move together.)
 pygments==2.20.0
+# mkdocs-redirects: emits a stub page at every URL the #3855 reorganisation
+# retired, so links already published — README badges, `af --help`, issue
+# comments, release notes — keep resolving. The map lives in mkdocs.yml.
+mkdocs-redirects==1.2.2

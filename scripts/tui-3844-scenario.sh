@@ -23,7 +23,7 @@
 # below, because the refusal comes from the DAEMON and NAMES THE ACCOUNT, which is
 # only possible if the value the picker attached crossed the wire on
 # CreateSessionRequest.Account. A session that actually runs as the account needs a
-# real agent binary; that is the manual leg in docs/tui-manual-testing.md.
+# real agent binary; that is the manual leg in docs/dev/tui-manual-testing.md.
 set -euo pipefail
 
 # shellcheck source=/dev/null

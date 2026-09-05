@@ -127,7 +127,7 @@ EOF
 # todo-cli
 
 A tiny shell todo list. It is the sandbox project the Agent Factory web demo
-is recorded against — see docs/demo-assets.md.
+is recorded against — see docs/dev/demo-assets.md.
 EOF
     chmod +x todo.sh test.sh
     git add -A

@@ -1,6 +1,6 @@
 name: Web selftest
 
-# The Playwright web-driver selftest (#1592 Phase 5 PR6, docs/web-selftest.md):
+# The Playwright web-driver selftest (#1592 Phase 5 PR6, docs/dev/web-selftest.md):
 # a real af daemon on a throwaway home, two seeded sessions behind a fake agent,
 # and the embedded SPA driven in a headless Chromium. It is the acceptance proof
 # for the web client and, until #2069, it ran only when someone typed `make
@@ -111,7 +111,7 @@ jobs:
       - uses: actions/checkout@v6
 
       # `make web-selftest-container` is the ONLY sanctioned entry point
-      # (docs/web-selftest.md), and CI uses it verbatim rather than reimplementing
+      # (docs/dev/web-selftest.md), and CI uses it verbatim rather than reimplementing
       # the steps — a CI-only copy of the harness is how the thing CI runs stops
       # being the thing developers run. The ubuntu runner ships Docker, which is
       # all the target needs; pr.yml's macOS job cannot host it for exactly this

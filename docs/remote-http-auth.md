@@ -1,5 +1,9 @@
 # Remote daemon access: HTTP and tokens
 
+For anyone who wants to reach their daemon — the web client, the TUI, or the API —
+from a second machine. After this page you will know the two ways to do that, why
+one of them is the recommendation, and exactly when a token is required.
+
 By default the Agent Factory daemon is reachable **only** from the machine it
 runs on. Local clients use a Unix socket whose `0600` permissions are the entire
 auth story (see the [HTTP API guide](http-api.md#authentication)), and the
@@ -565,7 +569,7 @@ plaintext backend.
 
 - [HTTP API guide](http-api.md) — the local Unix-socket surface and the
   `{data,error}` envelope the remote listener mirrors.
-- [The daemon](concepts/daemon.md) — the single-writer model behind every
+- [The daemon](daemon.md) — the single-writer model behind every
   transport.
 - [Configuration](configuration.md) — the global config file the keys above live
   in.
