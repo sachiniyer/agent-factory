@@ -56,8 +56,8 @@ var (
 // daemon serving — never an assumed success. Only after authorizing does the daemon
 // quiesce (stop admitting, report DaemonPhaseQuiescing so a stuck hand-off is
 // visible) and exit; the actor's StopPrevious then confirms it is gone.
-func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, requestExit func(), candidate []byte, toVersion, expectedPreviousSHA256 string) error {
-	plan, err := captureUpgradePlan(lifecycle, candidate, toVersion, expectedPreviousSHA256)
+func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, requestExit func(), candidate []byte, toVersion, expectedPreviousSHA256 string, clearUnverifiableArtifacts bool) error {
+	plan, err := captureUpgradePlan(lifecycle, candidate, toVersion, expectedPreviousSHA256, clearUnverifiableArtifacts)
 	if err != nil {
 		return fmt.Errorf("capture upgrade plan: %w", err)
 	}
@@ -106,7 +106,7 @@ func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, r
 // bytes and ToVersion are inputs (R3 supplies them from the release; the test a
 // stamped fake); everything else is read from this running daemon so the actor
 // validates and, on failure, restores exactly what was serving.
-func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion, expectedPreviousSHA256 string) (upgradetxn.Plan, error) {
+func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion, expectedPreviousSHA256 string, clearUnverifiableArtifacts bool) (upgradetxn.Plan, error) {
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return upgradetxn.Plan{}, err
@@ -151,6 +151,10 @@ func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion,
 		},
 		RecoveryJob:   recoveryJob,
 		MetadataPaths: metadataPaths,
+		// The operator's opt-in, read from the live config at the moment the
+		// upgrade is attempted (#3864). Off means Prepare refuses on a staged
+		// artifact whose owning home it cannot read, and names the file.
+		ClearUnverifiableArtifacts: clearUnverifiableArtifacts,
 	}, nil
 }
 

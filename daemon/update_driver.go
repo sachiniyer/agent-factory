@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -232,9 +233,17 @@ func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 			return upgradetxn.CandidateRejected(executable, candidate)
 		},
 		activate: func(ctx context.Context, candidate []byte, toVersion string) error {
+			// Read HERE, from the live config, rather than captured when the driver
+			// was built: an operator sets this precisely because an upgrade is
+			// refusing on a staged artifact, and a value read at daemon start would
+			// make them restart the daemon to be heard (#3864).
+			clearUnverifiable := false
+			if cfg := manager.Config(); cfg != nil {
+				clearUnverifiable = cfg.UpgradeClearUnverifiableArtifacts
+			}
 			// The baseline goes with it: Prepare re-verifies it under the locks,
 			// which is the only place the comparison cannot be raced.
-			return triggerUpgradeActivation(ctx, manager.lifecycle, requestExit, candidate, toVersion, baseline)
+			return triggerUpgradeActivation(ctx, manager.lifecycle, requestExit, candidate, toVersion, baseline, clearUnverifiable)
 		},
 	}
 }
@@ -509,6 +518,14 @@ func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel
 		// line has to carry what went wrong and what is still true.
 		d.rejectTag(tag)
 		log.ErrorLog.Printf("auto-update: daemon-owned upgrade to %s did not start; this daemon keeps serving %s and will not retry that release: %v", latest, d.currentVersion, err)
+		if errors.Is(err, upgradetxn.ErrForeignStagedArtifact) {
+			// This refusal is the one an unattended box can otherwise meet on every
+			// check for the rest of the machine's life, so it says what to DO rather
+			// than only what happened. The error above already names the artifact and
+			// the evidence; this names the way past the one case af will not clear on
+			// its own (#3864).
+			log.ErrorLog.Printf("auto-update: that upgrade is blocked by a binary staged beside the executable that af cannot attribute; remove the file named above once you are sure nothing needs it, or set upgrade_clear_unverifiable_artifacts = true to let af set it aside")
+		}
 		return updateCheckFailed
 	}
 	return updateCheckActivated

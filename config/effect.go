@@ -103,8 +103,12 @@ var keyEffectClasses = map[string]EffectClass{
 	// release; installing is still af's, at launch. See EffectNextAfLaunch.
 	"auto_update":    EffectNextAfLaunch,
 	"update_channel": EffectNextAfLaunch,
-	"keys":           EffectNextAfLaunch,
-	"detach_keys":    EffectNextAfLaunch,
+	// Read at the moment an upgrade is attempted — by `af upgrade` from disk, and
+	// by the daemon from its live config on each activation — so a save is in
+	// force for the next upgrade either path tries, with nothing to restart.
+	"upgrade_clear_unverifiable_artifacts": EffectAppliedLive,
+	"keys":                                 EffectNextAfLaunch,
+	"detach_keys":                          EffectNextAfLaunch,
 }
 
 // KeyEffectClass returns when a change to key takes effect. A dotted family leaf

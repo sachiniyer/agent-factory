@@ -822,6 +822,12 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 	if err := removeDurableFile(t.journal.PreviousBinaryPath); err != nil {
 		return fmt.Errorf("remove previous-binary cleanup actor: %w", err)
 	}
+	// AFTER the binaries it describes (#3864). The other order can crash between
+	// the two and leave artifacts nothing attributes, which is exactly the
+	// leftover the owner record exists to prevent.
+	if err := removeDurableFile(artifactOwnerPathForPrevious(t.journal.PreviousBinaryPath)); err != nil {
+		return fmt.Errorf("remove upgrade artifact owner record: %w", err)
+	}
 	if err := removeDurableFile(recoveryLockPath(t.journal.HomeDir, t.journal.ID)); err != nil {
 		return fmt.Errorf("remove inactive recovery lock: %w", err)
 	}

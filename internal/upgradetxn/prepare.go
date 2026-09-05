@@ -136,10 +136,23 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	// home's commit or rollback would overwrite the other's. Detected the way
 	// every home's transaction is visible — by its artifacts, which are staged
 	// beside the executable.
-	if foreign, err := foreignTransactionOver(executable, stablePlan.ID); err != nil {
+	//
+	// Asked of the EVIDENCE there rather than of the filenames (#3864): an
+	// artifact whose owning home has finished with it, or which nothing records
+	// at all and nothing has touched in an hour, is debris and is set aside
+	// rather than read as a claim. Prepare holds both locks, so it is entitled to
+	// clear; the unlocked probes in the in-place installer are not.
+	blocking, err := BlockingStagedArtifact(executable, stablePlan.ID, ArtifactScanOptions{
+		Clear:             true,
+		ClearUnverifiable: stablePlan.ClearUnverifiableArtifacts,
+	})
+	if err != nil {
 		return nil, err
-	} else if foreign != "" {
-		return nil, fmt.Errorf("another upgrade transaction (%s) is already staging over %s; refusing to start a second one", foreign, executable)
+	}
+	if blocking != nil {
+		return nil, fmt.Errorf(
+			"%w (%s): transaction %s, %s. Its preserved binary is %s",
+			ErrForeignStagedArtifact, executable, blocking.ID, blocking.Reason, blocking.PreviousPath)
 	}
 
 	activePath := activeJournalPath(home)
@@ -163,6 +176,18 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	}
 	published := false
 	previousPath, candidatePath := binaryArtifactPaths(executable, stablePlan.ID)
+	ownerPath := artifactOwnerPath(executable, stablePlan.ID)
+	ownerWritten := false
+	// Registered BEFORE the artifacts' cleanup below so that, defers being LIFO,
+	// it runs AFTER it. A failure path that removed the owner record first could
+	// die between the two and leave binaries nothing can attribute — which is the
+	// very leftover this contract exists to make impossible (#2984 review).
+	defer func() {
+		if published || !ownerWritten {
+			return
+		}
+		_ = os.Remove(ownerPath)
+	}()
 	var createdArtifacts []string
 	defer func() {
 		if published {
@@ -205,8 +230,29 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 			return nil, fmt.Errorf("inspect upgrade binary artifact %s: %w", path, err)
 		}
 	}
+	// Checked with the binaries, and BEFORE anything is written. A record already
+	// at this path belongs to an earlier attempt or another home; overwriting it
+	// and then removing it on the way out through the failure defer would leave
+	// THEIR binaries unattributable, and an unattributable artifact is what this
+	// design has to keep rare.
+	if _, err := os.Lstat(ownerPath); err == nil {
+		return nil, fmt.Errorf("an upgrade artifact owner record already exists at %s", ownerPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect upgrade artifact owner record %s: %w", ownerPath, err)
+	}
 
 	mode := executableInfo.Mode().Perm()
+	// Written BEFORE the binaries it describes, so no window exists in which they
+	// are on disk with nothing naming the home that owns them.
+	if err := writeArtifactOwner(ownerPath, ArtifactOwner{
+		SchemaVersion: artifactOwnerSchemaVersion,
+		TransactionID: stablePlan.ID,
+		HomeDir:       home,
+		StagedAt:      time.Now().UTC(),
+	}); err != nil {
+		return nil, fmt.Errorf("record the owner of the staged upgrade binaries: %w", err)
+	}
+	ownerWritten = true
 	createdArtifacts = append(createdArtifacts, previousPath)
 	if err := durableAtomicWriteFile(previousPath, previousBinary, mode); err != nil {
 		return nil, fmt.Errorf("snapshot previous binary: %w", err)
