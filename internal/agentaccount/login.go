@@ -223,6 +223,17 @@ func CheckLoginPreconditions(agent, dir string) ([]string, error) {
 			"GEMINI_CLI_HOME is a HOME-like root, so gemini keeps this account's credentials one level down at "+
 				"%s. Point the variable at the account directory itself, never at the .gemini path inside it.",
 			filepath.Join(dir, ".gemini")))
+		// The one place an operator is told that af writes into the agent's own
+		// settings, and the only surface where that is not a surprise: it is
+		// printed at the login this account was registered for. Both files are
+		// named so it can be checked rather than believed (#3858).
+		notices = append(notices, fmt.Sprintf(
+			"af has recorded this account's answers to gemini's two start-up questions in %s and %s — the "+
+				"Google sign-in as the auth type · the account directory as trusted — so the pane opens on the "+
+				"authorization code rather than on two questions about af's own directory. Neither is a "+
+				"credential, and an answer already in those files is left alone.",
+			filepath.Join(dir, ".gemini", geminiSettingsFile),
+			filepath.Join(dir, ".gemini", geminiTrustedFoldersFile)))
 	}
 	return notices, nil
 }
