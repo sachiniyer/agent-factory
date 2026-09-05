@@ -31,6 +31,15 @@ recognizes either `<root>/.gemini/oauth_creds.json` or
 
 ### Log in
 
+Install each agent you want to log into on the machine running the daemon
+first. For example, Codex login needs `codex` on the **daemon's `PATH`**, even if
+your sessions normally use another agent. Finding it in your current shell is
+not enough if that shell's `PATH` changed after the daemon started. From a shell with the corrected `PATH`, run
+`af daemon restart`. If you use an installed autostart service, first rerun
+`af daemon install` from that shell to replace the service's captured `PATH`;
+restarting alone reuses that snapshot. Run the login command in an interactive
+terminal.
+
 ```bash
 af accounts login claude work
 af accounts login codex work
@@ -52,6 +61,12 @@ Afterwards, af reports whether a credential file exists. It checks presence,
 never reads the secret; presence is not proof that a token is still valid.
 `af accounts login codex work --no-attach` starts the flow and prints how to
 attach instead of taking your terminal.
+
+To stop before signing in, press `ctrl+c` in the login pane: the account stays
+registered but `af accounts list` reports `not logged in`, and the login command
+reports that no credential was created. Re-run the login command when ready to
+finish. A named Codex account starts with its own history, settings, and skills
+as well as credentials.
 
 Gemini's registration pre-answers folder trust for the account directory and
 selects Google OAuth in that account's non-secret settings. Existing choices
@@ -75,7 +90,8 @@ settings. Explicit `BROWSER` or `NO_BROWSER` entries in
 
 ### Pick an account
 
-Once an account exists, a session can be pinned to it:
+After completing sign-in, pin a session to that account and its agent (a Codex
+account cannot be used by the default Claude agent):
 
 ```bash
 af sessions create --name spike --program codex --account work
