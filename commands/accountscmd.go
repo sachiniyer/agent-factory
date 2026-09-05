@@ -205,7 +205,8 @@ This makes a place; it does not log in. Run the agent's own login flow against
 the printed directory to put credentials there.
 
 Registration is idempotent — running it again on an existing account reports the
-same directory and touches nothing inside it.`,
+same directory and preserves existing settings. Missing non-credential runtime
+settings may be seeded; notices explaining them are printed to stderr.`,
 	// ArbitraryArgs, with the count checked inside RunE. cobra runs an Args
 	// validator BEFORE RunE, so ExactArgs(2) emitted human `Error:` and usage text
 	// even under --json — leaving an automation caller unable to parse the one
@@ -252,6 +253,9 @@ same directory and touches nothing inside it.`,
 		loggedIn, err := agentaccount.LoggedIn(home, agent, name)
 		if err != nil {
 			return jsonWrapError(cmd, accountsJSONFlag, err)
+		}
+		for _, notice := range agentaccount.RegistrationNotices(agent, dir) {
+			fmt.Fprintln(cmd.ErrOrStderr(), notice)
 		}
 		entry := accountEntry{Agent: agent, Name: name, Dir: dir, LoggedIn: loggedIn}
 		if accountsJSONFlag {

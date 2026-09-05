@@ -123,10 +123,10 @@ func valueText(value any) string {
 }
 
 // TestRegisterLeavesAgentsWithNoMeasuredPromptsUntouched keeps the table honest
-// from the other side. claude and codex reach their device-code prompt with an
-// empty account directory (#3857), so a registration that dropped settings into
-// their homes would be af inventing configuration for a flow that never asks.
+// from the other side. Claude needs no settings, and Codex must not invent
+// a runtime policy when the operator has no ambient configuration.
 func TestRegisterLeavesAgentsWithNoMeasuredPromptsUntouched(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	home := t.TempDir()
 	for _, agent := range []string{"claude", "codex"} {
 		dir, err := Register(home, agent, "work")

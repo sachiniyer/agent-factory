@@ -221,7 +221,8 @@ This makes a place; it does not log in. Run the agent's own login flow against
 the printed directory to put credentials there.
 
 Registration is idempotent — running it again on an existing account reports the
-same directory and touches nothing inside it.
+same directory and preserves existing settings. Missing non-credential runtime
+settings may be seeded; notices explaining them are printed to stderr.
 
 ```
 af accounts add <agent> <name> [flags]
