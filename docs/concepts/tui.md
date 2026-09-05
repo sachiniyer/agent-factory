@@ -4,6 +4,21 @@ The `af` terminal UI is the home base for running agents. It's built to keep you
 in one screen: a list of everything running on the left, a live look at any
 agent on the right, and a keystroke to dive into any of them full-screen.
 
+<video controls muted loop playsinline preload="metadata"
+       poster="../assets/tui/demo-poster.png"
+       aria-label="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
+  <source src="../assets/tui/demo.webm" type="video/webm">
+  <source src="../assets/tui/demo.mp4" type="video/mp4">
+  <img src="../assets/tui/demo.gif" alt="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
+</video>
+
+Demo: [MP4](../assets/tui/demo.mp4) · [WebM](../assets/tui/demo.webm) ·
+[GIF](../assets/tui/demo.gif). Nothing in those panes is a transcript — three
+real Codex sessions are working in three AF-owned worktrees, recorded by
+`scripts/container/record-demo.sh`. The web client's own demo is on the
+[home page](../index.md); see [Demo assets](../demo-assets.md) for how both are
+produced.
+
 Launch it from inside a git repository to open scoped to that project, or from
 anywhere to open on your project registry and pick one:
 
@@ -23,6 +38,8 @@ you can select a known project or add one.
 - **Agent tab.** A snapshot of the selected agent's terminal, updated as it
   works — so you can follow progress across several agents without attaching to
   any of them. Toggle it with `s` (open) and `x` (hide).
+
+![The TUI showing several Agent Factory sessions in the sidebar with the selected session's Agent tab beside them](../assets/tui/tui-sessions.svg)
 
 An idle row also says **why** it's idle, as far as the daemon can mechanically
 tell — `usage limit`, `process exited`, `restore gave up after 6 attempts: ...`,

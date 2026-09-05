@@ -29,6 +29,12 @@ if (!baseURL) {
 
 export default defineConfig({
   testDir: "./selftest",
+  // The demo recorder lives beside the gate in ./selftest so it shares this
+  // harness, but it is NOT a gate: it records a video for the docs and asserts
+  // nothing about correctness (#3855). Reached only through
+  // playwright.demo.config.ts, so `npx playwright test` — which is exactly how
+  // web-selftest-entry.sh invokes CI's Web selftest — never picks it up.
+  testIgnore: /web-demo\.spec\.ts$/,
   // One daemon, one browser: the flows mutate shared session state (create / kill /
   // archive), so they must run serially against a single worker.
   fullyParallel: false,

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# record-demo.sh — regenerate docs/assets/demo.* from real Agent Factory use.
+# record-demo.sh — regenerate docs/assets/tui/demo.* from real Agent Factory use.
+# (The WEB client's demo media is a different recorder: `make demo-assets`,
+# scripts/container/web-demo-entry.sh, writing docs/assets/web/.)
 #
 # The recording runs in the same isolated sandbox as `make
 # playtest-container`: a disposable mock repository, throwaway AF home, and
@@ -283,18 +285,18 @@ docker exec \
     "$container_name" bash /src/scripts/container/record-demo.sh
 
 printf '>>> copying generated media …\n'
-docker cp "$container_name:/home/dev/out/demo.gif" "$repo_root/docs/assets/demo.gif"
-docker cp "$container_name:/home/dev/out/demo.webm" "$repo_root/docs/assets/demo.webm"
-docker cp "$container_name:/home/dev/out/demo.mp4" "$repo_root/docs/assets/demo.mp4"
-docker cp "$container_name:/home/dev/out/demo-poster.png" "$repo_root/docs/assets/demo-poster.png"
+docker cp "$container_name:/home/dev/out/demo.gif" "$repo_root/docs/assets/tui/demo.gif"
+docker cp "$container_name:/home/dev/out/demo.webm" "$repo_root/docs/assets/tui/demo.webm"
+docker cp "$container_name:/home/dev/out/demo.mp4" "$repo_root/docs/assets/tui/demo.mp4"
+docker cp "$container_name:/home/dev/out/demo-poster.png" "$repo_root/docs/assets/tui/demo-poster.png"
 if [ -n "$frames_dir" ]; then
     mkdir -p "$frames_dir"
     docker cp "$container_name:/home/dev/out/frames/." "$frames_dir/"
 fi
 
 ls -lh \
-    "$repo_root/docs/assets/demo.gif" \
-    "$repo_root/docs/assets/demo.webm" \
-    "$repo_root/docs/assets/demo.mp4" \
-    "$repo_root/docs/assets/demo-poster.png"
+    "$repo_root/docs/assets/tui/demo.gif" \
+    "$repo_root/docs/assets/tui/demo.webm" \
+    "$repo_root/docs/assets/tui/demo.mp4" \
+    "$repo_root/docs/assets/tui/demo-poster.png"
 printf '>>> done · container teardown removes the copied auth and sandbox\n'

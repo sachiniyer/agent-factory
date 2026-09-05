@@ -16,7 +16,7 @@ the first session, then repeat for the next bug.
 - `fix-export-timeout`
 
 <figure markdown>
-![TUI screenshot showing parallel Agent Factory sessions](assets/tui-sessions.svg)
+![TUI screenshot showing parallel Agent Factory sessions](assets/tui/tui-sessions.svg)
 </figure>
 
 </div>
@@ -83,7 +83,7 @@ choose the cron trigger, and leave it enabled for the daemon to run.
 - Delivery: create a fresh session or target a persistent triage session
 
 <figure markdown>
-![TUI screenshot showing Agent Factory task automation state](assets/tui-tasks.svg)
+![TUI screenshot showing Agent Factory task automation state](assets/tui/tui-tasks.svg)
 </figure>
 
 </div>
@@ -111,7 +111,7 @@ watch task and point it at the script that emits one event per stdout line.
 - Prompt: `Investigate this CI failure: {{line}}`
 
 <figure markdown>
-![TUI screenshot showing Agent Factory task automation state](assets/tui-tasks.svg)
+![TUI screenshot showing Agent Factory task automation state](assets/tui/tui-tasks.svg)
 </figure>
 
 </div>
