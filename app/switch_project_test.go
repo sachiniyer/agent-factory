@@ -273,6 +273,9 @@ func TestBuildProjectListGivesInactivePathsIndependentResolutionBudgets(t *testi
 		"a path that spends its whole budget without answering keeps its recorded identity")
 }
 
+// TestBuildProjectListInvalidatesVanishedRegisteredWorktree: a registry root
+// that disappears must not keep lending its cached spelling to the surviving
+// live workspace.
 func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
 	_, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
 	h := newTestHome(t)
@@ -286,19 +289,41 @@ func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
 		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
 	}}
 
-	first, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
-	require.Contains(t, h.projectPathResolutions, registeredRoot, "the first poll must cache the successful registry root")
+	// Reaching the state the vanishing invalidates is not the property: a poll
+	// whose probes lost their own windows caches no resolution and proves no
+	// registration, so there is nothing cached for the vanishing to invalidate.
+	first := pollProjectsUntil(t, h, data, nil, func() bool {
+		return registryRootIsVouchedFor(h, registeredRoot)
+	}, "no poll ever resolved AND proved the registry root %s inside its own budgets, "+
+		"so nothing was ever cached for the vanishing to invalidate", registeredRoot)
 	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot),
 		"the live registered root is the preferred spelling before it disappears")
 
 	runGit(t, bare, "worktree", "remove", "--force", registeredRoot)
-	second, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
+
+	second := pollProjectsUntil(t, h, data, nil, func() bool {
+		return workspaceIsResolved(h, liveRoot)
+	}, liveWorkspaceUnresolved, liveRoot, projectPathScanTimeout)
 	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
 		"a vanished cached registry root must not replace the surviving live workspace")
 }
 
+// TestBuildProjectListRevalidatesPresentReplacementCheckout: a registry root
+// whose checkout is REPLACED by an unrelated repository — the directory is
+// still there, so nothing about its absence invalidates anything — must stop
+// lending the identity an earlier poll proved, once that proof has expired.
+//
+// The expiry is STAGED on the entries under test rather than waited out
+// (#3874). Sleeping past the one-second TTL expired the whole poll's cache
+// rather than the registry entry the assertion is about, the healthy live
+// workspace's resolution included, so the second poll had to re-probe a path
+// this test never meant to re-probe. That probe gets projectPathScanTimeout,
+// and a macOS runner that misses it makes the session row fall back to its
+// recorded bare RepoPath: the poll is then rooted at the bare repository, and
+// the assertion — which looks for the live workspace — reads that as the
+// revalidation having failed. Backdating the registry root's own timestamps
+// expires exactly what must be revalidated and leaves the live workspace's
+// fresh entry to be served from cache.
 func TestBuildProjectListRevalidatesPresentReplacementCheckout(t *testing.T) {
 	base, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
 	h := newTestHome(t)
@@ -312,17 +337,98 @@ func TestBuildProjectListRevalidatesPresentReplacementCheckout(t *testing.T) {
 		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
 	}}
 
-	first, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
-	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot))
+	first := pollProjectsUntil(t, h, data, nil, func() bool {
+		return registryRootIsVouchedFor(h, registeredRoot)
+	}, "no poll ever resolved AND proved the registry root %s inside its own budgets, "+
+		"so no resolution was ever staged for the replacement to have to expire", registeredRoot)
+	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot),
+		"the proven registry root is the preferred spelling while it is still the checkout that was registered")
 
 	runGit(t, bare, "worktree", "remove", "--force", registeredRoot)
 	runGit(t, base, "init", "-b", "main", registeredRoot)
-	time.Sleep(projectPathResolutionTTL + 100*time.Millisecond)
-	second, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
+
+	// Expire the registry root's resolution and its proof, and only those.
+	// Absence counts as expired: a poll that fails to prove the replacement
+	// caches nothing, which is the same "nothing fresh to lend" this stages.
+	expireRegistryRoot := func() {
+		aged := time.Now().Add(-projectPathResolutionTTL - time.Second)
+		if resolution, ok := h.projectPathResolutions[registeredRoot]; ok {
+			resolution.resolvedAt = aged
+			h.projectPathResolutions[registeredRoot] = resolution
+		}
+		if identity, ok := h.registeredProjectIdentities[registeredRoot]; ok {
+			identity.resolvedAt = aged
+			h.registeredProjectIdentities[registeredRoot] = identity
+		}
+	}
+
+	second := pollProjectsUntil(t, h, data, expireRegistryRoot, func() bool {
+		return workspaceIsResolved(h, liveRoot)
+	}, liveWorkspaceUnresolved, liveRoot, projectPathScanTimeout)
 	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
 		"an expired registry resolution must not lend the bare identity to a replacement checkout")
+}
+
+// liveWorkspaceUnresolved names the one poll outcome the two-poll registry
+// tests above cannot read their assertion through, and it is about the RUNNER
+// rather than the registry: a poll holds an identity for the live workspace
+// only when a probe of it answered — from cache, or freshly when the
+// one-second TTL lapsed across the git commands that replace the registry
+// checkout. Without one, the session row falls back to its recorded bare
+// RepoPath and the poll is rooted at the bare repository whatever the registry
+// did, so it answers the question neither way (#3874).
+const liveWorkspaceUnresolved = "the live workspace %s never resolved inside its own %s probe window, " +
+	"so no poll ever reached the state these assertions read"
+
+// registryRootIsVouchedFor reports whether the poll's caches hold BOTH facts a
+// registry root's preferred spelling rests on: its path resolved, and its
+// registration proven. Either one lost to its own budget leaves the row on the
+// recorded-identity fallback, which is a different case from the one under
+// test.
+func registryRootIsVouchedFor(h *home, root string) bool {
+	if _, resolved := h.projectPathResolutions[root]; !resolved {
+		return false
+	}
+	_, proven := h.registeredProjectIdentities[root]
+	return proven
+}
+
+// workspaceIsResolved reports whether the poll holds a resolved identity for a
+// path. Only successful probes are cached and an expired entry is dropped
+// before it is re-probed, so an entry present after a poll is that poll having
+// resolved the path — from its cache or from a probe of its own.
+func workspaceIsResolved(h *home, path string) bool {
+	_, resolved := h.projectPathResolutions[path]
+	return resolved
+}
+
+// pollProjectsUntil re-runs the project poll until one attempt satisfies ready,
+// returning that attempt's list, and fails naming the state never reached once
+// the deadline passes.
+//
+// It is the retry shape the sibling budget tests already carry (#3710 → #3720,
+// #3761 → #3765): every path a poll resolves is given one bounded window, and a
+// poll that lost one did not exercise the property under test — it produced the
+// same fallback a genuine failure produces, from the runner. Nothing caches a
+// lost probe, so polling again is a fresh attempt at the same question rather
+// than a reread of a settled one. stage runs before each attempt so every one of
+// them stages the same experiment.
+func pollProjectsUntil(t *testing.T, h *home, data []session.InstanceData, stage func(), ready func() bool,
+	unreached string, args ...any) []overlay.Project {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if stage != nil {
+			stage()
+		}
+		projects, degraded := h.buildProjectListFrom(data)
+		require.False(t, degraded)
+		if ready() {
+			return projects
+		}
+		require.Truef(t, time.Now().Before(deadline), unreached, args...)
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // probeOutcomeFor reports how the poll's probe for path ended, from the budget
