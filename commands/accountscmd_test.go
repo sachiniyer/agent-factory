@@ -429,10 +429,16 @@ func TestAccountsListReportsLoginStatePerAccount(t *testing.T) {
 func TestAccountsHelpShowsTheGeminiHomeRootShape(t *testing.T) {
 	for _, want := range []string{
 		"GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini",
-		"<dir>/.gemini/gemini-credentials.json",
+		"GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it",
 	} {
 		if !strings.Contains(accountsCmd.Long, want) {
 			t.Fatalf("account help is missing %q:\n%s", want, accountsCmd.Long)
+		}
+	}
+	for _, artifact := range agentaccount.AccountCredentialArtifacts("gemini") {
+		want := "<dir>/" + filepath.ToSlash(artifact)
+		if !strings.Contains(accountsCmd.Long, want) {
+			t.Errorf("account help is missing recognized Gemini credential artifact %q", want)
 		}
 	}
 	// And it carries no registration-only paragraph while the roster and the launch
