@@ -36,6 +36,7 @@ func (i *Instance) AttachVSCodeTab(name, tabID string) (*Tab, error) {
 	tab.ID = tabID
 	tab.Name = name
 	i.Tabs = append(i.Tabs, tab)
+	i.touchLocked()
 	return tab, nil
 }
 

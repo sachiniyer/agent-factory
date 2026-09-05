@@ -161,6 +161,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	}
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
+	i.touchLocked()
 	i.stateEpoch++
 	return true
 }
@@ -189,6 +190,7 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 		churnAt.After(i.lastPromptAttemptAt) &&
 		!i.lastPaneChurnAt.After(i.lastPromptAttemptAt)
 	i.lastPaneChurnAt = churnAt
+	i.touchLocked()
 	return true, checkpoint
 }
 
@@ -208,6 +210,9 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.agentObservationGeneration.Add(1)
 	i.agentObservation = nil
 	i.stateEpoch++
+	if changed {
+		i.touchLocked()
+	}
 	return changed
 }
 
@@ -244,6 +249,7 @@ func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDel
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
 	i.lastPaneChurnAt = churnAt
+	i.touchLocked()
 	return true
 }
 

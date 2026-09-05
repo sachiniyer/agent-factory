@@ -96,7 +96,10 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    repo's DEFAULT branch — a "successful" recovery onto the wrong branch that
 	//    silently strands the work this push just made durable.
 	i.mu.Lock()
-	i.Branch = branch
+	if i.Branch != branch {
+		i.Branch = branch
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 	// 3. Tear the in-sandbox workspace down over REST and reap the sandbox itself
 	//    (container rm / remote dir cleanup + tunnel close) — the branch is durable,
@@ -126,7 +129,10 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    keep the session classified as a remote sandbox for load + restore).
 	i.resetRemoteRuntime()
 	i.mu.Lock()
-	i.started = false
+	if i.started {
+		i.started = false
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 	return branch, nil
 }
@@ -338,7 +344,11 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	i.backend = res.Backend
 	i.remoteClient = rc
 	i.runtimeTeardown = res.Teardown
-	i.runtimeCleanupStateUnknown = false
+	i.touchLocked()
+	if i.runtimeCleanupStateUnknown {
+		i.runtimeCleanupStateUnknown = false
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 	return nil
 }
@@ -353,7 +363,11 @@ func (i *Instance) retainProvisionResultCleanup(res ProvisionResult) {
 	i.backend = res.Backend
 	i.remoteClient = nil
 	i.runtimeTeardown = res.Teardown
-	i.runtimeCleanupStateUnknown = true
+	i.touchLocked()
+	if !i.runtimeCleanupStateUnknown {
+		i.runtimeCleanupStateUnknown = true
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 }
 
@@ -386,10 +400,16 @@ func (i *Instance) resetRemoteRuntime() {
 	// Clear the cache and the runtime fields together under i.mu (#1729), so a
 	// concurrent AgentServer() never rebuilds against a half-cleared state.
 	i.mu.Lock()
+	if i.remoteClient != nil || i.runtimeTeardown != nil {
+		i.touchLocked()
+	}
 	i.agentSrv = nil
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
-	i.runtimeCleanupStateUnknown = false
+	if i.runtimeCleanupStateUnknown {
+		i.runtimeCleanupStateUnknown = false
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 	// THE credential's revocation point (#3068). This function is reached only when
 	// a runtime was conclusively reaped — teardown succeeded, or failed in a way
@@ -432,7 +452,10 @@ func (i *Instance) revokeSandboxCredential() {
 // before provisioning a replacement.
 func (i *Instance) markRuntimeCleanupStateUnknown() {
 	i.mu.Lock()
-	i.runtimeCleanupStateUnknown = true
+	if !i.runtimeCleanupStateUnknown {
+		i.runtimeCleanupStateUnknown = true
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 }
 

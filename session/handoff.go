@@ -301,8 +301,12 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 	swap := HandoffSwap{AgentHandoff: entry, previousProgram: i.Program}
 
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
+	i.touchLocked()
 	i.Tabs[0].Conversation = AgentConversationData{}
-	i.Program = target
+	if i.Program != target {
+		i.Program = target
+		i.touchLocked()
+	}
 	// Invalidate outgoing-runtime capture BEFORE its pane is torn down. A capture
 	// already waiting on a rollout must not refill the live slot after this record
 	// has been rewritten for the incoming agent.
@@ -342,8 +346,12 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 	}
 
 	i.Tabs[0].Handoffs = i.Tabs[0].Handoffs[:n-1]
+	i.touchLocked()
 	i.Tabs[0].Conversation = swap.From
-	i.Program = swap.previousProgram
+	if i.Program != swap.previousProgram {
+		i.Program = swap.previousProgram
+		i.touchLocked()
+	}
 	// Generations are monotonic even on rollback. Reusing the old number would
 	// make a token from the abandoned target indistinguishable from the restored
 	// outgoing runtime.

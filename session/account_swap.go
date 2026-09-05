@@ -287,13 +287,20 @@ func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversat
 	// can put that process's account-local conversation back into the live slot.
 	i.agentRuntimeGeneration++
 	i.clearAgentModelChangeLocked()
-	i.Account = name
-	i.accountAutoSelected = true
+	if i.Account != name {
+		i.Account = name
+		i.touchLocked()
+	}
+	if !i.accountAutoSelected {
+		i.accountAutoSelected = true
+		i.touchLocked()
+	}
 	pending := &AccountSwapData{From: from, To: name}
 	if plan := i.accountSwapLaunch; plan != nil && plan.account == name && plan.conversation.HasID() {
 		pending.ConversationID = plan.conversation.ID
 	}
 	i.pendingAccountSwap = pending
+	i.touchLocked()
 	return previous, nil
 }
 
@@ -306,9 +313,18 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	if i.inFlightOp != OpRespawning {
 		return fmt.Errorf("restoring account for %q requires the limit-resume fence", i.Title)
 	}
-	i.Account = name
-	i.accountAutoSelected = auto
-	i.pendingAccountSwap = nil
+	if i.Account != name {
+		i.Account = name
+		i.touchLocked()
+	}
+	if i.accountAutoSelected != auto {
+		i.accountAutoSelected = auto
+		i.touchLocked()
+	}
+	if i.pendingAccountSwap != nil {
+		i.pendingAccountSwap = nil
+		i.touchLocked()
+	}
 	i.accountSwapLaunch = nil
 	i.setAgentConversationLocked(conversation)
 	return nil
@@ -323,6 +339,7 @@ func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
 		return false
 	}
 	i.pendingAccountSwap = nil
+	i.touchLocked()
 	i.accountSwapLaunch = nil
 	return true
 }
@@ -377,7 +394,10 @@ func (i *Instance) markAccountSwapReplacementPanesStarted() error {
 	if i.pendingAccountSwap == nil || i.pendingAccountSwap.To != i.Account {
 		return fmt.Errorf("account swap for %q has no committed replacement to mark started", i.Title)
 	}
-	i.pendingAccountSwap.ReplacementPanesStarted = true
+	if !i.pendingAccountSwap.ReplacementPanesStarted {
+		i.pendingAccountSwap.ReplacementPanesStarted = true
+		i.touchLocked()
+	}
 	return nil
 }
 
