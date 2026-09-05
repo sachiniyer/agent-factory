@@ -217,8 +217,9 @@ func (i *Instance) ClearIdleEvidence() bool {
 }
 
 // markLoadRuntimeReplaced records that Start(false) created a replacement
-// process. The daemon loader consumes this after FromInstanceData returns so
-// the accompanying evidence clear is checkpointed before the row is installed.
+// agent or sibling process. The daemon loader consumes this after FromInstanceData
+// returns so the timestamp and any agent evidence clear are checkpointed before
+// the row is installed. Marking a sibling replacement does not clear agent evidence.
 func (i *Instance) markLoadRuntimeReplaced() {
 	i.mu.Lock()
 	defer i.mu.Unlock()

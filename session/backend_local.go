@@ -577,6 +577,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				i.mu.Lock()
 				i.touchLocked()
 				i.mu.Unlock()
+				i.markLoadRuntimeReplaced()
 				if account != "" {
 					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
 				}

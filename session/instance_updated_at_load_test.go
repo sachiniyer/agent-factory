@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -107,17 +108,41 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				sibling := tmux.NewTmuxSessionFromSanitizedNameWithDeps(siblingName, "sh", factory, cmdExec)
 				tab := &Tab{ID: "sibling", Name: "sibling", Kind: kind, Command: "sh", tmux: sibling}
 				i := &Instance{Title: "updated-at-sibling", Path: repo, Program: "claude", backend: &LocalBackend{},
-					liveness: LiveReady, CreatedAt: before, UpdatedAt: before, gitWorktree: gw, Tabs: []*Tab{newAgentTab(agent), tab}}
+					liveness: LiveReady, CreatedAt: before, UpdatedAt: before, gitWorktree: gw, Tabs: []*Tab{newAgentTab(agent), tab},
+					lastPromptAttemptAt: before, lastPromptDeliveryStatus: PromptDelivered, lastPaneChurnAt: before}
+				// Seed the durable record before load, then checkpoint only when the
+				// daemon settlement predicate includes this instance.
+				ms := newMockStorage()
+				storage, err := NewStorage(ms, "")
+				require.NoError(t, err)
+				seeded, err := json.Marshal([]InstanceData{i.ToInstanceData().ForStorage()})
+				require.NoError(t, err)
+				ms.data[i.repoIDForStorage()] = seeded
 				require.NoError(t, i.Start(false))
 				require.Len(t, i.Tabs, 2)
 				require.Same(t, sibling, i.Tabs[1].tmux, "respawn reuses the persisted binding")
 				require.Zero(t, i.agentRuntimeGeneration)
-				require.False(t, i.ConsumeLoadRuntimeReplacement())
+				require.Equal(t, before, i.lastPromptAttemptAt)
+				require.Equal(t, PromptDelivered, i.lastPromptDeliveryStatus)
+				require.Equal(t, before, i.lastPaneChurnAt)
+				enrolled := i.ConsumeLoadRuntimeReplacement()
+				require.Equal(t, !existing, enrolled)
+				if enrolled {
+					require.NoError(t, storage.SaveInstances([]*Instance{i}))
+				}
+				require.False(t, i.ConsumeLoadRuntimeReplacement(), "settlement is consumed once")
 				want := before
 				if !existing {
 					want = now
 				}
 				require.Equal(t, want, i.ToInstanceData().UpdatedAt)
+				var persisted []InstanceData
+				require.Len(t, ms.data, 1)
+				for _, raw := range ms.data {
+					require.NoError(t, json.Unmarshal(raw, &persisted))
+				}
+				require.Len(t, persisted, 1)
+				require.Equal(t, want, persisted[0].UpdatedAt, "load settlement must make the respawn timestamp durable")
 			})
 		}
 	}
