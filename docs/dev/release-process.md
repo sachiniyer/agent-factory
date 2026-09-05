@@ -1,4 +1,4 @@
-# Release Process
+# Release process
 
 Agent Factory ships on two channels (#1041):
 
@@ -81,7 +81,7 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
   still being built, and `auto_update = false` overrides it either way.
 - **Preview tracking is opt-in** via the global config key
   `update_channel: "preview"` (see
-  [configuration.md](configuration.md)) — the updater then lists releases
+  [configuration.md](../configuration.md)) — the updater then lists releases
   and picks the version-newest tag including `1.x.y-preview-z`
   prereleases, which are normally the newest. Prereleases are invisible to
   the `releases/latest` API/redirect, so the updater addresses release

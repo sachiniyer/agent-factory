@@ -1,5 +1,9 @@
 # The daemon
 
+For anyone wondering what keeps running after they close the window. After this
+page you will know what the daemon owns, why there is exactly one writer of that
+state, and the few commands that manage its lifecycle.
+
 Behind the TUI is a long-lived background process: the **Agent Factory daemon**.
 It is the piece that makes sessions survive restarts, keeps automations firing,
 and guarantees the TUI, the CLI, and the HTTP API never disagree about what
@@ -32,7 +36,7 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 - **Keeps sessions alive.** If a session's process dies unexpectedly, the daemon
   re-spawns it in place — the worktree and record are preserved, so the agent
-  comes back where it was. The always-on [root agent](../configuration.md#root-agents-always-ensured)
+  comes back where it was. The always-on [root agent](configuration.md#root-agents-always-ensured)
   is re-created rather than re-spawned — its record is replaced, but its recorded
   conversation and its tabs are carried across, so it comes back on the same
   context with the same tab strip. When that conversation cannot be resumed the
@@ -41,17 +45,17 @@ paragraph because it's why `af` doesn't corrupt itself:
   row with a one-shot note (`fresh context`, or `context unknown` when af cannot
   tell) that clears the first time you open the pane; the application log says
   which happened.
-- **Runs the scheduler.** All [tasks](../tasks.md) — cron schedules and
+- **Runs the scheduler.** All [tasks](tasks.md) — cron schedules and
   watch-script triggers — are hosted by the daemon. It arms the timers, watches
   the scripts, and delivers prompts on time, whether or not a TUI is open.
 - **Handles usage limits.** With auto-resume enabled, the daemon parks a session
   that hit a `claude`, `codex`, or `devin` usage limit and resumes it — when the
   banner's reset window elapses, or on the `limit_retry_interval` cadence for a
   banner that states no reset time (every `devin` limit) —
-  see [Usage limits](../usage-limits.md).
+  see [Usage limits](usage-limits.md).
 - **Serves the HTTP/JSON API.** The daemon exposes every session and task
   operation over a local Unix socket — see the
-  [HTTP API reference](../reference/api.md).
+  [HTTP API reference](reference/api.md).
 
 ## Lifecycle
 
@@ -83,4 +87,4 @@ The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
 (default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
 the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
 owner-only (`0600`) and local — never a TCP port, never the network. See the
-[HTTP API guide](../http-api.md) for the transport and auth details.
+[HTTP API guide](http-api.md) for the transport and auth details.

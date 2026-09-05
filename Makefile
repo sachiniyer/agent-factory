@@ -2,7 +2,7 @@
 # to run the full suite or a TUI play-test on a shared dev box: everything
 # runs inside docker/podman with no access to the host tmux server, the
 # real ~/.agent-factory, or this repo's worktrees.
-# See docs/container-testing.md.
+# See docs/dev/container-testing.md.
 
 .PHONY: test-container remote-roundtrip-container ws-pty-roundtrip-container \
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
@@ -16,7 +16,7 @@
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
 # scripts/file-length-allowlist.txt. Runs on the host — no container needed.
-# See docs/file-length-lint.md.
+# See docs/dev/file-length-lint.md.
 lint-file-length:
 	scripts/lint-file-length.sh
 
@@ -33,7 +33,7 @@ docs:
 #
 # AF_TESTBOX_NETWORK=none runs it with no container network at all, which is
 # what gets the suite going on a box whose docker bridge is missing (every
-# default-network run dies there). See docs/container-testing.md.
+# default-network run dies there). See docs/dev/container-testing.md.
 test-container:
 	scripts/testbox.sh test $(GOTESTARGS)
 
@@ -139,7 +139,7 @@ playtest-container-detached:
 # tui-driver-selftest runs the acceptance scenario (boot → 2 instances →
 # select → pane → interactive → type → attach/detach → assert selection + no
 # orphan clients) in an EPHEMERAL sandbox that is torn down automatically.
-# See docs/tui-manual-testing.md.
+# See docs/dev/tui-manual-testing.md.
 tui-driver:
 	scripts/testbox.sh drive
 
@@ -160,7 +160,7 @@ tui-driver-selftest:
 # than per-PR for that reason (.github/workflows/lifecycle.yml). The container
 # has no systemd, so the supervision assertion is SKIPped here and covered by
 # the CI runner leg. Narrow the run with LIFECYCLE_SCENARIO=scenario-a.
-# See docs/lifecycle-testing.md.
+# See docs/dev/lifecycle-testing.md.
 lifecycle-container:
 	scripts/testbox.sh lifecycle $(LIFECYCLE_SCENARIO)
 
@@ -183,7 +183,7 @@ testbox-image:
 # automatic step touches (emptying them costs the next run a cold rebuild).
 # Running containers are reported, never removed — on a box with several
 # worktrees one is most likely a sibling's in-flight run.
-# See docs/container-testing.md § disk footprint.
+# See docs/dev/container-testing.md § disk footprint.
 testbox-clean:
 	scripts/testbox.sh clean
 
@@ -229,7 +229,7 @@ web-test: web/node_modules
 # gate, not screenshots. Node/Playwright stay behind this target — the Go build and
 # `make test-container` never invoke them. Needs a real docker/podman daemon; the
 # whole run is fenced in the container, isolated from the host tmux + real AF home.
-# See docs/web-selftest.md.
+# See docs/dev/web-selftest.md.
 web-selftest-container:
 	scripts/testbox.sh web-selftest
 
@@ -243,6 +243,6 @@ web-selftest-container:
 # same throwaway-daemon sandbox, so what the docs show is the product the
 # self-test asserts on. It is NOT a gate: CI never runs it, and it asserts
 # nothing about correctness. Runs for a few minutes and commits its output — see
-# docs/demo-assets.md.
+# docs/dev/demo-assets.md.
 demo-assets:
 	scripts/testbox.sh web-demo

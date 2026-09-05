@@ -1,5 +1,10 @@
 # Tasks
 
+For anyone who wants an agent to start work without being asked. After this page
+you will be able to run a prompt on a cron schedule or on every line a watch
+command prints, choose whether each run gets a fresh session, and tell whether a
+task is actually firing.
+
 A task delivers a prompt to an AI agent session automatically. Every task has exactly one **trigger** — a cron schedule (`cron_expr`) or a long-running watch script (`watch_cmd`) — and one **delivery mode**: create a fresh session per fire, or send the prompt into an existing session (`target_session`).
 
 Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).

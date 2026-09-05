@@ -138,7 +138,7 @@ fi
 # forcing it offline would fail for an unrelated reason. Same for the targets
 # that genuinely reach the network from INSIDE the container — `lifecycle`
 # downloads releases, and `web-selftest` runs `npm ci`. See
-# docs/container-testing.md for which targets survive being cut off.
+# docs/dev/container-testing.md for which targets survive being cut off.
 engine_run() {
     if [ -n "${AF_TESTBOX_NETWORK:-}" ]; then
         "$ENGINE" run --network "$AF_TESTBOX_NETWORK" "$@"

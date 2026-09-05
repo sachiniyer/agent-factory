@@ -8,7 +8,7 @@ import (
 
 // This file holds the config package's pure path/shell string helpers,
 // extracted from config.go (#1146) to keep that file under its length ceiling
-// (docs/file-length-lint.md). They are behavior-identical to their previous
+// (docs/dev/file-length-lint.md). They are behavior-identical to their previous
 // in-config.go definitions — same package, no call-site changes.
 
 // prettyHomePath returns absPath with the user's home directory prefix

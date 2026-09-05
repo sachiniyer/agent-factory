@@ -1,11 +1,11 @@
-# Release Testing Plan
+# Release testing plan
 
 This checklist is the release gate for Agent Factory. It focuses on the
 behaviors that can lose user work or leave background resources behind:
 daemon coordination, tmux sessions, git worktrees, scheduled task runs,
 remote hooks, and release artifacts.
 
-## Automated Release Gate
+## Automated release gate
 
 These checks must pass on the release commit before cutting a release:
 
@@ -23,7 +23,7 @@ before tagging or publishing artifacts. Workflow linting with
 `actionlint` is part of the local release review because broken workflow
 syntax or retired action runtimes can block CI/release automation.
 
-## Local Preflight
+## Local preflight
 
 Run this from a clean checkout of `master`:
 
@@ -46,7 +46,7 @@ Expected result:
 - All tests pass.
 - Cross-compiled binaries build for Linux and macOS on amd64 and arm64.
 
-## Functional Coverage Matrix
+## Functional coverage matrix
 
 | Area | Automated coverage | Manual release smoke |
 | --- | --- | --- |
@@ -60,7 +60,7 @@ Expected result:
 | Upgrade/release artifacts | Unit tests cover binary download (success, non-200, stalled body, stalled headers), archive extraction, and daemon restart after binary swap; CI builds Linux/macOS artifacts. | Download the release tarball for the host platform, unpack it, run `af version`, and test `af upgrade` from the previous release binary. Run `install.sh` into a temp `AF_INSTALL_DIR` and confirm it fetches the latest release and `af version` reports the new tag. |
 | UI rendering | UI tests cover sidebar/menu/task pane/preview/terminal layout and overlay behavior. | Open the TUI in a narrow terminal and a normal terminal, verify text does not overlap, and check help/confirmation overlays. |
 
-## Manual Smoke
+## Manual smoke
 
 Use an isolated config directory so release testing cannot touch real user
 sessions:
@@ -92,7 +92,7 @@ Expected result:
 - `list` is empty after kill.
 - No `af_` tmux session or generated worktree remains for the smoke repo.
 
-## Release Artifact Verification
+## Release artifact verification
 
 After the release workflow publishes (`--latest` only sees the stable
 channel; verify a preview release by its `vX.Y.Z-preview-N` tag instead):
@@ -125,7 +125,7 @@ Expected result:
   `af version` reports the newest stable tag (the redirect never serves
   preview prereleases; pin one explicitly with `install.sh --version <tag>`).
 
-## Go/No-Go Criteria
+## Go / no-go criteria
 
 Do not cut or publish a release if any of these are true:
 - Any required CI check is failing or pending.
