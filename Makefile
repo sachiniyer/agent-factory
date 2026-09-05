@@ -11,7 +11,7 @@
 	lifecycle-container lifecycle-selftest \
 	testbox-image testbox-clean testbox-selftest \
 	session-image \
-	lint-file-length docs web-build web-test web-selftest-container
+	lint-file-length docs web-build web-test web-selftest-container demo-assets
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
@@ -232,3 +232,17 @@ web-test: web/node_modules
 # See docs/web-selftest.md.
 web-selftest-container:
 	scripts/testbox.sh web-selftest
+
+# Regenerate the web client's demo media (#3855): docs/assets/web/{demo.webm,
+# demo.mp4, demo.gif, demo-poster.png} plus a still of every beat, in the
+# default theme and dark. This is the ONLY way that media is produced — nothing
+# in docs/assets/web/ is hand-captured, so a UI change is reflected by re-running
+# this target rather than by someone remembering to retake a screenshot.
+#
+# It reuses the web-selftest image (Go + Node + Chromium, plus ffmpeg) and the
+# same throwaway-daemon sandbox, so what the docs show is the product the
+# self-test asserts on. It is NOT a gate: CI never runs it, and it asserts
+# nothing about correctness. Runs for a few minutes and commits its output — see
+# docs/demo-assets.md.
+demo-assets:
+	scripts/testbox.sh web-demo

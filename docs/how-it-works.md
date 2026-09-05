@@ -28,7 +28,7 @@ forwarded to the running program instead — press `Ctrl-]` to detach first.)
 - The session appears in the sidebar as soon as it is accepted.
 
 <figure markdown>
-![TUI screenshot showing multiple Agent Factory sessions and an Agent tab preview](assets/tui-sessions.svg)
+![TUI screenshot showing multiple Agent Factory sessions and an Agent tab preview](assets/tui/tui-sessions.svg)
 </figure>
 
 </div>
@@ -71,7 +71,7 @@ so you can scan progress without attaching:
 - dead or lost sessions can be restored when possible.
 
 <figure markdown>
-![TUI screenshot showing multiple Agent Factory sessions and an Agent tab preview](assets/tui-sessions.svg)
+![TUI screenshot showing multiple Agent Factory sessions and an Agent tab preview](assets/tui/tui-sessions.svg)
 </figure>
 
 </div>
@@ -115,7 +115,7 @@ deliver prompts automatically:
 - **Space** enables or disables a task.
 
 <figure markdown>
-![TUI screenshot showing the Agent Factory task manager](assets/tui-tasks.svg)
+![TUI screenshot showing the Agent Factory task manager](assets/tui/tui-tasks.svg)
 </figure>
 
 </div>

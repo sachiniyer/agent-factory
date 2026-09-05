@@ -6,6 +6,12 @@ client (`web/`, #1592 Phase 5) — the browser analogue of the
 single-page app in a headless Chromium against a **real** `af` daemon and asserts
 the core flows end to end. Assertions are the gate, not screenshots.
 
+The [demo recorder](demo-assets.md) borrows this harness — the same image, the
+same throwaway-daemon sandbox — to record the media the README leads with, so
+what the docs show is the product this gate asserts on. It is reached only
+through its own config and CI never runs it; nothing below changes because of
+it.
+
 ## Running it
 
 ```bash
