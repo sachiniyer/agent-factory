@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // shrinkReapWaits lowers the grace periods so reap tests finish in
@@ -75,7 +75,7 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 // with `%!s(MISSING)` / `%!d(...)` garbage.
 func TestReapLogsSessionNameLiterally(t *testing.T) {
 	// Redirect the WARNING logger to a buffer for the duration of this test.
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	oldOut, oldFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
 	log.WarningLog.SetOutput(&buf)
 	log.WarningLog.SetFlags(0)
@@ -499,7 +499,7 @@ func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T)
 	out, err := exec.Command("tmux", "set-environment", "-t", exactTarget(name), EnvMarkerHome, home).CombinedOutput()
 	require.NoError(t, err, "set ownership marker: %s", out)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	oldWarningOut := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(&warnings)
 	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarningOut) })

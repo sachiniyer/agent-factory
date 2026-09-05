@@ -76,7 +76,7 @@ inventory:
 | Reset-time parsing | `task/limit.go:140` `Check() (hit, resetAt, hasResetTime)` | Yes, three-valued already |
 | Park state | `LiveLimitReached` = 6, `session/liveness.go:54` | Yes |
 | Park→act scheduler | `daemon/limitresume.go:67` `ResumeLimitedSessions` | Yes — handoff is a sibling action |
-| Resume executor | `daemon/limit.go:285` `resumeFromLimitLocked` | Yes — same shape, different program |
+| Resume executor | `daemon/limit.go` `resumeFromLimitLockedOutcome` | Yes — same shape, different program |
 | **Program swap** | `session/backend_local.go:427` `Respawn` + `tmux.SetProgram` | **Yes — this is the executor** |
 | Prompt (re)delivery | `task/start.go:112` `StartAndSendPromptWithConversationCapture` | Yes |
 | Stored mission | `Instance.Prompt`, persisted `session/storage.go:77` | Yes — this is the anchor (§3) |

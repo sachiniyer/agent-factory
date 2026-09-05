@@ -59,6 +59,7 @@ func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
 		}
 		i.mu.Lock()
 		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, &handle)
+		i.touchLocked()
 		i.mu.Unlock()
 		log.InfoLog.Printf("session %q: reaped the leftover tmux session %q of a closed tab", i.Title, handle.TmuxName)
 		retired++

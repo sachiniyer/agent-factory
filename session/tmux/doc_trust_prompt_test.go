@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"bytes"
 	"errors"
 	"os/exec"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	cmd_test "github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // The non-Claude branch of CheckAndHandleTrustPrompt dismisses the aider/gemini
@@ -184,9 +184,9 @@ func runTrustPromptFrames(t *testing.T, program string, frames ...trustPromptFra
 	return session, &cmds
 }
 
-func captureTrustPromptLogs(t *testing.T) (info, warnings, errors *bytes.Buffer) {
+func captureTrustPromptLogs(t *testing.T) (info, warnings, errors *logtest.Buffer) {
 	t.Helper()
-	info, warnings, errors = &bytes.Buffer{}, &bytes.Buffer{}, &bytes.Buffer{}
+	info, warnings, errors = &logtest.Buffer{}, &logtest.Buffer{}, &logtest.Buffer{}
 	previousInfo := aflog.InfoLog.Writer()
 	previousWarnings := aflog.WarningLog.Writer()
 	previousErrors := aflog.ErrorLog.Writer()

@@ -232,6 +232,17 @@ and, from the live scheduler entry, `next_run_at` and `arming` — derived at re
 time and never stored. See [tasks.md](tasks.md) for the task shape and
 [Is it actually firing?](tasks.md#is-it-actually-firing) for what those mean.
 
+Session JSON timestamps (`af sessions list --json` and session responses) use
+RFC 3339 timestamps:
+
+| Field | Meaning |
+| --- | --- |
+| `created_at` | When the session was created. |
+| `updated_at` | When the session state last mutated: lifecycle, identity, prompt delivery, tab roster, or pane activity. Reads, serialization, and cache refreshes do not advance it. |
+
+`updated_at` survives saves and restarts. Older records retain their last save
+time; a missing or zero stored value falls back to `created_at` when loaded.
+
 `Snapshot` accepts additive list filters in the request body: `live: true`
 excludes archived sessions; `statuses` is an array of lifecycle names
 (`running`, `ready`, `lost`, `dead`, `archived`, or `limit-reached`) matched as

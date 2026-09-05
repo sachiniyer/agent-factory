@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	stdlog "log"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // Which relocate path an archive/restore takes, and what it does when a bounded
@@ -59,7 +59,7 @@ func TestMoveWorktree_SubmodulesUseDesignedFallbackWithoutWarning(t *testing.T) 
 	}
 	t.Cleanup(func() { worktreeMoveFast = realFastMove })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	previousWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = previousWarning })

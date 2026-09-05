@@ -405,18 +405,6 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance))
 }
 
-// resumeFromLimitLocked performs the shared limit-resume action. The caller must
-// hold BOTH the per-target lock and the per-session op lock for key, acquired in
-// that canonical target-before-op order (#2006) — the target lock serializes this
-// resume's send against a concurrent DeliverPrompt to the same pane, and the op
-// lock keeps a manual retry from interleaving with kill teardown. Both entry
-// points (resumeFromLimit and the auto-resume scheduler) take the two locks before
-// calling in, so this body never touches the lock helpers itself.
-func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.Instance, requestedTitle string) error {
-	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, nil)
-	return err
-}
-
 func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) error {
 	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
 	return err
@@ -458,6 +446,14 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 }
 
+// resumeFromLimitLockedOutcome performs the shared limit-resume action. The caller
+// must hold both the per-target lock and the per-session op lock for key, acquired
+// in that canonical target-before-op order (#2006): the target lock serializes
+// this resume's send against a concurrent DeliverPrompt to the same pane, and the
+// op lock keeps a manual retry from interleaving with kill teardown.
+// resumeFromLimitOutcome calls this body directly; the auto-resume scheduler's
+// resumeLimitedSession reaches it through resumeFromLimitLockedWithAccount. Both
+// take the two locks before calling in, so this body never acquires either itself.
 func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap) (resumeFromLimitOutcome, error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.

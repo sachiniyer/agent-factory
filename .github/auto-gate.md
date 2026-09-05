@@ -102,24 +102,29 @@ its own refusal, invalidates the aggregate as it already did, and the next
 evaluation brings the head up to date. Conceding instead would exit success
 having merged nothing. Any other unclassified refusal still fails loudly.
 
-**A required check that changes in that same window waits too, when nothing can
-be proven to have won (#3827).** `PUT /pulls/N/merge` answers 405 `Repository
-rule violations found` when the fixed aggregate is not green at the instant of
-the write — and it is invalidated outside the head's serialized lane on purpose,
-so a second evaluation of one head can flip it mid-transaction. With a winner
-proven that is still a concession (#3324); with none it is the gate's own
-refusal, and the next evaluation re-checks. An unreadable ownership read is not
-"no winner" — that stays loud, because the waiting path writes and a blind write
-would supersede whichever transaction owns the head.
+**A ruleset refusal with no proven winner preserves PASS (#3902).** GitHub can
+answer 405 `Repository rule violations found` immediately after the aggregate
+PASS write, before the ruleset observes that success. Writing a new failing
+WAITING generation in response created a permanent loop on #3893: every run
+published PASS, got 405, and erased its own PASS.
 
-**And the gate no longer issues that merge in the first place, when it can tell
-(#3829).** Immediately before the write it reads the published fixed aggregate —
-the check itself, not a fresh evaluation of what the check ought to say, which is
-a different question and cannot answer this one — and refuses with its own
-`Refusing to merge PR #N;` prefix when the newest generation is not `success`.
-Being a check-then-act it narrows the window rather than closing it; nothing can
-close it, because the merge API takes no conditional, so the classification above
-stays the backstop for whatever slips through.
+Before merging, the gate re-reads the exact aggregate check it published and
+requires `conclusion=success`. It polls at most four times with delays of 250,
+500 and 1000 milliseconds. If success is not observable yet, it reports a wait
+and leaves the published PASS alone. It also checks the latest aggregate
+generation before merging, so a newer owner still prevents the merge (#3829).
+These observations narrow the propagation window; they cannot guarantee the
+ruleset's internal view is already current.
+
+After a 405 rule violation, the gate checks for a competing winner. A proven
+winner keeps the existing concession behavior (#3324). With no winner, it leaves
+the aggregate PASS, waits one second, and retries the merge once, re-running the
+full merge preflight first. If the second attempt gets the same refusal, the
+run reports the wait and leaves PASS green for propagation and the next run.
+If that preflight no longer passes, the aggregate is invalidated as before.
+An unreadable ownership check is not proof of no winner: it stays loud and does
+not overwrite an unknown owner. A successful merge still invalidates the old
+shared-head authorization because master has advanced.
 
 The evidence for "another transaction owns this head" is the newest published
 generation of the aggregate check, ordered by the timestamps a check run
@@ -158,6 +163,16 @@ publish a green manual-only pass instead, which made the PR mergeable while
 leaving the review to a convention — #3760 landed that way with no review of any
 kind, and #3824 closed that everywhere except the external path, which kept
 publishing the same green pass until #3825.
+
+Usage-limit evidence includes Codex inline review replies (`in_reply_to_id` set),
+including replies carried by an empty `COMMENTED` review (#3900). The reply's
+`commit_id` must match the head, and its `created_at` must be strictly later than
+`headCurrentSince`; an edit cannot refresh an old answer. The latest artifact
+across issue comments, reviews and eligible replies wins (the reply wins a tie
+with its empty enclosing review), and a later real verdict supersedes the limit
+answer. The decision names the inline comment id. Replies do not supply verdicts
+or enter the body-finding artifact list, and finding-shaped text is not accepted
+as an inline outage answer. The existing finding predicates are unchanged.
 
 What counts as that observation is one rule, stated once as `CODEX_LIMIT_RULE` in
 `.github/scripts/auto-gate.js` and quoted here verbatim because a test requires

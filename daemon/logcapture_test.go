@@ -1,15 +1,14 @@
 package daemon
 
 import (
-	"bytes"
 	"io"
 	stdlog "log"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // The one sink daemon tests may install on a process-global logger (#3787).
@@ -34,35 +33,8 @@ import (
 // from landing: this file is the only place in daemon/**/*_test.go allowed to
 // call SetOutput on one of those loggers.
 
-// logCapture is a synchronized log sink. Write is called under the logger's own
-// mutex, but String/Reset are called from the test goroutine with no such
-// protection, so both ends take this lock.
-type logCapture struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (c *logCapture) Write(p []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.buf.Write(p)
-}
-
-// String returns everything captured so far. Safe to call while a foreign
-// goroutine is still logging.
-func (c *logCapture) String() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.buf.String()
-}
-
-// Reset drops what has been captured, for tests that assert on one phase of a
-// sequence at a time.
-func (c *logCapture) Reset() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.buf.Reset()
-}
+// logCapture uses the shared synchronized test sink.
+type logCapture = logtest.Buffer
 
 // captureLogger installs a fresh logCapture on logger for the test's lifetime
 // and restores the previous sink afterwards.

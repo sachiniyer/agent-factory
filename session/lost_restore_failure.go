@@ -108,6 +108,7 @@ func (i *Instance) SetLostRestoreFailure(attempts int, restoreErr error) bool {
 		return false
 	}
 	i.lostRestoreFailure = next
+	i.touchLocked()
 	return true
 }
 
@@ -125,6 +126,7 @@ func (i *Instance) ClearLostRestoreFailureAtObservation(generation AgentObservat
 		return false
 	}
 	i.lostRestoreFailure = LostRestoreFailure{}
+	i.touchLocked()
 	return true
 }
 
@@ -137,6 +139,7 @@ func (i *Instance) ClearLostRestoreFailure() bool {
 		return false
 	}
 	i.lostRestoreFailure = LostRestoreFailure{}
+	i.touchLocked()
 	return true
 }
 
@@ -159,5 +162,6 @@ func (i *Instance) ReconcileLostRestoreFailure(failure *LostRestoreFailure) bool
 		return false
 	}
 	i.lostRestoreFailure = next
+	i.touchLocked()
 	return true
 }

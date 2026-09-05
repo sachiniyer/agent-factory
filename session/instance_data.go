@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -16,6 +15,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 }
 
 // toInstanceDataLocked is the shared body. Caller holds i.mu (read or write).
+// CreatedAt and UpdatedAt are copied unchanged; reading does not mutate a session.
 func (i *Instance) toInstanceDataLocked() InstanceData {
 	data := InstanceData{
 		ID:     i.ID,
@@ -44,7 +44,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Height:                   i.Height,
 		Width:                    i.Width,
 		CreatedAt:                i.CreatedAt,
-		UpdatedAt:                time.Now(),
+		UpdatedAt:                i.UpdatedAt,
 		Program:                  i.Program,
 		Account:                  i.Account,
 		AccountAutoSelected:      i.accountAutoSelected,
@@ -308,6 +308,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone {
 		inFlightOp = OpReplacing
 	}
+	// Legacy records retain their last save time. Only truly missing timestamps
+	// fall back to creation; serialization never invents activity.
+	if data.UpdatedAt.IsZero() {
+		data.UpdatedAt = data.CreatedAt
+	}
 	instance := &Instance{
 		ID:         id,
 		TaskID:     data.TaskID,
@@ -552,7 +557,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// sandbox from the branch. Skipping Start also avoids driving the recursive
 	// remote backend with no live agent-server client.
 	if isSandboxBackendType(data.BackendType) {
-		instance.liveness = LiveLost
+		instance.mu.Lock()
+		if instance.liveness != LiveLost {
+			instance.liveness = LiveLost
+			instance.touchLocked()
+		}
+		instance.mu.Unlock()
 		return instance, nil
 	}
 
@@ -625,13 +635,17 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 	}
 
 	// Legacy single-session format: the agent tab keeps its exact legacy name.
+	// Reconstruction is not new activity. Build the unpublished instance directly,
+	// just as the current-format loop above does, without invoking mutators.
+	var ts *tmux.TmuxSession
 	if data.TmuxName != "" {
-		instance.setTmuxLocked(restoreTmuxSession(data.TmuxName, data.Program))
+		ts = restoreTmuxSession(data.TmuxName, data.Program)
 	} else {
-		instance.setTmuxLocked(tmux.NewTmuxSession(data.Title, data.Program))
+		ts = tmux.NewTmuxSession(data.Title, data.Program)
 	}
+	instance.Tabs = []*Tab{newAgentTab(ts)}
 	if data.AgentConversation != nil {
-		instance.SetAgentConversation(*data.AgentConversation)
+		instance.Tabs[0].Conversation = *data.AgentConversation
 	}
 }
 

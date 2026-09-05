@@ -604,6 +604,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		switch spec.run {
 		case runEnds:
 			i.taskRunActive = false
+			i.touchLocked()
 			// The completion transition IS the capture point for the adoption
 			// baseline (#3865): taken here, inside the same i.mu section that ends
 			// the run, nothing — not the rest of this transition, not the poll's
@@ -617,6 +618,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// LiveReady before its agent ever runs, so that would end the run at birth.
 			if to.liveness == LiveReady && from.liveness != LiveReady {
 				i.taskRunActive = false
+				i.touchLocked()
 				i.captureAdoptionBaselineLocked()
 			}
 		}
@@ -635,7 +637,10 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// Publish its identity and durable negative quota evidence in the same
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
-		i.limitAccount = i.Account
+		if i.limitAccount != i.Account {
+			i.limitAccount = i.Account
+			i.touchLocked()
+		}
 		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
@@ -643,9 +648,15 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	i.noteStateChangeLocked(from.liveness, from.op, prevResetAt)
 	switch spec.started {
 	case startedSet:
-		i.started = true
+		if !i.started {
+			i.started = true
+			i.touchLocked()
+		}
 	case startedClear:
-		i.started = false
+		if i.started {
+			i.started = false
+			i.touchLocked()
+		}
 	}
 	// A model-change diagnostic belongs to one concrete agent process. Archive
 	// retires that process, and restore starts a new one under the same Instance

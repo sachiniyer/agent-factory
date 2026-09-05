@@ -161,7 +161,8 @@ type Instance struct {
 	Width int
 	// CreatedAt is the time the instance was created.
 	CreatedAt time.Time
-	// UpdatedAt is the time the instance was last updated.
+	// UpdatedAt is the last session state mutation time, guarded by mu.
+	// Reads, serialization, and cache refreshes do not advance it.
 	UpdatedAt time.Time
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
@@ -621,6 +622,7 @@ func (i *Instance) AttachShellTab(name, tmuxName, tabID string) (*Tab, error) {
 	killed := !i.started || i.tabSpawnBlockedLocked() != nil
 	if !killed {
 		i.Tabs = append(i.Tabs, tab)
+		i.touchLocked()
 	}
 	i.mu.Unlock()
 	if killed {
@@ -648,6 +650,7 @@ func (i *Instance) DropClosedTab(idx int) error {
 	}
 	tab := i.Tabs[idx]
 	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+	i.touchLocked()
 	i.mu.Unlock()
 
 	// Release the TUI-side attach PTY (ptmx fd + blocked cmd.Wait goroutine) the

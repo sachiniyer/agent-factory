@@ -161,6 +161,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	}
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
+	i.touchLocked()
 	i.stateEpoch++
 	return true
 }
@@ -189,6 +190,7 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 		churnAt.After(i.lastPromptAttemptAt) &&
 		!i.lastPaneChurnAt.After(i.lastPromptAttemptAt)
 	i.lastPaneChurnAt = churnAt
+	i.touchLocked()
 	return true, checkpoint
 }
 
@@ -208,12 +210,16 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.agentObservationGeneration.Add(1)
 	i.agentObservation = nil
 	i.stateEpoch++
+	if changed {
+		i.touchLocked()
+	}
 	return changed
 }
 
 // markLoadRuntimeReplaced records that Start(false) created a replacement
-// process. The daemon loader consumes this after FromInstanceData returns so
-// the accompanying evidence clear is checkpointed before the row is installed.
+// agent or sibling process. The daemon loader consumes this after FromInstanceData
+// returns so the timestamp and any agent evidence clear are checkpointed before
+// the row is installed. Marking a sibling replacement does not clear agent evidence.
 func (i *Instance) markLoadRuntimeReplaced() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -244,6 +250,7 @@ func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDel
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
 	i.lastPaneChurnAt = churnAt
+	i.touchLocked()
 	return true
 }
 

@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	stdlog "log"
@@ -18,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -484,9 +484,9 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 
 // captureWarningLog redirects log.WarningLog to a buffer for the duration of
 // the test and returns the buffer. Restoration happens via t.Cleanup.
-func captureWarningLog(t *testing.T) *bytes.Buffer {
+func captureWarningLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	orig := log.WarningLog
 	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
 	t.Cleanup(func() { log.WarningLog = orig })

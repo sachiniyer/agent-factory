@@ -627,5 +627,6 @@ func (i *Instance) appendPendingMetadataTabsLocked() {
 			id = newTabID()
 		}
 		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL})
+		i.touchLocked()
 	}
 }

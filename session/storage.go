@@ -143,8 +143,9 @@ type InstanceData struct {
 	Height                   int                           `json:"height"`
 	Width                    int                           `json:"width"`
 	CreatedAt                time.Time                     `json:"created_at"`
-	UpdatedAt                time.Time                     `json:"updated_at"`
-	Prompt                   string                        `json:"prompt,omitempty"`
+	// UpdatedAt is the last session state mutation, preserved across saves and loads.
+	UpdatedAt time.Time `json:"updated_at"`
+	Prompt    string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
@@ -637,8 +638,9 @@ func NewStorage(state config.InstanceStorage, repoID string) (*Storage, error) {
 }
 
 // dedupeInstanceData collapses records that share a title, keeping the one
-// with the newest UpdatedAt (ties keep the earliest occurrence, so in-memory
-// records — which both save paths place ahead of disk-only records — win).
+// with the latest session mutation time, UpdatedAt (legacy records carry their
+// last save time). Ties keep the earliest occurrence, so in-memory
+// records — which both save paths place ahead of disk-only records — win.
 // Titles are unique per repo (the daemon's findTitleConflictLocked enforces
 // this on create), so two same-title records in one repo's list are always
 // the same logical session written twice (#808). Deduping at the save/load
