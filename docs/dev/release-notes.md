@@ -1,5 +1,13 @@
 # Release notes
 
+For maintainers writing release announcements and contributors checking how
+user-visible changes should be explained. These notes describe behavior and
+compatibility details that deserve attention during an upgrade.
+
+Read [Release process](release-process.md) first for channels and versioning.
+Use the [release testing plan](release-testing-plan.md) for validation, then
+consult the relevant notes below when preparing the announcement.
+
 ## `af sessions list` now tells you what its numbers mean
 
 - **Three new string fields, and nothing removed.** Every session carries

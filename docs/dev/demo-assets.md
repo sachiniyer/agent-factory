@@ -5,6 +5,10 @@ page lead with. After reading this you will know what lives in
 `docs/assets/web/`, how to regenerate all of it with one command, and what the
 recording is and is not allowed to claim.
 
+Read [Container testing](container-testing.md) first for the isolation boundary,
+then the [web guide](../web.md) for the screens the recorder captures. The
+[web client selftest](web-selftest.md) explains the shared harness.
+
 ## What ships
 
 Everything under `docs/assets/web/` is generated. Nothing there is
@@ -17,7 +21,8 @@ hand-captured, cropped, or retouched:
 | `demo.gif` | The fallback for renderers that will not play a video · ≤ 4 MB |
 | `demo-poster.png` | The frame shown before the video plays · the dashboard still |
 | `dashboard.png` · `new-session.png` · `agent-tab.png` · `review.png` · `tasks.png` · `config-accounts.png` | One still per beat, default theme |
-| the same six, `-dark` | One still per beat, dark theme |
+| `parallel-work.png` · `comparison-review.png` · `scheduled-triage.png` · `event-intake.png` | Use-case and comparison stills; task forms are filled but not submitted |
+| the same ten, `-dark` | One still per scene, dark theme |
 
 `docs/assets/tui/` holds the TUI's own media, produced by a different recorder
 (`scripts/container/record-demo.sh`, which drives real Codex sessions through
@@ -69,7 +74,8 @@ running `scripts/container/web-demo-entry.sh`, which:
    which drives the real web client through six beats — dashboard, the
    new-session modal, the agent tab streaming, the branch's diff beside its PR
    link, the Tasks view, the Config view at its Accounts section — twice, once
-   per theme, recording video and a still at each beat;
+   per theme, recording video and stills, including parallel work, comparison
+   review, and unsubmitted cron/watch task forms for the use-case pages;
 7. converts the recording with `ffmpeg` and copies the result out, but only
    after every size and duration budget has passed.
 

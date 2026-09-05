@@ -10,6 +10,20 @@ locally versus in CI, and the git hygiene a shared box needs — lives in
 [CLAUDE.md](https://github.com/sachiniyer/agent-factory/blob/master/CLAUDE.md)
 at the repository root. Read it first.
 
+## Suggested reading order
+
+1. Start here · read the repository operating contract linked above.
+2. Read [Container testing](container-testing.md) · learn the isolation boundary,
+   then [File-length lint](file-length-lint.md) for the structural gate.
+3. Choose your surface · [Surface parity](surface-parity.md), then
+   [Web client selftest](web-selftest.md) or [Manual TUI testing](tui-manual-testing.md).
+   Use [Demo assets](demo-assets.md) when refreshing documentation media.
+4. Follow the change into production · [Release process](release-process.md),
+   [Release testing plan](release-testing-plan.md), then
+   [Lifecycle testing](lifecycle-testing.md) for install and upgrade changes.
+5. Consult [Release notes](release-notes.md) and [Daemon memory](daemon-memory.md)
+   as needed · compatibility details, sizing, diagnosis…
+
 ## Before opening a pull request
 
 ```bash
@@ -29,6 +43,7 @@ the docs build — on every push.
 | Page | What it covers |
 | --- | --- |
 | [Container testing](container-testing.md) | Running the suite and play-tests inside docker, so real tmux servers and real daemons cannot escape. |
+| [Demo assets](demo-assets.md) | Regenerating the web demo and theme-specific stills. |
 | [Lifecycle testing](lifecycle-testing.md) | Clean install and install → upgrade on a real machine: the bugs that need two versions to exist. |
 | [Web client selftest](web-selftest.md) | The Playwright acceptance proof for the embedded web client. |
 | [Manual TUI testing](tui-manual-testing.md) | `scripts/tui-driver.sh`, the self-synchronizing driver for play-testing the live TUI. |

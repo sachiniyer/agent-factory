@@ -21,6 +21,9 @@
 //   5. tasks            the Tasks view
 //   6. config-accounts  the Config view, at the Accounts section
 //
+// Additional stills cover parallel work, comparison review, and filled cron/
+// watch task forms. Those forms are cancelled so no new automation starts.
+//
 // Video is recorded for the default-theme pass only: one take is what a hero
 // needs, and a second one would double the committed media for a view the
 // stills already cover.
@@ -171,6 +174,13 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     await beat(page, 1_200);
     await shot("dashboard");
 
+    // Parallel work: select a second independent worktree and show its transcript.
+    await row(page, SESSION_USAGE).click();
+    await expect(page.locator(".af-term-host")).toContainText("review it like any branch");
+    await settleTerminal(page);
+    await shot("parallel-work");
+    await row(page, SESSION_JSON).click();
+
     // --- 2. the new-session modal ------------------------------------------
     await page.locator("button.af-rail-new").click();
     const modal = page.locator(".af-modal-card");
@@ -235,12 +245,34 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     await beat(page, 1_200);
     await shot("review");
 
+    // Comparison: normal git review in a process tab, with the branch PR beside it.
+    await shot("comparison-review");
+
     // --- 5. the Tasks view -------------------------------------------------
     await page.locator('.af-viewtab[data-view="tasks"]').click();
     await expect(page.locator(".af-tasks")).toBeVisible();
     await expect(page.locator(".af-tasks .af-task-row")).toHaveCount(2);
     await beat(page, 2_000);
     await shot("tasks");
+
+    // Use-case forms are filled but never submitted: recording must not start a
+    // real watcher or leave a triage task able to fire during the next pass.
+    await page.locator(".af-tasks-add").click();
+    const taskForm = page.locator(".af-modal-card");
+    await taskForm.getByLabel("Task name", { exact: true }).fill("Daily issue triage");
+    await taskForm.getByLabel("Schedule type", { exact: true }).selectOption("custom");
+    await taskForm.getByLabel("Cron expression", { exact: true }).fill("0 9 * * 1-5");
+    await taskForm.getByLabel("Prompt", { exact: true }).fill("Review new issues, group duplicates, and propose next actions");
+    await beat(page, 600);
+    await shot("scheduled-triage");
+    await taskForm.getByLabel("Task name", { exact: true }).fill("CI failure watcher");
+    await taskForm.getByLabel("Trigger type", { exact: true }).selectOption("watch");
+    await taskForm.getByLabel("Watch command", { exact: true }).fill("./watch-ci-failures.sh");
+    await taskForm.getByLabel("Prompt", { exact: true }).fill("Investigate this CI failure: {{line}}");
+    await beat(page, 600);
+    await shot("event-intake");
+    await taskForm.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(taskForm).toBeHidden();
 
     // --- 6. the Config view, at the Accounts section -----------------------
     await page.locator('.af-viewtab[data-view="config"]').click();

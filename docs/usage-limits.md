@@ -65,8 +65,21 @@ attach instead of taking your terminal.
 To stop before signing in, press `ctrl+c` in the login pane: the account stays
 registered but `af accounts list` reports `not logged in`, and the login command
 reports that no credential was created. Re-run the login command when ready to
-finish. A named Codex account starts with its own history, settings, and skills
-as well as credentials.
+finish. A named Codex account has separate credentials, history, and skills.
+
+Codex registration seeds missing `approval_policy` · `sandbox_mode` · `model`
+from the operator's `~/.codex/config.toml`, with the selected profile overriding
+root values; existing account settings, including selected-profile values, stand.
+For effective `workspace-write` mode it also seeds missing workspace options
+(`network_access` · `writable_roots` · `exclude_tmpdir_env_var` · `exclude_slash_tmp`).
+It skips `model` if either config selects `model_provider` at root or in its
+selected profile, and seeds nothing if the ambient config has neither approval
+policy nor sandbox mode. Credentials, provider configuration, profiles, and
+project trust are never copied. An unresolved ambient profile or an ambient
+approval, sandbox, or active workspace option that fails schema validation prevents all
+seeding; unreadable or unparseable ambient files also leave settings alone.
+Both `af accounts add` and `af accounts login` print a notice explaining the
+seeding policy and any refusal.
 
 Gemini's registration pre-answers folder trust for the account directory and
 selects Google OAuth in that account's non-secret settings. Existing choices

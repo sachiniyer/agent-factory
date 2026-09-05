@@ -1,5 +1,11 @@
 # Surface parity
 
+For contributors adding or changing an action in the web client, TUI, or CLI.
+This page explains how to keep all three clients aligned with the daemon API.
+
+Read the [contributor overview](index.md) and [The daemon](../daemon.md) first.
+Then use the parity checks below alongside the relevant client test harness.
+
 Agent Factory ships three clients over one daemon: the TUI, the web UI, and the
 CLI. Since [#960](https://github.com/sachiniyer/agent-factory/issues/960) the
 daemon is the single writer, and since
