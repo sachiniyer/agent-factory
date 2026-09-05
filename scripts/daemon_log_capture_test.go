@@ -21,8 +21,8 @@ import (
 // goroutine from a Manager the failing test never created, writing into that
 // test's assertion buffer.
 //
-// daemon/logcapture_test.go now holds the one synchronized sink and the
-// installers for it. This check keeps a new bare buffer from landing beside it.
+// daemon/logcapture_test.go holds the installers and aliases the shared
+// log/logtest sink. This check keeps a new bare buffer from landing beside it.
 //
 // It is a drift lint, not a sandbox. A test that reached the global logger
 // through an intermediate variable in a file of its own would get past rule A;
@@ -263,21 +263,32 @@ func TestDaemonLogCaptureHelperLocksBothEnds(t *testing.T) {
 	if helper == "" {
 		t.Fatalf("%s is missing", daemonLogCaptureHelper)
 	}
+	// The daemon installers must still use the shared implementation we inspect.
+	if !strings.Contains(helper, `"github.com/sachiniyer/agent-factory/log/logtest"`) ||
+		!strings.Contains(helper, "type logCapture = logtest.Buffer") {
+		t.Fatalf("%s must alias the shared logtest.Buffer", daemonLogCaptureHelper)
+	}
+	const sharedCapture = "log/logtest/buffer.go"
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), sharedCapture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper = string(data)
 	if !strings.Contains(helper, "sync.Mutex") {
-		t.Fatalf("%s declares no mutex", daemonLogCaptureHelper)
+		t.Fatalf("%s declares no mutex", sharedCapture)
 	}
 	for _, method := range []string{"Write", "String", "Reset"} {
-		signature := "func (c *logCapture) " + method
+		signature := "func (c *Buffer) " + method
 		start := strings.Index(helper, signature)
 		if start < 0 {
-			t.Fatalf("%s has no %s method", daemonLogCaptureHelper, method)
+			t.Fatalf("%s has no %s method", sharedCapture, method)
 		}
 		body := helper[start:]
 		if end := strings.Index(body, "\n}\n"); end >= 0 {
 			body = body[:end]
 		}
 		if !strings.Contains(body, "c.mu.Lock()") {
-			t.Errorf("logCapture.%s does not take the lock; a sink locked on only one end "+
+			t.Errorf("logtest.Buffer.%s does not take the lock; a sink locked on only one end "+
 				"still races the reader (#3787):\n%s", method, body)
 		}
 	}

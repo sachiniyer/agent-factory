@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	stdlog "log"
 	"os"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/assert"
@@ -1161,7 +1161,7 @@ codex = "/opt/codex/bin/codex --quiet"
 	})
 
 	t.Run("invalid theme color warns and falls back", func(t *testing.T) {
-		var warnings bytes.Buffer
+		var warnings logtest.Buffer
 		prevWarning := log.WarningLog
 		log.WarningLog = stdlog.New(&warnings, "", 0)
 		t.Cleanup(func() { log.WarningLog = prevWarning })

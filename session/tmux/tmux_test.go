@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -18,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 
 	"github.com/stretchr/testify/require"
 )
@@ -422,9 +422,9 @@ func TestStartTimeoutCleanupFails(t *testing.T) {
 // captureErrorLog redirects log.ErrorLog at the test's ErrorLog into the
 // returned buffer for the duration of the test, restoring the previous
 // destination on cleanup.
-func captureErrorLog(t *testing.T) *bytes.Buffer {
+func captureErrorLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	prev := aflog.ErrorLog.Writer()
 	aflog.ErrorLog.SetOutput(&buf)
 	t.Cleanup(func() { aflog.ErrorLog.SetOutput(prev) })

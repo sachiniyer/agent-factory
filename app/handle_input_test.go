@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -761,6 +762,35 @@ func TestCancelNamingClearsPlaceholder(t *testing.T) {
 // already started. That is a broken invariant and must keep reaching ERROR, or
 // #2575's severity cleanup would silently mute a real state bug.
 func TestHandleStateNewTitleSeverity(t *testing.T) {
+	t.Run("default snapshot fetchers preserve existing rows", func(t *testing.T) {
+		h := newTestHome(t)
+		previousHTTP := withDaemonHTTP
+		withDaemonHTTP = func(func(*apiclient.Client) error) error {
+			t.Error("newTestHome snapshot poll reached the daemon launcher")
+			return errTestFetcherUnstubbed
+		}
+		t.Cleanup(func() { withDaemonHTTP = previousHTTP })
+
+		rows, err := allReposSnapshotFetcher()
+		require.ErrorIs(t, err, errTestFetcherUnstubbed)
+		require.Nil(t, rows)
+		instance := newSnapshotTestInstance(t, "retained")
+		h.store.AddInstance(instance)
+		projects := []ui.SidebarProject{{Root: "/repos/retained", SessionCount: 2}}
+		h.projects.SetProjects(projects)
+
+		msg := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
+		require.ErrorIs(t, msg.allReposErr, errTestFetcherUnstubbed)
+		require.Error(t, msg.err)
+		require.False(t, h.handleSnapshot(msg))
+		require.Same(t, instance, findSidebarInstance(h, "retained"))
+		// Cross-repo errors are handled separately from handleSnapshot in
+		// Update; exercise that path too, without executing its next tick.
+		_, _ = h.Update(msg)
+		require.Equal(t, projects, h.projects.Projects())
+		require.Same(t, instance, findSidebarInstance(h, "retained"))
+	})
+
 	t.Run("validation refusal is a notice", func(t *testing.T) {
 		h := newTestHome(t)
 		h.state = stateNew
@@ -785,6 +815,8 @@ func TestHandleStateNewTitleSeverity(t *testing.T) {
 
 	t.Run("started placeholder is an error", func(t *testing.T) {
 		h := newTestHome(t)
+		// Only synchronous naming severity matters here. newTestHome stubs both
+		// snapshot fetchers; do not execute returned commands or start a Tea loop.
 		h.state = stateNew
 		h.errBox.SetSize(160, 1)
 		h.pendingProgram = "claude"

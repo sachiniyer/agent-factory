@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	stdlog "log"
@@ -19,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // relocationWriterFixture starts a real survivor inside dir and returns its exit
@@ -119,7 +119,7 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 	}
 	t.Cleanup(func() { worktreeMoveFast = prev })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -150,7 +150,7 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 // be worse than no check at all — it is the shape that trains an operator to
 // ignore the one that matters.
 func TestArchiveWorktree_SilentWhenTheVacatedPathStaysGone(t *testing.T) {
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -307,7 +307,7 @@ func TestArchiveWorktree_ReportsResidueAtTheRecoveryAlternatePath(t *testing.T) 
 	require.NoError(t, err)
 	gw.beginRelocationRecovery(dest, srcPath, identity)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -327,7 +327,7 @@ func TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear(t *testing.T) 
 	restore := SetRelocationIdentityErrorForTest(vacated, context.DeadlineExceeded)
 	t.Cleanup(restore)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -367,7 +367,7 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 		relocationPathIdentity = prevIdentity
 	})
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
