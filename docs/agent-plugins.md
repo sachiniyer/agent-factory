@@ -94,8 +94,9 @@ convenient it would be. Detect and instruct instead.
 ## Relationship to `global_agent_skills`
 
 `af` can also *push* this skill into an agent's global config
-(`~/.codex/skills`, `~/.gemini/skills`, `~/.config/amp/skills`) when it launches
-a session, behind the `global_agent_skills` opt-in, which defaults to off. That
+(`~/.codex/skills`, `~/.gemini/skills`, `~/.config/amp/skills`,
+`~/.config/devin/skills`) when it launches a session, behind the
+`global_agent_skills` opt-in, which defaults to off. That
 is the same text by a different route. If you install the plugin you do not need
 the push, and you can leave `global_agent_skills` off — the plugin reaches
 sessions `af` never launched, which the push never did.
