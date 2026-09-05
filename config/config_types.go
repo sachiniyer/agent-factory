@@ -470,7 +470,7 @@ type Config struct {
 	// Read at daemon start (the route table is built once, at bind), so a change
 	// waits for the next daemon start. Global-only, like the listener keys: a
 	// cloned repo must never be able to open a memory-dumping endpoint on the
-	// machine that runs it. See docs/daemon-memory.md.
+	// machine that runs it. See docs/dev/daemon-memory.md.
 	DebugPprof bool `json:"debug_pprof" toml:"debug_pprof"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding

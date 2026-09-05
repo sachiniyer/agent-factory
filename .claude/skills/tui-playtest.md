@@ -21,7 +21,7 @@ judge what a human would think of it.
 container sandbox** — it satisfies every isolation rule below structurally
 (the container has its own tmux server, a throwaway AF home, a pre-built
 mock repo, pids/memory caps, and teardown is one `docker rm -f`). See
-[docs/container-testing.md](../../docs/container-testing.md).
+[docs/dev/container-testing.md](../../docs/dev/container-testing.md).
 
 ```bash
 WORK="/tmp/af-playtest-$(date +%Y%m%d-%H%M%S)" && mkdir -p "$WORK"
@@ -58,7 +58,7 @@ a `$TMUX` collision in #1155. Source
 self-synchronizing (waits on a screen marker, never a blind sleep),
 `af_ensure_nav` forces a known focus state, and `af_expect_selected` /
 `af_assert_no_orphan_clients` give real assertions. See
-[docs/tui-manual-testing.md](../../docs/tui-manual-testing.md) for the
+[docs/dev/tui-manual-testing.md](../../docs/dev/tui-manual-testing.md) for the
 interaction model and a gate-recipe library.
 
 ```bash

@@ -113,7 +113,7 @@ go test $(go list ./... | grep -vE '/(daemon|app)')   # only if you need breadth
 # The containerized suites below are NOT routine pre-PR gates — CI runs
 # `go test -race ./...` on every push, and ~20 concurrent container runs took
 # this box to load 160. Reach for one ONLY to reproduce a CI failure you
-# cannot diagnose from the logs, then stop. See docs/container-testing.md.
+# cannot diagnose from the logs, then stop. See docs/dev/container-testing.md.
 make test-container                # full suite, isolated tmux + AF home
 make remote-roundtrip-container    # mock remote round-trip
 make playtest-container            # TUI sandbox (throwaway home, mock repo)
@@ -160,7 +160,7 @@ file exceeds its line limit — 1000 lines for production code, 1500 for
 `*_test.go` — unless it's grandfathered in `scripts/file-length-allowlist.txt`.
 Grandfathered files carry a ceiling that ratchets (they can only shrink, and
 their entry must be removed once decomposed under the limit). Don't grandfather
-new files to dodge the limit — split them. See `docs/file-length-lint.md`.
+new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 
 ## Project Structure
 

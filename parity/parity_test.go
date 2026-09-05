@@ -98,7 +98,7 @@ func (inv inventory) byID() map[string]capability {
 
 // fixHint is appended to every drift failure: the whole point of this package is
 // that the fix is "make a parity decision", not "silence the test".
-const fixHint = "\n\nThis is the surface-parity drift check (see docs/surface-parity.md). " +
+const fixHint = "\n\nThis is the surface-parity drift check (see docs/dev/surface-parity.md). " +
 	"Add the item to parity/inventory.json: map it in the ledger and give its capability " +
 	"a tui/web/cli status with a code pointer and a verdict. If the other surfaces " +
 	"deliberately will not have it, say so in notes — that records the decision so it is " +

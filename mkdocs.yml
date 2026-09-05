@@ -91,6 +91,27 @@ extra:
 
 plugins:
   - search
+  # Every page this reorganisation moved keeps its old URL as a redirect stub,
+  # so links already out in the world — README badges, `af --help`, issue
+  # comments, release notes — still land on the page rather than a 404 (#3855).
+  # Add an entry here whenever a page moves; never delete one.
+  - redirects:
+      redirect_maps:
+        how-it-works.md: concepts.md
+        concepts/worktree-agents.md: sessions.md
+        concepts/tui.md: tui.md
+        concepts/daemon.md: daemon.md
+        container-testing.md: dev/container-testing.md
+        lifecycle-testing.md: dev/lifecycle-testing.md
+        web-selftest.md: dev/web-selftest.md
+        tui-manual-testing.md: dev/tui-manual-testing.md
+        surface-parity.md: dev/surface-parity.md
+        file-length-lint.md: dev/file-length-lint.md
+        release-process.md: dev/release-process.md
+        release-testing-plan.md: dev/release-testing-plan.md
+        release-notes.md: dev/release-notes.md
+        daemon-memory.md: dev/daemon-memory.md
+        demo-assets.md: dev/demo-assets.md
 
 # Fail the build on broken in-repo links and on `#fragment` targets that no
 # heading produces, but don't choke on links that intentionally point outside
@@ -113,41 +134,44 @@ validation:
 
 nav:
   - Home: index.md
-  - Why Agent Factory: why-agent-factory.md
-  - How it works: how-it-works.md
-  - Use cases: use-cases.md
-  - Compare: comparison.md
-  - Docs:
-      - Start here:
-          - Getting started: getting-started.md
-          - CLI guide: cli.md
-          - Configuration: configuration.md
-      - Core concepts:
-          - Sessions and worktrees: concepts/worktree-agents.md
-          - The TUI: concepts/tui.md
-          - The web client: web.md
-          - The daemon: concepts/daemon.md
-          - Tasks and automation: tasks.md
-          - Agent plugins: agent-plugins.md
-          - Backends (runtimes): backends.md
-          - Remote hooks: remote-hooks.md
+  - Use:
+      - Getting started: getting-started.md
+      - Concepts: concepts.md
+      - Sessions and worktrees: sessions.md
+      - The daemon: daemon.md
+      - Web client: web.md
+      - TUI: tui.md
+      - CLI: cli.md
+      - Tasks: tasks.md
+      - Accounts and usage limits: usage-limits.md
+      - Backends and remote access:
+          - Backends: backends.md
           - Remote daemon access: remote-http-auth.md
-          - Usage limits: usage-limits.md
-      - API and reference:
-          - HTTP API guide: http-api.md
+          - Remote hooks: remote-hooks.md
+      - Configuration: configuration.md
+      - Agent plugins: agent-plugins.md
+      - Troubleshooting: troubleshooting.md
+      - Reference:
           - CLI reference: reference/cli.md
+          - HTTP API guide: http-api.md
           - HTTP API reference: reference/api.md
-      - Maintainers:
-          - Daemon memory: daemon-memory.md
-          - Container testing: container-testing.md
-          - Lifecycle testing: lifecycle-testing.md
-          - Web client selftest: web-selftest.md
-          - Demo assets: demo-assets.md
-          - File-length lint: file-length-lint.md
-          - Surface parity: surface-parity.md
-          - Release process: release-process.md
-          - Release notes: release-notes.md
-          - Release testing plan: release-testing-plan.md
-          - TUI manual testing: tui-manual-testing.md
-          - TUI rewrite (design): design/tui-rewrite.md
-          - Agent handoff (design): design/agent-handoff.md
+      - Background:
+          - Why Agent Factory: why-agent-factory.md
+          - Use cases: use-cases.md
+          - Comparison: comparison.md
+  - Develop and maintain:
+      - Overview: dev/index.md
+      - Container testing: dev/container-testing.md
+      - Demo assets: dev/demo-assets.md
+      - Lifecycle testing: dev/lifecycle-testing.md
+      - Web client selftest: dev/web-selftest.md
+      - Manual TUI testing: dev/tui-manual-testing.md
+      - Surface parity: dev/surface-parity.md
+      - File-length lint: dev/file-length-lint.md
+      - Release process: dev/release-process.md
+      - Release testing plan: dev/release-testing-plan.md
+      - Release notes: dev/release-notes.md
+      - Daemon memory: dev/daemon-memory.md
+      - Design notes:
+          - TUI rewrite: design/tui-rewrite.md
+          - Agent handoff: design/agent-handoff.md

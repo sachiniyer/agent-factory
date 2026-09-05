@@ -5,122 +5,164 @@ hide:
   - toc
 ---
 
-<p class="af-section-label">Core workflow</p>
-<h2 class="af-section-title">One task, one agent, one reviewable branch</h2>
+Agent Factory (`af`) runs many AI coding agents — Claude Code, Codex, Aider,
+Gemini, Amp, opencode, and Devin — and gives each one its own git branch and git
+worktree, so parallel agents never share a checkout and every result comes back
+as a branch you review like any other. You drive the whole fleet from a browser,
+a terminal UI, or a JSON CLI, and all three read the same state. That state
+belongs to a background daemon, which keeps sessions running when you close the
+window, schedules recurring work, and serves the web client.
 
-Agent Factory is built for the moment after "ask an agent" becomes "supervise
-several agents." It gives each normal session an isolated git worktree, keeps
-the agent running under daemon supervision, and brings every session back to a
-normal git review path.
+## Install
+
+Prerequisites: **tmux**, **git**, and at least one agent CLI on your `PATH`, on
+Linux, macOS, or WSL2.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh
+```
+
+That puts `af` in `~/.local/bin` (override with `AF_INSTALL_DIR`, pin with
+`--version <tag>`). Building from source needs Go 1.25+ and `./dev-install.sh`.
+
+## First five minutes
+
+```bash
+cd your-project     # any git repo
+af doctor --setup   # check tmux, git, agent CLIs, storage, daemon health
+af                  # open the TUI
+```
+
+Press `n`, name the task, and describe it — the agent starts in a fresh
+worktree. Watch it in the Agent tab, press `↵` to type to it in place, `ctrl+]`
+to step back out, and `a` to archive it when you are done. Then open
+**<http://localhost:8443>**: the same sessions, live, in a browser, with no
+token and no login screen.
+
+[Getting started :octicons-arrow-right-24:](getting-started.md){ .md-button .md-button--primary }
+
+## The mental model in five terms
 
 <div class="grid cards" markdown>
 
--   :material-source-branch:{ .lg .middle } __Create isolated work__
+-   :material-account-box-outline:{ .lg .middle } __Session__
 
     ---
 
-    Start a session for a task. Agent Factory creates a branch and git worktree,
-    then launches your chosen agent inside it.
+    One agent working on one task, with its own tab strip and an explicit
+    lifecycle: archive to finish, restore to bring back, kill to discard.
 
-    [:octicons-arrow-right-24: Sessions and worktrees](concepts/worktree-agents.md)
+    [:octicons-arrow-right-24: Sessions and worktrees](sessions.md)
 
--   :material-view-dashboard-outline:{ .lg .middle } __Watch every agent__
-
-    ---
-
-    The TUI shows each session, status, and Agent tab from one terminal. Scan
-    progress without attaching to every running process.
-
-    [:octicons-arrow-right-24: The TUI](concepts/tui.md)
-
--   :material-keyboard-outline:{ .lg .middle } __Jump in when needed__
+-   :material-source-branch:{ .lg .middle } __Worktree__
 
     ---
 
-    Interact in-pane, attach full-screen, or open helper tabs for shells, dev
-    servers, and test watchers in the same worktree.
+    The isolated checkout and branch each session gets, so agents never collide
+    and the result is ordinary git work you can diff, push, and merge.
 
-    [:octicons-arrow-right-24: How it works](how-it-works.md)
+    [:octicons-arrow-right-24: Sessions and worktrees](sessions.md)
 
--   :material-call-merge:{ .lg .middle } __Review and merge normally__
-
-    ---
-
-    The result is a real branch. Use your existing `git diff`, pull request,
-    CI, and merge flow instead of trusting a hidden agent workspace.
-
-    [:octicons-arrow-right-24: Why Agent Factory](why-agent-factory.md)
-
--   :material-timer-cog-outline:{ .lg .middle } __Automate recurring work__
+-   :material-database-sync-outline:{ .lg .middle } __Daemon__
 
     ---
 
-    Cron tasks and watch scripts can create sessions or deliver prompts into
-    existing ones, hosted by the same daemon that keeps sessions alive.
+    The background process that owns all state, keeps sessions alive across
+    restarts, and serves the web client. Every surface is a thin client over it.
 
-    [:octicons-arrow-right-24: Tasks and automation](tasks.md)
+    [:octicons-arrow-right-24: The daemon](daemon.md)
 
--   :material-console-network-outline:{ .lg .middle } __Script the control plane__
+-   :material-timer-cog-outline:{ .lg .middle } __Task__
 
     ---
 
-    Every session and task operation is available through JSON CLI commands and
-    a local owner-only HTTP API over a Unix socket.
+    A prompt the daemon delivers on its own — on a cron schedule, or on each
+    line a watch command prints — into a fresh session or an existing one.
 
-    [:octicons-arrow-right-24: CLI guide](cli.md)
+    [:octicons-arrow-right-24: Tasks](tasks.md)
+
+-   :material-key-outline:{ .lg .middle } __Account__
+
+    ---
+
+    A named credential home for an agent, so a session runs as a specific
+    Claude, Codex, or Gemini login instead of your ambient one.
+
+    [:octicons-arrow-right-24: Accounts and usage limits](usage-limits.md)
+
+-   :material-map-outline:{ .lg .middle } __All five, expanded__
+
+    ---
+
+    One page with the ideas the rest of these docs assume, and how a prompt
+    becomes a branch you can merge.
+
+    [:octicons-arrow-right-24: Concepts](concepts.md)
 
 </div>
 
-## How Agent Factory fits
+## Three surfaces, one daemon
 
-Agent Factory is not a chat UI and it is not just tmux with a README. The TUI,
-CLI, and HTTP API are thin clients over a daemon that owns all session state,
-task schedules, worktree operations, and usage-limit recovery.
+<div class="grid cards" markdown>
+
+-   :material-web:{ .lg .middle } __Web client__
+
+    ---
+
+    Sessions, real terminals, tabs, tasks, and config in a browser — bundled
+    into the daemon and on by default at `http://localhost:8443`.
+
+    [:octicons-arrow-right-24: The web client](web.md)
+
+-   :material-console:{ .lg .middle } __TUI__
+
+    ---
+
+    `af` in a git repo: a dense rail of every session, in-place interaction, and
+    full-screen attach without leaving the terminal.
+
+    [:octicons-arrow-right-24: The TUI](tui.md)
+
+-   :material-console-network-outline:{ .lg .middle } __CLI__
+
+    ---
+
+    `af sessions` and `af tasks` emit JSON, so scripts — and other agents — can
+    create, prompt, watch, and archive sessions.
+
+    [:octicons-arrow-right-24: The CLI](cli.md)
+
+</div>
+
+They cannot disagree, because none of them owns state:
 
 ```mermaid
 flowchart TB
-    tui["af TUI<br/>sidebar · Agent tab · attach · tabs"]
+    web["web client<br/>browser · real terminals · tabs · tasks"]
+    tui["af TUI<br/>rail · Agent tab · attach · panes"]
     cli["CLI · HTTP API<br/>JSON commands · local Unix socket"]
     daemon["daemon<br/>single writer of all state<br/>sessions · tasks · usage limits"]
-    sessions["sessions<br/>one git worktree · branch per agent<br/>local or remote hooks"]
+    sessions["sessions<br/>one git worktree · branch per agent<br/>local, docker, ssh, or your own backend"]
 
+    web -->|"read projection · RPC"| daemon
     tui -->|"read projection · RPC"| daemon
     cli -->|"RPC"| daemon
     daemon -->|"owns"| sessions
 ```
 
-That design is what lets you close the TUI, reboot, script a task, or call the
-API without splitting the world into different sources of truth.
+## Beyond your laptop
 
-## Start here
+Sessions can run in a container, on another machine over SSH, or on
+infrastructure you provision yourself; the daemon itself can be reached from a
+second machine over SSH or an authenticated port.
 
-<div class="grid cards" markdown>
+[Backends and remote access :octicons-arrow-right-24:](backends.md){ .md-button }
 
--   :material-rocket-launch-outline:{ .lg .middle } __Install and try it__
+## Where to go next
 
-    ---
-
-    Install `af`, create a first worktree-backed session, attach, detach, and
-    archive it.
-
-    [:octicons-arrow-right-24: Getting started](getting-started.md)
-
--   :material-map-outline:{ .lg .middle } __Understand the workflow__
-
-    ---
-
-    Follow the path from prompt to worktree, supervision, interaction, review,
-    and cleanup.
-
-    [:octicons-arrow-right-24: How it works](how-it-works.md)
-
--   :material-compare-horizontal:{ .lg .middle } __Compare alternatives__
-
-    ---
-
-    See where Agent Factory sits relative to Herdr, GUI worktree apps, kanban
-    dashboards, Claude Agent View, and plain tmux.
-
-    [:octicons-arrow-right-24: Comparison](comparison.md)
-
-</div>
+- [Getting started](getting-started.md) — install, first session, first browser tab.
+- [Concepts](concepts.md) — the five terms, expanded.
+- [Troubleshooting](troubleshooting.md) — `af doctor` and what to file.
+- [Why Agent Factory](why-agent-factory.md) · [Use cases](use-cases.md) ·
+  [Comparison](comparison.md) — the longer argument, and where this sits next to
+  the alternatives.

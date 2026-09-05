@@ -1,7 +1,7 @@
 // Decides whether a change needs the Playwright web-driver selftest (#2762).
 //
 // The suite is a REQUIRED gate — pr.yml's Build job lists it in `needs`, which is
-// what gives a red run teeth (docs/web-selftest.md, and the header on
+// what gives a red run teeth (docs/dev/web-selftest.md, and the header on
 // .github/workflows/web-selftest.yml). But it is also the most expensive thing in
 // CI: a Go+Node+Chromium image, then a real daemon and a real browser. Running it
 // on every PR would tax every docs typo with that; running it on none of them is

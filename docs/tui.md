@@ -1,23 +1,12 @@
 # The TUI
 
+For anyone driving the fleet from a terminal. After this page you will know the
+layout, the two ways into a session, how tabs and panes work, and where to change
+any key binding.
+
 The `af` terminal UI is the home base for running agents. It's built to keep you
 in one screen: a list of everything running on the left, a live look at any
 agent on the right, and a keystroke to dive into any of them full-screen.
-
-<video controls muted loop playsinline preload="metadata"
-       poster="../assets/tui/demo-poster.png"
-       aria-label="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
-  <source src="../assets/tui/demo.webm" type="video/webm">
-  <source src="../assets/tui/demo.mp4" type="video/mp4">
-  <img src="../assets/tui/demo.gif" alt="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
-</video>
-
-Demo: [MP4](../assets/tui/demo.mp4) · [WebM](../assets/tui/demo.webm) ·
-[GIF](../assets/tui/demo.gif). Nothing in those panes is a transcript — three
-real Codex sessions are working in three AF-owned worktrees, recorded by
-`scripts/container/record-demo.sh`. The web client's own demo is on the
-[home page](../index.md); see [Demo assets](../demo-assets.md) for how both are
-produced.
 
 Launch it from inside a git repository to open scoped to that project, or from
 anywhere to open on your project registry and pick one:
@@ -30,6 +19,21 @@ af
 Run outside a git repository and `af` still opens — on the project registry, so
 you can select a known project or add one.
 
+<video controls muted loop playsinline preload="metadata"
+       poster="assets/tui/demo-poster.png"
+       aria-label="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
+  <source src="assets/tui/demo.webm" type="video/webm">
+  <source src="assets/tui/demo.mp4" type="video/mp4">
+  <img src="assets/tui/demo.gif" alt="Three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run that branch's tests">
+</video>
+
+Demo: [MP4](assets/tui/demo.mp4) · [WebM](assets/tui/demo.webm) ·
+[GIF](assets/tui/demo.gif). Nothing in those panes is a transcript — three
+real Codex sessions are working in three AF-owned worktrees, recorded by
+`scripts/container/record-demo.sh`. The web client's own demo is on the
+[home page](index.md); see [Demo assets](dev/demo-assets.md) for how both are
+produced.
+
 ## Layout
 
 - **Sidebar.** Every session, with a live status indicator (waiting on
@@ -39,7 +43,9 @@ you can select a known project or add one.
   works — so you can follow progress across several agents without attaching to
   any of them. Toggle it with `s` (open) and `x` (hide).
 
-![The TUI showing several Agent Factory sessions in the sidebar with the selected session's Agent tab beside them](../assets/tui/tui-sessions.svg)
+<figure markdown>
+![The TUI showing several Agent Factory sessions in the sidebar with the selected session's Agent tab beside them](assets/tui/tui-sessions.svg)
+</figure>
 
 An idle row also says **why** it's idle, as far as the daemon can mechanically
 tell — `usage limit`, `process exited`, `restore gave up after 6 attempts: ...`,
@@ -50,14 +56,14 @@ No reason ever claims the agent *finished*, *asked a question*, or is
 *wedged* — those can render identically in a terminal, so af reports the
 observation and leaves reading the pane to you (#3168). The full `idle_reason`
 vocabulary is in the
-[HTTP API guide](../http-api.md#session-idle-diagnosis).
+[HTTP API guide](http-api.md#session-idle-diagnosis).
 
 ## Interacting with a session
 
 There are two ways in, split deliberately:
 
 - **`↵` (Enter) — interact in-pane.** Type to the selected agent directly inside
-  the layout, without a full-screen takeover. `Ctrl-]` returns you to navigation
+  the layout, without a full-screen takeover. `ctrl+]` returns you to navigation
   mode.
 - **`o` — attach full-screen.** Hand the whole terminal to the session's tmux.
   The tmux detach key returns you to the sidebar. The agent keeps running either
@@ -78,7 +84,7 @@ matching the 1-9 jump keys; it was removed in #3023):
   session instead).
 
 Tabs persist across restarts, and each is a real process the daemon tracks.
-(Remote sessions are more limited — see [Remote hooks](../remote-hooks.md).)
+(Remote sessions are more limited — see [Remote hooks](remote-hooks.md).)
 
 For a named long-running command or a web preview with a URL/port, use
 `af sessions tab-create`; those kinds need input beyond this two-item picker.
@@ -97,28 +103,33 @@ For a named long-running command or a web preview with a URL/port, use
   restores an archived, Lost, or Dead session. **`D`** permanently kills a
   session, including any uncommitted or unmerged work.
 - **`m`** opens the tasks view to manage [scheduled and event-driven
-  automations](../tasks.md).
-- **`c`** retries a session that's parked on a [usage limit](../usage-limits.md).
+  automations](tasks.md).
+
+<figure markdown>
+![The TUI tasks view listing scheduled and watch automations](assets/tui/tui-tasks.svg)
+</figure>
+
+- **`c`** retries a session that's parked on a [usage limit](usage-limits.md).
 - **`s`** opens the selected tab as a workspace pane; **`S`** commits an
   active preview as another pane.
 - **`Left`** / **`Right`** move focus between open workspace panes when a pane
   has focus.
-- **`Ctrl-u`** / **`Ctrl-d`** preview-scroll the current tab. In a full-screen attach the child program owns input and scrolling; these only work in AF's navigation mode.
-- **`Ctrl-p`** switches the active project without restarting the TUI. It works
-  from navigation only — while you're attached to a pane, `Ctrl-p` is forwarded
-  to the running program, so detach (`Ctrl-]`) first.
+- **`ctrl+u`** / **`ctrl+d`** preview-scroll the current tab. In a full-screen attach the child program owns input and scrolling; these only work in AF's navigation mode.
+- **`ctrl+p`** switches the active project without restarting the TUI. It works
+  from navigation only — while you're attached to a pane, `ctrl+p` is forwarded
+  to the running program, so detach (`ctrl+]`) first.
 
 ## Key bindings are yours
 
 Every binding above is the default. You can rebind almost all of them in the
 `[keys]` table of your config — a handful of structural keys (Enter, Tab,
-Shift-Tab, Esc, `Ctrl-]`, the `1`–`9` tab jumps) are reserved. Run:
+Shift-Tab, Esc, `ctrl+]`, the `1`–`9` tab jumps) are reserved. Run:
 
 ```bash
 af keys
 ```
 
 to print every action with its **effective** binding (default or your rebind).
-See [Configuration → key bindings](../configuration.md#key-bindings-keys) for how
+See [Configuration → key bindings](configuration.md#key-bindings-keys) for how
 to set them, including how to restore pre-#1027 keys, and the
-[CLI reference](../reference/cli.md#af-keys) for the command.
+[CLI reference](reference/cli.md#af-keys) for the command.

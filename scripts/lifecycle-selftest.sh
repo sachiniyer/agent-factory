@@ -13,7 +13,7 @@
 # rubber stamp, and none of them is visible in a passing run.
 #
 # Every case here was watched failing against the pre-fix code before the fix
-# landed. See docs/lifecycle-testing.md.
+# landed. See docs/dev/lifecycle-testing.md.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

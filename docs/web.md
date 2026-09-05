@@ -1,15 +1,20 @@
 # The web client
 
-Agent Factory ships a **browser web client** — the same session rail, live
-terminals, tabs, projects, and tasks you get in the [TUI](concepts/tui.md), served
-straight from the daemon and rendered in a browser. It is the browser analogue of
-the TUI: everything reads from the daemon's live projection, so what you see in the
-browser matches what you see in `af` and `af sessions list`.
+For anyone who would rather drive their agents in a browser than a terminal.
+After this page you will know how to open the web client, what each of its three
+views does, how to create and watch a session in it, and what to change before
+letting anything but your own machine reach it.
 
-It is **on by default**. The daemon serves it on loopback
-(`http://127.0.0.1:8443`) with no extra setup, so a same-machine browser reaches
-it with no token. You only touch config to **disable** it or to **expose** it to
-another machine; the rest of this page is a tour.
+The web client is a full surface, not a viewer. It has the same session rail,
+live terminals, tabs, projects, and tasks as the [TUI](tui.md) — plus a VS Code
+tab the terminal cannot render — and it reads the daemon's live projection, so
+what you see in the browser matches `af` and `af sessions list` exactly.
+
+**It is already on**, on loopback, with no install step, no build, no token, and
+no login screen. Open **<http://127.0.0.1:8443>** and read the
+[tour](#a-tour-of-the-app) with it in front of you. If nothing answers,
+`af daemon status` says whether a daemon is up (it only reports — it never
+starts one); opening the TUI or creating a session does start one.
 
 !!! note "Where the auth details live"
     This page covers the web client itself. The listener and token model it
@@ -291,6 +296,11 @@ Selecting a session collapses the app bar to just the hamburger — the pane's t
 takes the whole top — and those project/view/**More** controls move into the drawer
 the hamburger opens, as an overlay that never resizes the pane underneath.
 
+<figure markdown>
+![The web client's sessions view: a rail of sessions on the left, the selected session's live terminal filling the rest of the window](assets/web/dashboard.png)
+<figcaption>The sessions view — the rail on the left, the selected agent's live terminal beside it.</figcaption>
+</figure>
+
 ### Sessions view
 
 The default view: a **rail** of the selected project's sessions on the left, a
@@ -336,6 +346,11 @@ per browser (localStorage), and the control shows a dot when it differs from the
 default. When a filter hides everything, the rail says so — and tells you how many
 sessions are behind it rather than looking empty.
 
+<figure markdown>
+![The new-session modal over the sessions view, with fields for the title, prompt, agent, backend, and account](assets/web/new-session.png)
+<figcaption>Creating a session: title, prompt, agent, backend, and account.</figcaption>
+</figure>
+
 #### Selecting vs. attaching (the keyboard model)
 
 The web client uses the TUI's explicit **navigate-then-attach** model, so the
@@ -362,6 +377,11 @@ else — **+ New**, selecting a session, and Archive/Restore/Kill — close it b
 opening the terminal or modal. The state filter stays open while you change it, and
 tapping the dimmed scrim dismisses the drawer directly.
 
+<figure markdown>
+![An attached agent tab streaming its output in the browser](assets/web/agent-tab.png)
+<figcaption>An attached agent tab, streaming as the agent works.</figcaption>
+</figure>
+
 #### The attach terminal
 
 The main pane hosts a real terminal (xterm.js) streaming the agent's live output
@@ -374,6 +394,11 @@ The header shows the title alone. It used to carry the terminal's connection sta
 joined to the session's branch (`Live · master`); both were removed as chrome that
 earned no attention. The terminal still reconnects on its own — what changed is that
 it does so without narrating it.
+
+<figure markdown>
+![A session's process tab showing git diff of the branch, with the pull request badge linked in the pane header](assets/web/review.png)
+<figcaption>Reviewing the work: `git diff` in the session's own worktree, with the branch's pull request linked in the pane header.</figcaption>
+</figure>
 
 #### Per-session actions
 
@@ -460,6 +485,11 @@ remains the escape hatch: paste any absolute (or `~`-prefixed) path the picker
 cannot reach and it is registered the same way. A directory the daemon cannot read
 comes back as its own error above the list — never as an empty one.
 
+<figure markdown>
+![The tasks view listing scheduled and watch automations with their next run times](assets/web/tasks.png)
+<figcaption>The tasks view — cron and watch automations, with their next occurrence.</figcaption>
+</figure>
+
 ### Tasks view
 
 The **Tasks** view lists the scheduled automations the daemon owns and drives their
@@ -481,6 +511,11 @@ agent program. A cron task requires a prompt; a watch task requires its command
 (and may use `{{line}}` in the prompt to interpolate the matched line). This is the
 same contract as [`af tasks add`](tasks.md) — the daemon re-validates on submit, so
 a bad cron expression comes back as an inline error.
+
+<figure markdown>
+![The config view scrolled to the Accounts section, listing registered agent credential accounts](assets/web/config-accounts.png)
+<figcaption>The config view at its Accounts section.</figcaption>
+</figure>
 
 ### Config view
 
@@ -854,8 +889,8 @@ drawer, to detach.)
 - [Remote daemon access](remote-http-auth.md) — the full listener, token, CORS,
   and `network.require_token` reference the web client rides on (including how to terminate
   TLS at a proxy).
-- [The TUI](concepts/tui.md) — the terminal client the web client mirrors.
+- [The TUI](tui.md) — the terminal client the web client mirrors.
 - [Tasks & automation](tasks.md) — the scheduled tasks the Tasks view drives.
 - [HTTP API guide](http-api.md) — the `/v1/...` API the same listener serves.
-- [Web client selftest](web-selftest.md) — the maintainer acceptance harness for
+- [Web client selftest](dev/web-selftest.md) — the maintainer acceptance harness for
   the web client.
