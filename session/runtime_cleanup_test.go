@@ -326,8 +326,8 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	// The private staging handle must survive that exact ordering without leaking
 	// into the ordinary daemon snapshot.
 	precommit := inst.ToInstanceData()
-	// #3783: pin the clock reading CI actually drew. ToInstanceData stamps
-	// UpdatedAt from time.Now(), and on 2026-09-03T08:16:41.424242007Z the
+	// #3783: pin the timestamp CI actually drew when ToInstanceData still
+	// stamped UpdatedAt at serialization. On 2026-09-03T08:16:41.424242007Z the
 	// nanosecond digits contained this fixture's "4242" remote PID, so the
 	// substring assertion below reported a leak that had not happened. Pinning it
 	// turns a rare collision into a deterministic one.

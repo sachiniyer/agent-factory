@@ -120,6 +120,7 @@ func (i *Instance) NoteAdoptionDelivery() error {
 		return ErrAdoptionFenced
 	}
 	i.adoption.deliveries++
+	i.touchLocked()
 	return nil
 }
 

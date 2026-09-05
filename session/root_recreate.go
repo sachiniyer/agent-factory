@@ -174,7 +174,10 @@ func (i *Instance) AcknowledgeRootRecreateContext() bool {
 	if i.rootRecreateContext.Note() == "" {
 		return false
 	}
-	i.rootRecreateContext = RootRecreateContextNone
+	if i.rootRecreateContext != RootRecreateContextNone {
+		i.rootRecreateContext = RootRecreateContextNone
+		i.touchLocked()
+	}
 	return true
 }
 
@@ -192,6 +195,7 @@ func (i *Instance) ReconcileRootRecreateContext(ctx RootRecreateContext) bool {
 		return false
 	}
 	i.rootRecreateContext = ctx
+	i.touchLocked()
 	return true
 }
 
@@ -266,7 +270,10 @@ func (i *Instance) noteRecreateContextLocked() {
 	// holding. The heal outcome still reaches the application log, and the note
 	// returns the moment the newer daemon is back.
 	if i.carriedRecreateNotice != RootRecreateContextNone && i.carriedRecreateNotice.Note() == "" {
-		i.rootRecreateContext = i.carriedRecreateNotice
+		if i.rootRecreateContext != i.carriedRecreateNotice {
+			i.rootRecreateContext = i.carriedRecreateNotice
+			i.touchLocked()
+		}
 		return
 	}
 	var created *AgentConversationData
@@ -278,5 +285,9 @@ func (i *Instance) noteRecreateContextLocked() {
 	// identified as that agent — which is what separates the provable
 	// agent-change fallback from a command that picked its own conversation.
 	classified := ClassifyRootRecreateContext(i.carriedConversation, created, i.currentAgentNameLocked())
-	i.rootRecreateContext = moreSevereRecreateContext(i.carriedRecreateNotice, classified)
+	next := moreSevereRecreateContext(i.carriedRecreateNotice, classified)
+	if i.rootRecreateContext != next {
+		i.rootRecreateContext = next
+		i.touchLocked()
+	}
 }

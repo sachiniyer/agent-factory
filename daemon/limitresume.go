@@ -153,14 +153,15 @@ func (m *Manager) ResumeLimitedSessions() {
 	}
 }
 
-// resumeLimitedSession auto-resumes one session when it is eligible and its
-// limit window has elapsed. Eligibility mirrors restoreLostSession: started,
-// LiveLimitReached, not tombstoned, not the reserved root (the manual retry and
-// the poll own those), and no kill in flight. It takes the per-target lock and
-// then the per-session op lock in that canonical order (#2006) before invoking the
-// shared resumeFromLimitLocked body; the op lock is only TryLock'd so the poll
-// goroutine never stalls behind a kill teardown, and everything is re-verified
-// under the locks because the checks above are point-in-time.
+// resumeLimitedSession auto-resumes one eligible session when its ordinary retry
+// is due or an account swap permits an earlier attempt. Eligibility mirrors
+// restoreLostSession: started, LiveLimitReached, not tombstoned, not the reserved
+// root (the manual retry and the poll own those), and no kill in flight. It takes
+// the per-target lock and then the per-session op lock in that canonical order
+// (#2006) before invoking resumeFromLimitLockedWithAccount; the op lock is only
+// TryLock'd so the poll goroutine never stalls behind a kill teardown, and
+// everything is re-verified under the locks because the checks above are
+// point-in-time.
 func (m *Manager) resumeLimitedSession(
 	key, repoID string,
 	inst *session.Instance,
