@@ -368,6 +368,12 @@ func artifactEvidenceFromOwner(ownerPath, id string) (ArtifactEvidence, string) 
 	switch {
 	case err == nil && journal.ID == id:
 		return ArtifactLive, fmt.Sprintf("still active in %s", owner.HomeDir)
+	case err == nil && journal.ID == "":
+		// It decoded, and it names nothing. That is not the home telling us it has
+		// moved on to other work — it is a journal we cannot interpret, and the
+		// only honest reading of "the transaction that owns this is not the one
+		// named here" is one where something IS named there.
+		return ArtifactUnverifiable, fmt.Sprintf("the upgrade journal in its home %s names no transaction", owner.HomeDir)
 	case err == nil:
 		return ArtifactFinished, fmt.Sprintf("its home %s is running transaction %s now, not this one", owner.HomeDir, journal.ID)
 	case errors.Is(err, ErrNoActiveTransaction):

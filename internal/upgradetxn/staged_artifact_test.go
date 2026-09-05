@@ -160,6 +160,25 @@ func TestStagedArtifact_UnreadableOwnerHomeKeepsBlockingUntilTheOperatorSaysOthe
 	require.NoFileExists(t, previous)
 }
 
+// A journal that decodes but names nothing is not the home saying it moved on.
+// "A different transaction is active there" is only a statement when there IS a
+// different transaction; an empty id is a journal af cannot interpret, and
+// clearing another home's rollback source on that reading would be acting on
+// corruption.
+func TestStagedArtifact_AJournalNamingNoTransactionIsNotAFinishedOne(t *testing.T) {
+	dir := t.TempDir()
+	executable := executableIn(t, dir)
+	previous, _ := stageArtifactFor(t, executable, "upgrade-blankjournal", 48*time.Hour)
+	home := t.TempDir()
+	require.NoError(t, os.MkdirAll(upgradeRoot(home), 0o755))
+	require.NoError(t, os.WriteFile(activeJournalPath(home), []byte("{}"), 0o600))
+	writeOwnerRecordFor(t, executable, "upgrade-blankjournal", home, 48*time.Hour)
+
+	blocking := clearingScan(t, executable, "upgrade-mine")
+	require.NotNil(t, blocking, "an uninterpretable journal is not evidence this transaction ended")
+	require.FileExists(t, previous)
+}
+
 // An absent home reads exactly like a finished transaction to a bare journal
 // stat, and an unmounted filesystem is the realistic way that happens (#2984).
 func TestStagedArtifact_MissingOwnerHomeIsNotAFinishedTransaction(t *testing.T) {
