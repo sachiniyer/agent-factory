@@ -533,6 +533,15 @@ registered per agent, and the controls to register another. It is rendered here
 for convenience but writes no config key — see
 [`af accounts`](reference/cli.md#af-accounts).
 
+**Log in** opens the agent's own sign-in in a terminal on this page, running on
+the daemon's host where the credential directory is. It is a **device code**, not
+a browser handoff: the pane prints a URL and a code, you sign in from whatever
+device you are actually holding, and you paste the code back into the pane. That
+is deliberate — the daemon host is usually headless and remote, so a
+browser-callback sign-in there would either open a browser nobody is looking at
+or wait for a redirect to that host's own localhost that your machine cannot
+reach.
+
 A registered account is then *selectable* on the **New session** form: its
 **Account** field lists the accounts belonging to the agent that form's **Program**
 names, so changing the program changes the list (claude's `work` and codex's `work`

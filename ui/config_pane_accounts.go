@@ -343,6 +343,12 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 }
 
 // accountRowPurpose is the one sentence under the selected account.
+//
+// It says the sign-in is a DEVICE CODE (#3854) because that is what the operator
+// is about to be handed and what they have to do with it: the pane prints a URL,
+// they finish it wherever they actually are. Saying only "hands you the terminal"
+// left someone on a headless daemon host waiting for a browser that af has
+// deliberately made sure will not open.
 func accountRowPurpose(account AccountRow) string {
 	if account.LoggedIn {
 		return fmt.Sprintf(
@@ -351,7 +357,8 @@ func accountRowPurpose(account AccountRow) string {
 	}
 	return fmt.Sprintf(
 		"No %s credential yet · ↵ runs %s's own login in a tmux session scoped to this account and hands you "+
-			"the terminal. af never reads the credential.", account.Agent, account.Agent)
+			"the terminal. It is a device code — the pane prints a URL, you finish it in your own browser. "+
+			"af never reads the credential.", account.Agent, account.Agent)
 }
 
 // renderAccountsUnavailable renders the section's failure line in place of rows.

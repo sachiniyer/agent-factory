@@ -326,7 +326,8 @@ func TestLoginCommand_IsPerAgentAndNotGuessed(t *testing.T) {
 
 	codex, ok := LoginCommand("codex")
 	require.True(t, ok)
-	require.Equal(t, []string{"login"}, codex)
+	require.Equal(t, []string{"login", "--device-auth"}, codex,
+		"the login pane is headless and remote, so codex must take the device-code flow")
 
 	// gemini is the case that makes "no words" and "no flow" different answers.
 	// Verified against gemini 0.51.0 on 2026-09-04: `gemini --help` lists mcp,
