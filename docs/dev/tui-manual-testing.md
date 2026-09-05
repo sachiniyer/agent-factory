@@ -1,5 +1,13 @@
 # Manual TUI testing — the driver (#1161)
 
+For contributors investigating interactive TUI behavior and maintainers
+recording a manual play-test. This page explains the driver that sends keys
+and waits for observable state.
+
+Read [Container testing](container-testing.md) first: the driver belongs
+inside that isolated sandbox. For browser behavior, use the
+[web client selftest](web-selftest.md).
+
 Driving the real multi-pane TUI by hand for a play-test gate used to be
 error-prone: keys landed in a live pane as literal text (#1156), hand-rolled
 tmux harnesses died on `$TMUX`/`TMUX_TMPDIR` collisions (#1155), and every run
