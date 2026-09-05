@@ -114,13 +114,14 @@ func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) 
 // as ResolveConfigForRepoInspection over an already-loaded global snapshot, but
 // refuses to ignore an unreadable personal-project layer.
 //
-// Automatic credential selection needs the COMPLETE candidate policy. Every
-// other caller degrades an unreadable project registry to "no personal layer"
-// (see projectPersonalDocument) because one bad record must not break session
-// creation everywhere. Here that degradation is the wrong trade: a project whose
-// personal layer narrows or clears the global candidate list would silently
-// inherit the global list instead, and af would move work onto an identity the
-// user did not authorize for this project. An incomplete read is a refusal.
+// Automatic credential selection needs the COMPLETE candidate policy. Ordinary
+// non-strict resolution degrades an unreadable project registry to "no personal
+// layer" (see projectPersonalDocumentFromLookupStrictness) because one bad record
+// must not break session creation everywhere. Here that degradation is the wrong
+// trade: a project whose personal layer narrows or clears the global candidate
+// list would silently inherit the global list instead, and af would move work
+// onto an identity the user did not authorize for this project. An incomplete
+// read is a refusal.
 //
 // The global snapshot is passed rather than loaded so one decision cannot be
 // split across two config generations: the caller has already gated on
@@ -318,33 +319,30 @@ func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string, strict 
 	return projectPersonalDocumentFromLookupStrictness(project, found, err, strict)
 }
 
-// projectPersonalDocument builds the SourceProjectPersonal document for
-// repoRoot. It resolves the repo to a registered project read-only (a bounded
-// Git/checkout-marker probe, but no writes) and loads that project's
-// machine-local config; a repo that is not a
-// registered project, or one with no personal file yet, yields an empty
-// presence-only document so the layer is always present for the resolver.
-//
-// A registry that cannot be listed (a corrupt or newer-schema record) degrades
-// to "no personal layer" with a one-time warning rather than failing config
-// resolution for every repo — including repos that have no personal config at
-// all. Before this layer existed, ResolveConfig never touched the registry, and
-// one bad project record must not now break session creation everywhere. The
-// explicit `af config --project` / `af projects` paths still surface the real
-// error, because they call the registry directly.
-func projectPersonalDocument(repoRoot string) (sourceDocument, error) {
-	return projectPersonalDocumentStrictness(repoRoot, false)
-}
-
+// projectPersonalDocumentStrictness resolves repoRoot to a registered project
+// read-only (a bounded Git/checkout-marker probe, but no writes) and delegates
+// loading its machine-local config to projectPersonalDocumentFromLookupStrictness.
 func projectPersonalDocumentStrictness(repoRoot string, strict bool) (sourceDocument, error) {
 	project, found, err := projectForRoot(repoRoot)
 	return projectPersonalDocumentFromLookupStrictness(project, found, err, strict)
 }
 
-func projectPersonalDocumentFromLookup(project Project, found bool, err error) (sourceDocument, error) {
-	return projectPersonalDocumentFromLookupStrictness(project, found, err, false)
-}
-
+// projectPersonalDocumentFromLookupStrictness builds the SourceProjectPersonal
+// document from a project lookup and loads that project's machine-local config.
+// A repo that is not a registered project, or one with no personal file yet,
+// yields an empty presence-only document so the layer is always present for the
+// resolver.
+//
+// Unless strict is set, a registry that cannot be listed (a corrupt or newer-schema
+// record) degrades to "no personal layer" with a one-time warning rather than
+// failing config resolution for every repo — including repos that have no
+// personal config at all. Before this layer existed, ResolveConfig never touched
+// the registry, and one bad project record must not now break session creation
+// everywhere. The explicit `af config --project` / `af projects` paths still
+// surface the real error, because they call the registry directly. Strict mode
+// returns the lookup error instead: identity decisions must not inherit broader
+// global policy when the personal layer is unreadable (see
+// ResolveConfigForIdentityDecisionFromGlobal).
 func projectPersonalDocumentFromLookupStrictness(project Project, found bool, err error, strict bool) (sourceDocument, error) {
 	if err != nil && strict {
 		return sourceDocument{}, err
