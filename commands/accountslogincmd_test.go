@@ -339,3 +339,29 @@ func TestAccountsLoginDetachIsNotAFailure(t *testing.T) {
 		t.Fatalf("af did not say how to rejoin the flow:\n%s", stderr)
 	}
 }
+
+// The help has to say the login is BROWSER-FREE, and say it per agent (#3854).
+// An operator on a headless daemon host reading "the browser or device-code
+// step" reasonably concludes a browser might open, and then waits for one that
+// never appears; the flow af actually runs prints a URL and a code and waits for
+// the code to be pasted back. The three levers are named because they differ —
+// a flag for codex, an environment variable for gemini and for claude — and an
+// operator who can see them does not have to trust a sentence about them.
+func TestAccountsLoginHelpDescribesTheDeviceCodeFlow(t *testing.T) {
+	help := accountsLoginCmd.Long
+	for _, want := range []string{
+		"device code",
+		"codex login --device-auth",
+		"NO_BROWSER=true",
+		"BROWSER=true",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("af accounts login --help is missing %q:\n%s", want, help)
+		}
+	}
+	// The old wording offered a browser step as an equal alternative. On the
+	// headless, remote host this flow is designed for, it is not one.
+	if strings.Contains(help, "browser or device-code") {
+		t.Fatalf("af accounts login --help still offers a browser step as an alternative:\n%s", help)
+	}
+}
