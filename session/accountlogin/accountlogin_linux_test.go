@@ -23,6 +23,10 @@ const (
 	ambientClaudeKey = "sk-ant-AMBIENT-MUST-NOT-REACH-LOGIN"
 	ambientOpenAIKey = "sk-openai-AMBIENT-MUST-NOT-REACH-LOGIN"
 	ambientGeminiKey = "gem-AMBIENT-MUST-NOT-REACH-LOGIN"
+	// The daemon's own BROWSER/NO_BROWSER. af decides a login pane's browser
+	// behaviour per agent, so neither this value nor the name it arrived under may
+	// survive into the pane (#3854).
+	ambientBrowser = "AMBIENT-BROWSER-MUST-NOT-REACH-LOGIN"
 )
 
 // loginPaneCase is one agent's end-to-end login pane: the invocation af must
@@ -43,6 +47,14 @@ type loginPaneCase struct {
 	// artifact is where this agent writes its credential, relative to the
 	// account directory.
 	artifact string
+	// loginEnv is what makes THIS agent's sign-in browser-free (#3854), asserted
+	// as NAME=VALUE on the running pane. codex's lever is a flag rather than a
+	// variable, so its map is empty.
+	loginEnv map[string]string
+	// absentEnv are the browser levers this agent must NOT carry — the other
+	// agent's, and the ambient copies staged below. A working session gets
+	// neither, and a login pane gets only its own.
+	absentEnv []string
 }
 
 func loginPaneCases() []loginPaneCase {
@@ -53,13 +65,20 @@ func loginPaneCases() []loginPaneCase {
 			configVar:       "CLAUDE_CONFIG_DIR",
 			credentialNames: []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"},
 			artifact:        ".credentials.json",
+			// claude 2.1.261 has no browser-free flag; its URL opener reads BROWSER
+			// and spawns it with the URL, so the no-op is the lever.
+			loginEnv:  map[string]string{"BROWSER": "true"},
+			absentEnv: []string{"NO_BROWSER"},
 		},
 		{
-			agent:           "codex",
-			argv:            "login",
-			configVar:       "CODEX_HOME",
+			agent:     "codex",
+			argv:      "login --device-auth",
+			configVar: "CODEX_HOME",
+			// The flag IS the lever, so the pane needs nothing from the environment
+			// and must not carry the other agents' levers either.
 			credentialNames: []string{"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"},
 			artifact:        "auth.json",
+			absentEnv:       []string{"NO_BROWSER", "BROWSER"},
 		},
 		{
 			agent:           "gemini",
@@ -67,6 +86,8 @@ func loginPaneCases() []loginPaneCase {
 			configVar:       "GEMINI_CLI_HOME",
 			credentialNames: []string{"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"},
 			artifact:        filepath.Join(".gemini", "gemini-credentials.json"),
+			loginEnv:        map[string]string{"NO_BROWSER": "true"},
+			absentEnv:       []string{"BROWSER"},
 		},
 	}
 }
@@ -103,6 +124,12 @@ func TestLoginPaneRunsTheAgentsOwnFlowInTheAccountEnvironment(t *testing.T) {
 			t.Setenv("ANTHROPIC_API_KEY", ambientClaudeKey)
 			t.Setenv("OPENAI_API_KEY", ambientOpenAIKey)
 			t.Setenv("GEMINI_API_KEY", ambientGeminiKey)
+			// And the daemon's own browser configuration, which must not decide how
+			// a login pane behaves: af sets these itself, per agent (#3854). Values
+			// af would never write, so an assertion below can tell "af's" from
+			// "inherited".
+			t.Setenv("BROWSER", ambientBrowser)
+			t.Setenv("NO_BROWSER", ambientBrowser)
 
 			binDir := t.TempDir()
 			reportPath := filepath.Join(binDir, "pane-environment")
@@ -164,7 +191,32 @@ func TestLoginPaneRunsTheAgentsOwnFlowInTheAccountEnvironment(t *testing.T) {
 				}
 			}
 
-			// 4. The login is reported from the AGENT'S OWN artifact. The fixture
+			// 4. BROWSER-FREE (#3854): the pane holds exactly this agent's lever,
+			//    with af's value rather than the daemon's, and none of the others.
+			//    Read off the real process, because the whole chain — the tmux
+			//    session environment, the exec shim's default-deny re-filter, the
+			//    account boundary — sits between af's table and this pane, and any
+			//    of them could drop it.
+			for name, want := range tc.loginEnv {
+				if !strings.Contains(report, name+"="+want+"\n") {
+					t.Fatalf("pane did not receive %s=%s, so the sign-in is not browser-free; environment:\n%s",
+						name, want, report)
+				}
+			}
+			for _, name := range tc.absentEnv {
+				for _, line := range strings.Split(report, "\n") {
+					if strings.HasPrefix(line, name+"=") {
+						t.Fatalf("pane carries %q, which is not this agent's browser lever; environment:\n%s",
+							line, report)
+					}
+				}
+			}
+			if strings.Contains(report, ambientBrowser) {
+				t.Fatalf("pane inherited the daemon's own browser configuration %q; environment:\n%s",
+					ambientBrowser, report)
+			}
+
+			// 5. The login is reported from the AGENT'S OWN artifact. The fixture
 			//    wrote it through the variable af injected, so this also proves the
 			//    directory the pane holds is the one af reports.
 			loggedIn := waitForLogin(t, home, tc.agent, "work")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 
@@ -69,6 +70,39 @@ func (t *TmuxSession) SetAccountEnvironmentForAgent(agent, name string) {
 	t.accountEnvironmentOnly = name != ""
 }
 
+// SetAccountLoginForAgent scopes an account LOGIN pane (#3854).
+//
+// It is SetAccountEnvironmentForAgent plus the environment that makes the
+// agent's own sign-in browser-free, and it is a separate setter rather than a
+// flag on that one because the two panes want opposite things. A login pane
+// exists to print a URL and a code; a working session's shell or process tab
+// exists to do work, and handing it NO_BROWSER or a no-op BROWSER would change
+// how the agent behaves for reasons that have nothing to do with the session.
+//
+// The operator's own pass-through WINS. A name already in session_env_passthrough
+// is skipped here, so the value they configured flows through untouched — af's
+// browser-free default is a default, not a wall, on a daemon host that really
+// does have a browser to open. Call it AFTER SetEnvPassthrough, which
+// accountlogin does.
+func (t *TmuxSession) SetAccountLoginForAgent(agent, name string) {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.account = name
+	t.accountAgent = agent
+	t.accountEnvironmentOnly = name != ""
+	t.accountLoginEnv = nil
+	if name == "" {
+		return
+	}
+	for _, entry := range sessionenv.AccountLoginEnvironment(agent) {
+		envName, _, ok := strings.Cut(entry, "=")
+		if !ok || slices.Contains(t.envPassthrough, envName) {
+			continue
+		}
+		t.accountLoginEnv = append(t.accountLoginEnv, entry)
+	}
+}
+
 // SetAccountShellEnvironmentForAgent scopes an af-created interactive shell.
 // Named-account shells use the startup-file-free form the boundary recognizes.
 func (t *TmuxSession) SetAccountShellEnvironmentForAgent(agent, name string) error {
@@ -108,7 +142,7 @@ func (t *TmuxSession) SetLaunchProgram(program string, proof sessionenv.AccountL
 // reason SetLaunchProgram writes them in one: Start used to read program through
 // its own lock and the declaration through another, so a rewrite landing between
 // them paired an old command with a new declaration.
-func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string, accountEnvironmentOnly bool) {
+func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string, accountEnvironmentOnly bool, accountLoginEnv []string) {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
 	return t.program, sessionenv.AccountLaunchProof{
@@ -118,7 +152,8 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 		append([]string(nil), t.envPassthrough...),
 		t.account,
 		t.accountAgent,
-		t.accountEnvironmentOnly
+		t.accountEnvironmentOnly,
+		append([]string(nil), t.accountLoginEnv...)
 }
 
 // It SNAPSHOTS rather than taking the program as a parameter: the caller used to
@@ -131,11 +166,22 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 }
 
 func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []string, string, error) {
-	program, proof, extra, account, accountAgent, accountEnvironmentOnly := t.launchSnapshot()
+	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
 		return "", nil, nil, nil, "", err
+	}
+	// The login pane's names join the pass-through allowlist for THIS launch
+	// rather than being written back onto the session, so calling the setter twice
+	// cannot mistake af's own additions for the operator's and drop them. The
+	// exec shim re-filters os.Environ() against exactly this list immediately
+	// before exec, so a name missing here is a value the agent never sees (#3854).
+	if len(loginEnv) > 0 {
+		extra, err = sessionenv.NormalizeExtraNames(append(extra, environmentEntryNames(loginEnv)...))
+		if err != nil {
+			return "", nil, nil, nil, "", err
+		}
 	}
 	var wrapped string
 	if account != "" {
@@ -177,7 +223,14 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
 	var sessionEnv []string
 	if account != "" {
-		boundaryNames := accountSessionBoundaryNames(accountAgent)
+		// The login pane's browser-free names go through the SAME three steps as
+		// the account boundary's, and for the same reason: af has to be the one
+		// that decides their value. Stripped from the client environment so the
+		// daemon's own BROWSER cannot ride along, named in update-environment so an
+		// existing server unsets a stale copy, and then set explicitly below
+		// (#3854).
+		boundaryNames := appendMissingEnvironmentNames(
+			accountSessionBoundaryNames(accountAgent), environmentEntryNames(loginEnv))
 		launchEnv = removeEnvironmentNames(launchEnv, boundaryNames)
 		selectedEnv, resolveErr := sessionenv.ResolveAccountEnvironment(accountAgent, account)
 		if resolveErr != nil {
@@ -185,7 +238,7 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 		}
 		// Selected roots belong to this tmux session, not the client environment:
 		// a fresh server copies its first client's environment globally.
-		sessionEnv = selectedEnv
+		sessionEnv = append(selectedEnv, loginEnv...)
 		// Keep every removed name in update-environment so an existing server
 		// explicitly unsets stale identities and startup hooks before new-session.
 		importNames = appendMissingEnvironmentNames(importNames, boundaryNames)
@@ -223,7 +276,7 @@ func accountSessionBoundaryNames(agent string) []string {
 }
 
 func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
-	_, _, _, account, accountAgent, _ := t.launchSnapshot()
+	_, _, _, account, accountAgent, _, _ := t.launchSnapshot()
 	if account == "" {
 		return nil
 	}
@@ -264,6 +317,18 @@ func (t *TmuxSession) runRestoredAccountCommand(args ...string) error {
 		return fmt.Errorf("%s %s: %w", args[0], t.sanitizedName, err)
 	}
 	return nil
+}
+
+// environmentEntryNames reads the names out of NAME=VALUE entries, dropping any
+// malformed one rather than inventing a name for it.
+func environmentEntryNames(entries []string) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if name, _, ok := strings.Cut(entry, "="); ok {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func removeEnvironmentNames(environ, names []string) []string {

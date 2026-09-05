@@ -9,11 +9,11 @@
 // THE PROBLEM THIS SOLVES, and it is the one #3385 called load-bearing: the login
 // child runs on the DAEMON host while the human is usually on a laptop over
 // Tailscale. So the button does not "open a browser" — it opens the daemon-side
-// pane here, and a device-code or paste-a-URL flow (what all three of these CLIs
-// fall back to on a headless host) is completed by the human reading the code and
-// finishing it in their OWN browser. A flow that insists on opening a browser on
-// the server is one nobody is sitting in front of, and that stays an
-// `af accounts login` on the host.
+// pane here, and the device-code flow — which af now SELECTS for all three CLIs
+// rather than relying on them to fall back to it (#3854) — is completed by the
+// human reading the code and finishing it in their OWN browser. A flow that
+// insists on opening a browser on the server is one nobody is sitting in front
+// of, and that stays an `af accounts login` on the host.
 //
 // No credential crosses this stream that af has read: the bytes are the pane's, on
 // their way to a terminal, exactly as they would be on the daemon host's screen.
@@ -98,7 +98,8 @@ export function openAccountLogin(opts: {
     "p",
     { class: "af-assistant-note" },
     `Running ${login.program} on the daemon host with this account's credential directory. ` +
-      "af never reads the credential. Complete the sign-in here; a device code or URL opens in your own browser.",
+      "af never reads the credential. The pane prints a URL and a device code · sign in on any device, " +
+      "then paste the code back here.",
   );
   const termHost = h("div", { class: "af-assistant-term" });
   const body = h("div", { class: "af-assistant-body" }, note, termHost);
