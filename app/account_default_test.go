@@ -21,6 +21,24 @@ import (
 // version-skew check mean anything: a client that sent no account has nothing to
 // compare the created session against.
 
+// requireNamingFormOpened asserts that pressing `n`/`N` OPENED the naming form
+// rather than refusing the keypress.
+//
+// It replaces a bare `require.Nil(t, cmd)` at every startNewInstance call site.
+// That was the right proxy until opening the form began asking the daemon which
+// account this project defaults to (#3386): the keypress now legitimately produces
+// a command, so "produced no command" fails on a form that opened perfectly.
+//
+// The replacement is STRICTER than the assertion it removes, not looser. Every
+// refusal in startNewInstance returns through handleNotice/handleError before the
+// form is set up, and both land in the error box — so an empty box is direct
+// evidence that nothing was reported, where a nil command was only evidence that
+// nothing was scheduled.
+func requireNamingFormOpened(t *testing.T, h *home, msgAndArgs ...any) {
+	t.Helper()
+	require.Empty(t, h.errBox.FullError(), msgAndArgs...)
+}
+
 // withDefaults is the registry answer from a host whose config scopes accounts
 // per agent.
 func withDefaults(defaults map[string]string) daemon.ListAccountsResponse {

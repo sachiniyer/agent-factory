@@ -134,14 +134,73 @@ func TestDefaultAccountLayersForAttributesTheWinningLayer(t *testing.T) {
 	assert.Equal(t, "side", codex.Name)
 	assert.Equal(t, SourceProjectPersonal, codex.Layer, "the project overrode it, so the refusal must name that file")
 	assert.Contains(t, codex.Source(), "default_accounts.codex")
-	assert.Contains(t, codex.ClearHint(repoRoot), "--project "+repoRoot)
-	assert.Equal(t, "work", codexGlobal.Name, "the global layer is reported separately as the no-repo fallback")
+	assert.Equal(t, "af config unset default_accounts.codex --project "+repoRoot, codex.ClearHint(repoRoot))
+	assert.Empty(t, codexGlobal.Name,
+		"a resolution that SUCCEEDED already folded the global layer in; returning it beside the answer would let "+
+			"a caller resolve past a project's opt-out")
 
 	claude, _ := DefaultAccountLayersFor(global, repoRoot, "claude")
 	assert.Equal(t, "shared", claude.Name)
 	assert.Equal(t, SourceGlobal, claude.Layer,
 		"an agent the project did not override resolves through the global layer, and the trace must say so")
-	assert.NotContains(t, claude.ClearHint(repoRoot), "--project")
+	assert.Equal(t, `af config set default_accounts.claude ""`, claude.ClearHint(repoRoot),
+		"`af config unset` without --project clears three migrated backend settings and refuses everything else, "+
+			"so a global hint pointing at it would print a command that errors")
+}
+
+// The empty value is the opt-out, and it is the reason ValidateDefaultAccountEntry
+// accepts one: a project that sets its entry to "" runs on the ambient identity
+// even while the global layer names an account. Merging per key is what makes that
+// expressible, and dropping the global fallback once the repo resolves is what
+// stops it being resolved past.
+func TestAnEmptyProjectEntryOptsOutOfTheGlobalDefault(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	writeGlobalTOML(t, home, "[default_accounts]\ncodex = \"work\"\nclaude = \"shared\"\n")
+	writePersonalConfig(t, project.ID, "[default_accounts]\ncodex = \"\"\n")
+	global, err := LoadConfig()
+	require.NoError(t, err)
+
+	codex, codexGlobal := DefaultAccountLayersFor(global, repoRoot, "codex")
+	assert.Empty(t, codex.Name, "the project turned the default off for this agent")
+	assert.Empty(t, codexGlobal.Name, "and the global entry must not come back as a fallback")
+	assert.Empty(t, ResolvedDefaultAccountsFor(global, repoRoot)["codex"],
+		"the catalog must agree, or a picker would preselect an identity the create does not use")
+
+	claude, _ := DefaultAccountLayersFor(global, repoRoot, "claude")
+	assert.Equal(t, "shared", claude.Name, "and the opt-out is per agent, like every other entry")
+}
+
+// An empty value is also how a GLOBAL default is cleared, since `af config unset`
+// refuses this key without --project. The hint must therefore be a command that
+// actually runs.
+func TestAnEmptyValueClearsAGlobalDefaultAccount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeGlobalTOML(t, home, "schema_version = 1\n[default_accounts]\ncodex = \"work\"\n")
+
+	_, err := SetGlobalConfigValue("default_accounts.codex", "")
+	require.NoError(t, err, "the hint every refusal prints must be a command the CLI accepts")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.DefaultAccounts["codex"])
+	_, globalLayer := DefaultAccountLayersFor(cfg, "", "codex")
+	assert.Empty(t, globalLayer.Name, "and the cleared entry stops selecting anything")
+}
+
+// The project hint has to run too, and `af config unset --project` is a different
+// code path from the global one.
+func TestTheProjectClearHintActuallyRemovesTheEntry(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	_, err := SetProjectConfigValue(project.ID, "default_accounts.codex", "work")
+	require.NoError(t, err)
+
+	_, err = UnsetProjectConfigValue(repoRoot, "default_accounts.codex")
+	require.NoError(t, err, "the --project hint every project-layer refusal prints must be a command that runs")
+
+	resolved, err := ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	assert.Empty(t, resolved.DefaultAccounts["codex"])
 }
 
 func TestDefaultAccountLayersForFallsBackWhenTheRepoDoesNotResolve(t *testing.T) {

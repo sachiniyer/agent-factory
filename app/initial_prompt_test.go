@@ -281,9 +281,9 @@ func TestStartNewInstanceResetsThePromptField(t *testing.T) {
 	h.errBox.SetSize(120, 1)
 	h.pendingPrompt = "a prompt stranded by some earlier create"
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance(false)
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	require.Equal(t, stateNew, h.state)
 
 	assert.Empty(t, h.pendingPrompt,

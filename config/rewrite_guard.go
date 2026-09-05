@@ -181,7 +181,7 @@ func structValueDrift(before, after reflect.Value) string {
 		if field.PkgPath != "" {
 			continue
 		}
-		if reflect.DeepEqual(before.Field(i).Interface(), after.Field(i).Interface()) {
+		if sameConfigValue(before.Field(i), after.Field(i)) {
 			continue
 		}
 		name := field.Name
@@ -191,6 +191,31 @@ func structValueDrift(before, after reflect.Value) string {
 		return fmt.Sprintf("%s from %v to %v", name, before.Field(i).Interface(), after.Field(i).Interface())
 	}
 	return ""
+}
+
+// sameConfigValue compares two same-typed config field values, treating a NIL map
+// and an EMPTY map as the same configuration — because for a config key they are:
+// both decode from a file with no entries, both resolve to no override, and
+// neither is a value a user can write differently.
+//
+// reflect.DeepEqual disagrees, and that disagreement was a REAL refusal rather
+// than a nicety. Unsetting the LAST entry of a dynamic map — `af config unset
+// program_overrides.claude --project <path>`, or default_accounts.<agent> —
+// produced an expectation holding an emptied map while the re-parsed file decoded
+// the removed table as nil. The guard then refused its own writer's edit with
+// "would change program_overrides from map[] to map[]": two values it printed
+// identically, because they ARE identical as configuration. The command it
+// refused is the one `af config unset --help` documents, and the one this key's
+// refusals hand a user to run.
+//
+// It stays strict about everything else: a map that gained, lost or changed any
+// entry still differs, and so does every non-map field.
+func sameConfigValue(before, after reflect.Value) bool {
+	if before.Kind() == reflect.Map && after.Kind() == reflect.Map &&
+		before.Len() == 0 && after.Len() == 0 {
+		return true
+	}
+	return reflect.DeepEqual(before.Interface(), after.Interface())
 }
 
 // snapshotProjectConfig is snapshotConfig's personal-project twin: a deep copy

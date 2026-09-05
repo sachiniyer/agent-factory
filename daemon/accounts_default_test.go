@@ -71,16 +71,26 @@ func TestExplicitAccountBeatsTheProjectDefault(t *testing.T) {
 		"and it carries no config provenance: the remedy for a refusal is the flag the user typed")
 }
 
+// writeGlobalAccounts puts a `default_accounts` table in the global config file.
+// The FILE, not the passed-in snapshot: the per-repo resolution reads the global
+// layer from disk, exactly as defaultProgramFor's does, and the snapshot is only
+// the fallback for a repo that does not resolve.
+func writeGlobalAccounts(t *testing.T, home, body string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(home, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName), []byte(body), 0o644))
+}
+
 // TestProjectDefaultAccountBeatsTheGlobalOne is the middle of the precedence —
 // the reason the key admits the personal per-project layer at all.
 func TestProjectDefaultAccountBeatsTheGlobalOne(t *testing.T) {
 	home, repoPath, project := defaultAccountFixture(t, "codex", "side")
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", "codex", "work"), 0o700))
+	writeGlobalAccounts(t, home, "[default_accounts]\ncodex = \"work\"\n")
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"side\"\n")
-	global := &config.Config{DefaultAccounts: map[string]string{"codex": "work"}}
 
 	req := CreateSessionRequest{Title: "layered", RepoPath: repoPath, Program: "codex"}
-	require.NoError(t, applyDefaultAccount(global, &req))
+	require.NoError(t, applyDefaultAccount(&config.Config{}, &req))
 	assert.Equal(t, "side", req.Account)
 	assert.Contains(t, req.AccountSource, "--project",
 		"the refusal hint must point at the layer that actually set it")
@@ -90,18 +100,38 @@ func TestProjectDefaultAccountBeatsTheGlobalOne(t *testing.T) {
 // repo cannot be resolved at all — the same shape defaultProgramFor uses.
 func TestGlobalDefaultAccountAppliesWithNoProjectOverride(t *testing.T) {
 	home, repoPath, _ := defaultAccountFixture(t, "codex", "work")
-	global := &config.Config{DefaultAccounts: map[string]string{"codex": "work"}}
+	writeGlobalAccounts(t, home, "[default_accounts]\ncodex = \"work\"\n")
 
 	req := CreateSessionRequest{Title: "global", RepoPath: repoPath, Program: "codex"}
-	require.NoError(t, applyDefaultAccount(global, &req))
+	require.NoError(t, applyDefaultAccount(&config.Config{}, &req))
 	assert.Equal(t, "work", req.Account)
+	assert.NotContains(t, req.AccountSource, "--project",
+		"a global default is cleared globally, so the hint must not send the user to a project file")
 
+	// The snapshot is the fallback for a path Git does not recognize, which is what
+	// defaultProgramFor does rather than failing the create here.
+	snapshot := &config.Config{DefaultAccounts: map[string]string{"codex": "work"}}
 	unresolvable := CreateSessionRequest{
 		Title: "no-repo", RepoPath: filepath.Join(home, "nowhere"), Program: "codex",
 	}
-	require.NoError(t, applyDefaultAccount(global, &unresolvable))
-	assert.Equal(t, "work", unresolvable.Account,
-		"a path Git does not recognize falls back to the global layer rather than failing the create here")
+	require.NoError(t, applyDefaultAccount(snapshot, &unresolvable))
+	assert.Equal(t, "work", unresolvable.Account)
+}
+
+// An empty project entry is the OPT-OUT, and it must survive the global fallback:
+// the repo resolution already folded the global layer in, so a caller that fell
+// back to it anyway would scope the session to the very account the project turned
+// off.
+func TestAnEmptyProjectEntryKeepsTheAmbientIdentity(t *testing.T) {
+	home, repoPath, project := defaultAccountFixture(t, "codex", "work")
+	writeGlobalAccounts(t, home, "[default_accounts]\ncodex = \"work\"\n")
+	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"\"\n")
+
+	req := CreateSessionRequest{Title: "opted-out", RepoPath: repoPath, Program: "codex"}
+	require.NoError(t, applyDefaultAccount(&config.Config{}, &req))
+	assert.Empty(t, req.Account, "this project opted out, so the global default must not reach it")
+	assert.Empty(t, defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"})["codex"],
+		"and the picker must agree, or it would preselect an identity the create does not use")
 }
 
 // An account belongs to ONE agent, and this is the property the map-shaped key

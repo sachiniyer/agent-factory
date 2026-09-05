@@ -43,6 +43,18 @@ func ValidateDefaultAccountEntry(lead, agent, name string) error {
 				"default would never apply; account scoping supports %s",
 			lead, agent, sessionenv.AccountAgentsSummary())
 	}
+	if strings.TrimSpace(name) == "" {
+		// EMPTY IS A VALUE, not a mistake, and it is the only way to clear this key.
+		// `af config unset` without --project clears three migrated backend settings
+		// and refuses everything else, so an empty value is what removes a GLOBAL
+		// default — exactly as it removes a program_overrides entry.
+		//
+		// In the personal per-project layer it is also the opt-out: the key merges per
+		// agent, so a project entry of "" is present, wins for that agent, and means
+		// "this project runs on the ambient identity" even when the global layer names
+		// an account.
+		return nil
+	}
 	if err := agentaccount.ValidateName(name); err != nil {
 		return fmt.Errorf("%s: default_accounts.%s is not a usable account name: %w", lead, agent, err)
 	}
@@ -148,12 +160,18 @@ func (s DefaultAccountSelection) Source() string {
 	return phrase
 }
 
-// ClearHint is the command that removes this default.
+// ClearHint is the command that removes this default — and it is a command that
+// RUNS, which is why the two layers get different ones.
+//
+// `af config unset` without --project clears three migrated backend settings and
+// refuses everything else, so pointing a global default at it would print an
+// instruction that errors. An empty value is what clears a global entry, the same
+// way it clears a program_overrides one.
 func (s DefaultAccountSelection) ClearHint(repoPath string) string {
 	if s.Layer == SourceProjectPersonal && repoPath != "" {
 		return fmt.Sprintf("af config unset %s --project %s", s.Key(), repoPath)
 	}
-	return "af config unset " + s.Key()
+	return fmt.Sprintf(`af config set %s ""`, s.Key())
 }
 
 // DefaultAccountLayersFor reports the `default_accounts` entry for agent from the
@@ -164,11 +182,12 @@ func (s DefaultAccountSelection) ClearHint(repoPath string) string {
 // The PROJECT selection is the per-repo resolution, which already folds the
 // global layer under the personal one — so when the global entry is the one that
 // wins there, the returned provenance says "global", and it says "personal
-// project" when the project overrode it. The GLOBAL selection is the fallback for
-// the case that resolution cannot happen at all: no repo path, a path Git does
-// not recognize, or a config that does not load. Falling back rather than failing
-// matches defaultProgramFor — the create surfaces a real path problem a moment
-// later, with more context than this read has.
+// project" when the project overrode it. The GLOBAL selection is returned ONLY as
+// the fallback for a resolution that could not happen at all: no repo path, a path
+// Git does not recognize, or a config that does not load. Falling back rather than
+// failing matches defaultProgramFor — the create surfaces a real path problem a
+// moment later, with more context than this read has — and the two are never
+// returned together, so a project's empty opt-out cannot be resolved past.
 //
 // It reads through ResolveConfigForRepoInspection, never the recording variant:
 // answering "what account would a create use" is a read, and a read must not
@@ -200,9 +219,14 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 	if err != nil {
 		return DefaultAccountSelection{}, globalLayer
 	}
+	// From here the repo resolution is AUTHORITATIVE and the fallback is dropped.
+	// It has already folded the global layer under the personal one — including a
+	// project entry set to "" to opt out of a global default — so returning the
+	// global selection beside it would let a caller resolve past that opt-out and
+	// scope the session to the very account the project turned off.
 	name := strings.TrimSpace(resolved.DefaultAccounts[agent])
 	if name == "" {
-		return DefaultAccountSelection{}, globalLayer
+		return DefaultAccountSelection{}, DefaultAccountSelection{}
 	}
 	project = DefaultAccountSelection{Agent: agent, Name: name, Layer: SourceGlobal, Path: globalLayer.Path}
 	// The manifest resolves this key per agent (MergeMapByKey), so the trace
@@ -217,7 +241,7 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 			}
 		}
 	}
-	return project, globalLayer
+	return project, DefaultAccountSelection{}
 }
 
 // ResolvedDefaultAccountsFor reports the effective `default_accounts` map for

@@ -84,6 +84,20 @@ a default everywhere. It is rejected from a repository's checked-in
 `.agent-factory/config.toml`: identity policy is never checked in, and a
 committed account name means nothing to anyone else who clones the repository.
 
+To clear one:
+
+```bash
+af config unset default_accounts.codex --project ~/work/monorepo  # drop the project's override
+af config set default_accounts.codex ""                           # clear the global default
+af config set default_accounts.codex "" --project ~/work/monorepo # opt this project OUT of the global default
+```
+
+An **empty value is meaningful**, and the three lines differ. `unset` removes the
+project's entry so the global default applies again; an empty value at either
+layer means "no default", and because the key merges per agent, an empty entry in
+a project's config wins for that agent and keeps its sessions on the ambient
+identity even when the global layer names an account.
+
 Accounts are also what make the rest of this page actionable: a plan ceiling
 belongs to an identity, so a second account is one of the ways past one.
 
