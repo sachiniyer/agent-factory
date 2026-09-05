@@ -9,7 +9,9 @@
 #   .agents/plugins/marketplace.json the Codex marketplace serving them
 #   .claude-plugin/marketplace.json  the Claude Code marketplace serving them
 #
-# All of it comes out of the hidden `af gen-docs` command. CI runs this script
+# Interface tokens and the style guide come from the standalone Go generator.
+# The reference and plugin artifacts come from the hidden `af gen-docs` command.
+# CI runs this script
 # and fails if the committed output differs (see .github/workflows/docs.yml), so
 # run it and commit the result whenever you add or change a command, a flag, an
 # HTTP route, or the af usage text in session/systemprompt.go.
@@ -19,3 +21,6 @@ cd "$(dirname "$0")/.."
 
 out="docs/reference"
 go run . gen-docs "$out" --plugin-root .
+
+# Staged design contract; does not load af state or change live screens.
+go run ./scripts/gen-design

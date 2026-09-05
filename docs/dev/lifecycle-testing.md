@@ -1,5 +1,12 @@
 # Lifecycle testing — clean install and install → upgrade
 
+For maintainers changing installation, upgrades, or daemon supervision. This
+page covers failures that appear only when a machine crosses versions.
+
+Read [Container testing](container-testing.md) first for isolation rules and
+[Release process](release-process.md) for version channels. Then choose the
+clean-install or upgrade scenario below.
+
 Every other gate in this repo tests **code in isolation**. `make test-container`,
 the `*-roundtrip-container` harnesses, `make tui-driver-selftest` — each builds
 the current tree and exercises it. None of them ever installs a release,
