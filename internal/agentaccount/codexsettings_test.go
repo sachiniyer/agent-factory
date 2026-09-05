@@ -13,6 +13,7 @@ import (
 
 func TestRegisterCodexRuntimeSettings(t *testing.T) {
 	const source = "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel = 'gpt-example'\napi_key = 'secret'\ncli_auth_credentials_store = 'keyring'\n[projects.'/private']\ntrust_level = 'trusted'\n"
+	const granular = "approval_policy = {granular = {mcp_elicitations = false, rules = false, sandbox_approval = false}}\n"
 	const seeded = "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel = 'gpt-example'\n"
 	const workspace = "approval_policy = 'never'\nsandbox_mode = 'workspace-write'\n[sandbox_workspace_write]\nnetwork_access = true\nwritable_roots = ['/work']\nexclude_tmpdir_env_var = true\nexclude_slash_tmp = true\n"
 	const workspaceKeys = "approval_policy = 'never'\nsandbox_mode = 'workspace-write'\n"
@@ -22,6 +23,17 @@ func TestRegisterCodexRuntimeSettings(t *testing.T) {
 		absent                        bool
 	}{
 		{"new", source, "", seeded, false},
+		{"granular policy", granular, "", granular, false},
+		{"granular known fields only", "approval_policy = {granular = {mcp_elicitations = false, rules = false, sandbox_approval = false, api_key = 'secret'}}\n", "", granular, false},
+		{"granular optional fields", "approval_policy = {granular = {mcp_elicitations = false, request_permissions = true, rules = false, sandbox_approval = false, skill_approval = true}}\n", "", "approval_policy = {granular = {mcp_elicitations = false, request_permissions = true, rules = false, sandbox_approval = false, skill_approval = true}}\n", false},
+		{"invalid ambient numeric policy", "approval_policy = 123\nsandbox_mode = 'workspace-write'\n", "", "", true},
+		{"invalid ambient preserves account", "approval_policy = 'typo'\n", "approval_policy = 'never'\n", "approval_policy = 'never'\n", false},
+		{"granular before original", granular, "model = 'chosen'\n[features]\nfast = true\n", granular + "model = 'chosen'\n[features]\nfast = true\n", false},
+		{"granular preserves existing policy", granular, "approval_policy = 'untrusted'\n", "approval_policy = 'untrusted'\n", false},
+		{"existing granular policy stands", source, granular, "sandbox_mode = 'danger-full-access'\nmodel = 'gpt-example'\n" + granular, false},
+		{"invalid ambient policy", "approval_policy = 'typo'\nsandbox_mode = 'danger-full-access'\nmodel = 'unused'\n", "", "", true},
+		{"invalid ambient granular policy", "approval_policy = { granular = { rules = false } }\n", "", "", true},
+		{"invalid ambient unknown shape", "approval_policy = { granular = { mcp_elicitations = false, rules = false, sandbox_approval = false }, api_key = 'secret' }\n", "", "", true},
 		{"account provider", source, "model_provider = 'custom'\n", "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel_provider = 'custom'\n", false},
 		{"account provider any value", source, "model_provider = false\n", "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel_provider = false\n", false},
 		{"account provider preserves model", source, "model_provider = 'custom'\nmodel = 'chosen'\n", "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel_provider = 'custom'\nmodel = 'chosen'\n", false},
@@ -65,6 +77,13 @@ func TestRegisterCodexRuntimeSettings(t *testing.T) {
 			_, err := Register(home, "codex", "work")
 			require.NoError(t, err)
 			data, err := os.ReadFile(path)
+			if strings.HasPrefix(tt.name, "invalid ambient ") {
+				notices, noticeErr := CheckLoginPreconditions("codex", dir)
+				require.NoError(t, noticeErr)
+				joined := strings.Join(notices, "\n")
+				require.Contains(t, joined, "Nothing was written")
+				require.Contains(t, joined, "approval_policy could not be verified")
+			}
 			if tt.absent {
 				require.True(t, os.IsNotExist(err))
 				return
@@ -85,7 +104,7 @@ func TestRegisterCodexRuntimeSettings(t *testing.T) {
 				var doc map[string]any
 				require.NoError(t, toml.Unmarshal(data, &doc))
 				require.Contains(t, doc, "approval_policy")
-				if tt.name == "workspace before original keys" {
+				if tt.name == "workspace before original keys" || tt.name == "granular before original" {
 					require.Equal(t, "chosen", doc["model"])
 				}
 

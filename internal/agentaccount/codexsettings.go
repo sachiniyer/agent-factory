@@ -49,6 +49,9 @@ func answerCodexLoginPrompts(dir string) error {
 	if err != nil || ambient == nil {
 		return nil
 	}
+	if policy, exists := ambient["approval_policy"]; exists && !validCodexApprovalPolicy(policy) {
+		return nil // Refuse partial inheritance from an unverified policy.
+	}
 	if !codexHasRuntimeKeys(ambient) {
 		return nil
 	}
@@ -64,11 +67,16 @@ func answerCodexLoginPrompts(dir string) error {
 		if _, exists := account[key]; exists {
 			continue
 		}
-		value, ok := ambient[key].(string)
-		if !ok {
+		value, exists := ambient[key]
+		if !exists {
 			continue
 		}
-		encoded, err := toml.Marshal(map[string]string{key: value})
+		if key == "approval_policy" {
+			value = codexApprovalSeedValue(value)
+		} else if _, ok := value.(string); !ok {
+			continue
+		}
+		encoded, err := encodeCodexSetting(key, value)
 		if err != nil {
 			return fmt.Errorf("encode codex setting %s: %w", key, err)
 		}
@@ -107,15 +115,21 @@ func codexWorkspaceOptions(ambient, account map[string]any) ([]byte, error) {
 			options[key] = value
 		}
 	}
+	return encodeCodexSetting("sandbox_workspace_write", options)
+}
+
+// encodeCodexSetting keeps every added setting at top level, including policies
+// and sandbox options whose values are tables.
+func encodeCodexSetting(key string, value any) ([]byte, error) {
 	var encoded bytes.Buffer
-	if err := toml.NewEncoder(&encoded).SetTablesInline(true).Encode(map[string]any{"sandbox_workspace_write": options}); err != nil {
-		return nil, fmt.Errorf("encode codex sandbox options: %w", err)
+	if err := toml.NewEncoder(&encoded).SetTablesInline(true).Encode(map[string]any{key: value}); err != nil {
+		return nil, fmt.Errorf("encode codex setting %s: %w", key, err)
 	}
 	return encoded.Bytes(), nil
 }
 
 func codexHasRuntimeKeys(doc map[string]any) bool {
-	_, approval := doc["approval_policy"].(string)
+	approval := validCodexApprovalPolicy(doc["approval_policy"])
 	_, sandbox := doc["sandbox_mode"].(string)
 	return approval || sandbox
 }
@@ -126,13 +140,16 @@ func codexSettingsNotice(dir string) string {
 	if err != nil {
 		return fmt.Sprintf("Nothing was written to %s because ~/.codex/config.toml could not be read: cannot locate the home directory: %v", path, err)
 	}
-	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when neither the ambient file nor the account has model_provider. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
+	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when neither the ambient file nor the account has model_provider. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Approval policies are validated before seeding; an invalid ambient policy skips all seeding. Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
 	_, ambient, err := readCodexSettings(source)
 	if err != nil {
 		return policy + " Nothing was written from the ambient file because it could not be read."
 	}
 	if ambient == nil {
 		return policy + " Nothing was written from the ambient file because it could not be parsed."
+	}
+	if policyValue, exists := ambient["approval_policy"]; exists && !validCodexApprovalPolicy(policyValue) {
+		return policy + " Nothing was written from the ambient file because approval_policy could not be verified. " + codexApprovalPolicyNotice
 	}
 	if _, customProvider := ambient["model_provider"]; customProvider {
 		policy += " model not seeded: ~/.codex/config.toml selects a custom model_provider."

@@ -13,6 +13,7 @@ func TestCodexApprovalWarningValidatesPolicy(t *testing.T) {
 		name, policy string
 		valid        bool
 	}{
+		{"untrusted outside current schema", "'untrusted'", false}, {"on failure outside current schema", "'on-failure'", false},
 		{"never", "'never'", true}, {"interactive", "'on-request'", true},
 		{"number", "123", false}, {"boolean", "true", false},
 		{"typo", "'typo'", false}, {"empty", "''", false},
@@ -38,6 +39,9 @@ func TestCodexApprovalWarningValidatesPolicy(t *testing.T) {
 					require.Contains(t, warning, want)
 				}
 				require.NotContains(t, warning, "has no top-level")
+				for _, accepted := range []string{"on-request", "never", "granular"} {
+					require.Contains(t, warning, accepted)
+				}
 			}
 			data, err := os.ReadFile(path)
 			require.NoError(t, err)
