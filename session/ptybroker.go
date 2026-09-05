@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -133,6 +135,12 @@ type ptyBroker struct {
 	rows, cols uint16
 	hasSize    bool
 	resizeGen  uint64 // bumped on each resize; a subscriber echoes when it lags
+	// warnedSessionGone latches the ONE warning a gone tmux session earns (#3862).
+	// Cleared by recoverCapture, and ONLY there: a broker outlives a session
+	// recovery that re-spawns tmux (resetBrokerCaptures preserves it, #1682), so
+	// that respawn is the one seam at which "the pane's session is gone" stops
+	// being terminal and a later death is news again.
+	warnedSessionGone bool
 
 	capturing   bool
 	stopCapture func() // tears down the capture goroutine + clientless channel
@@ -633,6 +641,11 @@ func (b *ptyBroker) input(p []byte) error {
 // failed resize-window (an old tmux, a vanished pane) must not swallow the echo
 // clients depend on to reflow; the apply error is logged, not propagated as a
 // missing echo.
+//
+// Which failures are logged is shouldWarnResizeFailure's call (#3862); nothing
+// else about the contract above moves. The apply is still attempted on every
+// frame and the error is still returned, so a caller that cares still learns of
+// it — only the log line is rationed.
 func (b *ptyBroker) resize(rows, cols uint16) error {
 	b.mu.Lock()
 	b.rows, b.cols = rows, cols
@@ -642,7 +655,9 @@ func (b *ptyBroker) resize(rows, cols uint16) error {
 	b.mu.Unlock()
 
 	if err := b.ch.Resize(rows, cols); err != nil {
-		log.WarningLog.Printf("pty broker: apply resize %dx%d to pane: %v", rows, cols, err)
+		if b.shouldWarnResizeFailure(err) {
+			log.WarningLog.Printf("pty broker: apply resize %dx%d to pane: %v", rows, cols, err)
+		}
 		return err
 	}
 	// Deliberately NO capture-pane repaint on resize: resize-window sends the pane's
@@ -654,6 +669,42 @@ func (b *ptyBroker) resize(rows, cols uint16) error {
 	// SIGWINCH redraw lands, so the pane never blanks. The initial-subscribe repaint
 	// (which has no concurrent output to race) remains the fix for a fresh pane.
 	return nil
+}
+
+// shouldWarnResizeFailure reports whether a failed apply is worth a log line, and
+// latches the gone-session case as it answers (#3862).
+//
+// A tmux session that is GONE fails every later resize-window identically, for as
+// long as that pane stays dead, so a per-frame warning turns a single drag into a
+// burst of the same line: five inside one second in the log that prompted this,
+// one per frame of one gesture. The first line is the news; the rest are the same
+// news re-reported. This says it once and then stops.
+//
+// Everything else stays as noisy as it was, and the exclusions are the point:
+//
+//   - A plain failure (an old tmux — resize-window predates 2.9 — or a one-off
+//     exec error) may not recur, so each occurrence is genuinely new information.
+//   - ErrTmuxTimeout is NOT a death certificate and must never be folded in here.
+//     ResizeWindow returns it precisely when the server is WEDGED and the
+//     session's state is UNKNOWN, and it takes deliberate care not to report that
+//     as ErrSessionGone. Silencing it after one line would hide a wedged server.
+//
+// The latch lives under b.mu with the rest of the size state, so two clients
+// resizing a dead pane concurrently still produce exactly one line between them.
+// It is "once per DEAD PANE", not once per process: recoverCapture clears it when
+// the upstream is re-established, so a session that dies, recovers and dies again
+// reports both deaths.
+func (b *ptyBroker) shouldWarnResizeFailure(err error) bool {
+	if !errors.Is(err, tmux.ErrSessionGone) {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.warnedSessionGone {
+		return false
+	}
+	b.warnedSessionGone = true
+	return true
 }
 
 // wakeAllLocked signals every subscriber that state changed. The notify channel
