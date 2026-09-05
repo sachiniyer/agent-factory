@@ -12,6 +12,10 @@ the agent CLI treats as its home. `af` never reads, stores, or forwards the
 credential itself: it decides which directory a session sees, and the agent's
 own login flow puts the material there.
 
+Install the agent you are logging into first: this example needs `codex` on
+your `PATH`, even if your sessions normally use another agent. Run it in an
+interactive terminal.
+
 ```bash
 af accounts login codex work   # register it, then run codex's own login in it
 af accounts list               # what is registered, and whether it holds a credential
@@ -21,8 +25,15 @@ af accounts list               # what is registered, and whether it holds a cred
 login flow in a tmux session scoped to it, hands you the terminal for the
 browser or device-code step, and afterwards reports whether the account holds a
 credential — read from the agent's own credential file, by checking that it
-exists. You can also do it by hand; `af accounts add` prints the directory and
-`af` runs exactly the same commands you would:
+exists. For Codex, open the displayed device-login URL in your browser and enter
+the one-time code there. To stop before signing in, press `ctrl+c` in the login
+pane: the account stays registered but `af accounts list` reports `not logged
+in`, and the login command reports that no credential was created. Re-run the
+login command when ready to finish. A named Codex account starts with its own
+history, settings, and skills as well as credentials.
+
+You can also register the home and run the agent's login yourself;
+`af accounts add` prints the directory:
 
 ```bash
 CODEX_HOME=$(af accounts add codex work) codex login
@@ -30,10 +41,11 @@ CLAUDE_CONFIG_DIR=$(af accounts add claude work) claude auth login
 GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
 ```
 
-Once an account exists, a session can be pinned to it:
+After completing sign-in, pin a session to that account and its agent (a Codex
+account cannot be used by the default Claude agent):
 
 ```bash
-af sessions create --name spike --account work
+af sessions create --name spike --program codex --account work
 ```
 
 The TUI's naming form offers the same field on `ctrl+o`, and so does the web

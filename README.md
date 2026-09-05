@@ -39,7 +39,9 @@ curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/ins
 ```
 
 That puts `af` in `~/.local/bin` (override with `AF_INSTALL_DIR`, pin with
-`--version <tag>`). Or build from source with Go 1.25+:
+`--version <tag>`). If the installer reports that directory is not on your
+`PATH`, run `export PATH="$HOME/.local/bin:$PATH"` and add the same line to your
+shell profile for future terminals. Or build from source with Go 1.25+:
 
 ```bash
 git clone https://github.com/sachiniyer/agent-factory.git
@@ -55,12 +57,27 @@ af doctor --setup   # check tmux, git, agent CLIs, storage, daemon health
 af                  # open the TUI
 ```
 
-Press `n`, name the task, and describe it — the agent starts in a fresh
-worktree. Watch it in the Agent tab on the right, press `↵` to type to it in
-place, `ctrl+]` to step back out, and `a` to archive it when you are done.
+A session is an agent in its own git worktree (an isolated checkout on a new
+branch). In the terminal UI (TUI), press `n`, replace the suggested name, then
+`shift+tab` to describe the work in **Initial prompt**. Press Tab to keep the
+prompt, then Enter to create the session. Tab from the name opens the agent
+picker if you need a different agent.
+
+Dismiss **Session created** with Enter or Esc. Watch the Agent tab on the right;
+`●` means ready/idle, not proof that the task succeeded. Press Enter to type to
+the agent in place (Enter again if **Interactive pane** help appears), and
+`ctrl+]` to return to navigation. Handle any remaining agent sign-in or trust
+prompt in its pane before expecting work to start. When you are done, press `a`
+and confirm with Enter to archive the session. A doctor warning that autostart
+is not installed does not block this walkthrough.
 
 Now open **<http://localhost:8443>**. The same sessions, live, in a browser: the
 daemon serves the web client on loopback with no token and no login screen.
+Use a browser on the machine running `af`, then select a session in the rail to
+open its terminal. If the page does not load, run
+`af daemon status` and check the `tcp listener` address and whether it is bound;
+use that port if it differs from 8443. An empty `network.listen_addr` disables
+the web listener. See [Web client](docs/web.md) for configuration and remote access.
 
 ## The mental model in five terms
 

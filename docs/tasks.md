@@ -58,6 +58,10 @@ An **all-whitespace** `target_session` means the same thing as an empty one — 
 
 `cron_expr` is a standard 5-field expression (`minute hour day-of-month month day-of-week`) with Vixie semantics, including the DOM/DOW OR rule when both fields are restricted. The daemon evaluates expressions in-process — what you write is exactly what is evaluated, with no conversion to OS timer formats.
 
+Run this from the git repository the task should work on. The add command
+returns JSON containing the task's `id` and `project_path`; check the project,
+then replace `<id>` below with that returned id (without angle brackets).
+
 ```bash
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * 1-5"
 af tasks trigger <id>     # run a cron task immediately
