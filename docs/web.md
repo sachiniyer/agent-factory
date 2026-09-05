@@ -530,13 +530,14 @@ helper instead of the row editor.
 
 An **Accounts** section sits below the settings: the credential accounts
 registered per agent, and the controls to register another. It is rendered here
-for convenience but writes no config key — see
-[`af accounts`](reference/cli.md#af-accounts).
+for convenience but writes no config key. See [Accounts](usage-limits.md#accounts)
+for login, project defaults, Docker mounting, and identity boundaries.
 
 **Log in** opens the agent's own sign-in in a terminal on this page, running on
 the daemon's host where the credential directory is. It is a **device code**, not
 a browser handoff: the pane prints a URL and a code, you sign in from whatever
-device you are actually holding, and you paste the code back into the pane. That
+device you are actually holding, and complete the agent-specific code step.
+Codex takes the device code in the browser; Claude and Gemini may ask for an authorization code in the pane. That
 is deliberate — the daemon host is usually headless and remote, so a
 browser-callback sign-in there would either open a browser nobody is looking at
 or wait for a redirect to that host's own localhost that your machine cannot
@@ -545,9 +546,12 @@ reach.
 A registered account is then *selectable* on the **New session** form: its
 **Account** field lists the accounts belonging to the agent that form's **Program**
 names, so changing the program changes the list (claude's `work` and codex's `work`
-are different identities in different registries). Leaving it on **Ambient
-identity** sends no account, which is what every create did before the field
-existed. An account with no credential in it yet is listed, labelled, and still
+are different identities in different registries). The picker preselects the
+project default and labels it `project default`.
+**Ambient identity** sends no account; the daemon still applies configured
+defaults. To opt a project out of a global default, set an empty project entry
+as described in [Project accounts](usage-limits.md#scoping-an-account-to-a-project).
+An account with no credential in it yet is listed, labelled, and still
 selectable — it is usually the one you just made.
 
 ---
