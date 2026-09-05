@@ -160,16 +160,16 @@ nav:
           - Use cases: use-cases.md
           - Comparison: comparison.md
   - Develop and maintain:
-      - Overview: dev/index.md
+      - Start here · reading order: dev/index.md
       - Container testing: dev/container-testing.md
-      - Demo assets: dev/demo-assets.md
-      - Lifecycle testing: dev/lifecycle-testing.md
+      - File-length lint: dev/file-length-lint.md
+      - Surface parity: dev/surface-parity.md
       - Web client selftest: dev/web-selftest.md
       - Manual TUI testing: dev/tui-manual-testing.md
-      - Surface parity: dev/surface-parity.md
-      - File-length lint: dev/file-length-lint.md
+      - Demo assets: dev/demo-assets.md
       - Release process: dev/release-process.md
       - Release testing plan: dev/release-testing-plan.md
+      - Lifecycle testing: dev/lifecycle-testing.md
       - Release notes: dev/release-notes.md
       - Daemon memory: dev/daemon-memory.md
       - Design notes:
