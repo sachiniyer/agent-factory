@@ -25,8 +25,9 @@ path, which has these per-agent meanings:
 | Codex | `CODEX_HOME` | The config directory itself |
 | Gemini | `GEMINI_CLI_HOME` | A home-like root; Gemini appends `.gemini/` |
 
-Point Gemini at the printed root, never its nested `.gemini` directory. Its
-credential artifact is `<root>/.gemini/gemini-credentials.json`.
+Point Gemini at the printed root, never its nested `.gemini` directory. af
+recognizes either `<root>/.gemini/oauth_creds.json` or
+`<root>/.gemini/gemini-credentials.json` as a credential artifact.
 
 ### Log in
 
