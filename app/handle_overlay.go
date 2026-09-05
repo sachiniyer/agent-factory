@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -21,7 +22,8 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectionOverlay.IsSubmitted() {
 			idx := m.selectionOverlay.GetSelectedIndex()
 			picked := tmux.SupportedPrograms[idx]
-			if picked != m.pendingProgram {
+			changed := picked != m.pendingProgram
+			if changed {
 				// An account belongs to ONE agent — claude's "work" and codex's "work"
 				// are different identities in different registries — so a program change
 				// invalidates whatever the account field holds (#3844). Dropping it is
@@ -33,6 +35,17 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.clearPendingAccount()
 			}
 			m.pendingProgram = picked
+			m.selectionOverlay = nil
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+			if changed {
+				// The new agent has its own registry and its own project default, so
+				// ask again rather than leaving the field on the ambient identity
+				// (#3386). clearPendingAccount above already dropped the old agent's
+				// pick AND its chosen flag, so the answer is free to land.
+				return m, m.fetchAccountDefault(m.namingInstance, sessionenv.AgentForCommand(picked))
+			}
+			return m, nil
 		}
 		m.selectionOverlay = nil
 		m.state = stateNew

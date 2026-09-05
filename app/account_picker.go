@@ -69,6 +69,16 @@ type accountChoice struct {
 	// account directory, by stat — never by reading it. False is a legitimate
 	// choice, not a failure.
 	loggedIn bool
+	// projectDefault marks the account this project's `default_accounts` config
+	// would apply to a create that named none (#3386). It is a LABEL, not a
+	// behaviour: the row is selected like any other, and saying so is the point —
+	// the issue's complaint is a default applied in silence.
+	projectDefault bool
+	// unregistered marks a row that exists only because the project default names
+	// it: the daemon's registry did not list it, so a create with it will be
+	// refused. Distinct from !loggedIn, which is an account that exists and merely
+	// has no credential in it yet.
+	unregistered bool
 }
 
 // accountChoicesFrom turns the daemon's registry into the picker's rows: the
@@ -87,9 +97,14 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 		label: "Ambient identity (the agent's own login)",
 		agent: agent,
 	}}
+	fallback := resp.Defaults[agent]
+	listed := false
 	for _, entry := range resp.Entries {
 		if entry.Agent != agent {
 			continue
+		}
+		if entry.Name == fallback {
+			listed = true
 		}
 		choices = append(choices, accountChoice{
 			value:            entry.Name,
@@ -97,6 +112,23 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 			agent:            entry.Agent,
 			registrationOnly: entry.RegistrationOnly,
 			loggedIn:         entry.LoggedIn,
+			projectDefault:   entry.Name == fallback,
+		})
+	}
+	// A default naming an account the registry does not list is a real state — a
+	// project configured before the account was registered, or one deleted since —
+	// and it is the state a user most needs to SEE, because the create refuses it.
+	// Hiding it would leave the form showing the ambient identity while the config
+	// says otherwise, which is the shape of silence #3386 is about. Appended last,
+	// the way programs.ts keeps an unlisted program, so it never displaces a real
+	// choice.
+	if fallback != "" && !listed {
+		choices = append(choices, accountChoice{
+			value:          fallback,
+			label:          fallback,
+			agent:          agent,
+			projectDefault: true,
+			unregistered:   true,
 		})
 	}
 	return choices
@@ -112,10 +144,15 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 // credential in it yet — and saying so is the whole of constraint 3.
 func (c accountChoice) item() string {
 	var marks []string
+	if c.projectDefault {
+		marks = append(marks, "project default")
+	}
 	if c.registrationOnly {
 		marks = append(marks, "registration only")
 	}
-	if c.value != ambientAccount && !c.loggedIn {
+	if c.unregistered {
+		marks = append(marks, "not registered")
+	} else if c.value != ambientAccount && !c.loggedIn {
 		marks = append(marks, "not logged in")
 	}
 	if len(marks) == 0 {
@@ -141,6 +178,18 @@ type accountRegistryMsg struct {
 	err    error
 }
 
+// accountDefaultMsg carries the same fetched registry back for the PRESELECTION
+// path (#3386), which runs when the form opens and when its program changes
+// rather than when the account field is opened. A distinct type because the two
+// answers do different things with the same response — one opens an overlay, the
+// other quietly fills a field — and because only one of them may report a failure.
+type accountDefaultMsg struct {
+	naming *session.Instance
+	agent  string
+	resp   daemon.ListAccountsResponse
+	err    error
+}
+
 // listAccountsThroughDaemon is the fetch seam, mirroring listBackendsThroughDaemon:
 // a package var so the unit suite can answer with a fixture instead of a daemon.
 //
@@ -148,11 +197,11 @@ type accountRegistryMsg struct {
 // control client the config pane's Accounts section uses), because this answer
 // has to come from the daemon the create will go to — which for a remote target
 // is another machine, and the one whose home holds the account directories.
-var listAccountsThroughDaemon = func(agent string) (daemon.ListAccountsResponse, error) {
+var listAccountsThroughDaemon = func(agent, repoPath string) (daemon.ListAccountsResponse, error) {
 	var resp daemon.ListAccountsResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		resp, e = c.ListAccounts(agent)
+		resp, e = c.ListAccounts(agent, repoPath)
 		return e
 	})
 	if err != nil {
@@ -164,7 +213,7 @@ var listAccountsThroughDaemon = func(agent string) (daemon.ListAccountsResponse,
 // SetAccountListerForTest swaps the registry seam so a test can answer with a
 // fixture — including account names no list in this process knows about, which is
 // how "the TUI knows no account names" is provable rather than asserted.
-func SetAccountListerForTest(f func(agent string) (daemon.ListAccountsResponse, error)) func() {
+func SetAccountListerForTest(f func(agent, repoPath string) (daemon.ListAccountsResponse, error)) func() {
 	prev := listAccountsThroughDaemon
 	listAccountsThroughDaemon = f
 	return func() { listAccountsThroughDaemon = prev }
@@ -198,10 +247,83 @@ func (m *home) openAccountPicker() (tea.Model, tea.Cmd) {
 			m.pendingProgram))
 	}
 	fetch := listAccountsThroughDaemon
+	repoPath := m.repoRoot
 	return m, func() tea.Msg {
-		resp, err := fetch("")
+		resp, err := fetch("", repoPath)
 		return accountRegistryMsg{naming: naming, agent: agent, resp: resp, err: err}
 	}
+}
+
+// fetchAccountDefault asks the daemon which account this project would apply to a
+// create that names none, so the naming form can PRESELECT it (#3386).
+//
+// Preselecting rather than sending nothing is the whole point. The daemon would
+// fill the account in either way, and the session would be identical — but a form
+// that shows "Ambient identity" while the create runs as `work` is the silence the
+// issue opens with, and it is also what makes the skew check meaningless: a client
+// that sent no account has nothing to compare the created session against.
+//
+// It is the same ListAccounts call the picker makes, so opening the field costs no
+// extra round trip's worth of new code, and the answer includes the registry — which
+// is what lets the picker mark the default row and offer it even when it names an
+// account the registry does not list.
+func (m *home) fetchAccountDefault(naming *session.Instance, agent string) tea.Cmd {
+	if naming == nil || agent == "" {
+		return nil
+	}
+	// An agent with no credential-root variable can never be scoped to an account,
+	// so `default_accounts` cannot hold an entry for it — the config loader refuses
+	// one. Asking would be a round trip on every `n` whose answer is known to be
+	// empty. The account FIELD still asks (openAccountPicker), because "this agent
+	// has no account registry" is something a user who pressed ctrl+o has to be
+	// told, and only the daemon's roster can say it.
+	if _, ok := sessionenv.SupportsAccounts(agent); !ok {
+		return nil
+	}
+	fetch := listAccountsThroughDaemon
+	repoPath := m.repoRoot
+	return func() tea.Msg {
+		resp, err := fetch("", repoPath)
+		return accountDefaultMsg{naming: naming, agent: agent, resp: resp, err: err}
+	}
+}
+
+// handleAccountDefault applies a delivered project default to the open naming
+// form.
+//
+// Every guard here is one the picker's own handler needs, for the same reason:
+// the fetch is asynchronous, so by the time it lands the user may have submitted,
+// cancelled, started naming a different session, or changed the program — which
+// changes which agent's registry the answer belongs to. The one guard this handler
+// adds is pendingAccountChosen: a default must never overwrite a decision the user
+// has already made, including the deliberate choice of the ambient identity, which
+// is indistinguishable from "no answer yet" by value alone.
+//
+// A failed fetch is SILENT. The field is optional and the daemon applies the same
+// default regardless, so a registry af could not read costs the user the preview,
+// never the create — and an error toast on every `n` in a project with no daemon
+// route would be noise about something that did not go wrong.
+func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) {
+	if m.state != stateNew || m.namingInstance == nil || m.namingInstance != msg.naming {
+		return m, nil
+	}
+	if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
+		return m, nil
+	}
+	if msg.err != nil || m.pendingAccountChosen {
+		return m, nil
+	}
+	// Read off the response rather than held on the model: the picker builds its
+	// own rows from a fresh ListAccounts answer, so a second copy here would be a
+	// second source of truth for the same fact, and the two would drift the first
+	// time one of them was refreshed and the other was not.
+	preselect := msg.resp.Defaults[msg.agent]
+	if preselect == ambientAccount {
+		return m, nil
+	}
+	m.pendingAccount = preselect
+	m.menu.SetNamingAccount(true)
+	return m, nil
 }
 
 // handleAccountRegistry opens the picker over a delivered registry.
@@ -328,7 +450,19 @@ func (m *home) handleStateSelectAccount(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(registrationOnlyRefusal(choice.agent, choice.label))
 	}
 	m.pendingAccount = choice.value
+	m.pendingAccountChosen = true
 	m.menu.SetNamingAccount(m.pendingAccount != ambientAccount)
+	if choice.unregistered {
+		// A row that exists only because the project default names it. It is a
+		// NOTICE rather than a refusal because the user can act on it and the form
+		// stays open — but it must not borrow the not-logged-in wording below, which
+		// promises a session that starts. This one will not: the create refuses,
+		// naming the config key (#3386).
+		return m, m.handleNotice(fmt.Errorf(
+			"account %q is this project's default but is not registered for %s on the daemon host, so the "+
+				"create will be refused — register it with `af accounts add %s %s`, or pick another account",
+			choice.label, choice.agent, choice.agent, choice.label))
+	}
 	if m.pendingAccount != ambientAccount && !choice.loggedIn {
 		// Selectable, and it says so — the second half of constraint 3. The row was
 		// already marked in the list; this is the confirmation for the keypress,
@@ -349,6 +483,7 @@ func (m *home) handleStateSelectAccount(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // that says a session is scoped to an identity it will not be created with.
 func (m *home) clearPendingAccount() {
 	m.pendingAccount = ambientAccount
+	m.pendingAccountChosen = false
 	m.menu.SetNamingAccount(false)
 }
 

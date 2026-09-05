@@ -42,6 +42,48 @@ accounts on its own — a session either runs as the account you named or does n
 start. The full command surface is in
 [`af accounts`](reference/cli.md#af-accounts).
 
+### Scoping an account to a project
+
+Typing `--account` on every create is the wrong unit of work when the answer is
+always the same for a whole repository. `default_accounts` says it once — per
+agent, and most usefully per project:
+
+```bash
+af projects register ~/work/monorepo                            # once
+af config set default_accounts.codex work --project ~/work/monorepo
+af config set default_accounts.codex personal --project ~/side/hobby
+```
+
+Now a session created in that project — from the CLI, the TUI, the web client or
+a scheduled task — runs as `work` with nothing typed. The resolution order is
+**explicit `--account` (or a picker choice) → the project's default → the global
+default → the agent's ambient login**, and it is applied by the background
+service on the create, so every surface gets the same answer.
+
+Three properties are worth knowing:
+
+- **It is keyed by agent, because an account belongs to one.** claude's `work`
+  and codex's `work` are different identities in different registries, so
+  `default_accounts.codex` never applies to a claude session — that session keeps
+  the ambient identity until you scope it too.
+- **The pickers show it.** The TUI's `ctrl+o` field and the web's Account select
+  preselect the project default and mark its row `project default`, so a scoped
+  create is visible before you press Enter rather than discovered afterwards.
+- **A default `af` cannot honour refuses the create**, naming the key, the file
+  it is set in, and how to clear it. It never falls back to the ambient identity:
+  a session quietly running as someone else is the failure the whole feature
+  exists to prevent.
+- **A project's always-on `root` agent is deliberately not scoped by it.** Its
+  command comes from `[root_agent]` rather than an agent name, and a preference
+  set about ordinary creates must not be able to stop a project's guaranteed
+  session from starting. Scoping a root belongs beside the program it already
+  names.
+
+Set it globally (`af config set default_accounts.codex work`, no `--project`) for
+a default everywhere. It is rejected from a repository's checked-in
+`.agent-factory/config.toml`: identity policy is never checked in, and a
+committed account name means nothing to anyone else who clones the repository.
+
 Accounts are also what make the rest of this page actionable: a plan ceiling
 belongs to an identity, so a second account is one of the ways past one.
 

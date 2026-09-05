@@ -405,6 +405,16 @@ type home struct {
 	// registries. Reset by startNewInstance so a cancelled create cannot leak an
 	// identity into the next one.
 	pendingAccount string
+	// pendingAccountChosen records that the USER decided this form's account,
+	// rather than it being the project default the daemon preselected (#3386).
+	//
+	// The two must be distinguishable, and pendingAccount alone cannot do it: the
+	// ambient identity IS the empty string, so "the user picked ambient" and "no
+	// answer yet" have the same value. The default fetch is asynchronous, so
+	// without this flag a preselection landing a moment after a deliberate pick
+	// would silently replace it — putting the session on an identity the user had
+	// just chosen against, which is the whole failure this field exists to prevent.
+	pendingAccountChosen bool
 	// pendingForceRemote records that this naming flow began with `N` (new remote)
 	// rather than `n`. It used to be read back off the naming placeholder's
 	// capabilities, which only worked because the placeholder was PROVISIONED with

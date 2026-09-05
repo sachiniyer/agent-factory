@@ -1125,10 +1125,17 @@ export async function reapConfigAssistant(token: string): Promise<void> {
 // to the daemon is out of scope by the epic's standing constraint (#3388).
 
 /** Lists the accounts registered on the DAEMON's host with their logged-in
- *  state, plus the agents an account can be registered for. */
-export async function listAccounts(token: string): Promise<AccountsResponse> {
-  const resp = await af<AccountsResponse>("ListAccounts", {}, token);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [] };
+ *  state, plus the agents an account can be registered for.
+ *
+ *  `repoPath` is optional and sharpens ONE thing: `defaults`, which is a
+ *  per-project fact even though the registry is not — `default_accounts` admits
+ *  the machine-local per-project config layer, so which account a create here
+ *  would use depends on which project "here" is (#3386). The registry view passes
+ *  nothing and gets the global answer. */
+export async function listAccounts(token: string, repoPath = ""): Promise<AccountsResponse> {
+  const body = repoPath === "" ? {} : { repo_path: repoPath };
+  const resp = await af<AccountsResponse>("ListAccounts", body, token);
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.

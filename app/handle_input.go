@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/namegen"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -351,7 +352,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
-	m.pendingAccount = ""
+	m.clearPendingAccount()
 	m.pendingForceRemote = false
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
@@ -433,7 +434,12 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.menu.SetNamingBackend(false)
 	m.menu.SetNamingAccount(false)
 	m.menu.SetState(ui.StateNewInstance)
-	return m, nil
+	// Ask which account this project would apply (#3386). Asynchronous and
+	// optional: the form is fully usable before it lands, and if it never does the
+	// create behaves exactly as it did before this key existed — the daemon applies
+	// the same default either way. What the preselection buys is that the user SEES
+	// it and can change it.
+	return m, m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
 }
 
 // noActiveProjectNotice is the refusal a create gets with no active project.
