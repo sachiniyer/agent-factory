@@ -175,6 +175,9 @@ func fakeVSCodeServerMain() {
 	}
 
 	mux := http.NewServeMux()
+	// The #3870 environment routes: what the editor was exec'd with, and what a
+	// shell it spawns inherits. See vscode_account_env_test.go.
+	registerFakeVSCodeEnvironmentRoutes(mux)
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {

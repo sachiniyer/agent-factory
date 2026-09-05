@@ -15,7 +15,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The VS Code tab (TabKindVSCode) is served by a code-server / openvscode-server
@@ -91,6 +90,17 @@ var errVSCodeBinaryMissing = errors.New("no VS Code server binary found")
 // connections. Also a sentinel and also not a failure: callers render the
 // self-refreshing "starting" notice, which resolves into the editor on its own.
 var errVSCodeStarting = errors.New("the VS Code server is still starting")
+
+// errVSCodeAccountScope reports that the session's selected account could not be
+// turned into an environment for the editor — it is not registered, its
+// directory is gone, or the boundary refused it.
+//
+// A sentinel because the pane must render it. It is the one spawn refusal whose
+// cause is the OPERATOR's to fix (`af accounts add …`, or clear a cloud-mode
+// selector), and the generic path answers a JSON error envelope that an iframe
+// shows as unreadable text. Like errVSCodeStartExited it is recorded and
+// replayed under the respawn cooldown, so its notice must NOT self-refresh.
+var errVSCodeAccountScope = errors.New("the VS Code editor cannot be scoped to this session's account")
 
 // errVSCodeStartExited reports an editor that exited without ever serving a
 // request — a broken start rather than a crash to heal from. It is what the
@@ -239,7 +249,13 @@ func vscodeArgs(flavor vscodeFlavor, socketPath, worktree string) []string {
 
 // vscodeServer is one supervised editor process serving one session's worktree.
 type vscodeServer struct {
-	worktree   string
+	worktree string
+	// account is the selected account NAME this editor's environment was built
+	// for, empty for the ambient identity. It is part of the reuse identity: the
+	// credential root is fixed in the child's environ at exec, so an editor whose
+	// session has since selected a different account can only be replaced, never
+	// re-scoped (#3870).
+	account    string
 	instanceID string
 	// socketPath is the editor's ONLY endpoint: a 0600 unix socket in a 0700
 	// directory. There is no host or port — the proxy's transport dials this.
@@ -602,9 +618,21 @@ func (v *vscodeSupervisor) reconcilePersistedBeforeSpawn(key, instanceID string)
 	return nil
 }
 
-// ensureServerForInstance is the production form: the stable instance id keeps
-// a same-title recreation from adopting or stopping its predecessor's editor.
+// ensureServerForInstance is the ambient-identity form: no session in hand to
+// read a selected account from, so the editor gets the daemon's own
+// environment. Every production caller goes through the scoped form below; this
+// is what the supervisor's own tests drive, and keeping it spares each of them
+// from restating a scope they are not about.
 func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree string) (vscodeEndpoint, error) {
+	return v.ensureServerForInstanceInScope(key, instanceID, worktree, ambientVSCodeScope())
+}
+
+// ensureServerForInstanceInScope is the production form: the stable instance id
+// keeps a same-title recreation from adopting or stopping its predecessor's
+// editor, and scope is the credential boundary the editor must run under.
+func (v *vscodeSupervisor) ensureServerForInstanceInScope(
+	key, instanceID, worktree string, scope vscodeAccountScope,
+) (vscodeEndpoint, error) {
 	if strings.TrimSpace(worktree) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session has no worktree to open in VS Code")
 	}
@@ -626,9 +654,13 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 		return vscodeEndpoint{}, fmt.Errorf("daemon is shutting down")
 	}
 
-	// Reuse a live editor, but only while it still serves THIS worktree: a session
-	// restored to a different path (or a key reused after a kill) must never be
-	// handed an editor rooted at the old directory.
+	// Reuse a live editor, but only while it still serves THIS worktree UNDER THIS
+	// ACCOUNT: a session restored to a different path (or a key reused after a
+	// kill) must never be handed an editor rooted at the old directory, and a
+	// session whose selected account has changed must never be handed an editor
+	// still holding the previous identity's credential root. The account is part
+	// of the reuse identity for the same reason the worktree is — it is baked into
+	// the child's environ at exec and cannot be changed afterwards.
 	if s := v.servers[key]; s != nil {
 		alive := s.alive()
 		switch {
@@ -637,18 +669,19 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 			// replacement session. A stale caller must not unregister that editor;
 			// its manager-side post-check will reject the old instance.
 			return vscodeEndpoint{}, fmt.Errorf("VS Code editor key %q belongs to a different stable session instance", key)
-		case alive && s.worktree == worktree:
+		case alive && s.worktree == worktree && s.account == scope.account:
 			if s.ready || v.probeReady(s) {
 				return s.endpoint(), nil
 			}
 			// Up, but not listening yet — keep waiting, don't respawn.
 			return vscodeEndpoint{}, errVSCodeStarting
 		default:
-			// Dead, or serving a stale worktree: drop it and start clean. Stop it
-			// OUT OF BAND — stop() blocks for up to the stop grace, and v.mu is held
-			// across the spawn below, so stopping inline would stall every OTHER
-			// session's editor behind this one teardown. It is already unregistered
-			// here, so nothing else can reach it and no one needs to wait for it.
+			// Dead, serving a stale worktree, or scoped to a superseded account:
+			// drop it and start clean. Stop it OUT OF BAND — stop() blocks for up to
+			// the stop grace, and v.mu is held across the spawn below, so stopping
+			// inline would stall every OTHER session's editor behind this one
+			// teardown. It is already unregistered here, so nothing else can reach
+			// it and no one needs to wait for it.
 			// A DEAD leader needs nothing from stop() — its reaper already killed
 			// the group at the only moment that was safe to — but stop() is correct
 			// and immediate on one, so the branch stays uniform.
@@ -688,7 +721,7 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 		return vscodeEndpoint{}, err
 	}
 
-	server, err := v.spawnLocked(key, instanceID, binary, worktree)
+	server, err := v.spawnLocked(key, instanceID, binary, worktree, scope)
 	if err != nil {
 		v.failures[key] = vscodeFailure{err: err, at: v.now(), instanceID: instanceID}
 		return vscodeEndpoint{}, err
@@ -735,7 +768,24 @@ func (v *vscodeSupervisor) probeReady(s *vscodeServer) bool {
 // There is no retry loop. The TCP path needed one to re-roll a lost port race;
 // a socket path is chosen by the daemon inside a directory only the daemon can
 // write, so there is no race to lose and a failure here is a real failure (#1873).
-func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string) (*vscodeServer, error) {
+func (v *vscodeSupervisor) spawnLocked(
+	key, instanceID, binary, worktree string, scope vscodeAccountScope,
+) (*vscodeServer, error) {
+	// The credential boundary is resolved FIRST, before anything is swept, named
+	// or exec'd. A failure REFUSES the editor rather than falling back to the
+	// daemon's own environment: an editor is a place a human opens an integrated
+	// terminal and runs the agent, so an unscoped one under a session that reports
+	// a selected account is the silent wrong-account outcome #3051 exists to
+	// prevent, reached through the one door #3051 did not close (#3870).
+	//
+	// It also stays OUT of the "starting <binary> failed" wrap below, deliberately.
+	// This refusal is rendered into the pane, and what the operator has to fix is
+	// the account, not the editor — a message that opens by blaming code-server
+	// sends them to debug an install that is working.
+	environ, err := scope.environment()
+	if err != nil {
+		return nil, err
+	}
 	// Before the first editor of this daemon's life, clear out any left by the
 	// last one. Safe here precisely because nothing has spawned yet.
 	v.sweepAbandonedSockets()
@@ -743,7 +793,8 @@ func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string)
 	if err != nil {
 		return nil, err
 	}
-	server, err := v.startOne(key, instanceID, binary, flavorForBinary(binary), socketPath, worktree)
+	server, err := v.startOne(
+		key, instanceID, binary, flavorForBinary(binary), socketPath, worktree, scope.account, environ)
 	if err != nil {
 		return nil, fmt.Errorf("starting %s failed: %w", filepath.Base(binary), err)
 	}
@@ -751,7 +802,13 @@ func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string)
 }
 
 // startOne execs one editor and waits for its socket to accept connections.
-func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscodeFlavor, socketPath, worktree string) (*vscodeServer, error) {
+// account and environ are the credential boundary spawnLocked resolved: the
+// selected account's name, recorded so a later reuse can tell this editor apart
+// from one the session has since moved off, and the exact environment to exec
+// with.
+func (v *vscodeSupervisor) startOne(
+	key, instanceID, binary string, flavor vscodeFlavor, socketPath, worktree, account string, environ []string,
+) (*vscodeServer, error) {
 	// Check the worktree before exec'ing. os/exec reports a missing cmd.Dir as
 	// ENOENT naming the BINARY ("fork/exec /usr/bin/code-server: no such file or
 	// directory"), which sends the user off debugging a code-server install that
@@ -782,7 +839,10 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	}
 	cmd := newGatedVSCodeCommand(binary, vscodeArgs(flavor, socketPath, worktree), gatePath)
 	cmd.Dir = worktree
-	cmd.Env = append(vscodeChildEnv(), vscodeOwnerNonceEnv+"="+processNonce)
+	// Copied rather than appended in place: environ belongs to the caller's scope,
+	// and append could write the nonce into its backing array.
+	cmd.Env = append(append(make([]string, 0, len(environ)+1), environ...),
+		vscodeOwnerNonceEnv+"="+processNonce)
 	// Own process group so the editor's whole tree (extension host, terminal
 	// workers) can be signalled together on teardown, mirroring the watcher
 	// supervisor (#610/#769).
@@ -798,6 +858,7 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	}
 	server := &vscodeServer{
 		worktree:   worktree,
+		account:    account,
 		instanceID: instanceID,
 		socketPath: socketPath,
 		transport:  newVSCodeTransport(socketPath),
@@ -861,67 +922,4 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 		}
 		return nil, err
 	}
-}
-
-// vscodeChildEnv builds the editor's environment from the daemon's, with the tmux
-// ancestry markers and VSCODE_IPC_HOOK_CLI REMOVED.
-//
-// This is load-bearing, not hygiene. The daemon inherits its environment from
-// whatever autostarted it — often a TUI running inside an af_ tmux pane — so it
-// can be carrying AF_SESSION/AF_HOME, and every child it spawns inherits them
-// too. /proc/<pid>/environ is fixed at exec and can never be shed, so a
-// code-server stamped with a session marker is attributed to that session
-// forever: once that session dies, `af doctor --fix` matches the marker plus the
-// home and KILLS the editor as a leaked process (doctor/checks.go). Scrubbing the
-// markers keeps a daemon-owned editor out of that attribution entirely.
-//
-// (The tmux teardown reaper is a separate mechanism and never sees this child at
-// all: it captures only a tmux pane's descendants and its pane-SID members, and a
-// daemon child is neither — the daemon is its own session leader via Setsid.)
-//
-// VSCODE_IPC_HOOK_CLI is scrubbed for the same reason and it is just as
-// load-bearing. code-server's shouldOpenInExistingInstance checks it
-// UNCONDITIONALLY, before it starts any server, and when it is set the CLI hands
-// the folder to that existing editor over the IPC socket and EXITS — --bind-addr
-// is never honored. So a daemon started from any VS Code / code-server integrated
-// terminal inherits the var, and then every editor it ever spawns dies during
-// startup (the pane shows a broken-editor notice despite a perfectly good
-// install) while the worktree pops open in the USER's own window instead. The var
-// is fixed in the daemon's environ at exec, so this is sticky for the daemon's
-// whole life — and af's own VS Code tab has an integrated terminal that sets it,
-// which makes `af` run from inside an af VS Code tab poison the daemon.
-//
-// Only what breaks the spawn is scrubbed. The git-askpass family
-// (VSCODE_GIT_ASKPASS_*, VSCODE_GIT_IPC_HANDLE, GIT_ASKPASS) also inherits stale
-// handles, but code-server overwrites those for its own terminals, so removing
-// them buys nothing; the shell-integration markers (VSCODE_INJECTION, VSCODE_PID,
-// TERM_PROGRAM, …) the editor resets itself. Blanket-scrubbing VSCODE_* would
-// trade a filter you can audit against upstream for one that merely looks tidy.
-var vscodeScrubbedEnv = []string{
-	tmux.EnvMarkerSession,
-	tmux.EnvMarkerHome,
-	vscodeOwnerNonceEnv,
-	"VSCODE_IPC_HOOK_CLI",
-}
-
-func vscodeChildEnv() []string {
-	src := os.Environ()
-	out := make([]string, 0, len(src))
-	for _, kv := range src {
-		if hasAnyEnvPrefix(kv, vscodeScrubbedEnv) {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
-}
-
-// hasAnyEnvPrefix reports whether the KEY=VALUE entry kv names any of keys.
-func hasAnyEnvPrefix(kv string, keys []string) bool {
-	for _, k := range keys {
-		if strings.HasPrefix(kv, k+"=") {
-			return true
-		}
-	}
-	return false
 }
