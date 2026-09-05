@@ -185,12 +185,18 @@ also excludes Docker; see [Opt-in auto-resume](#opt-in-auto-resume).
 
 ### Account-scoped handoff
 
-An account-scoped session refuses `af sessions handoff`: an account belongs to
-one agent's registry, so carrying its name to another agent would not carry the
-identity. The refusal leaves the current session intact. Create a separate
-session with the target agent and its account when you need that identity.
-The [handoff instructions](#hand-off-to-another-agent) below apply to sessions
-without account scoping.
+For a local session created with `--account`, `af sessions handoff` returns an
+error naming the account and saying “an account belongs to one agent”, if it
+gets past the earlier state and target checks. The replacement never starts;
+the outgoing agent keeps running with its selected account. The explicit guard
+is in [session/backend_local.go:416](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/backend_local.go#L416),
+before the old pane is stopped. The daemon reaches it through
+[session/instance_backend.go:417](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/instance_backend.go#L417),
+then rolls back the handoff record and returns the failure at
+[daemon/handoff.go:182](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/daemon/handoff.go#L182).
+Create a separate session with the target agent and its account when you need
+that identity. The [handoff instructions](#hand-off-to-another-agent) below apply
+to sessions without account scoping.
 
 ### Bug report redaction
 
