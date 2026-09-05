@@ -7,7 +7,7 @@
 <p align="center"><strong>Run a fleet of AI coding agents at once — isolated workspaces, one control plane.</strong></p>
 
 <p align="center">
-  <a href="docs/assets/demo.mp4"><img src="docs/assets/demo.gif" alt="Agent Factory demo video preview: three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run tests"></a>
+  <a href="docs/assets/web/demo.mp4"><img src="docs/assets/web/demo-poster.png" alt="The Agent Factory web client in a browser: a rail of three sessions in one project, the selected agent's terminal beside it showing the work it did in an isolated git worktree, that branch's pull request linked in the pane header, and the Tasks and Config views one tab away"></a>
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
 
 <p align="center">
   <a href="https://sachiniyer.github.io/agent-factory/">Docs</a> ·
-  Demo: <a href="docs/assets/demo.mp4">MP4</a> · <a href="docs/assets/demo.webm">WebM</a> · <a href="docs/assets/demo.gif">GIF</a>
+  Web demo: <a href="docs/assets/web/demo.mp4">MP4</a> · <a href="docs/assets/web/demo.webm">WebM</a> · <a href="docs/assets/web/demo.gif">GIF</a>
 </p>
 
 Agent Factory (`af`) supervises Claude Code, Codex, Aider, Gemini, Amp,
