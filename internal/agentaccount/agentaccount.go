@@ -40,12 +40,28 @@ var nameRule = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 // printed next step does not run is worse than no guidance: the operator
 // concludes the account is broken, when the only thing wrong was af's sentence.
 //
+// THE FLOW HAS TO BE BROWSER-FREE, which is what shapes codex's entry (#3854).
+// af runs these in a tmux pane on the DAEMON's host, which is headless and
+// usually remote: a browser-callback login there either opens a browser nobody
+// is sitting in front of, or waits for an OAuth redirect to the daemon's own
+// localhost that the operator's machine can never reach. The device-code shape —
+// print a URL and a short code, poll while the human signs in from any device —
+// is the one that fits. Where the agent expresses that as a FLAG it belongs
+// here; where it expresses it as an environment variable it belongs in
+// sessionenv.AccountLoginEnvironment, which is why gemini and claude add nothing
+// to their words.
+//
 // Verified 2026-08-07, re-verified 2026-09-04 against the installed CLIs before
-// af started RUNNING these rather than printing them (#3384):
-//   - claude 2.1.260: `claude auth --help` lists `login  Sign in to your
-//     Anthropic account`, and `login` is absent from `claude --help`.
-//   - codex-cli 0.152.1: `codex --help` lists `login  Manage login` at the top
-//     level.
+// af started RUNNING these rather than printing them (#3384), and again for
+// #3854:
+//   - claude 2.1.261: `claude auth --help` lists `login  Sign in to your
+//     Anthropic account`, and `login` is absent from `claude --help`. Its
+//     `login` takes --claudeai/--console/--email/--sso and NO browser-free flag,
+//     so the lever is environmental — see AccountLoginEnvironment.
+//   - codex-cli 0.153.2: `codex --help` lists `login  Manage login` at the top
+//     level, and `codex login --help` lists `--device-auth`. (--with-api-key and
+//     --with-access-token read a secret from stdin and are deliberately out of
+//     scope: af never handles credential material.)
 //   - gemini 0.51.0: there is NO login or auth subcommand — `gemini --help`
 //     lists only mcp, extensions, skills, hooks, gemma and the default query
 //     command. Its sign-in is the interactive picker the bare CLI raises on a
@@ -58,7 +74,7 @@ var nameRule = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 // command rather than a guessed one (#3057 review).
 var loginCommands = map[string][]string{
 	"claude": {"auth", "login"},
-	"codex":  {"login"},
+	"codex":  {"login", "--device-auth"},
 	"gemini": {},
 }
 
