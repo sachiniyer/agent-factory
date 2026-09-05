@@ -31,13 +31,12 @@ import (
 // author either routes it through the guard or writes down why it does not need
 // to be.
 //
-// Scoped to MkdirAll on purpose. os.MkdirAll creates every missing ANCESTOR, so
-// any home-relative path re-creates the whole home; os.Mkdir creates one level
-// and fails with ENOENT when its parent is gone, so it can only resurrect a home
-// it is handed directly, and no site in this tree passes one (audited for #3850:
-// upgradetxn's two are single-level by construction — createDurableDirectory
-// asserts filepath.Dir(path) == parent — agentaccount's is a child of
-// accounts/<agent>, and config/inrepo's is inside a repo).
+// Scoped to MkdirAll on purpose. os.MkdirAll creates every missing ancestor, so
+// any home-relative path re-creates the whole home. The os.Mkdir audit for #3850
+// establishes that every site in this tree creates exactly one level beneath a
+// parent that must already exist (ENOENT otherwise). None can re-create an
+// ancestor, and none can resurrect a deleted AF home. TestAuditedMkdirSites
+// enforces the audit below so new sites require their own reason.
 
 // allowedBareMkdirAll lists the sites whose argument is proven never to be at or
 // inside the AF home, keyed by "<repo-relative file>:<enclosing declaration>".
@@ -76,49 +75,7 @@ var allowedBareMkdirAll = map[string]struct {
 }
 
 func TestNoBareMkdirAllUnderTheAFHome(t *testing.T) {
-	root := moduleRoot(t)
-	fset := token.NewFileSet()
-
-	found := map[string][]token.Position{}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "testdata", "node_modules":
-				return fs.SkipDir
-			}
-			return nil
-		}
-		// Test files are excluded: a test's MkdirAll builds its own fixture home
-		// in a t.TempDir, which is the one place creating a home IS the point.
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		// Parsed with no build constraints applied, so a darwin- or windows-only
-		// file is covered on a linux CI runner too.
-		file, parseErr := parser.ParseFile(fset, path, nil, 0)
-		if parseErr != nil {
-			return fmt.Errorf("parse %s: %w", path, parseErr)
-		}
-		if !importsStdlibOS(file) {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
-		for _, call := range bareMkdirAllCalls(file) {
-			site := rel + ":" + enclosingDecl(file, call.Pos())
-			found[site] = append(found[site], fset.Position(call.Pos()))
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk the module: %v", err)
-	}
+	found := collectOSDirectoryCalls(t, "MkdirAll")
 
 	for _, site := range sortedKeys(found) {
 		positions := found[site]
@@ -160,6 +117,104 @@ func TestNoBareMkdirAllUnderTheAFHome(t *testing.T) {
 	}
 }
 
+// auditedMkdir records why each site creates only one level under an existing
+// parent, keyed by "<repo-relative file>:<enclosing declaration>". Counts and
+// stale entries ratchet both ways, just like allowedBareMkdirAll.
+var auditedMkdir = map[string]struct {
+	sites  int
+	reason string
+}{
+	"config/inrepo.go:inRepoConfigWriteTarget": {1,
+		"Creates the config directory inside a repo; its parent must exist or Mkdir returns ENOENT."},
+	"internal/agentaccount/agentaccount.go:Register": {1,
+		"Creates one account beneath accounts/<agent>, whose parent is created through guarded afhome.MkdirAll; ENOENT if gone."},
+	"internal/upgradetxn/install_lock.go:ensureLockRoot": {1,
+		"Creates upgrade/ directly beneath the existing AF home; Mkdir returns ENOENT if that parent is gone."},
+	"internal/upgradetxn/storage.go:prepareMetadataParents": {1,
+		"Creates one metadata directory after validateDirectoryNoSymlink checks its immediate parent; ENOENT if gone."},
+	"internal/upgradetxn/storage.go:createDurableDirectory": {1,
+		"Requires filepath.Dir(path) == parent and validates that parent before creating its immediate child; ENOENT if gone."},
+}
+
+func TestAuditedMkdirSites(t *testing.T) {
+	found := collectOSDirectoryCalls(t, "Mkdir")
+	for _, site := range sortedKeys(found) {
+		positions := found[site]
+		audited, ok := auditedMkdir[site]
+		if !ok {
+			file := site[:strings.LastIndex(site, ":")]
+			for _, pos := range positions {
+				t.Errorf("%s:%d: unaudited os.Mkdir. Audit the new site: it must create exactly one level "+
+					"under an existing parent and must not resurrect a deleted AF home. Then add %q to "+
+					"auditedMkdir in %s with its reason.", file, pos.Line, site, testFileName())
+			}
+			continue
+		}
+		if len(positions) != audited.sites {
+			t.Errorf("%s: audited for %d os.Mkdir call(s) but found %d. Reason on file: %s\n"+
+				"Audit each new site for single-level creation under an existing parent without resurrecting "+
+				"a deleted AF home, then update auditedMkdir with its count and reason. "+
+				"For a removed site, reduce the count or remove the stale entry.",
+				site, audited.sites, len(positions), audited.reason)
+		}
+	}
+	for _, site := range sortedKeys(auditedMkdir) {
+		if _, ok := found[site]; !ok {
+			t.Errorf("%s: listed in auditedMkdir but no os.Mkdir is there any more. Remove the stale entry.", site)
+		}
+	}
+}
+
+// collectOSDirectoryCalls walks the same non-test package set for both audits.
+func collectOSDirectoryCalls(t *testing.T, name string) map[string][]token.Position {
+	t.Helper()
+	root := moduleRoot(t)
+	fset := token.NewFileSet()
+
+	found := map[string][]token.Position{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor", "testdata", "node_modules":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		// Test files are excluded: a test builds its own fixture home
+		// in a t.TempDir, which is the one place creating a home IS the point.
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		// Parsed with no build constraints applied, so a darwin- or windows-only
+		// file is covered on a linux CI runner too.
+		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return fmt.Errorf("parse %s: %w", path, parseErr)
+		}
+		if !importsStdlibOS(file) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		for _, call := range osDirectoryCalls(file, name) {
+			site := rel + ":" + enclosingDecl(file, call.Pos())
+			found[site] = append(found[site], fset.Position(call.Pos()))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the module: %v", err)
+	}
+
+	return found
+}
+
 // importsStdlibOS reports whether file imports "os" under its own name, which is
 // what makes an `os.MkdirAll` selector the standard library's. A file that
 // aliases something else to `os` would be flagged and can say so in the
@@ -173,7 +228,7 @@ func importsStdlibOS(file *ast.File) bool {
 	return false
 }
 
-func bareMkdirAllCalls(file *ast.File) []*ast.CallExpr {
+func osDirectoryCalls(file *ast.File, name string) []*ast.CallExpr {
 	var calls []*ast.CallExpr
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -181,7 +236,7 @@ func bareMkdirAllCalls(file *ast.File) []*ast.CallExpr {
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "MkdirAll" {
+		if !ok || sel.Sel.Name != name {
 			return true
 		}
 		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" {

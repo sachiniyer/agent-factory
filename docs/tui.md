@@ -48,7 +48,7 @@ produced.
 </figure>
 
 An idle row also says **why** it's idle, as far as the daemon can mechanically
-tell — `usage limit`, `process exited`, `restore gave up after 6 attempts: ...`,
+tell — `usage limit`, `process exited`, `restore gave up after 6 attempts: …`,
 `no change after delivery`, `pane changed · 12m ago` — next to its branch name.
 The detail reports mechanically established facts only: process and restore
 state, prompt-delivery evidence, and when the pane's rendered bytes last changed.
@@ -68,6 +68,15 @@ There are two ways in, split deliberately:
 - **`o` — attach full-screen.** Hand the whole terminal to the session's tmux.
   The tmux detach key returns you to the sidebar. The agent keeps running either
   way.
+
+## Accounts
+
+On the new-session naming form (`n`), press `ctrl+o` to choose an account for
+the selected agent. The picker preselects the project default and labels it
+`project default`. Register and log in before creating the session; account
+names belong to one agent, so changing the agent changes the choices.
+See [Accounts](usage-limits.md#accounts) for login, project defaults, clearing a
+default, and the boundaries on handoff and automatic switching.
 
 ## Tabs
 
