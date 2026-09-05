@@ -255,6 +255,18 @@ type Config struct {
 	// additionally tracks the automatic 1.x.y-preview-z prereleases.
 	// Any other value falls back to stable with a warning.
 	UpdateChannel string `json:"update_channel" toml:"update_channel"`
+	// UpgradeClearUnverifiableArtifacts lets an upgrade set aside binaries staged
+	// beside the af executable whose owning agent-factory home af cannot read
+	// (#3864), instead of refusing to upgrade while they are there.
+	//
+	// Off by default, and the default is the whole point: an unreadable claim is
+	// still a claim, and an unmounted home reports exactly what a finished
+	// transaction does, so af refuses and names the file rather than guessing. A
+	// leftover af CAN attribute — one whose home says it is finished, or one
+	// nothing records at all and nothing has touched in an hour — is already set
+	// aside without this. Turn it on for a box where an upgrade keeps refusing on
+	// a staged artifact you have looked at and know is dead.
+	UpgradeClearUnverifiableArtifacts bool `json:"upgrade_clear_unverifiable_artifacts" toml:"upgrade_clear_unverifiable_artifacts"`
 	// Theme is the global-only TOML palette (#1389): either a named preset or a
 	// custom [theme] table, shared by the TUI and web. It is intentionally
 	// TOML-only because legacy config.json is frozen and a cloned repo must never
