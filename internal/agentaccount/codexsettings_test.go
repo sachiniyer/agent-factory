@@ -22,6 +22,9 @@ func TestRegisterCodexRuntimeSettings(t *testing.T) {
 		absent                        bool
 	}{
 		{"new", source, "", seeded, false},
+		{"account provider", source, "model_provider = 'custom'\n", "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel_provider = 'custom'\n", false},
+		{"account provider any value", source, "model_provider = false\n", "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel_provider = false\n", false},
+		{"account provider preserves model", source, "model_provider = 'custom'\nmodel = 'chosen'\n", "approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nmodel_provider = 'custom'\nmodel = 'chosen'\n", false},
 		{"workspace options", workspace, "", workspaceKeys + workspaceTable, false},
 		{"workspace options allowlist", workspace + "api_key = 'secret'\n[projects.private]\ntrust_level = 'trusted'\n", "", workspaceKeys + workspaceTable, false},
 		{"other sandbox mode", source + "[sandbox_workspace_write]\nnetwork_access = true\n", "", seeded, false},
@@ -68,6 +71,11 @@ func TestRegisterCodexRuntimeSettings(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, tt.want, string(data))
+			if strings.HasPrefix(tt.name, "account provider") {
+				notices, err := CheckLoginPreconditions("codex", dir)
+				require.NoError(t, err)
+				require.Contains(t, strings.Join(notices, "\n"), "model not seeded: this account's config.toml selects a custom model_provider")
+			}
 			if tt.name == "both runtime keys present" {
 				notices, err := CheckLoginPreconditions("codex", dir)
 				require.NoError(t, err)

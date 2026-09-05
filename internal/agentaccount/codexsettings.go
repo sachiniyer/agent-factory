@@ -56,8 +56,9 @@ func answerCodexLoginPrompts(dir string) error {
 	// Provider-specific models cannot be interpreted without provider configuration,
 	// which must not cross account homes. Presence matters, regardless of value.
 	_, customProvider := ambient["model_provider"]
+	_, accountProvider := account["model_provider"]
 	for _, key := range []string{"approval_policy", "sandbox_mode", "model"} {
-		if key == "model" && customProvider {
+		if key == "model" && (customProvider || accountProvider) {
 			continue
 		}
 		if _, exists := account[key]; exists {
@@ -125,7 +126,7 @@ func codexSettingsNotice(dir string) string {
 	if err != nil {
 		return fmt.Sprintf("Nothing was written to %s because ~/.codex/config.toml could not be read: cannot locate the home directory: %v", path, err)
 	}
-	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when the ambient file has no model_provider. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
+	policy := fmt.Sprintf("When the ambient file has approval_policy or sandbox_mode, registration independently seeds missing top-level approval_policy · sandbox_mode · model from %s into %s. Model is seeded only when neither the ambient file nor the account has model_provider. For ambient workspace-write mode, an absent sandbox_workspace_write table is copied with only these options (network_access · writable_roots · exclude_tmpdir_env_var · exclude_slash_tmp). Existing keys stand; unparseable documents are left alone. Credentials, provider configuration and project trust are never copied.", source, path)
 	_, ambient, err := readCodexSettings(source)
 	if err != nil {
 		return policy + " Nothing was written from the ambient file because it could not be read."
@@ -143,6 +144,9 @@ func codexSettingsNotice(dir string) string {
 	if err != nil || account == nil {
 		return policy + " The account document could not be read or parsed and was left alone."
 	}
+	if _, accountProvider := account["model_provider"]; accountProvider {
+		policy += " model not seeded: this account's config.toml selects a custom model_provider."
+	}
 	var present []string
 	for _, key := range []string{"approval_policy", "sandbox_mode", "model", "sandbox_workspace_write"} {
 		if _, ok := account[key]; ok {
@@ -153,21 +157,4 @@ func codexSettingsNotice(dir string) string {
 		policy += " Account settings: " + strings.Join(present, " · ") + "."
 	}
 	return policy
-}
-
-// CodexApprovalWarning diagnoses legacy accounts without changing their policy.
-// An explicitly chosen interactive policy stands just like any existing key.
-func CodexApprovalWarning(name, dir string) string {
-	path := filepath.Join(dir, "config.toml")
-	_, doc, err := readCodexSettings(path)
-	if err == nil && doc != nil {
-		if _, exists := doc["approval_policy"]; exists {
-			return ""
-		}
-	}
-	reason := "has no top-level approval_policy"
-	if err != nil || doc == nil {
-		reason = "could not be read or parsed to verify approval_policy"
-	}
-	return fmt.Sprintf("Codex account %q: %s %s; sessions can stop on Codex's approval picker. Set a top-level approval_policy in that file, or run `af accounts add codex %s` to seed missing runtime settings from ~/.codex/config.toml.", name, path, reason, name)
 }
