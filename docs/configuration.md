@@ -453,13 +453,13 @@ af teaches each agent how to drive `af` itself — `af sessions whoami`, `af ses
 
 For **claude**, **aider** and **opencode**, af owns the file and points the agent at it for that launch only (`--plugin-dir`, `--read`, and `OPENCODE_CONFIG` respectively). Everything lives under af's own config directory, so it disappears when you uninstall af and is invisible to an agent af did not launch.
 
-**codex**, **gemini** and **amp** auto-discover skills from a directory in your home and offer no per-launch pointer to an extra one. The only way to reach them is to write a file into *your* config — `$CODEX_HOME/skills/agent-factory/`, `~/.gemini/skills/agent-factory/`, `~/.config/amp/skills/agent-factory/` — which outlives the session, survives uninstalling af, and applies when you run those agents by hand somewhere af has nothing to do with. Creating a session is not consent to that, so **af does not do it by default**:
+**codex**, **gemini**, **amp** and **devin** auto-discover skills from a directory in your home and offer no per-launch pointer to an extra one. The only way to reach them is to write a file into *your* config — `$CODEX_HOME/skills/agent-factory/`, `~/.gemini/skills/agent-factory/`, `~/.config/amp/skills/agent-factory/`, `~/.config/devin/skills/agent-factory/` — which outlives the session, survives uninstalling af, and applies when you run those agents by hand somewhere af has nothing to do with. Creating a session is not consent to that, so **af does not do it by default**:
 
 ```toml
 global_agent_skills = true
 ```
 
-With it on, af writes (and keeps up to date) a single `agent-factory/SKILL.md` under each of those agents' skills directories. With it off — the default — those three agents simply do not get af's guidance; everything else about the session is unchanged.
+With it on, af writes (and keeps up to date) a single `agent-factory/SKILL.md` under each of those agents' skills directories. With it off — the default — those four agents simply do not get af's guidance; everything else about the session is unchanged.
 
 af only ever manages the file it wrote. Each one carries an af marker, and:
 

@@ -15,8 +15,8 @@ import (
 )
 
 // afSkillDirName is the directory- and skill-name every agent that auto-discovers
-// a SKILL.md (amp, codex, gemini) reads under its per-agent skills base. It is
-// deliberately "agent-factory", NOT "af": those skills dirs are the user's GLOBAL
+// a SKILL.md (amp, codex, gemini, devin) reads under its per-agent skills base.
+// It is deliberately "agent-factory", NOT "af": those skills dirs are the GLOBAL
 // per-agent config, shared with skills they install by hand, and "af" is exactly
 // the short name a user or another tool would pick for their own af helper skill.
 // Namespacing to "agent-factory" makes the directory unambiguously af-owned so we
@@ -29,9 +29,9 @@ const afSkillDirName = "agent-factory"
 const AfSkillName = afSkillDirName
 
 // AfSkillDescription is the one-line description every surface presents for the
-// af skill — the SKILL.md frontmatter for amp/codex/gemini, the Claude Code
-// slash command (plugin.go), and the generated plugin artifacts. It is what each
-// agent surfaces for lazy activation, so there is exactly one of it.
+// af skill — the SKILL.md frontmatter for amp/codex/gemini/devin, the Claude
+// Code slash command (plugin.go), and the generated plugin artifacts. It is what
+// each agent surfaces for lazy activation, so there is exactly one of it.
 const AfSkillDescription = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, and the daemon via the af CLI"
 
 // afSkillMarker stamps every file we write so a later launch can tell a file it
@@ -40,15 +40,15 @@ const AfSkillDescription = "Manage Agent Factory (af) sessions, tabs, scheduled 
 const afSkillMarker = "managed by agent-factory (af): regenerated on each af session launch; do not edit"
 
 // afSkillDoc is the SKILL.md served to every agent that auto-discovers a
-// name+description skill (amp, codex, gemini). Its body is afUsageReference
-// (systemprompt.go) — the SAME text Claude receives via the plugin skill and
-// aider via --read — so the agents' af knowledge cannot drift (#1043). All three
-// CLIs require only name + description frontmatter (verified against `amp skill
-// list`, the codex skill-creator, and the gemini skills docs); the description is
-// what each surfaces for lazy activation, so it mirrors the Claude plugin skill's
-// description. The afSkillMarker rides in an HTML comment just below the
-// frontmatter — invisible in rendered markdown, and the token writeAfMarkedFile
-// checks for ownership.
+// name+description skill (amp, codex, gemini, devin). Its body is
+// afUsageReference (systemprompt.go) — the SAME text Claude receives via the
+// plugin skill and aider via --read — so the agents' af knowledge cannot drift
+// (#1043). All four CLIs require only name + description frontmatter (verified
+// against `amp skill list`, the codex skill-creator, the gemini skills docs, and
+// `devin skills paths`); the description is what each surfaces for lazy
+// activation, so it mirrors the Claude plugin skill's description. The
+// afSkillMarker rides in an HTML comment just below the frontmatter — invisible
+// in rendered markdown, and the token writeAfMarkedFile checks for ownership.
 var afSkillDoc = "---\n" +
 	"name: " + afSkillDirName + "\n" +
 	"description: " + AfSkillDescription + "\n" +
@@ -134,20 +134,21 @@ func globalAgentSkillsConsent() globalSkillConsent {
 //
 // Every base passed here is the USER'S GLOBAL per-agent config directory
 // (codex's $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's
-// ~/.config/amp/skills), which is why the consent gate lives at this one choke
-// point rather than in each caller (#1977). A file written there reaches outside
-// af and outlives it: it survives archiving the session, survives uninstalling
-// af, and is still loaded when the user runs that agent by hand in an unrelated
-// directory tomorrow. Creating a session is not consent to edit the user's
-// global tool configuration, so af does none of it unless global_agent_skills
-// is on. An empty returned path means "not injected"; every caller discards the
-// path and only checks the error, so this reads as a clean skip.
+// ~/.config/amp/skills, devin's ~/.config/devin/skills), which is why the
+// consent gate lives at this one choke point rather than in each caller (#1977).
+// A file written there reaches outside af and outlives it: it survives archiving
+// the session, survives uninstalling af, and is still loaded when the user runs
+// that agent by hand in an unrelated directory tomorrow. Creating a session is
+// not consent to edit the user's global tool configuration, so af does none of
+// it unless global_agent_skills is on. An empty returned path means "not
+// injected"; every caller discards the path and only checks the error, so this
+// reads as a clean skip.
 //
 // The af-owned seams are unaffected and stay unconditional: claude
 // (--plugin-dir), aider (--read) and opencode (OPENCODE_CONFIG) all point at
 // files under af's OWN config dir, so they vanish with af and are invisible to
 // an agent af did not launch. That is the pattern this gate exists to converge
-// on; these three agents expose no equivalent per-launch pointer (codex's
+// on; these four agents expose no equivalent per-launch pointer (codex's
 // CODEX_HOME and gemini's GEMINI_CLI_HOME relocate the agent's whole home,
 // auth and history included, and amp's --settings-file would have af own
 // settings the user also sets), so consent is the honest seam until one does.
@@ -183,8 +184,8 @@ func ensureAfSkillDir(base string, legacy ...string) (string, error) {
 			removeAfSkillDir(legacyDir, filepath.Join(legacyDir, "SKILL.md"))
 		}
 		// INFO, not WARNING (#2166): global_agent_skills defaults false, so this
-		// fires on every codex/gemini/amp session start on a DEFAULT install. af
-		// is honoring the documented default, which is not a defect.
+		// fires on every codex/gemini/amp/devin session start on a DEFAULT
+		// install. af is honoring the documented default, which is not a defect.
 		log.InfoLog.Printf("af skill: not writing %s — af does not manage global agent config directories unless global_agent_skills = true is set in the af config (af guidance not injected for this agent)", path)
 		return "", nil
 	default: // globalSkillUnknown
@@ -325,6 +326,11 @@ func ensureGeminiSkillDir(target skillTarget) (string, error) {
 	return ensureAfSkillDir(base, ambientSkillBase(geminiSkillsBaseDir, target))
 }
 
+// ensureDevinSkillDir writes the af skill into devin's home skills base,
+// $HOME/.config/devin/skills (verified via `devin skills paths`, #2410). Devin
+// has no account scoping, so unlike codex/gemini it takes no skillTarget: there
+// is one base, and it is the user's own. See ensureAfSkillDir for the consent
+// gate every base here goes through.
 func ensureDevinSkillDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -336,11 +342,11 @@ func ensureDevinSkillDir() (string, error) {
 // aiderReadDoc is the read-only context file aider loads via --read. Aider has NO
 // auto-discovered global skills/instructions directory (its only persistent
 // global-instructions seams are the --read flag and the user-owned .aider.conf.yml
-// "read:" list; verified against aider 0.86.2). So — unlike amp/codex/gemini — af
-// injects the skill by pointing a --read flag at this af-owned file, exactly as
-// claude uses --plugin-dir. It is plain markdown (aider adds it to the chat as a
-// read-only file), not a SKILL.md, so it needs no frontmatter; the afSkillMarker
-// rides in a leading HTML comment for ownership.
+// "read:" list; verified against aider 0.86.2). So — unlike amp/codex/gemini and
+// devin — af injects the skill by pointing a --read flag at this af-owned file,
+// exactly as claude uses --plugin-dir. It is plain markdown (aider adds it to
+// the chat as a read-only file), not a SKILL.md, so it needs no frontmatter; the
+// afSkillMarker rides in a leading HTML comment for ownership.
 var aiderReadDoc = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReference + "\n"
 
 // aiderReadFilePath returns the path of the af-owned aider context file, under the

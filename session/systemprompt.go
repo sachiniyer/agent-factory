@@ -9,7 +9,7 @@ import (
 
 // afUsageReference is the single source of truth for teaching an agent the af
 // CLI. It is the body of the consolidated "af" skill delivered to every agent —
-// the Claude Code plugin skill (plugin.go), the amp/codex/gemini SKILL.md
+// the Claude Code plugin skill (plugin.go), the amp/codex/gemini/devin SKILL.md
 // (agentskill.go), and the aider --read context file — so no surface can drift
 // (#1043). Keep it complete but terse: every user-facing command group (sessions,
 // tabs, tasks, daemon, maintenance), no boilerplate.
@@ -185,11 +185,12 @@ func shellQuote(s string) string {
 //   - Aider: --read flag pointing at an af-owned context file. Aider has NO
 //     auto-discovered global skills folder, so it takes a flag (like claude);
 //     --read is a known, repeatable, additive aider flag.
-//   - Devin: --respect-workspace-trust false, appended CONDITIONALLY (devin
-//     rejects the flag twice) to suppress its interactive workspace-trust modal
-//     so an af worktree reaches ready without a human answering it. af writes no
-//     af-usage skill for devin yet — that file seam ($HOME/.config/devin/skills)
-//     is a follow-up; this case only finalizes devin's launch command.
+//   - Devin: BOTH seams. File seam — the af skill written to devin's home skills
+//     dir ($HOME/.config/devin/skills, verified via `devin skills paths`), behind
+//     the same global_agent_skills consent gate as codex/gemini/amp. And
+//     --respect-workspace-trust false, appended CONDITIONALLY (devin rejects the
+//     flag twice) to suppress its interactive workspace-trust modal so an af
+//     worktree reaches ready without a human answering it.
 //   - Commands running no known agent: no injection.
 //
 // Accepted tradeoff (#1585 review, finding 2): DetectAgentFromCommand is a shared
