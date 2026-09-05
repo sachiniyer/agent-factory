@@ -100,6 +100,26 @@ layer means "no default", and because the key merges per agent, an empty entry i
 a project's config wins for that agent and keeps its sessions on the ambient
 identity even when the global layer names an account.
 
+### What the account reaches
+
+A pinned account applies to every process `af` starts for that session: the
+agent pane, each helper tab, and the VS Code tab's editor — its integrated
+terminals and anything an extension shells out to included. Each one gets the
+account's credential home injected and the agent's other identity variables
+removed, so an `ANTHROPIC_API_KEY` left in your shell cannot quietly outrank the
+account you selected. If the account cannot be resolved when a VS Code tab opens
+— it was removed or renamed since the session was created — `af` refuses to
+start the editor and the pane names the `af accounts add` that repairs it,
+rather than opening one on your ambient login.
+
+One boundary `af` cannot hold for you: an **interactive shell you open inside
+the editor** reads your `~/.bashrc` and `/etc/bash.bashrc`, and a line there
+exporting the agent's credential variable wins over the account — exactly as it
+would in any other terminal. `af`'s own panes escape that because `af` chooses
+their command; a terminal profile inside the editor is yours, and it lives in
+the editor's own settings, which the editor can rewrite. If you pin sessions to
+accounts, keep agent credential variables out of your shell startup files.
+
 Accounts are also what make the rest of this page actionable: a plan ceiling
 belongs to an identity, so a second account is one of the ways past one.
 

@@ -225,7 +225,8 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	if strings.TrimSpace(worktree) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session %q has no worktree to open in VS Code", title)
 	}
-	endpoint, err := m.vscode.ensureServerForInstance(key, instance.ID, worktree)
+	endpoint, err := m.vscode.ensureServerForInstanceInScope(
+		key, instance.ID, worktree, vscodeAccountScopeForInstance(instance))
 	// The post-spawn recheck below must run on errVSCodeStarting too, NOT just on
 	// success. ensureServer REGISTERS the server in v.servers before returning that
 	// sentinel, so a cold spawn that merely outran the start grace has left a LIVE,
