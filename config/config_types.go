@@ -341,13 +341,14 @@ type Config struct {
 	// GlobalAgentSkills opts af into writing its "agent-factory" skill file
 	// into the USER'S GLOBAL per-agent config directories — codex's
 	// $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's
-	// ~/.config/amp/skills — so those agents discover af's CLI guidance
-	// (#1977). DEFAULT FALSE: creating a session is not consent to edit the
-	// user's global tool configuration, and a file written there outlives the
-	// session, survives uninstalling af, and still loads when the user runs
-	// that agent by hand somewhere af has nothing to do with.
+	// ~/.config/amp/skills, devin's ~/.config/devin/skills — so those agents
+	// discover af's CLI guidance (#1977). DEFAULT FALSE: creating a session is
+	// not consent to edit the user's global tool configuration, and a file
+	// written there outlives the session, survives uninstalling af, and still
+	// loads when the user runs that agent by hand somewhere af has nothing to
+	// do with.
 	//
-	// It governs ONLY the three agents with no per-launch pointer. claude
+	// It governs ONLY the four agents with no per-launch pointer. claude
 	// (--plugin-dir), aider (--read) and opencode (OPENCODE_CONFIG) get the
 	// same guidance from af-OWNED files under af's own config dir, are
 	// unaffected by this key, and stay on unconditionally — nothing of af's
