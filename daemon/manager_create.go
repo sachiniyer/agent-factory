@@ -50,6 +50,15 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// cannot disagree with the one a real create picks.
 		req.Program = defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
 	}
+	// The project's default credential account (#3386), from the same op-entry
+	// snapshot. It runs after the program is settled — an account belongs to ONE
+	// agent, so which registry the default is read from depends on the program this
+	// create actually resolved to — and BEFORE reserveCreate, so a default that
+	// cannot be honoured costs no worktree, branch or tmux session. An explicit
+	// Account is left exactly as the client sent it.
+	if err := applyDefaultAccount(cfg, &req); err != nil {
+		return session.InstanceData{}, err
+	}
 	repo, title, release, renamedArchived, err := m.reserveCreate(req)
 	if err != nil {
 		return session.InstanceData{}, err
@@ -140,6 +149,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Path:                           workspace,
 		Program:                        req.Program,
 		Account:                        req.Account,
+		AccountSource:                  req.AccountSource,
 		InPlace:                        req.InPlace,
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),

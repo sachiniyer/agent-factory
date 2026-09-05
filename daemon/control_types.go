@@ -21,7 +21,17 @@ type CreateSessionRequest struct {
 	// Account scopes the session to one of the agent's registered credential
 	// accounts (#3051). Empty leaves it on the ambient identity.
 	Account string `json:"account,omitempty"`
-	Prompt  string `json:"prompt"`
+	// AccountSource explains where a NON-REQUESTED account came from — the
+	// `default_accounts` key, the layer, the file, and how to clear it (#3386).
+	// Empty when the client named the account itself.
+	//
+	// `json:"-"` for the reason the provenance fields below are: it is an
+	// assertion the daemon makes about its OWN resolution, never a claim a client
+	// gets to make. It exists so a refusal raised later in the create — an off-box
+	// backend, a cross-agent program_overrides — can tell a user who never typed
+	// --account which config key put an account on their session.
+	AccountSource string `json:"-"`
+	Prompt        string `json:"prompt"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check

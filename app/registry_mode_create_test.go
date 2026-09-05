@@ -77,10 +77,10 @@ func TestStartNewInstanceWithActiveProjectStillOpensNaming(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = repoDir
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance(false)
 
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	assert.Equal(t, stateNew, h.state)
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, repoDir, h.namingInstance.Path,

@@ -67,6 +67,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	// EffectAppliedLive keys.
 	"default_program":   func(a, b *config.Config) bool { return a.DefaultProgram != b.DefaultProgram },
 	"program_overrides": func(a, b *config.Config) bool { return !reflect.DeepEqual(a.ProgramOverrides, b.ProgramOverrides) },
+	"default_accounts":  func(a, b *config.Config) bool { return !reflect.DeepEqual(a.DefaultAccounts, b.DefaultAccounts) },
 	"session_env_passthrough": func(a, b *config.Config) bool {
 		return !reflect.DeepEqual(a.SessionEnvPassthrough, b.SessionEnvPassthrough)
 	},

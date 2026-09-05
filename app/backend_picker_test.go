@@ -470,9 +470,9 @@ func TestStartNewInstanceResetsTheBackendField(t *testing.T) {
 	h.errBox.SetSize(120, 1)
 	h.pendingBackend = config.BackendDocker
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance(false)
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	require.Equal(t, stateNew, h.state)
 
 	assert.Empty(t, h.pendingBackend, "beginning a create must start from the repo default")

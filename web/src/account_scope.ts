@@ -59,6 +59,11 @@ export interface AccountChoice {
    *  would force one of the two mistakes: blocking a usable account, or saying
    *  nothing about one that is about to run without a credential. */
   note: string;
+  /** Whether this is the account the project's `default_accounts` config would
+   *  apply to a create that named none (#3386). A LABEL, not a behaviour: the row
+   *  is chosen like any other, and saying so is the whole point — the complaint
+   *  the issue opens with is a default applied in silence. */
+  projectDefault: boolean;
 }
 
 /**
@@ -119,16 +124,30 @@ export function accountAgentSupported(accounts: AccountsResponse | null, agent: 
  */
 export function accountChoices(accounts: AccountsResponse | null, agent: string): AccountChoice[] {
   const choices: AccountChoice[] = [
-    { value: AMBIENT_ACCOUNT, label: "Ambient identity (the agent's own login)", agent, blocked: "", note: "" },
+    {
+      value: AMBIENT_ACCOUNT,
+      label: "Ambient identity (the agent's own login)",
+      agent,
+      blocked: "",
+      note: "",
+      projectDefault: false,
+    },
   ];
   if (accounts === null || agent === "") {
     return choices;
   }
+  const fallback = accountDefaultFor(accounts, agent);
+  let listed = false;
   for (const entry of accounts.entries) {
     if (entry.agent !== agent) {
       continue;
     }
+    const isDefault = entry.name === fallback;
+    listed = listed || isDefault;
     const marks: string[] = [];
+    if (isDefault) {
+      marks.push("project default");
+    }
     if (entry.registration_only) {
       marks.push("registration only");
     }
@@ -139,6 +158,7 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string)
       value: entry.name,
       label: marks.length === 0 ? entry.name : `${entry.name} — ${marks.join(" · ")}`,
       agent: entry.agent,
+      projectDefault: isDefault,
       // The daemon is the authority on this state: `registration_only` is computed
       // by the build that owns the registry, which may be newer than this client,
       // so the flag is trusted and only the wording is written here. The canonical
@@ -156,7 +176,43 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string)
           + `from the Config view.`,
     });
   }
+  // A default naming an account the registry does not list is a real state — a
+  // project configured before the account was registered, or one deleted since —
+  // and it is exactly the state a user needs to SEE, because the create refuses
+  // it by name. Hiding it would leave the form showing the ambient identity while
+  // the project's config says otherwise, which is the silence #3386 is about.
+  // Appended last, so it never displaces a real choice.
+  if (fallback !== "" && !listed) {
+    choices.push({
+      value: fallback,
+      label: `${fallback} — project default · not registered`,
+      agent,
+      // NOT blocked: the daemon is the authority on what it accepts, and this
+      // client only knows that the registry it was handed did not list the name.
+      // Blocking here would be a client vetoing a value it merely does not
+      // recognize — and the create's own refusal names the config key, which is
+      // more use than a greyed-out button.
+      blocked: "",
+      note: `${fallback} is this project's default account but is not registered for ${agent} on the daemon `
+        + `host, so this create will be refused. Register it from the Config view, or pick another account.`,
+      projectDefault: true,
+    });
+  }
   return choices;
+}
+
+/**
+ * The account this project's config would apply for an agent, or "" for none.
+ *
+ * Read straight off the daemon's answer — the web computes no precedence of its
+ * own, for the reason ListPrograms.default exists: a second implementation of the
+ * order is a second answer, and only one of them is the one the create uses.
+ */
+export function accountDefaultFor(accounts: AccountsResponse | null, agent: string): string {
+  if (accounts === null || agent === "") {
+    return "";
+  }
+  return accounts.defaults?.[agent] ?? "";
 }
 
 /**

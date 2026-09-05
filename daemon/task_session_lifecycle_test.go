@@ -22,12 +22,12 @@ func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing
 	manager, warnings := newBareManagerCapturingWarnings()
 
 	previousArchive := archiveSessionForLifecycle
-	archiveSessionForLifecycle = func(*Manager, ArchiveSessionRequest) error {
+	archiveSessionForLifecycle = func(*Manager, ArchiveSessionRequest, sessionTeardownGuard) error {
 		return &mutationCommittedError{err: errors.New("archive skipped an unreadable file")}
 	}
 	t.Cleanup(func() { archiveSessionForLifecycle = previousArchive })
 
-	manager.runTaskSessionLifecycle("repo", "session-id", "nightly", "task-id", task.OnCompleteArchive, nil)
+	manager.runTaskSessionLifecycle("repo", "session-id", "nightly", "task-id", task.OnCompleteArchive, nil, 0)
 	assert.Contains(t, warnings.String(), "applied on_complete=archive")
 	assert.Contains(t, warnings.String(), "committed warning")
 	assert.NotContains(t, warnings.String(), "could not archive")
@@ -296,7 +296,7 @@ func TestTaskSessionLifecycle_BindsTheTeardownToTheStableID(t *testing.T) {
 	// catches it) and the handoff is what publishes the write.
 	got := make(chan KillSessionRequest, 1)
 	prev := killSessionForLifecycle
-	killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
+	killSessionForLifecycle = func(m *Manager, req KillSessionRequest, _ sessionTeardownGuard) error {
 		got <- req
 		return nil
 	}
@@ -381,13 +381,13 @@ func TestTaskSessionLifecycle_WaitsForPostWorktreeHooks(t *testing.T) {
 	hooks := make(chan struct{})
 	reaped := make(chan struct{})
 	prev := killSessionForLifecycle
-	killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
+	killSessionForLifecycle = func(m *Manager, req KillSessionRequest, _ sessionTeardownGuard) error {
 		close(reaped)
 		return nil
 	}
 	t.Cleanup(func() { killSessionForLifecycle = prev })
 
-	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, hooks)
+	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, hooks, inst.AdoptionDeliveriesAtRunEnd())
 
 	select {
 	case <-reaped:

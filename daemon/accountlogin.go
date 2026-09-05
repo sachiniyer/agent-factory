@@ -117,7 +117,16 @@ func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, e
 	// The FULL roster, not the filtered one: a client renders its register form
 	// from this, and narrowing it to the agent that was queried would make the
 	// form offer one agent because the list happened to be filtered.
-	return ListAccountsResponse{Entries: entries, Agents: sessionenv.AccountAgents()}, nil
+	roster := sessionenv.AccountAgents()
+	// Defaults follow the roster for the same reason: a picker whose program field
+	// moves from claude to codex must be able to preselect the new agent's default
+	// without another round trip (#3386). A nil manager (a test control server) has
+	// no config to resolve, so it reports no defaults rather than guessing one.
+	var defaults map[string]string
+	if m != nil {
+		defaults = defaultAccountsFor(m.Config(), req.RepoPath, roster)
+	}
+	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults}, nil
 }
 
 // RegisterAccount creates an account's credential directory without logging in.

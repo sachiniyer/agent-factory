@@ -48,6 +48,17 @@ type InstanceOptions struct {
 	Program string
 	// Account scopes the session to a registered credential account (#3051).
 	Account string
+	// AccountSource says where a NON-REQUESTED Account came from, as a sentence
+	// naming the config key, its file, and how to clear it (#3386). Empty when the
+	// caller asked for the account.
+	//
+	// It exists only for the refusals below. `--account work` on a hook-backed repo
+	// is answered by "omit --account", which is exactly right for someone who typed
+	// it — and useless for someone whose account arrived from a project's
+	// `default_accounts`, because there is no flag on their command to omit. The
+	// refusal is the same refusal; only the remedy differs, so only the remedy is
+	// carried.
+	AccountSource string
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -650,7 +661,8 @@ func refuseOffBoxAccountForKind(opts InstanceOptions, kind BackendKind) error {
 	if kind == BackendLocal || kind.CarriesAccount() {
 		return nil
 	}
-	return fmt.Errorf("account %q cannot be used with the %s backend: %s", opts.Account, kind, offBoxAccountRefusal(kind))
+	return accountRefusalWithSource(opts,
+		fmt.Errorf("account %q cannot be used with the %s backend: %s", opts.Account, kind, offBoxAccountRefusal(kind)))
 }
 
 // offBoxAccountRefusal appends only backend-specific facts to the shared
@@ -755,12 +767,12 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	requested := sessionenv.AgentForCommand(opts.Program)
 	agent := sessionenv.AgentForCommand(config.ResolveProgram(cfg, opts.Program))
 	if agent != requested {
-		return fmt.Errorf(
+		return accountRefusalWithSource(opts, fmt.Errorf(
 			"account %q was validated as a %s account, but this session's program_overrides resolves %s to "+
 				"a %s command — the account namespaces are separate, so a same-named %s account would be "+
 				"used instead of the %s one you selected. Remove the override, or create the session on the "+
 				"agent whose account you mean",
-			opts.Account, requested, requested, agent, agent, requested)
+			opts.Account, requested, requested, agent, agent, requested))
 	}
 	// Still an EXPLICIT list, and still deliberately NOT sessionenv.SupportsAccounts:
 	// that answers "does this agent have a credential-root variable", which is a
@@ -792,13 +804,32 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	// false for it: the account exists, the login works, and only the launch is
 	// unproven. Naming the follow-up is what makes that a state rather than a dead end.
 	if reason, ok := sessionenv.AccountRegistrationOnlyReason(agent); ok {
-		return fmt.Errorf("account %q is registered for %s, but %s", opts.Account, agent, reason)
+		return accountRefusalWithSource(opts,
+			fmt.Errorf("account %q is registered for %s, but %s", opts.Account, agent, reason))
 	}
-	return fmt.Errorf(
+	return accountRefusalWithSource(opts, fmt.Errorf(
 		"account %q cannot be used with %s yet: af has not established that the account boundary can "+
 			"verify how it launches that agent, so the session could start on the ambient identity or exit "+
 			"immediately; account scoping supports %s",
-		opts.Account, agent, sessionenv.AccountAgentsSummary())
+		opts.Account, agent, sessionenv.AccountAgentsSummary()))
+}
+
+// accountRefusalWithSource appends where a non-requested account came from, so a
+// refusal whose remedy is "omit --account" is not handed to someone with no
+// --account to omit (#3386).
+//
+// The clause goes LAST, after the refusal's own reason, because that reason is
+// what the user has to understand first. The separator is " · " and not a bare
+// concatenation for a reason the registration-only arm makes concrete: that
+// sentence can END IN A URL, and only whitespace terminates one for a terminal's
+// link detector — a period or a letter fused to it becomes part of the address.
+// AccountSource is itself a complete sentence, so this only joins the two.
+func accountRefusalWithSource(opts InstanceOptions, err error) error {
+	source := strings.TrimSpace(opts.AccountSource)
+	if source == "" || err == nil {
+		return err
+	}
+	return fmt.Errorf("%w · %s", err, source)
 }
 
 // resolveAccountForProvision resolves opts.Account to the registered account's
