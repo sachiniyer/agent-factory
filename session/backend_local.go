@@ -262,6 +262,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// that disappeared with the old tmux server. A pure reattach preserves
 			// them; a confirmed respawn must not attribute them to its replacement.
 			i.ClearIdleEvidence()
+			// This also calls noteAgentRuntimeReplaced, which touches UpdatedAt
+			// unconditionally, even when there was no idle evidence to clear.
 			resetAgentBrokerCaptures(i)
 			i.markLoadRuntimeReplaced()
 		}
