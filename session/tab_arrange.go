@@ -151,6 +151,7 @@ func (i *Instance) reorderTabLocked(from, to int) error {
 	reordered = append(reordered, tab)
 	reordered = append(reordered, rest[to:]...)
 	i.Tabs = reordered
+	i.touchLocked()
 	return nil
 }
 
@@ -206,6 +207,7 @@ func (i *Instance) reorderTabsFromData(target []TabData) bool {
 	}
 	if moved {
 		i.Tabs = newOrder
+		i.touchLocked()
 	}
 	return moved
 }

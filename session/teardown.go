@@ -358,7 +358,10 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 	gw := i.gitWorktree
 	title := i.Title
 	if mode.clearsStarted() {
-		i.started = false
+		if i.started {
+			i.started = false
+			i.touchLocked()
+		}
 	}
 	i.mu.Unlock()
 
@@ -425,7 +428,11 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 	// snapshot above was never torn down here, and dropping it would lose the only
 	// pointer to a session nothing killed.
 	for idx := range reaped {
+		before := len(i.pendingTabCleanup)
 		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, &reaped[idx])
+		if len(i.pendingTabCleanup) != before {
+			i.touchLocked()
+		}
 	}
 	i.mu.Unlock()
 
@@ -455,7 +462,10 @@ func clearClosedTmuxRefs(i *Instance, closed []closedTab) {
 	for _, c := range closed {
 		for _, tab := range i.Tabs {
 			if tab.ID == c.id && tab.tmux == c.ts {
-				tab.tmux = nil
+				if tab.tmux != nil {
+					tab.tmux = nil
+					i.touchLocked()
+				}
 				break
 			}
 		}
@@ -707,7 +717,10 @@ func (teardownKill) reapsPendingTabCleanup() bool { return true }
 func (teardownKill) finalize(i *Instance, closed []closedTab, gw *git.GitWorktree) {
 	clearClosedTmuxRefs(i, closed)
 	if i.gitWorktree == gw {
-		i.gitWorktree = nil
+		if i.gitWorktree != nil {
+			i.gitWorktree = nil
+			i.touchLocked()
+		}
 	}
 }
 
@@ -917,7 +930,10 @@ func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) 
 			kept = append(kept, tab)
 		}
 	}
-	i.Tabs = kept
+	if len(i.Tabs) != len(kept) {
+		i.Tabs = kept
+		i.touchLocked()
+	}
 }
 
 // worktreePathOf reads the path a teardown is about to mutate, or "" when there

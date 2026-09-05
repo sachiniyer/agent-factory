@@ -106,6 +106,7 @@ func (i *Instance) noteAgentRuntimeReplaced() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.agentRuntimeGeneration++
+	i.touchLocked()
 	i.clearAgentModelChangeLocked()
 }
 
@@ -126,6 +127,7 @@ func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {
 		return false
 	}
 	i.Tabs[0].Conversation = conv
+	i.touchLocked()
 	return true
 }
 
