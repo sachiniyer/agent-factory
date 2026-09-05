@@ -609,6 +609,47 @@ func TestResumeProgram_CodexProfileResumeFalsePositive(t *testing.T) {
 	require.Equal(t, want, got, "BUG: 'resume' in flag value position should not be detected as subcommand")
 }
 
+func TestConversationSelectorArgs_CodexGlobalOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		program string
+		want    []string
+	}{
+		{"long value option", "codex --model gpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"short value option", "codex -m gpt-5 resume --last", []string{"resume", "--last"}},
+		{"attached value option", "codex -mgpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"boolean option", "codex --search resume old-chat", []string{"resume", "old-chat"}},
+		{"equals value named resume", "codex --model=resume resume old-chat", []string{"resume", "old-chat"}},
+		{"separate model value named resume", "codex --model resume", nil},
+		{"separate profile value named resume", "codex --profile resume", nil},
+		{"config value containing resume", "codex --config model=resume", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ConversationSelectorArgs(tc.program))
+		})
+	}
+}
+
+func TestConversationSelectorArgs_CodexExecOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		program string
+		want    []string
+	}{
+		{"long value option", "codex exec --model gpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"short value option", "codex exec -m gpt-5 resume --last", []string{"resume", "--last"}},
+		{"attached value option", "codex exec -mgpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"boolean option", "codex exec --json resume old-chat", []string{"resume", "old-chat"}},
+		{"equals value named resume", "codex exec --model=resume resume old-chat", []string{"resume", "old-chat"}},
+		{"separate value named resume", "codex exec --model resume", nil},
+		{"exec alias", "codex e resume old-chat", []string{"resume", "old-chat"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ConversationSelectorArgs(tc.program))
+		})
+	}
+}
+
 // TestResumeProgram_Idempotent verifies that running the rewrite twice
 // produces the same string as running it once — defense against repeated
 // Restore() calls (e.g. user kills tmux multiple times in a row).

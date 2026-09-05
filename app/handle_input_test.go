@@ -197,9 +197,9 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 	h.store.AddInstance(existing)
 	h.sidebar.SetSelectedInstance(0)
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance(false)
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	require.NotNil(t, h.namingInstance)
 
 	require.Equal(t, []string{"", "existing"}, collectTitles(h.store.GetInstances()),

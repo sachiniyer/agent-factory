@@ -17,6 +17,12 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
+// testHookCreateLimitObservedBeforePublication pauses a limit-parked create
+// after its observation is installed but before the row is published. Tests use
+// it to exercise account-swap admission at that exact boundary. No-op in
+// production.
+var testHookCreateLimitObservedBeforePublication = func() {}
+
 func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
 	// Own the create's lifetime: cancel derives a child context that is cancelled
 	// the instant this returns (success, failure, or panic), so the readiness poll
@@ -49,6 +55,15 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// restating the precedence — so the program a picker labels "repo default"
 		// cannot disagree with the one a real create picks.
 		req.Program = defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
+	}
+	// The project's default credential account (#3386), from the same op-entry
+	// snapshot. It runs after the program is settled — an account belongs to ONE
+	// agent, so which registry the default is read from depends on the program this
+	// create actually resolved to — and BEFORE reserveCreate, so a default that
+	// cannot be honoured costs no worktree, branch or tmux session. An explicit
+	// Account is left exactly as the client sent it.
+	if err := applyDefaultAccount(cfg, &req); err != nil {
+		return session.InstanceData{}, err
 	}
 	repo, title, release, renamedArchived, err := m.reserveCreate(req)
 	if err != nil {
@@ -140,6 +155,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Path:                           workspace,
 		Program:                        req.Program,
 		Account:                        req.Account,
+		AccountSource:                  req.AccountSource,
 		InPlace:                        req.InPlace,
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),
@@ -214,7 +230,26 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
 	conversationCapture, startErr := task.StartAndSendPromptWithConversationCapture(ctx, instance, req.Prompt)
+	// A startup usage-limit result becomes candidate evidence in
+	// finishCreateStart. Take the publication fence BEFORE installing it and keep
+	// it until the row is both visible and durable, so final account-swap
+	// admission cannot scan between those two facts. The same errors.As
+	// classification is the one finishCreateStart uses below.
+	limitPublicationFenceHeld := false
+	var limitErr *task.LimitReachedError
+	if errors.As(startErr, &limitErr) {
+		m.accountLimitMu.Lock()
+		limitPublicationFenceHeld = true
+	}
+	releaseLimitPublicationFence := func() {
+		if limitPublicationFenceHeld {
+			m.accountLimitMu.Unlock()
+			limitPublicationFenceHeld = false
+		}
+	}
+	defer releaseLimitPublicationFence()
 	if serr := finishCreateStart(instance, req.Prompt, startErr); serr != nil {
+		releaseLimitPublicationFence()
 		// An unknown startup outcome is already a teardown boundary. Launch may have
 		// failed because the name it probed is not the name tmux stored; asking Kill
 		// through that same binding can then answer "absent" for the wrong name and
@@ -283,6 +318,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		}
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
+	if instance.LimitReached() {
+		testHookCreateLimitObservedBeforePublication()
+	}
 	// A heal (the root-agent ensure loop replacing a record it just reaped) marks
 	// what became of the prior conversation, so a root that came back without its
 	// history says so on its row instead of only in the application log (#2629).
@@ -302,6 +340,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// not in memory would let refresh construct a duplicate Instance
 	// (opening a fresh PTY in the tmux backend) that gets orphaned when
 	// the original is later stored under the same key.
+	// An unregistered create is not live evidence yet. The limit-publication
+	// fence acquired before finishCreateStart stays held through this insertion,
+	// so the candidate is either absent for the whole commit or visible as
+	// limited.
 	persistErr := func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -318,6 +360,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		m.startConversationCaptureLocked(repo.ID, key, instance, conversationCapture, conversationToken)
 		return nil
 	}()
+	releaseLimitPublicationFence()
 	if persistErr != nil {
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the

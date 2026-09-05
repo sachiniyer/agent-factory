@@ -255,7 +255,9 @@ text file (default `~/af-bug-report-<ts>.txt`, mode 0600; override with
 `-o/--output`) so you can read the whole thing in one scroll before attaching
 it. Redaction is **best-effort**: free-text and secret-bearing fields (session
 titles, session prompts, task prompts, tab and session commands, tab names,
-account labels, remote metadata) are dropped; every directory the bundle names is
+account labels, remote metadata) are dropped — a registered account label is
+replaced by the same marker wherever it appears, in the session records and in
+the daemon log and config sections that name it as text; every directory the bundle names is
 replaced by the role it plays (`[repo:N]`, `[worktree:N]`, `[af-home]`, `~`)
 rather than by its own name, and your username by `[user]`; and known credential
 shapes are scrubbed everywhere — but perfect redaction is impossible, so

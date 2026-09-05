@@ -175,6 +175,32 @@ type Config struct {
 	// (typically a full path with flags). When unset for an agent, the
 	// bare agent name is used and resolved via $PATH.
 	ProgramOverrides map[string]string `json:"program_overrides,omitempty" toml:"program_overrides,omitempty"`
+	// DefaultAccounts maps an agent name (key) to the credential account (value)
+	// a session for that agent runs as when the create names none (#3386).
+	//
+	// KEYED BY AGENT, and that is the whole design rather than a convenience. An
+	// account is a directory in ONE agent's registry: claude's "work" and codex's
+	// "work" are different identities that merely share a spelling. A single
+	// scalar default would therefore have to be re-interpreted against whichever
+	// agent the session resolved to, and the two ways of doing that are both
+	// wrong — refuse the create (a project default that breaks every session on a
+	// second agent), or look the name up in the other agent's registry (a session
+	// silently running as an identity nobody chose, the #2983 outcome). A map has
+	// neither failure: an agent with no entry gets the ambient identity, exactly
+	// as before this key existed.
+	//
+	// Keys are the agents sessionenv.AccountAgents() reports, which is narrower
+	// than tmux.SupportedPrograms: an agent with no credential-root variable
+	// cannot be scoped to an account at all, so an entry for one would be
+	// silently inert. Values are account NAMES, validated for shape here and for
+	// EXISTENCE at create time — the create is where a missing account matters,
+	// and it refuses rather than falling back to the ambient identity.
+	//
+	// Admitted globally and in the machine-local personal per-project layer, and
+	// deliberately NOT in a checked-in repo file: identity policy is never
+	// checked in, and a committed account name is meaningless for everyone else
+	// who clones the repository (the #3174 precedent for limit_account_candidates).
+	DefaultAccounts map[string]string `json:"default_accounts,omitempty" toml:"default_accounts,omitempty"`
 	// SessionEnvPassthrough extends the built-in, default-deny environment for
 	// agent sessions with exact variable names. It is deliberately global-only:
 	// a cloned repository must never be able to request a credential from the
@@ -255,6 +281,18 @@ type Config struct {
 	// additionally tracks the automatic 1.x.y-preview-z prereleases.
 	// Any other value falls back to stable with a warning.
 	UpdateChannel string `json:"update_channel" toml:"update_channel"`
+	// UpgradeClearUnverifiableArtifacts lets an upgrade set aside binaries staged
+	// beside the af executable whose owning agent-factory home af cannot read
+	// (#3864), instead of refusing to upgrade while they are there.
+	//
+	// Off by default, and the default is the whole point: an unreadable claim is
+	// still a claim, and an unmounted home reports exactly what a finished
+	// transaction does, so af refuses and names the file rather than guessing. A
+	// leftover af CAN attribute — one whose home says it is finished, or one
+	// nothing records at all and nothing has touched in an hour — is already set
+	// aside without this. Turn it on for a box where an upgrade keeps refusing on
+	// a staged artifact you have looked at and know is dead.
+	UpgradeClearUnverifiableArtifacts bool `json:"upgrade_clear_unverifiable_artifacts" toml:"upgrade_clear_unverifiable_artifacts"`
 	// Theme is the global-only TOML palette (#1389): either a named preset or a
 	// custom [theme] table, shared by the TUI and web. It is intentionally
 	// TOML-only because legacy config.json is frozen and a cloned repo must never
@@ -292,6 +330,14 @@ type Config struct {
 	// retry from PR2) and the scheduler does zero work. Deliberately GLOBAL-ONLY
 	// (it configures daemon behavior), like daemon_poll_interval.
 	LimitAutoResume bool `json:"limit_auto_resume" toml:"limit_auto_resume"`
+	// LimitAccountCandidates is the ordered, explicit set of registered account
+	// names the usage-limit scheduler may select when a session is blocked. An
+	// empty list (the default) disables account switching. The same names are
+	// resolved in the limited session's agent namespace, so a nonexistent account
+	// is skipped rather than reinterpreted. Admitted globally and from the
+	// machine-local personal-project layer, never checked-in repo config: a clone
+	// cannot opt the operator into changing identity or billing account.
+	LimitAccountCandidates []string `json:"limit_account_candidates,omitempty" toml:"limit_account_candidates,omitempty"`
 	// GlobalAgentSkills opts af into writing its "agent-factory" skill file
 	// into the USER'S GLOBAL per-agent config directories — codex's
 	// $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's

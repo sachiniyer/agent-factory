@@ -137,6 +137,15 @@ type Plan struct {
 	// snapshotted; absence is recorded so rollback removes files created by a
 	// candidate.
 	MetadataPaths []string
+	// ClearUnverifiableArtifacts lets Prepare set aside a staged artifact beside
+	// the executable whose owning home cannot be read, instead of refusing.
+	//
+	// Off by default, and it has to be: an unreadable claim is still a claim, and
+	// an unmounted home reports exactly what a finished transaction does. It is
+	// the operator's way past the one case the evidence cannot settle, which an
+	// unattended daemon would otherwise meet forever with no override at all
+	// (#3864, and the unoverridable-block shape of #2859).
+	ClearUnverifiableArtifacts bool
 }
 
 // SupervisionKind is the captured owner used for both candidate activation

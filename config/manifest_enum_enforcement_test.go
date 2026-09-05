@@ -104,11 +104,15 @@ func TestNonRepoSharedKeysAreRejectedFromAnInRepoFile(t *testing.T) {
 	// A shaped TOML body per key. Tables need a literal, so they are spelled out
 	// rather than generated — and they are exactly the ones worth pinning.
 	bodies := map[string]string{
-		"theme":                   "[theme]\nselected_fg = \"#ffffff\"\n",
-		"keys":                    "[keys]\nquit = \"Q\"\n",
-		"root_agent":              "[root_agent]\nenabled = true\n",
-		"root_agents":             "[root_agents]\n\"/audit/probe\" = { program = \"claude\" }\n",
-		"limit_patterns":          "[limit_patterns]\nclaude = \"probe\"\n",
+		"theme":          "[theme]\nselected_fg = \"#ffffff\"\n",
+		"keys":           "[keys]\nquit = \"Q\"\n",
+		"root_agent":     "[root_agent]\nenabled = true\n",
+		"root_agents":    "[root_agents]\n\"/audit/probe\" = { program = \"claude\" }\n",
+		"limit_patterns": "[limit_patterns]\nclaude = \"probe\"\n",
+		// Identity policy, and the sharpest case after root_agent: a checked-in
+		// entry here would have a cloned repository choose which of the operator's
+		// logged-in accounts — and therefore whose quota — its sessions run as.
+		"default_accounts":        "[default_accounts]\nclaude = \"probe\"\n",
 		"session_env_passthrough": "session_env_passthrough = [\"AUDIT_PROBE\"]\n",
 		"cors_allowed_origins":    "cors_allowed_origins = [\"http://audit.probe\"]\n",
 	}

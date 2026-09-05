@@ -59,6 +59,15 @@ type AccountEntry struct {
 // supports accounts.
 type ListAccountsRequest struct {
 	Agent string `json:"agent"`
+	// RepoPath sharpens Defaults, which is a PER-PROJECT fact even though the
+	// registry itself is not: `default_accounts` admits the machine-local
+	// per-project layer, so "which account would a create use here" depends on
+	// which project "here" is (#3386).
+	//
+	// Optional, exactly as ListProgramsRequest.RepoPath is: the registry and the
+	// roster are global, so a caller with no project in hand still gets a useful
+	// answer — just one whose Defaults come from the global layer alone.
+	RepoPath string `json:"repo_path,omitempty"`
 }
 
 // ListAccountsResponse carries the accounts and the roster they can be created
@@ -71,6 +80,23 @@ type ListAccountsRequest struct {
 type ListAccountsResponse struct {
 	Entries []AccountEntry `json:"entries"`
 	Agents  []string       `json:"agents"`
+	// Defaults maps an agent to the account a create with NO explicit account
+	// would run as for RepoPath — the `default_accounts` key resolved through the
+	// same precedence the create applies (#3386). An agent with no configured
+	// default is absent, which means the ambient identity.
+	//
+	// It exists so a picker can PRESELECT what the daemon is going to do instead
+	// of sending nothing and letting the daemon fill it in silently — the
+	// complaint #3386 opens with. Clients render it; they never compute it, for
+	// the reason ListPrograms.Default exists: a second implementation of the
+	// precedence is a second answer, and only one of them is the one the create
+	// uses.
+	//
+	// It is deliberately NOT validated here. A default naming an account that is
+	// not registered is reported as configured, and the create refuses it by name
+	// — dropping it from this map would hide the misconfiguration behind an
+	// "ambient identity" the picker would then be lying about.
+	Defaults map[string]string `json:"defaults,omitempty"`
 }
 
 // RegisterAccountRequest creates an account's credential directory on the

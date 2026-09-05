@@ -132,24 +132,38 @@ type InstanceData struct {
 	// drops it for every normal session; additive + rollforward, mirroring the
 	// Liveness precedent.
 	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
-	Height       int       `json:"height"`
-	Width        int       `json:"width"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	Prompt       string    `json:"prompt,omitempty"`
+	// LimitAccount is the identity that produced this limit observation. It may
+	// differ from Account while a durably selected replacement is still starting.
+	LimitAccount string `json:"limit_account,omitempty"`
+	// AccountLimitObservations retain quota walls after a successful identity
+	// replacement clears the session's current limit liveness. Candidate
+	// selection uses these per agent/account observations until a known reset
+	// window expires; an unknown reset stays conservatively active.
+	AccountLimitObservations []AccountLimitObservationData `json:"account_limit_observations,omitempty"`
+	Height                   int                           `json:"height"`
+	Width                    int                           `json:"width"`
+	CreatedAt                time.Time                     `json:"created_at"`
+	UpdatedAt                time.Time                     `json:"updated_at"`
+	Prompt                   string                        `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
 	// the exact mission lands (or is transferred to the usage-limit retry path).
 	PendingHandoffMission string `json:"pending_handoff_mission,omitempty"`
+	// PendingAccountSwap is the committed identity change whose replacement
+	// runtime still needs the in-session notice and stored task delivered.
+	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
 
 	Program string `json:"program"`
-	// Account is the credential account this session runs its agent as (#3051).
+	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the
 	// ambient account would spend the wrong quota while still displaying the
 	// account it was created with.
 	Account string `json:"account,omitempty"`
+	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
+	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
+	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by
 	// Manager.KillSession before teardown begins. Present only in the crash
 	// window between tombstone write and record deletion — a surviving
@@ -309,6 +323,7 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // unavailable.
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	d = d.RestoreAccountSwapRollbackFence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
@@ -385,6 +400,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	d = d.projectPendingAccountSwapForPreviousRelease()
 	// The compatibility projection must capture original values before either it
 	// or the relocation fence below overwrites them. Older binaries ignore
 	// ArchiveReport, but the previous release understands the inert/ownership

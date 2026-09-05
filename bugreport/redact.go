@@ -7,11 +7,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
@@ -71,6 +68,13 @@ type redactor struct {
 	// structured sections don't reach.
 	tmuxNames map[string]struct{}
 	titles    map[string]struct{}
+	// accounts are the registered agent-account labels, read from the accounts
+	// registry under the AF home once per run (see noteRegisteredAccounts). They
+	// are gathered rather than derived from the records being redacted: a label
+	// reaches the bundle through text no record owns — the daemon log tail, and
+	// the config file that selects a default account — so the record set is not
+	// the set that has to come out (#3871).
+	accounts map[string]struct{}
 	// roots are the absolute directories this run can name: the AF home, plus
 	// each session's repo and worktree, gathered by noteSession before any record
 	// is redacted. They are registered exactly the way titles are, and for the
@@ -155,6 +159,21 @@ func addUserVariant(users []string, name string) []string {
 func (r *redactor) scrub(s string) string {
 	s = credscrub.Scrub(s)
 	s = r.collapseKnownRoots(s)
+	// Account labels are swept HERE, in the catch-all, rather than beside the
+	// title pass: a label reaches the bundle through two sections that share only
+	// this function. collectLog routes the daemon log tail through scrubLog, which
+	// ends by delegating here; collectConfig hands the global config file straight
+	// to scrub() and touches no other pass. A sweep added next to the title pass
+	// would cover the log and silently miss the config file that NAMES the default
+	// account (#3871).
+	//
+	// It runs before the username pass for the reason that pass runs longest-first
+	// within itself: a username that is a token-boundary prefix of a label would
+	// otherwise consume the prefix, destroy the only exact match for the label, and
+	// strand its suffix in the bundle. The account alphabet makes the reverse
+	// impossible — a label never matches inside a longer run of label characters —
+	// so this order is safe in both directions rather than a coin flip.
+	s = r.scrubAccountLabels(s)
 	// Blank bare username tokens with the SAME manual token boundary the title
 	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
 	// when the username ends in a non-word rune (an OS username like "test-"), so
@@ -183,8 +202,16 @@ func (r *redactor) scrub(s string) string {
 // already-encoded JSON documents, where treating a short title such as "id" as
 // bare text would rewrite structural keys. Call this while the value is still a
 // value; all later text/JSON renderings then inherit the safe form.
+//
+// Account labels take the OPPOSITE trade and are swept by scrub() itself, keys
+// and all. They have to be: the config file is handed to scrub() whole and shares
+// no other pass, so leaving them out of it would leave the label in the section
+// that names the default account. What that costs is over-redaction for an
+// operator who names an account after a config key — visible in a file they are
+// told to read, and the safe direction for an artifact meant to be shared
+// (#3871).
 func (r *redactor) scrubUnstructured(s string) string {
-	return r.scrub(r.scrubSessionTitles(s))
+	return r.scrub(r.scrubKnownLabels(s))
 }
 
 // scrubLog scrubs the daemon log tail. On top of the standard scrub() pass it
@@ -211,7 +238,7 @@ func (r *redactor) scrubLog(s string) string {
 	// matcher is line-oriented while a legal title may contain newlines; running
 	// that matcher first replaced line one and made the original full-title match
 	// impossible, leaking the remaining lines (#2249 late review).
-	s = r.scrubSessionTitles(s)
+	s = r.scrubKnownLabels(s)
 	s = r.scrubTmuxNames(s)
 	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
 	// syntax is a safer boundary than a global punctuation matcher and also
@@ -257,7 +284,7 @@ func (r *redactor) scrubTmuxNames(s string) string {
 // orders them that way: a shape matcher that consumes part of a name makes the
 // exact full-title match impossible afterwards.
 func (r *redactor) scrubDiagnostic(s string) string {
-	return r.scrub(r.scrubTmuxNames(r.scrubSessionTitles(s)))
+	return r.scrub(r.scrubTmuxNames(r.scrubKnownLabels(s)))
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
@@ -285,17 +312,6 @@ func (r *redactor) scrubSessionTitles(s string) string {
 	return s
 }
 
-// sortLongestFirst keeps redaction order in one place: replace longer secrets
-// before their prefixes, with a lexical tie-break for deterministic output.
-func sortLongestFirst(values []string) {
-	sort.Slice(values, func(i, j int) bool {
-		if len(values[i]) != len(values[j]) {
-			return len(values[i]) > len(values[j])
-		}
-		return values[i] < values[j]
-	})
-}
-
 // tmuxPrefixMarker is the redaction of an af tmux session name whose title
 // segment is removed but whose "af_" prefix is kept so the line still reads as
 // referring to an af session.
@@ -305,114 +321,6 @@ const tmuxPrefixMarker = "af_" + redactedMarker
 // keeping the fixed, user-text-free "af_<hash>_" prefix (3 + 8 + 1 = 12 chars).
 func redactAFTmuxTitle(match string) string {
 	return match[:12] + redactedMarker
-}
-
-// replaceBareTitle removes a title only when it occupies a complete text token.
-// The legacy logger's raw %s form is delimited by surrounding prose/newlines, so
-// this covers that representation without compiling single-line punctuation-only
-// titles such as "." or "/" into an unbounded matcher that erases every period
-// or path separator in the bundle. A multiline title is different: its exact,
-// byte-identical cross-line sequence must be removed before a legacy line matcher
-// can consume line one and strand the rest. Exact %q forms are handled above.
-//
-// A token boundary means start/end of text or a neighboring rune that is not a
-// letter, number, combining mark, or underscore. Checking both edges regardless
-// of the title's own first/last character handles titles such as "client[prod]"
-// while refusing to match "." inside "1.2" or "/" inside "repo/path".
-func replaceBareTitle(s, title string) string {
-	return replaceBareToken(s, title, redactedMarker)
-}
-
-// replaceBareToken replaces token with marker only where token occupies a
-// COMPLETE text token — start/end of text or a neighboring rune that is not a
-// letter, number, mark, or underscore. It is the manual-boundary replacement both
-// the title scrub and the username scrub use, because a `\b<token>\b` regex only
-// anchors at word↔non-word transitions: a token that itself ENDS (or starts) in a
-// non-word rune — a username like "test-", or a title like "client[prod]" — has no
-// `\b` after its trailing "-", so `\b` never matches it and it leaks (#2533). This
-// checks the actual neighboring runes instead, so "test-" is redacted in
-// "test-/fix-login-bug" (the "/" is a non-word boundary) but not inside a larger
-// word.
-func replaceBareToken(s, token, marker string) string {
-	if strings.TrimSpace(token) == "" || (!containsWordRune(token) && !strings.ContainsAny(token, "\r\n")) {
-		return s
-	}
-	var out strings.Builder
-	scan, copied := 0, 0
-	changed := false
-	for scan <= len(s)-len(token) {
-		rel := strings.Index(s[scan:], token)
-		if rel < 0 {
-			break
-		}
-		start := scan + rel
-		end := start + len(token)
-		if titleTokenBoundary(s, start, end) && !insideRedactionMarker(s, start, end) {
-			out.WriteString(s[copied:start])
-			out.WriteString(marker)
-			copied = end
-			scan = end
-			changed = true
-			continue
-		}
-		// Advance one byte past this rejected occurrence. strings.Index remains
-		// byte-based too, so this cannot skip a later exact byte sequence.
-		scan = start + 1
-	}
-	if !changed {
-		return s
-	}
-	out.WriteString(s[copied:])
-	return out.String()
-}
-
-func titleTokenBoundary(s string, start, end int) bool {
-	if start > 0 {
-		r, _ := utf8.DecodeLastRuneInString(s[:start])
-		if isWordRune(r) {
-			return false
-		}
-	}
-	if end < len(s) {
-		r, _ := utf8.DecodeRuneInString(s[end:])
-		if isWordRune(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func isWordRune(r rune) bool {
-	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
-}
-
-func containsWordRune(s string) bool {
-	for _, r := range s {
-		if isWordRune(r) {
-			return true
-		}
-	}
-	return false
-}
-
-// insideRedactionMarker keeps the title sanitizer idempotent when a legal title
-// is itself "redacted", "secret", or another substring of a marker emitted by
-// an earlier title. Such a match is already inside public replacement text; it
-// must not grow the marker or destroy its recognizable shape.
-func insideRedactionMarker(s string, start, end int) bool {
-	for _, marker := range []string{redactedMarker, secretMarker, userMarker} {
-		first := start - len(marker) + 1
-		if first < 0 {
-			first = 0
-		}
-		for candidate := first; candidate <= start; candidate++ {
-			markerEnd := candidate + len(marker)
-			if markerEnd >= end && markerEnd <= len(s) && s[candidate:markerEnd] == marker {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // noteSession records a session's tmux name(s) and raw title(s) before they are
@@ -604,6 +512,19 @@ var sensitiveJSONKeys = map[string]bool{
 	//     needs the typed record's titles.
 	"alternate_path": true, "archive_warning": true,
 	"name": true, "account": true, "program": true, "error": true,
+	// The usage-limit swap's account labels (#3127), mirrored here for the reason
+	// every entry above is: a record the typed decode REJECTS must never be less
+	// private than one it accepts. "account" already covers the label nested in
+	// each account_limit_observations entry, because that key is matched exactly
+	// wherever it appears; these two are the spellings it does not reach.
+	//
+	// pending_account_swap is dropped WHOLESALE rather than per-field, which is
+	// this path's rule for an object whose shape it could not parse — the same
+	// call remote_meta and the teardown union get. It costs nothing here: the
+	// marker replaces the VALUE and leaves the KEY, so "a committed swap was
+	// still awaiting delivery" survives for triage while the two labels and the
+	// resumable conversation id inside it do not.
+	"limit_account": true, "pending_account_swap": true,
 	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
 	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
 	// bundle in a form the closing text scrub cannot recognize as a path, a home
@@ -728,6 +649,43 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// invents one (#3588).
 	if d.Account != "" {
 		d.Account = redactedMarker
+	}
+	// Every other account LABEL in the row takes Account's trade, for Account's
+	// reason: they are the same user-picked strings, reached through the
+	// usage-limit swap (#3127) rather than through `--account`, and a bundle that
+	// redacted one spelling of an employer's name while printing three others
+	// would be worse than one that redacted none — it reads as if the policy had
+	// been applied.
+	//
+	// The marker keeps what triage actually needs. LimitAccount answers "which
+	// identity hit the wall", the pending pair answers "a move was committed and
+	// its delivery had not settled", and the observation list answers "how many
+	// identities were walled at once" — all of which survive as counts and
+	// presence. None of them needs the label to be readable.
+	if d.LimitAccount != "" {
+		d.LimitAccount = redactedMarker
+	}
+	if d.PendingAccountSwap != nil {
+		if d.PendingAccountSwap.From != "" {
+			d.PendingAccountSwap.From = redactedMarker
+		}
+		if d.PendingAccountSwap.To != "" {
+			d.PendingAccountSwap.To = redactedMarker
+		}
+		// The same provider conversation id AgentConversation.ID is cleared for,
+		// and cleared the same way rather than marked: it is a resumable handle,
+		// so its VALUE is the sensitive part and its presence is not worth
+		// reporting.
+		d.PendingAccountSwap.ConversationID = ""
+	}
+	// Agent beside it stays verbatim — it is the bounded agent enum, classified
+	// as such in verbatimInstanceFields, and it is what makes the redacted
+	// account labels legible as "two claude accounts" rather than two opaque
+	// markers.
+	for i := range d.AccountLimitObservations {
+		if d.AccountLimitObservations[i].Account != "" {
+			d.AccountLimitObservations[i].Account = redactedMarker
+		}
 	}
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker

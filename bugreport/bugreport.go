@@ -153,6 +153,16 @@ func Build(in Inputs) (Result, error) {
 		bundlePath:  in.BundlePath,
 	}
 
+	// Registered account labels come from the accounts registry, not from any
+	// section being collected, so they are gathered before the first one is
+	// redacted. A registry that cannot be read is RECORDED rather than fatal: the
+	// bundle is still worth having, but the pass that removes account labels from
+	// the log and config sections did not run, and a bundle that looks swept when
+	// it is not is the one outcome this must never produce (#3871).
+	if err := r.noteRegisteredAccounts(); err != nil {
+		b.Errors = append(b.Errors, err.Error())
+	}
+
 	// Task statuses can mention a historical target that differs from the
 	// task's current TargetSession. Keep raw tasks local until instances have
 	// registered every persisted title, then sanitize all task statuses against

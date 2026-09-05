@@ -165,7 +165,7 @@ func (i *Instance) recoverUnderHeldFence(beforeLive func()) error {
 // out from under its own owner — which is why the check and the clear share one
 // critical section in clearOpIfHeld rather than being read-then-write.
 func (i *Instance) EndRecoverFence() bool {
-	return i.clearOpIfHeld(OpRestoring, "restore")
+	return i.clearOpIfHeld(OpRestoring, "restore", nil)
 }
 
 // BeginRecoverFence validates the recover precondition and raises the restore
@@ -287,7 +287,17 @@ func (i *Instance) BeginLimitResume() error {
 // released state to its clients can tell an effective release from a no-op and not
 // publish a duplicate settled event on the path that already published one.
 func (i *Instance) EndLimitResume() bool {
-	return i.clearOpIfHeld(OpRespawning, "limit resume")
+	return i.clearOpIfHeld(OpRespawning, "limit resume", func() {
+		// A preflighted account replacement also fences lazy sibling starts. If the
+		// identity was never committed, releasing the resume owns and retires that
+		// provisional plan; a committed replacement keeps it until delivery clears
+		// pendingAccountSwap. This runs inside clearOpIfHeld's lock rather than
+		// after it, so a second admission cannot raise the fence and install a new
+		// plan in the gap and have this retire THAT one.
+		if i.pendingAccountSwap == nil {
+			i.accountSwapLaunch = nil
+		}
+	})
 }
 
 // clearOpIfHeld lowers the in-flight fence ONLY while it is still the op the caller
@@ -303,7 +313,9 @@ func (i *Instance) EndLimitResume() bool {
 //
 // It is shared rather than written twice because both fence owners want the identical
 // rule, and a second copy is the one that would keep the split.
-func (i *Instance) clearOpIfHeld(held InFlightOp, operation string) bool {
+// cleared, when non-nil, runs under the same write lock right after the fence
+// comes down, for state a fence owner must retire indivisibly with it.
+func (i *Instance) clearOpIfHeld(held InFlightOp, operation string, cleared func()) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != held {
@@ -312,6 +324,9 @@ func (i *Instance) clearOpIfHeld(held InFlightOp, operation string) bool {
 	if err := i.transitionLocked(ClearOp()); err != nil {
 		log.WarningLog.Printf("%s: clearing the in-flight fence for %q: %v", operation, i.Title, err)
 		return false
+	}
+	if cleared != nil {
+		cleared()
 	}
 	return true
 }
@@ -335,6 +350,34 @@ func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
 		return fmt.Errorf("respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}
 	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Respawn(i) })
+}
+
+// RespawnForAccountSwap starts the replacement identity in a fresh provider
+// conversation. Local recovery normally resumes the prior conversation, which
+// belongs to the previous account's separate home; Docker already provisions a
+// fresh sandbox and launch through its ordinary Respawn implementation.
+func (i *Instance) RespawnForAccountSwap() error {
+	return i.RespawnForAccountSwapWithLiveBoundary(nil)
+}
+
+// RespawnForAccountSwapWithLiveBoundary is the fresh-conversation account
+// replacement with the same pre-ConfirmLive callback used by ordinary respawn.
+// The idle-evidence mechanism owns that boundary; account swapping only routes
+// its distinct launch through it.
+func (i *Instance) RespawnForAccountSwapWithLiveBoundary(beforeLive func()) error {
+	if op := i.GetInFlightOp(); op != OpRespawning {
+		return fmt.Errorf("account respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
+	}
+	if err := i.withLiveBoundary(beforeLive, func() error {
+		backend := i.currentBackend()
+		if local, ok := backend.(*LocalBackend); ok {
+			return local.respawnFresh(i)
+		}
+		return backend.Respawn(i)
+	}); err != nil {
+		return err
+	}
+	return i.markAccountSwapReplacementPanesStarted()
 }
 
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing
@@ -868,7 +911,7 @@ func (i *Instance) BeginArchivedRestoreFence() error {
 // no-op once the re-spawn has moved the row off OpRestoring, and it never disturbs
 // an op some other owner raised (see clearOpIfHeld).
 func (i *Instance) EndArchivedRestoreFence() bool {
-	return i.clearOpIfHeld(OpRestoring, "archive restore")
+	return i.clearOpIfHeld(OpRestoring, "archive restore", nil)
 }
 
 // CloseAttachOnly releases resources this instance opened to view or drive its

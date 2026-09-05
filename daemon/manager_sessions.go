@@ -23,10 +23,39 @@ var errSessionNotFound = errors.New("not found")
 // request's own (possibly stale) id under a cross-repo title collision (#1592
 // Phase 5 follow-up).
 func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, error) {
-	return m.killSessionRequestedBy(req, "internal daemon caller")
+	return m.killSessionRequestedBy(req, "internal daemon caller", nil)
 }
 
-func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string) (session.InstanceData, error) {
+// sessionTeardownGuard is an extra precondition a caller may attach to a
+// destructive session op. It is evaluated INSIDE that op's fence — after the
+// per-session op-lock is held and the killsInFlight claim is registered, and
+// before the op touches anything — and is handed the instance the map holds
+// under m.mu at that moment (nil when the target is a ghost record with no live
+// instance). A non-nil return aborts the op with the session bit-for-bit
+// unchanged.
+//
+// It exists because a decision taken OUTSIDE that fence cannot be acted on
+// safely: whatever it observed can change in the gap before the destructive
+// call, which is exactly how a task teardown reached a session a user had
+// adopted (#3865). Every caller but that teardown passes nil.
+type sessionTeardownGuard func(current *session.Instance) error
+
+// runSessionTeardownGuard evaluates guard against the instance the manager holds
+// under key RIGHT NOW. Both destructive ops call it from inside their fence, and
+// they read the map rather than reusing the instance they resolved before it —
+// the whole point of a guard here is that it answers about current state, not
+// about the state that motivated the operation.
+func (m *Manager) runSessionTeardownGuard(guard sessionTeardownGuard, key string) error {
+	if guard == nil {
+		return nil
+	}
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	return guard(current)
+}
+
+func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string, guard sessionTeardownGuard) (session.InstanceData, error) {
 	instance, repoID, title, resolvedID, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return session.InstanceData{}, err
@@ -113,6 +142,14 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	if m.currentInstanceReplaced(key, instance, targetID) {
 		m.info().Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
+	}
+	// The caller's own precondition, asked here and nowhere earlier: this line
+	// sits inside both the killsInFlight claim (registered above, before the
+	// op-lock acquire) and the op-lock, which together are the fence every
+	// delivery path contends on. Nothing destructive has happened yet, so a
+	// refusal leaves the session exactly as it was.
+	if err := m.runSessionTeardownGuard(guard, key); err != nil {
+		return session.InstanceData{}, err
 	}
 	// Admission belongs before the commit point and before AgentServer.Kill closes
 	// brokers or the local backend tears panes down. Cleanup's later backstop can
@@ -335,7 +372,13 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	stage.set("deleting record from storage")
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown, so this call site cannot be the one that forgets.
-	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr)
+	var evidence session.InstanceData
+	if instance != nil {
+		evidence = instance.ToInstanceData()
+	} else if data != nil {
+		evidence = *data
+	}
+	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr, evidence)
 	if err != nil {
 		if settledDescriptorGhostCleanup {
 			m.reconcileSettledGhostCleanup(repoID, req.Title, key, targetID)

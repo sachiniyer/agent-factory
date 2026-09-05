@@ -185,8 +185,14 @@ account while reporting the one you asked for.
 ssh, sandbox and hook refuse by design, not because the work is pending. docker
 bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
-af never switches accounts on its own — not on a rate limit, not on a failure.
-A session runs as the account it was started with.
+By default af never switches accounts on its own. With limit_auto_resume enabled,
+an explicit limit_account_candidates list may opt an unpinned local session into
+switching after a usage limit. af skips registered candidates with a current
+limit observation, says which identity changed in the session, and waits normally
+when none is usable. Docker account-scoped creates remain supported, but
+automatic Docker replacement is disabled until af can durably identify and reap a
+crash-surviving container and freeze its complete provision plan. An explicit
+--account is a permanent pin and is never overridden.
 
 ```
 af accounts
@@ -447,10 +453,15 @@ Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
 session prompts, task prompts, tab and session commands, tab names, account
-labels, remote metadata) are dropped; every directory the bundle names is
-replaced by the role it plays ([repo:N], [worktree:N], [af-home], ~) rather than
-by its own name, and your username by [user]; and known credential shapes are
-scrubbed wherever they appear. Perfect redaction is impossible — open the file
+labels, remote metadata) are dropped. A registered account label is replaced by
+the same marker everywhere it appears — the session records, and the daemon log
+and config sections that name it as text — so the report is no less private
+through its log than through its records; if the accounts registry cannot be
+read, the bundle says so in its collection errors instead of looking redacted
+when it is not. Every directory the bundle names is replaced by the role it plays
+([repo:N], [worktree:N], [af-home], ~) rather than by its own name, and your
+username by [user]; and known credential shapes are scrubbed wherever they
+appear. Perfect redaction is impossible — open the file
 and review it before sharing it publicly.
 
 Use --json to emit the structured manifest (wrapped in the shared {data,error}
@@ -876,6 +887,7 @@ Settable keys:
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
+  limit_account_candidates   comma-separated registered account names, or "" to disable account switching
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
@@ -899,7 +911,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
@@ -911,6 +923,7 @@ Examples:
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
+  af config set default_accounts.codex work --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo
 
 With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global write is sent
@@ -1737,7 +1750,7 @@ af sessions create [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to the ambient identity) |
+| `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to this project's default_accounts entry for the agent, else the ambient identity) |
 | `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, sandbox, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
 | `--in-place` |  | Alias for --here |

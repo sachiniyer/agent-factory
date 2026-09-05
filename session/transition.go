@@ -578,6 +578,9 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// mis-ordered edge (#2135). The observer re-decides on its next tick.
 		return nil
 	}
+	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
+		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
+	}
 	from := stateAxes{i.liveness, i.inFlightOp}
 	spec, ok := transitionTable[ev.kind]
 	if !ok {
@@ -601,6 +604,12 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		switch spec.run {
 		case runEnds:
 			i.taskRunActive = false
+			// The completion transition IS the capture point for the adoption
+			// baseline (#3865): taken here, inside the same i.mu section that ends
+			// the run, nothing — not the rest of this transition, not the poll's
+			// later persistPollChange — can land a delivery that reads as though it
+			// had always been there. See session/adoption_fence.go.
+			i.captureAdoptionBaselineLocked()
 		case runEndsOnIdleEdge:
 			// The AGENT's own axis, and the EDGE into it. Not ClassifyActivity — that
 			// calls an in-flight archive "pending", which would miss an agent going
@@ -608,6 +617,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// LiveReady before its agent ever runs, so that would end the run at birth.
 			if to.liveness == LiveReady && from.liveness != LiveReady {
 				i.taskRunActive = false
+				i.captureAdoptionBaselineLocked()
 			}
 		}
 	}
@@ -619,6 +629,14 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		i.limitResetAt = time.Time{}
 	case limitResetFromEvent:
 		i.limitResetAt = ev.resetAt
+	}
+	if ev.kind == tkParkHandoff {
+		// The incoming runtime, not the retired predecessor, produced this wall.
+		// Publish its identity and durable negative quota evidence in the same
+		// critical section as LiveLimitReached so account-swap admission cannot
+		// observe a limit without its provider/account attribution.
+		i.limitAccount = i.Account
+		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
 	// holding an older one learns its in-flight decision is stale (#2135).

@@ -23,6 +23,7 @@ import {
   accountAgentFor,
   accountAgentSupported,
   accountChoices,
+  accountDefaultFor,
   accountNotice,
   accountSelectable,
 } from "./account_scope.js";
@@ -142,11 +143,14 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
  *  default" alone — the exact behavior before these fields existed, so a catalog
  *  failure can never block a create.
  *
- *  loadAccounts fetches the daemon host's credential-account registry (#3844).
- *  Unlike the other two it is NOT per-project — accounts live in the daemon's home,
- *  not in a repo — so it is fetched once on open. What IS per-selection is which
- *  slice of it applies: an account belongs to one agent, so the offered rows follow
- *  the PROGRAM field, and the resolution of a "repo default" program comes from the
+ *  loadAccounts fetches the daemon host's credential-account registry (#3844). The
+ *  registry itself is not per-project — accounts live in the daemon's home, not in a
+ *  repo — but the DEFAULT it reports is (#3386): `default_accounts` admits the
+ *  machine-local per-project config layer, so which account a create here would use
+ *  depends on which project is picked. It is therefore re-run with the other two
+ *  whenever the project changes. What is per-selection instead is which slice of the
+ *  registry applies: an account belongs to one agent, so the offered rows follow the
+ *  PROGRAM field, and the resolution of a "repo default" program comes from the
  *  program catalog. A rejection degrades that field to the ambient identity alone,
  *  which is what every create did before it existed. */
 export function newSessionModal(
@@ -157,7 +161,7 @@ export function newSessionModal(
     onCancel: () => void;
     loadBackends: (repoPath: string) => Promise<BackendCatalog>;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
-    loadAccounts: () => Promise<AccountsResponse>;
+    loadAccounts: (repoPath: string) => Promise<AccountsResponse>;
     // #2470: fetch a random, readable session name from the daemon (the wordlist
     // is Go-only) to show as shadow text; an empty submit adopts it.
     suggestName: () => Promise<string>;
@@ -240,6 +244,13 @@ export function newSessionModal(
   // read back off a row, because it is what decides whether a re-render may keep the
   // user's pick — and that decision must not depend on the shape of the list.
   let accountAgent = "";
+  // Whether the USER decided this field, as opposed to it holding the project
+  // default the daemon reported. The two must be distinguishable, and the select's
+  // value alone cannot do it: the ambient identity IS the empty string, so "chose
+  // ambient" and "not answered yet" are the same value. The registry lands
+  // asynchronously, so without this a preselection arriving after a deliberate pick
+  // would silently replace it — the outcome this field exists to prevent.
+  let accountPicked = false;
 
   // Mirrors the chrome's busy flag. An async availability refresh can land at ANY
   // time — including mid-submit — and it must never be the thing that decides
@@ -304,11 +315,29 @@ export function newSessionModal(
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
     }
-    accountSelect.value = sameAgent && accountRows.some((c) => c.value === previous) ? previous : AMBIENT_ACCOUNT;
+    if (!sameAgent) {
+      // A different agent means a different registry, so a deliberate pick for the
+      // previous one says nothing about this one.
+      accountPicked = false;
+    }
+    if (accountPicked && accountRows.some((c) => c.value === previous)) {
+      accountSelect.value = previous;
+    } else {
+      // PRESELECT the project default rather than sending nothing and letting the
+      // daemon fill it in (#3386). The session is identical either way; what
+      // changes is that the user sees which identity it will run as, can change it,
+      // and — because the value is now actually sent — the skew check below has
+      // something to compare the created session against.
+      const preselect = accountDefaultFor(accounts, agent);
+      accountSelect.value = accountRows.some((c) => c.value === preselect) ? preselect : AMBIENT_ACCOUNT;
+    }
     syncSubmitState();
   };
 
-  accountSelect.addEventListener("change", syncSubmitState);
+  accountSelect.addEventListener("change", () => {
+    accountPicked = true;
+    syncSubmitState();
+  });
   programSelect.addEventListener("change", renderAccounts);
 
   const renderPrograms = (): void => {
@@ -359,6 +388,29 @@ export function newSessionModal(
         renderPrograms();
       });
 
+    // The registry is the daemon host's, but the DEFAULT it reports is the picked
+    // project's (#3386), so this rides the same per-load token as the two catalogs:
+    // a slow answer for the project the user just left must not preselect an
+    // account for the one they just picked. A failure is silent by design — the
+    // field keeps the ambient identity alone, which is what every create did before
+    // it existed, so an unreachable registry costs the choice and never the session.
+    void callbacks
+      .loadAccounts(repoPath)
+      .then((registry) => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        accounts = registry;
+        renderAccounts();
+      })
+      .catch(() => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        accounts = null;
+        renderAccounts();
+      });
+
     if (repoPath === "") {
       choices = backendChoices(null);
       renderChoices();
@@ -404,22 +456,6 @@ export function newSessionModal(
   renderChoices();
   renderAccounts();
   loadCatalogsFor(projectSelect.value);
-
-  // The account registry is the DAEMON HOST's, not a repo's, so it is asked for once
-  // on open — like the name suggestion below and unlike the two per-project catalogs
-  // above. A failure is silent by design: the field keeps the ambient identity alone,
-  // which is what every create did before this field existed, so an unreachable
-  // registry costs the user the choice and never the session.
-  void callbacks
-    .loadAccounts()
-    .then((registry) => {
-      accounts = registry;
-      renderAccounts();
-    })
-    .catch(() => {
-      accounts = null;
-      renderAccounts();
-    });
 
   // Ask for the autocreate name once, on open. Repo-agnostic (the daemon avoids
   // every live title), so it needs no re-fetch on a project change. A failure is

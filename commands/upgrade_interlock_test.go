@@ -552,11 +552,11 @@ func TestForeignUpgradeStagingOver_OnlyMatchesThisExecutable(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
 	}
 
-	require.Nil(t, foreignUpgradeStagingOver(target, ""),
+	require.Nil(t, foreignUpgradeStagingOver(target, "", upgradetxn.ArtifactScanOptions{}),
 		"only a preserved-previous artifact for THIS executable may block it")
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-real.previous"), []byte("x"), 0o755))
-	found := foreignUpgradeStagingOver(target, "")
+	found := foreignUpgradeStagingOver(target, "", upgradetxn.ArtifactScanOptions{})
 	require.NotNil(t, found)
 	require.Equal(t, "upgrade-real", found.ID)
 }
@@ -615,9 +615,9 @@ func TestForeignUpgradeStagingOver_SkipsThisHomesOwnTransaction(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("binary"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-ours.previous"), []byte("x"), 0o755))
 
-	require.Nil(t, foreignUpgradeStagingOver(target, "upgrade-ours"),
+	require.Nil(t, foreignUpgradeStagingOver(target, "upgrade-ours", upgradetxn.ArtifactScanOptions{}),
 		"our own transaction's artifact must not block the install its journal policy allowed")
-	require.NotNil(t, foreignUpgradeStagingOver(target, "upgrade-someone-else"),
+	require.NotNil(t, foreignUpgradeStagingOver(target, "upgrade-someone-else", upgradetxn.ArtifactScanOptions{}),
 		"another home's artifact must still block")
 }
 
@@ -713,4 +713,86 @@ func TestWriteExecutableInPlace_AllowRejectedInstallsAnyway(t *testing.T) {
 	installed, readErr := os.ReadFile(target)
 	require.NoError(t, readErr)
 	require.Equal(t, "new binary", string(installed))
+}
+
+// stagedLeftoverFor writes the artifacts a transaction stages beside an
+// executable and ages them past the grace, which is what a cleanup that died
+// after removing active.json leaves behind.
+func stagedLeftoverFor(t *testing.T, executable, id string) string {
+	t.Helper()
+	dir := filepath.Dir(executable)
+	base := filepath.Base(executable)
+	previous := filepath.Join(dir, "."+base+".af-upgrade-"+id+".previous")
+	require.NoError(t, os.WriteFile(previous, []byte("preserved previous binary"), 0o755))
+	stamp := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(previous, stamp, stamp))
+	return previous
+}
+
+// The in-place installer meets the same leftover the daemon does, and until
+// #3864 it refused on it too — with --ignore-active-upgrade as the only way
+// past, on every invocation, forever, because nothing ever removed the file.
+func TestWriteExecutableInPlace_ClearsAnInertLeftoverInsteadOfRefusing(t *testing.T) {
+	upgradeHome(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+	previous := stagedLeftoverFor(t, target, "upgrade-leftover")
+
+	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag),
+		"debris nothing owns must not refuse an install")
+
+	on, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "new binary", string(on))
+
+	require.NoFileExists(t, previous)
+	aside, err := filepath.Glob(previous + ".debris-*")
+	require.NoError(t, err)
+	require.Len(t, aside, 1, "the leftover is set aside where the scan cannot see it, not deleted")
+}
+
+// The two scanners must not drift. Both installers look at the same directory,
+// and a second opinion about whether an artifact is live is a disagreement in
+// which one of them says "proceed" over a rollback the other is protecting — so
+// the in-place path now carries POLICY only, and the verdict comes from the
+// engine (#3864). This asserts that on both answers, over the same fixture.
+func TestForeignUpgradeStagingOver_AgreesWithTheEngineScanner(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		age     time.Duration
+		blocked bool
+	}{
+		{name: "a leftover nothing owns", age: 48 * time.Hour, blocked: false},
+		{name: "an artifact staged moments ago", age: 0, blocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "af")
+			require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+			previous := filepath.Join(dir, ".af.af-upgrade-upgrade-other.previous")
+			require.NoError(t, os.WriteFile(previous, []byte("preserved"), 0o755))
+			if tc.age > 0 {
+				stamp := time.Now().Add(-tc.age)
+				require.NoError(t, os.Chtimes(previous, stamp, stamp))
+			}
+
+			// Read-only on both sides, so neither call can clear what the other
+			// was about to see.
+			opts := upgradetxn.ArtifactScanOptions{}
+			engine, err := upgradetxn.BlockingStagedArtifact(target, "upgrade-mine", opts)
+			require.NoError(t, err)
+			installer := foreignUpgradeStagingOver(target, "upgrade-mine", opts)
+
+			require.Equal(t, tc.blocked, engine != nil, "fixture check: the engine's verdict is the one under test")
+			require.Equal(t, engine != nil, installer != nil,
+				"the in-place installer must block exactly when the engine says the artifact is live")
+			if engine != nil {
+				require.Equal(t, engine.ID, installer.ID)
+				require.Equal(t, engine.PreviousPath, installer.artifact)
+				require.Equal(t, engine.Reason, installer.reason,
+					"and it must carry the engine's reason, not invent its own")
+			}
+		})
+	}
 }

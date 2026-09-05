@@ -59,8 +59,12 @@ const (
 var keyEffectClasses = map[string]EffectClass{
 	// Applied live — a running daemon honours these without a restart, either in its
 	// own behaviour or on the next session/worktree it creates.
-	"default_program":                EffectAppliedLive,
-	"program_overrides":              EffectAppliedLive,
+	"default_program":   EffectAppliedLive,
+	"program_overrides": EffectAppliedLive,
+	// default_accounts is read per create, from the daemon's live config snapshot
+	// and the per-repo resolution beside it, so a change reaches the next session
+	// with no restart (#3386).
+	"default_accounts":               EffectAppliedLive,
 	"session_env_passthrough":        EffectAppliedLive,
 	"on_archive_command":             EffectAppliedLive,
 	"worktree_root":                  EffectAppliedLive,
@@ -69,6 +73,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"log_max_size_mb":                EffectAppliedLive,
 	"log_max_backups":                EffectAppliedLive,
 	"limit_auto_resume":              EffectAppliedLive,
+	"limit_account_candidates":       EffectAppliedLive,
 	"limit_retry_interval":           EffectAppliedLive,
 	"limit_patterns":                 EffectAppliedLive,
 	"global_agent_skills":            EffectAppliedLive,
@@ -103,8 +108,12 @@ var keyEffectClasses = map[string]EffectClass{
 	// release; installing is still af's, at launch. See EffectNextAfLaunch.
 	"auto_update":    EffectNextAfLaunch,
 	"update_channel": EffectNextAfLaunch,
-	"keys":           EffectNextAfLaunch,
-	"detach_keys":    EffectNextAfLaunch,
+	// Read at the moment an upgrade is attempted — by `af upgrade` from disk, and
+	// by the daemon from its live config on each activation — so a save is in
+	// force for the next upgrade either path tries, with nothing to restart.
+	"upgrade_clear_unverifiable_artifacts": EffectAppliedLive,
+	"keys":                                 EffectNextAfLaunch,
+	"detach_keys":                          EffectNextAfLaunch,
 }
 
 // KeyEffectClass returns when a change to key takes effect. A dotted family leaf

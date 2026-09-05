@@ -397,6 +397,42 @@ from the daemon and NAMES THE ACCOUNT, which is only possible if the picked valu
 rode `CreateSessionRequest.Account` across the wire. A session that actually RUNS
 as the account needs a real agent binary, which is why that step stays here.
 
+The project default (#3386) is the same field arriving pre-filled. Set it for the
+project first, with af's own verbs rather than by hand — the point is that the
+documented gesture produces it:
+
+```bash
+af projects register <repo>                          # once
+af config set default_accounts.claude <name> --project <repo>
+af_boot; af_ensure_nav; af_focus_tree
+af_send n; af_wait_for 'submit name'
+af_wait_for 'account ✓'          # NO ctrl+o, NO pick — this is the whole feature
+af_send C-o; af_wait_for '<name>.*project default'   # and it says WHY
+af_send Escape
+af_send Tab; af_send Down; af_send Enter             # change the program…
+af_wait_gone 'account ✓'                             # …and the claude default drops
+af_send Tab; af_send Up; af_send Enter               # back to claude…
+af_wait_for 'account ✓'                              # …and it returns, per agent
+```
+
+The `account ✓` with no keypress is the assertion that distinguishes this feature
+from the daemon quietly applying a default on the create: the session is identical
+either way, and what #3386 adds is that the user sees which identity it will run as
+before pressing enter. The appear → disappear → reappear sequence on that one
+marker is also what makes the check non-vacuous — a marker that were always painted
+would fail the middle leg.
+
+Set the key to an account that is NOT registered to see the other half: the row is
+still offered, appended last and labelled `project default · not registered`,
+because hiding it would leave the form reporting the ambient identity while the
+config says otherwise. That create is refused by the daemon naming the key and the
+file it is set in.
+
+`scripts/tui-3386-scenario.sh` automates all of the above, with the same stand-in
+caveat as #3844's: the create is refused by the account boundary, and the refusal
+naming the account is the evidence that a value nobody typed was resolved from the
+project's config and carried across the wire.
+
 `enter newline` is the overlay's own hint row, used as the marker rather than
 its `Initial prompt` title: the status-bar hint underneath says `initial
 prompt` too, so the title alone cannot tell "field open" from "field
@@ -429,6 +465,42 @@ backend went with it — which passes "the form opens" and silently gives the us
 a session their repo did not ask for. The refusal has to come from the daemon
 and has to name the backend. `scripts/tui-2599-scenario.sh` automates all three
 legs (form opens, backend honored, `ctrl+r` → `local` still creates).
+
+### Usage-limit account switching (the #3127 class)
+
+`scripts/tui-3127-scenario.sh` drives the whole opt-in flow against a real
+daemon. It is not a TUI-rendering gate — the decision under test is the daemon's
+— but the driver is what makes it reachable: every unit test in `daemon/` and
+`session/` swaps a seam, and none of them proves a real daemon polling a real
+tmux pane reaches the decision at all.
+
+Two things about it are worth stealing for any account gate.
+
+**The stand-in has to be PROVABLE.** `configure-playtest-agent.sh` installs its
+bash stand-in as `af-playtest-standin`, and the account boundary refuses to scope
+a command it cannot prove is a direct invocation of the agent — so that default
+can never be account-scoped. This scenario installs its own at `$HOME/bin/claude`
+and, crucially, sets no `program_overrides` at all: `trustBase`
+(`session/program_resolution.go`) admits an override only when it is
+byte-for-byte af's own detected built-in, which here is the quoted path plus
+`--dangerously-skip-permissions`. Writing the bare path instead — the obvious
+thing — refuses every candidate with "could not be proven to be a direct claude
+invocation".
+
+**A successful swap is a TRANSIENT state.** Park, decide, tear down and replace
+takes about four seconds, so polling for `liveness_name=limit-reached` on the
+path that MOVES is a race the scenario loses. Assert the durable facts instead —
+`account`, `account_auto_selected`, and the daemon's own
+`auto-resumed limit-blocked session … on claude account "…"` line — and keep the
+limit-state assertion for the paths where af must NOT move, where the wall is
+where the session stays. The stand-in walls every identity except the swap
+target for exactly that reason.
+
+For "the replacement really runs as the account", ask the LIVE process rather
+than matching its startup line: enter the pane and echo `$CLAUDE_CONFIG_DIR`. A
+startup line proves what the process was told at exec; the echo proves what it
+still has — and the in-session switch notice is long enough to push that startup
+line out of the visible pane anyway.
 
 ### Tree / selection / focus changes (the #1156, #1084 class)
 

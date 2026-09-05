@@ -195,11 +195,12 @@ let hasDaemonPalette = false;
  *  to the repo default rather than blocking its form. */
 const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
   token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
-/** The create form's account registry (#3844). Not per-project — accounts live in
- *  the DAEMON's home, not in a repo — so unlike the two catalogs beside it this
- *  takes no path and the modal asks once on open. */
-const loadCreateAccounts = (): Promise<AccountsResponse> =>
-  token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token);
+/** The create form's account registry (#3844). The registry itself is not
+ *  per-project — accounts live in the DAEMON's home, not in a repo — but the
+ *  default it reports is (#3386), so this takes the picked project's path like the
+ *  two catalogs beside it. */
+const loadCreateAccounts = (repoPath: string): Promise<AccountsResponse> =>
+  token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
@@ -718,7 +719,8 @@ function newSession(): void {
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
       // The credential-account registry (#3844): the daemon owns it, and it lives
-      // on the daemon's host rather than in any repo, so this takes no path.
+      // on the daemon's host rather than in any repo — but the account default it
+      // reports is the project's (#3386), so this follows the project picker.
       loadAccounts: loadCreateAccounts,
       // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
       // the web asks rather than generating a name of its own.

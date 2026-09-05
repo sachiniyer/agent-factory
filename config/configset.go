@@ -85,6 +85,10 @@ var settableKeySpecs = map[string]settableKeySpec{
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
 	"auto_update": {kind: cfgBool},
+	// The staged-artifact escape hatch (#3864). A plain bool: it only widens what
+	// an upgrade may set aside when it cannot read the owning home, and there is
+	// nothing in the value for a validator to catch.
+	"upgrade_clear_unverifiable_artifacts": {kind: cfgBool},
 	// The opt-in profiling endpoint (#3651). A plain bool: the daemon decides where
 	// it is served (unix socket only) and there is nothing here for a value to get
 	// wrong, so no validator.
@@ -122,6 +126,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// where the binary is actually run, and already lives there.
 	"vscode_server_binary":           {kind: cfgString},
 	"limit_auto_resume":              {kind: cfgBool},
+	"limit_account_candidates":       {kind: cfgStringList, validate: validateLimitAccountCandidatesValue},
 	"global_agent_skills":            {kind: cfgBool},
 	"docker.mount_agent_credentials": {kind: cfgBool, section: "docker"},
 	"ssh.host_key_verification": {kind: cfgString, section: "ssh", validate: func(_, v string) error {
@@ -162,6 +167,15 @@ var settableKeySpecs = map[string]settableKeySpec{
 	}},
 	"program_overrides": {kind: cfgString, section: "program_overrides", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		return ValidateProgramEnum("program_overrides key", "program_overrides key", leaf, v)
+	}},
+	// The project-scoped credential identity (#3386). A dynamic family keyed by
+	// AGENT, so `af config set default_accounts.codex work --project <path>` is the
+	// gesture, and the whole map is still writable as compact JSON by the config
+	// panes. The validator is the loader's own, so a shape a hand-edit would be
+	// rejected for is rejected at the command that took it — existence of the
+	// account is checked at create time instead, where a missing one matters.
+	"default_accounts": {kind: cfgString, section: "default_accounts", dynamic: true, structured: true, validate: func(leaf, v string) error {
+		return ValidateDefaultAccountEntry("default_accounts key", leaf, v)
 	}},
 	"limit_patterns": {kind: cfgString, section: "limit_patterns", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		if err := ValidateProgramEnum("limit_patterns key", "limit_patterns key", leaf, v); err != nil {
@@ -428,6 +442,9 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	if writeErr != nil {
 		return nil, writeErr
 	}
+	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+	}
 	return result, nil
 }
 
@@ -478,6 +495,12 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	})
 	if writeErr != nil {
 		return nil, writeErr
+	}
+	// The same note the global write produces (#3386). A per-project account
+	// default is the shape this key exists for, so it is the one that most needs
+	// to say "that account is not registered yet" at the moment it is typed.
+	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
 	}
 	return result, nil
 }

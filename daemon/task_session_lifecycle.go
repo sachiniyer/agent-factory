@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -25,16 +27,16 @@ import (
 // so a test can assert WHICH session the deferred goroutine names — the stale-id
 // retarget it guards against is invisible if the only observable is that some
 // session went away. Production points it at the real RPC and never reassigns it.
-var killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
-	_, err := m.KillSession(req)
+var killSessionForLifecycle = func(m *Manager, req KillSessionRequest, guard sessionTeardownGuard) error {
+	_, err := m.killSessionRequestedBy(req, "task on_complete teardown", guard)
 	return err
 }
 
 // archiveSessionForLifecycle is the archive twin of killSessionForLifecycle.
 // Keeping the whole result behind one seam lets tests prove a committed warning
 // is classified as a successful reap without performing a real archive.
-var archiveSessionForLifecycle = func(m *Manager, req ArchiveSessionRequest) error {
-	_, _, err := m.ArchiveSession(req)
+var archiveSessionForLifecycle = func(m *Manager, req ArchiveSessionRequest, guard sessionTeardownGuard) error {
+	_, _, err := m.archiveSessionGuarded(req, guard)
 	return err
 }
 
@@ -153,10 +155,20 @@ func (m *Manager) applyDeferredTaskSessionLifecycle(repoID string, instance *ses
 	if !owed {
 		return
 	}
-	if owedID != instance.ID || instance.GetLiveness() != session.LiveReady || instance.TaskRunActive() {
-		// Either a different session now holds this title, or the user picked the
-		// work back up during the attach. Drop the intent rather than carrying it
-		// forward: a verb owed to a finished run must not land on new work.
+	if instance.GetLiveness() != session.LiveReady || instance.TaskRunActive() {
+		// The user picked the work back up during the attach. Drop the intent rather
+		// than carrying it forward: a verb owed to a finished run must not land on
+		// new work.
+		return
+	}
+	// And the same re-validation the hook-wait teardown performs under the fence
+	// (#3865) — a different session now holding the title, or a delivery since the
+	// run ended. Two separate reads here, so this is an early-out and not the
+	// decision: the authoritative one is taken under the fence inside
+	// runTaskSessionLifecycle, which this call reaches through
+	// applyTaskSessionLifecycleOnRunEnd below.
+	if err := taskLifecycleStillOwed(instance, owedID, instance.AdoptionDeliveriesAtRunEnd(), instance.AdoptionDeliveries()); err != nil {
+		m.info().Printf("task %s: dropping the lifecycle owed to session %q's finished run: %v", instance.TaskID, instance.Title, err)
 		return
 	}
 	// The run genuinely ended and nothing has happened since, so this is the same
@@ -192,6 +204,11 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	// the last time a lifecycle op keyed on a title reached the wrong worktree.
 	sessionID := instance.ID
 	title := instance.Title
+	// The adoption baseline was pinned by the completion transition itself, in the
+	// same critical section that cleared taskRunActive (#3865) — NOT read here,
+	// which is the window #2953 left open with persistPollChange's storage I/O
+	// inside it. This is a read of a value that is already fixed.
+	adoptedAt := instance.AdoptionDeliveriesAtRunEnd()
 	hooksDone := instance.PostWorktreeHooksDone()
 	verb, err := m.taskSessionLifecycle(repoID, taskID)
 	if err != nil {
@@ -206,7 +223,7 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	if verb == task.OnCompleteKeep {
 		return
 	}
-	go m.runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb, hooksDone)
+	go m.runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb, hooksDone, adoptedAt)
 }
 
 // taskSessionLifecycle resolves the on_complete verb for one task in a repo.
@@ -231,7 +248,75 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID string) (string, error) {
 	return task.OnCompleteKeep, nil
 }
 
+// taskLifecycleStillOwed reports WHY a teardown owed to one completed run may no
+// longer act on the session the manager holds now, or nil when it still may. It
+// is the single re-validation both routes into a teardown use — the hook-wait
+// goroutine, under the fence, and the deferred drain's early-out.
+//
+// deliveries is passed in rather than read here because WHERE it is read is the
+// whole point: the decision that destroys reads it through CloseAdoptionFence,
+// in one critical section with the fence shutting, so a delivery cannot land
+// between the read and the destruction.
+//
+// The two conditions are the identity and the adoption signal, and nothing else.
+// Liveness is deliberately absent: a user's turn that starts and settles reads
+// LiveReady again, so a level cannot separate the task's idle from the user's
+// (#2953's first P1). The deferred route still asks its own liveness question
+// before calling this, because there the user typed into an ATTACHED tmux, which
+// reaches no agent-server entry point and so moves no count.
+func taskLifecycleStillOwed(current *session.Instance, sessionID string, adoptedAt, deliveries uint64) error {
+	if current == nil {
+		return errors.New("the session is no longer registered")
+	}
+	if current.ID != sessionID {
+		return fmt.Errorf("session id %s now holds this title, not %s", current.ID, sessionID)
+	}
+	if deliveries != adoptedAt {
+		return fmt.Errorf("its delivery count moved from %d to %d since its run ended, so the work is the user's now", adoptedAt, deliveries)
+	}
+	return nil
+}
+
+// testHookTaskLifecycleGuardPassed runs INSIDE the teardown's fence, after the
+// re-validation has passed and the adoption fence is shut, and before the
+// destructive operation touches anything. It is the seam that makes the
+// constraint-5 race expressible: a test pauses the teardown exactly in the window
+// #2953 could never close and delivers into it. No-op in production.
+var testHookTaskLifecycleGuardPassed = func() {}
+
 // runTaskSessionLifecycle performs the teardown on its own goroutine.
+//
+// # The fence, and why the decision is taken inside it (#3865)
+//
+// Four earlier attempts re-CHECKED the completion decision before calling
+// ArchiveSession/KillSession and were all wrong for one reason: the check and the
+// destruction were not serialized against each other, so a delivery could pass
+// its own guards and land in the gap between them. What follows is not a fifth
+// comparison. The teardown now takes the same fence delivery takes, re-validates
+// under it, and only then destroys:
+//
+//	                 ┌─────────────── inside Archive/Kill ───────────────┐
+//	hook wait ──────▶│ op-lock held · killsInFlight[key] claimed          │
+//	                 │   guard(current):                                 │
+//	                 │     CloseAdoptionFence()  ─ shut and read, one i.mu│
+//	                 │     compare id + deliveries against the baseline   │
+//	                 │   ── testHookTaskLifecycleGuardPassed ──           │
+//	                 │   destroy, or return and stand down               │
+//	                 └───────────────────────────────────────────────────┘
+//
+// Both delivery paths are covered, by different halves of that fence:
+//
+//   - Manager.SendPrompt takes killsInFlight + the op-lock. It either completes
+//     before the guard (its bump is inside the count the guard reads) or is
+//     refused by the claim this teardown is holding.
+//   - Browser/TUI PTY input reaches InputTab with NO manager lock, so the op-lock
+//     says nothing about it. The adoption fence does: CloseAdoptionFence and
+//     NoteAdoptionDelivery are one i.mu section each, so a keystroke either
+//     counted before the guard read (stand down) or is refused (ErrAdoptionFenced).
+//     See session/adoption_fence.go for that argument in full.
+//
+// Standing down leaves the session exactly where it is — the recoverable
+// outcome, and the same one the hook-wait timeout already produces.
 //
 // It reuses ArchiveSession/KillSession rather than reaching for the primitives
 // underneath, so a task-driven teardown is the SAME operation a user's
@@ -244,7 +329,7 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID string) (string, error) {
 // same title between the completion edge and this call cannot be reaped in the
 // original's place — the resolver only falls back to {Title, RepoID} when ID is
 // empty.
-func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb string, hooksDone <-chan struct{}) {
+func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb string, hooksDone <-chan struct{}, adoptedAt uint64) {
 	// post_worktree_commands can still be running: the agent's readiness and the
 	// hook run are deliberately concurrent (task.WaitForReady does not charge a
 	// slow build hook against the startup budget), so a short task can finish while
@@ -264,17 +349,71 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 			return
 		}
 	}
+	// The fence is shut by the guard and reopened as soon as the operation it
+	// covers is over, whichever way that went. Reopening is unconditional because
+	// the alternative fails badly: an archive refused for some unrelated reason
+	// would leave a live session permanently unable to accept a keystroke. After a
+	// teardown that DID go through, the session is out of the manager and the
+	// reopen is a no-op for it.
+	//
+	// fenced and standDown are written and read on this goroutine only — the guard
+	// is invoked synchronously by the destructive call below, not by one of its
+	// workers.
+	var fenced *session.Instance
+	var standDown error
+	defer func() {
+		if fenced != nil {
+			fenced.ReopenAdoptionFence()
+		}
+	}()
+	guard := func(current *session.Instance) error {
+		var deliveries uint64
+		if current != nil {
+			deliveries = current.CloseAdoptionFence()
+		}
+		if err := taskLifecycleStillOwed(current, sessionID, adoptedAt, deliveries); err != nil {
+			// Reopened HERE rather than left to the defer: a refusal means the
+			// destructive call returns without touching anything, so there is nothing
+			// left to fence, and the user whose delivery caused this stand-down should
+			// not have their next keystroke refused while this goroutine finishes
+			// logging.
+			if current != nil {
+				current.ReopenAdoptionFence()
+			}
+			standDown = err
+			return err
+		}
+		fenced = current
+		testHookTaskLifecycleGuardPassed()
+		return nil
+	}
+
 	var err error
 	switch verb {
 	case task.OnCompleteArchive:
-		err = archiveSessionForLifecycle(m, ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
+		err = archiveSessionForLifecycle(m, ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID}, guard)
 	case task.OnCompleteKill:
-		err = killSessionForLifecycle(m, KillSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
+		err = killSessionForLifecycle(m, KillSessionRequest{ID: sessionID, Title: title, RepoID: repoID}, guard)
 	default:
 		// Unreachable: ValidateTrigger refuses an unknown verb on write, and
 		// SessionLifecycle canonicalizes. Log rather than guess — picking a verb
 		// here would be inventing destructive intent from a value nothing accepted.
 		m.warn().Printf("task %s declares an unknown on_complete %q; leaving session %q in place", taskID, verb, title)
+		return
+	}
+	// Reopened at the earliest correct moment rather than only on the way out. The
+	// remaining window — between the destructive op releasing its killsInFlight
+	// claim and returning here — carries no I/O, and a delivery landing inside it
+	// is refused with an error and retried rather than lost.
+	if fenced != nil {
+		fenced.ReopenAdoptionFence()
+	}
+	if standDown != nil {
+		// The one line the recoverable outcome gets, naming which of the two
+		// conditions failed. Not a warning: a user adopting a finished task session
+		// is ordinary, and the verb going unapplied is the correct result.
+		m.info().Printf("task %s: not applying on_complete=%s to session %q — %v; leaving the session in place",
+			taskID, verb, title, standDown)
 		return
 	}
 	if isMutationCommitted(err) {

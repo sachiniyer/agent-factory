@@ -31,7 +31,7 @@ func stubAccounts(t *testing.T, resp daemon.ListAccountsResponse, err error) (*i
 	t.Helper()
 	calls := 0
 	var asked []string
-	t.Cleanup(SetAccountListerForTest(func(agent string) (daemon.ListAccountsResponse, error) {
+	t.Cleanup(SetAccountListerForTest(func(agent, _ string) (daemon.ListAccountsResponse, error) {
 		calls++
 		asked = append(asked, agent)
 		return resp, err

@@ -37,10 +37,68 @@ af sessions create --name spike --account work
 ```
 
 The TUI's naming form offers the same field on `ctrl+o`, and so does the web
-client's new-session modal. `af` refuses an unproved fallback and never rotates
-accounts on its own — a session either runs as the account you named or does not
-start. The full command surface is in
-[`af accounts`](reference/cli.md#af-accounts).
+client's new-session modal. `af` refuses an unproved fallback — a session either
+runs as the account you named or does not start — and by default never rotates
+accounts on its own. Rotating after a usage limit is opt-in and needs an
+explicit candidate list — see [Opt-in auto-resume](#opt-in-auto-resume). A
+session created with `--account` is pinned and is never rotated at all. The full
+command surface is in [`af accounts`](reference/cli.md#af-accounts).
+
+### Scoping an account to a project
+
+Typing `--account` on every create is the wrong unit of work when the answer is
+always the same for a whole repository. `default_accounts` says it once — per
+agent, and most usefully per project:
+
+```bash
+af projects register ~/work/monorepo                            # once
+af config set default_accounts.codex work --project ~/work/monorepo
+af config set default_accounts.codex personal --project ~/side/hobby
+```
+
+Now a session created in that project — from the CLI, the TUI, the web client or
+a scheduled task — runs as `work` with nothing typed. The resolution order is
+**explicit `--account` (or a picker choice) → the project's default → the global
+default → the agent's ambient login**, and it is applied by the background
+service on the create, so every surface gets the same answer.
+
+Three properties are worth knowing:
+
+- **It is keyed by agent, because an account belongs to one.** claude's `work`
+  and codex's `work` are different identities in different registries, so
+  `default_accounts.codex` never applies to a claude session — that session keeps
+  the ambient identity until you scope it too.
+- **The pickers show it.** The TUI's `ctrl+o` field and the web's Account select
+  preselect the project default and mark its row `project default`, so a scoped
+  create is visible before you press Enter rather than discovered afterwards.
+- **A default `af` cannot honour refuses the create**, naming the key, the file
+  it is set in, and how to clear it. It never falls back to the ambient identity:
+  a session quietly running as someone else is the failure the whole feature
+  exists to prevent.
+- **A project's always-on `root` agent is deliberately not scoped by it.** Its
+  command comes from `[root_agent]` rather than an agent name, and a preference
+  set about ordinary creates must not be able to stop a project's guaranteed
+  session from starting. Scoping a root belongs beside the program it already
+  names.
+
+Set it globally (`af config set default_accounts.codex work`, no `--project`) for
+a default everywhere. It is rejected from a repository's checked-in
+`.agent-factory/config.toml`: identity policy is never checked in, and a
+committed account name means nothing to anyone else who clones the repository.
+
+To clear one:
+
+```bash
+af config unset default_accounts.codex --project ~/work/monorepo  # drop the project's override
+af config set default_accounts.codex ""                           # clear the global default
+af config set default_accounts.codex "" --project ~/work/monorepo # opt this project OUT of the global default
+```
+
+An **empty value is meaningful**, and the three lines differ. `unset` removes the
+project's entry so the global default applies again; an empty value at either
+layer means "no default", and because the key merges per agent, an empty entry in
+a project's config wins for that agent and keeps its sessions on the ambient
+identity even when the global layer names an account.
 
 Accounts are also what make the rest of this page actionable: a plan ceiling
 belongs to an identity, so a second account is one of the ways past one.
@@ -130,6 +188,7 @@ reset-less banner — including every `devin` limit — resumes on the
 
 ```toml
 limit_auto_resume = true
+limit_account_candidates = ["work", "personal"] # optional account-switch order
 limit_retry_interval = "30m"   # fallback cadence when a banner states no reset time
 ```
 
@@ -143,10 +202,46 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   the daemon backs off exponentially (settling at one attempt every 5 minutes)
   rather than hammering an exhausted plan. Killing the session is always the
   off-ramp.
-- **Global-only.** `limit_auto_resume` and `limit_retry_interval` are rejected
+- **Optional account switch** → before waiting for the old identity's reset, an
+  unpinned local session may restart on the first registered account
+  in `limit_account_candidates` that has no current limit observation. The
+  ordered list is the opt-in; af never chooses from every registered account.
+  If every listed account is limited or absent, the existing wait remains.
+  Docker account-scoped creates remain supported, but automatic Docker
+  replacement stays disabled until its complete provision plan and container
+  cleanup identity can survive a daemon crash.
+- **An explicit `--account` is immutable.** It is a pin, so automatic switching
+  never overrides it. Accounts selected by the scheduler may move again after
+  they later hit their own limit.
+- **No invented quota claim.** Providers expose no quota API af can read. The
+  scheduler uses the same honest evidence as `af quota`: a candidate is rejected
+  when af currently observes one of its sessions at a limit; absence of that
+  observation is not presented as a provider guarantee.
+- **Visible in the session.** The first prompt after replacement names the old
+  and new identities before repeating the stored task prompt.
+- **One credential boundary.** A local swap stops every agent, shell, and process
+  pane before committing the new identity, then restores them with the selected
+  account environment; the agent starts a fresh provider conversation. New
+  account-scoped terminal tabs remain interactive but skip shell startup files,
+  because an rc file can otherwise replace the selected identity after af has
+  established it. A resolved command that explicitly pins `--continue`,
+  `--resume`, `--session-id`,
+  or `codex resume` is not safe to carry across accounts, so af names those
+  arguments and keeps the existing wait instead.
+- **Operator-only.** `limit_auto_resume`, `limit_retry_interval`, and
+  `limit_account_candidates` are rejected
   in in-repo configs. A save through `af config set` applies them to the running
-  daemon at once — no restart; a raw hand-edit of `config.toml` takes effect on
-  the next daemon start.
+  daemon at once — no restart. The candidate list may also be replaced in a
+  machine-local personal-project config, so one project can use a narrower set
+  without trusting checked-in repository config with identity policy.
+
+Set the global ordered list with:
+
+```sh
+af config set limit_account_candidates work,personal
+```
+
+Or add `--project <id-or-path>` for a personal per-project override.
 
 Full config reference: [configuration.md](configuration.md#usage-limit-auto-resume).
 

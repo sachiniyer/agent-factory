@@ -125,8 +125,14 @@ ssh, sandbox and hook refuse by design, not because the work is pending. docker
 bind-MOUNTS the directory, so account writes land in your real account. ` +
 		session.AccountWriteBackRationale + `
 
-af never switches accounts on its own — not on a rate limit, not on a failure.
-A session runs as the account it was started with.` + accountsRegistrationOnlyHelp(),
+By default af never switches accounts on its own. With limit_auto_resume enabled,
+an explicit limit_account_candidates list may opt an unpinned local session into
+switching after a usage limit. af skips registered candidates with a current
+limit observation, says which identity changed in the session, and waits normally
+when none is usable. Docker account-scoped creates remain supported, but
+automatic Docker replacement is disabled until af can durably identify and reap a
+crash-surviving container and freeze its complete provision plan. An explicit
+--account is a permanent pin and is never overridden.` + accountsRegistrationOnlyHelp(),
 }
 
 // accountsRegistrationOnlyHelp appends the registration-only agents to the group

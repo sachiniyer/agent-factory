@@ -44,11 +44,23 @@ type ProjectConfig struct {
 	// ProgramOverrides entries merge key-wise over the lower layers: a key set
 	// here wins for that agent, other agents' entries still apply.
 	ProgramOverrides map[string]string `toml:"program_overrides,omitempty"`
+	// DefaultAccounts names, per agent, the credential account this project's
+	// sessions run as when the create names none (#3386). Entries merge key-wise
+	// over the global map exactly as ProgramOverrides does, so scoping one agent
+	// here leaves the others on whatever the global layer said.
+	//
+	// This is the layer the feature exists for: an account is a personal identity,
+	// so "this project runs as my work codex" is a statement about one machine and
+	// one person, never about the repository.
+	DefaultAccounts map[string]string `toml:"default_accounts,omitempty"`
 	// BranchPrefix overrides the git branch prefix for this project's sessions.
 	BranchPrefix string `toml:"branch_prefix,omitempty"`
 	// OnArchiveCommand overrides the operator-authored archive hook for this
 	// project. This file is machine-local under the AF home, never checked in.
 	OnArchiveCommand string `toml:"on_archive_command,omitempty"`
+	// LimitAccountCandidates replaces the global account-swap candidate list for
+	// this project. It is machine-local identity policy, never checked in.
+	LimitAccountCandidates []string `toml:"limit_account_candidates,omitempty"`
 	// RootAgent is the personal per-project root-agent profile (#2216 Phase 6):
 	// whether THIS project keeps an always-ensured root session on this machine,
 	// and the command it runs. It is the highest-precedence root-agent layer, so
@@ -195,6 +207,11 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		}
 	}
 
+	if err := validateDefaultAccounts(
+		fmt.Sprintf("Config issue in %s", prettyPath), cfg.DefaultAccounts); err != nil {
+		return nil, err
+	}
+
 	// The same shape warning (#3566), beside the same key check above. This layer
 	// admits program_overrides and its own on_archive_command, and sits ABOVE the
 	// in-repo file in precedence — so when it sets a key, its value is the one
@@ -205,6 +222,11 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	shellValues.add("root_agent.program", cfg.RootAgent.Program)
 	shellValues.warnExecSeparator(prettyPath)
 
+	normalizedCandidates, err := normalizeLimitAccountCandidates(cfg.LimitAccountCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyPath, err)
+	}
+	cfg.LimitAccountCandidates = normalizedCandidates
 	return &cfg, nil
 }
 
@@ -348,6 +370,29 @@ func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (st
 		return "", false
 	}
 	return repo.ID, true
+}
+
+// WithProjectConfigLockForRoot runs fn while holding the personal config file
+// lock for the registered project rooted at root. An unregistered root has no
+// supported personal-project writer, so fn runs without a lock. Registry and
+// lock failures are returned before fn runs.
+//
+// Identity-changing operations use this to keep their final personal-policy
+// read and durable identity checkpoint atomic with af config set/unset
+// --project. The ordinary resolver intentionally remains a point-in-time read.
+func WithProjectConfigLockForRoot(root string, fn func() error) error {
+	project, found, err := projectForRoot(root)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fn()
+	}
+	path, err := ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		return err
+	}
+	return WithFileLock(path, fn)
 }
 
 // ResolveProjectSelector resolves a `--project` selector — a prj_ id or a

@@ -86,7 +86,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		entry.instance.SetPrompt(mission)
 		if op == session.OpReplacing {
 			resetAt, _ := entry.instance.LimitResetAt()
-			if err := entry.instance.Transition(session.ParkHandoff(resetAt)); err != nil {
+			if err := m.parkHandoffAtLimit(entry.instance, resetAt); err != nil {
 				return err
 			}
 		}
@@ -115,11 +115,11 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		if errors.As(err, &limitErr) {
 			entry.instance.SetPrompt(mission)
 			if op == session.OpReplacing {
-				if terr := entry.instance.Transition(session.ParkHandoff(limitErr.ResetAt)); terr != nil {
+				if terr := m.parkHandoffAtLimit(entry.instance, limitErr.ResetAt); terr != nil {
 					return errors.Join(err, terr)
 				}
 			} else {
-				entry.instance.SetLimitReached(limitErr.ResetAt)
+				m.setLimitReached(entry.instance, limitErr.ResetAt)
 			}
 			if !entry.instance.ClearPendingHandoffMission(mission) {
 				return fmt.Errorf("pending mission changed while parking its usage limit")

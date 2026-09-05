@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -359,6 +360,29 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:  "default_accounts",
+		Type: "table",
+		// Deliberately no Default value to quote: the built-in state is "no entry
+		// for any agent", which is the ambient identity every session had before
+		// this key existed.
+		Default:  "none · sessions run on the agent's own ambient login",
+		Purpose:  "Which of an agent's logged-in accounts a new session runs as · one entry per agent, most useful set per project so one project runs as your work identity and another as your personal one.",
+		Tier:     TierAdvanced,
+		Settable: true,
+		// The KEYS are enumerated, not the values: only an agent whose credential
+		// root af can relocate may be scoped to an account at all, and that set is
+		// narrower than tmux.SupportedPrograms. An account NAME is free-form.
+		Enum: sessionenv.AccountAgents(),
+		// Global and personal-per-project, never in-repo. Identity policy is never
+		// checked in: a committed account name is meaningless for everyone else who
+		// clones the repository, and af must not let a repo choose whose quota its
+		// sessions spend (the #3174 precedent for limit_account_candidates).
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeMapByKey,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "session_env_passthrough",
 		Type:       "list",
 		Default:    "none",
@@ -393,6 +417,18 @@ var configManifest = []ManifestEntry{
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "limit_account_candidates",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Registered account names a usage-limited session may switch to, in order · empty keeps waiting on the current identity; set globally or as a personal per-project override.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeListReplace,
 		Formats:    formatTOMLJSON,
 	},
 	{
@@ -563,6 +599,18 @@ var configManifest = []ManifestEntry{
 		Sources:    sourceRepoOnly,
 		Precedence: precedenceRepo,
 		Merge:      MergeTableByField,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "upgrade_clear_unverifiable_artifacts",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Let an upgrade set aside a binary staged beside af whose owning agent-factory home af cannot read · only for a leftover you have checked yourself; af already clears the ones it can attribute.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
 		Formats:    formatTOMLJSON,
 	},
 }

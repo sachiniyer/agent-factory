@@ -254,6 +254,10 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 			return nil, err
 		}
 	}
+	if err := validateDefaultAccounts(
+		fmt.Sprintf("Config issue in %s", prettyConfigPath), config.DefaultAccounts); err != nil {
+		return nil, err
+	}
 	// Beside the program-override KEY check above: warn about the SHAPE of a
 	// value this file hands to /bin/sh -c (#3566). Each of the three config
 	// sources warns for the keys it admits — this one is the only source of
@@ -268,6 +272,11 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
 	}
 	config.SessionEnvPassthrough = normalizedSessionEnv
+	normalizedCandidates, err := normalizeLimitAccountCandidates(config.LimitAccountCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
+	}
+	config.LimitAccountCandidates = normalizedCandidates
 
 	sanitizeLimitPatterns(config)
 	sanitizeThemeColors(config, prettyConfigPath)

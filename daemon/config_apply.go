@@ -67,16 +67,20 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	// EffectAppliedLive keys.
 	"default_program":   func(a, b *config.Config) bool { return a.DefaultProgram != b.DefaultProgram },
 	"program_overrides": func(a, b *config.Config) bool { return !reflect.DeepEqual(a.ProgramOverrides, b.ProgramOverrides) },
+	"default_accounts":  func(a, b *config.Config) bool { return !reflect.DeepEqual(a.DefaultAccounts, b.DefaultAccounts) },
 	"session_env_passthrough": func(a, b *config.Config) bool {
 		return !reflect.DeepEqual(a.SessionEnvPassthrough, b.SessionEnvPassthrough)
 	},
-	"on_archive_command":             func(a, b *config.Config) bool { return a.OnArchiveCommand != b.OnArchiveCommand },
-	"worktree_root":                  func(a, b *config.Config) bool { return a.WorktreeRoot != b.WorktreeRoot },
-	"vscode_server_binary":           func(a, b *config.Config) bool { return a.VSCodeServerBinary != b.VSCodeServerBinary },
-	"daemon_poll_interval":           func(a, b *config.Config) bool { return a.DaemonPollInterval != b.DaemonPollInterval },
-	"log_max_size_mb":                func(a, b *config.Config) bool { return a.LogMaxSizeMB != b.LogMaxSizeMB },
-	"log_max_backups":                func(a, b *config.Config) bool { return a.LogMaxBackups != b.LogMaxBackups },
-	"limit_auto_resume":              func(a, b *config.Config) bool { return a.LimitAutoResume != b.LimitAutoResume },
+	"on_archive_command":   func(a, b *config.Config) bool { return a.OnArchiveCommand != b.OnArchiveCommand },
+	"worktree_root":        func(a, b *config.Config) bool { return a.WorktreeRoot != b.WorktreeRoot },
+	"vscode_server_binary": func(a, b *config.Config) bool { return a.VSCodeServerBinary != b.VSCodeServerBinary },
+	"daemon_poll_interval": func(a, b *config.Config) bool { return a.DaemonPollInterval != b.DaemonPollInterval },
+	"log_max_size_mb":      func(a, b *config.Config) bool { return a.LogMaxSizeMB != b.LogMaxSizeMB },
+	"log_max_backups":      func(a, b *config.Config) bool { return a.LogMaxBackups != b.LogMaxBackups },
+	"limit_auto_resume":    func(a, b *config.Config) bool { return a.LimitAutoResume != b.LimitAutoResume },
+	"limit_account_candidates": func(a, b *config.Config) bool {
+		return !reflect.DeepEqual(a.LimitAccountCandidates, b.LimitAccountCandidates)
+	},
 	"limit_retry_interval":           func(a, b *config.Config) bool { return a.LimitRetryInterval != b.LimitRetryInterval },
 	"limit_patterns":                 func(a, b *config.Config) bool { return !reflect.DeepEqual(a.LimitPatterns, b.LimitPatterns) },
 	"global_agent_skills":            func(a, b *config.Config) bool { return a.GlobalAgentSkills != b.GlobalAgentSkills },

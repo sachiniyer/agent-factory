@@ -113,6 +113,8 @@ var verbatimInstanceFields = map[string]string{
 	"AgentConversation.Agent":       "agent enum name; the resumable ID beside it is cleared",
 	"AgentConversation.CaptureKind": "bounded capture-kind enum",
 
+	"AccountLimitObservations[].Agent": "agent enum name (tmux.SupportedPrograms); the account label beside it is redacted",
+
 	"PendingTabCleanup[].TabID": "minted tab id (#1738) — never derived from user text, and kept for triage; the TmuxName beside it is redacted",
 
 	"Tabs[].ID":                          "minted tab id (#1738)",
