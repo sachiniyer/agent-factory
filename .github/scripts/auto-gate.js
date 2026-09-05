@@ -2590,7 +2590,7 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
   }
 
   try {
-    await deleteMergedHeadRef({ github, context, core, gate, prNumber });
+    await headRefPruner.deleteMergedHeadRef({ github, context, core, gate, prNumber });
   } catch (error) {
     postMergeErrors.push(error);
   }
@@ -2819,12 +2819,18 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
 // Three conditions, each protecting something different, and every one of them
 // no-ops rather than failing: this runs after the merge has landed, and nothing
 // here is worth reddening a merge that already succeeded.
+//
+// TWO callers reach it (#3852): merge(), pruning the branch it has just merged,
+// and sweepMergedHeadRefs(), revisiting a branch whose keep has since gone
+// stale. Both go through headRefPruner below, so the conditions have one home.
+// The outcome is RETURNED as well as logged because the sweep summarizes a run's
+// worth of them; the merge path ignores the return value.
 async function deleteMergedHeadRef({ github, context, core, gate, prNumber }) {
   const { owner, repo } = context.repo;
   const branch = gate.headRefName;
   // (a) A fork's branch is not ours to delete, and the token cannot anyway.
   if (!branch || gate.headRepository !== `${owner}/${repo}`) {
-    return;
+    return { branch, prNumber, outcome: "skipped", reason: "not a branch of this repository" };
   }
   try {
     // (c) first, because it is the only condition whose answer cannot change in
@@ -2853,10 +2859,9 @@ async function deleteMergedHeadRef({ github, context, core, gate, prNumber }) {
     ]);
     const blocking = [...dependents, ...siblings].map((pull) => pull.number);
     if (blocking.length > 0) {
-      core.notice(
-        `Keeping ${branch}: open PR ${joinPullNumbers([...new Set(blocking)])} still uses it.`,
-      );
-      return;
+      const reason = `open PR ${joinPullNumbers([...new Set(blocking)])} still uses it`;
+      core.notice(`Keeping ${branch}: ${reason}.`);
+      return { branch, prNumber, outcome: "kept", reason };
     }
 
     // (b) The ref must still point at the commit that was merged. A lane that
@@ -2868,28 +2873,346 @@ async function deleteMergedHeadRef({ github, context, core, gate, prNumber }) {
     // deleteRef accepts an expected OID (introspected), so the pair cannot be
     // made atomic from here. Ordering is the only lever this side of pushing a
     // lease with git, and it is used.
+    //
+    // It matters MORE on the sweep than on the merge path, not less: the merge
+    // path reads it seconds after the merge, while the sweep can reach a branch
+    // hours or weeks later. #3603's own correction is the evidence — eleven of
+    // its fifteen residue branches carried post-merge commits, so "it was at the
+    // merged head when we merged it" is not a substitute for re-reading the tip.
     const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
     const tip = String(ref?.data?.object?.sha || "").toLowerCase();
     if (tip !== String(gate.headSha || "").toLowerCase()) {
-      core.notice(
-        `Keeping ${branch}: it now points at ${tip || "an unreadable commit"}, not the merged ` +
-          `${gate.headSha}, so it carries work this merge did not take.`,
-      );
-      return;
+      const reason =
+        `it now points at ${tip || "an unreadable commit"}, not the merged ` +
+        `${gate.headSha}, so it carries work this merge did not take`;
+      core.notice(`Keeping ${branch}: ${reason}.`);
+      return { branch, prNumber, outcome: "kept", reason };
     }
 
     await github.rest.git.deleteRef({ owner, repo, ref: `heads/${branch}` });
     core.notice(`Deleted merged head branch ${branch} for PR #${prNumber}.`);
+    return { branch, prNumber, outcome: "deleted" };
   } catch (error) {
     // Already gone, or the ref moved under us between the read and the delete.
     // Both mean there is nothing left to prune, which is the desired end state.
     const status = Number(error?.status ?? error?.response?.status);
     if (status === 404 || status === 422) {
       core.notice(`Nothing to prune for ${branch}: ${formatError(error)}.`);
-      return;
+      return { branch, prNumber, outcome: "absent", reason: formatError(error) };
     }
     throw error;
   }
+}
+
+// The one binding both callers reach the keep-conditions through. Naming it
+// keeps the conditions in a single place rather than a merge-side and a
+// sweep-side copy that drift, and it is what lets a test replace the helper once
+// and observe that neither path carries a private one.
+const headRefPruner = { deleteMergedHeadRef };
+
+// ---------------------------------------------------------------------------
+// The kept-branch sweep (#3852).
+//
+// deleteMergedHeadRef applies its keep-conditions ONCE, inside the merge of the
+// PR that owns the branch — and by then that PR is closed, so nothing revisits
+// the answer when the reason for the keep goes away. #3847 is the shape: it was
+// the base of the open #3849, so keeping it at 16:10:59 was correct; #3849 was
+// retargeted onto master at 16:12:28, and the branch has been deletable and
+// unreachable ever since. The keep is right. What was missing is a re-check
+// after the blocking condition clears.
+//
+// A sweep rather than an event hook, because the events that clear a block are
+// several — a dependent retargeted, closed or merged; a sibling closed — and
+// each would need its own trigger AND its own way of finding the branch it just
+// unblocked. One pass over the branches that could be deletable answers all of
+// them, and drains whatever earlier leaks are still on origin at the same time.
+// ---------------------------------------------------------------------------
+
+// How many candidate branches one gate run acts on. Each candidate costs two
+// open-PR list queries and a ref read, and Auto Gate runs on nearly every PR
+// event, so an unbounded sweep would spend the GITHUB_TOKEN's hourly budget on
+// housekeeping. A backlog drains across consecutive runs instead of making one
+// run slow.
+const BRANCH_SWEEP_CANDIDATE_LIMIT = 25;
+// Branches per enumeration page. The whole list is one round trip at this size:
+// origin carries 56 branches today, and peaked at the 201 #3603 recorded.
+const BRANCH_SWEEP_PAGE_SIZE = 100;
+// Pages of branches one run will read — five times the worst count this repo has
+// ever carried. Reaching it WARNS rather than silently shortening the candidate
+// set, because a sweep that quietly stopped looking is indistinguishable from a
+// sweep that found nothing.
+const BRANCH_SWEEP_MAX_PAGES = 5;
+// Per branch, how many of its pull requests and of its ruleset rules the
+// enumeration reads. Truncation is fail-safe in both directions: an unseen
+// merged PR means the branch is not a candidate this run, and an unseen rule
+// means the branch is treated as protected.
+const BRANCH_SWEEP_REF_DETAIL = 20;
+// The ruleset rule that forbids deleting a matching ref.
+//
+// It is the discriminator rather than "carries any rule at all", because a
+// repository-wide ruleset carrying only required-status-checks would otherwise
+// make the sweep inert. And it is read from `rules` rather than from GraphQL's
+// branchProtectionRule or refUpdateRule because BOTH of those are null on master
+// here (measured): this repo protects master with a RULESET, so a check that
+// consulted only classic branch protection would report the default branch
+// unprotected — the exact shape of a fabricated negative.
+const BRANCH_SWEEP_DELETION_RULE = "DELETION";
+
+const BRANCH_SWEEP_QUERY = `
+  query BranchSweepCandidates(
+    $owner: String!
+    $repo: String!
+    $cursor: String
+    $branches: Int!
+    $detail: Int!
+  ) {
+    repository(owner: $owner, name: $repo) {
+      defaultBranchRef {
+        name
+      }
+      refs(refPrefix: "refs/heads/", first: $branches, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          name
+          target {
+            oid
+          }
+          branchProtectionRule {
+            id
+          }
+          rules(first: $detail) {
+            totalCount
+            nodes {
+              type
+            }
+          }
+          associatedPullRequests(first: $detail, orderBy: { field: UPDATED_AT, direction: DESC }) {
+            totalCount
+            nodes {
+              number
+              merged
+              mergedAt
+              headRefOid
+              headRepository {
+                nameWithOwner
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Every branch on the repository, with everything a candidacy decision needs
+// about it, in one round trip per BRANCH_SWEEP_PAGE_SIZE.
+//
+// Branch-side rather than PR-side. Walking the last N merged PRs and asking
+// whether each head ref still resolves is the obvious REST shape, and it cannot
+// reach the backlog: closed PRs sorted by update time cover about two days per
+// 200 on this repo (page 1 spans 2026-09-03..2026-09-04, measured), while the
+// deletable leftovers on origin today were merged between 2026-07-24 and
+// 2026-09-04. A window wide enough to see them is ten-plus REST pages on every
+// gate run. The branch list is 56 rows and bounds the answer completely, so
+// asking that side is both cheaper and total.
+async function listSweepBranches({ github, context }) {
+  const { owner, repo } = context.repo;
+  const branches = [];
+  let cursor = null;
+  let defaultBranch = "";
+  for (let page = 0; page < BRANCH_SWEEP_MAX_PAGES; page += 1) {
+    const response = await retryRead("could not list branches for the head-ref sweep", () =>
+      github.graphql(BRANCH_SWEEP_QUERY, {
+        owner,
+        repo,
+        cursor,
+        branches: BRANCH_SWEEP_PAGE_SIZE,
+        detail: BRANCH_SWEEP_REF_DETAIL,
+      }),
+    );
+    const repository = response?.repository;
+    defaultBranch = repository?.defaultBranchRef?.name || defaultBranch;
+    const refs = repository?.refs;
+    branches.push(...(refs?.nodes || []).filter(Boolean));
+    if (refs?.pageInfo?.hasNextPage !== true) {
+      return { branches, defaultBranch, truncated: false };
+    }
+    cursor = refs.pageInfo.endCursor || null;
+    if (!cursor) {
+      // More pages exist and there is nothing to ask for them with. That is
+      // truncation, not completion.
+      break;
+    }
+  }
+  return { branches, defaultBranch, truncated: true };
+}
+
+// Whether one enumerated branch is worth spending the three conditions on, and
+// which merge it would be pruned for. Derived entirely from the enumeration
+// above — no extra round trip — and every answer it can give is "not a
+// candidate" or "a candidate": it never authorizes a delete on its own.
+function sweepCandidate(branch, { owner, repo, defaultBranch }) {
+  const name = branch?.name || "";
+  const tip = String(branch?.target?.oid || "").toLowerCase();
+  if (!name || !tip) {
+    return null;
+  }
+  // The default branch is never a candidate, protected or not. A PR whose HEAD
+  // is master targeting some other base is a legal if unusual shape, and it
+  // would otherwise reach the conditions like any other branch.
+  if (name === defaultBranch) {
+    return null;
+  }
+  const rules = branch.rules;
+  const seenRules = rules?.nodes || [];
+  // Fail closed on both shapes of "the whole rule list was not seen": a page
+  // that truncated, and no rule list at all. Skipping a branch that turns out to
+  // be unprotected costs one leftover branch, and shows up as a candidate count
+  // that does not move; the other direction deletes something the repository
+  // protects.
+  const rulesUnread = !rules || Number(rules.totalCount || 0) > seenRules.length;
+  if (
+    branch.branchProtectionRule ||
+    rulesUnread ||
+    seenRules.some((rule) => rule?.type === BRANCH_SWEEP_DELETION_RULE)
+  ) {
+    return null;
+  }
+  // The most recent merge, because it is the one whose head the branch should
+  // still be sitting at. Keyed on an older merged PR, a branch that a later
+  // merge made deletable would fail the tip comparison forever.
+  const merged = (branch.associatedPullRequests?.nodes || [])
+    .filter((pull) => pull?.merged && pull?.mergedAt)
+    .sort((a, b) => String(a.mergedAt).localeCompare(String(b.mergedAt)))
+    .at(-1);
+  if (!merged) {
+    // No merged PR at all: a branch backing only open or closed-unmerged PRs, or
+    // none, may hold work that exists nowhere else. #3603 drew that line — "PR
+    // state, not ancestry" — and it still holds.
+    return null;
+  }
+  // (a), asked here so a fork head costs nothing further. deleteMergedHeadRef
+  // asks the same question again against the same fact; this is a filter, not a
+  // substitute for it.
+  if (merged.headRepository?.nameWithOwner !== `${owner}/${repo}`) {
+    return null;
+  }
+  return {
+    branch: name,
+    prNumber: merged.number,
+    mergedAt: merged.mergedAt,
+    headSha: String(merged.headRefOid || "").toLowerCase(),
+    tip,
+  };
+}
+
+// One pass. Enumerate, filter to candidates, and hand each surviving one to the
+// same helper the merge path uses.
+async function sweepMergedHeadRefs({
+  github,
+  context,
+  core,
+  limit = BRANCH_SWEEP_CANDIDATE_LIMIT,
+}) {
+  const { owner, repo } = context.repo;
+  const { branches, defaultBranch, truncated } = await listSweepBranches({ github, context });
+  if (truncated) {
+    core.warning(
+      `Head-ref sweep stopped at its page cap after ${branches.length} branch(es); ` +
+        "anything beyond it was not examined this run.",
+    );
+  }
+
+  // Which branch is the default is what keeps the sweep off it when nothing else
+  // does — master's protection here is a ruleset, so a row for it can legitimately
+  // carry no classic protection at all — and "the read did not say" is not "there
+  // is no default branch". Refuse the whole pass rather than sweep without it.
+  const refused = defaultBranch ? "" : "the enumeration did not name the default branch";
+  if (refused) {
+    core.warning(`Head-ref sweep acted on nothing: ${refused}.`);
+  }
+
+  const candidates = [];
+  let moved = 0;
+  for (const branch of refused ? [] : branches) {
+    const candidate = sweepCandidate(branch, { owner, repo, defaultBranch });
+    if (!candidate) {
+      continue;
+    }
+    // (b) from the enumeration read, as a FILTER and not as the decision. It can
+    // only remove candidates — the load-bearing comparison is still the last
+    // read deleteMergedHeadRef makes before the delete, against a ref it fetches
+    // itself. Without this filter the branches carrying post-merge commits
+    // (eleven of fifteen, in #3603's count) would fill the per-run cap forever
+    // and spend three API calls each on an answer that cannot change.
+    if (candidate.tip !== candidate.headSha) {
+      moved += 1;
+      core.info(
+        `Head-ref sweep: ${candidate.branch} is at ${candidate.tip}, not PR #${candidate.prNumber}'s ` +
+          `merged ${candidate.headSha}; it carries work that merge did not take.`,
+      );
+      continue;
+    }
+    candidates.push(candidate);
+  }
+  // Oldest merge first, so a backlog drains in a definite order rather than
+  // being starved by newer arrivals.
+  candidates.sort((a, b) => String(a.mergedAt).localeCompare(String(b.mergedAt)));
+  const acting = candidates.slice(0, Math.max(0, limit));
+  const deferred = candidates.length - acting.length;
+
+  const deleted = [];
+  const kept = [];
+  const failed = [];
+  for (const candidate of acting) {
+    try {
+      const outcome = await headRefPruner.deleteMergedHeadRef({
+        github,
+        context,
+        core,
+        gate: {
+          headRefName: candidate.branch,
+          headRepository: `${owner}/${repo}`,
+          headSha: candidate.headSha,
+        },
+        prNumber: candidate.prNumber,
+      });
+      if (outcome?.outcome === "deleted") {
+        deleted.push(candidate.branch);
+      } else {
+        kept.push({ branch: candidate.branch, reason: outcome?.reason || outcome?.outcome || "" });
+      }
+    } catch (error) {
+      // One branch's failure must not cost the others their pass, and none of it
+      // is worth failing the run: this is housekeeping running beside a merge
+      // decision, and Auto Gate red is this repo's highest-priority alarm.
+      failed.push({ branch: candidate.branch, reason: formatError(error) });
+      core.warning(`Head-ref sweep could not prune ${candidate.branch}: ${formatError(error)}.`);
+    }
+  }
+
+  const summary = refused
+    ? `Head-ref sweep: ${branches.length} branch(es) examined · acted on none · ${refused}`
+    : `Head-ref sweep: ${branches.length} branch(es) examined · ${candidates.length} candidate(s) · ` +
+      `deleted ${deleted.length}${deleted.length > 0 ? ` (${deleted.join(", ")})` : ""} · ` +
+      `kept ${kept.length} · moved since merge ${moved} · deferred ${deferred}` +
+      (failed.length > 0 ? ` · failed ${failed.length}` : "");
+  core.notice(summary);
+  core.setOutput("branch_sweep", summary);
+  return {
+    examined: branches.length,
+    candidates,
+    deleted,
+    kept,
+    failed,
+    moved,
+    deferred,
+    truncated,
+    summary,
+  };
 }
 
 async function resolveTargets({ github, context, core, prNumber }) {
@@ -4572,10 +4895,17 @@ module.exports = {
   resolveAggregateHeads,
   resolveMergeRefusal,
   resolveTargets,
+  sweepMergedHeadRefs,
   __test: {
     CONCEDED_MERGE_REFUSALS,
     RETRYABLE_MERGE_REFUSALS,
     deleteMergedHeadRef,
+    headRefPruner,
+    sweepCandidate,
+    listSweepBranches,
+    BRANCH_SWEEP_CANDIDATE_LIMIT,
+    BRANCH_SWEEP_DELETION_RULE,
+    BRANCH_SWEEP_MAX_PAGES,
     parseSummaryRows,
     parseVerdictArtifact,
     MASTER_PUSH_WORKFLOWS,
