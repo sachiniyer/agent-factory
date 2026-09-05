@@ -109,6 +109,23 @@ func NewRemoteAgentServer(ep AgentServerEndpoint, title string) (AgentServer, er
 	return &remoteAgentServer{rc: rc}, nil
 }
 
+// noteAdoption counts a delivery against the Instance this server drives, before
+// the write reaches the sandbox (#3865).
+//
+// It tolerates a nil Instance because NewRemoteAgentServer builds one: that
+// constructor drives a workspace at a URL directly, with no daemon-held session
+// behind it, so no on_complete teardown can be owed for it and there is nothing
+// for a delivery to make stale. Every server the daemon reaches through
+// Instance.AgentServer() is bound (agentserver_local.go), and the local runtime
+// is deliberately NOT given this tolerance — a nil Instance there would be a
+// construction bug, and it should say so rather than silently stop counting.
+func (s *remoteAgentServer) noteAdoption() error {
+	if s.inst == nil {
+		return nil
+	}
+	return s.inst.NoteAdoptionDelivery()
+}
+
 func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
 	return s.rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
 }
@@ -179,6 +196,11 @@ func (s *remoteAgentServer) SendPrompt(prompt string) error {
 }
 
 func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
+	// Adoption, counted before the write (#3865). SendPrompt above routes through
+	// here, so this is the one bump for both.
+	if err := s.noteAdoption(); err != nil {
+		return PromptNotDelivered, err
+	}
 	var resp agentSendPromptResp
 	if err := s.rc.callWithin("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, &resp, agentSendPromptCallTimeout); err != nil {
 		return PromptCouldNotConfirm, err
@@ -222,6 +244,12 @@ func (s *remoteAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, erro
 }
 
 func (s *remoteAgentServer) Input(tab int, b []byte) error {
+	// The off-box runtime's PTY input path, same reason as the local one (#3865).
+	// It has no InputTab: a remote roster is fixed, so ws_pty.go's id-native
+	// binding never selects this runtime.
+	if err := s.noteAdoption(); err != nil {
+		return err
+	}
 	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return err

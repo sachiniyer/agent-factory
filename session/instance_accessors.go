@@ -200,6 +200,15 @@ func (i *Instance) MarkStartupStateUnknown() {
 	// the task's concurrency budget. Store that fact on the same transition that
 	// stores the terminal marker so projections, persistence, and unloadable-row
 	// accounting cannot disagree about whether the slot was released.
+	// Same section, same reason as the completion transition (#3865): this is the
+	// other edge that clears the run marker, so it is the other place the adoption
+	// baseline has to be pinned. On the EDGE, not beside the assignment below,
+	// which is unconditional — a second call once the run has already ended must
+	// not pin a fresh baseline over a teardown's, since that would fold a delivery
+	// made in between into the baseline and read as though nothing had happened.
+	if i.taskRunActive {
+		i.captureAdoptionBaselineLocked()
+	}
 	i.taskRunActive = false
 	// The create attempt has settled into an explicit blocked outcome. Leaving
 	// OpCreating set makes projections report an operation that no goroutine owns
