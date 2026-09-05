@@ -9,9 +9,11 @@ are the web client's own.
 
 With the daemon running, open **<http://127.0.0.1:8443>** on the same machine.
 The default listener needs no configuration or token. If nothing answers,
-`af daemon status` reports whether the daemon is running without starting it;
-`af daemon start` starts it. A port conflict can leave the daemon running without
-the web listener; check its logs if the browser still cannot connect.
+`af daemon status` reports whether the daemon is running without starting it.
+Run `af` in a git repository to open the TUI and start the daemon. A port conflict
+can leave the daemon running without the web listener; check its logs if the
+browser still cannot connect. For automatic startup at login, use
+`af daemon install`.
 
 For another machine or a shared host, read [Beyond localhost](#beyond-localhost)
 after the tour. [Remote daemon access](remote-http-auth.md) is the full setup guide.
@@ -99,9 +101,13 @@ switcher first; creation stays disabled until a project is available.
 
 An account without a credential is labelled but still selectable. A
 registration-only account explains why it cannot scope a session and blocks
-creation if selected. Register and sign in to accounts in [Config](#config-view). Click **Create** to submit: a pending
-row appears, then the session opens attached when creation completes. Validation
-errors stay in the modal. **Cancel**, the backdrop, or `Escape` closes the form.
+creation if selected. Register and sign in to accounts in [Config](#config-view).
+**Create** checks required fields in the browser; missing values show inline
+errors and leave the form and its values open. After those checks pass, the modal
+closes before sending the request. A pending row tracks creation, then the session
+opens attached on success. Daemon-side failures appear in a brief toast; reopen
+**+ New** and re-enter the form to retry. **Cancel**, the backdrop, or `Escape`
+closes the form before submission.
 
 ### Watch and interact with the agent
 
@@ -131,9 +137,13 @@ session can offer both; see [usage limits](usage-limits.md).
 The selected rail row also exposes **Archive** and **Kill**; other actionable rows
 show them on hover or keyboard focus. Each opens a confirmation:
 
-- **Archive** tears down the terminal and moves the worktree into the archive.
-- **Restore**, in the archive action's place on an archived row, moves the
-  worktree back and respawns the agent. Reveal **Archived** in the filter first.
+- **Archive** tears down a local session's terminal and moves its worktree into
+  the archive. For Docker, SSH, or remote-hook sessions, it pushes the branch to
+  origin and tears down the remote sandbox; there is no local worktree to move.
+- **Restore**, in the archive action's place on an archived row, moves a local
+  worktree back and respawns the agent. For a remote session, it provisions a
+  fresh sandbox from the pushed branch and relaunches the agent; the old
+  sandbox's conversation does not return. Reveal **Archived** in the filter first.
 - **Kill** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
@@ -290,8 +300,10 @@ the listener or putting it behind a proxy.
 
 ### Keyboard reference
 
-These are the web client's bindings. Navigation shortcuts apply outside focused form controls
-and attached terminals; they are not a promise that every TUI binding is shared.
+These are the web client's bindings. Shortcuts for the rail and view switching
+apply outside focused form controls and attached terminals. While attached, `ctrl+]`
+detaches, and `Alt+j`, `Alt+k`, and `Alt+w` still act on panes. Other keys pass
+through to the agent unless a modal or menu handles them.
 
 | Key | Action |
 | --- | --- |
