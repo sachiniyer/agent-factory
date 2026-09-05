@@ -1,558 +1,344 @@
 # The web client
 
-For anyone who would rather drive their agents in a browser than a terminal.
-After this page you will know how to open the web client, what each of its three
-views does, how to create and watch a session in it, and what to change before
-letting anything but your own machine reach it.
-
-The web client is a full surface, not a viewer. It has the same session rail,
-live terminals, tabs, projects, and tasks as the [TUI](tui.md) — plus a VS Code
-tab the terminal cannot render — and it reads the daemon's live projection, so
-what you see in the browser matches `af` and `af sessions list` exactly.
-
-**It is already on**, on loopback, with no install step, no build, no token, and
-no login screen. Open **<http://127.0.0.1:8443>** and read the
-[tour](#a-tour-of-the-app) with it in front of you. If nothing answers,
-`af daemon status` says whether a daemon is up (it only reports — it never
-starts one); opening the TUI or creating a session does start one.
-
-!!! note "Where the auth details live"
-    This page covers the web client itself. The listener and token model it
-    rides on are shared with every remote `af` client and documented in full under
-    [Remote daemon access](remote-http-auth.md). This page gives you the short path
-    for the common cases and links there for the rest.
-
----
-
-## It's already on
-
-The web client is served on the daemon's **plain-HTTP TCP listener**, and that
-listener is bound by default at `127.0.0.1:8443`. A fresh install needs **zero**
-config: start the daemon (any `af` command does), open `http://127.0.0.1:8443`, and
-you're in. The address is controlled by one **global-only** key, `network.listen_addr` — a
-cloned repo must never be able to open a network port, so it lives only in your
-global config and defaults to loopback.
-
-On startup the daemon logs a one-time banner with the address and the bearer
-token:
-
-```
-daemon HTTP TCP listener enabled on 127.0.0.1:8443 (plain HTTP — terminate TLS at a proxy if needed)
-  bearer token: kZ9…-…q0
-  all peers connect with NO token (network.require_token defaults to false; set network.require_token = true to require auth)
-```
-
-### Loopback (default), the network, or off
-
-`network.listen_addr` takes three shapes. Because config parsing layers your file on top
-of the defaults, an **absent** `network.listen_addr` inherits the loopback default, while
-an **explicit** `network.listen_addr = ""` is the deliberate opt-out — the two are not the
-same.
-
-- **`127.0.0.1:8443` — the default.** The listener is reachable only from the same
-  machine. A browser on that machine is a **loopback** peer and needs **no token**
-  (see [the auth model](#the-auth-model)). You get this with no config at all. To
-  reach it from another machine, forward the port over SSH — nothing new is
-  exposed to the network:
-
-    ```bash
-    # on your laptop: forward local :8443 to the host's loopback listener
-    ssh -N -L 8443:127.0.0.1:8443 you@workstation
-    ```
-
-- **`0.0.0.0:8443` (or a LAN/Tailscale IP) — expose to the network.** The listener
-  is reachable from the network. Pair it with **`network.require_token = true`** — af
-  serves a tokenless network bind and only warns (see [Remote daemon
-  access](remote-http-auth.md#the-tokenless-network-warning)). Only bind a routable
-  interface when you must, and put it behind a firewall. Hand-edit your global
-  config and restart the daemon:
-
-    ```toml
-    # ~/.agent-factory/config.toml
-    [network]
-    listen_addr = "0.0.0.0:8443"
-    require_token = true   # strongly recommended: the default is false — no token at all
-    ```
-
-    ```bash
-    af daemon restart   # live sessions keep running; the new daemon re-adopts them
-    ```
-
-    See [Remote daemon access](remote-http-auth.md#option-2-direct-tcp-token) for the
-    full network setup, including CORS and `network.require_token`.
-
-- **`""` — disable the web server.** An explicit empty value turns the HTTP TCP
-  listener off entirely; the daemon runs pure-unix-socket and serves no browser UI:
-
-    ```toml
-    # ~/.agent-factory/config.toml
-    [network]
-    listen_addr = ""
-    ```
-
-    ```bash
-    af daemon restart
-    ```
-
-If the default loopback port is already taken (for example a second daemon), the
-bind is **logged and skipped** — the daemon keeps running, just without the web
-server. A web-port conflict never blocks session management.
-
-The listener is **plain HTTP** — af terminates no TLS of its own. If you expose it
-beyond loopback and want transport encryption, put it behind a reverse proxy
-(nginx/Caddy) or a private network (Tailscale/VPN). See
-[Transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
-
----
+Open the client, choose a project, create a session, and follow its work without
+leaving your browser. This tour walks through **Sessions · Tasks · Config** using
+stills from a recorded demo. The demo agent's output is scripted; the controls
+are the web client's own.
 
 ## Open it in a browser
 
-Point your browser at the listener's address:
+With the daemon running, open **<http://127.0.0.1:8443>** on the same machine.
+The default listener needs no configuration or token. If nothing answers,
+`af daemon status` reports whether the daemon is running without starting it;
+`af daemon start` starts it. A port conflict can leave the daemon running without
+the web listener; check its logs if the browser still cannot connect.
 
-```
-http://127.0.0.1:8443/
-```
-
-The same listener serves both the app (at `/`) and the API (at `/v1/...`), so
-there is nothing else to run — the daemon *is* the web server. It serves plain
-HTTP; there is no certificate warning to click through.
-
-If you front the daemon with a TLS-terminating reverse proxy, point the browser at
-the **proxy's** `https://` origin instead, and let the proxy reach af's plaintext
-backend — see
-[Transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
-
----
-
-## Install it as an app
-
-The web client is a PWA, so you can install it and get an app window with its own
-icon instead of a browser tab — no extra tooling, it's the same daemon and the same
-page.
-
-In a Chromium browser (Chrome, Edge, Brave), open the app and click **Install app**
-in the top bar; you can also use the install icon in the address bar. The button
-carries a **×** — dismiss it and it won't come back.
-
-Firefox and Safari don't offer the button. Use their own add-to-home-screen or
-"Add to Dock" instead; the icons and app name come from the same manifest.
-
-### Why the Install button isn't showing
-
-**A browser will only install a page served from a secure context**, and that rule
-decides everything here:
-
-| Where you opened it | Secure context? | Install button |
-| --- | --- | --- |
-| `http://localhost:8443` / `http://127.0.0.1:8443` | yes — loopback is trusted by definition | **shows** |
-| `https://af.example.ts.net` (behind a TLS proxy) | yes | **shows** |
-| `http://100.x.y.z:8443` (plain HTTP over Tailscale/LAN) | **no** | **hidden** |
-
-So if you reach af over a **plain-HTTP Tailscale or LAN address, there is no Install
-button, and that is correct rather than broken**. The browser never offers an
-install for an insecure origin, so a button there could only fail. Nothing else
-about the app changes — it is fully functional over plain HTTP, install is simply
-not on the menu.
-
-**To install from a remote machine, put the daemon behind HTTPS** — a
-TLS-terminating reverse proxy in front of `network.listen_addr` — and open the proxy's
-`https://` origin. Tailscale's own HTTPS (`tailscale serve`) works too, since it
-gives you an `https://…ts.net` origin. See
-[Transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
-
-### What gets installed
-
-- The **app mark** — a factory on the accent tile — as the favicon, the app icon,
-  and the home-screen icon (including an Android-safe maskable variant).
-- A **standalone window**: no URL bar, its own entry in your launcher/dock.
-- **Browser chrome that matches the app theme**, following the Auto/Light/Dark
-  toggle rather than just your OS.
-
-There is a small **service worker** behind the install. It is worth knowing exactly
-what it does, because the app is a live terminal:
-
-- It **never touches `/v1`** — not the API, not the `/v1/events` socket, not the
-  session PTY streams, not web-tab or VS Code previews. Those are left on the
-  browser's own network path, byte for byte as if no worker existed.
-- It caches **only the static shell** (the page, the bundle, the icons), and
-  **network-first**: a reachable daemon always wins, so an auto-updated af never
-  serves you the old bundle. The cache is only ever consulted when the network has
-  already failed, so a daemon that went away gives you the app's own "can't reach
-  the daemon" screen instead of a browser error page.
-
-Installing is not required for any of this — it's the same app either way.
-
----
-
-## The auth model
-
-Whether the web client asks you for a token depends on **where your browser is**,
-judged from the real TCP connection address (never a header — those are
-attacker-controlled and ignored, see [When is a token required?](remote-http-auth.md#when-is-a-token-required-loopback-vs-network)).
-
-**By default, never.** `network.require_token` defaults to `false`, so the app connects
-with no login screen wherever your browser is. Turning the token on is opt-in:
-
-| Your browser is on… | Token needed? | What you see |
-| --- | --- | --- |
-| **Anywhere**, default (`network.require_token = false`) | **No** | The app loads straight through — no login screen |
-| **The same machine** (loopback), `network.require_token = true` | No | The app loads straight through — loopback stays exempt |
-| **The same machine**, `network.require_token` **and** `network.require_loopback_token` both `true` | **Yes** | A login screen asking you to paste the daemon token |
-| **Another machine** (network peer), `network.require_token = true` | **Yes** | A login screen asking you to paste the daemon token |
-
-The web client never guesses: it asks the daemon via `/v1/auth-info` whether
-*this* connection needs a token, and skips the login screen whenever the answer is
-no. That is why the default experience is simply "open the URL and you're in".
-
-### No token by default
-
-Making a same-machine browser hunt for a token and paste it bought no real
-security — anyone on the box already runs as your user, the same trust the Unix
-socket grants — and it cost every new user a login screen before they saw the
-product. So the token is **off by default** and auth is opt-in. What bounds the
-exposure is the *other* default: `network.listen_addr` is loopback-only, so nothing off
-the machine can reach the daemon until you change it.
-
-Two cases break that assumption, and both are on you to close:
-
-- **A shared / multi-user machine**: the loopback listener has no per-user gating,
-  so every local account can reach it. Set **both** `network.require_token = true` and
-  `network.require_loopback_token = true` (the latter is inert on its own), or
-  `network.listen_addr = ""` to turn the web server off.
-- **A network bind**: pointing `network.listen_addr` at a routable interface while leaving
-  the tokenless default would serve an **unauthenticated control plane** to anyone
-  who can route to it. af allows that and warns once at daemon start rather than
-  refusing, so this one is on you. Set
-  `network.require_token = true` to bind the network, or keep `network.listen_addr` on loopback
-  and reach it over SSH/Tailscale port-forwarding.
-
-See the [Security notes](#security-notes).
-
-### With `network.require_token = true`: paste the token
-
-When you turn the token on, the web client shows a login screen with a single
-field. Get the token from the **host**:
-
-```console
-$ af token show
-token: kZ9abc...-...q0
-```
-
-Paste the `token` value into the field and click **Connect**. **You paste it once**:
-the token is saved in the browser's `localStorage` for that origin, so a reload, a
-new tab, and a browser restart all reconnect silently. A rejected token shows an
-actionable error (`That token was rejected. Check af token show on the host and try
-again.`) and is **forgotten**, so the next visit prompts cleanly instead of retrying
-a dead credential. A connection that fails for any other reason — the daemon is
-down, the wrong host — reports the daemon's own message and **keeps** the token: a
-daemon restart doesn't cost you a re-paste.
-
-See [Turning auth on](remote-http-auth.md#turning-auth-on-networkrequire_token-true) for
-the full setup, and the note there on why `network.require_loopback_token` does nothing
-unless `network.require_token` is also `true`.
-
-**Disconnect** (top-right) forgets the stored token and returns you to the login
-screen — useful on a shared machine.
-
----
+For another machine or a shared host, read [Beyond localhost](#beyond-localhost)
+after the tour. [Remote daemon access](remote-http-auth.md) is the full setup guide.
 
 ## A tour of the app
 
-The app is one screen with three top-level views, switched by the **view tabs** in
-the top bar or the `[` / `]` keys:
-
-```
-┌───────────────────────────────────────────────────────────────────────┐
-│  Agent Factory   [ Sessions ]  Tasks  Config   project ▾   Disconnect │  ← app bar
-├──────────────────────┬────────────────────────────────────────────────┤
-│ Sessions      3 ▼ +New│ fix-login-flow │ Agent │ Terminal │ + │  ← title + tabs
-│                       │ ┌────────────────────────────────────────────┐ │
-│ ● fix-login-flow      │ │                                            │ │
-│   ⎇ fix/login         │ │                                            │ │
-│ ○ add-metrics         │ │                                            │ │
-│   ⎇ metrics           │ │   (live agent terminal — xterm.js)         │ │  ← attach terminal
-│ ◆ nightly-refactor    │ │                                            │ │
-│   ⎇ refactor          │ │                                            │ │
-│                       │ └────────────────────────────────────────────┘ │
-└──────────────────────┴────────────────────────────────────────────────┘
-```
-
-The **app bar** carries, left to right: the **Agent Factory** brand, the three
-**view tabs** (Sessions / Tasks / Config), the **project switcher** (top-right; lists
-every project with per-project session + working counts, and scopes the rail and
-Tasks view to the selected project), and **Disconnect**.
-
-The client keeps a live WebSocket to the daemon's event stream and reconnects on
-its own, but does not draw a connection indicator: the rail simply keeps up to
-date. A dropped stream shows as the rail going quiet rather than as a badge.
-
-On a phone, width is assigned by function rather than desktop shrink behavior. With
-no session selected, the session-drawer toggle and view tabs share one aligned row in
-their keyboard order; the current **project** gets the wide slot on the next row beside
-one **More** button. Long project names end in an ellipsis. The decorative brand
-disappears, while install, theme, and Disconnect remain available as
-comfortable touch targets inside **More** instead of being squeezed or removed.
-Selecting a session collapses the app bar to just the hamburger — the pane's tab row
-takes the whole top — and those project/view/**More** controls move into the drawer
-the hamburger opens, as an overlay that never resizes the pane underneath.
-
-<figure markdown>
-![The web client's sessions view: a rail of sessions on the left, the selected session's live terminal filling the rest of the window](assets/web/dashboard.png)
-<figcaption>The sessions view — the rail on the left, the selected agent's live terminal beside it.</figcaption>
-</figure>
-
 ### Sessions view
 
-The default view: a **rail** of the selected project's sessions on the left, a
-**main pane** on the right that attaches the selected session's live terminal.
-The project switcher (top-right) scopes the rail and Tasks view; the rail lists
-only sessions whose repo root matches the selected project.
-
-**The rail** mirrors the TUI sidebar. Each row carries the same three signals as
-the TUI:
-
-- a **status dot** (waiting on you, hit a usage limit, dead-and-recovering,
-  archived),
-- the **title**, with the TUI's `[lost]` / `[deleting]` / `[limit]` / `[remote]`
-  prefixes, and
-- the **branch** as a secondary `⎇` line — prefixed, when the session is idle
-  for a mechanically known reason, by the same idle detail the TUI shows
-  (`no change after delivery · pane changed 12m ago`). No reason claims the
-  agent finished, asked a question, or is wedged — the daemon observes pane
-  bytes changing, not what the agent meant. See the
-  [`idle_reason` vocabulary](http-api.md#session-idle-diagnosis).
-
-Rows are ordered exactly like the TUI: the reserved root agent is pinned to the
-top, then live sessions (oldest created first), the archived group last
-(newest first), with a subtle hairline under the root agent when other rows
-follow it. The header shows the count of the sessions
-currently **shown**, the **filter** control (below), and a **`+ New`** button that
-opens the new-session modal (its project picker is seeded from the repos af has
-seen).
-
-#### Filtering by state
-
-The rail shows the work you can still act on: **archived sessions are hidden by
-default**, and every other state is shown. The **funnel** control in the rail header
-opens a checkbox per state — Needs you, Working, Waiting on a limit, Broken,
-Archived — so you can reveal the archive or narrow to just one group (only
-what's working, say).
-Archived rows render dimmed when shown, so they read as inactive.
-
-The filter is a **display filter, applied within the selected project**: the daemon
-still sends every session, the rail just draws the ones you asked for. It also
-governs `j`/`k`, which walk exactly the rows on screen. Your choice is remembered
-per browser (localStorage), and the control shows a dot when it differs from the
-default. When a filter hides everything, the rail says so — and tells you how many
-sessions are behind it rather than looking empty.
-
 <figure markdown>
-![The new-session modal over the sessions view, with fields for the title, prompt, agent, backend, and account](assets/web/new-session.png)
-<figcaption>Creating a session: title, prompt, agent, backend, and account.</figcaption>
+![Sessions view with the project rail and the selected session’s agent tab](assets/web/dashboard.png#only-light)
+![Sessions view with the project rail and the selected session’s agent tab](assets/web/dashboard-dark.png#only-dark)
+<figcaption>Choose a project, then select a session to see its tabs.</figcaption>
 </figure>
 
-#### Selecting vs. attaching (the keyboard model)
+The app bar's **Sessions**, **Tasks**, and **Config** buttons switch views.
+The **project switcher** scopes Sessions and Tasks to one repository and remembers
+that choice across reloads. Its menu shows session and working counts per project.
+**Auto · Light · Dark** chooses the browser theme; Auto follows your system.
+**Disconnect** forgets the browser's saved daemon token and returns to the login
+screen. **Install app**, when offered by the browser, opens its installation
+prompt; its **×** dismisses the offer. See [Install it as an app](#install-it-as-an-app).
 
-The web client uses the TUI's explicit **navigate-then-attach** model, so the
-keyboard never surprises you:
+If the project list is empty, choose **+ Add project** in the switcher. Browse the
+filesystem on the daemon's host: click directories to descend, **Up** for the
+parent, and **Home** for its home directory. **Use** on a git checkout fills
+**Repository path**; you can also type an absolute or `~`-prefixed path. Click
+**Add project** to register it. **Cancel** leaves it unchanged. The switcher's
+**Delete project** control asks for confirmation, archives its live sessions, and
+removes the registration while preserving the real repository.
 
-- **`j` / `k` (or `↑` / `↓`) navigate the rail.** Moving the selection *does not*
-  attach — it just highlights a row. j/k always navigate, even after you've been
-  typing to an agent.
-- **`Enter` attaches** the selected session: the main pane's terminal takes the
-  keyboard, and keystrokes now flow to the agent — **including `Escape`**, which is
-  the agents' interrupt key (it cancels the current turn), exactly as in the TUI.
-- **`ctrl+]` detaches**, handing the keyboard back to the rail — the same detach
-  chord the TUI uses. (`Escape` is *not* a detach: it goes to the agent.)
-- **Clicking a row** does both at once: it selects *and* attaches, the same as
-  `Enter` on that row. Clicking directly into the terminal also attaches; clicking
-  or tabbing away (or, on mobile, opening the rail drawer) returns to rail
-  navigation — so you are never trapped even without `ctrl+]`.
+The **rail** lists the selected project's sessions. Click a row to select it and
+attach its terminal. The main pane shows that session's title and tabs; a linked
+pull request badge appears when the daemon has one for its branch. The rail count
+is the number of rows currently shown. The root agent is pinned first, then live
+sessions oldest first, then archived sessions newest first.
 
-The pane you're driving is highlighted with an accent border, so the active mode is
-always legible.
+Read the state words alongside the glyphs, rather than relying on color:
 
-On a phone the rail is a drawer over the main pane. Actions that take you somewhere
-else — **+ New**, selecting a session, and Archive/Restore/Kill — close it before
-opening the terminal or modal. The state filter stays open while you change it, and
-tapping the dimmed scrim dismisses the drawer directly.
+| Rail signal | Meaning |
+| --- | --- |
+| Filled circle | Ready; read the accompanying state and idle detail for the next action |
+| Hollow circle | The agent process is dead |
+| Dashed circle | The session is lost |
+| Diamond | A usage limit has been reached |
+| Archive icon and dimmed row | Archived session |
+| Working label | Work is in progress; the status dot is omitted |
 
-<figure markdown>
-![An attached agent tab streaming its output in the browser](assets/web/agent-tab.png)
-<figcaption>An attached agent tab, streaming as the agent works.</figcaption>
-</figure>
+The secondary line includes idle detail and the branch when available, such as
+`Needs you · pane changed · 12m ago`. These are observations of terminal activity,
+not a claim that the agent finished or asked a question. Diagnostic title prefixes
+such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 
-#### The attach terminal
+The **funnel** opens state checkboxes: **Needs you · Working · Waiting on a limit ·
+Broken · Archived**. Archived sessions start hidden. The filter applies inside the
+selected project and is remembered by this browser; a dot on the funnel marks a
+non-default filter. If it hides everything, the empty state reports hidden rows.
 
-The main pane hosts a real terminal (xterm.js) streaming the agent's live output
-over the daemon's WebSocket PTY plane — the same bytes the TUI paints. One pane-header
-row holds the session title, horizontally scrolling tabs, and the conditional
-**Retry** escape. The title keeps a useful minimum and ellipsizes; Retry never shrinks;
-the tab strip owns the remaining width and scrolls rather than wrapping.
+On a phone, **Toggle sessions** opens the rail drawer. Selecting a session closes
+it; tapping the backdrop dismisses it. With a session selected, project and view
+controls move into the drawer. **More** holds the install, theme, and Disconnect
+controls on narrow screens.
 
-The header shows the title alone. It used to carry the terminal's connection state
-joined to the session's branch (`Live · master`); both were removed as chrome that
-earned no attention. The terminal still reconnects on its own — what changed is that
-it does so without narrating it.
+### Create a session
 
-<figure markdown>
-![A session's process tab showing git diff of the branch, with the pull request badge linked in the pane header](assets/web/review.png)
-<figcaption>Reviewing the work: `git diff` in the session's own worktree, with the branch's pull request linked in the pane header.</figcaption>
-</figure>
-
-#### Per-session actions
-
-Each actionable session's rail row reserves space for two quiet glyph actions. They
-stay visible on the selected row and reveal on hover or keyboard focus on any other
-row, without moving the title. A creating or legacy id-less row renders status only —
-the daemon projects no lifecycle action, so neither the TUI nor web invents one:
-
-- **`▪` Archive** — move a live session into the archived group. On an archived
-  row the same slot becomes **`↶` Restore**.
-- **`⌫` Kill** — permanently tear the session down. Its resting treatment is
-  muted, while the confirmation remains explicitly destructive.
-
-Both actions keep their confirmation step. The pane header also carries the
-conditional escapes a limit-blocked session needs: a **Retry** button, shown only
-when the selected session is parked at a usage limit (the "wait for the window"
-answer), and a **Handoff** button, shown whenever the selected session is
-handoff-capable — a local-worktree session whose agent can be swapped in place
-(the "switch agents" answer, the same swap as `af sessions handoff` and the TUI's
-`F`). A limit-blocked local session shows both; a normal local session shows
-Handoff alone. Picking an agent in the Handoff modal confirms the swap (the modal
-is the confirm, because a handoff stops a working agent); see
-[usage-limits.md](usage-limits.md#hand-off-to-another-agent). Send follow-up
-instructions by typing in the attached terminal (or with `af sessions
-send-prompt`).
-
-**Create** a session with **`+ New`**; the pending row appears immediately without
-destructive controls, then opens attached when creation completes. Kill, archive,
-and restore resolve the row that exposed the action by its stable id, so acting on
-an unselected row and titles that collide across repos are unambiguous. Accessible
-action names also include that row's title.
-
-### Tabs
-
-Just like the TUI, a session isn't limited to its agent — it can hold **as many
-tabs as you make**, all running in the *same* worktree. (There used to be a
-nine-tab cap, matching the 1-9 jump keys; it was removed in #3023 because the
-keyboard should not decide how much a session may hold.) The tab bar shares the pane
-header row with the title at every viewport width:
-
-```
-┌──────────┬────────────┬──────────┬─────────────┐
-│  Agent   │  Terminal  │  btop  × │ + New tab ▾ │
-└──────────┴────────────┴──────────┴─────────────┘
-```
-
-- **Tab 0 is the agent** — it's unclosable (killing the session tears it down).
-- **`t`** opens a new shell tab directly. The labelled **`+ New tab`** menu
-  offers **Terminal** and **VS Code** where the resulting pane will appear.
-- **`w`** (or a tab's **`×`**) closes the active shell tab.
-- **`1`–`9`** switch to that tab (without attaching, like j/k); **clicking** a tab
-  switches *and* attaches. Past the ninth there is no number key — click, or use
-  the bar, which scrolls once the tabs outgrow the row.
-
-Tabs labelled **Agent** / **Terminal** / a process name mirror the TUI's labels. A
-failed tab op surfaces as a brief toast rather than a modal. **Off-box sessions** (docker, ssh, and remote-hook) run their workspace on
-another host, so there is no daemon-side worktree to spawn a shell/process/VS Code
-tab in — `t` is disabled and the tab bar explains why. An external HTTPS web tab
-is metadata-only and is admitted (its `×` and `w` work like a local web tab's);
-see [backends.md](backends.md) for the loopback and plain-HTTP refusals. Archived
-sessions similarly say to restore before creating tabs instead of leaving an
-unexplained blank.
-
-### Project switcher
-
-The **project switcher** in the top-right of the app bar lists every project
-(repo) af knows about — those with a session or task, plus any registered
-project (the durable registry, so a freshly added repo shows before it has any
-sessions) — each showing a per-project session + working count, the
-cross-project glance that replaces the old all-projects rail. Selecting a
-project scopes the rail and Tasks view to it; the choice persists across
-reloads. Projects with no live sessions show an empty-state prompt (`No active
-sessions in <project> — + New`). The switcher menu footer holds the **+ Add
-project** affordance and the delete-project control.
-
-**+ Add project** opens a modal with a minimal **directory picker** over the
-daemon host's filesystem, plus the free-text path field. The picker starts at the
-directory you last browsed (else the daemon host's home), lists directories only,
-one per line — click to descend, **Up** for the parent, **Home** to jump back —
-and marks which entries are git checkouts. Only a checkout offers **Use**; a plain
-directory stays navigable but is not a target. **Use** fills the path field rather
-than submitting, so what gets registered is always the string on screen. The field
-remains the escape hatch: paste any absolute (or `~`-prefixed) path the picker
-cannot reach and it is registered the same way. A directory the daemon cannot read
-comes back as its own error above the list — never as an empty one.
+Click **+ New** in the rail. If there are no projects, add one through the project
+switcher first; creation stays disabled until a project is available.
 
 <figure markdown>
-![The tasks view listing scheduled and watch automations with their next run times](assets/web/tasks.png)
-<figcaption>The tasks view — cron and watch automations, with their next occurrence.</figcaption>
+![New session form with Title, Project, Program, Backend, Account, and Prompt fields](assets/web/new-session.png#only-light)
+![New session form with Title, Project, Program, Backend, Account, and Prompt fields](assets/web/new-session-dark.png#only-dark)
+<figcaption>Choose where the session runs and which identity it uses before creating it.</figcaption>
 </figure>
+
+| Field | What to choose |
+| --- | --- |
+| Title | A session name. Leave it empty to use the suggested name, if one has loaded. |
+| Project | The repository to work in; starts with the selected project. |
+| Program | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
+| Backend | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
+| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Ambient identity** selects the agent's own login instead. |
+| Prompt | Optional initial instructions to send to the agent. |
+
+An account without a credential is labelled but still selectable. A
+registration-only account explains why it cannot scope a session and blocks
+creation if selected. Register and sign in to accounts in [Config](#config-view). Click **Create** to submit: a pending
+row appears, then the session opens attached when creation completes. Validation
+errors stay in the modal. **Cancel**, the backdrop, or `Escape` closes the form.
+
+### Watch and interact with the agent
+
+<figure markdown>
+![The newly created tidy-tests session with its Agent terminal selected](assets/web/agent-tab.png#only-light)
+![The newly created tidy-tests session with its Agent terminal selected](assets/web/agent-tab-dark.png#only-dark)
+<figcaption>The Agent tab shows the session’s live terminal; type here to give it the next instruction.</figcaption>
+</figure>
+
+The **Agent** tab streams the agent's terminal output. Click the terminal to give
+it keyboard focus and type a follow-up prompt. While attached, ordinary keys go
+to the agent, including `Escape`; the agent decides what they do. Press `ctrl+]`
+to return keyboard focus to navigation. Clicking the rail or opening its mobile
+drawer also returns to navigation.
+
+With navigation focused, `j` and `k` (or the arrow keys) move the rail selection
+without attaching. `Enter` attaches the selected session. The pane's accent border
+marks the pane you are driving. See the [keyboard reference](#keyboard-reference)
+for tab and view navigation.
+
+The pane header's **Retry** appears for a session waiting on a usage limit and
+requests another attempt. **Handoff** appears when the session supports swapping
+agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
+the current agent and continue with the replacement. A limit-blocked local
+session can offer both; see [usage limits](usage-limits.md).
+
+The selected rail row also exposes **Archive** and **Kill**; other actionable rows
+show them on hover or keyboard focus. Each opens a confirmation:
+
+- **Archive** tears down the terminal and moves the worktree into the archive.
+- **Restore**, in the archive action's place on an archived row, moves the
+  worktree back and respawns the agent. Reveal **Archived** in the filter first.
+- **Kill** permanently destroys the session and prunes its branch.
+
+Pending creation rows have no destructive actions. An action belongs to the row
+whose button you clicked, even when a different session is selected.
+
+### Review the work in another tab
+
+<figure markdown>
+![The diff tab beside Agent showing a branch diff and a linked pull request badge](assets/web/review.png#only-light)
+![The diff tab beside Agent showing a branch diff and a linked pull request badge](assets/web/review-dark.png#only-dark)
+<figcaption>Switch tabs to review the work while keeping the agent’s terminal available.</figcaption>
+</figure>
+
+Click an existing process tab, such as **diff** in the still, to attach it. To
+inspect changes yourself, choose **+ New tab → Terminal** and run `git diff` in
+the shell. The still's diff is terminal output, not a separate diff-view control.
+Tabs run in the session's worktree. Click **Agent** to return to the agent, or the
+**PR** badge to open its pull request.
+
+**+ New tab** also offers **VS Code**, which opens an editor for the worktree;
+see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a
+closable tab closes it; the Agent tab cannot be closed independently. Double-click
+a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
+to split that pane, or onto its center to replace the displayed tab.
+
+There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
+`t` creates a shell tab, `w` closes the active closable tab, and `1`–`9` select a
+tab without attaching. Clicking a tab selects and attaches it.
+
+When a backend cannot create local tabs, the bar explains the restriction.
+Archived sessions must be restored before creating tabs. Agents can also create
+[web tabs](#web-tabs) for dev-server previews through the CLI or API; these do not
+appear as a creation option in the menu.
 
 ### Tasks view
 
-The **Tasks** view lists the scheduled automations the daemon owns and drives their
-lifecycle from the browser — the analogue of the TUI's automations pane and
-`af tasks`. Each row shows the task name, its trigger (`cron: …` or `watch: …`),
-whether it's enabled (`[✓]` / `[ ]`), its target session, and its last-run time and
-status.
-
-Actions per row:
-
-- **Enable / Disable** — flip the task on or off.
-- **Trigger** — fire a cron task now (shown only for **enabled cron** tasks; the
-  daemon has no manual fire for watch or disabled tasks).
-- **Remove** — delete the task.
-
-**`+ Add`** opens a modal to create one: a name, a project, a **cron** or **watch**
-trigger with its value, the prompt to deliver, an optional target session, and the
-agent program. A cron task requires a prompt; a watch task requires its command
-(and may use `{{line}}` in the prompt to interpolate the matched line). This is the
-same contract as [`af tasks add`](tasks.md) — the daemon re-validates on submit, so
-a bad cron expression comes back as an inline error.
+Choose **Tasks** in the app bar to manage automations for the selected project.
 
 <figure markdown>
-![The config view scrolled to the Accounts section, listing registered agent credential accounts](assets/web/config-accounts.png)
-<figcaption>The config view at its Accounts section.</figcaption>
+![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks.png#only-light)
+![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks-dark.png#only-dark)
+<figcaption>Read the next run and last outcome, then edit or trigger a task from its row.</figcaption>
 </figure>
+
+Each row shows its name, cron schedule or watch command, optional target session,
+arming or next-run information, and last-run outcome. A checked square means
+enabled; an empty square means disabled. A health mark can replace the enabled
+tick, with explanatory text in the row.
+
+| Control | Action |
+| --- | --- |
+| Enable · Disable | Turn the task on or off. |
+| Edit | Open the existing task's form to change it. |
+| Trigger | Run an enabled cron task now; absent for watch and disabled tasks. |
+| Remove | Delete the task. |
+| + Add | Open a form to create a task. |
+
+In the form, enter **Name**, choose **Project**, and choose a **Trigger**. A
+**Cron schedule** uses a schedule picker with time, interval, or weekday controls
+as appropriate; **Custom** accepts a raw cron expression. **Watch command** shows
+a command field instead. **Prompt** supplies the instructions (required for cron);
+a watch prompt may use `{{line}}` for the matched line. **Target session** is
+optional; **Program** selects the agent for a new session. Submit with **Add** or
+**Save**, or leave with **Cancel**. Invalid values show an inline error.
+See [Tasks and automation](tasks.md) for scheduling semantics.
 
 ### Config view
 
-The **Config** view edits your **global** config from the browser — the web
-counterpart of the TUI's config pane and [`af config set`](reference/cli.md#af-config-set).
-It lists the settings the daemon's manifest reports, grouped into tiers with the
-advanced ones folded behind a **Show N advanced settings** toggle, and names the
-`config.toml` it is writing. One row edits at a time: a write is per-key, exactly
-as `af config set` is, so there is no "save all" implying an atomicity the writer
-does not have. **Configure with assistant** opens the conversational config
-helper instead of the row editor.
+Choose **Config** to edit global settings on the daemon's host. The header names
+the `config.toml` being written; switching projects does not change this scope.
 
-An **Accounts** section sits below the settings: the credential accounts
-registered per agent, and the controls to register another. It is rendered here
-for convenience but writes no config key — see
-[`af accounts`](reference/cli.md#af-accounts).
+<figure markdown>
+![Config view with common settings, the advanced settings toggle, and Accounts registration and login controls](assets/web/config-accounts.png#only-light)
+![Config view with common settings, the advanced settings toggle, and Accounts registration and login controls](assets/web/config-accounts-dark.png#only-dark)
+<figcaption>Edit settings by tier, then register and sign in to agent accounts below them.</figcaption>
+</figure>
 
-**Log in** opens the agent's own sign-in in a terminal on this page, running on
-the daemon's host where the credential directory is. It is a **device code**, not
-a browser handoff: the pane prints a URL and a code, you sign in from whatever
-device you are actually holding, and you paste the code back into the pane. That
-is deliberate — the daemon host is usually headless and remote, so a
-browser-callback sign-in there would either open a browser nobody is looking at
-or wait for a redirect to that host's own localhost that your machine cannot
-reach.
+Settings are grouped in the daemon's tier order. Each row explains the key's
+purpose and shows its current value. **Show N advanced settings** expands the
+advanced tier; **Hide advanced settings** folds it again.
 
-A registered account is then *selectable* on the **New session** form: its
-**Account** field lists the accounts belonging to the agent that form's **Program**
-names, so changing the program changes the list (claude's `work` and codex's `work`
-are different identities in different registries). Leaving it on **Ambient
-identity** sends no account, which is what every create did before the field
-existed. An account with no credential in it yet is listed, labelled, and still
-selectable — it is usually the one you just made.
+Checkboxes and dropdowns save when changed. For text or structured values, edit
+the field and click its **Save** button or press `Enter`; unchanged values leave
+Save disabled. Each write affects one key. The row shows either the saved value,
+an applicable restart notice, or the validation error.
 
----
+**Configure with assistant** opens a terminal overlay for conversational setup.
+Type your request there and use **×** to close it and return to the settings.
 
-## Web tabs
+The **Accounts** section groups registered identities by agent and shows their
+names, credential directories, and **Logged in** or **Not logged in** state.
+Logged in means a credential file exists; it does not verify that the credential
+is valid or unexpired. These identities are managed separately from config keys.
+
+Type a name in an agent's account field and click **Register** to create its
+credential directory. **Log in** or **Log in again** opens the agent's own login
+flow in a terminal on this page, running on the daemon host. Follow that pane's
+URL and device-code instructions in your own browser. The flow writes the
+credential on the host; there is no credential-entry field in the web form.
+Close the login overlay with **×** when finished.
+
+Accounts supported for session scoping are available in the new-session form's
+**Account** field. A registration-only account displays a notice that sessions
+cannot yet be scoped to it. Registration and login failures appear beside the
+relevant row.
+
+## Beyond localhost
+
+### Listener and remote access
+
+The default `network.listen_addr` is `127.0.0.1:8443`: the browser client and JSON
+API share a plain-HTTP listener. An absent key inherits that default; explicitly
+setting `network.listen_addr = ""` disables the listener. Listener settings are
+global-only. Apply changes with `af daemon restart`.
+
+For remote use, keep loopback and forward the port over SSH, or configure a
+network bind with authentication and transport protection. Follow
+[Remote daemon access](remote-http-auth.md) for the commands, CORS settings,
+reverse proxies, and TLS setup.
+
+### The auth model
+
+By default, `network.require_token = false`, so any peer that can reach the
+listener gets full control without a token. Loopback binding keeps that access
+on the host; it does not separate the host's local users.
+
+With `network.require_token = true`, network peers must authenticate. Loopback
+peers are exempt only on a loopback-bound listener, unless
+`network.require_loopback_token = true` too. A network-bound listener enforces
+the token even for a loopback-origin connection.
+
+When required, the login screen asks for the daemon token. On the host, use
+`af token show`, then paste the value and click **Connect**. The browser stores
+it for that origin and reuses it on reload. A rejected token is forgotten;
+other connection errors keep it for a retry. **Disconnect** clears it.
+
+### Security notes
+
+On a shared machine, enable both `network.require_token` and
+`network.require_loopback_token`, or disable the listener. Before binding a
+routable address, enable `network.require_token`; otherwise anyone who can reach
+it has full control. The daemon warns about this combination but still serves it.
+Use an SSH tunnel, private network, or TLS-terminating proxy for remote transport.
+The daemon itself serves plain HTTP.
+
+The token grants full access. Keep it private, use **Disconnect** on shared
+browsers, and use `af token rotate` if it is exposed. Read the
+[remote access security notes](remote-http-auth.md#security-notes) before exposing
+the listener or putting it behind a proxy.
+
+## Reference
+
+### Keyboard reference
+
+These are the web client's bindings. Navigation shortcuts apply outside focused form controls
+and attached terminals; they are not a promise that every TUI binding is shared.
+
+| Key | Action |
+| --- | --- |
+| `j` · `k`, `↓` · `↑` | Move the Sessions rail selection without attaching |
+| `Enter` | Attach the selected session in navigation mode |
+| `ctrl+]` | Detach the terminal and return to navigation |
+| `Escape` | Close an open modal or menu; otherwise pass through to an attached agent |
+| `1`–`9` | Select a tab in navigation mode |
+| `t` | Create a shell tab when supported |
+| `w` | Close the active tab when closable; never the Agent tab |
+| `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
+| `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
+| `Alt+w` | Close the focused pane in Sessions |
+
+The web view-cycle and split-pane chords are defined by the browser client;
+the TUI has its own [keyboard reference](tui.md).
+
+### JSON API
+
+The same listener serves the app at `/` and the API under `/v1/`. Use the
+[HTTP API guide](http-api.md) for requests and authentication, and the
+[API reference](reference/api.md) for endpoints. A separate frontend server is
+not needed.
+
+### Install it as an app
+
+The client can be installed as a standalone app window. In a browser that offers
+installation, click **Install app** in the app bar to open its prompt. The
+button's **×** remembers a dismissal in this browser. You can also use the
+browser's own installation or add-to-home-screen controls where supported.
+
+#### Why the install button is not showing
+
+The button appears only when the browser offers an install prompt, the app is
+not already installed, and you have not dismissed the offer. A secure context is
+required: loopback HTTP and HTTPS qualify; plain HTTP on a LAN or Tailscale
+address does not. Use a TLS-terminating proxy for remote installation; see
+[transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
+
+#### What gets installed
+
+The app uses the same daemon and page, with its own icon and standalone window.
+Browser chrome follows **Auto · Light · Dark**. The service worker caches the
+static shell, using the network first, so an unreachable daemon can show the
+app's connection-error screen. It does not cache API requests, event streams,
+terminal streams, or previews. Installing is optional.
+
+### Web tabs
+
+The preview toolbar's **Reload** refreshes the frame; **Open** opens its target
+in a separate browser tab. A stopped dev server offers **Retry** in the fallback
+panel after you restart it.
 
 Alongside terminal tabs, a session can hold **web tabs** — a tab that renders a
 **site in an iframe** instead of a terminal. The primary use is a **live
@@ -567,14 +353,14 @@ ask you for (a [VS Code tab](#vs-code-tabs), which always targets the worktree,
 
 ```bash
 # a local dev server on port 5173 (Vite/Next/CRA/…)
-af sessions tab-create <title> --kind web --port 5173
+af sessions tab-create my-session --kind web --port 5173
 
 # any URL (localhost or external)
-af sessions tab-create <title> --kind web --url http://localhost:3000
-af sessions tab-create <title> --kind web --url https://example.com/docs
+af sessions tab-create my-session --kind web --url http://localhost:3000
+af sessions tab-create my-session --kind web --url https://example.com/docs
 
 # a target may point at a specific page, not just a server root
-af sessions tab-create <title> --kind web --url http://localhost:8899/viewer.html
+af sessions tab-create my-session --kind web --url http://localhost:8899/viewer.html
 ```
 
 How the target is rendered depends on whether it is **local** or **external**:
@@ -590,8 +376,7 @@ How the target is rendered depends on whether it is **local** or **external**:
 - **External (`https://…`):** the web UI iframes it **directly** (never through the
   daemon). This is best-effort: many sites send `X-Frame-Options` /
   `frame-ancestors` and the **browser blocks embedding**. af does not try to defeat
-  framing protections — every external web tab carries an always-present **"open
-  ↗"** link (the guaranteed escape hatch), and if the site does not load in time
+  framing protections — every external web tab carries an always-present **Open** link (the guaranteed escape hatch), and if the site does not load in time
   (slow / unreachable) the tab shows a clean fallback panel with an **"Open in a
   new tab"** link.
 
@@ -655,7 +440,7 @@ brings the tab back to life.
       **CRA/webpack** `homepage` / `publicPath`, **Next** `basePath`), or serve
       relative asset URLs. This is the option that also works remotely.
 
-### Per-tab preview origins
+#### Per-tab preview origins
 
 Set [`network.preview_listen_addr`](configuration.md#global-config) (for example
 `127.0.0.1:8444`) and the daemon opens a **second** plain-HTTP port that serves
@@ -668,7 +453,7 @@ http://af<opaque-label>.localhost:8444/
 
 The tab's dev server owns that origin's **root**, so `/assets/app.js` resolves to
 the dev server's own `/assets/app.js` with no base-path configuration and no
-guessing. Because each tab is a genuinely **distinct origin**, the browser also
+guessing. Because each tab is a **distinct origin**, the browser also
 isolates them from each other and from the web UI: one preview's JavaScript cannot
 read another's response (the preview port answers no CORS allow-origin header) and
 cannot reach the web UI or its token. The hostname's opaque label is a per-tab
@@ -704,7 +489,7 @@ What to know before turning it on:
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
 
-#### VS Code tabs get one too — per session
+##### VS Code tabs get one too — per session
 
 A **VS Code tab** moves onto a per-**session** origin, not a per-tab one: there is one
 editor per session, so both of a session's editors sit on the same origin and share one
@@ -755,7 +540,7 @@ origin of its own (it needs one for `localStorage`, cookies and service workers)
 safe because the browser's own cross-origin rules already keep it away from the web
 UI. A small **reload** control sits above every web tab for dev-preview refreshes.
 
-## VS Code tabs
+### VS Code tabs
 
 A **VS Code tab** is a full VS Code editor, in the browser, opened on the
 session's **worktree** — so you can read and edit what an agent is building
@@ -767,7 +552,7 @@ opens. That is what makes it offerable from the tab bar's labelled **New tab**
 menu, which lists **Terminal** and **VS Code**. From the CLI:
 
 ```bash
-af sessions tab-create <title> --kind vscode [--name editor]
+af sessions tab-create my-session --kind vscode --name editor
 ```
 
 !!! note "code-server is not bundled — install it yourself"
@@ -816,90 +601,3 @@ tab survives a restart and simply starts a new editor when you next open it.
 
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
-
-## Keyboard reference
-
-| Key | In the Sessions view |
-| --- | --- |
-| `j` / `k`, `↓` / `↑` | Move the rail selection (never attaches) |
-| `Enter` | Attach the selected session's terminal |
-| `ctrl+]` | Detach — return the keyboard to the rail |
-| `Escape` | Interrupt the agent (forwarded to the terminal); closes an open modal/menu first |
-| `1`–`9` | Switch to that tab of the selected session |
-| `t` | New shell tab in the worktree |
-| `w` | Close the active shell tab (tab 0, the agent, is unclosable) |
-| `[` / `]` | Cycle the top-level view (Sessions → Tasks → Config) |
-
-`[` / `]` work in every view; the rest are the Sessions view's session/tab keys.
-While a terminal is attached, **every** key flows to the agent — `Escape` included,
-as the interrupt — and only `ctrl+]` detaches. An open modal or menu still takes
-`Escape` to close itself. (No keyboard? Click the rail, or open the mobile rail
-drawer, to detach.)
-
----
-
-## Security notes
-
-!!! warning "Shared machines: the default loopback web UI has no local auth"
-    The default `127.0.0.1:8443` web listener is reachable by **any local process
-    or user** on the machine with **no token** — that's what makes zero-config
-    local access work. Unlike the daemon's unix control socket, whose `0600`
-    permissions restrict it to **your** account, the loopback web listener grants
-    every local account on the box the same full control of your sessions.
-
-    On a **single-user machine** (a laptop, a personal workstation) this is fine —
-    anyone who can run a process as you already has that access. On a
-    **shared / multi-user machine**, close the gap one of two ways:
-
-    - `network.require_token = true` **and** `network.require_loopback_token = true` — loopback
-      peers must present the bearer token too (`af token show`). Both are needed:
-      `network.require_token` defaults to `false`, which disables the token for everyone,
-      so `network.require_loopback_token` alone changes nothing; or
-    - `network.listen_addr = ""` — disable the web server entirely.
-
-!!! warning "A network bind requires the token"
-    `network.require_token` defaults to `false`, so pointing `network.listen_addr` at a routable
-    interface (`0.0.0.0:8443`, a LAN/Tailscale IP) would serve **full control of
-    your daemon to anyone who can reach the port, with no credential**. The daemon
-    **warns once at daemon start** on that combination and serves it anyway: a
-    non-loopback `network.listen_addr` should set `network.require_token = true`. This is the boundary on the
-    zero-friction default — a stock install is protected by the loopback bind, and
-    af will not let that protection be removed silently.
-
-- **The token is full access.** Under the single-owner model, one token grants full
-  control of the daemon. Treat it like a password; never commit it or paste it into
-  a shared log. Rotate it with `af token rotate` if you suspect exposure.
-- **The browser keeps the token in `localStorage`.** That is what makes you paste it
-  once instead of every visit, and it is a real tradeoff: anything that can run
-  same-origin JavaScript in the tab can read it. af's own bundle is fully
-  self-contained (no CDN, no third-party script, and the daemon's CSP is
-  `default-src 'self'`), so the exposure is an XSS in af itself — not a supply-chain
-  script. The token still rides the `Authorization` header rather than a cookie the
-  browser would attach automatically, so there is no CSRF surface. On a **shared
-  machine**, use **Disconnect** when you step away (it erases the stored token), or
-  use a private/incognito window, whose storage the browser discards on close.
-- **Prefer loopback + SSH over `0.0.0.0`.** Binding `network.listen_addr` to `127.0.0.1`
-  and forwarding over SSH keeps the port off the network entirely, encrypts the
-  channel, and still gives you the browser UI.
-- **af serves plain HTTP — front it for encryption.** The listener terminates no
-  TLS. Never expose it beyond loopback without a TLS-terminating reverse proxy
-  (nginx/Caddy), a private network (Tailscale/VPN), or an SSH tunnel — the token
-  travels over the connection as-is.
-- **The loopback exemption is scoped to a loopback bind.** It applies only when
-  `network.listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`). On a **network** bind
-  (`0.0.0.0`/routable) the token is enforced for every peer, loopback-origin
-  included, so a same-host reverse proxy cannot bypass it. Behind a proxy on a
-  loopback-bound daemon, auth is the proxy's job (or set `network.require_loopback_token
-  = true`). See
-  [Reverse proxies and the loopback exemption](remote-http-auth.md#reverse-proxies-and-the-loopback-exemption).
-
-## See also
-
-- [Remote daemon access](remote-http-auth.md) — the full listener, token, CORS,
-  and `network.require_token` reference the web client rides on (including how to terminate
-  TLS at a proxy).
-- [The TUI](tui.md) — the terminal client the web client mirrors.
-- [Tasks & automation](tasks.md) — the scheduled tasks the Tasks view drives.
-- [HTTP API guide](http-api.md) — the `/v1/...` API the same listener serves.
-- [Web client selftest](dev/web-selftest.md) — the maintainer acceptance harness for
-  the web client.
