@@ -18,6 +18,62 @@ Tasks are hosted by the agent-factory daemon, which starts automatically wheneve
 
 When `target_session` is set, the session title is looked up in the task's own repo (a same-titled session in an unrelated repo can never receive the prompt). If no session with that title exists at fire time, it is **auto-created** with the task's `project_path`/`program` and the rendered prompt as its initial prompt — same behavior as `af sessions send-prompt --create`.
 
+## Worked examples
+
+Run these from the repository you want the task to own, with Claude installed
+and signed in. Each command creates an enabled task and returns its id and
+`project_path`; check that path before leaving it running. Cron times use the
+daemon's timezone. These are independent examples: enable only the ones you
+want to keep, and use `af tasks remove <id>` when finished.
+
+### Cron → new session
+
+```bash
+af tasks add --name "Daily triage" --program claude --cron "0 9 * * 1-5" --prompt "Review recent commits and write a triage summary; do not edit code"
+```
+
+At 09:00 each weekday, a new session appears with a title based on Daily triage.
+Its first prompt asks for the summary. Each fire gets a separate worktree and
+conversation; the task records `started` after startup, not after the review
+finishes. Completed sessions stay available for inspection by default.
+
+### Cron → existing session
+
+```bash
+af tasks add --name "Daily captain check" --program claude --cron "0 9 * * 1-5" --target-session captain --prompt "Review recent commits and summarize what changed since your last check; do not edit code"
+```
+
+At the same weekday time, the prompt arrives in this project's `captain`
+session, preserving its conversation and worktree. If it does not exist, the
+first fire creates it. Later deliveries record `sent`; they do not create a
+new session for each check. The program flag selects the agent for creation,
+not a replacement for the agent already running in the target.
+
+### Watch command → new session
+
+```bash
+af tasks add --name "Review events" --program claude --watch-cmd 'while sleep 300; do date -u +%Y-%m-%dT%H:%M:%SZ; done' --prompt "At {{line}}, review the latest commit and summarize it; do not edit code" --max-concurrent-runs 1
+```
+
+Five minutes after the watcher starts, and every five minutes afterwards, it
+emits a timestamp. Each line becomes a prompt with that timestamp substituted
+for `{{line}}`, delivered to a new session. One session may run at a time;
+further events queue until it finishes. Replace this demonstration clock with
+your own event source when ready; the [script contract](#script-contract)
+explains stdout, stderr, and queue limits.
+
+### Watch command → existing session
+
+```bash
+af tasks add --name "Captain events" --program claude --watch-cmd 'while sleep 300; do date -u +%Y-%m-%dT%H:%M:%SZ; done' --target-session captain --prompt "Checkpoint {{line}}: summarize progress since the last checkpoint; do not edit code"
+```
+
+Each timestamp becomes another prompt in this project's `captain` session,
+auto-created on the first event if missing. Deliveries happen in order and
+reuse the conversation. There is no concurrency cap here: that flag applies
+only to watch tasks creating a session per event. A silent watcher produces
+no prompt, even while its state says `watching`.
+
 ## Task fields
 
 Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CLI) or the TUI Tasks pane (`m` to open, `n` to create).
@@ -201,6 +257,46 @@ The TUI Tasks pane shows each watch task's supervision state, derived from the p
 - **watching** — enabled, script supervised by the daemon
 - **stopped** — script exited 0 (or the task is disabled)
 - **errored** — crash-loop breaker tripped, or arming refused the task because its target relationship is unsafe (e.g. the target session is archived). The full `last_run_status`, shown on the row's detail line, says which; for a crash loop, check `~/.agent-factory/logs/task-<id>.log`
+
+## Debugging a task
+
+Start with the id returned by add (replace `<id>` below):
+
+```bash
+af tasks show <id>
+af tasks list --all
+```
+
+`show` gives the trigger, project, last run, live arming state, next cron run,
+and audit trail. `list --all` locates a task bound to another project; use
+`af tasks show <id> --repo /path/to/repo` to inspect it locally. An enabled task
+with `not-armed` cannot fire; unknown arming means no daemon reported a verdict.
+Check the audit trail for a disable or retime before interpreting overdue runs.
+
+For a cron task, `af tasks trigger <id>` exercises delivery immediately without
+waiting for the next scheduled occurrence. Watch tasks need an actual stdout
+line; manual trigger is refused. Check their stderr in
+`~/.agent-factory/logs/task-<id>.log` (or `logs/task-<id>.log` under your custom
+AF home), especially after a stopped or errored watcher. After fixing a script,
+`af tasks restart <id>` re-arms that enabled watcher.
+
+Search the daemon's `agent-factory.log` for the task id. With
+`AGENT_FACTORY_HOME` set, the log is in that directory; otherwise it is under
+the OS user config directory's `agent-factory` folder (`~/.config/agent-factory`
+on Linux, subject to `XDG_CONFIG_HOME`). The message bodies include:
+
+```text
+task <id> started successfully as instance "<title>"
+task <id> delivered prompt to target session "captain" (sent)
+task <id> parked at a usage limit as instance "<title>"; waiting for the limit window to reset
+scheduled task <id> failed to run: <reason>
+```
+
+The last line reports a cron delivery failure; watch stderr and the daemon log
+explain watch failures and queued deliveries. A successful startup or delivery
+proves the task fired, not that the agent completed its work. A parked run needs
+the [usage-limit recovery path](usage-limits.md#task-runs-park-dont-fail).
+The following section explains the health fields in more detail.
 
 ## Is it actually firing?
 

@@ -96,7 +96,7 @@ switcher first; creation stays disabled until a project is available.
 | Project | The repository to work in; starts with the selected project. |
 | Program | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
 | Backend | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
-| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Ambient identity** selects the agent's own login instead. |
+| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Ambient identity** sends no account; the daemon still applies configured defaults. |
 | Prompt | Optional initial instructions to send to the agent. |
 
 An account without a credential is labelled but still selectable. A
@@ -239,18 +239,25 @@ The **Accounts** section groups registered identities by agent and shows their
 names, credential directories, and **Logged in** or **Not logged in** state.
 Logged in means a credential file exists; it does not verify that the credential
 is valid or unexpired. These identities are managed separately from config keys.
+See [Accounts](usage-limits.md#accounts) for login, project defaults, Docker
+mounting, and identity boundaries.
 
 Type a name in an agent's account field and click **Register** to create its
 credential directory. **Log in** or **Log in again** opens the agent's own login
 flow in a terminal on this page, running on the daemon host. Follow that pane's
-URL and device-code instructions in your own browser. The flow writes the
-credential on the host; there is no credential-entry field in the web form.
+URL in your own browser and complete the agent-specific code step. Codex takes
+the device code in the browser; Claude and Gemini may ask for an authorization
+code in the pane. The flow writes the credential on the host; there is no
+credential-entry field in the web form.
 Close the login overlay with **×** when finished.
 
 Accounts supported for session scoping are available in the new-session form's
 **Account** field. A registration-only account displays a notice that sessions
 cannot yet be scoped to it. Registration and login failures appear beside the
 relevant row.
+
+To opt a project out of a global account default, set an empty project entry as
+described in [Project accounts](usage-limits.md#scoping-an-account-to-a-project).
 
 ## Beyond localhost
 

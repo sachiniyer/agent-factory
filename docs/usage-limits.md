@@ -12,32 +12,83 @@ the agent CLI treats as its home. `af` never reads, stores, or forwards the
 credential itself: it decides which directory a session sees, and the agent's
 own login flow puts the material there.
 
+### Credential directories
+
+Accounts are registered separately for Claude, Codex, and Gemini. The directory
+is under `accounts/<agent>/<name>` in the AF home; the same name for two agents
+does not share a login. `af accounts add <agent> <name>` prints the directory
+path, which has these per-agent meanings:
+
+| Agent | Environment variable | Directory shape |
+|---|---|---|
+| Claude | `CLAUDE_CONFIG_DIR` | The config directory itself |
+| Codex | `CODEX_HOME` | The config directory itself |
+| Gemini | `GEMINI_CLI_HOME` | A home-like root; Gemini appends `.gemini/` |
+
+Point Gemini at the printed root, never its nested `.gemini` directory. af
+recognizes either `<root>/.gemini/oauth_creds.json` or
+`<root>/.gemini/gemini-credentials.json` as a credential artifact.
+
+### Log in
+
 ```bash
-af accounts login codex work   # register it, then run codex's own login in it
-af accounts list               # what is registered, and whether it holds a credential
+af accounts login claude work
+af accounts login codex work
+af accounts login gemini work
+af accounts list
 ```
 
-`af accounts login` registers the account if needed, starts the agent's own
-login flow in a tmux session scoped to it, hands you the terminal for the
-browser or device-code step, and afterwards reports whether the account holds a
-credential — read from the agent's own credential file, by checking that it
-exists. You can also do it by hand; `af accounts add` prints the directory and
-`af` runs exactly the same commands you would:
+Each login registers the account if needed and opens the agent's own login in
+a tmux pane on the daemon host. Complete sign-in in a browser on the device you
+are using. The flows differ:
+
+| Agent | What af launches | What you do |
+|---|---|---|
+| Claude | `claude auth login` with `BROWSER=true`, a no-op browser opener | Open the printed URL and paste the authorization code into the pane if prompted |
+| Codex | `codex login --device-auth` | Open the verification URL and enter the device code there while the CLI polls |
+| Gemini | `gemini` with `NO_BROWSER=true` | Open the URL, sign in, then paste the authorization code at the terminal prompt |
+
+Afterwards, af reports whether a credential file exists. It checks presence,
+never reads the secret; presence is not proof that a token is still valid.
+`af accounts login codex work --no-attach` starts the flow and prints how to
+attach instead of taking your terminal.
+
+Gemini's registration pre-answers folder trust for the account directory and
+selects Google OAuth in that account's non-secret settings. Existing choices
+are preserved, so an account with a different authentication method can still
+show the picker. This touches only the account's own `.gemini` settings; it
+neither authenticates you nor writes a credential. Claude and Codex need no
+such settings to reach sign-in.
+
+The equivalent manual setup is:
 
 ```bash
-CODEX_HOME=$(af accounts add codex work) codex login
-CLAUDE_CONFIG_DIR=$(af accounts add claude work) claude auth login
-GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
+CODEX_HOME=$(af accounts add codex work) codex login --device-auth
+CLAUDE_CONFIG_DIR=$(af accounts add claude work) BROWSER=true claude auth login
+GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini
 ```
+
+Use the managed login to get af's identity environment isolation too: it
+removes competing identity variables while preserving proxy and certificate
+settings. Explicit `BROWSER` or `NO_BROWSER` entries in
+`session_env_passthrough` override the browser-free defaults.
+
+### Pick an account
 
 Once an account exists, a session can be pinned to it:
 
 ```bash
-af sessions create --name spike --account work
+af sessions create --name spike --program codex --account work
 ```
 
-The TUI's naming form offers the same field on `ctrl+o`, and so does the web
-client's new-session modal. `af` refuses an unproved fallback — a session either
+In the TUI, press `n` to open the naming form, then `ctrl+o` to pick an
+account for the selected agent. In the web client, use **New session** ·
+**Program** · **Account**. The picker lists that agent's accounts and shows the
+project default; changing the program changes the account list. Register and
+log in from the web config view's **Accounts** section using **Log in**.
+See the [TUI guide](tui.md#accounts) and [web guide](web.md#config-view).
+
+`af` refuses an unproved fallback — a session either
 runs as the account you named or does not start — and by default never rotates
 accounts on its own. Rotating after a usage limit is opt-in and needs an
 explicit candidate list — see [Opt-in auto-resume](#opt-in-auto-resume). A
@@ -62,7 +113,7 @@ a scheduled task — runs as `work` with nothing typed. The resolution order is
 default → the agent's ambient login**, and it is applied by the background
 service on the create, so every surface gets the same answer.
 
-Three properties are worth knowing:
+The default has these properties:
 
 - **It is keyed by agent, because an account belongs to one.** claude's `work`
   and codex's `work` are different identities in different registries, so
@@ -91,7 +142,7 @@ To clear one:
 ```bash
 af config unset default_accounts.codex --project ~/work/monorepo  # drop the project's override
 af config set default_accounts.codex ""                           # clear the global default
-af config set default_accounts.codex "" --project ~/work/monorepo # opt this project OUT of the global default
+af config set default_accounts.codex "" --project ~/work/monorepo # opt this project out of the global default
 ```
 
 An **empty value is meaningful**, and the three lines differ. `unset` removes the
@@ -120,8 +171,43 @@ their command; a terminal profile inside the editor is yours, and it lives in
 the editor's own settings, which the editor can rewrite. If you pin sessions to
 accounts, keep agent credential variables out of your shell startup files.
 
-Accounts are also what make the rest of this page actionable: a plan ceiling
-belongs to an identity, so a second account is one of the ways past one.
+### Docker and backend boundaries
+
+Account selection supports local and Docker sessions and requires tmux 3.2 or
+newer. Docker bind-mounts the selected credential directory read-write so token
+refreshes reach the real account. This differs from
+`docker.mount_agent_credentials`, which opts into mounting an ambient agent
+credential read-only. Account selection must establish the selected identity
+or refuse the create; it never silently uses an ambient login.
+
+SSH, sandbox, and hook backends refuse account selection because af cannot
+ensure refreshed credentials are written back. Automatic account replacement
+also excludes Docker; see [Opt-in auto-resume](#opt-in-auto-resume).
+
+### Account-scoped handoff
+
+For a local session created with `--account`, `af sessions handoff` returns an
+error naming the account and saying “an account belongs to one agent”, if it
+gets past the earlier state and target checks. The replacement never starts;
+the outgoing agent keeps running with its selected account. The explicit guard
+is in [session/backend_local.go:416](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/backend_local.go#L416),
+before the old pane is stopped. The daemon reaches it through
+[session/instance_backend.go:417](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/instance_backend.go#L417),
+then rolls back the handoff record and returns the failure at
+[daemon/handoff.go:182](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/daemon/handoff.go#L182).
+Create a separate session with the target agent and its account when you need
+that identity. The [handoff instructions](#hand-off-to-another-agent) below apply
+to sessions without account scoping.
+
+### Bug report redaction
+
+Bug report bundles replace session account fields and registered account labels
+with a redaction marker, including labels embedded in collected config and log
+text. Credential directories and their secrets are not collected. The local
+operator log retains account names so login and switching remain diagnosable;
+label redaction happens when the bundle is assembled. If the registry cannot
+be read, collection still produces a bundle but reports that account labels
+could not be redacted. Review that collection error before sharing it.
 
 ## Usage limits
 
