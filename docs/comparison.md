@@ -18,15 +18,23 @@ This page is a map of tradeoffs, not a scorecard. The best choice depends on
 where you want the center of gravity to live: your terminal, a desktop app, a
 team board, a hosted cloud agent, or a manual shell setup.
 
+<figure markdown>
+![Web client showing a branch’s git diff in a process tab beside its PR link](assets/web/comparison-review.png#only-light)
+![Web client showing a branch’s git diff in a process tab beside its PR link, dark theme](assets/web/comparison-review-dark.png#only-dark)
+<figcaption>Agent Factory’s web client keeps sessions visible while you review a
+branch with ordinary git commands. The diff shown here is terminal output in a
+process tab; the PR badge opens the external review.</figcaption>
+</figure>
+
 ## The big picture
 
 <div class="af-table-wide" markdown>
 
 | Tool family | Examples | Best center of gravity | Agent Factory contrast |
 |---|---|---|---|
-| **Agent Factory** | `af` | One task becomes one branch/worktree, supervised from a TUI, CLI, daemon, and local API. | Git review, cron/watch automation, remote hooks, usage-limit recovery, and recoverable lifecycle are the core product. Supports Claude Code, Codex, Aider, Gemini, Amp, opencode, and Devin through named agent choices. |
+| **Agent Factory** | `af` | One task becomes one branch/worktree, supervised from the web client, TUI, CLI, and daemon API. | Git review, cron/watch automation, remote hooks, usage-limit recovery, and recoverable lifecycle are the core product. Supports Claude Code, Codex, Aider, Gemini, Amp, opencode, and Devin through named agent choices. |
 | **Agent terminal multiplexers** | Herdr, Agent Deck, Claude Squad | Keep many live terminal agents visible, switchable, and persistent. | Agent Factory is more opinionated about repo-scoped sessions, worktree ownership, task scheduling, and archive/restore semantics. |
-| **Desktop worktree apps** | Conductor, Superset, Nimbalyst, Crystal | Visual workspace management, built-in diff review, and local parallel branches. | Agent Factory keeps the primary interface in the terminal and hands review back to normal git/PR tools. |
+| **Desktop worktree apps** | Conductor, Superset, Nimbalyst, Crystal | Visual workspace management, built-in diff review, and local parallel branches. | Agent Factory offers web and terminal clients and hands review back to normal git/PR tools. |
 | **Kanban/review boards** | Vibe Kanban | Plan, dispatch, review, and track many agent tasks as team work items. | Agent Factory is lighter and repo-local, with cron/watch automation instead of a shared planning board. |
 | **Built-in agent dashboards** | Claude Code Agent View, Codex in ChatGPT | Native multi-session surfaces for one agent ecosystem. | Agent Factory is agent-agnostic across Claude Code, Codex, Aider, Gemini, Amp, opencode, and Devin, with one lifecycle around all of them. |
 | **Cloud coding agents** | Codex cloud, Copilot cloud agent, Cursor Cloud Agents, Jules, Devin | Delegate work to hosted environments and return for review or PRs. | Agent Factory keeps work local by default and gives you direct terminal/process control. |
@@ -41,7 +49,7 @@ team board, a hosted cloud agent, or a manual shell setup.
 
 | Tool | Category | Primary interface | Isolation and review model | Best fit | Agent Factory contrast |
 |---|---|---|---|---|---|
-| **Agent Factory** | Terminal orchestration | TUI, JSON CLI, local HTTP API | One normal session creates one branch and git worktree; archive/restore/kill are explicit. | Local multi-agent repo work where reviewable branches and automation matter. | Baseline. |
+| **Agent Factory** | Terminal orchestration | Web client, TUI, JSON CLI, local HTTP API | One normal session creates one branch and git worktree; archive/restore/kill are explicit. | Local multi-agent repo work where reviewable branches and automation matter. | Baseline. |
 | **Herdr** | Agent terminal multiplexer | Terminal panes, mouse/keyboard UI, CLI/socket API | Persistent real PTYs and agent state; worktree workflow can sit around the terminal runtime. | People who want a true terminal multiplexer redesigned around agents. | Herdr is stronger as a general live terminal runtime; Agent Factory is stronger as a repo/worktree/task lifecycle manager. |
 | **Agent Deck** | Agent terminal manager | Terminal dashboard | Groups, search, forking, worktrees, cost tracking, and phone-controlled conductor workflows. | Managing many terminal-agent sessions across projects. | Agent Deck is broader fleet management; Agent Factory is narrower around repo-scoped daemon state, tasks, and branch lifecycle. |
 | **Claude Squad** | Terminal worktree manager | TUI | Multiple AI terminal agents in isolated git workspaces with review/check-out flows. | Lightweight terminal management for local agents. | Agent Factory is a fork that adds per-repo scoping, daemon-owned state, tasks, remote hooks, JSON CLI, HTTP API, archive/restore, and generated docs. |
@@ -96,9 +104,9 @@ prompt -> session -> branch/worktree -> visible agent -> git review -> archive o
 
 It is a good fit when you want:
 
-- a terminal-first workflow instead of a desktop or browser app;
+- web and terminal clients around live agent processes;
 - every normal session isolated by git worktree by default;
-- a daemon-owned state model shared by the TUI, CLI, and API;
+- a daemon-owned state model shared by the web client, TUI, CLI, and API;
 - built-in cron/watch automations;
 - explicit archive, restore, kill, and usage-limit recovery behavior;
 - local and remote sessions under one repo-scoped view.

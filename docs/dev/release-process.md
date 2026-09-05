@@ -1,5 +1,13 @@
 # Release process
 
+For maintainers preparing releases and contributors changing update behavior.
+This page explains stable and preview channels, version numbering, and how
+artifacts reach users.
+
+Read the [contributor overview](index.md) first. Follow this page with the
+[release testing plan](release-testing-plan.md) before cutting a release, and
+[Lifecycle testing](lifecycle-testing.md) when an upgrade path changes.
+
 Agent Factory ships on two channels (#1041):
 
 | Channel | Version shape | Cut by | GitHub release |

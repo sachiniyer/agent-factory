@@ -1,5 +1,13 @@
 # File-length lint (#1145)
 
+For contributors whose Go changes hit the file-length gate, and reviewers
+deciding where code should live. This page explains the limits and how the
+allowlist ratchets down.
+
+Read the [contributor overview](index.md) first for the pull request checks.
+Then use the limits below to decide whether to split a file or remove an
+obsolete allowlist entry.
+
 A structural-health guard that keeps Go source files from silently growing
 into 2000-line monsters. Large files are decomposition candidates and a
 recurring source of merge pain and gotchas, so CI now bounds them.

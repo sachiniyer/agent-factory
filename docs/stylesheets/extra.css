@@ -360,8 +360,8 @@
   margin: 0;
 }
 
+/* Let Material control display for #only-light / #only-dark twins. */
 .md-typeset .af-visual-example img {
-  display: block;
   width: 100%;
   max-width: 100%;
   height: auto;
