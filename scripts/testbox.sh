@@ -10,6 +10,8 @@
 #   scripts/testbox.sh selftest                run the TUI driver self-test (#1161)
 #   scripts/testbox.sh drive                   boot af via the driver + attach
 #   scripts/testbox.sh lifecycle [scenario]    clean-install / install->upgrade gate
+#   scripts/testbox.sh web-selftest            browser gate for the web client (#1592)
+#   scripts/testbox.sh web-demo                record docs/assets/web/ (#3855) — NOT a gate
 #   scripts/testbox.sh build                   (re)build the image only
 #   scripts/testbox.sh clean                   reclaim this harness's disk (#2133)
 #
@@ -725,6 +727,49 @@ web-selftest)
     finish_image_start
     exit "$rc"
     ;;
+web-demo)
+    # The DEMO recorder (#3855) — the same image, cache volumes and container
+    # shape as web-selftest above, pointed at a different entry script. It boots
+    # a real daemon on a throwaway home, seeds a small plausible project, drives
+    # the SPA through the core flows while recording video and stills, converts
+    # the recording with the image's ffmpeg, and writes the finished media into
+    # docs/assets/web/.
+    #
+    # It is NOT a gate and CI never runs it: `make demo-assets` is how the
+    # product's face gets refreshed, and the assets it writes are committed.
+    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.web-selftest" -q --label "$LABEL" -t "$WEB_IMAGE" >/dev/null
+    ensure_cache_volumes af-web-selftest-gomod af-web-selftest-gobuild
+    # The ONE path out of the container, and deliberately the committed asset
+    # directory rather than a scratch dir the caller then has to copy: `make
+    # demo-assets` should leave a `git status` to review, not a homework
+    # assignment. The entry script stages every file and only copies them in
+    # once every conversion and size budget has passed, so a run that dies
+    # halfway leaves what is committed untouched.
+    #
+    # Unlike web-selftest's per-run results dir this is a FIXED path, because it
+    # is a tracked directory — which also means two concurrent recorders would
+    # fight over it. That is the right trade for a target a maintainer runs by
+    # hand every few months.
+    DEMO_OUT="$REPO_ROOT/docs/assets/web"
+    mkdir -p "$DEMO_OUT"
+    rc=0
+    WEB_DEMO_NAME="af-web-demo-$RUN_TOKEN"
+    watch_image_start "$WEB_DEMO_NAME"
+    engine_run --rm --label "$LABEL" --init \
+        --name "$WEB_DEMO_NAME" \
+        -v "$REPO_ROOT":/src:ro \
+        -v "$DEMO_OUT":/work/demo-out \
+        -v af-web-selftest-gomod:/cache/gomod \
+        -v af-web-selftest-gobuild:/cache/gobuild \
+        --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
+        --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
+        -e AF_DEMO_TARGET_SECONDS \
+        -e AF_DEMO_MAX_GIF_BYTES \
+        -e AF_DEMO_MAX_MP4_BYTES \
+        "$WEB_IMAGE" bash /src/scripts/container/web-demo-entry.sh || rc=$?
+    finish_image_start
+    exit "$rc"
+    ;;
 clean)
     # Reclaim the disk this harness holds, and only what this harness holds
     # (#2133). Every run already reaps its own dangling images and caps the
@@ -786,7 +831,7 @@ clean)
     "$ENGINE" system df
     ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | build | clean)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | web-demo | build | clean)" >&2
     exit 1
     ;;
 esac

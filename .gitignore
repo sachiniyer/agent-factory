@@ -48,6 +48,10 @@ web/*.tsbuildinfo
 # sources (web/playwright.config.ts, web/selftest/*.spec.ts) ARE committed; only
 # the per-run outputs below are ignored.
 web/test-results/
+# Demo recorder staging (#3855). The recorder's sources are committed and so is
+# its OUTPUT (docs/assets/web/ — the product's face); only Playwright's own
+# per-run output dir is ignored.
+web/demo-results/
 web/playwright-report/
 web/.playwright/
 web/selftest/.last-run.json

@@ -142,6 +142,7 @@ nav:
           - Container testing: container-testing.md
           - Lifecycle testing: lifecycle-testing.md
           - Web client selftest: web-selftest.md
+          - Demo assets: demo-assets.md
           - File-length lint: file-length-lint.md
           - Surface parity: surface-parity.md
           - Release process: release-process.md
