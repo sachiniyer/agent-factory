@@ -536,7 +536,7 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	// exact session, never the request's own id, which under a cross-repo title
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
-	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx))
+	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx), nil)
 	if !resp.record(err) {
 		return err
 	}

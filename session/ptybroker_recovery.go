@@ -211,6 +211,12 @@ func (b *ptyBroker) recoverCapture(onlyIfNoHealthyCapture bool) {
 	b.mu.Lock()
 	b.base = b.headLocked()
 	b.buf = nil
+	// The upstream is about to be re-established, so the pane's death stops being
+	// the terminal condition shouldWarnResizeFailure latched on (#3862) and a later
+	// one deserves its own line. Cleared here rather than after the restart because
+	// this section runs on EVERY path out of the recovery, including the one where
+	// nobody is left attached and no capture is restarted.
+	b.warnedSessionGone = false
 	// Re-read the subscriber count AFTER the teardown drained: nobody left → just the
 	// lazy re-arm, the next Subscribe restarts a fresh capture.
 	resume := !b.closed && len(b.subs) != 0

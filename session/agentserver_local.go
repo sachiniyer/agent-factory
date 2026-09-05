@@ -246,6 +246,11 @@ func (s *localAgentServer) SendPrompt(prompt string) error {
 }
 
 func (s *localAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
+	// Adoption, counted before the write (#3865). SendPrompt above routes through
+	// here, so this is the one bump for both.
+	if err := s.inst.NoteAdoptionDelivery(); err != nil {
+		return PromptNotDelivered, err
+	}
 	// The reliable command path (tmux send-keys), which is what automated/scheduled
 	// deliveries need — it lands whether or not a PTY is currently attached.
 	backend := s.inst.currentBackend()
@@ -414,6 +419,12 @@ func (s *localAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscriptio
 }
 
 func (s *localAgentServer) InputTab(tabID string, b []byte) error {
+	// The browser terminal's path (daemon/ws_pty.go idTabBinding.input), which
+	// takes no manager lock — so this bump, and the fence it consults, are the
+	// whole of its serialization against a teardown (#3865).
+	if err := s.inst.NoteAdoptionDelivery(); err != nil {
+		return err
+	}
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {
 		return err
@@ -438,6 +449,10 @@ func (s *localAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error
 }
 
 func (s *localAgentServer) Input(tab int, b []byte) error {
+	// The legacy ordinal PTY path, same reason as InputTab (#3865).
+	if err := s.inst.NoteAdoptionDelivery(); err != nil {
+		return err
+	}
 	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return err

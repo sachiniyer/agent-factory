@@ -453,7 +453,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		// external-session kill path above carries into KillSession. A title-only
 		// lookup here can resolve a NEW same-title session created after the
 		// snapshot and archive work the user never confirmed deleting.
-		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID}, taskTargets)
+		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID}, taskTargets, nil)
 		if errors.Is(err, errSessionNotFound) {
 			// Snapshot-gated idempotency, exactly like the kill path: this target
 			// existed under m.mu and is now authoritatively absent by stable ID, so
