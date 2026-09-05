@@ -19,6 +19,7 @@ func checkSetup(ctx *scanContext, report *Report) {
 	checkAFHome(ctx, report)
 	cfg := checkConfig(ctx, report)
 	checkStateDirs(ctx, report)
+	checkCodexAccounts(ctx.opts.ConfigDir, report)
 	checkLogStorage(report)
 	checkGit(report)
 	checkTmux(report)
