@@ -118,7 +118,10 @@ func (i *Instance) restoreCarriedTabs() {
 	// not registered with the daemon yet), and this keeps that an assertion
 	// instead of an assumption.
 	if len(i.Tabs) == 1 {
-		i.Tabs = append(i.Tabs, rebuilt...)
+		if len(rebuilt) > 0 {
+			i.Tabs = append(i.Tabs, rebuilt...)
+			i.touchLocked()
+		}
 	}
 	i.mu.Unlock()
 }

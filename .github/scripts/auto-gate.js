@@ -52,25 +52,14 @@ const CONCEDED_MERGE_REFUSALS = [
   // #3324: the ruleset refuses the write because a competing merge advanced
   // master past the required up-to-date check between evaluation and merge.
   //
-  // `unprovenReason` is what this shape means when NO winner can be proven, and
-  // it is a wait rather than a failure (#3827). The ruleset refused because a
-  // required check is not green at this instant — "Required status check \"Auto
-  // Gate decision\" is failing" — which is a state the next evaluation re-checks,
-  // not a defect in this head. Run 33839375109 died on exactly that: a second
-  // evaluation of the same head invalidated the aggregate between this run's PASS
-  // and its merge, nothing had merged yet, and the loud path reddened master over
-  // a race that resolved correctly twenty seconds later.
-  //
-  // This is NOT the RETRYABLE list below, and the difference is real: a shape
-  // there is never a concession, while this one is a concession whenever a winner
-  // IS proven. One shape, two outcomes, decided by evidence — so it stays here,
-  // where the evidence is gathered.
+  // No proven winner means propagation may be lagging our PASS (#3902).
+  // Preserve that PASS and retry once; invalidating it here caused #3893's
+  // permanent write-PASS / merge-405 / write-WAITING loop.
   {
     status: 405,
     pattern: /Repository rule violations found/i,
     unprovenReason:
-      "a required check changed between the evaluation and the merge (another evaluation of " +
-      "this head is likely in flight); the next evaluation re-checks",
+      "the ruleset has not accepted the passing checks; no competing winner was proven",
   },
   { status: 405, pattern: /not mergeable/i },
   // #3434: a merge for this PR is already in flight. #3379 made the maintainer
@@ -359,6 +348,8 @@ const RETRY_DELAYS_MS = [250, 1000];
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
 // read back as "nobody merged" — refusing the concession this exists to grant.
 const MERGE_SETTLE_DELAYS_MS = [1000, 2000, 4000];
+const AGGREGATE_PROPAGATION_DELAYS_MS = [250, 500, 1000];
+const RULE_VIOLATION_RETRY_DELAY_MS = 1000;
 const MAX_RATE_LIMIT_DELAY_MS = 10000;
 
 // GitHub reads are side-effect-free, and check-run updates are idempotent when
@@ -367,8 +358,9 @@ const MAX_RATE_LIMIT_DELAY_MS = 10000;
 // once and then reconciled by a per-attempt marker instead of being replayed.
 // This is especially important for aggregate invalidation, which closes a
 // stale-green safety window. Squash merge, workflow dispatch, and GraphQL
-// mutations are also non-idempotent; keep those calls single-shot and never
-// route them through these helpers.
+// mutations are also non-idempotent; never route them through these helpers.
+// The merge path retries only a definite ruleset refusal, after proving no
+// winner and re-running its preflight (#3902).
 async function retryRead(label, operation, subject = null) {
   return retryTransient(label, operation, {
     failureName: "AutoGateReadError",
@@ -1402,6 +1394,25 @@ async function publishedAggregateConclusion({ github, context, headSha }) {
   return newest ? newest.conclusion || "" : null;
 }
 
+// Observe the exact check we just wrote, rather than trusting the PATCH response.
+// A missing/stale read is not evidence of a competing owner. Do not write a new
+// failure while GitHub is propagating our PASS; leave it to converge (#3902).
+async function aggregatePassIsObservable({ github, context, checkRunId }) {
+  for (let attempt = 0; attempt <= AGGREGATE_PROPAGATION_DELAYS_MS.length; attempt += 1) {
+    if (attempt > 0) {
+      await delay(AGGREGATE_PROPAGATION_DELAYS_MS[attempt - 1]);
+    }
+    const check = await readOrNull(() => github.rest.checks.get({
+      ...context.repo,
+      check_run_id: checkRunId,
+    }));
+    if (check?.data?.conclusion === "success") {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Re-establish that this transaction still owns the aggregate on this head.
 // Aggregate invalidation runs outside the head-keyed serialized lane, so a newer
 // event can take ownership at any moment — including during a write's backoff.
@@ -1743,6 +1754,7 @@ async function processAggregateHead({
         core,
         prNumber,
         expectedHeadSha: pending.headSha,
+        aggregateCheckRunId: pending.checkRunId,
       });
       // A successful merge advances master and invalidates every other
       // candidate's mergeability snapshot. Its resulting event will serialize
@@ -1793,6 +1805,14 @@ async function processAggregateHead({
             "transaction owns it. The merge refusal below stands.",
         );
         throw error;
+      }
+      // A PASS that the ruleset has not accepted is still PASS. The merge helper
+      // already retried once with a fresh evaluation. A new WAITING generation
+      // here would prevent the published success from ever converging (#3902).
+      if (error?.autoGateConcessionReason === "unproven-wait" || error?.autoGatePassUnobserved) {
+        const reason = `${message}; leaving the fixed aggregate PASS; the next evaluation retries`;
+        core.notice(reason);
+        return { state: "waiting", pending, aggregate, reason };
       }
       let invalidated;
       try {
@@ -2349,7 +2369,10 @@ async function updateBranchToBase({ github, context, prNumber, headSha }) {
   });
 }
 
-async function merge({ github, context, core, prNumber, expectedHeadSha }) {
+async function merge({
+  github, context, core, prNumber, expectedHeadSha, aggregateCheckRunId,
+  ruleViolationRetries = 1,
+}) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
   }
@@ -2476,8 +2499,17 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
   // costs nothing either way: waiting one evaluation is the same outcome that
   // classification produces, and the next evaluation re-checks.
   //
-  // `null` means this head carries no aggregate at all, which is not this check's
-  // business: the gate's own `aggregate.ok` guard above already decides that.
+  if (aggregateCheckRunId && !await aggregatePassIsObservable({
+    github, context, checkRunId: aggregateCheckRunId,
+  })) {
+    const error = new Error(
+      `Refusing to merge PR #${prNumber}; the aggregate PASS is not yet observable on ${gate.headSha}`,
+    );
+    error.autoGatePassUnobserved = true;
+    throw error;
+  }
+  // Legacy direct callers do not supply a published check id. The latest-run
+  // guard still applies to them; the serialized path also polls its own id.
   const publishedAggregate = await publishedAggregateConclusion({
     github,
     context,
@@ -2501,6 +2533,18 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
       sha: gate.headSha,
     });
   } catch (error) {
+    // Only a definite ruleset refusal with no proven winner is replayed. The
+    // workflow wrapper classifies it; ambiguous errors and proven concessions
+    // keep their existing exits. Re-enter the whole merge preflight after the
+    // bounded delay so a changed head, check, finding or owner cancels the retry.
+    if (error?.autoGateConcessionReason === "unproven-wait" && ruleViolationRetries > 0) {
+      core.notice(`${error.message}; leaving the fixed aggregate PASS and retrying merge once`);
+      await delay(RULE_VIOLATION_RETRY_DELAY_MS);
+      return merge({
+        github, context, core, prNumber, expectedHeadSha, aggregateCheckRunId,
+        ruleViolationRetries: ruleViolationRetries - 1,
+      });
+    }
     // A retryable refusal becomes the gate's OWN refusal message, so it travels
     // the path a fresh refusal already travels — invalidate the aggregate, record
     // the reason, wait. Rethrowing GitHub's wording instead is what reddened
@@ -2790,17 +2834,10 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
     return newerOwner;
   }
 
-  // No winner — and for a shape that names what its unproven case MEANS, that is
-  // a wait rather than a failure (#3827). It becomes the gate's own refusal, so it
-  // travels the path a fresh refusal already travels: processAggregateHead keys on
-  // this prefix, invalidates the aggregate, records the reason, and waits. Nothing
-  // exits claiming a merge that did not happen — the state is `waiting`, not
-  // `conceded`, and the required check is left non-green.
-  //
-  // Not when ownership could not be READ, though. That is "no answer", not "no
-  // winner", and the waiting path writes a fresh invalidation on its way out —
-  // which is precisely what must not happen over a transaction this run failed to
-  // see (#3551). An unreadable owner stays loud, exactly as before.
+  // No winner: this is a propagation wait, not permission to invalidate our
+  // still-passing aggregate (#3902). The caller retries once, then leaves PASS
+  // standing. Unknown ownership is still not "no winner": keep that error loud
+  // and do not overwrite a transaction this run could not read (#3551).
   if (refusal.unprovenReason && !error.autoGateOwnershipUnknown) {
     return {
       reason: "unproven-wait",
@@ -4230,9 +4267,36 @@ async function evaluateCodex({
       }),
     subject,
   );
+  const reviewComments = await retryRead(
+    `could not read review comments for PR #${number}`,
+    () =>
+      github.paginate(github.rest.pulls.listReviewComments, {
+        owner,
+        repo,
+        pull_number: number,
+        per_page: 100,
+      }),
+    subject,
+  );
   const codexComments = comments.filter((comment) => comment.user?.login === CODEX_REVIEWER);
   const codexReviewArtifacts = [...codexComments, ...reviews]
     .filter((comment) => comment.user?.login === CODEX_REVIEWER)
+    .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
+  // Inline answers (#3900) are outage evidence only, never verdict/finding
+  // artifacts. Bind by GitHub's commit_id and use creation time even if edited.
+  const codexInlineReplies = reviewComments
+    .filter((comment) =>
+      comment.user?.login === CODEX_REVIEWER && comment.in_reply_to_id &&
+      String(comment.commit_id || "").toLowerCase() === String(sha).toLowerCase(),
+    )
+    .map((comment) => ({
+      ...comment,
+      updated_at: comment.created_at,
+      submitted_at: comment.created_at,
+    }));
+  // Replies precede their empty enclosing review on a timestamp tie: GitHub
+  // posts both in the same second. Later reviews still supersede the answer.
+  const codexUsageLimitArtifacts = [...codexInlineReplies, ...codexReviewArtifacts]
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
   // Both artifact shapes, each carrying its OWN time: the prose line's is its
   // comment's, the summary row's is the row's. Sorted by that rather than by
@@ -4251,11 +4315,12 @@ async function evaluateCodex({
     // of retryRead rather than reaching here, so an unreadable list can never be
     // mistaken for "no rate limit" — or for a rate limit.
     //
-    // Latest across issue comments AND reviews — the list is already sorted
+    // Latest across issue comments, reviews AND inline replies — already sorted
     // newest-first. Reading only issue comments would miss a review posted after
     // a quota message, which proves the reviewer answered again and therefore
     // that the quota message no longer describes the present.
-    const latestCodexArtifact = codexReviewArtifacts[0];
+    const latestCodexArtifact = codexUsageLimitArtifacts[0];
+    const isInlineReply = codexInlineReplies.includes(latestCodexArtifact);
     const latestCodexBody = latestCodexArtifact?.body || "";
     // The detector is an unanchored substring match, so a review that merely
     // QUOTES the usage-limit phrase trips it — reviewing this very gate is
@@ -4266,7 +4331,8 @@ async function evaluateCodex({
     // gate lands on "keep blocking" rather than on a false degradation.
     const looksLikeReviewArtifact =
       CODEX_REVIEW_RE.test(latestCodexBody) && REVIEWED_COMMIT_RE.test(latestCodexBody);
-    const rateLimited = codexReportsReviewUsageLimit(latestCodexBody) && !looksLikeReviewArtifact;
+    const rateLimited = codexReportsReviewUsageLimit(latestCodexBody) && !looksLikeReviewArtifact &&
+      !(isInlineReply && CODEX_BODY_FINDING_RE.test(latestCodexBody));
     // …and it has to be evidence about THIS head, on the same freshness rule the
     // verdict below is held to. A usage-limit answer only proves the reviewer was
     // out of quota when it answered; a head pushed after it may simply not have
@@ -4277,10 +4343,14 @@ async function evaluateCodex({
     const rateLimitTime = rateLimited ? reviewArtifactTime(latestCodexArtifact) : 0;
     reviewerUnavailable =
       rateLimited && headCurrentSince != null && rateLimitTime > headCurrentSince;
+    const inlineSource = isInlineReply ? ` (inline comment ${latestCodexArtifact.id})` : "";
+    if (reviewerUnavailable && isInlineReply) {
+      notes.push(`Codex usage-limit answer${inlineSource}`);
+    }
     const suffix = !rateLimited
       ? ""
       : reviewerUnavailable
-        ? "; the latest Codex response was usage-limited"
+        ? `; the latest Codex response was usage-limited${inlineSource}`
         : "; the latest Codex response was usage-limited but predates this head, so it is not " +
           "evidence about this head";
     // Split, because the two states need different actions from a reader: one
@@ -4422,17 +4492,6 @@ async function evaluateCodex({
     });
   }
 
-  const reviewComments = await retryRead(
-    `could not read review comments for PR #${number}`,
-    () =>
-      github.paginate(github.rest.pulls.listReviewComments, {
-        owner,
-        repo,
-        pull_number: number,
-        per_page: 100,
-      }),
-    subject,
-  );
   const resolvedByAllowedReply = new Set(
     reviewComments
       .filter((comment) => {

@@ -123,8 +123,14 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 			return fmt.Errorf("failed to create git worktree: %w", err)
 		}
 		i.mu.Lock()
-		i.gitWorktree = gitWorktree
-		i.Branch = branchName
+		if i.gitWorktree != gitWorktree {
+			i.gitWorktree = gitWorktree
+			i.touchLocked()
+		}
+		if i.Branch != branchName {
+			i.Branch = branchName
+			i.touchLocked()
+		}
 		i.mu.Unlock()
 	}
 	i.mu.RLock()
@@ -176,7 +182,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				if !preserveAgentHandle {
 					i.setTmuxLocked(nil)
 				}
-				i.started = false
+				if i.started {
+					i.started = false
+					i.touchLocked()
+				}
 				i.mu.Unlock()
 				if ts != nil && !preserveAgentHandle {
 					if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
@@ -186,7 +195,14 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 		} else {
 			i.mu.Lock()
-			i.started = true
+			if !i.started {
+				i.started = true
+				// Start(false) reconstructs this process-local flag on load.
+				// Actual respawns record their own runtime mutation below.
+				if firstTimeSetup {
+					i.touchLocked()
+				}
+			}
 			i.mu.Unlock()
 		}
 	}()
@@ -246,6 +262,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// that disappeared with the old tmux server. A pure reattach preserves
 			// them; a confirmed respawn must not attribute them to its replacement.
 			i.ClearIdleEvidence()
+			// This also calls noteAgentRuntimeReplaced, which touches UpdatedAt
+			// unconditionally, even when there was no idle evidence to clear.
 			resetAgentBrokerCaptures(i)
 			i.markLoadRuntimeReplaced()
 		}
@@ -554,8 +572,15 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				continue
 			}
 			restoreResult, err := tab.tmux.RestoreWithResult(worktreePath)
-			if err == nil && account != "" && restoreResult == tmux.RestoreRespawned {
-				respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
+			if err == nil && restoreResult == tmux.RestoreRespawned {
+				// Respawn replaces the process even when the tab's tmux binding is reused.
+				i.mu.Lock()
+				i.touchLocked()
+				i.mu.Unlock()
+				i.markLoadRuntimeReplaced()
+				if account != "" {
+					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
+				}
 			}
 			if err != nil {
 				if account != "" {
@@ -672,7 +697,10 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 	for k := range bindings {
 		for _, t := range i.Tabs {
 			if t.ID == bindings[k].id {
-				t.tmux = bindings[k].tmux
+				if t.tmux != bindings[k].tmux {
+					t.tmux = bindings[k].tmux
+					i.touchLocked()
+				}
 				bindings[k].bound = true
 				break
 			}

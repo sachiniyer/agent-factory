@@ -24,14 +24,11 @@ import (
 // be the exact thing accounts exist to avoid, and a folder-trust question about
 // a directory af created has one honest answer.
 //
-// It is deliberately a TABLE with one entry rather than a branch. Which agents
-// af writes settings for is a question a reviewer must be able to answer by
-// looking, the way loginCommands answers "which agents does af know a login
-// invocation for" — and the absent agents are the claim: claude and codex reach
-// their device-code prompt with an empty account directory, measured in #3857,
-// so there is nothing for af to answer on their behalf.
+// Gemini answers login questions; Codex inherits only the operator's selected
+// non-credential runtime defaults so a separate home can run unattended.
 var loginPromptAnswers = map[string]func(dir string) error{
 	"gemini": answerGeminiLoginPrompts,
+	"codex":  answerCodexLoginPrompts,
 }
 
 // answerLoginPrompts runs the agent's entry, if it has one. An agent with no
@@ -279,6 +276,11 @@ func writeAgentJSON(path string, doc map[string]any) error {
 		return fmt.Errorf("encode %s: %w", path, err)
 	}
 	data = append(data, '\n')
+	return writeAgentSettings(path, data)
+}
+
+// writeAgentSettings atomically installs owner-only settings through the AF home guard.
+func writeAgentSettings(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := afhome.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)

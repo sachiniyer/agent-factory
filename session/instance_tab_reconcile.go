@@ -277,6 +277,7 @@ func (i *Instance) dropTabWhere(pred func(*Tab) bool, label string) bool {
 		if pred(i.Tabs[idx]) {
 			dropped = i.Tabs[idx]
 			i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+			i.touchLocked()
 			break
 		}
 	}

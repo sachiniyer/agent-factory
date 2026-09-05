@@ -117,6 +117,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)
+		i.touchLocked()
 	}
 	i.mu.Unlock()
 	if stale {
@@ -195,6 +196,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)
+		i.touchLocked()
 	}
 	i.mu.Unlock()
 	if stale {
@@ -250,6 +252,7 @@ func (i *Instance) appendReconciledTab(matchID, name string, tab *Tab) bool {
 	adopt := !stale && !exists
 	if adopt {
 		i.Tabs = append(i.Tabs, tab)
+		i.touchLocked()
 	}
 	title := i.Title
 	i.mu.Unlock()
@@ -306,6 +309,7 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	tab := newWebTab(url)
 	tab.Name = uniqueTabName(i.Tabs, base)
 	i.Tabs = append(i.Tabs, tab)
+	i.touchLocked()
 	return tab, nil
 }
 
@@ -335,5 +339,6 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	tab := newVSCodeTab()
 	tab.Name = uniqueTabName(i.Tabs, base)
 	i.Tabs = append(i.Tabs, tab)
+	i.touchLocked()
 	return tab, nil
 }

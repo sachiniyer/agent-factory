@@ -70,6 +70,7 @@ func (i *Instance) closeRemovedTabRetainingCleanup(tab *Tab) error {
 	if handle, _ := stageTabCleanup(nil, tab); handle != nil {
 		i.mu.Lock()
 		i.pendingTabCleanup = append(i.pendingTabCleanup, *handle)
+		i.touchLocked()
 		i.mu.Unlock()
 	}
 	return err
@@ -130,6 +131,7 @@ func (i *Instance) CloseTabByIDWithCommit(
 		return CommittedTabClose{}, fmt.Errorf("tab cannot be closed")
 	}
 
+	updatedAt := i.UpdatedAt
 	tab := i.removeTabLocked(idx)
 	handle, staged := stageTabCleanup(i.pendingTabCleanup, tab)
 	i.pendingTabCleanup = staged
@@ -144,6 +146,7 @@ func (i *Instance) CloseTabByIDWithCommit(
 		copy(i.Tabs[idx+1:], i.Tabs[idx:])
 		i.Tabs[idx] = tab
 		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, handle)
+		i.UpdatedAt = updatedAt
 		i.mu.Unlock()
 		return CommittedTabClose{}, err
 	}
@@ -158,7 +161,11 @@ func (i *Instance) CloseTabByIDWithCommit(
 	// Confirmed dead. Retire the handle and hand the caller the projection that
 	// records the retirement.
 	i.mu.Lock()
+	before := len(i.pendingTabCleanup)
 	i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, handle)
+	if len(i.pendingTabCleanup) != before {
+		i.touchLocked()
+	}
 	settled := i.toInstanceDataLocked()
 	i.mu.Unlock()
 	return CommittedTabClose{Settled: &settled}, nil
@@ -228,6 +235,7 @@ func restoredTabCleanup(data []TabCleanupData) []TabCleanupData {
 func (i *Instance) removeTabLocked(idx int) *Tab {
 	tab := i.Tabs[idx]
 	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+	i.touchLocked()
 	return tab
 }
 

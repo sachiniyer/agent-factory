@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -808,17 +809,76 @@ func TestUnprovenLatchSurvivesAnUnreadableRegistry(t *testing.T) {
 		t.Fatalf("an unreadable registry must not drop the unproven latch: the row resolves, so nothing else would ever retry it")
 	}
 
-	// Repaired, and the next due pass completes it.
+	// Repair the registry, but make the next proof lose its 250ms window
+	// (#3890). The child spins until CommandContext kills it; no sleep or
+	// synthetic error can stand in for the real timeout classification.
 	if err := os.RemoveAll(corrupt); err != nil {
 		t.Fatalf("repair registry: %v", err)
 	}
+	binDir := t.TempDir()
+	stalled := filepath.Join(binDir, "stalled")
+	script := "#!/bin/sh\n: > \"" + stalled + "\"\nwhile :; do :; done\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath)
+	proofCalls := 0
+	config.SetRegisteredProjectProofRaceHookForTest(t, func() { proofCalls++ })
+	previousNow := nowFunc
+	now := previousNow()
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = previousNow })
 	manager.mu.Lock()
+	failures := manager.rootHealFailures
 	manager.rootHealNextAttempt = nowFunc()
 	manager.mu.Unlock()
 	manager.EnsureRootAgents()
 
+	t.Setenv("PATH", oldPath)
+
+	if _, err := os.Stat(stalled); err != nil {
+		t.Fatalf("the proof must reach the stalled git child: %v", err)
+	}
+	if owed, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; !kept || owed.proven {
+		t.Fatal("a timed-out proof must retain the unproven latch")
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("a timed-out proof must not record an identity: %q", recorded)
+	}
+	manager.mu.Lock()
+	next, gotFailures := manager.rootHealNextAttempt, manager.rootHealFailures
+	manager.mu.Unlock()
+	if gotFailures != failures+1 || !next.Equal(now.Add(rootEnsureBackoffFor(failures+1))) {
+		t.Fatalf("a timed-out proof must advance failure backoff: failures=%d next=%s", gotFailures, next)
+	}
+	manager.EnsureRootAgents()
+	if proofCalls != 1 {
+		t.Fatalf("a pass before the backoff is due must not probe again: %d calls", proofCalls)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("the proof must not retry before its backoff is due: %q", recorded)
+	}
+
+	// A healthy probe may still lose a window on a loaded runner. Advance the
+	// cadence's clock and wait for the durable outcome, retaining the exact ID
+	// assertion. Losing the latch must fail immediately, not be retried away.
+	waitUntil(t, 10*time.Second, "the repaired registry's retained identity proof", func() bool {
+		if _, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; !kept {
+			t.Fatal("the latch disappeared before the identity was recorded")
+		}
+		manager.mu.Lock()
+		now = manager.rootHealNextAttempt
+		manager.mu.Unlock()
+		manager.EnsureRootAgents()
+		return onlyIdentityFor(t, project.ID) != ""
+	})
+
 	if recorded := onlyIdentityFor(t, project.ID); recorded != realID {
 		t.Fatalf("the retained latch must complete once the registry reads again: recorded %q, want %s", recorded, realID)
+	}
+	if _, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; kept {
+		t.Fatal("a recorded identity must retire the latch")
 	}
 }
 

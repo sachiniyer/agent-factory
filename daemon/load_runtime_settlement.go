@@ -5,9 +5,9 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// persistLoadRuntimeReplacements makes a load-time respawn's evidence clear
-// durable before the restored map becomes authoritative. A failed write is
-// returned as an owed settlement so the live daemon retries it every poll;
+// persistLoadRuntimeReplacements makes a load-time respawn's timestamp and any
+// agent evidence clear durable before the restored map becomes authoritative.
+// A failed write is returned as an owed settlement so the live daemon retries it every poll;
 // abandoning the newly spawned process would be worse than retaining it with a
 // loudly tracked metadata gap.
 func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []settleOwedEntry {
@@ -18,7 +18,7 @@ func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []se
 		}
 		repoID, _ := splitDaemonInstanceKey(key)
 		if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
-			log.WarningLog.Printf("load-time runtime replacement for %q could not persist its cleared idle evidence; the daemon will retry: %v", instance.Title, err)
+			log.WarningLog.Printf("load-time runtime replacement for %q could not persist its timestamp and idle evidence; the daemon will retry: %v", instance.Title, err)
 			owed = append(owed, settleOwedEntry{repoID: repoID, key: key, instance: instance})
 		}
 	}

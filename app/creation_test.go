@@ -42,6 +42,8 @@ func activeProjectHome(t *testing.T) *home {
 	return h
 }
 
+var errTestFetcherUnstubbed = errors.New("test home: all-repos fetcher not stubbed")
+
 // newTestHome builds a minimal home with real UI components and a tempdir-
 // scoped storage. AGENT_FACTORY_HOME is redirected so nothing escapes into
 // the user's real config dir.
@@ -93,6 +95,14 @@ func newTestHome(t *testing.T) *home {
 	// Nil is the no-observation answer, which leaves arming UNKNOWN exactly as a
 	// down daemon does; tests exercising the merge swap in their own.
 	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) { return nil, nil }))
+
+	// The same snapshot poll also fetches cross-repo rows. Its production
+	// default reaches EnsureDaemon, so close this seam even when polling is
+	// incidental. An error preserves rows a test preloaded; an empty success
+	// would reconcile them away. Tests needing fresh rows override this seam.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return nil, errTestFetcherUnstubbed
+	}))
 
 	// The live-termpane bind would dial a real WS PTY stream (#1592 PR6). Default
 	// the factory to an inert fake so a test that incidentally reaches a bind

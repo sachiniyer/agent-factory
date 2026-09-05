@@ -639,7 +639,10 @@ func (i *Instance) SetArchived() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
-	i.started = false
+	if i.started {
+		i.started = false
+		i.touchLocked()
+	}
 	i.liveness = LiveArchived
 	i.inFlightOp = OpNone
 	i.clearAgentModelChangeLocked()
@@ -815,8 +818,14 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 		}
 		return err
 	}
-	i.Title = newTitle
-	i.Branch = gw.GetBranchName()
+	if i.Title != newTitle {
+		i.Title = newTitle
+		i.touchLocked()
+	}
+	if i.Branch != gw.GetBranchName() {
+		i.Branch = gw.GetBranchName()
+		i.touchLocked()
+	}
 	return nil
 }
 
@@ -967,4 +976,5 @@ func (i *Instance) SetBackend(b Backend) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.backend = b
+	i.touchLocked()
 }

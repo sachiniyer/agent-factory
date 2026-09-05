@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 const (
@@ -29,10 +29,10 @@ const (
 // captureLogs redirects InfoLog and ErrorLog to in-memory buffers for the
 // duration of the test. Returns the buffers; output collected reflects every
 // Printf call routed through those loggers after the swap.
-func captureLogs(t *testing.T) (info, errLog *bytes.Buffer) {
+func captureLogs(t *testing.T) (info, errLog *logtest.Buffer) {
 	t.Helper()
-	info = &bytes.Buffer{}
-	errLog = &bytes.Buffer{}
+	info = &logtest.Buffer{}
+	errLog = &logtest.Buffer{}
 	prevInfoOut := aflog.InfoLog.Writer()
 	prevErrOut := aflog.ErrorLog.Writer()
 	aflog.InfoLog.SetOutput(info)

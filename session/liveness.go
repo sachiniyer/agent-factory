@@ -550,7 +550,10 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
-	i.limitAccount = i.Account
+	if i.limitAccount != i.Account {
+		i.limitAccount = i.Account
+		i.touchLocked()
+	}
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
@@ -563,13 +566,18 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
 		if observation.Agent == agent && observation.Account == account {
-			observation.ResetAt = RetainedAccountLimitReset(observation.ResetAt, resetAt)
+			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
+			if !observation.ResetAt.Equal(retained) {
+				observation.ResetAt = retained
+				i.touchLocked()
+			}
 			return
 		}
 	}
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
 		Agent: agent, Account: account, ResetAt: resetAt,
 	})
+	i.touchLocked()
 }
 
 // RetainedAccountLimitReset merges two negative quota observations without
