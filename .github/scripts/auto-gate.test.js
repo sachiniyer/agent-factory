@@ -3491,6 +3491,100 @@ test("the degraded pass with a head-bound approval still merges itself", async (
   assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
 });
 
+// #3900: PR #3893's empty review carried its quota answer in an inline reply.
+function inlineLimitFixture(overrides = {}) {
+  const reply = {
+    ...codexRateLimit("2026-07-09T01:20:00Z"),
+    id: 3941258257,
+    pull_request_review_id: 5122042163,
+    in_reply_to_id: 3941257907,
+    commit_id: HEAD_SHA,
+    ...overrides,
+  };
+  return {
+    headForcePushes: [{ createdAt: "2026-07-09T01:10:00Z", afterCommit: { oid: HEAD_SHA } }],
+    issueComments: [prComment("sachiniyer", "## Review — approve")],
+    reviews: [{
+      id: 5122042163,
+      user: reply.user,
+      state: "COMMENTED",
+      body: "",
+      commit_id: HEAD_SHA,
+      submitted_at: reply.created_at,
+    }],
+    reviewComments: [reply],
+  };
+}
+
+test("inline usage-limit reply permits an approved degraded PASS and names its id", async () => {
+  const result = await evaluateGate(inlineLimitFixture());
+  assert.equal(result.degradedForUnavailableReviewer, true);
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
+  assert.match([...result.notes, ...result.reasons].join("\n"), /3941258257/);
+});
+
+test("inline usage-limit reply must be created after headCurrentSince, even if edited later", async () => {
+  for (const created_at of ["2026-07-09T01:09:00Z", "2026-07-09T01:10:00Z"]) {
+    const result = await evaluateGate(inlineLimitFixture({ created_at }));
+    assert.equal(result.degradedForUnavailableReviewer, false);
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.reasons.join("\n"), /has not reviewed head/);
+    const report = await autoGate.reportDecision({
+      github: fakeGateGithub(), context: fakeContext(), core: fakeCore(), result, manual: false,
+    });
+    assert.equal(report.state, "waiting");
+  }
+});
+
+test("inline usage-limit evidence requires the reply's own head commit and Codex author", async () => {
+  for (const overrides of [{ commit_id: OTHER_SHA }, { user: { login: "someone-else" } }]) {
+    const result = await evaluateGate(inlineLimitFixture(overrides));
+    assert.equal(result.degradedForUnavailableReviewer, false);
+    assert.equal(result.shouldMerge, false);
+  }
+});
+
+test("finding-shaped inline usage-limit text is not an outage answer", async () => {
+  for (const overrides of [
+    { in_reply_to_id: undefined },
+    { body: "P1: detector quotes " + CODEX_LIMIT_CODE_REVIEWS },
+  ]) {
+    const result = await evaluateGate(inlineLimitFixture(overrides));
+    assert.equal(result.degradedForUnavailableReviewer, false);
+    assert.equal(result.shouldMerge, false);
+  }
+});
+
+test("an inline reply cannot supply a verdict or supersede a body finding", async () => {
+  const fixture = inlineLimitFixture({ body: codexVerdict(HEAD_SHA).body });
+  let result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  fixture.reviews = [codexReview(HEAD_SHA, "P1: fix this", "2026-07-09T01:15:00Z")];
+  result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /finding/);
+});
+
+test("a later review response supersedes inline quota evidence even without a verdict", async () => {
+  const fixture = inlineLimitFixture();
+  fixture.reviews.push({
+    user: { login: "chatgpt-codex-connector[bot]" }, body: "Review started.",
+    commit_id: HEAD_SHA, submitted_at: "2026-07-09T01:30:00Z",
+  });
+  const result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  assert.equal(result.degradedForUnavailableReviewer, false);
+});
+
+test("a later real verdict supersedes an inline usage-limit answer", async () => {
+  const fixture = inlineLimitFixture();
+  fixture.reviews.push(codexReview(HEAD_SHA, "Looks good.", "2026-07-09T01:30:00Z"));
+  const result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, true);
+  assert.equal(result.degradedForUnavailableReviewer, false);
+});
+
 // #3825. The blocker above was pushed into `reasons`, and the published check
 // reads `reasons` only on the auto-merge path: a non-allowed author takes the
 // manual path, whose conclusion is computed from `manualMergeBlockers` alone. So
@@ -6806,31 +6900,92 @@ test("a newer owner is recognised in the shape the API actually returns", async 
   assert.equal(older?.reason, "unproven-wait");
 });
 
-// …and when there is genuinely no winner to find, the same refusal is a WAIT
-// rather than an unhandled error. The ruleset refused because a required check
-// is not green; that is a state the next evaluation re-checks, not a defect in
-// this head. #3811 made the same call for `Base branch was modified`.
-test("a rule-violation refusal with no proven winner waits instead of reddening master", async () => {
+// #3902: a ruleset can lag the PASS write without any competing transaction.
+test("a rule-violation refusal retries once without reddening the passing aggregate", async () => {
+  const github = fakeGateGithub({
+    mergeErrors: [mergeRefusal("Repository rule violations found")],
+  });
+  const mergePull = github.rest.pulls.merge;
+  github.rest.pulls.merge = async (options) => {
+    assert.equal(github.createdChecks.length, 2, "no new WAITING generation before either merge");
+    assert.equal(github.updatedChecks.at(-1).conclusion, "success");
+    return mergePull(options);
+  };
+  const { error } = await runApplyGateStep({ github });
+  assert.equal(error, null);
+  assert.equal(github.mergeAttempts, 2);
+  assert.ok(github.mergedWith);
+  // Successful-merge cleanup still invalidates the now-stale shared-head
+  // authorization, but only AFTER the merge has advanced master.
+  assert.ok(github.operations.indexOf("merge") < github.operations.lastIndexOf("check:create"));
+});
+
+test("two rule-violation refusals leave PASS green and report a bounded wait", async () => {
   const github = fakeGateGithub({
     mergeError: mergeRefusal("Repository rule violations found"),
     pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
   });
-
   const { error, notices } = await runApplyGateStep({ github });
+  assert.equal(error, null);
+  assert.equal(github.mergeAttempts, 2);
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.createdChecks.length, 2, "no new failing aggregate after PASS");
+  assert.equal(github.updatedChecks.at(-1).conclusion, "success");
+  assert.match(notices.join("\n"), /leaving.*aggregate.*PASS/i);
+});
 
-  assert.equal(error, null, "the master Auto Gate run must not go red over a re-checkable state");
-  assert.equal(github.mergedWith, null, "and nothing merged");
-  assert.match(
-    notices.join("\n"),
-    /Refusing to merge PR #1465; a required check changed between the evaluation and the merge/,
-    "the decision must name the wait in the gate's own words",
-  );
-  assert.ok(
-    github.createdChecks
-      .slice(1)
-      .some((check) => check.output?.title?.startsWith("WAITING")),
-    "a waiting outcome still leaves the aggregate non-green",
-  );
+test("a changed evaluation cancels the rule-violation retry and invalidates PASS", async () => {
+  const github = fakeGateGithub({
+    mergeErrors: [mergeRefusal("Repository rule violations found")],
+  });
+  const paginate = github.paginate.bind(github);
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.pulls.listReviewComments && github.mergeAttempts > 0) {
+      return [codexFinding({ id: 3902, line: 10 })];
+    }
+    return paginate(fn, options);
+  };
+  const { error, notices } = await runApplyGateStep({ github });
+  assert.equal(error, null);
+  assert.equal(github.mergeAttempts, 1, "fresh findings must prevent a second merge write");
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.createdChecks.at(-1).conclusion, "failure");
+  assert.match(notices.join("\n"), /gate no longer passes/);
+});
+
+test("the aggregate PASS must be observable before a merge is attempted", async () => {
+  const github = fakeGateGithub();
+  const getCheck = github.rest.checks.get;
+  let reads = 0;
+  github.rest.checks.get = async (options) => {
+    const response = await getCheck(options);
+    reads += 1;
+    return reads < 3 ? { data: { ...response.data, conclusion: "failure" } } : response;
+  };
+  const mergePull = github.rest.pulls.merge;
+  github.rest.pulls.merge = async (options) => {
+    assert.ok(reads >= 3, "the write response alone does not prove propagation");
+    return mergePull(options);
+  };
+  const { error } = await runApplyGateStep({ github });
+  assert.equal(error, null);
+  assert.ok(github.mergedWith);
+});
+
+test("an aggregate PASS that is not yet observable waits without a failing write", async () => {
+  const github = fakeGateGithub();
+  let reads = 0;
+  github.rest.checks.get = async () => {
+    reads += 1;
+    return { data: { conclusion: "failure" } };
+  };
+  const { error, notices } = await runApplyGateStep({ github });
+  assert.equal(error, null);
+  assert.ok(reads > 1 && reads <= 5, "polling is bounded");
+  assert.equal(github.mergeAttempts, 0);
+  assert.equal(github.createdChecks.length, 2);
+  assert.equal(github.updatedChecks.at(-1).conclusion, "success");
+  assert.match(notices.join("\n"), /not yet observable/);
 });
 
 // The fake is infrastructure, and this is the property the pre-merge check below
@@ -8807,7 +8962,14 @@ function fakeGateGithub({
           github.dispatchedWorkflows.push(options);
         },
       },
-      checks: { create: createCheck, listForRef, update: updateCheck },
+      checks: {
+        create: createCheck, listForRef, update: updateCheck,
+        get: async ({ check_run_id }) => {
+          const created = github.createdChecks[check_run_id - 10000];
+          const updates = github.updatedChecks.filter((check) => check.check_run_id === check_run_id);
+          return { data: { id: check_run_id, ...created, ...Object.assign({}, ...updates) } };
+        },
+      },
       git: {
         getRef: async ({ ref }) => {
           github.refReads.push(ref);

@@ -56,9 +56,13 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 		return err
 	}
 	i.mu.Lock()
-	i.started = true
+	if !i.started {
+		i.started = true
+		i.touchLocked()
+	}
 	if len(i.Tabs) == 0 {
 		i.Tabs = []*Tab{newRemoteAgentTab()}
+		i.touchLocked()
 	}
 	// AFTER the agent tab, never before: index 0 is the agent everywhere — it is
 	// unclosable and it is what the PTY stream targets — so a restored web tab that
@@ -72,7 +76,10 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 // trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
 func (b *remoteAgentBackend) Kill(i *Instance, _ bool) error {
 	i.mu.Lock()
-	i.started = false
+	if i.started {
+		i.started = false
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 	return nil
 }
@@ -81,7 +88,10 @@ func (b *remoteAgentBackend) Kill(i *Instance, _ bool) error {
 // the remote workspace its canonical instance still owns.
 func (b *remoteAgentBackend) CloseAttachOnly(i *Instance) error {
 	i.mu.Lock()
-	i.started = false
+	if i.started {
+		i.started = false
+		i.touchLocked()
+	}
 	i.mu.Unlock()
 	return nil
 }

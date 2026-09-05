@@ -31,7 +31,10 @@ func (i *Instance) RepoName() (string, error) {
 func (i *Instance) SetPrompt(prompt string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.Prompt = prompt
+	if i.Prompt != prompt {
+		i.Prompt = prompt
+		i.touchLocked()
+	}
 }
 
 // GetPrompt returns the session's current durable goal.
@@ -47,7 +50,10 @@ func (i *Instance) GetPrompt() string {
 func (i *Instance) SetPendingHandoffMission(mission string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.pendingHandoffMission = mission
+	if i.pendingHandoffMission != mission {
+		i.pendingHandoffMission = mission
+		i.touchLocked()
+	}
 }
 
 // PendingHandoffMission returns the takeover brief awaiting confirmed delivery.
@@ -66,7 +72,10 @@ func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 	if i.pendingHandoffMission != mission {
 		return false
 	}
-	i.pendingHandoffMission = ""
+	if i.pendingHandoffMission != "" {
+		i.pendingHandoffMission = ""
+		i.touchLocked()
+	}
 	return true
 }
 
@@ -116,6 +125,9 @@ func (i *Instance) ArchiveWarning() string {
 func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if i.runtimeTeardown != nil || teardown != nil {
+		i.touchLocked()
+	}
 	i.agentSrv = nil
 	i.runtimeTeardown = teardown
 }
@@ -134,7 +146,10 @@ func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 func (i *Instance) SetSandboxBranch(branch string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.Branch = branch
+	if i.Branch != branch {
+		i.Branch = branch
+		i.touchLocked()
+	}
 }
 
 // MarkUserKilled records kill intent on the instance (#1108). Callers persist
@@ -150,7 +165,10 @@ func (i *Instance) MarkUserKilled() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
-	i.userKilled = true
+	if !i.userKilled {
+		i.userKilled = true
+		i.touchLocked()
+	}
 	i.inFlightOp = OpNone
 	i.noteStateChangeLocked(lv, op, resetAt)
 }
@@ -170,6 +188,7 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	changed := false
 	if userKilled && !i.userKilled {
 		i.userKilled = true
+		i.touchLocked()
 		if i.inFlightOp != OpKilling {
 			i.inFlightOp = OpNone
 		}
@@ -194,8 +213,14 @@ func (i *Instance) MarkStartupStateUnknown() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
-	i.startupStateUnknown = true
-	i.started = false
+	if !i.startupStateUnknown {
+		i.startupStateUnknown = true
+		i.touchLocked()
+	}
+	if i.started {
+		i.started = false
+		i.touchLocked()
+	}
 	// Startup-unknown is a terminal delivery outcome, not a run still consuming
 	// the task's concurrency budget. Store that fact on the same transition that
 	// stores the terminal marker so projections, persistence, and unloadable-row
@@ -208,8 +233,9 @@ func (i *Instance) MarkStartupStateUnknown() {
 	// made in between into the baseline and read as though nothing had happened.
 	if i.taskRunActive {
 		i.captureAdoptionBaselineLocked()
+		i.taskRunActive = false
+		i.touchLocked()
 	}
-	i.taskRunActive = false
 	// The create attempt has settled into an explicit blocked outcome. Leaving
 	// OpCreating set makes projections report an operation that no goroutine owns
 	// and can keep old clients polling forever.
@@ -362,7 +388,10 @@ func (i *Instance) SetTitle(title string) error {
 	if i.started {
 		return fmt.Errorf("cannot change title of a started instance")
 	}
-	i.Title = title
+	if i.Title != title {
+		i.Title = title
+		i.touchLocked()
+	}
 	return nil
 }
 
@@ -438,7 +467,10 @@ func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
 func (i *Instance) SetStartedForTest(started bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.started = started
+	if i.started != started {
+		i.started = started
+		i.touchLocked()
+	}
 }
 
 // MarkLoadRuntimeReplacedForTest seeds the loader settlement owed by a
@@ -456,6 +488,7 @@ func (i *Instance) SetPendingTabCleanupForTest(pending []TabCleanupData) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.pendingTabCleanup = append([]TabCleanupData(nil), pending...)
+	i.touchLocked()
 }
 
 // SetGitWorktreeForTest assigns a git worktree to this instance. Test-only:
@@ -464,7 +497,10 @@ func (i *Instance) SetPendingTabCleanupForTest(pending []TabCleanupData) {
 func (i *Instance) SetGitWorktreeForTest(gw *git.GitWorktree) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.gitWorktree = gw
+	if i.gitWorktree != gw {
+		i.gitWorktree = gw
+		i.touchLocked()
+	}
 }
 
 // AddTabForTest appends a tmux-less tab record. Test-only: UI tests (the
@@ -474,6 +510,7 @@ func (i *Instance) AddTabForTest(name string, kind TabKind) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.Tabs = append(i.Tabs, &Tab{Name: name, Kind: kind})
+	i.touchLocked()
 }
 
 // AddWebTabForTest appends a web tab carrying url. Test-only: the URL is the
@@ -484,4 +521,5 @@ func (i *Instance) AddWebTabForTest(name, url string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.Tabs = append(i.Tabs, &Tab{ID: newTabID(), Name: name, Kind: TabKindWeb, URL: url})
+	i.touchLocked()
 }
