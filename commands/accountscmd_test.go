@@ -428,7 +428,7 @@ func TestAccountsListReportsLoginStatePerAccount(t *testing.T) {
 // the variable one level too deep and logs in somewhere af will not look.
 func TestAccountsHelpShowsTheGeminiHomeRootShape(t *testing.T) {
 	for _, want := range []string{
-		"GEMINI_CLI_HOME=$(af accounts add gemini work) gemini",
+		"GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini",
 		"<dir>/.gemini/gemini-credentials.json",
 	} {
 		if !strings.Contains(accountsCmd.Long, want) {
@@ -440,5 +440,23 @@ func TestAccountsHelpShowsTheGeminiHomeRootShape(t *testing.T) {
 	// rather than needing an edit (#3639).
 	if strings.Contains(strings.ToLower(accountsCmd.Long), sessionenv.AccountRegistrationOnlyMarker) {
 		t.Fatalf("no agent is registration-only, so the help must say nothing about it:\n%s", accountsCmd.Long)
+	}
+}
+
+// The group help walks the operator through a login, so it must not promise a
+// browser step either (#3854) — and the pasteable by-hand invocations underneath
+// it are what af actually runs, so codex's has to carry --device-auth.
+func TestAccountsHelpDescribesTheDeviceCodeFlow(t *testing.T) {
+	help := accountsCmd.Long
+	for _, want := range []string{
+		"device code",
+		"codex login --device-auth",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("af accounts --help is missing %q:\n%s", want, help)
+		}
+	}
+	if strings.Contains(help, "browser or device-code") {
+		t.Fatalf("af accounts --help still offers a browser step as an alternative:\n%s", help)
 	}
 }

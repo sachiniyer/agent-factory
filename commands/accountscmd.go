@@ -86,15 +86,20 @@ flow against it · list shows what is registered.
   af accounts login codex work
 
 That one command registers the account if needed, starts codex's own login in a
-tmux session scoped to it, hands you the terminal for the browser or device-code
-step, and afterwards reports whether the account holds a credential — read from
-the agent's own credential file, by checking that it exists.
+tmux session scoped to it, hands you the terminal for the device-code step, and
+afterwards reports whether the account holds a credential — read from the agent's
+own credential file, by checking that it exists.
+
+Every login af runs is browser-free. The pane is on the daemon's host, which is
+usually headless and remote, so the flow that fits is the device code: the CLI
+prints a URL and a code, you sign in from whatever device you are holding, and
+the CLI polls. af selects it per agent — see af accounts login --help.
 
 You can still do it by hand, and af runs exactly these:
 
-  CODEX_HOME=$(af accounts add codex work) codex login
-  CLAUDE_CONFIG_DIR=$(af accounts add claude work) claude auth login
-  GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
+  CODEX_HOME=$(af accounts add codex work) codex login --device-auth
+  CLAUDE_CONFIG_DIR=$(af accounts add claude work) BROWSER=true claude auth login
+  GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini
 
 Those variables do not all have the same shape, and mixing them up is the easy
 mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.

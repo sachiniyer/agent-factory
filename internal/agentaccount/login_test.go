@@ -18,7 +18,7 @@ import (
 func TestLoginProgram_IsTheAgentsOwnInvocation(t *testing.T) {
 	for agent, want := range map[string]string{
 		"claude": "claude auth login",
-		"codex":  "codex login",
+		"codex":  "codex login --device-auth",
 		"gemini": "gemini",
 	} {
 		got, err := LoginProgram(agent)

@@ -167,6 +167,15 @@ type TmuxSession struct {
 	// selected account's environment without pretending its shell/process command
 	// is the provider executable guarded by the direct-agent launch proof.
 	accountEnvironmentOnly bool
+	// accountLoginEnv holds the NAME=VALUE entries that make an account LOGIN
+	// pane browser-free (#3854), or nil for every other pane. It is a resolved
+	// list rather than a bool because the operator's own pass-through wins: a name
+	// they already asked for is left out here and flows through with their value.
+	//
+	// Guarded by programMu with envPassthrough, which it extends — the exec shim
+	// re-filters the environment before exec, so a value tmux holds and the
+	// allowlist does not admit never reaches the agent.
+	accountLoginEnv []string
 	// generatedArgs are the argument words af authored for program, declared so
 	// the account boundary can verify af's output instead of refusing it (#3083,
 	// #3108). Guarded by programMu with program itself, because a launch reads
