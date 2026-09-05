@@ -572,8 +572,14 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				continue
 			}
 			restoreResult, err := tab.tmux.RestoreWithResult(worktreePath)
-			if err == nil && account != "" && restoreResult == tmux.RestoreRespawned {
-				respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
+			if err == nil && restoreResult == tmux.RestoreRespawned {
+				// Respawn replaces the process even when the tab's tmux binding is reused.
+				i.mu.Lock()
+				i.touchLocked()
+				i.mu.Unlock()
+				if account != "" {
+					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
+				}
 			}
 			if err != nil {
 				if account != "" {

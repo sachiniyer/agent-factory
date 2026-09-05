@@ -557,7 +557,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// sandbox from the branch. Skipping Start also avoids driving the recursive
 	// remote backend with no live agent-server client.
 	if isSandboxBackendType(data.BackendType) {
-		instance.liveness = LiveLost
+		instance.mu.Lock()
+		if instance.liveness != LiveLost {
+			instance.liveness = LiveLost
+			instance.touchLocked()
+		}
+		instance.mu.Unlock()
 		return instance, nil
 	}
 
