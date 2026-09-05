@@ -228,3 +228,44 @@ func TestResolveGlobalConfigUnaffectedByPersonalLayer(t *testing.T) {
 			"the global-only read path must not synthesize a personal candidate")
 	}
 }
+
+// The per-project write path for a LIST key, end to end: set a narrower list on
+// one project, resolve it, clear it, resolve again. That round trip IS the
+// documented use of this key — "one project uses a narrower set without trusting
+// checked-in repo config with identity policy" — and neither half was covered by
+// anything else.
+//
+// Both assertions carry their own weight. The first is that the personal layer
+// REPLACES the global list rather than merging into it (MergeListReplace in the
+// manifest): a merge would silently re-admit a global candidate the project
+// meant to exclude, which for identity policy is the wrong direction to be
+// wrong in. The second is that clearing falls back to the GLOBAL list rather
+// than to empty — an unset that resolved to "no candidates" would look like the
+// feature quietly turning itself off.
+//
+// What this does NOT cover, despite looking like it might: the rewrite guard's
+// value comparison. projectRewriteDrift exempts the key being written
+// (exemptRewrittenKeys copies it from `after` onto `expected` before
+// structValueDrift runs), so the cleared list is never compared. Measured, not
+// assumed — reproducing #3386's nil-vs-empty defect on the slice arm of
+// structValueDrift leaves this test green. The unset half is red-first against
+// an unset that does not remove.
+func TestSetAndUnsetProjectLimitAccountCandidatesRoundTrips(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	writeGlobalTOML(t, home, "limit_account_candidates = [\"global-only\"]\n")
+
+	_, err := SetProjectConfigValue(project.ID, "limit_account_candidates", "work,personal")
+	require.NoError(t, err)
+	resolved, err := ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"work", "personal"}, resolved.LimitAccountCandidates,
+		"the personal layer REPLACES the global list rather than merging into it")
+
+	unset, err := UnsetProjectConfigValue(project.ID, "limit_account_candidates")
+	require.NoError(t, err, "clearing the last entry must not trip the rewrite guard")
+	require.True(t, unset.Removed)
+	resolved, err = ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"global-only"}, resolved.LimitAccountCandidates,
+		"clearing the project override falls back to the global list, not to empty")
+}
