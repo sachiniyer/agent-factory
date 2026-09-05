@@ -98,7 +98,7 @@ rather than whichever one your shell happens to have.
 
 ```bash
 af accounts login codex work   # register it, then run codex's own login in it
-af sessions create --name spike --account work
+af sessions create --name spike --program codex --account work
 ```
 
 `af` never reads, stores, or forwards the credential itself — it decides which
@@ -109,7 +109,7 @@ both `limit_auto_resume` and an explicit `limit_account_candidates` list. The
 TUI's naming form (`ctrl+o`) and the web client's new-session modal offer the
 same field.
 
-Full page: [Accounts and usage limits](usage-limits.md).
+Full page: [Accounts and usage limits](usage-limits.md#accounts).
 
 ## The short version
 
