@@ -607,19 +607,19 @@
       "title": "Register and select per-session agent credential accounts",
       "tui": {
         "status": "yes",
-        "pointer": "ui/config_pane_accounts.go accountsSection (list + register); app/account_login.go loadAccountsIntoPane, handleAccountRegister; app/account_picker.go openAccountPicker (ctrl+o on the naming form) -> app/session_control.go CreateSessionRequest.Account"
+        "pointer": "ui/config_pane_accounts.go accountsSection (list + register); app/account_login.go loadAccountsIntoPane, handleAccountRegister; app/account_picker.go openAccountPicker (ctrl+o on the naming form), fetchAccountDefault/handleAccountDefault (preselects the project default, #3386) -> app/session_control.go CreateSessionRequest.Account"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/accounts.ts renderAccountsSection (list + register); web/src/index.ts doRegisterAccount, accountsRefetcher; web/src/account_scope.ts accountChoices -> web/src/modals.ts newSessionModal's Account field -> web/src/api.ts createSession body.account"
+        "pointer": "web/src/accounts.ts renderAccountsSection (list + register); web/src/index.ts doRegisterAccount, accountsRefetcher; web/src/account_scope.ts accountChoices, accountDefaultFor -> web/src/modals.ts newSessionModal's Account field (preselects the project default, #3386) -> web/src/api.ts createSession body.account"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/accountscmd.go accountsAddCmd, accountsListCmd; api/sessions.go --account; internal/sessionenv/account_scope.go"
+        "pointer": "commands/accountscmd.go accountsAddCmd, accountsListCmd; api/sessions.go --account; commands/configcmd.go `af config set default_accounts.<agent> --project` (#3386); internal/sessionenv/account_scope.go"
       },
       "verdict": "parity",
       "issue": "#3844",
-      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have."
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key \u2014 a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file \u2014 which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
     },
     {
       "id": "session.archive",

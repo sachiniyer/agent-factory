@@ -44,6 +44,15 @@ type ProjectConfig struct {
 	// ProgramOverrides entries merge key-wise over the lower layers: a key set
 	// here wins for that agent, other agents' entries still apply.
 	ProgramOverrides map[string]string `toml:"program_overrides,omitempty"`
+	// DefaultAccounts names, per agent, the credential account this project's
+	// sessions run as when the create names none (#3386). Entries merge key-wise
+	// over the global map exactly as ProgramOverrides does, so scoping one agent
+	// here leaves the others on whatever the global layer said.
+	//
+	// This is the layer the feature exists for: an account is a personal identity,
+	// so "this project runs as my work codex" is a statement about one machine and
+	// one person, never about the repository.
+	DefaultAccounts map[string]string `toml:"default_accounts,omitempty"`
 	// BranchPrefix overrides the git branch prefix for this project's sessions.
 	BranchPrefix string `toml:"branch_prefix,omitempty"`
 	// OnArchiveCommand overrides the operator-authored archive hook for this
@@ -193,6 +202,11 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := validateDefaultAccounts(
+		fmt.Sprintf("Config issue in %s", prettyPath), cfg.DefaultAccounts); err != nil {
+		return nil, err
 	}
 
 	// The same shape warning (#3566), beside the same key check above. This layer

@@ -73,10 +73,10 @@ func TestStartNewInstanceNeverProvisionsTheRepoBackend(t *testing.T) {
 			seen := recordPlaceholderProvision(t)
 			h.repoRoot = repoDeclaringBackend(t, repoBackend)
 
-			model, cmd := h.startNewInstance(false)
+			model, _ := h.startNewInstance(false)
 
 			require.Same(t, h, model)
-			require.Nil(t, cmd, "pressing n must open the form, not report an error")
+			requireNamingFormOpened(t, h, "pressing n must open the form, not report an error")
 			assert.Equal(t, stateNew, h.state,
 				"the naming form must open no matter which backend the repo declares")
 			require.NotNil(t, h.namingInstance, "the rail needs a row to name")
@@ -121,9 +121,9 @@ func TestStartNewRemoteThreadsForceRemoteFromTheKeypress(t *testing.T) {
 	})
 	h.repoRoot = repoDir
 
-	model, cmd := h.startNewInstance(true)
+	model, _ := h.startNewInstance(true)
 	require.Same(t, h, model)
-	require.Nil(t, cmd, "N in a hook-configured repo must open the form")
+	requireNamingFormOpened(t, h, "N in a hook-configured repo must open the form")
 	require.Equal(t, stateNew, h.state)
 
 	// The placeholder is inert even for N: launch_cmd must not run while the user
@@ -182,10 +182,10 @@ func TestNamingPlaceholderIgnoresAnUnreadableRepoConfig(t *testing.T) {
 	recordPlaceholderProvision(t)
 	h.repoRoot = repoDeclaringBackend(t, "moonbase")
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance(false)
 
 	require.Same(t, h, model)
-	assert.Nil(t, cmd, "an unresolvable repo backend must not refuse the keypress")
+	requireNamingFormOpened(t, h, "an unresolvable repo backend must not refuse the keypress")
 	assert.Equal(t, stateNew, h.state, "the naming form must still open")
 	assert.Empty(t, h.errBox.FullError())
 }
@@ -203,10 +203,10 @@ func TestNamingPlaceholderDoesNotReachDockerRuntime(t *testing.T) {
 	// No docker.image: exactly the config from the issue's repro.
 	h.repoRoot = repoRoot
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance(false)
 
 	require.Same(t, h, model)
-	require.Nil(t, cmd, "the docker runtime must never be asked to provision a naming row")
+	requireNamingFormOpened(t, h, "the docker runtime must never be asked to provision a naming row")
 	assert.Equal(t, stateNew, h.state)
 	assert.NotContains(t, h.errBox.FullError(), "docker.image",
 		"a BackendConfigError here means the provisioner ran for a placeholder")
@@ -241,10 +241,10 @@ func TestNamingPlaceholderSkipsAResolvableDockerRepo(t *testing.T) {
 	writeRepoDockerImage(t, repoRoot, "alpine:3.20")
 	h.repoRoot = repoRoot
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance(false)
 
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	require.Equal(t, stateNew, h.state)
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, session.WorkspaceLocalWorktree, h.namingInstance.Capabilities().Workspace,

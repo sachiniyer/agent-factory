@@ -6497,9 +6497,10 @@ async function reapConfigAssistant(token2) {
     );
   }
 }
-async function listAccounts(token2) {
-  const resp = await af("ListAccounts", {}, token2);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [] };
+async function listAccounts(token2, repoPath = "") {
+  const body = repoPath === "" ? {} : { repo_path: repoPath };
+  const resp = await af("ListAccounts", body, token2);
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -6989,16 +6990,30 @@ function accountAgentSupported(accounts, agent) {
 }
 function accountChoices(accounts, agent) {
   const choices = [
-    { value: AMBIENT_ACCOUNT, label: "Ambient identity (the agent's own login)", agent, blocked: "", note: "" }
+    {
+      value: AMBIENT_ACCOUNT,
+      label: "Ambient identity (the agent's own login)",
+      agent,
+      blocked: "",
+      note: "",
+      projectDefault: false
+    }
   ];
   if (accounts === null || agent === "") {
     return choices;
   }
+  const fallback = accountDefaultFor(accounts, agent);
+  let listed = false;
   for (const entry of accounts.entries) {
     if (entry.agent !== agent) {
       continue;
     }
+    const isDefault = entry.name === fallback;
+    listed = listed || isDefault;
     const marks = [];
+    if (isDefault) {
+      marks.push("project default");
+    }
     if (entry.registration_only) {
       marks.push("registration only");
     }
@@ -7009,6 +7024,7 @@ function accountChoices(accounts, agent) {
       value: entry.name,
       label: marks.length === 0 ? entry.name : `${entry.name} \u2014 ${marks.join(" \xB7 ")}`,
       agent: entry.agent,
+      projectDefault: isDefault,
       // The daemon is the authority on this state: `registration_only` is computed
       // by the build that owns the registry, which may be newer than this client,
       // so the flag is trusted and only the wording is written here. The canonical
@@ -7019,7 +7035,28 @@ function accountChoices(accounts, agent) {
       note: entry.logged_in ? "" : `${entry.name} has no ${entry.agent} credential yet \u2014 the session will run as it until you log in from the Config view.`
     });
   }
+  if (fallback !== "" && !listed) {
+    choices.push({
+      value: fallback,
+      label: `${fallback} \u2014 project default \xB7 not registered`,
+      agent,
+      // NOT blocked: the daemon is the authority on what it accepts, and this
+      // client only knows that the registry it was handed did not list the name.
+      // Blocking here would be a client vetoing a value it merely does not
+      // recognize — and the create's own refusal names the config key, which is
+      // more use than a greyed-out button.
+      blocked: "",
+      note: `${fallback} is this project's default account but is not registered for ${agent} on the daemon host, so this create will be refused. Register it from the Config view, or pick another account.`,
+      projectDefault: true
+    });
+  }
   return choices;
+}
+function accountDefaultFor(accounts, agent) {
+  if (accounts === null || agent === "") {
+    return "";
+  }
+  return accounts.defaults?.[agent] ?? "";
 }
 function accountNotice(choices, selected) {
   const choice = choices.find((c) => c.value === selected);
@@ -10207,6 +10244,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let programCatalog = null;
   let accountRows = accountChoices(null, "");
   let accountAgent = "";
+  let accountPicked = false;
   let busy = false;
   const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
@@ -10239,10 +10277,21 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
     }
-    accountSelect.value = sameAgent && accountRows.some((c) => c.value === previous) ? previous : AMBIENT_ACCOUNT;
+    if (!sameAgent) {
+      accountPicked = false;
+    }
+    if (accountPicked && accountRows.some((c) => c.value === previous)) {
+      accountSelect.value = previous;
+    } else {
+      const preselect = accountDefaultFor(accounts, agent);
+      accountSelect.value = accountRows.some((c) => c.value === preselect) ? preselect : AMBIENT_ACCOUNT;
+    }
     syncSubmitState();
   };
-  accountSelect.addEventListener("change", syncSubmitState);
+  accountSelect.addEventListener("change", () => {
+    accountPicked = true;
+    syncSubmitState();
+  });
   programSelect.addEventListener("change", renderAccounts);
   const renderPrograms = () => {
     const previous = programSelect.value;
@@ -10270,6 +10319,19 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       programCatalog = null;
       programs = programChoices(null);
       renderPrograms();
+    });
+    void callbacks.loadAccounts(repoPath).then((registry) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      accounts = registry;
+      renderAccounts();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      accounts = null;
+      renderAccounts();
     });
     if (repoPath === "") {
       choices = backendChoices(null);
@@ -10307,13 +10369,6 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   renderChoices();
   renderAccounts();
   loadCatalogsFor(projectSelect.value);
-  void callbacks.loadAccounts().then((registry) => {
-    accounts = registry;
-    renderAccounts();
-  }).catch(() => {
-    accounts = null;
-    renderAccounts();
-  });
   void callbacks.suggestName().then((name) => {
     if (name !== "") {
       suggestedName = name;
@@ -15536,7 +15591,7 @@ var PALETTE_RETRY_MS = 1e3;
 var paletteRetryTimer = null;
 var hasDaemonPalette = false;
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
-var loadCreateAccounts = () => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token);
+var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
 var sessionEventGeneration = 0;
 var resyncRequestGeneration = 0;
@@ -15830,7 +15885,8 @@ function newSession() {
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
       // The credential-account registry (#3844): the daemon owns it, and it lives
-      // on the daemon's host rather than in any repo, so this takes no path.
+      // on the daemon's host rather than in any repo — but the account default it
+      // reports is the project's (#3386), so this follows the project picker.
       loadAccounts: loadCreateAccounts,
       // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
       // the web asks rather than generating a name of its own.

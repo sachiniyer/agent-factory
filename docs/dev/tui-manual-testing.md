@@ -397,6 +397,42 @@ from the daemon and NAMES THE ACCOUNT, which is only possible if the picked valu
 rode `CreateSessionRequest.Account` across the wire. A session that actually RUNS
 as the account needs a real agent binary, which is why that step stays here.
 
+The project default (#3386) is the same field arriving pre-filled. Set it for the
+project first, with af's own verbs rather than by hand — the point is that the
+documented gesture produces it:
+
+```bash
+af projects register <repo>                          # once
+af config set default_accounts.claude <name> --project <repo>
+af_boot; af_ensure_nav; af_focus_tree
+af_send n; af_wait_for 'submit name'
+af_wait_for 'account ✓'          # NO ctrl+o, NO pick — this is the whole feature
+af_send C-o; af_wait_for '<name>.*project default'   # and it says WHY
+af_send Escape
+af_send Tab; af_send Down; af_send Enter             # change the program…
+af_wait_gone 'account ✓'                             # …and the claude default drops
+af_send Tab; af_send Up; af_send Enter               # back to claude…
+af_wait_for 'account ✓'                              # …and it returns, per agent
+```
+
+The `account ✓` with no keypress is the assertion that distinguishes this feature
+from the daemon quietly applying a default on the create: the session is identical
+either way, and what #3386 adds is that the user sees which identity it will run as
+before pressing enter. The appear → disappear → reappear sequence on that one
+marker is also what makes the check non-vacuous — a marker that were always painted
+would fail the middle leg.
+
+Set the key to an account that is NOT registered to see the other half: the row is
+still offered, appended last and labelled `project default · not registered`,
+because hiding it would leave the form reporting the ambient identity while the
+config says otherwise. That create is refused by the daemon naming the key and the
+file it is set in.
+
+`scripts/tui-3386-scenario.sh` automates all of the above, with the same stand-in
+caveat as #3844's: the create is refused by the account boundary, and the refusal
+naming the account is the evidence that a value nobody typed was resolved from the
+project's config and carried across the wire.
+
 `enter newline` is the overlay's own hint row, used as the marker rather than
 its `Initial prompt` title: the status-bar hint underneath says `initial
 prompt` too, so the title alone cannot tell "field open" from "field

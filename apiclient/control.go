@@ -274,10 +274,15 @@ func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBacken
 }
 
 // ListAccounts reads the daemon host's registered accounts and their logged-in
-// state. HTTP twin of ListAccounts.
-func (c *Client) ListAccounts(agent string) (daemon.ListAccountsResponse, error) {
+// state, plus the per-agent account defaults configured for repoPath (#3386).
+// HTTP twin of ListAccounts.
+//
+// repoPath is optional and only sharpens the defaults: the registry and the
+// roster are the daemon host's regardless of project.
+func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsResponse, error) {
 	var resp daemon.ListAccountsResponse
-	if err := c.call("ListAccounts", daemon.ListAccountsRequest{Agent: agent}, &resp); err != nil {
+	req := daemon.ListAccountsRequest{Agent: agent, RepoPath: repoPath}
+	if err := c.call("ListAccounts", req, &resp); err != nil {
 		return daemon.ListAccountsResponse{}, err
 	}
 	return resp, nil

@@ -534,6 +534,15 @@ export interface AccountEntry {
 export interface AccountsResponse {
   entries: AccountEntry[];
   agents: string[];
+  /** Per agent, the account a create with NO explicit account would run as for
+   *  the project this was fetched for — the `default_accounts` config key,
+   *  resolved by the daemon through the precedence the create applies (#3386).
+   *  An agent with no configured default is absent, meaning the ambient identity.
+   *
+   *  Optional because the daemon omits it when empty, and because a daemon older
+   *  than this client does not send it at all — in which case the picker simply
+   *  offers no preselection, which is what it did before this field existed. */
+  defaults?: Record<string, string>;
 }
 
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */

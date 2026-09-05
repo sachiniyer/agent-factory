@@ -84,6 +84,7 @@ type configEntry struct {
 var globalConfigReadOrder = []string{
 	"default_program",
 	"program_overrides",
+	"default_accounts",
 	"session_env_passthrough",
 	"auto_update",
 	"network.listen_addr",
@@ -513,7 +514,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
@@ -525,6 +526,7 @@ Examples:
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
+  af config set default_accounts.codex work --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo
 
 With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global write is sent

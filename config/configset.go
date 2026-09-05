@@ -167,6 +167,15 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"program_overrides": {kind: cfgString, section: "program_overrides", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		return ValidateProgramEnum("program_overrides key", "program_overrides key", leaf, v)
 	}},
+	// The project-scoped credential identity (#3386). A dynamic family keyed by
+	// AGENT, so `af config set default_accounts.codex work --project <path>` is the
+	// gesture, and the whole map is still writable as compact JSON by the config
+	// panes. The validator is the loader's own, so a shape a hand-edit would be
+	// rejected for is rejected at the command that took it — existence of the
+	// account is checked at create time instead, where a missing one matters.
+	"default_accounts": {kind: cfgString, section: "default_accounts", dynamic: true, structured: true, validate: func(leaf, v string) error {
+		return ValidateDefaultAccountEntry("default_accounts key", leaf, v)
+	}},
 	"limit_patterns": {kind: cfgString, section: "limit_patterns", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		if err := ValidateProgramEnum("limit_patterns key", "limit_patterns key", leaf, v); err != nil {
 			return err
@@ -432,6 +441,9 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	if writeErr != nil {
 		return nil, writeErr
 	}
+	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+	}
 	return result, nil
 }
 
@@ -482,6 +494,12 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	})
 	if writeErr != nil {
 		return nil, writeErr
+	}
+	// The same note the global write produces (#3386). A per-project account
+	// default is the shape this key exists for, so it is the one that most needs
+	// to say "that account is not registered yet" at the moment it is typed.
+	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
 	}
 	return result, nil
 }

@@ -243,6 +243,12 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 			return err
 		}
 		field.Set(reflect.ValueOf(normalized))
+	case "default_accounts":
+		for agent, name := range field.Interface().(map[string]string) {
+			if err := ValidateDefaultAccountEntry("default_accounts key", agent, name); err != nil {
+				return err
+			}
+		}
 	case "limit_patterns":
 		for agent, pattern := range field.Interface().(map[string]string) {
 			if err := ValidateProgramEnum("limit_patterns key", "limit_patterns key", agent, pattern); err != nil {

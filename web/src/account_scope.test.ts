@@ -17,6 +17,7 @@ import {
   accountAgentFor,
   accountAgentSupported,
   accountChoices,
+  accountDefaultFor,
   accountNotice,
   accountSelectable,
   accountSkewMessage,
@@ -218,4 +219,50 @@ test("an applied account raises nothing, and neither does an ambient create", ()
     "",
     "a daemon that volunteered an account nobody asked for is not this check's business",
   );
+});
+
+// #3386: a project can default to an account. The web's job is to SHOW that
+// default and let the user change it — the issue's complaint is that a default
+// applied by the daemon in silence is indistinguishable from no default at all.
+
+test("the project default is read from the daemon, never computed here", () => {
+  const accounts = registry({ defaults: { claude: "work", codex: "work" } });
+
+  assert.equal(accountDefaultFor(accounts, "claude"), "work");
+  assert.equal(accountDefaultFor(accounts, "gemini"), "", "an agent with no configured default has none");
+  assert.equal(accountDefaultFor(accounts, ""), "", "an unresolvable program resolves to no registry");
+  assert.equal(accountDefaultFor(null, "claude"), "", "a registry that never loaded reports nothing");
+  assert.equal(
+    accountDefaultFor(registry(), "claude"),
+    "",
+    "a daemon too old to send defaults offers no preselection rather than a guessed one",
+  );
+});
+
+test("the default's row says so, and only that agent's row does", () => {
+  const accounts = registry({ defaults: { claude: "work" } });
+  const claude = accountChoices(accounts, "claude");
+  const codex = accountChoices(accounts, "codex");
+
+  const marked = claude.filter((c) => c.projectDefault);
+  assert.deepEqual(marked.map((c) => c.value), ["work"], "exactly the configured account is marked");
+  assert.match(marked[0].label, /project default/, "and the label says it, so the preselection is not silent");
+  assert.equal(
+    codex.every((c) => !c.projectDefault),
+    true,
+    "an account belongs to ONE agent: a claude default must never be attributed to codex's same-named account",
+  );
+});
+
+test("a default naming an unregistered account is OFFERED, labelled, and not blocked", () => {
+  const accounts = registry({ defaults: { claude: "retired" } });
+  const choices = accountChoices(accounts, "claude");
+
+  const row = choices.find((c) => c.value === "retired");
+  assert.notEqual(row, undefined, "hiding it would show the ambient identity while the config says otherwise");
+  assert.equal(choices[choices.length - 1].value, "retired", "appended last, so it displaces no real choice");
+  assert.match(row!.label, /not registered/);
+  assert.equal(row!.blocked, "", "the daemon is the authority on what it accepts; this client only knows its own list");
+  assert.equal(accountSelectable(choices, "retired"), true);
+  assert.match(accountNotice(choices, "retired"), /refused/, "and the note says the create will be refused");
 });

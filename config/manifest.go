@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -355,6 +356,29 @@ var configManifest = []ManifestEntry{
 		Enum:       tmux.SupportedPrograms,
 		Sources:    sourceGlobalRepoPersonal,
 		Precedence: precedenceGlobalRepoPersonal,
+		Merge:      MergeMapByKey,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:  "default_accounts",
+		Type: "table",
+		// Deliberately no Default value to quote: the built-in state is "no entry
+		// for any agent", which is the ambient identity every session had before
+		// this key existed.
+		Default:  "none · sessions run on the agent's own ambient login",
+		Purpose:  "Which of an agent's logged-in accounts a new session runs as · one entry per agent, most useful set per project so one project runs as your work identity and another as your personal one.",
+		Tier:     TierAdvanced,
+		Settable: true,
+		// The KEYS are enumerated, not the values: only an agent whose credential
+		// root af can relocate may be scoped to an account at all, and that set is
+		// narrower than tmux.SupportedPrograms. An account NAME is free-form.
+		Enum: sessionenv.AccountAgents(),
+		// Global and personal-per-project, never in-repo. Identity policy is never
+		// checked in: a committed account name is meaningless for everyone else who
+		// clones the repository, and af must not let a repo choose whose quota its
+		// sessions spend (the #3174 precedent for limit_account_candidates).
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
 		Merge:      MergeMapByKey,
 		Formats:    formatTOMLJSON,
 	},

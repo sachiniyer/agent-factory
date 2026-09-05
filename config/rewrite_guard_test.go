@@ -184,3 +184,59 @@ func TestEverySettableKeyIsExemptable(t *testing.T) {
 	assert.Empty(t, configRewriteDrift(before, after, SchemaVersionField),
 		"the machine-managed schema marker every global write touches must be exemptable too")
 }
+
+// TestUnsettingTheLastDynamicMapEntryIsNotDrift is the regression this guard's
+// nil-vs-empty comparison exists for, driven through the real writer.
+//
+// It is NOT about default_accounts: program_overrides is the older key with the
+// same shape, and it was refused the same way. Removing the last entry of a
+// dynamic map left the guard comparing an emptied map against a nil one and
+// refusing its own writer's edit with "would change program_overrides from map[]
+// to map[]" — two values printed identically because they are the same
+// configuration. `af config unset <key> --project <path>` is documented as the way
+// to clear a per-project override, and it could not clear the last one.
+func TestUnsettingTheLastDynamicMapEntryIsNotDrift(t *testing.T) {
+	for _, key := range []string{"program_overrides.claude", "default_accounts.codex"} {
+		t.Run(key, func(t *testing.T) {
+			_, repoRoot, project := registeredTestProject(t)
+			value := "/opt/claude --verbose"
+			if key == "default_accounts.codex" {
+				value = "work"
+			}
+			_, err := SetProjectConfigValue(project.ID, key, value)
+			require.NoError(t, err)
+
+			_, err = UnsetProjectConfigValue(repoRoot, key)
+			require.NoError(t, err, "removing the last entry of a dynamic map is the edit the writer asked for")
+
+			// The PERSONAL layer is what unset clears, so that is what is asserted.
+			// A resolved value can legitimately come back from a lower layer —
+			// program_overrides has a built-in auto-detected claude entry — and
+			// asserting on it would be asserting the wrong thing.
+			personal, err := LoadProjectConfig(project.ID)
+			require.NoError(t, err)
+			if personal != nil {
+				assert.Empty(t, personal.ProgramOverrides["claude"])
+				assert.Empty(t, personal.DefaultAccounts["codex"])
+			}
+			_ = repoRoot
+		})
+	}
+}
+
+// The control, and the reason the fix is a normalization rather than a loosened
+// comparison: a SIBLING entry must still be guarded, so an edit that would move
+// one is still refused.
+func TestUnsettingOneEntryStillGuardsItsSiblings(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID,
+		"[default_accounts]\ncodex = \"work\"\nclaude = \"personal\"\n")
+
+	_, err := UnsetProjectConfigValue(repoRoot, "default_accounts.codex")
+	require.NoError(t, err)
+
+	resolved, err := ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	assert.Empty(t, resolved.DefaultAccounts["codex"], "the named entry is gone")
+	assert.Equal(t, "personal", resolved.DefaultAccounts["claude"], "and its sibling is untouched")
+}

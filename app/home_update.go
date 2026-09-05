@@ -298,6 +298,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// it holds (#3844); open the picker over the answer, if the form is still
 		// open ON THE SAME PROGRAM — see handleAccountRegistry.
 		return m.handleAccountRegistry(msg)
+	case accountDefaultMsg:
+		// The naming form asked which account this PROJECT would apply to a create
+		// that names none (#3386); preselect it, so the default is visible and
+		// changeable rather than applied in silence.
+		return m.handleAccountDefault(msg)
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
