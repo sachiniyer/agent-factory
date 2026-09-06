@@ -217,10 +217,13 @@ tick, with explanatory text in the row.
 
 In the form, enter **Name**, choose **Project**, and choose a **Trigger**. A
 **Cron schedule** uses a schedule picker with time, interval, or weekday controls
-as appropriate; **Custom** accepts a raw cron expression. **Watch command** shows
+as appropriate; **Custom (cron)** accepts a raw cron expression. **Watch command** shows
 a command field instead. **Prompt** supplies the instructions (required for cron);
 a watch prompt may use `{{line}}` for the matched line. **Target session** is
-optional; **Program** selects the agent for a new session. Submit with **Add** or
+optional; **Program** selects the agent for a new session. **On done** chooses
+Keep, Archive or Kill for a session spawned by the task; its hint explains the
+consequence. A task targeting an existing session cannot apply that cleanup.
+Submit with **Add** or
 **Save**, or leave with **Cancel**. Invalid values show an inline error.
 See [Tasks and automation](tasks.md) for scheduling semantics.
 
