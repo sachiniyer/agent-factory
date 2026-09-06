@@ -104,7 +104,6 @@ var globalConfigReadOrder = []string{
 	"upgrade_clear_unverifiable_artifacts",
 	"vscode_server_binary",
 	"appearance",
-	"theme",
 	"root_agents",
 	"root_agent",
 	"limit_auto_resume",
@@ -252,6 +251,10 @@ Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_U
 is refused rather than ignored. Run it on the daemon host to ask about that host.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := config.RetiredThemeKeyError(args[0]); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
+
 		log.Initialize(false)
 		defer log.Close()
 		if err := requireLocalTarget("af config get", "resolves the value from this machine's config"); err != nil {
@@ -441,6 +444,9 @@ func writeRootAgentShapeLegend(w io.Writer) error {
 }
 
 func unknownConfigKeyError(key string) error {
+	if err := config.RetiredThemeKeyError(key); err != nil {
+		return err
+	}
 	if key == "auto_yes" {
 		return config.RemovedAutoYesError()
 	}
@@ -461,7 +467,6 @@ Settable keys:
   default_program            agent enum (%s)
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
-  theme                      nord | zenburn | compact JSON object of #RRGGBB color slots
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
@@ -524,7 +529,7 @@ is rejected with the location it actually belongs to. Clear an override with
 Examples:
   af config set default_program codex
   af config set auto_update false
-  af config set theme zenburn
+  af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
@@ -541,6 +546,10 @@ writes a registered project's machine-local override file, which no remote daemo
 owns.`, tmux.SupportedProgramsString()),
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := config.RetiredThemeKeyError(args[0]); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
+
 		log.Initialize(false)
 		defer log.Close()
 		if configSetProjectFlag != "" {
@@ -697,6 +706,10 @@ quietly clears a key on this machine instead. --project stays local-only — the
 override file it clears is this machine's.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := config.RetiredThemeKeyError(args[0]); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
+
 		log.Initialize(false)
 		defer log.Close()
 		if configUnsetProjectFlag == "" {

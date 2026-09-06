@@ -374,7 +374,7 @@ func TestManifestTierAssignments(t *testing.T) {
 		"default_program", "network.listen_addr", "network.require_token",
 		"network.require_loopback_token", "update_channel", "auto_update", "appearance",
 	}
-	wantCommon := []string{"theme", "vscode_server_binary"}
+	wantCommon := []string{"vscode_server_binary"}
 
 	var gotCore, gotCommon []string
 	for _, e := range Manifest() {
@@ -501,7 +501,7 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 		"`af config set network.require_loopback_token <value>`",
 		"`af config set program_overrides <value>`",
 		"`af config set limit_patterns <value>`",
-		"`af config set theme <value>`",
+		"`af config set appearance <value>`",
 		"`af config set session_env_passthrough <value>`",
 		"`af config set root_agents <value>`",
 		"`af config set root_agent <value>`",
@@ -531,37 +531,6 @@ func TestRenderBriefingIntroducesValidatedSetPathAndPerKeyTiming(t *testing.T) {
 	} {
 		if strings.Contains(out, obsolete) {
 			t.Errorf("briefing introduction still contains obsolete guidance %q", obsolete)
-		}
-	}
-}
-
-func TestRenderBriefingDescribesThemeAsScalarOrTable(t *testing.T) {
-	entry := manifestKeyIndex(t)["theme"]
-	if !reflect.DeepEqual(entry.AcceptedTypes, []string{"string", "table"}) {
-		t.Fatalf("theme accepted types = %v, want string and table", entry.AcceptedTypes)
-	}
-
-	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
-	themeStart := strings.Index(out, "### `theme`")
-	if themeStart < 0 {
-		t.Fatal("briefing has no theme section")
-	}
-	themeEnd := strings.Index(out[themeStart+1:], "\n### `")
-	if themeEnd < 0 {
-		themeEnd = len(out) - themeStart - 1
-	}
-	theme := out[themeStart : themeStart+1+themeEnd]
-
-	if !strings.Contains(theme, "- type: string or table") {
-		t.Errorf("theme briefing does not describe both accepted shapes:\n%s", theme)
-	}
-	if strings.Contains(theme, "not a single value") {
-		t.Errorf("theme briefing contradicts the scalar preset syntax:\n%s", theme)
-	}
-
-	for _, rendered := range ManifestWithValues(DefaultConfig()) {
-		if rendered.Key == "theme" && !reflect.DeepEqual(rendered.AcceptedTypes, entry.AcceptedTypes) {
-			t.Errorf("rendered theme accepted types = %v, want %v", rendered.AcceptedTypes, entry.AcceptedTypes)
 		}
 	}
 }

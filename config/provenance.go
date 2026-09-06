@@ -237,7 +237,6 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	leafValues := make(map[string]reflect.Value)
 	origins := make(map[string]SourceRef)
 	materialized := false
-	var themeIdentity *ThemeConfig
 	for i := range candidates {
 		candidate := &candidates[i]
 		trace := &result.Candidates[candidate.traceIndex]
@@ -247,11 +246,6 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		}
 
 		configured, _ := candidate.document.metadata.topLevel(entry.Key)
-		if entry.Key == "theme" {
-			if theme, ok := reflectedThemeConfig(candidate.typed); ok {
-				themeIdentity = &theme
-			}
-		}
 		leaves, configuredCount, normalizedCount, candidateMaterialized, err := compositeLeaves(
 			candidate.typed, configured, candidate.document.isBuiltIn())
 		if err != nil {
@@ -358,26 +352,7 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	if len(origins) > 0 {
 		result.Origins = origins
 	}
-	if entry.Key == "theme" && themeIdentity != nil {
-		theme := value.Interface().(ThemeConfig)
-		theme.preset = themeIdentity.preset
-		theme.explicitPreset = themeIdentity.explicitPreset
-		value = reflect.ValueOf(theme)
-	}
 	return computedValue{resolved: result, value: value}, nil
-}
-
-func reflectedThemeConfig(value reflect.Value) (ThemeConfig, bool) {
-	for value.IsValid() && value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return ThemeConfig{}, false
-		}
-		value = value.Elem()
-	}
-	if !value.IsValid() || value.Type() != reflect.TypeOf(ThemeConfig{}) {
-		return ThemeConfig{}, false
-	}
-	return value.Interface().(ThemeConfig), true
 }
 
 func setNonParticipantResult(trace *CandidateTrace) {
@@ -482,13 +457,6 @@ func compositeLeaves(value reflect.Value, configured any, builtIn bool) (map[str
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		materialized = true
-	} else if _, namedPreset := configured.(string); namedPreset && value.Kind() == reflect.Struct {
-		// A dual-shape composite such as theme = "zenburn" configures the
-		// complete typed struct produced by its text decoder. Treating the scalar
-		// only as top-level presence would make every expanded field look like an
-		// unconfigured mutation of the inherited snapshot.
-		names = compositeNames(value)
 		materialized = true
 	} else {
 		// JSON null is a present, typed nil table. It contributes no fields but
@@ -675,7 +643,7 @@ func pluralize(word string, count int) string {
 }
 
 // ResolvedValuePath returns either a top-level resolution or a dotted leaf
-// projection such as program_overrides.codex or theme.accent. Only values with
+// projection such as program_overrides.codex or root_agent.program. Only values with
 // a real per-leaf origin can be projected: borrowing a replace-table's winner
 // would fabricate a source for omitted fields materialized as zero values. A
 // leaf is projected from the already-resolved value and origins; it never runs

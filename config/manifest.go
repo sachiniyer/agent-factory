@@ -67,8 +67,7 @@ type ManifestEntry struct {
 	Type string
 	// AcceptedTypes lists every config shape the decoder accepts when Type alone
 	// is incomplete. It includes Type itself and is nil for ordinary one-shape
-	// keys. Theme uses this to describe its named string presets and custom table
-	// without weakening Type's lock to the normalized Go struct.
+	// keys. Type continues to describe the normalized Go value.
 	AcceptedTypes []string
 	// Default is the default value rendered for a human. For a key whose default
 	// is deterministic, TestManifestDefaultsMatchDefaultConfig pins this against
@@ -214,22 +213,6 @@ var configManifest = []ManifestEntry{
 	},
 
 	// ---- Tier 2 ----
-	{
-		Key:  "theme",
-		Type: "table",
-		AcceptedTypes: []string{
-			"string",
-			"table",
-		},
-		Default:    "nord",
-		Purpose:    "Colors the terminal and browser interfaces use · choose the nord or zenburn preset, or provide one #RRGGBB value per custom slot.",
-		Tier:       TierCommon,
-		Settable:   true,
-		Sources:    sourceGlobalOnly,
-		Precedence: precedenceGlobal,
-		Merge:      MergeTableByField,
-		Formats:    formatTOMLOnly,
-	},
 	{
 		Key:        "vscode_server_binary",
 		Type:       "string",

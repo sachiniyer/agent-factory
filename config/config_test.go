@@ -359,7 +359,7 @@ func TestDefaultConfig(t *testing.T) {
 		assert.False(t, cfg.RequireLoopbackToken)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
-		assert.Equal(t, DefaultThemeConfig(), cfg.Theme)
+		assert.Equal(t, "system", cfg.Appearance)
 		assert.NotEmpty(t, cfg.BranchPrefix)
 		assert.True(t, strings.HasSuffix(cfg.BranchPrefix, "/"))
 		assert.Equal(t, WorktreeRootSibling, cfg.WorktreeRoot)
@@ -966,10 +966,9 @@ func TestLoadConfig(t *testing.T) {
 		// an operator who wants auth finds the key already there to flip.
 		assert.Contains(t, string(data), `require_token = false`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
-		// Keep the automatic default in the table shape older TOML-era binaries
-		// understand; only an explicit named choice is compacted to a scalar.
-		assert.Contains(t, string(data), `[theme]`)
-		assert.Contains(t, string(data), `accent = '#88C0D0'`)
+		// New configs expose only fixed appearance modes.
+		assert.NotContains(t, string(data), `[theme]`)
+		assert.Contains(t, string(data), `appearance = 'system'`)
 		assert.NotContains(t, string(data), `theme = 'nord'`)
 
 		// The materialized file must reload cleanly through the TOML path.
@@ -1102,11 +1101,7 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
 		assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
-		assert.Equal(t, "#ABCDEF", cfg.Theme.Accent)
-		assert.Equal(t, "#010203", cfg.Theme.Foreground)
-		assert.Equal(t, "#AABBCC", cfg.Theme.PaneBorderPreview)
-		assert.Equal(t, DefaultThemeConfig().Success, cfg.Theme.Success,
-			"omitted theme fields keep their Nord defaults")
+		assert.Equal(t, "system", cfg.Appearance)
 		assert.Equal(t, "/home/me/.local/bin/claude --dangerously-skip-permissions",
 			cfg.ProgramOverrides[tmux.ProgramClaude])
 		assert.Equal(t, "/opt/codex/bin/codex --quiet",
@@ -1160,7 +1155,7 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.True(t, cfg.RequireLoopbackToken)
 	})
 
-	t.Run("invalid theme color warns and falls back", func(t *testing.T) {
+	t.Run("retired theme color migrates to system", func(t *testing.T) {
 		var warnings logtest.Buffer
 		prevWarning := log.WarningLog
 		log.WarningLog = stdlog.New(&warnings, "", 0)
@@ -1175,10 +1170,9 @@ error = "#cc9393"
 		cfg, err := LoadConfig()
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
-		assert.Equal(t, DefaultThemeConfig().Accent, cfg.Theme.Accent)
-		assert.Equal(t, "#CC9393", cfg.Theme.Error)
-		assert.Contains(t, warnings.String(), "theme.accent")
-		assert.Contains(t, warnings.String(), "not a #RRGGBB color")
+		assert.Equal(t, "system", cfg.Appearance)
+		assert.Contains(t, warnings.String(), "appearance")
+		assert.Contains(t, warnings.String(), "migrated retired theme")
 	})
 
 	t.Run("loads legacy config.toml without schema_version as current schema", func(t *testing.T) {

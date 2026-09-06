@@ -183,22 +183,22 @@
       "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. TUI/web exposure is tracked by #2216."
     },
     {
-      "id": "theme.apply",
-      "title": "Apply the configured semantic theme palette",
+      "id": "appearance.select",
+      "title": "Select Light / Dark / System appearance",
       "tui": {
         "status": "yes",
-        "pointer": "app/home_model.go:434 -> app/theme.go applyTheme -> ui/theme.go ApplyTheme"
+        "pointer": "ui/appearance.go configEnumLabels; app/home_model.go -> ui/appearance.go ApplyAppearance; config/appearance.go"
       },
       "web": {
-        "status": "n/a",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/ui.ts THEME_CHOICES; web/src/index.ts -> web/src/theme.ts stampTheme/currentMode"
       },
       "cli": {
         "status": "n/a",
-        "pointer": ""
+        "pointer": "commands/configcmd.go config set appearance (edits the TUI preference)"
       },
       "verdict": "deliberate",
-      "notes": "#3913 retires configurable web palettes and the last GetTheme caller, so the daemon renderer-read endpoint is removed. The web selects fixed generated Light/Dark/System palettes locally (web/src/theme.ts). Legacy TUI ApplyTheme remains in use until P5 of #3906; CLI has no persistent visual renderer."
+      "notes": "TUI and web independently select fixed Light/Dark/System palettes. TUI System detects terminal background with dark fallback; web System follows OS appearance. The CLI edits the TUI appearance setting for its next launch and has no persistent renderer; it does not change the browser preference. Appearance is client-local; there is no shared palette RPC. See docs/design/tui-theme-daemon-follow-up.md for the migration and launch/apply boundary."
     },
     {
       "id": "config.validate",

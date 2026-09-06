@@ -287,7 +287,7 @@ function mount(): void {
   // chord is swallowed here (stopPropagation) so it never leaks into the PTY.
   document.addEventListener("keydown", onKeydown, true);
 
-  // Follow the OS theme while the choice is Auto (redesign PR1).
+  // Follow the OS theme while the choice is System (redesign PR1).
   watchSystemTheme();
 
   void bootstrap();
@@ -1929,7 +1929,7 @@ function setTheme(choice: ThemeChoice): void {
   splitView.applyTheme();
 }
 
-/** While the choice is Auto, follow the OS: a prefers-color-scheme flip re-themes the
+/** While the choice is System, follow the OS: a prefers-color-scheme flip re-themes the
  *  terminals to match (the CSS chrome already reacts via the media query). An explicit
  *  Light/Dark choice ignores the OS. */
 function watchSystemTheme(): void {
@@ -2128,11 +2128,6 @@ function stopStream(): void {
  * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
-  if (ev.type === "theme.changed") {
-    // Older daemons publish this after live config/auth changes. Refresh data, never colors.
-    requestResync();
-    return;
-  }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns
   // tasks.json, so a task.created/updated/removed event just triggers a debounced
   // ListTasks refetch (the authoritative task projection). The session reducer

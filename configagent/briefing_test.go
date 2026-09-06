@@ -165,7 +165,7 @@ func TestBriefingSetsStructuredKeysThroughConfigSet(t *testing.T) {
 	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
 
 	for _, key := range []string{
-		"theme", "keys", "root_agents", "root_agent", "program_overrides",
+		"keys", "root_agents", "root_agent", "program_overrides",
 		"limit_patterns", "session_env_passthrough",
 	} {
 		if !strings.Contains(out, "`"+key+"`") {
@@ -188,8 +188,8 @@ func TestBriefingSetsStructuredKeysThroughConfigSet(t *testing.T) {
 			t.Errorf("briefing still directs a raw structured edit: %q", retired)
 		}
 	}
-	if !strings.Contains(out, "do not offer to pick hex values") {
-		t.Error("briefing should still tell the agent not to pick hex values slot by slot in conversation")
+	if !strings.Contains(out, "custom color editing is retired") {
+		t.Error("briefing must restrict appearance to fixed modes")
 	}
 	if !strings.Contains(out, "`af config set network.cors_allowed_origins <value>`") {
 		t.Error("the assistant must use the canonical settable network key for the CORS list")
@@ -203,16 +203,6 @@ func TestBriefingUsesPerKeyEffectNoticeForStructuredSettings(t *testing.T) {
 	}
 	if strings.Contains(out, "same validated, immediate-apply") {
 		t.Error("briefing still claims every structured setting applies immediately")
-	}
-}
-
-func TestBriefingAllowsPartialCustomThemeObjects(t *testing.T) {
-	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
-	if !strings.Contains(out, "only the requested color slots") {
-		t.Error("briefing must explain that a custom theme object may contain only requested slots")
-	}
-	if strings.Contains(out, "containing all") {
-		t.Error("briefing still requires every color slot in a custom theme object")
 	}
 }
 

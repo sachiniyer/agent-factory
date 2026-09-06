@@ -13,7 +13,7 @@ is separate and follows the OS for System.
 
 Legacy `auto`, absent and unknown values resolve to System; reading does not
 rewrite the file, and saving a valid choice replaces it. Retired palette rows
-are hidden even from older daemon manifests. See [configuration migration](../configuration.md#theme-colors-theme)
+are hidden even from older daemon manifests. See [configuration migration](../configuration.md#appearance-and-legacy-theme-migration)
 for the full retired-key list and the deliberately separate daemon cleanup in
 [#3936](https://github.com/sachiniyer/agent-factory/issues/3936).
 

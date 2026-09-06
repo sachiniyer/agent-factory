@@ -164,7 +164,7 @@ reverse proxy that terminates TLS (nginx, caddy), or a VPN such as Tailscale.
 
 `)
 
-	fmt.Fprintf(&b, `
+	fmt.Fprint(&b, `
 ## Editing the structured settings
 
 Structured settings use one compact JSON value. Read the current JSON with
@@ -172,9 +172,6 @@ Structured settings use one compact JSON value. Read the current JSON with
 to `+"`af config set <key> '<json>'`"+`. Shell-quote the JSON so it remains one argument.
 The structured settings are:
 
-- `+"`theme`"+` — the `+"`nord`"+` or `+"`zenburn`"+` preset name, or a partial
-  object containing only the requested color slots as `+"`#RRGGBB`"+` strings;
-  omitted slots keep their current colors (there are %d slots in the full palette).
 - `+"`keys`"+` — an object whose entries rebind TUI actions.
 - `+"`root_agents`"+` — an object keyed by repository path, with one root-agent profile
   per value.
@@ -186,11 +183,9 @@ The structured settings are:
 - `+"`session_env_passthrough`"+` — an array of exact environment variable NAMES a
   session may inherit. Names only — never put a value here. This is a security setting.
 
-For `+"`theme`"+` specifically: do not offer to pick hex values slot by slot in
-conversation — that is a miserable way to choose colors. Ask what they want (a darker
-background, a different accent), submit only those slots in a partial object, and set it.
+Appearance offers only `+"`light`"+`, `+"`dark`"+`, or `+"`system`"+`; custom color editing is retired.
 
-`, config.ThemeSlotCount())
+`)
 
 	fmt.Fprintf(&b, "## The settings\n\nEvery setting below is shown with its current value on this machine.\n"+
 		"Recommend from these values · do not guess at what is set.\n\n%s\n",

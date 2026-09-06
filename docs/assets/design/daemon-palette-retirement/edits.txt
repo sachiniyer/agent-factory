@@ -1,0 +1,45 @@
+appearance edit light: light
+appearance edit dark: dark
+appearance edit system: system
+
+ Agent Factory
+ ▼ Sessions (0)
+
+
+
+
+                           ╭────────────────────────────────────────────────────────────────────────────────────╮
+                           │                                                                                    │
+                           │  Config  /home/dev/sandbox/home/config.toml                                        │
+                           │                                                                                    │
+                           │  Core                                                                              │
+                           │    default_program  claude                                                         │
+                           │    network.listen_addr  127.0.0.1:8443                                             │
+                           │    network.require_token  false                                                    │
+                           │    network.require_loopback_token  false                                           │
+                           │    update_channel  stable                                                          │
+                           │    auto_update  true                                                               │
+                           │  › appearance  System                                                              │
+                           │      TUI appearance · Light, Dark or System (terminal background); applies on      │
+                           │      next TUI launch.                                                              │
+                           │      one of: Light · Dark · System                                                 │
+                           │  Common                                                                            │
+                           │    vscode_server_binary  (unset)                                                   │
+                           │  Accounts                                                                          │
+                           │                                    No accounts                                     │
+                           │    ↓ 5 more                                                                        │
+                           │  set appearance = system                                                           │
+                           │  Saved — this setting takes effect the next time you launch af.                    │
+                           │                                                                                    │
+                           │  ↑/↓ move · ↵ edit · a show advanced · C assistant · esc close                     │
+                           │                                                                                    │
+                           │                                                                                    │
+                           ╰────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+                                             n new · N new remote · / search · ? help · q quit
+

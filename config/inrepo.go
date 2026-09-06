@@ -316,6 +316,9 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, tomlGlobalConfigLocation)
 	}
 	for key := range presentKeys {
+		if err := RetiredThemeKeyError(key); err != nil {
+			return nil, nil, fmt.Errorf("in-repo config %s: %w; remove the retired key from this file", prettyPath, err)
+		}
 		if inRepoGlobalOnlyKeys[key] {
 			// TOML-only global keys (the [keys] keymap, #1026) must point at
 			// config.toml — a config.json carrying "keys" is ignored-with-
