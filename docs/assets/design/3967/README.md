@@ -1,7 +1,7 @@
 # Focused-session phone header · #3967
 
 The six `before-phone-session-*` captures were recorded before implementation,
-from master `bfd04c2c7b2b8e1fc86da03c47bb8a5a0096b760`, using the existing container
+from master `3905ab48104334fce8cf126e4fdb43641ec8ad8f`, using the existing container
 recorder/selftest (`make perf-container`). The only recorder change added the
 360, 390 and 430px screenshots; the UI and bundle were unchanged. Both themes
 use 812px height. The baseline visual suite and all performance budgets passed.
