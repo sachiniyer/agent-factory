@@ -13,11 +13,12 @@ The specimens consume the generated CSS. TUI examples show the prescribed cell l
 and colours in HTML; they are not a running Bubble Tea app. Example controls are inert,
 except native disclosure menus. System selects one of these same two themes.
 
-The web stills show the real rail, header, terminal and tabs after P2 slices A/B; the remaining
-components are awaiting their slices. Web has six [recorder beats](../dev/demo-assets.md)
-in both themes, plus filter, project-menu, terminal-action, keyboard, split and phone captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
-screen/theme matrix. Missing captures are labelled. Empty/error specimens illustrate the rules; the [P4 recovery matrix](recovery-stills.md)
-provides asserted recordings. Click a still for the full screen.
+The web stills show the redesigned product after P2, recorded with the repository's
+[container recorder](../dev/demo-assets.md). TUI stills are real app-model Update/View
+frames after P5, with deterministic fixtures in both themes; they are not live agent
+recordings. The [TUI appearance gallery](tui-design-c-stills.md) covers the complete
+matrix, including Light · Dark · System. Empty/error web specimens link to the
+[P4 recovery matrix](recovery-stills.md). Click a still for the full screen.
 
 {{range .Components}}{{$c := .}}
 <h3>{{.Name}}</h3>
@@ -29,7 +30,7 @@ provides asserted recordings. Click a still for the full screen.
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="{{.}}"><h4>TUI · {{themeLabel .}}</h4><pre>{{tuiSample $c.TUI}}</pre></section>
-<figure>{{if $c.TUIStill}}<a href="../../assets/tui/{{$c.TUIStill}}"><img loading="lazy" src="../../assets/tui/{{$c.TUIStill}}" alt="Current TUI {{$c.Name}} evidence"></a>{{end}}<figcaption>{{$c.TUINote}}{{if $c.TUIStill}} Original colours preserved beside both theme specimens.{{end}}</figcaption></figure>
+<figure>{{if $c.TUIStill}}<a href="../../assets/design/tui-c/{{$c.TUIStill}}-{{.}}.svg"><img loading="lazy" src="../../assets/tui/{{$c.TUIStill}}-{{.}}.png" alt="{{$c.TUINote}} · {{.}}"></a>{{end}}<figcaption>{{$c.TUINote}}{{if $c.TUIStill}} {{themeLabel .}} · Regenerated after P2/P5.{{end}}</figcaption></figure>
 </div>
 {{end}}{{end}}
 
@@ -62,10 +63,10 @@ disclosures may take at most 120ms; reduced motion and all TUI changes are immed
 
 ## Capture coverage
 
-The [existing Sessions SVG](../assets/tui/tui-sessions.svg) supplements the recorder
-poster and shows an older palette. The [Tasks SVG](../assets/tui/tui-tasks.svg) supplies
-Tasks context. Neither establishes light/dark recorder coverage. P1 owns the baseline
-matrix; P2/P5 own applying tokens and matching new stills; P6 refreshes the public tour.
+The [Sessions still](../assets/tui/tui-sessions.svg) and
+[Tasks still](../assets/tui/tui-tasks.svg) use the same refreshed app-model driver
+as the light/dark matrix. The [TUI video](../assets/tui/demo.mp4) uses the separate
+real-agent recorder. Stand-in and model fixtures are identified at their source.
 
 ## Regeneration
 

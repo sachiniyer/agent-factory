@@ -38,7 +38,7 @@ the TUI and needs a credential file). The two never share a path.
 make demo-assets
 ```
 
-That is the whole procedure. It takes a few minutes, writes into
+This takes a few minutes, writes into
 `docs/assets/web/`, and leaves a `git status` to review and commit.
 
 It runs entirely inside a container — the same Go + Node + Chromium image the
@@ -140,3 +140,28 @@ Whenever the web client's chrome changes in a way the demo shows — the rail, t
 pane header, the new-session modal, the view tabs, the Tasks list, or the Config
 view's Accounts section. The media is the product's face; a screenshot nobody
 re-took is worse than no screenshot.
+
+## Public TUI previews
+
+After refreshing the TUI model SVG/ANSI pairs with `AF_TUI_DESIGN_CAPTURE` and
+`AF_TUI_RECOVERY_CAPTURE` in the playtest sandbox, `make demo-assets` also renders
+22 PNG previews into `docs/assets/tui/`. Use
+`AF_TUI_STILLS_ONLY=1 make demo-assets` to render just these previews. The
+container installs the SVG writer’s DejaVu Sans Mono font before rendering.
+The browser renders the final P5 SVGs
+without cropping their content or changing their colours. The style guide links
+these smaller previews to the full SVGs; the TUI page uses the pane and Tasks
+previews. Run the model capture first so these stay in sync with its goldens.
+
+The real-agent TUI video recorder sets true-colour terminal output and uses the
+fixed dark surface for the renderer background. This prevents the recording
+terminal's default palette from replacing the P5 colours.
+
+The separate `session-link.png` comes from the `copy-link.png` attachment of
+`AF_PLAYWRIGHT_ARGS=session-route.spec.ts make web-selftest-container`. Copy that
+attachment from the run’s printed artifact directory when refreshing all public
+media. Recovery images likewise come from `recovery.spec.ts` attachments.
+
+The recorder losslessly re-encodes PNGs with ffmpeg, keeping the smaller encoding,
+and enforces the twelve tour stills’ 906,092-byte aggregate from #3884. Re-encoding
+does not change dimensions or decoded pixels.

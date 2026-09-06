@@ -67,8 +67,8 @@ Dismiss **Session created** with Enter or Esc. Watch the Agent tab on the right;
 `●` means ready/idle, not proof that the task succeeded. Press Enter to type to
 the agent in place (Enter again if **Interactive pane** help appears), and
 `ctrl+]` to return to navigation. Handle any remaining agent sign-in or trust
-prompt in its pane before expecting work to start. When you are done, press `a`
-and confirm with Enter to archive the session. A doctor warning that autostart
+prompt in its pane before expecting work to start. Keep the session active for
+the browser step below. A doctor warning that autostart
 is not installed does not block this walkthrough.
 
 Now open **<http://localhost:8443>**. The same sessions, live, in a browser: the
@@ -81,6 +81,12 @@ brackets. For a wildcard host, use `127.0.0.1` instead of `0.0.0.0`, or `[::1]`
 instead of `[::]`, when browsing on this machine; keep the reported port. An
 empty `network.listen_addr` disables the web listener. See [Web client](docs/web.md)
 for configuration and remote access.
+
+The browser header offers **Sessions**, **Tasks** and **Config**, plus
+**Light · Dark · System** for appearance (System follows your OS). The selected
+terminal says **Keyboard** while it owns input; `ctrl+]` returns to navigation.
+After viewing the session in the browser, return to TUI navigation, press `a`
+and confirm with Enter to archive it.
 
 ## The mental model in five terms
 

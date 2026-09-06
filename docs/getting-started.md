@@ -88,11 +88,13 @@ On a fresh project the sidebar has no sessions. From here:
    pane, or **`o`** to **attach** full-screen. From an in-pane interaction,
    **`ctrl+]`** returns you to navigation mode; from a full-screen attach,
    **`ctrl+w`** (the default detach key) drops you back to the sidebar. The first
-   interaction shows **Interactive pane** help; press Enter to continue. The
+   interaction shows **Interactive pane** help; press Enter to continue. The pane
+   title then says **Keyboard** to show where typing goes. The
    first full-screen attach shows **Attaching to session**; press Enter to
    attach or Esc to cancel. Either way the agent keeps running. Use **`s`** to open a selected tab as a workspace pane; when a pane
    has focus, **`←`** / **`→`** move focus between open panes.
-4. When you are done with a session, select it, press **`a`**, and confirm with
+4. Keep this session active for the browser step below. After that, when you
+   are done, select it, press **`a`**, and confirm with
    Enter or `y` to archive it: tmux is torn down, the worktree is moved aside, and the session can be restored later. **`D`**
    permanently kills a session and removes its worktree and branch, including
    any uncommitted or unmerged work. If a session is marked Lost or Dead after a
@@ -119,6 +121,11 @@ IPv6 brackets), for example `http://192.168.1.10:9000` for a listener bound to
 or `[::1]` instead of `[::]`, when browsing on this machine; keep the reported
 port. An empty global `network.listen_addr` disables the web listener; see
 [Web client](web.md) for configuration.
+
+The header switches between **Sessions**, **Tasks** and **Config**. Choose
+**Light · Dark · System** there for browser appearance; System follows your OS.
+The TUI has its own **appearance** setting in Config (`,`), applied at the next
+launch; its System choice follows the terminal background.
 
 You get the same session rail, live terminals, tabs, tasks, and config — plus
 things a terminal cannot do, like a VS Code tab rooted at a session's worktree.

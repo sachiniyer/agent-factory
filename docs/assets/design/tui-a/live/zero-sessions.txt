@@ -27,10 +27,10 @@
 
 
 
-──────────────────────────────
- Projects (1) · ↵ switch
-● mock-repo (0)
 
 
-                                   n new · N new remote │ / search │ ? help · q quit
+
+
+
+                                   n new · N new remote · / search · ? help · q quit
 

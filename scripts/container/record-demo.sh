@@ -21,7 +21,7 @@ set -euo pipefail
 COLS="${DEMO_COLS:-168}"
 ROWS="${DEMO_ROWS:-32}"
 AGG_FONT_SIZE="${DEMO_FONT_SIZE:-14}"
-AGG_THEME="${DEMO_THEME:-dracula}"
+AGG_THEME="${DEMO_THEME:-2e3440,eceff4,2e3440,e4c8cd,d5e2cc,ebcb8b,90c4d3,dbb9d5,90c4d3,eceff4}"
 AGG_FPS="${DEMO_FPS:-12}"
 AGG_IDLE="${DEMO_IDLE:-3.0}"
 AGG_SPEED="${DEMO_SPEED:-1.8}"
@@ -36,6 +36,8 @@ MAX_GIF_BYTES="${DEMO_MAX_GIF_BYTES:-2000000}"
 if [ "${AF_DEMO_INNER:-}" = 1 ]; then
     export AF_DRIVER_COLS="$COLS" AF_DRIVER_ROWS="$ROWS"
     export AF_DRIVER_BIN=/home/dev/bin/af
+    export COLORTERM=truecolor
+    export AF_DRIVER_LAUNCH_ENV="COLORTERM=truecolor TERM=xterm-256color"
     export AGENT_FACTORY_HOME="$HOME/sandbox/home"
 
     sandbox="$HOME/sandbox"
@@ -74,6 +76,7 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
     source /src/scripts/tui-driver.sh
     af_reset_sandbox
     af_boot
+    tmux set-environment -g COLORTERM truecolor
     tmux set-option -g status off
 
     create_session() {
@@ -216,7 +219,7 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
         ffmpeg -y -loglevel error -ss "$timestamp" -i "$out_gif" -frames:v 1 \
             "$(printf '%s/frames/frame-%02d.png' "$out" "$i")"
     done
-    cp "$out/frames/frame-05.png" "$out_poster"
+    cp "$out/frames/frame-03.png" "$out_poster"
 
     ls -lh "$out_gif" "$out_webm" "$out_mp4" "$out_poster"
     printf 'record-demo: %.2fs · %s-byte GIF · real Codex in three AF worktrees\n' \
