@@ -38,7 +38,6 @@ func (p tabHotkeysPty) Start(cmd *exec.Cmd) (*os.File, error) {
 	}
 	return f, err
 }
-func (p tabHotkeysPty) Close() {}
 
 // nameKeyedTmuxExec tracks tmux session existence per name so an instance's
 // agent session and any shell siblings are independent. It also returns a spawn

@@ -6671,6 +6671,144 @@ function h(tag, props = {}, ...children) {
   return el2;
 }
 
+// src/terminal_ansi.ts
+var TERMINAL_ANSI = {
+  "light": {
+    "black": "#2E3440",
+    "red": "#944049",
+    "green": "#51693C",
+    "yellow": "#7C5A15",
+    "blue": "#426486",
+    "magenta": "#7F5478",
+    "cyan": "#2D6271",
+    "white": "#434C5E",
+    "brightBlack": "#000000",
+    "brightRed": "#76333A",
+    "brightGreen": "#415430",
+    "brightYellow": "#634811",
+    "brightBlue": "#35506B",
+    "brightMagenta": "#664360",
+    "brightCyan": "#244E5A",
+    "brightWhite": "#171A20"
+  },
+  "dark": {
+    "black": "#B4BCC8",
+    "red": "#D9B2B9",
+    "green": "#A3BE8C",
+    "yellow": "#EBCB8B",
+    "blue": "#81A1C1",
+    "magenta": "#B590AF",
+    "cyan": "#90C4D3",
+    "white": "#D8DEE9",
+    "brightBlack": "#959CA5",
+    "brightRed": "#E1C1C7",
+    "brightGreen": "#B5CBA3",
+    "brightYellow": "#EFD5A2",
+    "brightBlue": "#9AB4CD",
+    "brightMagenta": "#C4A6BF",
+    "brightCyan": "#A6D0DC",
+    "brightWhite": "#FFFFFF"
+  }
+};
+
+// src/theme.ts
+var THEME_CHOICES = ["light", "dark", "system"];
+var STORAGE_KEY = "af-theme";
+function connectionAttemptMayCommit(request, installedToken, candidate) {
+  return request.isCurrent() && installedToken === candidate;
+}
+function normalizeThemeChoice(value) {
+  return value === "light" || value === "dark" ? value : "system";
+}
+function readThemeChoice() {
+  try {
+    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return "system";
+  }
+}
+function persistThemeChoice(choice) {
+  try {
+    localStorage.setItem(STORAGE_KEY, choice);
+  } catch {
+  }
+}
+function currentMode() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") return attr;
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {
+    return "dark";
+  }
+}
+function surface(mode) {
+  const probe = document.createElement("span");
+  probe.dataset.afTheme = mode;
+  probe.hidden = true;
+  document.documentElement.append(probe);
+  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  probe.remove();
+  return color;
+}
+function themeColorMetaContents(choice) {
+  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
+}
+function refreshThemeMode() {
+  const mode = currentMode();
+  document.documentElement.dataset.afTheme = mode;
+  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
+  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
+  }
+}
+function stampTheme(choice) {
+  if (choice === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", choice);
+  refreshThemeMode();
+}
+function bootStampTheme() {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+function xtermTheme(mode) {
+  return TERMINAL_ANSI[mode];
+}
+function currentXtermTheme() {
+  return xtermTheme(currentMode());
+}
+
+// src/recovery.ts
+function recoveryScreen(state) {
+  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
+  action.addEventListener("click", state.run);
+  const screen = h(
+    "section",
+    { class: "af-recovery" },
+    h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
+    ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
+    action
+  );
+  scopeRecovery(screen);
+  if (state.failed) screen.setAttribute("role", "alert");
+  return screen;
+}
+function mutationNotice(condition, detail, action, failed = true) {
+  return scopeRecovery(h(
+    "div",
+    { class: "af-recovery af-recovery-notice", role: "alert" },
+    h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
+    h("p", { class: "af-recovery-detail" }, detail),
+    h("p", { class: "af-recovery-next" }, action)
+  ));
+}
+function scopeRecovery(element) {
+  element.setAttribute("data-af-theme", currentMode());
+  return element;
+}
+
 // src/nav.ts
 var VIEWS = ["sessions", "tasks", "config"];
 function cycleView(current, delta) {
@@ -7112,7 +7250,7 @@ function viewNavigation(onSelect) {
 }
 function modalChrome(opts) {
   const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
+  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
   errorLine.hidden = true;
   const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
   const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
@@ -7141,7 +7279,7 @@ function modalChrome(opts) {
     },
     setError(msg) {
       if (msg) {
-        errorLine.textContent = msg;
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
       } else {
         errorLine.textContent = "";
@@ -7170,13 +7308,17 @@ function defaultsDisclosure() {
 
 // src/accounts.ts
 function emptyAccountsState() {
-  return { entries: [], agents: [], error: "", status: null };
+  return { entries: [], agents: [], error: "", status: null, loaded: false };
 }
 var ACCOUNT_INPUT_ATTR = "data-account-input";
 var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential. Signing in is a device code \xB7 the pane prints a URL, you finish it in your own browser.";
 function renderAccountsSection(state, actions2, registration = { open: false, agent: "" }) {
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
+  }
   const head = h(
     "div",
     { class: "af-accounts-head" },
@@ -7229,6 +7371,17 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
   sync();
   add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
   section.append(list, add);
+  if (state.entries.length === 0 && !registration.open) {
+    add.hidden = true;
+    const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
+      empty.remove();
+      add.hidden = false;
+      add.open = true;
+      registration.open = true;
+      add.querySelector(".af-accounts-register:not([hidden]) input")?.focus();
+    } });
+    section.prepend(empty);
+  }
   return section;
 }
 function renderAccountRow(entry, status, actions2) {
@@ -8257,115 +8410,6 @@ function wrappedCellPosition(index, cols) {
 }
 function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
-}
-
-// src/terminal_ansi.ts
-var TERMINAL_ANSI = {
-  "light": {
-    "black": "#2E3440",
-    "red": "#944049",
-    "green": "#51693C",
-    "yellow": "#7C5A15",
-    "blue": "#426486",
-    "magenta": "#7F5478",
-    "cyan": "#2D6271",
-    "white": "#434C5E",
-    "brightBlack": "#000000",
-    "brightRed": "#76333A",
-    "brightGreen": "#415430",
-    "brightYellow": "#634811",
-    "brightBlue": "#35506B",
-    "brightMagenta": "#664360",
-    "brightCyan": "#244E5A",
-    "brightWhite": "#171A20"
-  },
-  "dark": {
-    "black": "#B4BCC8",
-    "red": "#D9B2B9",
-    "green": "#A3BE8C",
-    "yellow": "#EBCB8B",
-    "blue": "#81A1C1",
-    "magenta": "#B590AF",
-    "cyan": "#90C4D3",
-    "white": "#D8DEE9",
-    "brightBlack": "#959CA5",
-    "brightRed": "#E1C1C7",
-    "brightGreen": "#B5CBA3",
-    "brightYellow": "#EFD5A2",
-    "brightBlue": "#9AB4CD",
-    "brightMagenta": "#C4A6BF",
-    "brightCyan": "#A6D0DC",
-    "brightWhite": "#FFFFFF"
-  }
-};
-
-// src/theme.ts
-var THEME_CHOICES = ["light", "dark", "system"];
-var STORAGE_KEY = "af-theme";
-function connectionAttemptMayCommit(request, installedToken, candidate) {
-  return request.isCurrent() && installedToken === candidate;
-}
-function normalizeThemeChoice(value) {
-  return value === "light" || value === "dark" ? value : "system";
-}
-function readThemeChoice() {
-  try {
-    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
-  } catch {
-    return "system";
-  }
-}
-function persistThemeChoice(choice) {
-  try {
-    localStorage.setItem(STORAGE_KEY, choice);
-  } catch {
-  }
-}
-function currentMode() {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light" || attr === "dark") return attr;
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  } catch {
-    return "dark";
-  }
-}
-function surface(mode) {
-  const probe = document.createElement("span");
-  probe.dataset.afTheme = mode;
-  probe.hidden = true;
-  document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
-  probe.remove();
-  return color;
-}
-function themeColorMetaContents(choice) {
-  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
-}
-function refreshThemeMode() {
-  const mode = currentMode();
-  document.documentElement.dataset.afTheme = mode;
-  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
-  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
-  }
-}
-function stampTheme(choice) {
-  if (choice === "system") document.documentElement.removeAttribute("data-theme");
-  else document.documentElement.setAttribute("data-theme", choice);
-  refreshThemeMode();
-}
-function bootStampTheme() {
-  const choice = readThemeChoice();
-  stampTheme(choice);
-  return choice;
-}
-function xtermTheme(mode) {
-  return TERMINAL_ANSI[mode];
-}
-function currentXtermTheme() {
-  return xtermTheme(currentMode());
 }
 
 // src/terminal.ts
@@ -12995,6 +13039,7 @@ var TasksPane = class {
   }
   el;
   menus = [];
+  lastError;
   lastTasks = null;
   lastProject = null;
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
@@ -13003,10 +13048,11 @@ var TasksPane = class {
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
-  update(tasks, selectedProject) {
-    if (this.lastTasks === tasks && this.lastProject === selectedProject) {
+  update(tasks, selectedProject, error) {
+    if (this.lastTasks === tasks && this.lastProject === selectedProject && this.lastError === error) {
       return;
     }
+    this.lastError = error;
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
@@ -13030,6 +13076,24 @@ var TasksPane = class {
     }
   }
   render(tasks) {
+    if (this.lastError) {
+      this.el.replaceChildren(recoveryScreen({
+        condition: "Tasks unavailable",
+        detail: this.lastError,
+        failed: true,
+        action: "Retry",
+        run: () => this.actions.retry?.()
+      }));
+      return;
+    }
+    if (this.lastProject === null) {
+      this.el.replaceChildren(recoveryScreen({
+        condition: "No project registered",
+        action: "Add project",
+        run: () => this.actions.addProject?.()
+      }));
+      return;
+    }
     const addBtn = h(
       "button",
       { type: "button", class: "af-tasks-add", title: "Add task" },
@@ -13046,12 +13110,7 @@ var TasksPane = class {
     );
     if (tasks.length === 0) {
       this.el.replaceChildren(
-        head,
-        h(
-          "p",
-          { class: "af-tasks-empty" },
-          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule."
-        )
+        recoveryScreen({ condition: "No tasks", action: "Add task", run: () => this.actions.add() })
       );
       return;
     }
@@ -13715,10 +13774,26 @@ function visibleRailSessions(state) {
   const scoped = scopeToProject(state.sessions, state.selectedProject);
   return filterSessions(orderedSessions(scoped), state.statusFilter);
 }
+var loginDrafts = /* @__PURE__ */ new WeakMap();
 function renderLogin(root2, state, actions2) {
+  const draft = state.loginError || state.connecting || state.loginCondition ? root2.querySelector("#af-token")?.value ?? loginDrafts.get(root2) ?? "" : "";
+  loginDrafts.set(root2, draft);
   root2.replaceChildren(loginView(state, actions2));
+  const input = root2.querySelector("#af-token");
+  if (input) input.value = draft;
 }
 function loginView(state, actions2) {
+  if (state.loginCondition === "unavailable") {
+    const screen = recoveryScreen({
+      condition: "Cannot reach the daemon",
+      failed: true,
+      detail: state.loginError ?? "Check the daemon and its listener address, then retry.",
+      action: state.connecting ? "Connecting\u2026" : "Retry",
+      run: () => actions2.retryConnection?.()
+    });
+    screen.classList.add("af-recovery-login");
+    return screen;
+  }
   if (state.connecting && !state.loginError) {
     return connectingView();
   }
@@ -13753,7 +13828,7 @@ function loginView(state, actions2) {
     }
   });
   const children = [
-    h("h1", { class: "af-title" }, "Agent Factory"),
+    h("h1", { class: state.loginCondition === "expired" ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.loginCondition === "expired" ? "Login expired" : "Sign in"),
     h(
       "p",
       { class: "af-subtitle" },
@@ -13770,19 +13845,14 @@ function loginView(state, actions2) {
   if (state.loginError) {
     children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
-  return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 function connectingView() {
-  return h(
+  return scopeRecovery(h(
     "main",
-    { class: "af-login" },
-    h(
-      "div",
-      { class: "af-card" },
-      h("h1", { class: "af-title" }, "Agent Factory"),
-      h("p", { class: "af-subtitle" }, "Connecting\u2026")
-    )
-  );
+    { class: "af-login af-recovery af-recovery-login" },
+    h("h1", { class: "af-recovery-title" }, "Connecting\u2026")
+  ));
 }
 function noAuthLoginView(state, actions2) {
   const button = h(
@@ -13807,7 +13877,7 @@ function noAuthLoginView(state, actions2) {
   if (state.loginError) {
     children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
-  return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 var AppShell = class {
   constructor(actions2, termHost2, modalHost2, installEl) {
@@ -13978,6 +14048,8 @@ var AppShell = class {
     this.navScrim.addEventListener("click", () => this.setNav(false));
     this.sessionsBody = h("div", { class: "af-body" }, rail, this.main, this.navScrim);
     this.tasksPane = new TasksPane({
+      retry: () => this.actions.retryTasks?.(),
+      addProject: () => this.actions.addProject(),
       add: () => this.actions.addTask(),
       edit: (task) => this.actions.editTask(task),
       toggle: (task) => this.actions.toggleTask(task),
@@ -14025,6 +14097,7 @@ var AppShell = class {
   // presentation decision. The root class is media-query inert on desktop.
   lastCondensedSessionChrome = null;
   lastTasks = null;
+  lastTasksError;
   lastTasksProject = null;
   // The top-right project switcher (redesign PR2): a button showing the current
   // project + a dropdown menu listing every project with its per-project counts, the
@@ -14134,6 +14207,7 @@ var AppShell = class {
   // selected (selectedId is null before AND after that first update, so the
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
+  lastEmptyKey = "";
   mainRendered = false;
   idleAgeTimer;
   // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
@@ -14204,7 +14278,13 @@ var AppShell = class {
     }
     if (this.lastError !== state.tabError) {
       this.lastError = state.tabError;
-      this.toast.textContent = state.tabError ?? "";
+      this.toast.replaceChildren(...state.tabError ? [recoveryScreen({
+        condition: state.tabNotice ? "Notice" : "Operation failed",
+        detail: state.tabError,
+        failed: !state.tabNotice,
+        action: "Dismiss",
+        run: () => this.actions.dismissNotice?.()
+      })] : []);
       this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
     if (this.lastLive !== state.live) {
@@ -14231,10 +14311,11 @@ var AppShell = class {
         opt.setAttribute("aria-pressed", active ? "true" : "false");
       }
     }
-    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject) {
+    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject || this.lastTasksError !== state.tasksError) {
+      this.lastTasksError = state.tasksError;
       this.lastTasks = state.tasks;
       this.lastTasksProject = state.selectedProject;
-      this.tasksPane.update(state.tasks, state.selectedProject);
+      this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
     this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
     const sessionsChanged = this.lastSessions !== state.sessions;
@@ -14263,7 +14344,9 @@ var AppShell = class {
       this.lastRailToken = railToken;
       rebuildKeepingScroll(this.railList, previousRailToken, railToken, () => this.renderRail(state));
     }
-    if (selectionChanged || !this.mainRendered) {
+    const emptyKey = `${state.selectedProject}:${state.sessions.length}:${state.projectsError ?? ""}`;
+    if (selectionChanged || !this.mainRendered || !selectedSession(state) && emptyKey !== this.lastEmptyKey) {
+      this.lastEmptyKey = emptyKey;
       this.mainRendered = true;
       this.renderMain(state);
     } else {
@@ -14328,9 +14411,7 @@ var AppShell = class {
     this.railMenus = [];
     const list = this.railList;
     if (!state.selectedProject) {
-      list.replaceChildren(
-        h("li", { class: "af-rail-empty" }, "No projects yet \u2014 add one from the project switcher to get started.")
-      );
+      list.replaceChildren();
       return;
     }
     const rows = visible.map((s) => {
@@ -14444,6 +14525,7 @@ var AppShell = class {
    *  - otherwise nothing: rows are showing.
    */
   railNotice(state, scoped, visible) {
+    if (scoped.length === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -14747,8 +14829,25 @@ var AppShell = class {
       delete this.main.dataset.afTheme;
       delete this.main.dataset.termStatus;
       this.main.replaceChildren(
-        h("p", { class: "af-empty-title" }, "Select a session"),
-        h("p", { class: "af-empty-hint" }, "Pick a session in the rail to attach its terminal.")
+        recoveryScreen(state.projectsError && state.selectedProject === null ? {
+          condition: "Projects unavailable",
+          detail: state.projectsError,
+          failed: true,
+          action: "Retry",
+          run: () => this.actions.retryConnection?.()
+        } : state.selectedProject === null ? {
+          condition: "No project registered",
+          action: "Add project",
+          run: () => this.actions.addProject()
+        } : scopeToProject(state.sessions, state.selectedProject).length === 0 ? {
+          condition: "No sessions",
+          action: "New session",
+          run: () => this.actions.newSession()
+        } : {
+          condition: "Select a session",
+          action: "Choose a session",
+          run: () => this.railList.querySelector(".af-row")?.focus()
+        })
       );
       return;
     }
@@ -15518,11 +15617,13 @@ function mount() {
   void bootstrap();
 }
 async function bootstrap() {
+  store.set({ connecting: true, loginCondition: void 0, loginError: null });
   let required = true;
   try {
     required = await probeAuthRequired();
   } catch {
-    required = true;
+    store.set({ connecting: false, loginCondition: "unavailable" });
+    return;
   }
   if (!required) {
     store.set({ authRequired: false });
@@ -15567,7 +15668,7 @@ function rerender() {
 }
 async function connect(candidate) {
   const attempt = connectionGate.begin();
-  store.set({ connecting: true, loginError: null });
+  store.set({ connecting: true, loginError: null, loginCondition: void 0 });
   let sessions;
   try {
     sessions = await probeToken(candidate);
@@ -15576,20 +15677,22 @@ async function connect(candidate) {
     if (shouldForgetToken(e)) {
       clearToken();
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e) });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
+  let tasksError = "";
   let tasks = [];
   try {
     tasks = await listTasks(candidate);
-  } catch {
+  } catch (e) {
+    tasksError = errorText(e);
     tasks = [];
   }
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  const registeredProjects = await fetchRegisteredProjects(candidate);
+  const { projects: registeredProjects, error: projectsError } = await fetchRegisteredProjects(candidate);
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   resolvingRoute = true;
@@ -15607,6 +15710,8 @@ async function connect(candidate) {
     shownTabs: [0],
     tabError: null,
     tasks,
+    tasksError,
+    projectsError,
     registeredProjects
   });
   resolvingRoute = false;
@@ -15616,12 +15721,14 @@ async function connect(candidate) {
 }
 async function fetchRegisteredProjects(tok) {
   try {
-    return (await listProjects(tok)).map((p) => p.root);
-  } catch {
-    return [];
+    const projects = (await listProjects(tok)).map((p) => p.root);
+    return { projects, error: "" };
+  } catch (e) {
+    return { projects: [], error: errorText(e) };
   }
 }
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
+  store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   stopStream();
   closeModal();
@@ -15828,7 +15935,10 @@ function newSession() {
           }
         }).catch((e) => {
           requestResync();
-          surfaceTabError(e);
+          m.setBusy(false);
+          m.setError(errorText(e));
+          if (!modal && token === tok) openModal(m);
+          else surfaceTabError(e);
         });
       },
       onCancel: closeModal
@@ -16058,13 +16168,14 @@ function reorderSessionTab(from, to) {
 function surfaceTabError(e) {
   const msg = errorText(e);
   console.error("af-web: operation failed:", msg);
-  showTransientNotice(msg);
+  showTransientNotice(msg, false);
 }
-function showTransientNotice(msg) {
+function showTransientNotice(msg, notice = true) {
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
-  store.set({ tabError: msg });
+  store.set({ tabError: msg, tabNotice: notice });
+  if (!notice) return;
   tabErrorTimer = window.setTimeout(() => {
     tabErrorTimer = null;
     store.set({ tabError: null });
@@ -16104,7 +16215,7 @@ var accountsRefetcher = createFencedRefetcher({
   fetch: listAccounts,
   commit: (resp) => {
     store.set({
-      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "" }
+      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true }
     });
   },
   onError: (err) => {
@@ -16206,10 +16317,9 @@ var tasksRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       store.get().registeredProjects
     );
-    store.set({ tasks, selectedProject });
-  }
-  // No onError: a transport/auth failure leaves the last-known list up; a task.*
-  // event or the next mutation refetches. Nothing to surface here.
+    store.set({ tasks, selectedProject, tasksError: "" });
+  },
+  onError: (e) => store.set({ tasksError: errorText(e) })
 });
 function refreshTasks() {
   tasksRefetcher.refresh();
@@ -16235,10 +16345,9 @@ var projectsRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       registeredProjects
     );
-    store.set({ registeredProjects, selectedProject });
-  }
-  // No onError: a transport/auth failure keeps the last-known registry up; the next
-  // projects.changed event or reconnect refetches. Never blank the union on a blip.
+    store.set({ registeredProjects, selectedProject, projectsError: "" });
+  },
+  onError: (e) => store.set({ projectsError: errorText(e) })
 });
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
@@ -16447,6 +16556,11 @@ var actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  dismissNotice: clearTabError,
+  retryConnection: () => {
+    void bootstrap();
+  },
+  retryTasks: refreshTasks,
   notice: surfaceNotice,
   paneDropHintAt: (x, y) => splitView.showTabDropHintAt(x, y),
   clearPaneDropHint: () => splitView.clearTabDropHint(),

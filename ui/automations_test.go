@@ -263,7 +263,7 @@ func TestAutomationsHintsReflectKeymapRebinds(t *testing.T) {
 	out := a.View()
 	assert.Contains(t, out, "f manage", "manage title hint follows the rebound task-manager key")
 	assert.Contains(t, out, "g hooks", "hooks title hint follows the rebound hooks key")
-	assert.Contains(t, out, "press f, then n", "empty-state hint follows the rebound task-manager key")
+	assert.NotContains(t, out, "No tasks", "empty conditions belong in the task manager")
 	assert.NotContains(t, out, "m manage", "default task-manager key must not be hardcoded")
 	assert.NotContains(t, out, "e hooks", "default hooks key must not be hardcoded")
 }
@@ -275,8 +275,7 @@ func TestAutomationsEmptyStateEllipsized(t *testing.T) {
 	a.SetRect(layout.Rect{W: 22, H: 3})
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 3}, "empty section")
-	assert.Contains(t, out, "No tasks")
-	assert.Contains(t, out, "…", "the truncated hint marks its cut")
+	assert.NotContains(t, out, "No tasks", "no duplicate empty instruction in the rail")
 }
 
 // TestAutomationsCursorScrollsIntoView: with more tasks than rows, moving the
@@ -323,7 +322,7 @@ func TestAutomationsEmptyStateUsesSentenceCase(t *testing.T) {
 	a.SetRect(layout.Rect{W: 60, H: 3})
 
 	out := stripANSI(a.View())
-	assert.Contains(t, out, "No tasks — press",
+	assert.NotContains(t, out, "No tasks — press",
 		"the empty automations section renders in sentence case:\n%s", out)
 	assert.NotContains(t, out, "no tasks — press",
 		"the lowercase form must be gone:\n%s", out)

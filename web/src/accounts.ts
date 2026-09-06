@@ -1,4 +1,5 @@
 import { field } from "./components.js";
+import { recoveryScreen } from "./recovery.js";
 // The Accounts section of the web config view (#3385) — the owner's ask, in his
 // words: "I'd like to be able to do the logging in from the config tab of the TUI
 // or the web", and then "can I click a button in config to spawn a tmux session
@@ -63,6 +64,7 @@ export interface AccountStatus {
  *  fresh install has no accounts and the register form still has to offer the
  *  agents one can be made for. */
 export interface AccountsState {
+  loaded?: boolean;
   entries: AccountEntry[];
   agents: string[];
   /** Why the accounts could not be read, or "" when they were. A section that
@@ -74,7 +76,7 @@ export interface AccountsState {
 
 /** The empty state, so the shell has one place to get it from. */
 export function emptyAccountsState(): AccountsState {
-  return { entries: [], agents: [], error: "", status: null };
+  return { entries: [], agents: [], error: "", status: null, loaded: false };
 }
 
 /** Marks a register field with the agent it belongs to, so a rebuild can restore
@@ -100,6 +102,10 @@ export function renderAccountsSection(state: AccountsState, actions: AccountActi
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
 
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting…"));
+    return section;
+  }
   const head = h(
     "div",
     { class: "af-accounts-head" },
@@ -152,6 +158,17 @@ export function renderAccountsSection(state: AccountsState, actions: AccountActi
   sync();
   add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
   section.append(list, add);
+  if (state.entries.length === 0 && !registration.open) {
+    add.hidden = true;
+    const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
+      empty.remove();
+      add.hidden = false;
+      add.open = true;
+      registration.open = true;
+      add.querySelector<HTMLInputElement>(".af-accounts-register:not([hidden]) input")?.focus();
+    } });
+    section.prepend(empty);
+  }
   return section;
 }
 

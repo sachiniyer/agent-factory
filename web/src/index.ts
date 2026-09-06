@@ -12,6 +12,7 @@
 
 import "./styles.css";
 import "./tokens.css";
+import "./recovery.css";
 import { parseRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
 import { copyText } from "./clipboard.js";
 import {
@@ -297,13 +298,13 @@ function mount(): void {
  *  itself and falls back to the paste form, once. A probe transport failure also
  *  falls back to the token login — never auto-connects on uncertainty. */
 async function bootstrap(): Promise<void> {
+  store.set({ connecting: true, loginCondition: undefined, loginError: null });
   let required = true;
   try {
     required = await probeAuthRequired();
   } catch {
-    // Can't reach the probe (daemon down / wrong host): fail safe to the
-    // token login — the user can still paste a token and retry.
-    required = true;
+    store.set({ connecting: false, loginCondition: "unavailable" });
+    return;
   }
   if (!required) {
     // Tokenless client (loopback / require_token=false): connect straight through
@@ -362,7 +363,7 @@ function rerender(): void {
  *  token only when the daemon REJECTED it (shouldForgetToken). */
 async function connect(candidate: string): Promise<void> {
   const attempt = connectionGate.begin();
-  store.set({ connecting: true, loginError: null });
+  store.set({ connecting: true, loginError: null, loginCondition: undefined });
   let sessions: SessionData[];
   try {
     sessions = await probeToken(candidate);
@@ -375,7 +376,7 @@ async function connect(candidate: string): Promise<void> {
     if (shouldForgetToken(e)) {
       clearToken();
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e) });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
     return;
   }
   if (!attempt.isCurrent()) return;
@@ -390,10 +391,12 @@ async function connect(candidate: string): Promise<void> {
   // not as a temporary session-backed fallback that would then stick (reconcile keeps
   // a valid current selection). A transport failure degrades to no tasks (the events
   // plane / a view switch refetches); the scope then falls back until they load.
+  let tasksError = "";
   let tasks: TaskData[] = [];
   try {
     tasks = await listTasks(candidate);
-  } catch {
+  } catch (e) {
+    tasksError = errorText(e);
     tasks = [];
   }
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
@@ -401,7 +404,7 @@ async function connect(candidate: string): Promise<void> {
   // registered-but-sessionless project as a real, restorable selection, or a persisted
   // choice on an empty registered repo would fall back on connect. Degrades to none on
   // a transport failure — the projects.changed resync refetches it.
-  const registeredProjects = await fetchRegisteredProjects(candidate);
+  const { projects: registeredProjects, error: projectsError } = await fetchRegisteredProjects(candidate);
   // Fence the final app commit against a disconnect during tasks/projects loading.
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real
@@ -422,6 +425,8 @@ async function connect(candidate: string): Promise<void> {
     shownTabs: [0],
     tabError: null,
     tasks,
+    tasksError,
+    projectsError,
     registeredProjects,
   });
   resolvingRoute = false;
@@ -435,11 +440,12 @@ async function connect(candidate: string): Promise<void> {
  *  missing registry just means the derived-from-sessions list until the next
  *  projects.changed resync. Maps the registry records to their roots — the only field
  *  the switcher/picker union consumes. */
-async function fetchRegisteredProjects(tok: string): Promise<string[]> {
+async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[]; error: string }> {
   try {
-    return (await listProjects(tok)).map((p) => p.root);
-  } catch {
-    return [];
+    const projects = (await listProjects(tok)).map((p) => p.root);
+    return { projects, error: "" };
+  } catch (e) {
+    return { projects: [], error: errorText(e) };
   }
 }
 
@@ -448,6 +454,7 @@ async function fetchRegisteredProjects(tok: string): Promise<string[]> {
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
+  store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
   stopStream();
   closeModal();
@@ -799,7 +806,10 @@ function newSession(): void {
             // direct fallback so even a missed delete event cannot strand a
             // phantom creating row, and surface the daemon's unmodified error text.
             requestResync();
-            surfaceTabError(e);
+            m.setBusy(false);
+            m.setError(errorText(e));
+            if (!modal && token === tok) openModal(m);
+            else surfaceTabError(e);
           });
       },
       onCancel: closeModal,
@@ -1276,17 +1286,18 @@ function surfaceTabError(e: unknown): void {
   // message (e.g. create failure or tab cap) or a fail-closed refusal verbatim.
   const msg = errorText(e);
   console.error("af-web: operation failed:", msg);
-  showTransientNotice(msg);
+  showTransientNotice(msg, false);
 }
 
 /** Shows `msg` in the transient toast and arms its auto-dismiss, resetting the timer
  *  on a fresh message. Shared by the failed-operation path above and by UI notices
  *  (ui.ts `notice`), so there is ONE toast lifecycle rather than two that drift. */
-function showTransientNotice(msg: string): void {
+function showTransientNotice(msg: string, notice = true): void {
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
-  store.set({ tabError: msg });
+  store.set({ tabError: msg, tabNotice: notice });
+  if (!notice) return;
   tabErrorTimer = window.setTimeout(() => {
     tabErrorTimer = null;
     store.set({ tabError: null });
@@ -1361,7 +1372,7 @@ const accountsRefetcher = createFencedRefetcher({
   fetch: listAccounts,
   commit: (resp) => {
     store.set({
-      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "" },
+      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true },
     });
   },
   onError: (err: unknown) => {
@@ -1551,10 +1562,9 @@ const tasksRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       store.get().registeredProjects,
     );
-    store.set({ tasks, selectedProject });
+    store.set({ tasks, selectedProject, tasksError: "" });
   },
-  // No onError: a transport/auth failure leaves the last-known list up; a task.*
-  // event or the next mutation refetches. Nothing to surface here.
+  onError: (e: unknown) => store.set({ tasksError: errorText(e) }),
 });
 
 function refreshTasks(): void {
@@ -1602,10 +1612,9 @@ const projectsRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       registeredProjects,
     );
-    store.set({ registeredProjects, selectedProject });
+    store.set({ registeredProjects, selectedProject, projectsError: "" });
   },
-  // No onError: a transport/auth failure keeps the last-known registry up; the next
-  // projects.changed event or reconnect refetches. Never blank the union on a blip.
+  onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
 });
 
 function refreshRegisteredProjects(): void {
@@ -1906,6 +1915,9 @@ const actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  dismissNotice: clearTabError,
+  retryConnection: () => { void bootstrap(); },
+  retryTasks: refreshTasks,
   notice: surfaceNotice,
   paneDropHintAt: (x: number, y: number) => splitView.showTabDropHintAt(x, y),
   clearPaneDropHint: () => splitView.clearTabDropHint(),

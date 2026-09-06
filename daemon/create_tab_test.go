@@ -32,7 +32,6 @@ func (p tabPtyFactory) Start(cmd *exec.Cmd) (*os.File, error) {
 	}
 	return f, err
 }
-func (p tabPtyFactory) Close() {}
 
 // tabNameKeyedExec is a tmux mock tracking session existence per session name,
 // so an instance's agent session and its CLI-spawned process tab are

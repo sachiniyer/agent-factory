@@ -98,9 +98,11 @@ type runOnEventLoopMsg struct {
 }
 
 type instanceStartedMsg struct {
-	instance *session.Instance
-	started  *session.Instance
-	err      error
+	draft     *sessionStartRequest
+	rawPrompt string
+	instance  *session.Instance
+	started   *session.Instance
+	err       error
 	// account is the credential account the create ASKED for (#3844), empty for
 	// the ambient identity. The handler compares it with the account the daemon
 	// reports on the session it returned: a daemon predating account support drops

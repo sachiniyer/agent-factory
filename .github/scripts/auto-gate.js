@@ -152,7 +152,7 @@ maintainer-review exit a human can take.`;
 // it. Re-spelling it per regex meant a copy change took three edits and nothing
 // failed if only two landed. `\s+` throughout, because a GitHub-rendered body
 // wraps: the separator is not the only place a hard break can fall.
-const CODEX_LIMIT_STEM = String.raw`reached\s+your\s+Codex\s+usage\s+limits?`;
+const CODEX_LIMIT_STEM = String.raw`(?:reached\s+your\s+Codex\s+usage\s+limits?|Codex\s+usage\s+limits?\s+have\s+been\s+reached)`;
 const CODEX_LIMIT_STEM_RE = new RegExp(CODEX_LIMIT_STEM + String.raw`\b`, "i");
 // The clause after the stem, CAPTURED rather than matched-around, so no negation
 // has to backtrack across a variable separator. At least one character: a
@@ -869,6 +869,14 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // manual path never reads — so on a non-allowed author's PR the item was
   // computed, dropped, and the decision published green (#3825).
   const awaitingMaintainerReview = degradedForUnavailableReviewer && !approval;
+  if (degradedForUnavailableReviewer) {
+    const outage = await require("./codex-outage.js").gateNotice({
+      github, context, since: codex.reviewerUnavailableSince,
+    });
+    const note = `${outage}; ${approval ? "merging on maintainer approval" : "awaiting maintainer approval"}`;
+    notes.push(note);
+    if (core.summary) await core.summary.addRaw(`${note}\n`).write();
+  }
   // One branch, mutually exclusive, because the two outcomes are one decision:
   // an approved degraded head merges, an unapproved one blocks with the exit
   // named. An earlier shape pushed the blocker under `&& !approval` and then
@@ -4213,6 +4221,7 @@ async function evaluateCodex({
   // reviewerUnavailableReason is the one reason a degradation may waive; the
   // caller uses it to tell that reason apart from every independent blocker.
   let reviewerUnavailable = false;
+  let reviewerUnavailableSince = null;
   let reviewerUnavailableReason = "";
   const { owner, repo } = context.repo;
   // Two anchors, because the rules below ask two different questions and one
@@ -4321,7 +4330,6 @@ async function evaluateCodex({
     // that the quota message no longer describes the present.
     const latestCodexArtifact = codexUsageLimitArtifacts[0];
     const isInlineReply = codexInlineReplies.includes(latestCodexArtifact);
-    const latestCodexBody = latestCodexArtifact?.body || "";
     // The detector is an unanchored substring match, so a review that merely
     // QUOTES the usage-limit phrase trips it — reviewing this very gate is
     // enough. A body carrying both review markers is a review, not a quota
@@ -4329,10 +4337,7 @@ async function evaluateCodex({
     // one on #3371), so requiring their absence cannot suppress it. Such a body
     // already fails parseReviewedCommit, so it is not a verdict either, and the
     // gate lands on "keep blocking" rather than on a false degradation.
-    const looksLikeReviewArtifact =
-      CODEX_REVIEW_RE.test(latestCodexBody) && REVIEWED_COMMIT_RE.test(latestCodexBody);
-    const rateLimited = codexReportsReviewUsageLimit(latestCodexBody) && !looksLikeReviewArtifact &&
-      !(isInlineReply && CODEX_BODY_FINDING_RE.test(latestCodexBody));
+    const rateLimited = isCodexUsageLimitArtifact(latestCodexArtifact, isInlineReply);
     // …and it has to be evidence about THIS head, on the same freshness rule the
     // verdict below is held to. A usage-limit answer only proves the reviewer was
     // out of quota when it answered; a head pushed after it may simply not have
@@ -4361,6 +4366,7 @@ async function evaluateCodex({
       : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
+      reviewerUnavailableSince = new Date(rateLimitTime).toISOString();
     }
     reasons.push(missingVerdictReason);
   } else {
@@ -4608,11 +4614,21 @@ async function evaluateCodex({
     notes,
     reviewerUnavailable,
     reviewerUnavailableReason,
+    reviewerUnavailableSince,
     findingBlockers,
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
     maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
   };
+}
+
+// Shared by the health watch and gate. Keep review-shaped quotations out of
+// outage evidence, including finding-shaped inline replies.
+function isCodexUsageLimitArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
+  const body = artifact?.body || "";
+  const looksLikeReviewArtifact = CODEX_REVIEW_RE.test(body) && REVIEWED_COMMIT_RE.test(body);
+  return codexReportsReviewUsageLimit(body) && !looksLikeReviewArtifact &&
+    !(isInlineReply && CODEX_BODY_FINDING_RE.test(body));
 }
 
 function parseReviewedCommit(body) {
@@ -4941,6 +4957,8 @@ function formatError(error) {
 }
 
 module.exports = {
+  codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact,
+    parseReviewedCommit, parseVerdictArtifact },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,

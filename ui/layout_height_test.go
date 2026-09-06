@@ -213,7 +213,7 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 // the manager itself stays a modal overlay, never rendered in-rail — and the
 // composed workspace must still tile the window exactly (#1087).
 func TestWorkspaceFocusedAutomationsTilesExactly(t *testing.T) {
-	lay := layout.Grid{Panes: 1}.Solve(100, 30)
+	lay := layout.Grid{Panes: 1, Automations: 1}.Solve(100, 30)
 	require.True(t, lay.AutomationsVisible)
 	require.False(t, lay.AutomationsCompact)
 

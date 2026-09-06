@@ -127,9 +127,8 @@ func (s *TaskPane) AcknowledgeSavedEdit(id string) {
 }
 
 // RestoreFailedEdit makes a consumed edit retryable when its daemon update
-// fails. A successful final reload will still replace the pane and clear this
-// state; if that reload also fails, the in-memory edit remains the only copy
-// and must stay dirty rather than being mistaken for a persisted baseline.
+// fails. Its in-memory values and patch remain dirty through background reloads
+// so retry cannot discard the only copy of the user's changes.
 func (s *TaskPane) RestoreFailedEdit(id string) {
 	s.markTaskDirty(id)
 }
