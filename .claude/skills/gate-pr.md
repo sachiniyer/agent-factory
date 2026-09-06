@@ -657,7 +657,8 @@ is a pass**:
   `auto-gate.js` keeps them apart on purpose.
 
   *Is the reviewer out of quota?* — `codexReportsReviewUsageLimit()`. It matches
-  the stem `reached your Codex usage limits?` and then counts the message,
+  the stems `reached your Codex usage limits?` and `Codex usage limits have
+  been reached` (#3932), then counts the message,
   **unless** the clause after `for` contains a phrase on a short list of
   other-job scopes actually OBSERVED in the wild. That list is empty today.
 

@@ -176,7 +176,7 @@ jobs:
       # runner's preinstalled Node and the built-in node:test — no package.json,
       # no install step.
       - name: Test auto-gate helper
-        run: node --test .github/scripts/auto-gate.test.js
+        run: node --test .github/scripts/auto-gate.test.js .github/scripts/codex-outage.test.js
 
       # Same rationale again, one layer up: this helper decides whether the web
       # selftest RUNS, and its tests also assert the wiring that gives a red run
