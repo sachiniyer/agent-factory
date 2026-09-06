@@ -25,10 +25,12 @@ import (
 )
 
 type home struct {
-	failedCreate        *instanceStartedMsg
-	recovery            *recoveryNotice
-	snapshotUnavailable bool
-	ctx                 context.Context
+	failedCreate         *instanceStartedMsg
+	recovery             *recoveryNotice
+	snapshotUnavailable  bool
+	snapshotFailureSince *time.Time
+	snapshotClock        func() time.Time // nil uses time.Now; injected by snapshot recovery tests.
+	ctx                  context.Context
 
 	// -- Storage and Configuration --
 

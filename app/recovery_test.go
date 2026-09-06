@@ -57,6 +57,10 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					h.projects.SetDegraded(true)
 					want = "Cannot load projects"
 				case "no-daemon":
+					clock := &fakeClock{}
+					h.snapshotClock = clock.Now
+					h.handleSnapshot(snapshotFetchedMsg{err: errors.New("connection refused")})
+					clock.advance(snapshotFailureGrace)
 					h.handleSnapshot(snapshotFetchedMsg{err: errors.New("connection refused")})
 					want = "Cannot reach the daemon"
 				case "create-failed":
