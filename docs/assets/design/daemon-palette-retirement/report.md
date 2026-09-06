@@ -53,3 +53,7 @@ confirmed both OS modes, explicit-mode precedence and unavailable-detector dark
 fallback. No daemon or app tests ran on the host. Both API and CLI references
 were regenerated; only the CLI reference changed because the retired launch
 operation was a private control RPC.
+
+After integrating newer master changes, all 727 web tests, the bundle rebuild,
+reference generation, Go local gates and parity passed again. The only merge
+conflict was the generated service-worker cache stamp, resolved by rebuilding.
