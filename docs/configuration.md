@@ -90,7 +90,8 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `ssh.host_key_verification` | How the `backend = "ssh"` runtime verifies a remote host key: `strict` (default — verify, refuse an unknown or changed key), `accept-new` (trust-on-first-use: record an unknown key, still refuse a changed one), or `insecure` (no verification). Global-only: a repo selects `ssh.host`, but only the operator relaxes verification (a repo-settable waiver + repo-settable host would be a one-commit MITM). `accept-new` writes learned keys to an af-owned store under the AF home, never `~/.ssh/known_hosts`. See [backends.md → SSH backend](backends.md#ssh-backend). |
 | `sandbox.ssh` | Free-form ssh command that reaches a `backend = "sandbox"` host. Global-only because af executes it on the daemon host; a repository may select the sandbox backend but cannot choose this command. See [backends.md → Sandbox backend](backends.md#sandbox-backend). |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
-| `theme` | Retired for browser appearance. Use Light, Dark or System in the browser header. See [Appearance migration](#theme-colors-theme). |
+| `appearance` | TUI Light / Dark / System; `light`, `dark`, or `system` (default). Applied on the next TUI launch. |
+| `theme` | Retired for web and TUI appearance. Use the TUI `appearance` setting or browser header. See [Appearance migration](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
 ### Agent approval behavior
@@ -268,27 +269,41 @@ environment it started with until that process is restarted.
 
 ### Theme colors (`theme`)
 
-Browser appearance now has exactly **Light**, **Dark** and **System** in the
-header. System follows OS appearance; an unavailable preference falls back to
-dark. The choice is local to each browser. Saved `auto` choices migrate to System;
-saved Light and Dark choices keep their meaning.
+Appearance has exactly **Light**, **Dark** and **System**, using two fixed product
+palettes. For the TUI, set the global TOML key `appearance = "system"`, or use
+`af config set appearance light` (also `dark` or `system`). The Config pane shows
+the same choice. Changes apply on the next TUI launch, not to the daemon's
+palette or an already-open terminal. This preference belongs to the machine
+where the TUI runs; a remote Config editor still edits its named remote target.
+It is global-only and is not accepted from a repository's configuration.
+Read it with `af config get appearance`; `af config list` includes it as well.
+The default value is `system`.
 
-The web uses two fixed product palettes. Remove `theme = "nord"`,
-`theme = "zenburn"` or the old `[theme]` color table from your configuration when
-migrating. These settings no longer affect browser chrome or terminal colors.
-No color editor, Config key or assistant instruction can customize the web
-palette. Existing agent-owned ANSI output is preserved. The unused
-`POST /v1/GetTheme` renderer endpoint has been retired; the TUI’s launch-time
-`ApplyTheme` operation remains during the staged migration.
+System detects the terminal background through OSC 11, with `COLORFGBG` as the
+terminal library's fallback and **dark** when no background is available.
+Explicit Light/Dark bypass detection. The browser keeps its separate local
+header preference and follows OS appearance for System. Both use the saved
+values `light`, `dark`, and `system`; legacy `auto`, absent and unrecognized
+choices resolve to System. Reading an old value does not rewrite the file;
+saving a supported choice replaces it. No legacy palette is projected.
+
+Remove `theme = "nord"`, `theme = "zenburn"` or the old `[theme]` color table
+when migrating. These settings no longer affect either renderer. The TUI hides
+them even in older daemon manifests; Appearance is the replacement, not a
+per-colour editor. Agent-owned ANSI output remains unchanged.
+
+The unused `POST /v1/GetTheme` endpoint is retired. The legacy daemon
+`ApplyTheme` operation and its config compatibility readers are deliberately
+unchanged here; [#3936](https://github.com/sachiniyer/agent-factory/issues/3936)
+owns their removal and the remaining daemon/CLI/assistant schema cleanup.
 
 The retired table keys are `foreground`, `foreground_strong`,
 `foreground_muted`, `foreground_dim`, `background`, `background_subtle`,
 `background_panel`, `accent`, `success`, `warning`, `error`, `info`, `purple`,
 `selection_background`, `selection_foreground`, `pane_border_default`,
 `pane_border_selected`, `pane_border_interactive` and `pane_border_preview`.
-They are not projected into replacement colors. During the staged TUI migration
-(#3906), an older daemon/TUI may still accept these keys for its own interface;
-the web ignores them and hides the serialized theme field from older manifests.
+They are not projected into replacement colors. Older binaries may still
+accept them; current web/TUI renderers ignore them.
 
 ### Root agents (always-ensured)
 
@@ -490,7 +505,7 @@ delete_cmd = "./infra/delete.sh"
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
-| `auto_update`, `network.require_token`, `network.require_loopback_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`, `daemon_poll_interval`, `debug_pprof`, `branch_prefix`, `on_archive_command`, `default_accounts`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `root_agent`, `limit_auto_resume`, `limit_account_candidates`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `docker.mount_agent_credentials`, `ssh.host_key_verification`, `sandbox.ssh`, `session_env_passthrough`, `upgrade_clear_unverifiable_artifacts` | Operator-only. Setting them in-repo is rejected with an error naming the key. Most are global only; `branch_prefix`, `on_archive_command`, `default_accounts`, `root_agent`, and `limit_account_candidates` also admit the machine-local personal-project layer. `default_accounts` is rejected in-repo because it names an identity: a committed account name is meaningless for everyone else who clones the repository, and a repo must never choose whose quota its sessions spend. `limit_account_candidates` is rejected in-repo for the same reason, and it is the stronger case: it names the accounts af may move a session ONTO by itself. The daemon network-surface keys (`network.require_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `on_archive_command` and `vscode_server_binary` are rejected in-repo because they name code the daemon host executes. `debug_pprof` is global-only for the adjacent reason: a profile is a dump of the daemon's live memory, so a repo-settable version would let merely cloning a repository arrange for one to be servable on the machine that runs it. `session_env_passthrough`, `docker.mount_agent_credentials`, and `ssh.host_key_verification` are global-only so a cloned repo cannot grant its own docker image access to the daemon environment or the operator's credentials, nor waive ssh host-key verification (a repo-settable waiver + repo-settable `ssh.host` is a one-commit MITM) — a repo selects the image/host, only the operator relaxes the safeguard. `sandbox.ssh` is the strongest case of the same rule: af EXECUTES it on the daemon host, so a repo-settable version would be arbitrary code execution from a cloned repository rather than merely a widened permission — a repo selects `backend = "sandbox"`, only the operator says what command reaches the sandbox. All eight legacy flat spellings listed above remain accepted aliases so existing configs do not break. `upgrade_clear_unverifiable_artifacts` is global-only for the same reason as the rest of the upgrade surface: it governs what af may move aside next to its own executable, which a cloned repository has no business deciding. See [remote-http-auth.md](remote-http-auth.md). |
+| `auto_update`, `network.require_token`, `network.require_loopback_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`, `daemon_poll_interval`, `debug_pprof`, `branch_prefix`, `on_archive_command`, `default_accounts`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `appearance`, `theme`, `root_agents`, `root_agent`, `limit_auto_resume`, `limit_account_candidates`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `docker.mount_agent_credentials`, `ssh.host_key_verification`, `sandbox.ssh`, `session_env_passthrough`, `upgrade_clear_unverifiable_artifacts` | Operator-only. Setting them in-repo is rejected with an error naming the key. Most are global only; `branch_prefix`, `on_archive_command`, `default_accounts`, `root_agent`, and `limit_account_candidates` also admit the machine-local personal-project layer. `default_accounts` is rejected in-repo because it names an identity: a committed account name is meaningless for everyone else who clones the repository, and a repo must never choose whose quota its sessions spend. `limit_account_candidates` is rejected in-repo for the same reason, and it is the stronger case: it names the accounts af may move a session ONTO by itself. The daemon network-surface keys (`network.require_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `on_archive_command` and `vscode_server_binary` are rejected in-repo because they name code the daemon host executes. `debug_pprof` is global-only for the adjacent reason: a profile is a dump of the daemon's live memory, so a repo-settable version would let merely cloning a repository arrange for one to be servable on the machine that runs it. `session_env_passthrough`, `docker.mount_agent_credentials`, and `ssh.host_key_verification` are global-only so a cloned repo cannot grant its own docker image access to the daemon environment or the operator's credentials, nor waive ssh host-key verification (a repo-settable waiver + repo-settable `ssh.host` is a one-commit MITM) — a repo selects the image/host, only the operator relaxes the safeguard. `sandbox.ssh` is the strongest case of the same rule: af EXECUTES it on the daemon host, so a repo-settable version would be arbitrary code execution from a cloned repository rather than merely a widened permission — a repo selects `backend = "sandbox"`, only the operator says what command reaches the sandbox. All eight legacy flat spellings listed above remain accepted aliases so existing configs do not break. `upgrade_clear_unverifiable_artifacts` is global-only for the same reason as the rest of the upgrade surface: it governs what af may move aside next to its own executable, which a cloned repository has no business deciding. See [remote-http-auth.md](remote-http-auth.md). |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

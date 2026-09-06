@@ -23,7 +23,7 @@ func init() {
 func themeFromConfig(_ config.ThemeConfig) Theme { return theme.Roles() }
 
 // ApplyTheme rebuilds styles from fixed generated roles. Legacy palette input
-// is intentionally ignored; appearance selection is added in P5 slice C.
+// is intentionally ignored; ApplyAppearance selects the fixed light/dark mode.
 func ApplyTheme(cfg config.ThemeConfig) {
 	activeTheme = themeFromConfig(cfg)
 	AccentColor = activeTheme.Accent

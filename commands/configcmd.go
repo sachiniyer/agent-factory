@@ -103,6 +103,7 @@ var globalConfigReadOrder = []string{
 	"update_channel",
 	"upgrade_clear_unverifiable_artifacts",
 	"vscode_server_binary",
+	"appearance",
 	"theme",
 	"root_agents",
 	"root_agent",
