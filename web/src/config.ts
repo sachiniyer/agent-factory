@@ -277,6 +277,7 @@ export class ConfigPane {
    * that drops its own focus cannot be operated twice from the keyboard.
    */
   private rerenderKeepingUserState(): void {
+    const accountsOpen = !!this.el.querySelector(".af-accounts-list:not([hidden])");
     const active = document.activeElement;
     // The account register fields (#3385) are rebuilt like everything else, and
     // they hold a name the user is part-way through typing. Capturing every
@@ -305,6 +306,11 @@ export class ConfigPane {
     // reader this change exists for, and a plain focus() would yank them back to the
     // field the moment a save or an external refresh landed.
     this.restoreAccountDrafts(accountDrafts);
+    if (accountsOpen) {
+      const list = this.el.querySelector<HTMLElement>(".af-accounts-list");
+      if (list) list.hidden = false;
+      this.el.querySelector(".af-accounts > .af-recovery")?.remove();
+    }
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {

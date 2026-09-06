@@ -6525,15 +6525,511 @@ function h(tag, props = {}, ...children) {
   return el2;
 }
 
+// src/theme.ts
+var THEME_CHOICES = ["auto", "light", "dark"];
+var STORAGE_KEY = "af-theme";
+var HEX = /^#[0-9A-Fa-f]{6}$/;
+var BLACK = "#000000";
+var WHITE = "#FFFFFF";
+var NORD_THEME = {
+  name: "nord",
+  foreground: "#D8DEE9",
+  foreground_strong: "#ECEFF4",
+  foreground_muted: "#C3CBD6",
+  foreground_dim: "#A7B0BE",
+  background: "#2E3440",
+  background_subtle: "#3B4252",
+  background_panel: "#434C5E",
+  accent: "#88C0D0",
+  success: "#A3BE8C",
+  warning: "#EBCB8B",
+  error: "#CC8A91",
+  info: "#81A1C1",
+  purple: "#B590AF",
+  selection_background: "#4C566A",
+  selection_foreground: "#ECEFF4",
+  pane_border_default: "#4C566A",
+  pane_border_selected: "#88C0D0",
+  pane_border_interactive: "#A3BE8C",
+  pane_border_preview: "#B48EAD"
+};
+function rgb(hex2) {
+  if (!HEX.test(hex2)) return null;
+  return [
+    Number.parseInt(hex2.slice(1, 3), 16),
+    Number.parseInt(hex2.slice(3, 5), 16),
+    Number.parseInt(hex2.slice(5, 7), 16)
+  ];
+}
+function hex([r, g, b]) {
+  return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+function mix(a, b, amount) {
+  const aa = rgb(a);
+  const bb = rgb(b);
+  if (!aa || !bb) return NORD_THEME.foreground;
+  return hex(aa.map((v, i) => v + (bb[i] - v) * amount));
+}
+function rgbToHSL(color) {
+  const value = rgb(color) ?? rgb(NORD_THEME.accent);
+  const [r, g, b] = value.map((part) => part / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  if (max === min) return [0, 0, lightness];
+  const delta = max - min;
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue = 0;
+  if (max === r) hue = (g - b) / delta + (g < b ? 6 : 0);
+  else if (max === g) hue = (b - r) / delta + 2;
+  else hue = (r - g) / delta + 4;
+  return [hue / 6, saturation, lightness];
+}
+function hslToHex(hue, saturation, lightness) {
+  if (saturation === 0) return hex([255 * lightness, 255 * lightness, 255 * lightness]);
+  const q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
+  const p = 2 * lightness - q;
+  const channel = (offset) => {
+    let value = hue + offset;
+    if (value < 0) value += 1;
+    if (value > 1) value -= 1;
+    if (value < 1 / 6) return p + (q - p) * 6 * value;
+    if (value < 1 / 2) return q;
+    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
+    return p;
+  };
+  return hex([255 * channel(1 / 3), 255 * channel(0), 255 * channel(-1 / 3)]);
+}
+function rgba(color, alpha) {
+  const value = rgb(color) ?? rgb(NORD_THEME.background);
+  return `rgba(${value[0]}, ${value[1]}, ${value[2]}, ${alpha})`;
+}
+function luminance(color) {
+  const value = rgb(color);
+  if (!value) return 0;
+  const linear = value.map((part) => {
+    const channel = part / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+function contrastRatio(a, b) {
+  const first = luminance(a);
+  const second = luminance(b);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
+function passes(color, backgrounds, minimum) {
+  return HEX.test(color) && backgrounds.every((background) => contrastRatio(color, background) >= minimum);
+}
+function shiftToContrast(color, backgrounds, minimum, toward) {
+  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
+  for (let step = 1; step <= 100; step++) {
+    const candidate = mix(color, toward, step / 100);
+    if (passes(candidate, backgrounds, minimum)) return candidate;
+  }
+  return color.toUpperCase();
+}
+function adjustLightnessToContrast(color, backgrounds, minimum) {
+  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
+  const [hue, saturation, lightness] = rgbToHSL(color);
+  for (let step = 1; step <= 100; step++) {
+    const amount = step / 100;
+    const darker = hslToHex(hue, saturation, lightness * (1 - amount));
+    if (passes(darker, backgrounds, minimum)) return darker;
+    const lighter = hslToHex(hue, saturation, lightness + (1 - lightness) * amount);
+    if (passes(lighter, backgrounds, minimum)) return lighter;
+  }
+  return null;
+}
+function readable(candidate, backgrounds, minimum, fallback, toward) {
+  if (passes(candidate, backgrounds, minimum)) return candidate.toUpperCase();
+  const safeFallback = shiftToContrast(fallback, backgrounds, minimum, toward);
+  if (passes(safeFallback, backgrounds, minimum)) return safeFallback;
+  for (const endpoint of [BLACK, WHITE]) {
+    const shifted = shiftToContrast(fallback, backgrounds, minimum, endpoint);
+    if (passes(shifted, backgrounds, minimum)) return shifted;
+  }
+  const minimumContrast = (color) => Math.min(...backgrounds.map((background) => contrastRatio(color, background)));
+  return minimumContrast(BLACK) >= minimumContrast(WHITE) ? BLACK : WHITE;
+}
+var themeKeys = Object.keys(NORD_THEME).filter((key) => key !== "name");
+function normalizeTheme(value) {
+  const out = { ...NORD_THEME, name: typeof value?.name === "string" ? value.name : void 0 };
+  for (const key of themeKeys) {
+    const candidate = value?.[key];
+    out[key] = typeof candidate === "string" && HEX.test(candidate) ? candidate.toUpperCase() : NORD_THEME[key];
+  }
+  return out;
+}
+function hasConnectedToken(token2) {
+  return token2 !== null;
+}
+function connectionAttemptMayCommit(request, installedToken, candidate) {
+  return request.isCurrent() && installedToken === candidate;
+}
+function paletteFetchFailurePlan(status, hasLoadedPalette) {
+  const unsupported = status === 404 || status === 405 || status === 501;
+  const rejectedCredential = status === 401 || status === 403;
+  return {
+    reset: unsupported || !hasLoadedPalette,
+    retry: !unsupported && !rejectedCredential,
+    reauthenticate: rejectedCredential
+  };
+}
+function semantic(candidate, fallback, surfaces, minimum, toward) {
+  return readable(candidate, surfaces, minimum, fallback, toward);
+}
+function deriveTheme(input, mode) {
+  const source = normalizeTheme(input);
+  const dark = mode === "dark";
+  let canvas = dark ? source.background : source.foreground;
+  let surface = dark ? source.background_subtle : mix(source.foreground, source.foreground_strong, 0.55);
+  let raised = dark ? source.background_panel : source.foreground_strong;
+  let inset = dark ? mix(source.background, source.background_subtle, 0.22) : mix(source.foreground, source.background, 0.06);
+  let surfaces = [canvas, surface, inset, raised];
+  const resetSurfaceSystem = () => {
+    canvas = dark ? NORD_THEME.background : NORD_THEME.foreground;
+    surface = dark ? NORD_THEME.background_subtle : mix(NORD_THEME.foreground, NORD_THEME.foreground_strong, 0.55);
+    raised = dark ? NORD_THEME.background_panel : NORD_THEME.foreground_strong;
+    inset = dark ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22) : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
+    surfaces = [canvas, surface, inset, raised];
+  };
+  const sourceSurfaceText = dark ? source.foreground : source.background;
+  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
+  const hasSharedSurfaceText = [sourceSurfaceText, fallbackSurfaceText, BLACK, WHITE].some(
+    (candidate) => passes(candidate, surfaces, 4.5)
+  );
+  if (!hasSharedSurfaceText) {
+    resetSurfaceSystem();
+  }
+  const toward = dark ? source.foreground_strong : source.background;
+  const subtleAlpha = dark ? 0.12 : 0.09;
+  const tintAlpha = dark ? 0.2 : 0.16;
+  const provisionalText = readable(
+    dark ? source.foreground : source.background,
+    surfaces,
+    4.5,
+    fallbackSurfaceText,
+    toward
+  );
+  const lightSemantic = (candidate, fallback, backgrounds, minimum, neutral) => adjustLightnessToContrast(candidate, backgrounds, minimum) ?? adjustLightnessToContrast(fallback, backgrounds, minimum) ?? readable(fallback, backgrounds, minimum, neutral, neutral);
+  const provisionalSemantic = (candidate, fallback) => {
+    if (dark) return semantic(candidate, fallback, surfaces, 4.5, toward);
+    return lightSemantic(candidate, fallback, surfaces, 4.5, provisionalText);
+  };
+  const hasSharedFillText = (color, alphas) => {
+    const fills = surfaces.flatMap((background) => alphas.map((alpha) => mix(background, color, alpha)));
+    return passes(BLACK, fills, 4.5) || passes(WHITE, fills, 4.5);
+  };
+  const provisionalAccent = provisionalSemantic(source.accent, NORD_THEME.accent);
+  const provisionalDanger = provisionalSemantic(source.error, NORD_THEME.error);
+  if (!hasSharedFillText(provisionalAccent, [subtleAlpha, tintAlpha]) || !hasSharedFillText(provisionalDanger, [subtleAlpha])) {
+    resetSurfaceSystem();
+  }
+  const text = readable(
+    dark ? source.foreground : source.background,
+    surfaces,
+    4.5,
+    dark ? NORD_THEME.foreground : NORD_THEME.background,
+    toward
+  );
+  const text2 = readable(
+    dark ? source.foreground_muted : source.background_subtle,
+    surfaces,
+    4.5,
+    dark ? NORD_THEME.foreground_muted : NORD_THEME.background_subtle,
+    toward
+  );
+  const text3 = readable(
+    dark ? source.foreground_dim : source.background_panel,
+    surfaces,
+    4.5,
+    dark ? NORD_THEME.foreground_dim : NORD_THEME.background_panel,
+    toward
+  );
+  const modeSemantic = (candidate, fallback, minimum) => {
+    if (dark) return semantic(candidate, fallback, surfaces, minimum, toward);
+    return lightSemantic(candidate, fallback, surfaces, minimum, text);
+  };
+  const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
+  const danger = modeSemantic(source.error, NORD_THEME.error, 4.5);
+  const ready = modeSemantic(source.success, NORD_THEME.success, 3);
+  const statusNeedsYou = modeSemantic(source.success, NORD_THEME.success, 4.5);
+  const lost = modeSemantic(source.warning, NORD_THEME.warning, 3);
+  const limit = modeSemantic(source.error, NORD_THEME.error, 3);
+  const dead = semantic(text2, NORD_THEME.foreground_muted, surfaces, 3, toward);
+  const termColor = (candidate, fallback) => dark ? semantic(candidate, fallback, [canvas], 4.5, toward) : lightSemantic(candidate, fallback, [canvas], 4.5, text);
+  const termGreen = termColor(source.success, NORD_THEME.success);
+  const termAmber = termColor(source.warning, NORD_THEME.warning);
+  const termBlue = termColor(source.info, NORD_THEME.info);
+  const border = dark ? semantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, toward) : lightSemantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, text);
+  const borderSelected = modeSemantic(source.pane_border_selected, NORD_THEME.pane_border_selected, 3);
+  const borderInteractive = modeSemantic(source.pane_border_interactive, NORD_THEME.pane_border_interactive, 3);
+  const borderPreview = modeSemantic(source.pane_border_preview, NORD_THEME.pane_border_preview, 3);
+  const onAccentCandidates = [source.selection_foreground, source.background, text, BLACK, WHITE];
+  const onAccent = onAccentCandidates.find((candidate) => passes(candidate, [accent], 4.5)) ?? text;
+  const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
+  const hoverCandidate = mix(accent, hoverToward, 0.12);
+  const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
+  const semanticFillText = (candidate, fillSurfaces) => {
+    const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
+    return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
+  };
+  const accentFillSurfaces = surfaces.flatMap((background) => [
+    mix(background, accent, subtleAlpha),
+    mix(background, accent, tintAlpha)
+  ]);
+  const accentText = semanticFillText(accent, accentFillSurfaces);
+  const selectedText = semanticFillText(text, accentFillSurfaces);
+  const selectedTextMuted = semanticFillText(text2, accentFillSurfaces);
+  const selectedStatusNeedsYou = semanticFillText(statusNeedsYou, accentFillSurfaces);
+  const selectedStatusWorking = semanticFillText(text2, accentFillSurfaces);
+  const selectedStatusWaiting = semanticFillText(danger, accentFillSurfaces);
+  const selectedStatusBroken = semanticFillText(danger, accentFillSurfaces);
+  const selectedStatusInactive = semanticFillText(text2, accentFillSurfaces);
+  const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
+  const dangerText = semanticFillText(danger, dangerFillSurfaces);
+  const effectBase = dark ? canvas : text;
+  const selectionAlpha = dark ? 0.72 : 0.45;
+  const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
+  const selectionForeground = readable(
+    source.selection_foreground,
+    [selectionSurface],
+    4.5,
+    NORD_THEME.selection_foreground,
+    text
+  );
+  const tokens = {
+    "--af-bg-canvas": canvas,
+    "--af-bg-surface": surface,
+    "--af-bg-inset": inset,
+    "--af-bg-raised": raised,
+    "--af-bg-term": canvas,
+    "--af-border": border,
+    "--af-border-subtle": mix(surface, border, 0.35),
+    "--af-border-strong": border,
+    "--af-border-selected": borderSelected,
+    "--af-border-interactive": borderInteractive,
+    "--af-border-preview": borderPreview,
+    "--af-text": text,
+    "--af-text-2": text2,
+    "--af-text-3": text3,
+    "--af-accent": accent,
+    "--af-accent-text": accentText,
+    "--af-accent-hover": accentHover,
+    "--af-accent-subtle": rgba(accent, subtleAlpha),
+    "--af-accent-tint": rgba(accent, tintAlpha),
+    "--af-on-accent": onAccent,
+    "--af-danger": danger,
+    "--af-danger-text": dangerText,
+    "--af-danger-subtle": rgba(danger, subtleAlpha),
+    "--af-focus-ring": accent,
+    "--af-text-muted": text2,
+    "--af-status-needs-you": statusNeedsYou,
+    "--af-status-working": text2,
+    "--af-status-waiting": danger,
+    "--af-status-broken": danger,
+    "--af-status-inactive": text2,
+    "--af-selected-text": selectedText,
+    "--af-selected-text-muted": selectedTextMuted,
+    "--af-selected-status-needs-you": selectedStatusNeedsYou,
+    "--af-selected-status-working": selectedStatusWorking,
+    "--af-selected-status-waiting": selectedStatusWaiting,
+    "--af-selected-status-broken": selectedStatusBroken,
+    "--af-selected-status-inactive": selectedStatusInactive,
+    "--af-dot-ready": ready,
+    "--af-dot-lost": lost,
+    "--af-dot-dead": dead,
+    "--af-dot-archived": dead,
+    "--af-dot-limit": limit,
+    "--af-term-green": termGreen,
+    "--af-term-amber": termAmber,
+    "--af-term-blue": termBlue,
+    "--af-term-dim": text3,
+    "--af-shadow-1": `0 1px 2px ${rgba(effectBase, dark ? 0.4 : 0.08)}`,
+    "--af-shadow-2": `0 4px 10px ${rgba(effectBase, dark ? 0.45 : 0.12)}`,
+    "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
+    "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42)
+  };
+  const ansiDistinct = (color, avoid) => {
+    const normalized = color.toUpperCase();
+    const rejected = new Set(avoid.map((value) => value.toUpperCase()));
+    if (!rejected.has(normalized) && passes(normalized, [canvas], 4.5)) return normalized;
+    let best = normalized;
+    let bestDistance = -1;
+    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
+      for (let step = 1; step <= 255; step++) {
+        const candidate = mix(normalized, endpoint, step / 255);
+        if (rejected.has(candidate) || !passes(candidate, [canvas], 4.5)) continue;
+        const value = rgb(candidate);
+        const distance = Math.min(
+          ...avoid.map((occupied) => {
+            const other = rgb(occupied);
+            return value.reduce((sum, channel, index) => sum + (channel - other[index]) ** 2, 0);
+          })
+        );
+        if (distance > bestDistance) {
+          best = candidate;
+          bestDistance = distance;
+        }
+      }
+    }
+    return best;
+  };
+  const bright = (color) => ansiDistinct(color, [color]);
+  const ansiBlack = dark ? text3 : text;
+  const ansiWhite = ansiDistinct(dark ? text : text3, [ansiBlack]);
+  const brightBlack = ansiDistinct(ansiBlack, [ansiBlack, ansiWhite]);
+  const brightWhite = ansiDistinct(ansiWhite, [ansiWhite, ansiBlack, brightBlack]);
+  const xterm = {
+    background: tokens["--af-bg-term"],
+    foreground: text,
+    cursor: text,
+    cursorAccent: canvas,
+    selectionBackground: rgba(source.selection_background, selectionAlpha),
+    selectionForeground,
+    black: ansiBlack,
+    red: danger,
+    green: termGreen,
+    yellow: termAmber,
+    blue: termBlue,
+    magenta: termColor(source.purple, NORD_THEME.purple),
+    cyan: accent,
+    white: ansiWhite,
+    brightBlack,
+    brightRed: bright(danger),
+    brightGreen: bright(termGreen),
+    brightYellow: bright(termAmber),
+    brightBlue: bright(termBlue),
+    brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
+    brightCyan: bright(accent),
+    brightWhite
+  };
+  return { tokens, xterm };
+}
+var activeThemes = {
+  light: deriveTheme(NORD_THEME, "light"),
+  dark: deriveTheme(NORD_THEME, "dark")
+};
+function isChoice(value) {
+  return value === "auto" || value === "light" || value === "dark";
+}
+function readThemeChoice() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (isChoice(raw)) return raw;
+  } catch {
+  }
+  return "auto";
+}
+function persistThemeChoice(choice) {
+  try {
+    localStorage.setItem(STORAGE_KEY, choice);
+  } catch {
+  }
+}
+function prefersDark() {
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  } catch {
+    return false;
+  }
+}
+function currentMode() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") return attr;
+  return prefersDark() ? "dark" : "light";
+}
+function applyCurrentMode() {
+  const root2 = document.documentElement;
+  for (const screen of document.querySelectorAll(".af-recovery")) screen.setAttribute("data-af-theme", currentMode());
+  for (const [name, value] of Object.entries(activeThemes[currentMode()].tokens)) root2.style.setProperty(name, value);
+}
+function themeColorMetaContents(choice) {
+  const light = activeThemes.light.tokens["--af-bg-surface"];
+  const dark = activeThemes.dark.tokens["--af-bg-surface"];
+  if (choice === "auto") return { light, dark };
+  const forced = choice === "dark" ? dark : light;
+  return { light: forced, dark: forced };
+}
+function syncThemeColorMeta(choice) {
+  const colors = themeColorMetaContents(choice);
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
+  }
+}
+function refreshThemeMode() {
+  applyCurrentMode();
+  syncThemeColorMeta(document.documentElement.hasAttribute("data-theme") ? currentMode() : "auto");
+}
+function applyDaemonTheme(theme) {
+  activeThemes = { light: deriveTheme(theme, "light"), dark: deriveTheme(theme, "dark") };
+  refreshThemeMode();
+}
+function resetDaemonTheme() {
+  applyDaemonTheme(NORD_THEME);
+}
+function stampTheme(choice) {
+  const root2 = document.documentElement;
+  if (choice === "auto") root2.removeAttribute("data-theme");
+  else root2.setAttribute("data-theme", choice);
+  applyCurrentMode();
+  syncThemeColorMeta(choice);
+}
+function bootStampTheme() {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+function xtermTheme(mode) {
+  return activeThemes[mode].xterm;
+}
+function currentXtermTheme() {
+  return xtermTheme(currentMode());
+}
+
+// src/recovery.ts
+function recoveryScreen(state) {
+  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
+  action.addEventListener("click", state.run);
+  const screen = h(
+    "section",
+    { class: "af-recovery" },
+    h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
+    ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
+    action
+  );
+  scopeRecovery(screen);
+  if (state.failed) screen.setAttribute("role", "alert");
+  return screen;
+}
+function mutationNotice(condition, detail, action, failed = true) {
+  return scopeRecovery(h(
+    "div",
+    { class: "af-recovery af-recovery-notice", role: "alert" },
+    h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
+    h("p", { class: "af-recovery-detail" }, detail),
+    h("p", { class: "af-recovery-next" }, action)
+  ));
+}
+function scopeRecovery(element) {
+  element.setAttribute("data-af-theme", currentMode());
+  return element;
+}
+
 // src/accounts.ts
 function emptyAccountsState() {
-  return { entries: [], agents: [], error: "", status: null };
+  return { entries: [], agents: [], error: "", status: null, loaded: false };
 }
 var ACCOUNT_INPUT_ATTR = "data-account-input";
 var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential. Signing in is a device code \xB7 the pane prints a URL, you finish it in your own browser.";
 function renderAccountsSection(state, actions2) {
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
+  }
   const head = h(
     "div",
     { class: "af-accounts-head" },
@@ -6566,7 +7062,15 @@ function renderAccountsSection(state, actions2) {
     }
     list.append(renderRegisterRow(agent, state.status, actions2));
   }
-  section.append(list);
+  if (state.entries.length === 0) {
+    list.hidden = true;
+    const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
+      empty.remove();
+      list.hidden = false;
+      list.querySelector("input")?.focus();
+    } });
+    section.replaceChildren(empty, list);
+  } else section.append(list);
   return section;
 }
 function renderAccountRow(entry, status, actions2) {
@@ -6772,6 +7276,7 @@ var ConfigPane = class {
    * that drops its own focus cannot be operated twice from the keyboard.
    */
   rerenderKeepingUserState() {
+    const accountsOpen = !!this.el.querySelector(".af-accounts-list:not([hidden])");
     const active = document.activeElement;
     const accountDrafts = this.readAccountDrafts();
     const focusedAccount = active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
@@ -6782,6 +7287,11 @@ var ConfigPane = class {
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreAccountDrafts(accountDrafts);
+    if (accountsOpen) {
+      const list = this.el.querySelector(".af-accounts-list");
+      if (list) list.hidden = false;
+      this.el.querySelector(".af-accounts > .af-recovery")?.remove();
+    }
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -7648,468 +8158,6 @@ function wrappedCellPosition(index, cols) {
 }
 function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
-}
-
-// src/theme.ts
-var THEME_CHOICES = ["auto", "light", "dark"];
-var STORAGE_KEY = "af-theme";
-var HEX = /^#[0-9A-Fa-f]{6}$/;
-var BLACK = "#000000";
-var WHITE = "#FFFFFF";
-var NORD_THEME = {
-  name: "nord",
-  foreground: "#D8DEE9",
-  foreground_strong: "#ECEFF4",
-  foreground_muted: "#C3CBD6",
-  foreground_dim: "#A7B0BE",
-  background: "#2E3440",
-  background_subtle: "#3B4252",
-  background_panel: "#434C5E",
-  accent: "#88C0D0",
-  success: "#A3BE8C",
-  warning: "#EBCB8B",
-  error: "#CC8A91",
-  info: "#81A1C1",
-  purple: "#B590AF",
-  selection_background: "#4C566A",
-  selection_foreground: "#ECEFF4",
-  pane_border_default: "#4C566A",
-  pane_border_selected: "#88C0D0",
-  pane_border_interactive: "#A3BE8C",
-  pane_border_preview: "#B48EAD"
-};
-function rgb(hex2) {
-  if (!HEX.test(hex2)) return null;
-  return [
-    Number.parseInt(hex2.slice(1, 3), 16),
-    Number.parseInt(hex2.slice(3, 5), 16),
-    Number.parseInt(hex2.slice(5, 7), 16)
-  ];
-}
-function hex([r, g, b]) {
-  return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
-}
-function mix(a, b, amount) {
-  const aa = rgb(a);
-  const bb = rgb(b);
-  if (!aa || !bb) return NORD_THEME.foreground;
-  return hex(aa.map((v, i) => v + (bb[i] - v) * amount));
-}
-function rgbToHSL(color) {
-  const value = rgb(color) ?? rgb(NORD_THEME.accent);
-  const [r, g, b] = value.map((part) => part / 255);
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const lightness = (max + min) / 2;
-  if (max === min) return [0, 0, lightness];
-  const delta = max - min;
-  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
-  let hue = 0;
-  if (max === r) hue = (g - b) / delta + (g < b ? 6 : 0);
-  else if (max === g) hue = (b - r) / delta + 2;
-  else hue = (r - g) / delta + 4;
-  return [hue / 6, saturation, lightness];
-}
-function hslToHex(hue, saturation, lightness) {
-  if (saturation === 0) return hex([255 * lightness, 255 * lightness, 255 * lightness]);
-  const q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
-  const p = 2 * lightness - q;
-  const channel = (offset) => {
-    let value = hue + offset;
-    if (value < 0) value += 1;
-    if (value > 1) value -= 1;
-    if (value < 1 / 6) return p + (q - p) * 6 * value;
-    if (value < 1 / 2) return q;
-    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
-    return p;
-  };
-  return hex([255 * channel(1 / 3), 255 * channel(0), 255 * channel(-1 / 3)]);
-}
-function rgba(color, alpha) {
-  const value = rgb(color) ?? rgb(NORD_THEME.background);
-  return `rgba(${value[0]}, ${value[1]}, ${value[2]}, ${alpha})`;
-}
-function luminance(color) {
-  const value = rgb(color);
-  if (!value) return 0;
-  const linear = value.map((part) => {
-    const channel = part / 255;
-    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-}
-function contrastRatio(a, b) {
-  const first = luminance(a);
-  const second = luminance(b);
-  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
-}
-function passes(color, backgrounds, minimum) {
-  return HEX.test(color) && backgrounds.every((background) => contrastRatio(color, background) >= minimum);
-}
-function shiftToContrast(color, backgrounds, minimum, toward) {
-  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
-  for (let step = 1; step <= 100; step++) {
-    const candidate = mix(color, toward, step / 100);
-    if (passes(candidate, backgrounds, minimum)) return candidate;
-  }
-  return color.toUpperCase();
-}
-function adjustLightnessToContrast(color, backgrounds, minimum) {
-  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
-  const [hue, saturation, lightness] = rgbToHSL(color);
-  for (let step = 1; step <= 100; step++) {
-    const amount = step / 100;
-    const darker = hslToHex(hue, saturation, lightness * (1 - amount));
-    if (passes(darker, backgrounds, minimum)) return darker;
-    const lighter = hslToHex(hue, saturation, lightness + (1 - lightness) * amount);
-    if (passes(lighter, backgrounds, minimum)) return lighter;
-  }
-  return null;
-}
-function readable(candidate, backgrounds, minimum, fallback, toward) {
-  if (passes(candidate, backgrounds, minimum)) return candidate.toUpperCase();
-  const safeFallback = shiftToContrast(fallback, backgrounds, minimum, toward);
-  if (passes(safeFallback, backgrounds, minimum)) return safeFallback;
-  for (const endpoint of [BLACK, WHITE]) {
-    const shifted = shiftToContrast(fallback, backgrounds, minimum, endpoint);
-    if (passes(shifted, backgrounds, minimum)) return shifted;
-  }
-  const minimumContrast = (color) => Math.min(...backgrounds.map((background) => contrastRatio(color, background)));
-  return minimumContrast(BLACK) >= minimumContrast(WHITE) ? BLACK : WHITE;
-}
-var themeKeys = Object.keys(NORD_THEME).filter((key) => key !== "name");
-function normalizeTheme(value) {
-  const out = { ...NORD_THEME, name: typeof value?.name === "string" ? value.name : void 0 };
-  for (const key of themeKeys) {
-    const candidate = value?.[key];
-    out[key] = typeof candidate === "string" && HEX.test(candidate) ? candidate.toUpperCase() : NORD_THEME[key];
-  }
-  return out;
-}
-function hasConnectedToken(token2) {
-  return token2 !== null;
-}
-function connectionAttemptMayCommit(request, installedToken, candidate) {
-  return request.isCurrent() && installedToken === candidate;
-}
-function paletteFetchFailurePlan(status, hasLoadedPalette) {
-  const unsupported = status === 404 || status === 405 || status === 501;
-  const rejectedCredential = status === 401 || status === 403;
-  return {
-    reset: unsupported || !hasLoadedPalette,
-    retry: !unsupported && !rejectedCredential,
-    reauthenticate: rejectedCredential
-  };
-}
-function semantic(candidate, fallback, surfaces, minimum, toward) {
-  return readable(candidate, surfaces, minimum, fallback, toward);
-}
-function deriveTheme(input, mode) {
-  const source = normalizeTheme(input);
-  const dark = mode === "dark";
-  let canvas = dark ? source.background : source.foreground;
-  let surface = dark ? source.background_subtle : mix(source.foreground, source.foreground_strong, 0.55);
-  let raised = dark ? source.background_panel : source.foreground_strong;
-  let inset = dark ? mix(source.background, source.background_subtle, 0.22) : mix(source.foreground, source.background, 0.06);
-  let surfaces = [canvas, surface, inset, raised];
-  const resetSurfaceSystem = () => {
-    canvas = dark ? NORD_THEME.background : NORD_THEME.foreground;
-    surface = dark ? NORD_THEME.background_subtle : mix(NORD_THEME.foreground, NORD_THEME.foreground_strong, 0.55);
-    raised = dark ? NORD_THEME.background_panel : NORD_THEME.foreground_strong;
-    inset = dark ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22) : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
-    surfaces = [canvas, surface, inset, raised];
-  };
-  const sourceSurfaceText = dark ? source.foreground : source.background;
-  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
-  const hasSharedSurfaceText = [sourceSurfaceText, fallbackSurfaceText, BLACK, WHITE].some(
-    (candidate) => passes(candidate, surfaces, 4.5)
-  );
-  if (!hasSharedSurfaceText) {
-    resetSurfaceSystem();
-  }
-  const toward = dark ? source.foreground_strong : source.background;
-  const subtleAlpha = dark ? 0.12 : 0.09;
-  const tintAlpha = dark ? 0.2 : 0.16;
-  const provisionalText = readable(
-    dark ? source.foreground : source.background,
-    surfaces,
-    4.5,
-    fallbackSurfaceText,
-    toward
-  );
-  const lightSemantic = (candidate, fallback, backgrounds, minimum, neutral) => adjustLightnessToContrast(candidate, backgrounds, minimum) ?? adjustLightnessToContrast(fallback, backgrounds, minimum) ?? readable(fallback, backgrounds, minimum, neutral, neutral);
-  const provisionalSemantic = (candidate, fallback) => {
-    if (dark) return semantic(candidate, fallback, surfaces, 4.5, toward);
-    return lightSemantic(candidate, fallback, surfaces, 4.5, provisionalText);
-  };
-  const hasSharedFillText = (color, alphas) => {
-    const fills = surfaces.flatMap((background) => alphas.map((alpha) => mix(background, color, alpha)));
-    return passes(BLACK, fills, 4.5) || passes(WHITE, fills, 4.5);
-  };
-  const provisionalAccent = provisionalSemantic(source.accent, NORD_THEME.accent);
-  const provisionalDanger = provisionalSemantic(source.error, NORD_THEME.error);
-  if (!hasSharedFillText(provisionalAccent, [subtleAlpha, tintAlpha]) || !hasSharedFillText(provisionalDanger, [subtleAlpha])) {
-    resetSurfaceSystem();
-  }
-  const text = readable(
-    dark ? source.foreground : source.background,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground : NORD_THEME.background,
-    toward
-  );
-  const text2 = readable(
-    dark ? source.foreground_muted : source.background_subtle,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground_muted : NORD_THEME.background_subtle,
-    toward
-  );
-  const text3 = readable(
-    dark ? source.foreground_dim : source.background_panel,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground_dim : NORD_THEME.background_panel,
-    toward
-  );
-  const modeSemantic = (candidate, fallback, minimum) => {
-    if (dark) return semantic(candidate, fallback, surfaces, minimum, toward);
-    return lightSemantic(candidate, fallback, surfaces, minimum, text);
-  };
-  const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
-  const danger = modeSemantic(source.error, NORD_THEME.error, 4.5);
-  const ready = modeSemantic(source.success, NORD_THEME.success, 3);
-  const statusNeedsYou = modeSemantic(source.success, NORD_THEME.success, 4.5);
-  const lost = modeSemantic(source.warning, NORD_THEME.warning, 3);
-  const limit = modeSemantic(source.error, NORD_THEME.error, 3);
-  const dead = semantic(text2, NORD_THEME.foreground_muted, surfaces, 3, toward);
-  const termColor = (candidate, fallback) => dark ? semantic(candidate, fallback, [canvas], 4.5, toward) : lightSemantic(candidate, fallback, [canvas], 4.5, text);
-  const termGreen = termColor(source.success, NORD_THEME.success);
-  const termAmber = termColor(source.warning, NORD_THEME.warning);
-  const termBlue = termColor(source.info, NORD_THEME.info);
-  const border = dark ? semantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, toward) : lightSemantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, text);
-  const borderSelected = modeSemantic(source.pane_border_selected, NORD_THEME.pane_border_selected, 3);
-  const borderInteractive = modeSemantic(source.pane_border_interactive, NORD_THEME.pane_border_interactive, 3);
-  const borderPreview = modeSemantic(source.pane_border_preview, NORD_THEME.pane_border_preview, 3);
-  const onAccentCandidates = [source.selection_foreground, source.background, text, BLACK, WHITE];
-  const onAccent = onAccentCandidates.find((candidate) => passes(candidate, [accent], 4.5)) ?? text;
-  const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
-  const hoverCandidate = mix(accent, hoverToward, 0.12);
-  const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
-  const semanticFillText = (candidate, fillSurfaces) => {
-    const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
-    return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
-  };
-  const accentFillSurfaces = surfaces.flatMap((background) => [
-    mix(background, accent, subtleAlpha),
-    mix(background, accent, tintAlpha)
-  ]);
-  const accentText = semanticFillText(accent, accentFillSurfaces);
-  const selectedText = semanticFillText(text, accentFillSurfaces);
-  const selectedTextMuted = semanticFillText(text2, accentFillSurfaces);
-  const selectedStatusNeedsYou = semanticFillText(statusNeedsYou, accentFillSurfaces);
-  const selectedStatusWorking = semanticFillText(text2, accentFillSurfaces);
-  const selectedStatusWaiting = semanticFillText(danger, accentFillSurfaces);
-  const selectedStatusBroken = semanticFillText(danger, accentFillSurfaces);
-  const selectedStatusInactive = semanticFillText(text2, accentFillSurfaces);
-  const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
-  const dangerText = semanticFillText(danger, dangerFillSurfaces);
-  const effectBase = dark ? canvas : text;
-  const selectionAlpha = dark ? 0.72 : 0.45;
-  const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
-  const selectionForeground = readable(
-    source.selection_foreground,
-    [selectionSurface],
-    4.5,
-    NORD_THEME.selection_foreground,
-    text
-  );
-  const tokens = {
-    "--af-bg-canvas": canvas,
-    "--af-bg-surface": surface,
-    "--af-bg-inset": inset,
-    "--af-bg-raised": raised,
-    "--af-bg-term": canvas,
-    "--af-border": border,
-    "--af-border-subtle": mix(surface, border, 0.35),
-    "--af-border-strong": border,
-    "--af-border-selected": borderSelected,
-    "--af-border-interactive": borderInteractive,
-    "--af-border-preview": borderPreview,
-    "--af-text": text,
-    "--af-text-2": text2,
-    "--af-text-3": text3,
-    "--af-accent": accent,
-    "--af-accent-text": accentText,
-    "--af-accent-hover": accentHover,
-    "--af-accent-subtle": rgba(accent, subtleAlpha),
-    "--af-accent-tint": rgba(accent, tintAlpha),
-    "--af-on-accent": onAccent,
-    "--af-danger": danger,
-    "--af-danger-text": dangerText,
-    "--af-danger-subtle": rgba(danger, subtleAlpha),
-    "--af-focus-ring": accent,
-    "--af-text-muted": text2,
-    "--af-status-needs-you": statusNeedsYou,
-    "--af-status-working": text2,
-    "--af-status-waiting": danger,
-    "--af-status-broken": danger,
-    "--af-status-inactive": text2,
-    "--af-selected-text": selectedText,
-    "--af-selected-text-muted": selectedTextMuted,
-    "--af-selected-status-needs-you": selectedStatusNeedsYou,
-    "--af-selected-status-working": selectedStatusWorking,
-    "--af-selected-status-waiting": selectedStatusWaiting,
-    "--af-selected-status-broken": selectedStatusBroken,
-    "--af-selected-status-inactive": selectedStatusInactive,
-    "--af-dot-ready": ready,
-    "--af-dot-lost": lost,
-    "--af-dot-dead": dead,
-    "--af-dot-archived": dead,
-    "--af-dot-limit": limit,
-    "--af-term-green": termGreen,
-    "--af-term-amber": termAmber,
-    "--af-term-blue": termBlue,
-    "--af-term-dim": text3,
-    "--af-shadow-1": `0 1px 2px ${rgba(effectBase, dark ? 0.4 : 0.08)}`,
-    "--af-shadow-2": `0 4px 10px ${rgba(effectBase, dark ? 0.45 : 0.12)}`,
-    "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
-    "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42)
-  };
-  const ansiDistinct = (color, avoid) => {
-    const normalized = color.toUpperCase();
-    const rejected = new Set(avoid.map((value) => value.toUpperCase()));
-    if (!rejected.has(normalized) && passes(normalized, [canvas], 4.5)) return normalized;
-    let best = normalized;
-    let bestDistance = -1;
-    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
-      for (let step = 1; step <= 255; step++) {
-        const candidate = mix(normalized, endpoint, step / 255);
-        if (rejected.has(candidate) || !passes(candidate, [canvas], 4.5)) continue;
-        const value = rgb(candidate);
-        const distance = Math.min(
-          ...avoid.map((occupied) => {
-            const other = rgb(occupied);
-            return value.reduce((sum, channel, index) => sum + (channel - other[index]) ** 2, 0);
-          })
-        );
-        if (distance > bestDistance) {
-          best = candidate;
-          bestDistance = distance;
-        }
-      }
-    }
-    return best;
-  };
-  const bright = (color) => ansiDistinct(color, [color]);
-  const ansiBlack = dark ? text3 : text;
-  const ansiWhite = ansiDistinct(dark ? text : text3, [ansiBlack]);
-  const brightBlack = ansiDistinct(ansiBlack, [ansiBlack, ansiWhite]);
-  const brightWhite = ansiDistinct(ansiWhite, [ansiWhite, ansiBlack, brightBlack]);
-  const xterm = {
-    background: tokens["--af-bg-term"],
-    foreground: text,
-    cursor: text,
-    cursorAccent: canvas,
-    selectionBackground: rgba(source.selection_background, selectionAlpha),
-    selectionForeground,
-    black: ansiBlack,
-    red: danger,
-    green: termGreen,
-    yellow: termAmber,
-    blue: termBlue,
-    magenta: termColor(source.purple, NORD_THEME.purple),
-    cyan: accent,
-    white: ansiWhite,
-    brightBlack,
-    brightRed: bright(danger),
-    brightGreen: bright(termGreen),
-    brightYellow: bright(termAmber),
-    brightBlue: bright(termBlue),
-    brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
-    brightCyan: bright(accent),
-    brightWhite
-  };
-  return { tokens, xterm };
-}
-var activeThemes = {
-  light: deriveTheme(NORD_THEME, "light"),
-  dark: deriveTheme(NORD_THEME, "dark")
-};
-function isChoice(value) {
-  return value === "auto" || value === "light" || value === "dark";
-}
-function readThemeChoice() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (isChoice(raw)) return raw;
-  } catch {
-  }
-  return "auto";
-}
-function persistThemeChoice(choice) {
-  try {
-    localStorage.setItem(STORAGE_KEY, choice);
-  } catch {
-  }
-}
-function prefersDark() {
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  } catch {
-    return false;
-  }
-}
-function currentMode() {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light" || attr === "dark") return attr;
-  return prefersDark() ? "dark" : "light";
-}
-function applyCurrentMode() {
-  const root2 = document.documentElement;
-  for (const [name, value] of Object.entries(activeThemes[currentMode()].tokens)) root2.style.setProperty(name, value);
-}
-function themeColorMetaContents(choice) {
-  const light = activeThemes.light.tokens["--af-bg-surface"];
-  const dark = activeThemes.dark.tokens["--af-bg-surface"];
-  if (choice === "auto") return { light, dark };
-  const forced = choice === "dark" ? dark : light;
-  return { light: forced, dark: forced };
-}
-function syncThemeColorMeta(choice) {
-  const colors = themeColorMetaContents(choice);
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
-  }
-}
-function refreshThemeMode() {
-  applyCurrentMode();
-  syncThemeColorMeta(document.documentElement.hasAttribute("data-theme") ? currentMode() : "auto");
-}
-function applyDaemonTheme(theme) {
-  activeThemes = { light: deriveTheme(theme, "light"), dark: deriveTheme(theme, "dark") };
-  refreshThemeMode();
-}
-function resetDaemonTheme() {
-  applyDaemonTheme(NORD_THEME);
-}
-function stampTheme(choice) {
-  const root2 = document.documentElement;
-  if (choice === "auto") root2.removeAttribute("data-theme");
-  else root2.setAttribute("data-theme", choice);
-  applyCurrentMode();
-  syncThemeColorMeta(choice);
-}
-function bootStampTheme() {
-  const choice = readThemeChoice();
-  stampTheme(choice);
-  return choice;
-}
-function xtermTheme(mode) {
-  return activeThemes[mode].xterm;
-}
-function currentXtermTheme() {
-  return xtermTheme(currentMode());
 }
 
 // src/terminal.ts
@@ -10149,7 +10197,7 @@ function handoffAgentChoices(catalog, current) {
 // src/modals.ts
 function modalChrome(opts) {
   const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
+  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
   errorLine.hidden = true;
   const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
   const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
@@ -10178,7 +10226,7 @@ function modalChrome(opts) {
     },
     setError(msg) {
       if (msg) {
-        errorLine.textContent = msg;
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
       } else {
         errorLine.textContent = "";
@@ -13119,6 +13167,7 @@ var TasksPane = class {
     this.el.setAttribute("aria-label", "Tasks");
   }
   el;
+  lastError;
   lastTasks = null;
   lastProject = null;
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
@@ -13127,10 +13176,11 @@ var TasksPane = class {
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
-  update(tasks, selectedProject) {
-    if (this.lastTasks === tasks && this.lastProject === selectedProject) {
+  update(tasks, selectedProject, error) {
+    if (this.lastTasks === tasks && this.lastProject === selectedProject && this.lastError === error) {
       return;
     }
+    this.lastError = error;
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
@@ -13140,6 +13190,24 @@ var TasksPane = class {
     rebuildKeepingScroll(this.el, previous, token2, () => this.render(scoped));
   }
   render(tasks) {
+    if (this.lastError) {
+      this.el.replaceChildren(recoveryScreen({
+        condition: "Tasks unavailable",
+        detail: this.lastError,
+        failed: true,
+        action: "Retry",
+        run: () => this.actions.retry?.()
+      }));
+      return;
+    }
+    if (this.lastProject === null) {
+      this.el.replaceChildren(recoveryScreen({
+        condition: "No project registered",
+        action: "Add project",
+        run: () => this.actions.addProject?.()
+      }));
+      return;
+    }
     const addBtn = h(
       "button",
       { type: "button", class: "af-tasks-add", title: "Add task" },
@@ -13156,12 +13224,7 @@ var TasksPane = class {
     );
     if (tasks.length === 0) {
       this.el.replaceChildren(
-        head,
-        h(
-          "p",
-          { class: "af-tasks-empty" },
-          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule."
-        )
+        recoveryScreen({ condition: "No tasks", action: "Add task", run: () => this.actions.add() })
       );
       return;
     }
@@ -13842,10 +13905,26 @@ function visibleRailSessions(state) {
   const scoped = scopeToProject(state.sessions, state.selectedProject);
   return filterSessions(orderedSessions(scoped), state.statusFilter);
 }
+var loginDrafts = /* @__PURE__ */ new WeakMap();
 function renderLogin(root2, state, actions2) {
+  const draft = state.loginError || state.connecting || state.loginCondition ? root2.querySelector("#af-token")?.value ?? loginDrafts.get(root2) ?? "" : "";
+  loginDrafts.set(root2, draft);
   root2.replaceChildren(loginView(state, actions2));
+  const input = root2.querySelector("#af-token");
+  if (input) input.value = draft;
 }
 function loginView(state, actions2) {
+  if (state.loginCondition === "unavailable") {
+    const screen = recoveryScreen({
+      condition: "Cannot reach the daemon",
+      failed: true,
+      detail: state.loginError ?? "Check the daemon and its listener address, then retry.",
+      action: state.connecting ? "Connecting\u2026" : "Retry",
+      run: () => actions2.retryConnection?.()
+    });
+    screen.classList.add("af-recovery-login");
+    return screen;
+  }
   if (state.connecting && !state.loginError) {
     return connectingView();
   }
@@ -13880,7 +13959,7 @@ function loginView(state, actions2) {
     }
   });
   const children = [
-    h2("h1", { class: "af-title" }, "Agent Factory"),
+    h2("h1", { class: state.loginCondition === "expired" ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.loginCondition === "expired" ? "Login expired" : "Sign in"),
     h2(
       "p",
       { class: "af-subtitle" },
@@ -13897,19 +13976,14 @@ function loginView(state, actions2) {
   if (state.loginError) {
     children.push(h2("p", { class: "af-error", role: "alert" }, state.loginError));
   }
-  return h2("main", { class: "af-login" }, h2("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h2("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 function connectingView() {
-  return h2(
+  return scopeRecovery(h2(
     "main",
-    { class: "af-login" },
-    h2(
-      "div",
-      { class: "af-card" },
-      h2("h1", { class: "af-title" }, "Agent Factory"),
-      h2("p", { class: "af-subtitle" }, "Connecting\u2026")
-    )
-  );
+    { class: "af-login af-recovery af-recovery-login" },
+    h2("h1", { class: "af-recovery-title" }, "Connecting\u2026")
+  ));
 }
 function noAuthLoginView(state, actions2) {
   const button = h2(
@@ -13934,7 +14008,7 @@ function noAuthLoginView(state, actions2) {
   if (state.loginError) {
     children.push(h2("p", { class: "af-error", role: "alert" }, state.loginError));
   }
-  return h2("main", { class: "af-login" }, h2("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h2("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 var AppShell = class {
   constructor(actions2, termHost2, modalHost2, installEl) {
@@ -14114,6 +14188,8 @@ var AppShell = class {
     this.navScrim.addEventListener("click", () => this.setNav(false));
     this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main, this.navScrim);
     this.tasksPane = new TasksPane({
+      retry: () => this.actions.retryTasks?.(),
+      addProject: () => this.actions.addProject(),
       add: () => this.actions.addTask(),
       edit: (task) => this.actions.editTask(task),
       toggle: (task) => this.actions.toggleTask(task),
@@ -14158,6 +14234,7 @@ var AppShell = class {
   // presentation decision. The root class is media-query inert on desktop.
   lastCondensedSessionChrome = null;
   lastTasks = null;
+  lastTasksError;
   lastTasksProject = null;
   // The top-right project switcher (redesign PR2): a button showing the current
   // project + a dropdown menu listing every project with its per-project counts, the
@@ -14266,6 +14343,7 @@ var AppShell = class {
   // selected (selectedId is null before AND after that first update, so the
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
+  lastEmptyKey = "";
   mainRendered = false;
   idleAgeTimer;
   // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
@@ -14335,7 +14413,7 @@ var AppShell = class {
     }
     if (this.lastError !== state.tabError) {
       this.lastError = state.tabError;
-      this.toast.textContent = state.tabError ?? "";
+      this.toast.replaceChildren(...state.tabError ? [mutationNotice(state.tabNotice ? "Notice" : "Operation failed", state.tabError, state.tabNotice ? "Continue working." : "Try the action again.", !state.tabNotice)] : []);
       this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
     if (this.lastLive !== state.live) {
@@ -14362,10 +14440,11 @@ var AppShell = class {
         opt.setAttribute("aria-pressed", active ? "true" : "false");
       }
     }
-    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject) {
+    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject || this.lastTasksError !== state.tasksError) {
+      this.lastTasksError = state.tasksError;
       this.lastTasks = state.tasks;
       this.lastTasksProject = state.selectedProject;
-      this.tasksPane.update(state.tasks, state.selectedProject);
+      this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
     this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
     const sessionsChanged = this.lastSessions !== state.sessions;
@@ -14394,7 +14473,9 @@ var AppShell = class {
       this.lastRailToken = railToken;
       rebuildKeepingScroll(this.railList, previousRailToken, railToken, () => this.renderRail(state));
     }
-    if (selectionChanged || !this.mainRendered) {
+    const emptyKey = `${state.selectedProject}:${state.sessions.length}:${state.projectsError ?? ""}`;
+    if (selectionChanged || !this.mainRendered || !selectedSession(state) && emptyKey !== this.lastEmptyKey) {
+      this.lastEmptyKey = emptyKey;
       this.mainRendered = true;
       this.renderMain(state);
     } else {
@@ -14853,8 +14934,25 @@ var AppShell = class {
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.termStatus;
       this.main.replaceChildren(
-        h2("p", { class: "af-empty-title" }, "Select a session"),
-        h2("p", { class: "af-empty-hint" }, "Pick a session in the rail to attach its terminal.")
+        recoveryScreen(state.projectsError && state.selectedProject === null ? {
+          condition: "Projects unavailable",
+          detail: state.projectsError,
+          failed: true,
+          action: "Retry",
+          run: () => this.actions.retryConnection?.()
+        } : state.selectedProject === null ? {
+          condition: "No project registered",
+          action: "Add project",
+          run: () => this.actions.addProject()
+        } : scopeToProject(state.sessions, state.selectedProject).length === 0 ? {
+          condition: "No sessions",
+          action: "New session",
+          run: () => this.actions.newSession()
+        } : {
+          condition: "Select a session",
+          action: "Choose a session",
+          run: () => this.railList.querySelector(".af-row")?.focus()
+        })
       );
       return;
     }
@@ -15632,11 +15730,13 @@ function mount() {
   void bootstrap();
 }
 async function bootstrap() {
+  store.set({ connecting: true, loginCondition: void 0, loginError: null });
   let required = true;
   try {
     required = await probeAuthRequired();
   } catch {
-    required = true;
+    store.set({ connecting: false, loginCondition: "unavailable" });
+    return;
   }
   if (!required) {
     store.set({ authRequired: false });
@@ -15676,7 +15776,7 @@ function rerender() {
 }
 async function connect(candidate) {
   const attempt = connectionGate.begin();
-  store.set({ connecting: true, loginError: null });
+  store.set({ connecting: true, loginError: null, loginCondition: void 0 });
   let sessions;
   try {
     sessions = await probeToken(candidate);
@@ -15685,7 +15785,7 @@ async function connect(candidate) {
     if (shouldForgetToken(e)) {
       clearToken();
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e) });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
@@ -15693,14 +15793,16 @@ async function connect(candidate) {
   storeToken(candidate);
   await refreshDaemonPalette(candidate);
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  let tasksError = "";
   let tasks = [];
   try {
     tasks = await listTasks(candidate);
-  } catch {
+  } catch (e) {
+    tasksError = errorText(e);
     tasks = [];
   }
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  const registeredProjects = await fetchRegisteredProjects(candidate);
+  const { projects: registeredProjects, error: projectsError } = await fetchRegisteredProjects(candidate);
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   store.set({
@@ -15717,18 +15819,22 @@ async function connect(candidate) {
     shownTabs: [0],
     tabError: null,
     tasks,
+    tasksError,
+    projectsError,
     registeredProjects
   });
   startStream(candidate);
 }
 async function fetchRegisteredProjects(tok) {
   try {
-    return (await listProjects(tok)).map((p) => p.root);
-  } catch {
-    return [];
+    const projects = (await listProjects(tok)).map((p) => p.root);
+    return { projects, error: "" };
+  } catch (e) {
+    return { projects: [], error: errorText(e) };
   }
 }
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
+  store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   stopStream();
   closeModal();
@@ -15912,7 +16018,10 @@ function newSession() {
           }
         }).catch((e) => {
           requestResync();
-          surfaceTabError(e);
+          m.setBusy(false);
+          m.setError(errorText(e));
+          if (!modal && token === tok) openModal(m);
+          else surfaceTabError(e);
         });
       },
       onCancel: closeModal
@@ -16142,13 +16251,14 @@ function reorderSessionTab(from, to) {
 function surfaceTabError(e) {
   const msg = errorText(e);
   console.error("af-web: operation failed:", msg);
-  showTransientNotice(msg);
+  showTransientNotice(msg, false);
 }
-function showTransientNotice(msg) {
+function showTransientNotice(msg, notice = true) {
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
-  store.set({ tabError: msg });
+  store.set({ tabError: msg, tabNotice: notice });
+  if (!notice) return;
   tabErrorTimer = window.setTimeout(() => {
     tabErrorTimer = null;
     store.set({ tabError: null });
@@ -16188,7 +16298,7 @@ var accountsRefetcher = createFencedRefetcher({
   fetch: listAccounts,
   commit: (resp) => {
     store.set({
-      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "" }
+      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true }
     });
   },
   onError: (err) => {
@@ -16290,10 +16400,9 @@ var tasksRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       store.get().registeredProjects
     );
-    store.set({ tasks, selectedProject });
-  }
-  // No onError: a transport/auth failure leaves the last-known list up; a task.*
-  // event or the next mutation refetches. Nothing to surface here.
+    store.set({ tasks, selectedProject, tasksError: "" });
+  },
+  onError: (e) => store.set({ tasksError: errorText(e) })
 });
 function refreshTasks() {
   tasksRefetcher.refresh();
@@ -16319,10 +16428,9 @@ var projectsRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       registeredProjects
     );
-    store.set({ registeredProjects, selectedProject });
-  }
-  // No onError: a transport/auth failure keeps the last-known registry up; the next
-  // projects.changed event or reconnect refetches. Never blank the union on a blip.
+    store.set({ registeredProjects, selectedProject, projectsError: "" });
+  },
+  onError: (e) => store.set({ projectsError: errorText(e) })
 });
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
@@ -16513,6 +16621,10 @@ var actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  retryConnection: () => {
+    void bootstrap();
+  },
+  retryTasks: refreshTasks,
   notice: surfaceNotice,
   paneDropHintAt: (x, y) => splitView.showTabDropHintAt(x, y),
   clearPaneDropHint: () => splitView.clearTabDropHint(),

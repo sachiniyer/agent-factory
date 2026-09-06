@@ -1204,7 +1204,7 @@ test("an unreachable daemon reports a real transport message, not [object Object
   await p.locator("#af-token").fill("some-token");
   await p.locator(".af-login-form button[type=submit]").click();
 
-  const err = p.locator(".af-error");
+  const err = p.locator(".af-recovery");
   await expect(err).toBeVisible();
   await expect(err).toContainText("Couldn't reach the daemon");
   await expect(err).not.toContainText("[object Object]");
@@ -1356,7 +1356,7 @@ test("token persistence: an unreachable daemon KEEPS the stored token", async ({
 
   await ctx.route("**/v1/Snapshot", (route) => route.abort("connectionrefused"));
   await p.reload();
-  await expect(p.locator(".af-error")).toContainText("Couldn't reach the daemon");
+  await expect(p.locator(".af-recovery")).toContainText("Couldn't reach the daemon");
   expect(await storedToken(p)).toBe("still-good");
 
   // Daemon back: the very next load resumes silently, with no paste in between.
@@ -5232,7 +5232,8 @@ test("#2218: failing slow create shows the daemon error and leaves no phantom ro
   const envelope = (await failed.json()) as { error?: { message?: string } };
   const daemonMessage = envelope.error?.message ?? "";
   expect(daemonMessage).toContain("failed to start instance");
-  await expect(page.locator(".af-toast"), "the web must render the daemon's exact failure").toHaveText(daemonMessage);
+  await expect(page.locator(".af-modal-error"), "the retained form must explain the failure").toContainText(daemonMessage);
+  await expect(page.locator('input[aria-label="Session title"]')).toHaveValue(created);
   await expect(creating, "the failed provisional id must be removed").toHaveCount(0, { timeout: 30_000 });
 
   // A fresh authoritative Snapshot must agree: reload cannot resurrect a phantom.
