@@ -1,12 +1,16 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSaveInstances_KeepsUnknownRuntimeCleanupAlongsideStartedSibling makes an
@@ -516,5 +520,59 @@ func TestSaveInstances_StillPrunesDisposableSandboxRows(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Fatalf("checkpoint persisted %d rows, want only the live sibling", len(rows))
+	}
+}
+
+// TestSaveInstances_RetainedNonGitAliasScope reproduces macOS's symlinked temp
+// root on every OS and keeps checkpoint identity separate from display identity.
+func TestSaveInstances_RetainedNonGitAliasScope(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	root := testguard.CanonicalTempDir(t)
+	alias := filepath.Join(testguard.CanonicalTempDir(t), "alias")
+	require.NoError(t, os.Symlink(root, alias))
+	rawID, resolvedID := config.RepoIDFromRoot(alias), config.RepoIDFromRoot(root)
+	require.NotEqual(t, rawID, resolvedID)
+	require.Equal(t, resolvedID, config.RepoIDForPath(alias), "display aliases normalize")
+	for _, spelling := range []string{root, alias} {
+		for _, binding := range []struct{ name, pinned, want string }{
+			{"fresh-historical", "", config.RepoIDFromRoot(spelling)},
+			{"pinned-raw", rawID, rawID},
+			{"pinned-resolved", resolvedID, resolvedID},
+		} {
+			t.Run(filepath.Base(spelling)+"/"+binding.name, func(t *testing.T) {
+				state := newMockStorage()
+				alive := &Instance{ID: "alive-id", Title: "alive", Path: spelling, started: true, liveness: LiveRunning}
+				retained := &Instance{ID: "retained-id", Title: "retained", Path: spelling, liveness: LiveLost, started: false}
+				retained.MarkUserKilled()
+				alive.PinStorageRepoID(binding.pinned)
+				retained.PinStorageRepoID(binding.pinned)
+				storage, err := NewStorage(state, "")
+				require.NoError(t, err)
+				require.NoError(t, storage.SaveInstances([]*Instance{alive, retained}))
+				var rows []InstanceData
+				require.Contains(t, state.data, binding.want, "checkpoint must preserve its historical or retained scope")
+				require.NoError(t, json.Unmarshal(state.data[binding.want], &rows))
+				require.Len(t, rows, 2, "retained row must remain beside its live sibling")
+				require.Len(t, state.data, 1, "no second identity bucket may be invented")
+				require.Equal(t, "retained", rows[1].Title)
+				require.True(t, rows[1].UserKilled)
+			})
+		}
+	}
+	// Loaded rows keep their actual containing key even after the alias vanishes.
+	require.NoError(t, os.Remove(alias))
+	for _, pinned := range []string{rawID, resolvedID} {
+		state := newMockStorage()
+		data, err := json.Marshal([]InstanceData{{ID: "loaded-id", Title: "loaded", Path: alias, Program: "claude", UserKilled: true, Liveness: LiveLost}})
+		require.NoError(t, err)
+		state.data[pinned] = data
+		storage, err := NewStorage(state, "")
+		require.NoError(t, err)
+		loaded, err := storage.LoadInstances()
+		require.NoError(t, err)
+		require.Len(t, loaded, 1)
+		require.NoError(t, storage.SaveInstances(loaded))
+		require.Len(t, state.data, 1)
+		require.Contains(t, state.data, pinned)
 	}
 }

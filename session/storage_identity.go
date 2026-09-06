@@ -8,7 +8,7 @@ import (
 
 // repoIDForStorage returns the durable per-repo key for a checkpoint. A loaded
 // instance keeps the key of its containing file; a fresh instance captures its
-// resolved identity on first save.
+// Git identity or historical raw-path fallback on first save.
 func (i *Instance) repoIDForStorage() string {
 	i.mu.RLock()
 	remembered := i.storageRepoID
@@ -34,7 +34,7 @@ func (i *Instance) repoIDForStorage() string {
 	} else {
 		// Worktree-less remote rows carry only the requested workspace path,
 		// which retains the historical direct-resolution behavior.
-		derived = config.RepoIDForPath(i.Path)
+		derived = RepoIDForStoragePath(i.Path)
 	}
 
 	i.mu.Lock()
@@ -57,4 +57,13 @@ func (i *Instance) PinStorageRepoID(repoID string) {
 		i.storageRepoID = repoID
 	}
 	i.mu.Unlock()
+}
+
+// RepoIDForStoragePath returns Git identity or the historical raw-path hash for
+// an unpinned session, preserving durable keys independently of display aliases.
+func RepoIDForStoragePath(path string) string {
+	if repo, err := config.RepoFromPath(path); err == nil {
+		return repo.ID
+	}
+	return config.RepoIDFromRoot(path)
 }
