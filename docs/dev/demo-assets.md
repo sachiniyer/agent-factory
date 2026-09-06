@@ -22,7 +22,8 @@ hand-captured, cropped, or retouched:
 | `demo-poster.png` | The frame shown before the video plays · the dashboard still |
 | `dashboard.png` · `new-session.png` · `agent-tab.png` · `review.png` · `tasks.png` · `config-accounts.png` | One still per beat, default theme |
 | `parallel-work.png` · `comparison-review.png` · `scheduled-triage.png` · `event-intake.png` | Use-case and comparison stills; task forms are filled but not submitted |
-| the same ten, `-dark` | One still per scene, dark theme |
+| `session-filter.png` · `project-menu.png` · `phone-session.png` · `phone-drawer.png` · `phone-controls.png` · `phone-project-menu.png` · `phone-filter.png` | Rail/header disclosure and phone evidence, recorded in a separate context after the hero pass |
+| the same seventeen, `-dark` | One still per scene, dark theme |
 
 `docs/assets/tui/` holds the TUI's own media, produced by a different recorder
 (`scripts/container/record-demo.sh`, which drives real Codex sessions through

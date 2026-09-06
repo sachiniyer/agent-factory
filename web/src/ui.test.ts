@@ -57,13 +57,13 @@ test("relative idle ages refresh without a session event", () => {
       idleReason: "settled-after-pane-change",
       paneChurnAt: "2026-08-10T12:50:00Z",
     },
-    textContent: "pane changed · <1m ago · ",
+    textContent: " · pane changed · <1m ago",
     closest: () => row,
   };
   const root = { querySelectorAll: () => [idle] };
 
   refreshIdleReasonAges(root as unknown as ParentNode, new Date("2026-08-10T15:00:00Z"));
-  assert.equal(idle.textContent, "pane changed · 2h ago · ");
+  assert.equal(idle.textContent, " · pane changed · 2h ago");
   assert.equal(row.title, "worker — Ready; pane changed · 2h ago; archive incomplete");
 });
 
