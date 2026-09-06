@@ -7159,10 +7159,13 @@ function field(label, control) {
 }
 function defaultsDisclosure() {
   const summaryText = h("span", { class: "af-defaults-summary" });
-  const summary = h("summary", {}, "Edit defaults \xB7 ", summaryText);
+  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Edit defaults \xB7"), " ", summaryText);
   const body = h("div", { class: "af-defaults-body" });
   const el2 = h("details", { class: "af-defaults" }, summary, body);
-  return { el: el2, body, summaryText };
+  const setSummary = (fragments) => {
+    summaryText.replaceChildren(...fragments.flatMap((fragment, index) => [h("span", { class: "af-defaults-fragment" }, `${fragment}${index < fragments.length - 1 ? " \xB7" : ""}`), " "]));
+  };
+  return { el: el2, body, setSummary };
 }
 
 // src/accounts.ts
@@ -7617,6 +7620,7 @@ var ConfigPane = class {
     }
     input.setAttribute("aria-label", e.key);
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
     const commit = () => {
       if (!canCommit(input.value, e.value)) {
         return;
@@ -7625,6 +7629,7 @@ var ConfigPane = class {
     };
     const syncSave = () => {
       save.disabled = !canCommit(input.value, e.value);
+      dirty.hidden = save.disabled;
     };
     input.addEventListener("input", () => {
       this.editing = e.key;
@@ -7639,7 +7644,7 @@ var ConfigPane = class {
     });
     save.addEventListener("click", commit);
     syncSave();
-    return h("div", { class: "af-config-control" }, input, save);
+    return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 };
 
@@ -8266,12 +8271,12 @@ var TERMINAL_ANSI = {
     "cyan": "#2D6271",
     "white": "#434C5E",
     "brightBlack": "#000000",
-    "brightRed": "#000000",
-    "brightGreen": "#000000",
-    "brightYellow": "#000000",
-    "brightBlue": "#000000",
-    "brightMagenta": "#000000",
-    "brightCyan": "#000000",
+    "brightRed": "#76333A",
+    "brightGreen": "#415430",
+    "brightYellow": "#634811",
+    "brightBlue": "#35506B",
+    "brightMagenta": "#664360",
+    "brightCyan": "#244E5A",
     "brightWhite": "#171A20"
   },
   "dark": {
@@ -8284,12 +8289,12 @@ var TERMINAL_ANSI = {
     "cyan": "#90C4D3",
     "white": "#D8DEE9",
     "brightBlack": "#959CA5",
-    "brightRed": "#FFFFFF",
-    "brightGreen": "#FFFFFF",
-    "brightYellow": "#FFFFFF",
-    "brightBlue": "#FFFFFF",
-    "brightMagenta": "#FFFFFF",
-    "brightCyan": "#FFFFFF",
+    "brightRed": "#E1C1C7",
+    "brightGreen": "#B5CBA3",
+    "brightYellow": "#EFD5A2",
+    "brightBlue": "#9AB4CD",
+    "brightMagenta": "#C4A6BF",
+    "brightCyan": "#A6D0DC",
     "brightWhite": "#FFFFFF"
   }
 };
@@ -10186,8 +10191,12 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
     const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace("Ambient identity (the agent's own login)", "ambient");
-    defaults.summaryText.textContent = `Program: ${choiceLabel(programSelect)} \xB7 Backend: ${choiceLabel(backendSelect)} \xB7 Account: ${choiceLabel(accountSelect)}`;
     const accountNeedsChoice = !!accountHint.textContent || accountPicked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent);
+    defaults.setSummary([
+      `Program: ${choiceLabel(programSelect)}`,
+      `Backend: ${choiceLabel(backendSelect)}`,
+      ...accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`]
+    ]);
     const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
     if (accountBlock.parentElement !== accountParent) {
       const focused = document.activeElement;
@@ -10652,6 +10661,26 @@ var Status = {
   Archived: 6
 };
 
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 // src/status.ts
 var OPERATOR_KIND_LABELS = {
   "needs-you": "Needs you",
@@ -10704,14 +10733,7 @@ function idleReasonLabel(reason) {
   return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
 }
 function formatPaneChurnAge(churn, now) {
-  const ageMs = Math.max(0, now.getTime() - churn.getTime());
-  const minute = 6e4;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (ageMs < minute) return "<1m";
-  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
-  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
-  return `${Math.floor(ageMs / day)}d`;
+  return formatDuration(now.getTime() - churn.getTime());
 }
 var READY_ICON = "circle";
 var DEAD_ICON = "circle";
@@ -12959,9 +12981,9 @@ function taskHealthSummary(t) {
   }
   return t.unassessable ? "Health unknown" : "";
 }
-function taskArmingSummary(t) {
+function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   if (t.next_run_at) {
-    return `next run ${t.next_run_at}`;
+    return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   return "";
 }
@@ -13060,9 +13082,10 @@ var TasksPane = class {
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
     const next = h("div", { class: "af-task-next" }, taskArmingSummary(t));
-    const main = h("div", { class: "af-task-main" }, name, next, trigger, meta);
+    const detail = h("div", { class: "af-task-detail" }, next, trigger, meta);
+    const main = h("div", { class: "af-task-main" }, name, detail);
     if (t.last_run_status?.startsWith("errored:")) {
-      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), next);
+      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
     }
     const toggleBtn = h(
       "button",

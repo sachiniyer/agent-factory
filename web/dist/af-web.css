@@ -2942,6 +2942,46 @@ textarea[class] {
     margin-left: auto;
   }
 }
+.af-defaults-fragment {
+  display: inline-block;
+  white-space: nowrap;
+}
+.af-task-row {
+  align-items: center;
+  margin-bottom: 0;
+}
+.af-task-detail {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.5;
+}
+.af-task-detail .af-task-next,
+.af-task-detail .af-task-trigger,
+.af-task-detail .af-task-meta {
+  display: inline;
+  margin: 0;
+  white-space: nowrap;
+}
+.af-task-detail > :empty {
+  display: none;
+}
+.af-task-detail > :not(:empty) ~ :not(:empty)::before {
+  content: " \b7  ";
+  color: var(--af-ink-muted);
+}
+.af-primary {
+  border: calc(var(--af-space-1) / 4) solid var(--af-accent);
+}
+.af-primary:disabled {
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border-color: var(--af-border);
+}
+.af-config-dirty {
+  color: var(--af-ink);
+  font-size: var(--af-type-body);
+}
 
 /* src/tokens.css */
 [data-af-theme=light] {

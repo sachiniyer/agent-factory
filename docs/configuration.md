@@ -277,7 +277,9 @@ The web uses two fixed product palettes. Remove `theme = "nord"`,
 `theme = "zenburn"` or the old `[theme]` color table from your configuration when
 migrating. These settings no longer affect browser chrome or terminal colors.
 No color editor, Config key or assistant instruction can customize the web
-palette. Existing agent-owned ANSI output is preserved.
+palette. Existing agent-owned ANSI output is preserved. The unused
+`POST /v1/GetTheme` renderer endpoint has been retired; the TUI’s launch-time
+`ApplyTheme` operation remains during the staged migration.
 
 The retired table keys are `foreground`, `foreground_strong`,
 `foreground_muted`, `foreground_dim`, `background`, `background_subtle`,

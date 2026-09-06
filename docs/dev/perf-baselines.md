@@ -98,11 +98,11 @@ reason to move a budget.
 
 ## Demo stills and intentional redesigns
 
-`playwright.visual.config.ts` drives the **same forty-one demo stills** as the
+`playwright.visual.config.ts` drives the **same forty-two demo stills** as the
 recorder: the ten workflow scenes plus rail disclosures, phone layouts,
 terminal actions, tab types, keyboard ownership, split panes, form disclosures,
 confirmations, account registration and controlled recovery fixtures, all in light
-and dark (82 goldens). It omits video, conversion and video pacing. It waits for final
+and dark (84 goldens). It omits video, conversion and video pacing. It waits for final
 stand-in output, a stable terminal and the visible rail's settled `Needs you`
 states before shooting; completed terminal output alone precedes the daemon's
 idle observation on fast runners. Goldens are committed under

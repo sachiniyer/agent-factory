@@ -1,3 +1,4 @@
+import { formatTime } from "./time.js";
 import { actionsDisclosure } from "./components.js";
 // The TASKS view of the web client (#1592 Phase 5 PR8): the browser analogue of the
 // TUI's automations / task pane (ui/task_pane.go, ui/automations.go). It lists the
@@ -224,9 +225,9 @@ export function taskHealthSummary(t: TaskData): string {
 /** The next-run fragment: what the LIVE scheduler entry will fire, or the fact
  *  that nothing is holding this task. Absent arming says nothing at all — no
  *  daemon has reported on it, which is not the same as "not armed". */
-export function taskArmingSummary(t: TaskData): string {
+export function taskArmingSummary(t: TaskData, now: Date = new Date()): string {
   if (t.next_run_at) {
-    return `next run ${t.next_run_at}`;
+    return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   // The not-armed fact belongs to the HEALTH fragment now, which leads the line
   // and carries the mark with it — a fact that will stop the task firing has no
@@ -360,9 +361,10 @@ export class TasksPane {
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
     const next = h("div", { class: "af-task-next" }, taskArmingSummary(t));
-    const main = h("div", { class: "af-task-main" }, name, next, trigger, meta);
+    const detail = h("div", { class: "af-task-detail" }, next, trigger, meta);
+    const main = h("div", { class: "af-task-main" }, name, detail);
     if (t.last_run_status?.startsWith("errored:")) {
-      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), next);
+      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
     }
 
     const toggleBtn = h(

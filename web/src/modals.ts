@@ -195,10 +195,11 @@ export function newSessionModal(
     const choiceLabel = (select: HTMLSelectElement) => (select.selectedOptions[0]?.textContent ?? "Loading…")
       .replace(/^Repo default \((.*)\)$/, "$1 (default)")
       .replace("Ambient identity (the agent's own login)", "ambient");
-    defaults.summaryText.textContent = `Program: ${choiceLabel(programSelect)} · Backend: ${choiceLabel(backendSelect)} · Account: ${choiceLabel(accountSelect)}`;
     // Ambiguity, unavailable choices and explicit overrides must remain in view.
     const accountNeedsChoice = !!accountHint.textContent || accountPicked
       || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent));
+    defaults.setSummary([`Program: ${choiceLabel(programSelect)}`, `Backend: ${choiceLabel(backendSelect)}`,
+      ...(accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`])]);
     const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
     if (accountBlock.parentElement !== accountParent) {
       const focused = document.activeElement as HTMLElement | null;

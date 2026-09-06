@@ -204,8 +204,12 @@ export function field(label: string, control: HTMLElement): HTMLElement {
 /** Compact inherited choices; callers update the summary without replacing fields. */
 export function defaultsDisclosure() {
   const summaryText = h("span", { class: "af-defaults-summary" });
-  const summary = h("summary", {}, "Edit defaults · ", summaryText);
+  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Edit defaults ·"), " ", summaryText);
   const body = h("div", { class: "af-defaults-body" });
   const el = h("details", { class: "af-defaults" }, summary, body);
-  return { el, body, summaryText };
+  const setSummary = (fragments: string[]) => {
+    summaryText.replaceChildren(...fragments.flatMap((fragment, index) =>
+      [h("span", { class: "af-defaults-fragment" }, `${fragment}${index < fragments.length - 1 ? " ·" : ""}`), " "]));
+  };
+  return { el, body, setSummary };
 }

@@ -465,6 +465,7 @@ async function recordSplits(browser: Browser): Promise<void> {
 async function recordControls(page: Page, shot: (name: string) => Promise<unknown>): Promise<void> {
   await page.locator(".af-rail-new").click();
   await expect(page.locator(".af-defaults summary")).toContainText("Program:");
+  await expect(page.locator(".af-defaults summary")).not.toContainText("Account:");
   await page.getByLabel("Session title", { exact: true }).fill("review-followup");
   await shot("create-compact");
   if (!await page.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await page.locator(".af-defaults summary").click();
@@ -477,6 +478,7 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await page.keyboard.press("Escape");
   await page.locator('.af-viewtab[data-view="tasks"]').click();
   const task = page.locator(".af-task-row").first();
+  await expect.poll(async () => (await task.boundingBox())?.height ?? Infinity).toBeLessThanOrEqual(64);
   await task.locator(".af-term-more").click();
   await shot("task-actions");
   await task.getByRole("button", { name: "Remove", exact: true }).click();
@@ -487,6 +489,20 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await shot("edit-task");
   await page.keyboard.press("Escape");
   await page.locator('.af-viewtab[data-view="config"]').click();
+  const configInput = page.getByLabel("vscode_server_binary", { exact: true });
+  const savedValue = await configInput.inputValue();
+  await configInput.fill("/usr/local/bin/code-server");
+  const save = configInput.locator("..").locator(".af-config-save");
+  await configInput.press("Tab");
+  await expect(save).toBeFocused();
+  await expect(page.locator(".af-config-dirty:visible")).toHaveText("Unsaved");
+  await expect(save).toHaveCSS("outline-style", "solid");
+  await expect(save).toHaveCSS("outline-width", "2px");
+  await expect(save).toHaveCSS("border-width", "1px");
+  await shot("config-dirty");
+  await configInput.fill(savedValue);
+  await expect(save).toBeDisabled();
+  await expect(save).toHaveCSS("border-width", "1px");
   await page.locator(".af-account-disclosure summary").click();
   await page.getByLabel("Account agent", { exact: true }).selectOption("claude");
   await page.getByLabel("New claude account name", { exact: true }).fill("team");

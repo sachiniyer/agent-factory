@@ -520,6 +520,8 @@ export class ConfigPane {
 
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
 
+    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
+
     // ONE gate, both gestures. There are two ways to commit this field — the
     // button and Enter — and they must agree. Enter used to call save()
     // unconditionally while the button honored `disabled`, so pressing Enter on
@@ -535,6 +537,7 @@ export class ConfigPane {
 
     const syncSave = () => {
       save.disabled = !canCommit(input.value, e.value);
+      dirty.hidden = save.disabled;
     };
 
     input.addEventListener("input", () => {
@@ -551,6 +554,6 @@ export class ConfigPane {
     save.addEventListener("click", commit);
     syncSave();
 
-    return h("div", { class: "af-config-control" }, input, save);
+    return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 }
