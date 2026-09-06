@@ -594,7 +594,7 @@ func (p *schedulePicker) renderWeekdayRow() string {
 			style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
 		}
 		if active && i == p.weekdayCursor {
-			style = style.Reverse(true)
+			style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
 		}
 		b.WriteString(style.Render(" " + letter + " "))
 	}
@@ -610,7 +610,7 @@ func (p *schedulePicker) chip(cell scheduleCell, text string) string {
 	}
 	style := lipgloss.NewStyle().Foreground(t.Ink)
 	if p.focused && p.activeCell() == cell {
-		style = lipgloss.NewStyle().Bold(true).Background(t.Accent).Foreground(t.Surface)
+		style = lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	}
 	return style.Render(" " + text + " ")
 }

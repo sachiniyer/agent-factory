@@ -77,3 +77,13 @@ func TestReviewedSelectionAndBlurredTitleRoles(t *testing.T) {
 		t.Fatal("blurred sidebar title must use the contrast-checked surface on ink-muted pair")
 	}
 }
+
+func TestConfigLocationAndPurposeHierarchy(t *testing.T) {
+	roles := theme.Roles()
+	if configLocationStyle.GetForeground() != roles.InkMuted || configPurposeStyle.GetForeground() != roles.Ink {
+		t.Fatal("Config location must be muted without dimming entry purposes")
+	}
+	if taskPlaceholderStyle.GetFaint() {
+		t.Fatal("placeholder contrast must not be reduced below its token role")
+	}
+}

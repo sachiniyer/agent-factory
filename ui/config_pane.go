@@ -119,6 +119,7 @@ var (
 	configHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Ink)
 	configKeyStyle      = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	configValueStyle    = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configLocationStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 	configPurposeStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	configSelectedStyle = lipgloss.NewStyle().Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
 	configErrorStyle    = lipgloss.NewStyle().Foreground(activeTheme.Dead)
@@ -501,7 +502,7 @@ func (c *ConfigPane) renderHeader() string {
 	var b strings.Builder
 	b.WriteString(configTitleStyle.Render("Config"))
 	if c.location != "" {
-		b.WriteString(configPurposeStyle.Render("  " + c.location))
+		b.WriteString(configLocationStyle.Render("  " + c.location))
 	}
 	// The location is the one part of this line the pane does not control the
 	// length of, so it is clipped rather than allowed to wrap (#3430): a wrapped

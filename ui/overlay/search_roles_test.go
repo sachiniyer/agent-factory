@@ -1,38 +1,60 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/stretchr/testify/require"
 )
 
 func TestSearchLivenessRoles(t *testing.T) {
 	profile, dark := lipgloss.ColorProfile(), lipgloss.HasDarkBackground()
-	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile); lipgloss.SetHasDarkBackground(dark) })
-	roles := theme.Roles()
+	lives := map[string]session.Liveness{"running": session.LiveRunning, "ready": session.LiveReady, "lost": session.LiveLost, "dead": session.LiveDead, "archived": session.LiveArchived, "limit-reached": session.LiveLimitReached}
+	states := append(theme.States(), theme.State{Name: "unset"})
 	for _, profile := range []termenv.Profile{termenv.TrueColor, termenv.Ascii} {
 		lipgloss.SetColorProfile(profile)
 		for _, mode := range []bool{false, true} {
 			lipgloss.SetHasDarkBackground(mode)
-			for _, tc := range []struct {
-				status session.Status
-				role   lipgloss.AdaptiveColor
-				glyph  string
-			}{
-				{session.Lost, roles.Lost, "◌"}, {session.Dead, roles.Dead, "○"}, {session.Archived, roles.Archived, "▧"},
-			} {
-				inst := &session.Instance{Title: "Result"}
-				inst.SetStatusForTest(tc.status)
-				rendered := NewSearchOverlay([]*session.Instance{inst}).Render()
-				require.Contains(t, rendered, lipgloss.NewStyle().Foreground(tc.role).Render(tc.glyph))
-				title, ok := searchRowTitle("│ " + lipgloss.NewStyle().Foreground(tc.role).Render(tc.glyph) + " ▸ Result │")
-				require.True(t, ok)
-				require.Equal(t, "Result", title)
+			for _, state := range states {
+				for _, op := range []session.InFlightOp{session.OpNone, session.OpCreating, session.OpRestoring, session.OpKilling, session.OpArchiving} {
+					inst := &session.Instance{Title: "Result"}
+					require.NoError(t, inst.Transition(session.ObserveLiveness(lives[state.Name])))
+					inst.SetInFlightOpForTest(op)
+					s := NewSearchOverlay([]*session.Instance{inst})
+					for _, selected := range []int{0, -1} {
+						s.selectedIdx = selected
+						reg := zones.NewRegistry()
+						s.RegisterZones(reg, layout.Point{})
+						rect, ok := reg.Find(zones.OverlaySearchRow(0))
+						require.True(t, ok, "state=%s op=%v selected=%v", state.Name, op, selected)
+						row := strings.Split(s.Render(), "\n")[rect.Y]
+						glyph := state.Glyph
+						if op != session.OpNone {
+							glyph = ""
+						}
+						plain := xansi.Strip(row)
+						if glyph == "" {
+							require.NotContains(t, plain, "●")
+							require.NotContains(t, plain, "○")
+							require.NotContains(t, plain, "◌")
+							require.NotContains(t, plain, "▧")
+							require.NotContains(t, plain, "◆")
+						} else {
+							require.Contains(t, row, lipgloss.NewStyle().Foreground(state.Color).Render(glyph))
+						}
+						title, ok := searchRowTitle(row)
+						require.True(t, ok)
+						require.Equal(t, "Result", title)
+					}
+				}
 			}
 		}
 	}

@@ -151,7 +151,14 @@ func (s *SearchOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) 
 // border/padding, which is what distinguishes them from the query and hint
 // lines.
 func searchRowTitle(line string) (string, bool) {
-	t := strings.Trim(xansi.Strip(line), "│ ")
+	plain := strings.Trim(xansi.Strip(line), "│")
+	// Two frame-padding cells, two row-indent cells, the blank status cell
+	// and its separator identify working rows without inventing a glyph.
+	if strings.HasPrefix(plain, "      ") {
+		title := strings.TrimPrefix(strings.TrimSpace(plain), "▸ ")
+		return title, title != ""
+	}
+	t := strings.TrimSpace(plain)
 	r, size := utf8.DecodeRuneInString(t)
 	if r != '●' && r != '○' && r != '◌' && r != '◆' && r != '▧' {
 		return "", false

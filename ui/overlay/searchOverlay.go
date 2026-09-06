@@ -261,12 +261,10 @@ func (s *SearchOverlay) Render() string {
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
-	statusRunning := lipgloss.NewStyle().Foreground(t.Running)
 	statusReady := lipgloss.NewStyle().Foreground(t.Ready)
 	statusLost := lipgloss.NewStyle().Foreground(t.Lost)
 	statusDead := lipgloss.NewStyle().Foreground(t.Dead)
 	statusArchived := lipgloss.NewStyle().Foreground(t.Archived)
-	statusLoading := lipgloss.NewStyle().Foreground(t.InkMuted)
 	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
 	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
 	statusLimit := lipgloss.NewStyle().Foreground(t.LimitReached)
@@ -300,22 +298,16 @@ func (s *SearchOverlay) Render() string {
 	for i := plan.startIdx; i < plan.endIdx; i++ {
 		r := s.results[i]
 
-		// Status indicator. Two axes (#1195): a create in flight reads as loading;
-		// otherwise a total switch over the liveness — every value explicit (incl.
-		// LimitReached, #1146, which gets its own red diamond so it never reads as a
-		// live dot), no silent default. Running/Ready get the filled dot; every
-		// other liveness keeps its fixed semantic glyph.
+		// Working, in-flight and unset states reserve a blank status cell.
+		// Otherwise use the fixed liveness glyph, independent of colour.
 		var statusStr string
 		switch {
-		case r.Instance.GetInFlightOp() == session.OpCreating:
-			statusStr = statusLoading.Render("○")
 		case r.Instance.GetInFlightOp() != session.OpNone:
-			// A kill/archive teardown in flight — going away.
-			statusStr = normalStyle.Render("○")
+			statusStr = " "
 		default:
 			switch r.Instance.GetLiveness() {
 			case session.LiveRunning:
-				statusStr = statusRunning.Render("●")
+				statusStr = " "
 			case session.LiveReady:
 				statusStr = statusReady.Render("●")
 			case session.LiveLimitReached:
@@ -329,7 +321,7 @@ func (s *SearchOverlay) Render() string {
 			case session.LiveArchived:
 				statusStr = statusArchived.Render("▧")
 			case session.LivenessUnset:
-				statusStr = normalStyle.Render("○")
+				statusStr = " "
 			}
 		}
 

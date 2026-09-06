@@ -34,9 +34,10 @@ func ApplyTheme(cfg config.ThemeConfig) {
 		ForegroundDim:       activeTheme.InkMuted,
 		SelectionBackground: activeTheme.SurfaceRaised,
 		SelectionForeground: activeTheme.Ink,
-		Success:             activeTheme.Ready,
-		Warning:             activeTheme.Lost,
-		Error:               activeTheme.Dead,
+		Ready:               activeTheme.Ready,
+		Lost:                activeTheme.Lost,
+		Dead:                activeTheme.Dead,
+		ArchiveWarning:      activeTheme.Dead,
 	})
 	applyThemeStyles()
 }
@@ -126,7 +127,6 @@ func applyThemeStyles() {
 	tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
 	taskPlaceholderStyle = lipgloss.NewStyle().
-		Faint(true).
 		Foreground(activeTheme.InkMuted)
 	taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 

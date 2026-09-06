@@ -1,0 +1,311 @@
+P5 A whole-PR role audit (base d7705ac0, final third-round correction)
+
+Review scope: every changed path below, including prior-round changes; not only
+three inline locations. Production diffs reviewed against interface-design.md.
+Tests/generator reviewed for semantic assertions and fixed-palette ownership;
+docs/nav and raw evidence reviewed for provenance and no page-tree leak.
+
+Fixed glyphs: search now matches all theme.States() bindings, plus unset and
+all in-flight operations. The generated-contract-driven test covers both themes,
+TrueColor and no-colour, selected/unselected rows and pointer zones. Tree's
+existing total switch preserves blank running/in-flight/unset cells.
+
+Reserved roles: Ready, Lost, Archived and LimitReached are only used by session
+indicators. Generic doctor PASS/FIXED/WARN use Ink. Failure notices use Dead.
+Tree Theme now has distinct Ready/Lost/Dead/ArchiveWarning fields; archive
+retained-location and failure text uses Dead independently of Lost.
+
+Selection: config keys/accounts, rail/tab/pane, task/hook/picker selections use
+Ink on SurfaceRaised. Selected archived/deleting/name-placeholder rows no longer
+override Ink with muted text. Schedule cursor cells use the same pair plus
+underline instead of reverse video or an accent selection fill. Primary action
+buttons retain Surface on Accent. Config source location is InkMuted while
+purpose text stays Ink. Removed terminal Faint from placeholders.
+
+Contrast: generator validates all text roles on Surface and SurfaceRaised at
+4.5:1, border at 3:1; Surface on Accent and the blurred title Surface on InkMuted
+are explicitly checked at 4.5:1 in both themes. Examined every background setter,
+foreground assignment, reverse/faint modifier and generated style assignment in
+changed production files. A cell-level pass through all 64 current SVGs finds
+26 actual emitted foreground/background combinations, listed below: every one
+exceeds 4.5:1, including border cells. SGR token tolerance remains +/-1 channel.
+
+Literal ownership: ui/theme/literals_test.go scans all production ui/ and app/;
+only generated ui/theme/theme.go is exempt. Test PTY strings and captured SVG/ANSI
+contain colours as fixtures, not production palette definitions. No token or
+dependency edits; no daemon/theme.go or daemon ApplyTheme edits.
+
+Staged boundaries remain explicit: B owns the common overlay recipe (including
+confirmation border/text emphasis), heading/hint hierarchy, footer/preview copy,
+branch/tab glyph nits and density cuts. C owns Light/Dark/System and migration;
+shared daemon retirement is #3936. This audit does not claim B/C shipped in A.
+
+Emitted pairs across every gallery SVG:
+#2c6171 on #f8f9fc: 6.528:1 (24 stills)
+#2e3440 on #90c3d3: 6.502:1 (6 stills)
+#2e3440 on #b7c0ce: 6.807:1 (3 stills)
+#2e3440 on #eceff3: 10.829:1 (18 stills)
+#2e3440 on #f8f9fc: 11.863:1 (31 stills)
+#405430 on #eceff3: 7.200:1 (6 stills)
+#405430 on #f8f9fc: 7.888:1 (1 stills)
+#4c5669 on #f8f9fc: 7.018:1 (25 stills)
+#657083 on #f8f9fc: 4.751:1 (9 stills)
+#705014 on #f8f9fc: 7.008:1 (1 stills)
+#883b43 on #eceff3: 6.612:1 (1 stills)
+#883b43 on #f8f9fc: 7.244:1 (11 stills)
+#90c3d3 on #2e3440: 6.502:1 (24 stills)
+#a1aaba on #2e3440: 5.337:1 (9 stills)
+#b7c0ce on #2e3440: 6.807:1 (25 stills)
+#d5e2cc on #2e3440: 9.266:1 (1 stills)
+#d5e2cc on #434c5e: 6.401:1 (6 stills)
+#d8dee9 on #2e3440: 9.245:1 (1 stills)
+#e3c8cd on #2e3440: 7.975:1 (11 stills)
+#e3c8cd on #434c5e: 5.509:1 (1 stills)
+#ebcb8b on #2e3440: 7.998:1 (1 stills)
+#eceff3 on #2e3440: 10.829:1 (30 stills)
+#eceff3 on #434c5e: 7.480:1 (18 stills)
+#eceff4 on #2e3440: 10.836:1 (10 stills)
+#f8f9fc on #2c6171: 6.528:1 (6 stills)
+#f8f9fc on #4c5669: 7.018:1 (3 stills)
+
+Reviewed path inventory:
+.gitattributes
+app/design_stills_test.go
+app/help.go
+app/render.go
+app/testdata/design/accounts-dark.svg
+app/testdata/design/accounts-light.svg
+app/testdata/design/alarm-dark.svg
+app/testdata/design/alarm-light.svg
+app/testdata/design/archive-warning-dark.svg
+app/testdata/design/archive-warning-light.svg
+app/testdata/design/config-dark.svg
+app/testdata/design/config-light.svg
+app/testdata/design/confirmation-dark.svg
+app/testdata/design/confirmation-light.svg
+app/testdata/design/help-dark.svg
+app/testdata/design/help-light.svg
+app/testdata/design/hooks-dark.svg
+app/testdata/design/hooks-light.svg
+app/testdata/design/keyboard-dark.svg
+app/testdata/design/keyboard-light.svg
+app/testdata/design/pane-dark.svg
+app/testdata/design/pane-light.svg
+app/testdata/design/preview-dark.svg
+app/testdata/design/preview-light.svg
+app/testdata/design/project-picker-dark.svg
+app/testdata/design/project-picker-light.svg
+app/testdata/design/prompt-dark.svg
+app/testdata/design/prompt-light.svg
+app/testdata/design/search-dark.svg
+app/testdata/design/search-light.svg
+app/testdata/design/selection-dark.svg
+app/testdata/design/selection-light.svg
+app/testdata/design/sessions-dark.svg
+app/testdata/design/sessions-light.svg
+app/testdata/design/task-create-dark.svg
+app/testdata/design/task-create-light.svg
+app/testdata/design/task-schedule-dark.svg
+app/testdata/design/task-schedule-light.svg
+app/testdata/design/task-weekdays-dark.svg
+app/testdata/design/task-weekdays-light.svg
+app/testdata/design/tasks-dark.svg
+app/testdata/design/tasks-light.svg
+app/testdata/recovery/no-project-dark.svg
+app/testdata/recovery/no-project-light.svg
+app/testdata/recovery/projects-unavailable-dark.svg
+app/testdata/recovery/projects-unavailable-light.svg
+app/testdata/recovery/tasks-unavailable-dark.svg
+app/testdata/recovery/tasks-unavailable-light.svg
+app/testdata/recovery/zero-accounts-dark.svg
+app/testdata/recovery/zero-accounts-light.svg
+app/testdata/recovery/zero-sessions-dark.svg
+app/testdata/recovery/zero-sessions-light.svg
+app/testdata/recovery/zero-tasks-dark.svg
+app/testdata/recovery/zero-tasks-light.svg
+app/theme.go
+design/style-guide.tmpl
+docs/assets/design/tui-a/accounts-dark.ansi
+docs/assets/design/tui-a/accounts-dark.svg
+docs/assets/design/tui-a/accounts-light.ansi
+docs/assets/design/tui-a/accounts-light.svg
+docs/assets/design/tui-a/alarm-dark.ansi
+docs/assets/design/tui-a/alarm-dark.svg
+docs/assets/design/tui-a/alarm-light.ansi
+docs/assets/design/tui-a/alarm-light.svg
+docs/assets/design/tui-a/archive-failed-dark.ansi
+docs/assets/design/tui-a/archive-failed-dark.svg
+docs/assets/design/tui-a/archive-failed-light.ansi
+docs/assets/design/tui-a/archive-failed-light.svg
+docs/assets/design/tui-a/archive-warning-dark.ansi
+docs/assets/design/tui-a/archive-warning-dark.svg
+docs/assets/design/tui-a/archive-warning-light.ansi
+docs/assets/design/tui-a/archive-warning-light.svg
+docs/assets/design/tui-a/config-dark.ansi
+docs/assets/design/tui-a/config-dark.svg
+docs/assets/design/tui-a/config-light.ansi
+docs/assets/design/tui-a/config-light.svg
+docs/assets/design/tui-a/confirmation-dark.ansi
+docs/assets/design/tui-a/confirmation-dark.svg
+docs/assets/design/tui-a/confirmation-light.ansi
+docs/assets/design/tui-a/confirmation-light.svg
+docs/assets/design/tui-a/create-failed-dark.ansi
+docs/assets/design/tui-a/create-failed-dark.svg
+docs/assets/design/tui-a/create-failed-light.ansi
+docs/assets/design/tui-a/create-failed-light.svg
+docs/assets/design/tui-a/help-dark.ansi
+docs/assets/design/tui-a/help-dark.svg
+docs/assets/design/tui-a/help-light.ansi
+docs/assets/design/tui-a/help-light.svg
+docs/assets/design/tui-a/hooks-dark.ansi
+docs/assets/design/tui-a/hooks-dark.svg
+docs/assets/design/tui-a/hooks-light.ansi
+docs/assets/design/tui-a/hooks-light.svg
+docs/assets/design/tui-a/keyboard-dark.ansi
+docs/assets/design/tui-a/keyboard-dark.svg
+docs/assets/design/tui-a/keyboard-light.ansi
+docs/assets/design/tui-a/keyboard-light.svg
+docs/assets/design/tui-a/kill-failed-dark.ansi
+docs/assets/design/tui-a/kill-failed-dark.svg
+docs/assets/design/tui-a/kill-failed-light.ansi
+docs/assets/design/tui-a/kill-failed-light.svg
+docs/assets/design/tui-a/live/create-failed.txt
+docs/assets/design/tui-a/live/first-session.txt
+docs/assets/design/tui-a/live/too-small.txt
+docs/assets/design/tui-a/live/zero-sessions.txt
+docs/assets/design/tui-a/live/zero-tasks.txt
+docs/assets/design/tui-a/no-daemon-dark.ansi
+docs/assets/design/tui-a/no-daemon-dark.svg
+docs/assets/design/tui-a/no-daemon-light.ansi
+docs/assets/design/tui-a/no-daemon-light.svg
+docs/assets/design/tui-a/no-project-dark.ansi
+docs/assets/design/tui-a/no-project-dark.svg
+docs/assets/design/tui-a/no-project-light.ansi
+docs/assets/design/tui-a/no-project-light.svg
+docs/assets/design/tui-a/pane-dark.ansi
+docs/assets/design/tui-a/pane-dark.svg
+docs/assets/design/tui-a/pane-light.ansi
+docs/assets/design/tui-a/pane-light.svg
+docs/assets/design/tui-a/perf/before-viewport.json
+docs/assets/design/tui-a/perf/metrics.json
+docs/assets/design/tui-a/perf/metrics.txt
+docs/assets/design/tui-a/perf/tui-runs.json
+docs/assets/design/tui-a/preview-dark.ansi
+docs/assets/design/tui-a/preview-dark.svg
+docs/assets/design/tui-a/preview-light.ansi
+docs/assets/design/tui-a/preview-light.svg
+docs/assets/design/tui-a/project-picker-dark.ansi
+docs/assets/design/tui-a/project-picker-dark.svg
+docs/assets/design/tui-a/project-picker-light.ansi
+docs/assets/design/tui-a/project-picker-light.svg
+docs/assets/design/tui-a/projects-unavailable-dark.ansi
+docs/assets/design/tui-a/projects-unavailable-dark.svg
+docs/assets/design/tui-a/projects-unavailable-light.ansi
+docs/assets/design/tui-a/projects-unavailable-light.svg
+docs/assets/design/tui-a/prompt-dark.ansi
+docs/assets/design/tui-a/prompt-dark.svg
+docs/assets/design/tui-a/prompt-light.ansi
+docs/assets/design/tui-a/prompt-light.svg
+docs/assets/design/tui-a/role-audit.txt
+docs/assets/design/tui-a/search-dark.ansi
+docs/assets/design/tui-a/search-dark.svg
+docs/assets/design/tui-a/search-light.ansi
+docs/assets/design/tui-a/search-light.svg
+docs/assets/design/tui-a/selection-dark.ansi
+docs/assets/design/tui-a/selection-dark.svg
+docs/assets/design/tui-a/selection-light.ansi
+docs/assets/design/tui-a/selection-light.svg
+docs/assets/design/tui-a/sessions-dark.ansi
+docs/assets/design/tui-a/sessions-dark.svg
+docs/assets/design/tui-a/sessions-light.ansi
+docs/assets/design/tui-a/sessions-light.svg
+docs/assets/design/tui-a/task-create-dark.ansi
+docs/assets/design/tui-a/task-create-dark.svg
+docs/assets/design/tui-a/task-create-light.ansi
+docs/assets/design/tui-a/task-create-light.svg
+docs/assets/design/tui-a/task-edit-save-failed-dark.ansi
+docs/assets/design/tui-a/task-edit-save-failed-dark.svg
+docs/assets/design/tui-a/task-edit-save-failed-light.ansi
+docs/assets/design/tui-a/task-edit-save-failed-light.svg
+docs/assets/design/tui-a/task-save-failed-dark.ansi
+docs/assets/design/tui-a/task-save-failed-dark.svg
+docs/assets/design/tui-a/task-save-failed-light.ansi
+docs/assets/design/tui-a/task-save-failed-light.svg
+docs/assets/design/tui-a/task-schedule-dark.ansi
+docs/assets/design/tui-a/task-schedule-dark.svg
+docs/assets/design/tui-a/task-schedule-light.ansi
+docs/assets/design/tui-a/task-schedule-light.svg
+docs/assets/design/tui-a/task-weekdays-dark.ansi
+docs/assets/design/tui-a/task-weekdays-dark.svg
+docs/assets/design/tui-a/task-weekdays-light.ansi
+docs/assets/design/tui-a/task-weekdays-light.svg
+docs/assets/design/tui-a/tasks-dark.ansi
+docs/assets/design/tui-a/tasks-dark.svg
+docs/assets/design/tui-a/tasks-light.ansi
+docs/assets/design/tui-a/tasks-light.svg
+docs/assets/design/tui-a/tasks-unavailable-dark.ansi
+docs/assets/design/tui-a/tasks-unavailable-dark.svg
+docs/assets/design/tui-a/tasks-unavailable-light.ansi
+docs/assets/design/tui-a/tasks-unavailable-light.svg
+docs/assets/design/tui-a/too-small-dark.ansi
+docs/assets/design/tui-a/too-small-dark.svg
+docs/assets/design/tui-a/too-small-light.ansi
+docs/assets/design/tui-a/too-small-light.svg
+docs/assets/design/tui-a/zero-accounts-dark.ansi
+docs/assets/design/tui-a/zero-accounts-dark.svg
+docs/assets/design/tui-a/zero-accounts-light.ansi
+docs/assets/design/tui-a/zero-accounts-light.svg
+docs/assets/design/tui-a/zero-sessions-dark.ansi
+docs/assets/design/tui-a/zero-sessions-dark.svg
+docs/assets/design/tui-a/zero-sessions-light.ansi
+docs/assets/design/tui-a/zero-sessions-light.svg
+docs/assets/design/tui-a/zero-tasks-dark.ansi
+docs/assets/design/tui-a/zero-tasks-dark.svg
+docs/assets/design/tui-a/zero-tasks-light.ansi
+docs/assets/design/tui-a/zero-tasks-light.svg
+docs/design/interface-design.md
+docs/design/style-guide.md
+docs/design/tui-design-a-stills.md
+docs/design/tui-theme-daemon-follow-up.md
+doctor/report.go
+doctor/report_roles_test.go
+internal/designtokens/generate.go
+internal/designtokens/validate.go
+mkdocs.yml
+ui/alarm.go
+ui/automations.go
+ui/config_pane.go
+ui/config_pane_accounts.go
+ui/err.go
+ui/hooks_pane.go
+ui/menu.go
+ui/overlay/combined_fgbg_test.go
+ui/overlay/confirmationOverlay.go
+ui/overlay/overlay.go
+ui/overlay/overlay_test.go
+ui/overlay/projectPickerOverlay.go
+ui/overlay/promptOverlay.go
+ui/overlay/searchOverlay.go
+ui/overlay/search_roles_test.go
+ui/overlay/selectionOverlay.go
+ui/overlay/textOverlay.go
+ui/overlay/zones.go
+ui/projects.go
+ui/recovery.go
+ui/schedule_picker.go
+ui/sidebar_deferral_test.go
+ui/sidebar_model.go
+ui/sidebar_render.go
+ui/tab_pane.go
+ui/tabbed_window.go
+ui/tabbed_window_style_test.go
+ui/task_pane.go
+ui/task_pane_edit.go
+ui/theme.go
+ui/theme/literals_test.go
+ui/theme/sgr_test.go
+ui/theme/theme.go
+ui/theme_test.go
+ui/tree/archive_role_test.go
+ui/tree/render.go
+ui/tree/render_test.go

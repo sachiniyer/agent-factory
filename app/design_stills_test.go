@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/config"
@@ -24,7 +26,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(mode == "dark")
 				h := newTestHome(t)
@@ -36,6 +38,8 @@ func TestDesignDriverScenes(t *testing.T) {
 				h.sidebar.SelectInstance(inst)
 				h.relayout()
 				switch scene {
+				case "archive-warning":
+					inst.ReconcileArchiveWarning("Archive incomplete: complete original tree retained at /retained/source")
 				case "alarm":
 					h.alarmBanner.SetAlarms([]ui.AlarmInfo{{TaskName: "Review intake", Target: "Apply design roles", Pending: 3}})
 					h.relayout()
@@ -65,9 +69,22 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.state = stateTasks
 					h.automations.TaskPane().SetTasks([]task.Task{{ID: "design", Name: "Daily design review", Enabled: true}})
 					h.automations.TaskPane().SetFocus(true)
-				case "task-create":
+				case "task-create", "task-schedule", "task-weekdays":
 					h.state = stateTasks
 					h.automations.TaskPane().EnterCreateMode(h.repoRoot)
+					if scene != "task-create" {
+						pane := h.automations.TaskPane()
+						pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+						pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+						if scene == "task-weekdays" {
+							pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
+							for n := 0; n < 4; n++ {
+								pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
+							}
+						} else {
+							pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
+						}
+					}
 				case "help":
 					h.showHelpScreen(helpTypeGeneral{}, nil)
 				case "confirmation":
@@ -75,8 +92,8 @@ func TestDesignDriverScenes(t *testing.T) {
 				case "search":
 					h.state = stateSearch
 					results := []*session.Instance{inst}
-					for title, status := range []session.Status{session.Lost, session.Dead, session.Archived} {
-						result := newLoadingInstance(t, []string{"Lost session", "Dead session", "Archived session"}[title])
+					for title, status := range []session.Status{session.Running, session.Lost, session.Dead, session.Archived, session.Loading} {
+						result := newLoadingInstance(t, []string{"Running session", "Lost session", "Dead session", "Archived session", "Creating session"}[title])
 						result.SetStatusForTest(status)
 						results = append(results, result)
 					}

@@ -31,9 +31,10 @@ type Theme struct {
 	ForegroundDim       lipgloss.TerminalColor
 	SelectionBackground lipgloss.TerminalColor
 	SelectionForeground lipgloss.TerminalColor
-	Success             lipgloss.TerminalColor
-	Warning             lipgloss.TerminalColor
-	Error               lipgloss.TerminalColor
+	Ready               lipgloss.TerminalColor
+	Lost                lipgloss.TerminalColor
+	Dead                lipgloss.TerminalColor
+	ArchiveWarning      lipgloss.TerminalColor
 }
 
 // deadIcon is hollow (not the filled readyIcon) so a dead session differs from
@@ -172,17 +173,18 @@ func init() {
 		ForegroundDim:       t["ink-muted"],
 		SelectionBackground: t["surface-raised"],
 		SelectionForeground: t["ink"],
-		Success:             t["ready"],
-		Warning:             t["lost"],
-		Error:               t["dead"],
+		Ready:               t["ready"],
+		Lost:                t["lost"],
+		Dead:                t["dead"],
+		ArchiveWarning:      t["dead"],
 	})
 }
 
 // ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
 func ApplyTheme(t Theme) {
-	readyStyle = lipgloss.NewStyle().Foreground(t.Success)
-	deadStyle = lipgloss.NewStyle().Foreground(theme.Colors()["dead"])
-	lostStyle = lipgloss.NewStyle().Foreground(t.Warning)
+	readyStyle = lipgloss.NewStyle().Foreground(t.Ready)
+	deadStyle = lipgloss.NewStyle().Foreground(t.Dead)
+	lostStyle = lipgloss.NewStyle().Foreground(t.Lost)
 	archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
 	limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
 
@@ -210,7 +212,7 @@ func ApplyTheme(t Theme) {
 		Foreground(t.SelectionForeground)
 	deletingTitleColor = t.ForegroundMuted
 	placeholderTitleColor = t.ForegroundMuted
-	archiveWarningColor = t.Warning
+	archiveWarningColor = t.ArchiveWarning
 }
 
 // InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
@@ -372,7 +374,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	placeholder := i == r.namingInstance && i.Title == "" && r.namePlaceholder != ""
 	if placeholder {
 		titleText = r.namePlaceholder
-		titleS = titleS.Foreground(placeholderTitleColor)
+		if !selected {
+			titleS = titleS.Foreground(placeholderTitleColor)
+		}
 	}
 	if i.Capabilities().Workspace == session.WorkspaceRemote {
 		titleText = "[remote] " + titleText
@@ -389,11 +393,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	}
 	if op == session.OpKilling || op == session.OpArchiving {
 		titleText = "[deleting] " + titleText
-		titleS = titleS.Foreground(deletingTitleColor)
-		// Dim the branch line too: on a selected row descS is the
-		// high-contrast selectedDescStyle, and leaving it bright makes the
-		// secondary line stand out more than the dimmed title (#853).
-		descS = descS.Foreground(deletingTitleColor)
+		if !selected {
+			titleS = titleS.Foreground(deletingTitleColor)
+		}
+		// Unselected deleting rows recede together; selection retains ink.
+		if !selected {
+			descS = descS.Foreground(deletingTitleColor)
+		}
 	}
 	// An archived row (#1028) is dimmed and carries the ▧ archived glyph so it
 	// reads as "filed away, restartable" rather than a live session. It
@@ -404,7 +410,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// "[archived]..." (#1225). The state is already conveyed three other ways on
 	// the same row — the ▧ glyph, the dimming below, and the "▼ Archived (n)"
 	// section header — so the name stays full-width like a live row's.
-	if liveness == session.LiveArchived {
+	if liveness == session.LiveArchived && !selected {
 		titleS = titleS.Foreground(deletingTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}

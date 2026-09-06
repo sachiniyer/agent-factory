@@ -29,7 +29,6 @@ const watchRunNowRefusal = "watch tasks run on their watch command's output, not
 // taskPlaceholderStyle renders form placeholders faint so an example (the
 // cron "e.g. 0 9 * * 1-5") can never be mistaken for a typed value.
 var taskPlaceholderStyle = lipgloss.NewStyle().
-	Faint(true).
 	Foreground(activeTheme.InkMuted)
 
 // taskFormMoreStyle dims the ↑/↓ markers flagging fields scrolled out of a

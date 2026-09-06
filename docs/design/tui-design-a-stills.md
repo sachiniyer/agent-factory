@@ -21,9 +21,9 @@ Shared daemon config retirement is tracked in
 
 ## Capture provenance
 
-These 58 stills are deterministic real app-model `Update`/`View` output,
+These 64 stills are deterministic real app-model `Update`/`View` output,
 converted from ANSI cells by P4's SVG writer. They are not live-daemon screen
-recordings. `TestDesignDriverScenes` adds sixteen chrome scenes to P4's thirteen
+recordings. `TestDesignDriverScenes` adds nineteen chrome scenes to P4's thirteen
 recovery scenes. Both run only in the isolated sandbox created by
 `make playtest-container-detached`; no host TUI, app tests or daemon tests run.
 The supplementary P4 live tmux scenario passed retained failed creation,
@@ -54,15 +54,20 @@ selections use Ink on SurfaceRaised. The blurred sidebar title uses Surface on
 InkMuted, with a 4.5:1 contrast gate in both palettes. Regression tests pin these
 role assignments. Only the affected accounts, config, zero-accounts, search,
 pane, keyboard and preview SVG/ANSI pairs were refreshed in the make-created
-playtest sandbox; all 58 driver goldens pass. The search fixture now includes
+playtest sandbox; all 64 driver goldens pass. The search fixture now includes
 lost, dead and archived results.
+
+The final whole-PR [role audit](../assets/design/tui-a/role-audit.txt) records
+every changed file, role pair and staged B/C boundary. It additionally fixes
+blank working/in-flight search cells, archive-failure Dead text, muted Config
+location, retained selection ink and token-only placeholder contrast.
 
 ## Performance and verification
 
 One `make perf-container` pass at 1,000 sessions verified the Codex corrections
 on top of the master merge through `d7705ac0` (#3929 and #3928). Full frame
-averaged **78.161 ms** (range 74.646–80.518); key-to-render averaged **66.919 ms**
-(62.425–70.430).
+averaged **65.880 ms** (range 58.376–70.261); key-to-render averaged **84.821 ms**
+(70.399–92.373).
 Every sample meets P5's stricter 480 / 351 ms limits. The harness still reports
 P1's original looser CI ceilings; these are not the thresholds used to accept P5.
 [Raw samples](../assets/design/tui-a/perf/tui-runs.json) and the
@@ -80,6 +85,7 @@ stills were self-reviewed before requesting review.
 
 | Scene | Light | Dark |
 | --- | --- | --- |
+| archive warning | ![archive warning, light](../assets/design/tui-a/archive-warning-light.svg) | ![archive warning, dark](../assets/design/tui-a/archive-warning-dark.svg) |
 | accounts | ![accounts, light](../assets/design/tui-a/accounts-light.svg) | ![accounts, dark](../assets/design/tui-a/accounts-dark.svg) |
 | archive failed | ![archive-failed, light](../assets/design/tui-a/archive-failed-light.svg) | ![archive-failed, dark](../assets/design/tui-a/archive-failed-dark.svg) |
 | config | ![config, light](../assets/design/tui-a/config-light.svg) | ![config, dark](../assets/design/tui-a/config-dark.svg) |
@@ -109,3 +115,5 @@ stills were self-reviewed before requesting review.
 | zero sessions | ![zero-sessions, light](../assets/design/tui-a/zero-sessions-light.svg) | ![zero-sessions, dark](../assets/design/tui-a/zero-sessions-dark.svg) |
 | zero tasks | ![zero-tasks, light](../assets/design/tui-a/zero-tasks-light.svg) | ![zero-tasks, dark](../assets/design/tui-a/zero-tasks-dark.svg) |
 | Alarm | ![Alarm, light](../assets/design/tui-a/alarm-light.svg) | ![Alarm, dark](../assets/design/tui-a/alarm-dark.svg) |
+| task schedule | ![task schedule light](../assets/design/tui-a/task-schedule-light.svg) | ![task schedule dark](../assets/design/tui-a/task-schedule-dark.svg) |
+| task weekdays | ![task weekdays light](../assets/design/tui-a/task-weekdays-light.svg) | ![task weekdays dark](../assets/design/tui-a/task-weekdays-dark.svg) |
