@@ -28,6 +28,7 @@
 import type { BackendCatalog } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
+  OnCompleteOption,
   AccountLoginResponse,
   AccountsResponse,
   ConfigResponse,
@@ -966,8 +967,8 @@ export async function probeWebTab(path: string, token: string, timeoutMs: number
 // class the session write-path fixed.
 
 /** Fetches the daemon's lifecycle choices in presentation order. */
-export async function listOnComplete(token: string): Promise<string[]> {
-  const resp = await af<{ values: string[] }>("ListOnComplete", {}, token);
+export async function listOnComplete(token: string): Promise<OnCompleteOption[]> {
+  const resp = await af<{ values: OnCompleteOption[] }>("ListOnComplete", {}, token);
   return resp.values;
 }
 

@@ -10,6 +10,10 @@ type ListOnCompleteResponse = apiproto.ListOnCompleteResponse
 
 // ListOnComplete serves the task package's canonical choices without touching state.
 func (s *controlServer) ListOnComplete(_ ListOnCompleteRequest, resp *ListOnCompleteResponse) error {
-	resp.Values = task.OnCompleteValues()
+	values := task.OnCompleteValues()
+	resp.Values = make([]apiproto.OnCompleteOption, 0, len(values))
+	for _, value := range values {
+		resp.Values = append(resp.Values, apiproto.OnCompleteOption{Value: value, Hint: task.OnCompleteHint(value)})
+	}
 	return nil
 }

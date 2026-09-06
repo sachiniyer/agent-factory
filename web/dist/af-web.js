@@ -13134,7 +13134,7 @@ function buildTask(input) {
     cron_expr: input.trigger === "cron" ? input.cron : "",
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
-    on_complete: taskOnCompleteValue(input),
+    on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -13143,9 +13143,6 @@ function buildTask(input) {
 }
 function onCompleteUnavailableReason(targetSession) {
   return targetSession.trim() ? "Not applicable \u2014 the target session is meant to be reused." : null;
-}
-function taskOnCompleteValue(input) {
-  return input.targetSession.trim() || input.onComplete === "keep" ? "" : input.onComplete ?? "";
 }
 function triggerSummary(t) {
   if (t.watch_cmd && t.watch_cmd.trim() !== "") {
@@ -13703,9 +13700,12 @@ function taskFormModal(opts) {
   targetInput.setAttribute("aria-label", "Target session");
   const onCompleteSelect = h("select", { class: "af-input", disabled: true });
   onCompleteSelect.setAttribute("aria-label", "On done");
-  const seedOnComplete = opts.seed?.on_complete || "keep";
-  onCompleteSelect.append(h("option", { value: seedOnComplete }, seedOnComplete[0].toUpperCase() + seedOnComplete.slice(1)));
+  const seedOnComplete = opts.seed?.on_complete ?? "";
+  onCompleteSelect.append(h("option", { value: seedOnComplete }, seedOnComplete ? seedOnComplete[0].toUpperCase() + seedOnComplete.slice(1) : "Default"));
+  const onCompleteHint = h("span", { class: "af-modal-hint af-on-complete-hint", id: "af-task-on-complete-hint" });
+  onCompleteSelect.setAttribute("aria-describedby", onCompleteHint.id);
   const onCompleteField = field("On done", onCompleteSelect);
+  onCompleteField.append(onCompleteHint);
   const onCompleteReason = h("p", { class: "af-muted" });
   const onCompleteReasonField = fieldGroup("On done", onCompleteReason);
   const syncOnComplete = () => {
@@ -13715,17 +13715,26 @@ function taskFormModal(opts) {
     onCompleteReason.textContent = reason ?? "";
   };
   targetInput.addEventListener("input", syncOnComplete);
-  void opts.loadOnComplete().then((values) => {
-    const choices = [...values];
-    if (!choices.includes(seedOnComplete)) choices.push(seedOnComplete);
+  let onCompleteOptions = [];
+  const renderOnCompleteHint = () => {
+    onCompleteHint.textContent = onCompleteOptions.find((option) => option.value === onCompleteSelect.value)?.hint ?? "";
+  };
+  onCompleteSelect.addEventListener("change", renderOnCompleteHint);
+  void opts.loadOnComplete().then((options) => {
+    onCompleteOptions = options;
+    const choices = [...options];
+    if (seedOnComplete && !choices.some((option) => option.value === seedOnComplete)) {
+      choices.push({ value: seedOnComplete, hint: "" });
+    }
     onCompleteSelect.replaceChildren();
-    for (const value of choices) {
+    for (const { value } of choices) {
       onCompleteSelect.append(h("option", { value }, value[0].toUpperCase() + value.slice(1)));
     }
-    onCompleteSelect.value = seedOnComplete;
+    onCompleteSelect.value = seedOnComplete || choices[0]?.value || "";
     onCompleteSelect.disabled = false;
+    renderOnCompleteHint();
   }).catch(() => {
-    onCompleteSelect.title = "Could not load choices. The current value will be preserved.";
+    onCompleteHint.textContent = "Could not load choices; the current value is kept.";
   });
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
@@ -13817,7 +13826,7 @@ function taskFormModal(opts) {
       watchCmd,
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
-      onComplete: targetInput.value.trim() || onCompleteSelect.value === "keep" ? "" : onCompleteSelect.value,
+      onComplete: onCompleteSelect.value,
       program: programSelect.value
     });
   });
@@ -16786,6 +16795,7 @@ function openEditTask(task) {
         }
         const m = modal;
         m.setBusy(true);
+        const value = buildTask(input);
         void updateTask(
           task,
           {
@@ -16794,7 +16804,7 @@ function openEditTask(task) {
             cron_expr: input.trigger === "cron" ? input.cron : "",
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
-            on_complete: input.onComplete ?? "",
+            on_complete: value.on_complete ?? "",
             project_path: input.projectPath,
             program: input.program
           },

@@ -28,7 +28,7 @@ import { asForm, field, modalChrome, type ModalHandle, projectLabel } from "./mo
 import { icon, type IconName } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron, previewIsRedundant } from "./schedule.js";
-import type { TaskData } from "./types.js";
+import type { OnCompleteOption, TaskData } from "./types.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 
 /** The add-task form's inputs (a subset of task.Task the browser fills; the daemon
@@ -87,7 +87,7 @@ export function buildTask(input: AddTaskInput): TaskData {
     cron_expr: input.trigger === "cron" ? input.cron : "",
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
-    on_complete: taskOnCompleteValue(input),
+    on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -98,10 +98,6 @@ export function buildTask(input: AddTaskInput): TaskData {
 /** Targeted tasks reuse a session, so a spawned-session policy cannot apply. */
 export function onCompleteUnavailableReason(targetSession: string): string | null {
   return targetSession.trim() ? "Not applicable — the target session is meant to be reused." : null;
-}
-
-function taskOnCompleteValue(input: AddTaskInput): string {
-  return input.targetSession.trim() || input.onComplete === "keep" ? "" : input.onComplete ?? "";
 }
 
 /** The task's trigger as a one-line summary, mirroring the TUI's row detail
@@ -806,7 +802,7 @@ function taskFormModal(opts: {
    *  imported so this module stays free of the API/token layer, and re-run on every
    *  project change: the program a repo defaults to is a per-repo fact. */
   loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
-  loadOnComplete: () => Promise<string[]>;
+  loadOnComplete: () => Promise<OnCompleteOption[]>;
   onSubmit: (input: AddTaskInput) => void;
   onCancel: () => void;
 }): ModalHandle {
@@ -884,9 +880,12 @@ function taskFormModal(opts: {
   onCompleteSelect.setAttribute("aria-label", "On done");
   // Preserve the seed while loading or if the catalog is unavailable. Do not
   // invent selectable choices from a local enum copy.
-  const seedOnComplete = opts.seed?.on_complete || "keep";
-  onCompleteSelect.append(h("option", { value: seedOnComplete }, seedOnComplete[0].toUpperCase() + seedOnComplete.slice(1)));
+  const seedOnComplete = opts.seed?.on_complete ?? "";
+  onCompleteSelect.append(h("option", { value: seedOnComplete }, seedOnComplete ? seedOnComplete[0].toUpperCase() + seedOnComplete.slice(1) : "Default"));
+  const onCompleteHint = h("span", { class: "af-modal-hint af-on-complete-hint", id: "af-task-on-complete-hint" });
+  onCompleteSelect.setAttribute("aria-describedby", onCompleteHint.id);
   const onCompleteField = field("On done", onCompleteSelect);
+  onCompleteField.append(onCompleteHint);
   const onCompleteReason = h("p", { class: "af-muted" });
   const onCompleteReasonField = fieldGroup("On done", onCompleteReason);
   const syncOnComplete = (): void => {
@@ -896,17 +895,27 @@ function taskFormModal(opts: {
     onCompleteReason.textContent = reason ?? "";
   };
   targetInput.addEventListener("input", syncOnComplete);
-  void opts.loadOnComplete().then((values) => {
-    const choices = [...values];
-    if (!choices.includes(seedOnComplete)) choices.push(seedOnComplete);
+  let onCompleteOptions: OnCompleteOption[] = [];
+  const renderOnCompleteHint = (): void => {
+    onCompleteHint.textContent = onCompleteOptions.find(option => option.value === onCompleteSelect.value)?.hint ?? "";
+  };
+  onCompleteSelect.addEventListener("change", renderOnCompleteHint);
+  void opts.loadOnComplete().then((options) => {
+    onCompleteOptions = options;
+    const choices = [...options];
+    if (seedOnComplete && !choices.some(option => option.value === seedOnComplete)) {
+      choices.push({ value: seedOnComplete, hint: "" });
+    }
     onCompleteSelect.replaceChildren();
-    for (const value of choices) {
+    for (const { value } of choices) {
       onCompleteSelect.append(h("option", { value }, value[0].toUpperCase() + value.slice(1)));
     }
-    onCompleteSelect.value = seedOnComplete;
+    // The daemon serves the default first, in least-destructive-first order.
+    onCompleteSelect.value = seedOnComplete || choices[0]?.value || "";
     onCompleteSelect.disabled = false;
+    renderOnCompleteHint();
   }).catch(() => {
-    onCompleteSelect.title = "Could not load choices. The current value will be preserved.";
+    onCompleteHint.textContent = "Could not load choices; the current value is kept.";
   });
 
   // The program field (#1970). Its options come from the daemon, never from a list
@@ -1028,7 +1037,7 @@ function taskFormModal(opts: {
       watchCmd,
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
-      onComplete: targetInput.value.trim() || onCompleteSelect.value === "keep" ? "" : onCompleteSelect.value,
+      onComplete: onCompleteSelect.value,
       program: programSelect.value,
     });
   });
@@ -1046,7 +1055,7 @@ export function addTaskModal(
     onSubmit: (input: AddTaskInput) => void;
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
-    loadOnComplete: () => Promise<string[]>;
+    loadOnComplete: () => Promise<OnCompleteOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -1071,7 +1080,7 @@ export function editTaskModal(
     onSubmit: (input: AddTaskInput) => void;
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
-    loadOnComplete: () => Promise<string[]>;
+    loadOnComplete: () => Promise<OnCompleteOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({

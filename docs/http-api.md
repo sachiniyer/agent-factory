@@ -425,8 +425,12 @@ other unchanged.
 ### Task completion choices
 
 `POST /v1/ListOnComplete` accepts `{}` and returns
-`{"data":{"values":["keep","archive","kill"]},"error":null}`. Values follow
+a shared-envelope payload whose `values` array contains `{value, hint}` options,
+for example `{"value":"kill","hint":"deletes the run's session and its branch — permanent"}`.
+Values follow
 `task.OnCompleteValues()` order, least destructive first. Clients should render
-this catalog rather than copy the enum. Send `on_complete` on the task in
-`AddTask`, or on `update` in `UpdateTask`; empty means keep. Completion policies
-apply only to spawned sessions, so tasks with `target_session` must use empty.
+this catalog rather than copy the enum or consequence wording. The default is
+the first option. Send `on_complete` on the task in `AddTask`, or on `update` in
+`UpdateTask`; send the selected verb unchanged. The store canonicalizes keep to
+empty on both create and update. Completion policies apply only to spawned
+sessions, so tasks with `target_session` must use empty.

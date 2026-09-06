@@ -13,8 +13,8 @@ test("buildTask sends the chosen spawned-session lifecycle", () => {
   assert.equal(buildTask({ ...input, onComplete: "kill" }).on_complete, "kill");
 });
 
-test("buildTask stores keep as empty and clears lifecycle for a target session", () => {
-  assert.equal(buildTask({ ...input, onComplete: "keep" }).on_complete, "");
+test("buildTask forwards keep to daemon canonicalization and clears lifecycle for a target session", () => {
+  assert.equal(buildTask({ ...input, onComplete: "keep" }).on_complete, "keep");
   assert.equal(buildTask({ ...input, onComplete: "" }).on_complete, "");
   assert.equal(buildTask({ ...input, targetSession: "reused" }).on_complete, "");
 });

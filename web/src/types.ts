@@ -262,6 +262,12 @@ export interface SnapshotResponse {
 	delivery_alarms?: unknown[];
 }
 
+/** One lifecycle choice served by the daemon, including its consequence. */
+export interface OnCompleteOption {
+  value: string;
+  hint: string;
+}
+
 /**
  * The subset of task.Task (task/task.go) the tasks view reads and mutates (#1592
  * Phase 5 PR8). Field names and JSON tags match the Go struct EXACTLY so this

@@ -611,3 +611,50 @@ async function prepareVisual(page: Page): Promise<void> {
     await route.fulfill({ response, json: body });
   });
 }
+
+// Behavioral coverage shares the daemon/container fence with the modal goldens.
+test("task completion hints follow the selected consequence", async ({ page }) => {
+  await openAfterInitialResync(page, async () => { await page.goto("/"); });
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  await page.locator(".af-tasks-add").click();
+  const dialog = page.getByRole("dialog");
+  const choice = dialog.getByRole("combobox", { name: "On done", exact: true });
+  await expect(choice).toBeEnabled();
+  for (const [value, hint] of [
+    ["keep", "leaves the run's session in place"],
+    ["archive", "archives the run's session — restorable"],
+    ["kill", "deletes the run's session and its branch — permanent"],
+  ]) {
+    await choice.selectOption(value);
+    await expect(dialog.locator(".af-on-complete-hint")).toHaveText(hint, { timeout: 5_000 });
+    await expect(dialog.locator(".af-on-complete-hint")).toBeVisible();
+  }
+  await dialog.getByRole("textbox", { name: "Target session", exact: true }).fill("reused");
+  await expect(choice).toBeHidden();
+  await expect(dialog.locator(".af-on-complete-hint")).toBeHidden();
+});
+
+test("task completion catalog failure is visible and preserves the seed", async ({ page }) => {
+  await page.route("**/v1/ListOnComplete", route => route.abort("failed"));
+  await page.route("**/v1/ListTasks", async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.data.tasks[0].on_complete = "archive";
+    await route.fulfill({ response, json: body });
+  });
+  await openAfterInitialResync(page, async () => { await page.goto("/"); });
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  await page.locator(".af-task-row").first().getByRole("button", { name: "Edit", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.locator(".af-on-complete-hint")).toHaveText("Could not load choices; the current value is kept.", { timeout: 5_000 });
+  await expect(dialog.locator(".af-on-complete-hint")).toBeVisible();
+  await expect(dialog.getByRole("combobox", { name: "On done", exact: true })).toHaveValue("archive");
+  await expect(dialog.getByRole("combobox", { name: "On done", exact: true })).toBeDisabled();
+  let saved: string | undefined;
+  await page.route("**/v1/UpdateTask", async route => {
+    saved = route.request().postDataJSON().update.on_complete;
+    await route.fulfill({ json: { data: { task: {} }, error: null } });
+  });
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => saved).toBe("archive");
+});
