@@ -3491,6 +3491,52 @@ test("the degraded pass with a head-bound approval still merges itself", async (
   assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
 });
 
+// #3951 live reproductions; #3948's summary edit time was captured from GitHub
+// after the issue was filed (the issue gives no timestamp for that summary).
+const CODEX_TRANSIENT_FAILURE = 'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error';
+for (const [pr, head, committed, limit, later, body] of [
+  [3937, "9528ae06", "12:22:12", "12:22:34", "12:30:46", CODEX_TRANSIENT_FAILURE],
+  [3948, "a40e7aac", "12:38:27", "12:38:32", "12:48:27", "<!-- codex-pull-request-review-summary -->\n## Codex Review Summary"],
+  [3949, "8f4eab35", "12:37:11", "12:37:49", "12:45:33", "<!-- codex-pull-request-review-summary -->\n## Codex Review Summary …"],
+]) {
+  test(`#3951: PR #${pr} non-review artifact permits head-current degradation`, async () => {
+    const at = (time) => `2026-09-06T${time}Z`;
+    const options = {
+      headSha: head.padEnd(40, "0"), headCommittedDate: at(committed),
+      issueComments: [
+        codexRateLimit(at(limit), "Codex usage limits have been reached for code reviews. Please check with the admins of this repo to increase the limits by adding credits."),
+        codexRateLimit(at(later), body),
+      ],
+    };
+    const blocked = await evaluateGate(options);
+    assert.match(blocked.reasons.join("\n"), /awaiting maintainer review/);
+    assert.doesNotMatch(blocked.reasons.join("\n"), /no parseable verdict/);
+    const approved = await evaluateGate({ ...options, issueComments: [
+      ...options.issueComments,
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", at("12:50:00")),
+    ] });
+    assert.equal(approved.shouldMerge, true, approved.reasons.join("; "));
+    if (pr !== 3937) {
+      const withoutLimit = await evaluateGate({ ...options, issueComments: [options.issueComments[1]] });
+      assert.doesNotMatch(withoutLimit.reasons.join("\n"), /awaiting maintainer review|no parseable verdict/);
+    }
+    // A summary must not refresh stale evidence; a failure is itself evidence.
+    const stale = await evaluateGate({ ...options, headCommittedDate: at("12:50:01") });
+    assert.doesNotMatch(stale.reasons.join("\n"), /awaiting maintainer review/);
+  });
+}
+
+test("a transient Codex failure alone arms degradation only after the head", async () => {
+  for (const timestamp of ["2026-07-09T00:59:59Z", "2026-07-09T01:00:00Z", "2026-07-09T01:00:01Z"]) {
+    const result = await evaluateGate({ issueComments: [codexRateLimit(timestamp, CODEX_TRANSIENT_FAILURE)] });
+    assert.equal(/awaiting maintainer review/.test(result.reasons.join("\n")), timestamp.endsWith("01Z"));
+  }
+  const quoted = codexVerdict(HEAD_SHA);
+  quoted.body += `\n${CODEX_TRANSIENT_FAILURE}`;
+  assert.equal(autoGate.codexEvidence.isCodexUsageLimitArtifact(quoted), false);
+  assert.equal(autoGate.codexEvidence.isCodexUsageLimitArtifact({ body: `${CODEX_TRANSIENT_FAILURE} P2`, in_reply_to_id: 1 }), false);
+});
+
 test("degraded evaluation writes outage duration to the Actions job summary", async () => {
   const core = fakeCore();
   let summary = "";

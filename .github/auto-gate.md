@@ -164,6 +164,17 @@ leaving the review to a convention — #3760 landed that way with no review of a
 kind, and #3824 closed that everywhere except the external path, which kept
 publishing the same green pass until #3825.
 
+`Codex Review: Something went wrong. Try again later by commenting "@codex
+review". Unknown error` is also reviewer-unavailable evidence (#3951), with the
+same strictly-after-`headCurrentSince` timing rule and maintainer-review
+requirement as usage-limit answers. The shared outage-record predicate counts
+this failure too. A real review quoting the message remains a review.
+
+`<!-- codex-pull-request-review-summary -->` identifies the maintained
+“Codex Review Summary” activity comment. It is excluded from latest-response
+selection even when it has no parseable rows: an edit cannot supersede an earlier
+head-current limit answer. Existing verdict-row parsing uses each row's own time.
+
 Usage-limit evidence includes Codex inline review replies (`in_reply_to_id` set),
 including replies carried by an empty `COMMENTED` review (#3900). The reply's
 `commit_id` must match the head, and its `created_at` must be strictly later than

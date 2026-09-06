@@ -126,3 +126,9 @@ test('successive sweeps close the same record and retain recovery beyond the sca
   assert.deepEqual(readRecord(record).episodes, closed);
   assert.deepEqual(methods, ['POST', 'PATCH', 'PATCH']);
 });
+
+test('transient failure starts an outage through the shared artifact predicate', () => {
+  const failure = comment(2, 'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error');
+  const pulls = [{ number: 3951, head: { sha: head }, merged_at: t(3), artifacts: [failure, verdict(4)] }];
+  assert.deepEqual(aggregate(pulls, t(5)).map(e => [e.start, e.end, e.merged]), [[t(2), t(4), [3951]]]);
+});

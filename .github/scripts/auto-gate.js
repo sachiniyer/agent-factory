@@ -4306,6 +4306,9 @@ async function evaluateCodex({
   // Replies precede their empty enclosing review on a timestamp tie: GitHub
   // posts both in the same second. Later reviews still supersede the answer.
   const codexUsageLimitArtifacts = [...codexInlineReplies, ...codexReviewArtifacts]
+    // Maintained activity tables are not reviewer answers, even without rows.
+    // Keep their row-based verdict parsing below, but never let an edit mask an outage.
+    .filter((artifact) => !String(artifact.body || "").trimStart().startsWith(CODEX_SUMMARY_MARKER))
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
   // Both artifact shapes, each carrying its OWN time: the prose line's is its
   // comment's, the summary row's is the row's. Sorted by that rather than by
@@ -4627,7 +4630,10 @@ async function evaluateCodex({
 function isCodexUsageLimitArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
   const body = artifact?.body || "";
   const looksLikeReviewArtifact = CODEX_REVIEW_RE.test(body) && REVIEWED_COMMIT_RE.test(body);
-  return codexReportsReviewUsageLimit(body) && !looksLikeReviewArtifact &&
+  // #3951: the transient failure carries the review heading but no verdict.
+  // Share this classification with codex-outage.js; preserve the quote/finding guards.
+  const failed = /^\s*Codex Review: Something went wrong\b/i.test(body);
+  return (codexReportsReviewUsageLimit(body) || failed) && !looksLikeReviewArtifact &&
     !(isInlineReply && CODEX_BODY_FINDING_RE.test(body));
 }
 
