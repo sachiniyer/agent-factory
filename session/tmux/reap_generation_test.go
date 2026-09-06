@@ -42,8 +42,7 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	old := spawnMarkedSessionWithEscapee(t, name, home, vanishedGeneration)
-	out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
-	require.NoError(t, err, "vanish original tmux session: %s", out)
+	vanishSessionWithObservableEscapee(t, name, old)
 	require.True(t, proctree.AliveSame(old), "original marked helper must outlive its tmux session")
 
 	barrier, sweepDone := startSweepAtGraceBarrier(t, name, func() error {
