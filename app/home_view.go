@@ -155,6 +155,16 @@ func (m *home) View() string {
 		return ui.TerminalTooSmall(m.termWidth, m.termHeight)
 	}
 
+	if m.recovery != nil {
+		return ui.RecoveryScreen(layout.Rect{W: m.termWidth, H: m.termHeight}, m.recovery.condition, m.recovery.detail, m.recovery.action, true)
+	}
+
+	if m.snapshotUnavailable && m.state == stateDefault {
+		return ui.RecoveryScreen(layout.Rect{W: m.termWidth, H: m.termHeight},
+			"Cannot reach the daemon", "The last loaded sessions are retained. af retries automatically.",
+			"Check the daemon connection.", true)
+	}
+
 	// The left rail stacks the tree over the bottom-aligned automations
 	// section, separated by a horizontal rule (#1087); the workspace panes
 	// take the full height beside it (#1090), divided evenly with 1-col
@@ -193,6 +203,10 @@ func (m *home) View() string {
 		// re-prioritizing this message would paper over it in the wrong layer.
 		case m.store.NumInstances() > 0:
 			cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
+		case m.repoRoot == "" && m.projects.Degraded():
+			cols = append(cols, ui.RecoveryScreen(m.lastLayout.Workspace, "Cannot load projects", "The project registry is unavailable.", "Check the project registry.", true))
+		case m.repoRoot == "" && !m.projects.HasProjects():
+			cols = append(cols, ui.NoRegisteredProjectWorkspace(m.lastLayout.Workspace))
 		case m.repoRoot == "":
 			// The empty rail, which is all #2830 is about: no sessions, and no
 			// active project to create one in, so `n` cannot work from any focused

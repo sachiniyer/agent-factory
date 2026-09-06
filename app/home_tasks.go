@@ -17,6 +17,12 @@ import (
 func (m *home) handleTaskCreate() tea.Cmd {
 	sp := m.automations.TaskPane()
 	name, prompt, cronExpr, watchCmd, targetSession, projectPath, program := sp.ConsumePendingCreate()
+	committed := false
+	defer func() {
+		if !committed {
+			sp.RestoreCreateMode()
+		}
+	}()
 
 	if name == "" {
 		return m.handleNotice(fmt.Errorf("task name is required"))
@@ -77,8 +83,9 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// can accept the saved task without presenting a retryable create form.
 	addErr := addTaskThroughDaemon(t)
 	if addErr != nil && !apiclient.IsMutationCommitted(addErr) {
-		return m.handleError(fmt.Errorf("failed to save task: %v", addErr))
+		return m.showRecovery("Cannot save task", "Your input is retained. "+addErr.Error(), "Press any key to return to the form.", fmt.Errorf("failed to save task: %v", addErr))
 	}
+	committed = true
 	// Refresh sidebar and task pane
 	// A reload failure is NOT nothing: the save committed, so the list on screen is
 	// now stale, and returning nil tells the user it is current. They then read a

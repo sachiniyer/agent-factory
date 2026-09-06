@@ -25,7 +25,10 @@ import (
 )
 
 type home struct {
-	ctx context.Context
+	failedCreate        *instanceStartedMsg
+	recovery            *recoveryNotice
+	snapshotUnavailable bool
+	ctx                 context.Context
 
 	// -- Storage and Configuration --
 
@@ -555,8 +558,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	// project's sessions when one is selected.
 	if repoRoot != "" {
 		if err := h.coldStartFromSnapshot(); err != nil {
-			fmt.Printf("Failed to load sessions from daemon: %v\n", err)
-			os.Exit(1)
+			log.WarningLog.Printf("failed to load sessions from daemon: %v", err)
 		}
 	}
 
@@ -583,6 +585,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		tasks, err := task.LoadTasksForCurrentRepo()
 		if err != nil {
 			log.WarningLog.Printf("failed to load tasks: %v", err)
+			h.automations.TaskPane().SetUnavailable(err)
 		} else {
 			h.store.SetTasks(tasks)
 			// Load tasks into the automations strip's task manager.

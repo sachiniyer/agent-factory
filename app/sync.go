@@ -163,10 +163,11 @@ var coldStartWarmupWait = 2 * time.Minute
 // reconnecting tabs to their tmux sessions by name so a restored session is
 // immediately attachable. A single unrestorable record is logged and skipped,
 // never aborting the whole cold start. Returns an error only on a hard
-// (non-warming) daemon failure, which newHome surfaces and exits on — there is
-// no standalone fallback anymore (#960 PR 6 dropped no-daemon mode).
+// (non-warming) daemon failure. Startup renders recovery and keeps normal
+// snapshot polling alive; unavailable data is never presented as an empty list.
 func (m *home) coldStartFromSnapshot() error {
 	data, err := m.fetchColdStartSnapshot(m.repoID)
+	m.snapshotUnavailable = err != nil
 	if err != nil {
 		return err
 	}
@@ -267,6 +268,8 @@ func refreshPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd
 // the sole owner/writer of session state, so there is no disk-based reconcile to
 // fall back to.
 func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
+	wasUnavailable := m.snapshotUnavailable
+	m.snapshotUnavailable = msg.err != nil && !daemon.IsDaemonStartingErr(msg.err)
 	if msg.err != nil {
 		if daemon.IsDaemonStartingErr(msg.err) {
 			// Daemon still restoring (#829); the cold-start Snapshot already
@@ -274,9 +277,9 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 			return false
 		}
 		log.WarningLog.Printf("failed to fetch daemon snapshot: %v", msg.err)
-		return false
+		return !wasUnavailable
 	}
-	changed := false
+	changed := wasUnavailable
 	// An empty active scope owns no sessions, so there is nothing to reconcile
 	// (#2864). The daemon reads an empty repoID as "every repo" — the same
 	// all-repos answer the cold start deliberately refuses in registry mode
@@ -294,7 +297,7 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	// does not touch, so the cross-repo view a registry-mode user actually needs
 	// stays live.
 	if m.repoID != "" {
-		changed = m.reconcileSnapshot(msg.data)
+		changed = m.reconcileSnapshot(msg.data) || changed
 	}
 	if m.applyDeliveryAlarms(msg.alarms) {
 		changed = true
@@ -344,11 +347,11 @@ func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
 // deletions. Returns whether anything visible changed (the caller repaints on a
 // diff). A read error leaves the last-known list intact, matching handleSnapshot.
 func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
+	changed := m.automations.TaskPane().SetUnavailable(tasksErr)
 	if tasksErr != nil {
 		log.WarningLog.Printf("failed to refresh tasks: %v", tasksErr)
-		return false
+		return changed
 	}
-	changed := false
 	if !reflect.DeepEqual(m.store.GetTasks(), tasks) {
 		m.store.SetTasks(tasks)
 		changed = true

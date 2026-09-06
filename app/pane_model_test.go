@@ -11,6 +11,8 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
@@ -35,6 +37,9 @@ func paneTestHome(t *testing.T) *home {
 		inst.AddTabForTest("shell", session.TabKindShell)
 		h.store.AddInstance(inst)
 	}
+	// Focus-ring fixtures need populated rail sections; empty sections reserve no rows.
+	h.store.SetTasks([]task.Task{{ID: "focus-task", Name: "Focus task"}})
+	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: h.repoRoot, Active: true}})
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
 	resizeHome(h, 200, 40)
@@ -103,9 +108,9 @@ func TestFirstRunWorkspaceEmptyState(t *testing.T) {
 	view := h.View()
 
 	assert.Contains(t, view, "No sessions yet")
-	assert.Contains(t, view, "press n to create one")
-	// The onboarding block is a single punchy line now (#1993 / empty-state
-	// polish): the help and setup lines that duplicated the footer are gone.
+	assert.Contains(t, view, "Press n to create one")
+	// The condition and next action stand alone; help and setup instructions
+	// that duplicate the footer stay out of the recovery screen.
 	assert.NotContains(t, view, "Press ? for all keys")
 	assert.NotContains(t, view, "af doctor --setup")
 	assert.NotContains(t, view, "s opens the selected tab")

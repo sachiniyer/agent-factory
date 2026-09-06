@@ -129,7 +129,7 @@ type Grid struct {
 	// section holds. The section grows to show one row per automation (plus
 	// its title) when the rail has the vertical room, and only collapses into
 	// a scrollable strip when the tree + automations together can't fit
-	// (#1126); zero keeps the section at its AutomationsRows floor.
+	// (#1126); zero reserves no section rows.
 	Automations int
 
 	// Projects is the number of projects the rail's bottom-most section holds
@@ -279,6 +279,17 @@ func (g Grid) Solve(width, height int) Layout {
 			autoRows = AutomationsCompactRows
 		}
 
+		// Empty sections reserve no rail rows; their create actions remain in
+		// the task manager and project switch command.
+		if g.Projects == 0 {
+			l.ProjectsVisible = false
+			projRows = 0
+		}
+		if g.Automations == 0 {
+			l.AutomationsVisible = false
+			autoRows = 0
+		}
+
 		// Tree-priority guard (#1590): the instances tree is in the focus ring and
 		// must never be squeezed to nothing by the fixed bottom sections. Enforce a
 		// minimum tree height explicitly instead of leaning on the minimal-mode
@@ -289,7 +300,10 @@ func (g Grid) Solve(width, height int) Layout {
 		// non-minimal layout can produce, the same "tree wins the squeeze" contract
 		// #1560 gave the automations overlap.
 		treeH := func() int {
-			h := railH - autoRows - RailRuleRows
+			h := railH
+			if l.AutomationsVisible {
+				h -= autoRows + RailRuleRows
+			}
 			if l.ProjectsVisible {
 				h -= projRows + RailRuleRows
 			}
@@ -322,8 +336,10 @@ func (g Grid) Solve(width, height int) Layout {
 			rail, l.Projects = rail.CutBottom(projRows)
 			rail, l.ProjectsRule = rail.CutBottom(RailRuleRows)
 		}
-		rail, l.Automations = rail.CutBottom(autoRows)
-		rail, l.RailRule = rail.CutBottom(RailRuleRows)
+		if l.AutomationsVisible {
+			rail, l.Automations = rail.CutBottom(autoRows)
+			rail, l.RailRule = rail.CutBottom(RailRuleRows)
+		}
 	}
 	l.Tree = rail
 	l.Workspace = workspace

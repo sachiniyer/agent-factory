@@ -7,6 +7,7 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 type ErrBox struct {
@@ -100,7 +101,7 @@ func (e *ErrBox) String() string {
 	if e.err != nil {
 		err = e.statusLine()
 	}
-	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, errStyle.Render(err))
+	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, theme.Styles()["body"].Render(err))
 }
 
 func (e *ErrBox) statusLine() string {

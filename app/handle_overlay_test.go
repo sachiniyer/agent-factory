@@ -308,11 +308,9 @@ func TestHandleStateTasks_PendingCreateFlushesDirtyTaskState(t *testing.T) {
 // state while the sidebar showed disk state (divergence), and dirty was
 // cleared so the user couldn't tell anything went wrong.
 //
-// The fix's chosen recovery semantics (documented on saveContentPaneState):
-// reload BOTH panes from disk so they can never diverge, and surface the
-// persist failure via handleError so the dropped edit is never silent. We do
-// NOT keep dirty=true — after reloading from disk the in-memory edit is gone,
-// so a lingering dirty flag would point at nothing.
+// P4 recovery preserves the failed editor draft and dirty patch for retry,
+// while the sidebar reloads committed disk state. The recovery screen makes
+// the rejected save visible.
 //
 // We inject a real UpdateTask failure by making the config dir unwritable
 // after seeding: the file-lock/atomic-write both need to create files in that
@@ -378,24 +376,22 @@ func TestHandleStateTasks_ValidationFailureLeavesTaskPaneStale(t *testing.T) {
 	assert.NotEmpty(t, h.errBox.String(),
 		"BUG: save failure must be surfaced to the user, not silently swallowed")
 
-	// (b) TaskPane and sidebar agree, and both reflect committed disk state.
+	// (b) The sidebar reflects committed disk state; the editor retains its draft.
 	disk, err := task.LoadTasksForCurrentRepo()
 	require.NoError(t, err)
 	require.Len(t, disk, 1)
 	assert.True(t, disk[0].Enabled,
 		"the failed write must not have changed disk: it still holds the pre-toggle value")
 	require.Len(t, tp.GetTasks(), 1)
-	assert.True(t, tp.GetTasks()[0].Enabled,
-		"BUG: TaskPane must reload from disk after a failed save, not keep its stale toggle")
+	assert.False(t, tp.GetTasks()[0].Enabled,
+		"the failed draft value remains available for retry")
 	require.Len(t, h.store.GetTasks(), 1)
 	assert.True(t, h.store.GetTasks()[0].Enabled,
-		"sidebar must agree with the TaskPane (both reflect disk)")
+		"sidebar reflects committed disk state")
 
-	// (c) State is not left silently "saved": reloading cleared dirty, but the
-	// error surfaced above means the user knows the edit was dropped. A
-	// lingering dirty flag would point at edits the reload already discarded.
-	assert.False(t, tp.IsDirty(),
-		"reloading from disk clears dirty; the dropped edit is communicated via the error, not a dangling dirty flag")
+	// (c) The retained edit stays dirty so the next save can retry it.
+	assert.True(t, tp.IsDirty(),
+		"the failed patch stays dirty and retryable")
 }
 
 // TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID covers
@@ -535,7 +531,8 @@ func TestHandleStateTasks_FailedCreateDoesNotDuplicateOnReopen(t *testing.T) {
 	// The transient failure clears; a later flush would succeed.
 	restoreUpdater()
 
-	// Esc closes the overlay.
+	// Esc first leaves the retained create form, then the task manager.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	require.Equal(t, stateDefault, h.state, "Esc must close the tasks overlay")
 

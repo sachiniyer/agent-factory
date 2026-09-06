@@ -782,7 +782,7 @@ func TestHandleStateNewTitleSeverity(t *testing.T) {
 		msg := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
 		require.ErrorIs(t, msg.allReposErr, errTestFetcherUnstubbed)
 		require.Error(t, msg.err)
-		require.False(t, h.handleSnapshot(msg))
+		require.True(t, h.handleSnapshot(msg), "unavailable status needs a repaint")
 		require.Same(t, instance, findSidebarInstance(h, "retained"))
 		// Cross-repo errors are handled separately from handleSnapshot in
 		// Update; exercise that path too, without executing its next tick.
