@@ -49,8 +49,9 @@ to those goldens. Keep captured ANSI beside the gallery for source inspection.
 
 ## Performance and verification
 
-`make perf-container` passed at 1,000 sessions. Full frame averaged **67.541 ms**
-(range 64.518–72.424); key-to-render averaged **57.507 ms** (54.502–60.771).
+`make perf-container` passed at 1,000 sessions after merging master through
+`d7705ac0` (#3929 and #3928). The approved TUI stills are unchanged. Full frame averaged **74.481 ms**
+(range 61.333–95.673); key-to-render averaged **103.291 ms** (61.199–171.667).
 Every sample meets P5's stricter 480 / 351 ms limits. The harness still reports
 P1's original looser CI ceilings; these are not the thresholds used to accept P5.
 [Raw samples](../assets/design/tui-a/perf/tui-runs.json) and the
