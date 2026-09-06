@@ -25,6 +25,8 @@
 // only for the currently-shown instance (rebuilt from the retained tree on return),
 // mirroring how the single terminal was disposed+rebuilt on every selection change.
 
+import { paneChrome } from "./components.js";
+
 import {
   closeLeaf,
   companionTab,
@@ -856,23 +858,7 @@ export class SplitView {
   private createPane(leaf: LeafNode): Pane {
     const container = el("div", "af-pane");
     container.setAttribute("data-leaf", leaf.id);
-    const head = el("div", "af-pane-head");
-    // The kind icon is a decorative sibling of the label, exactly as in the tab bar
-    // (#1813): same two functions, same pair, so the two surfaces cannot drift.
-    const glyph = el("span", "af-pane-glyph");
-    glyph.setAttribute("aria-hidden", "true");
-    const label = el("span", "af-pane-label");
-    const closeBtn = document.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.className = "af-pane-close";
-    closeBtn.title = "Close pane";
-    closeBtn.setAttribute("aria-label", "Close pane");
-    closeBtn.append(icon("x"));
-    closeBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.closePane(leaf.id);
-    });
-    head.append(glyph, label, closeBtn);
+    const { head, glyph, label } = paneChrome(() => this.closePane(leaf.id));
 
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");

@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { viewNavigation } from "./components.js";
+import { viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
 import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -184,7 +184,7 @@ export interface AppState {
    *  daemon host, not a manifest key, and merging the two would be the category
    *  error #3385 asks this surface to avoid. */
   accounts: AccountsState;
-  /** the persisted theme preference (redesign PR1): Auto follows the OS, Light/Dark
+  /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
    *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
   themeChoice: ThemeChoice;
@@ -564,8 +564,8 @@ export function tabRealId(tab: { id?: string }): string {
 /** The appbar label for a theme choice (redesign PR1). */
 function themeLabel(choice: ThemeChoice): string {
   switch (choice) {
-    case "auto":
-      return "Auto";
+    case "system":
+      return "System";
     case "light":
       return "Light";
     case "dark":
@@ -736,7 +736,7 @@ export class AppShell {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   private readonly viewTabs: Map<View, HTMLElement>;
-  // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
+  // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
   private lastThemeChoice: ThemeChoice | null = null;
@@ -785,6 +785,7 @@ export class AppShell {
 
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
+  private terminalChrome: ReturnType<typeof terminalChrome> | null = null;
   // The full bounded archive-loss notice for the selected session. It stays
   // mounted above the terminal and is patched on every same-selection snapshot,
   // so automatic Lost recovery cannot turn it into a one-shot toast.
@@ -895,7 +896,7 @@ export class AppShell {
     const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect.setAttribute("title", "Disconnect and forget the saved token");
 
-    // The theme toggle: a compact Auto/Light/Dark segmented control. A click routes
+    // The theme toggle: a compact Light/Dark/System segmented control. A click routes
     // through actions.setTheme, which persists the choice and re-themes the terminals.
     const themeToggle = h("div", { class: "af-theme-toggle" });
     themeToggle.setAttribute("role", "group");
@@ -1135,6 +1136,7 @@ export class AppShell {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose(): void {
     window.clearInterval(this.idleAgeTimer);
+    this.terminalChrome?.dispose();
   }
 
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
@@ -1418,6 +1420,12 @@ export class AppShell {
     // filter menu carries the per-state totals for what's hidden.
     this.railCount.textContent = String(visible.length);
     this.renderFilterMenu(state, scoped);
+    const openIds = new Set(this.railMenus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.dataset.sessionId));
+    const active = document.activeElement as HTMLElement | null;
+    const focusedId = active?.closest<HTMLElement>("[data-session-id]")?.dataset.sessionId;
+    const focusedName = active?.getAttribute("aria-label");
+    for (const menu of this.railMenus) menu.dispose();
+    this.railMenus = [];
     const list = this.railList;
     // No project selected ⇒ there are no projects at all (nothing has been created):
     // the global empty rail. Post-#2456 the coherent first step is registering a repo
@@ -1438,13 +1446,30 @@ export class AppShell {
     });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
+    for (const menu of this.railMenus) if (openIds.has(menu.el.dataset.sessionId)) menu.open();
+    if (focusedId && focusedName) {
+      const host = list.querySelector(`[data-session-id="${CSS.escape(focusedId)}"]`);
+      host?.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+    }
   }
 
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
+  private railMenus: ReturnType<typeof actionsDisclosure>[] = [];
   private rowActions(session: ManagedSession, selected: boolean): HTMLElement {
-    return h("div", { class: "af-row-actions" }, ...this.sessionActionButtons(session, "rail", selected));
+    const host = h("div", { class: "af-row-actions" });
+    const buttons = this.sessionActionButtons(session, "rail", selected);
+    if (!buttons.length) return host;
+    const menu = actionsDisclosure(`Actions for ${session.title}`);
+    menu.el.dataset.sessionId = session.id;
+    this.railMenus.push(menu);
+    menu.trigger.replaceChildren("…");
+    menu.panel.append(...buttons);
+    menu.el.addEventListener("click", (event) => event.stopPropagation());
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    host.append(menu.el);
+    return host;
   }
 
   /** Builds both rail and fallback-header controls from the same daemon capabilities.
@@ -1488,7 +1513,7 @@ export class AppShell {
       const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        ...(surface === "rail" ? [icon("octagon-x")] : ["Kill"]),
+        "Kill",
       );
       const killLabel = `Kill session “${killSession.title}”`;
       killBtn.setAttribute("aria-label", killLabel);
@@ -1518,7 +1543,7 @@ export class AppShell {
     const label = `${verb} “${sessionTitle}”`;
     btn.dataset.action = action;
     if (surface === "rail") {
-      btn.replaceChildren(icon(action === "restore" ? "archive-restore" : "archive"));
+      btn.textContent = verb.replace(" session", "");
     } else {
       btn.textContent = verb.replace(" session", "");
     }
@@ -1755,8 +1780,9 @@ export class AppShell {
       const menuBox = menu.getBoundingClientRect();
       const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
       const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const below = anchor.bottom + 6;
-      const above = anchor.top - menuBox.height - 6;
+      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
+      const below = anchor.bottom + gap;
+      const above = anchor.top - menuBox.height - gap;
       const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
@@ -1814,6 +1840,7 @@ export class AppShell {
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         close();
+        this.terminalChrome?.menu.close();
         this.actions.newTab(kind);
       });
       return b;
@@ -1883,6 +1910,8 @@ export class AppShell {
   }
 
   private renderMain(state: AppState): void {
+    this.terminalChrome?.dispose();
+    this.terminalChrome = null;
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
@@ -1894,6 +1923,7 @@ export class AppShell {
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
+      delete this.main.dataset.afTheme;
       // Dropped rather than left at its last value: with no session attached there is
       // no terminal for a status to describe, and a stale "open" here would let a
       // selftest wait on the PREVIOUS attach and call it the new one.
@@ -1912,81 +1942,26 @@ export class AppShell {
       );
       return;
     }
-    this.headTitle = h("span", { class: "af-term-title" }, selected.title);
-    // The PR badge is the web's session.pr.open (#3285): the daemon-discovered
-    // number + state (#3232/#3287) as a plain link — the browser's native
-    // analogue of the TUI's p/y keys. Built hidden and filled by patchMainHead,
-    // NOT decided here: discovery normally lands while the session is already
-    // selected (the daemon sweep refreshes pr_info with no selection change),
-    // the same render-time trap Retry hit (#1932).
-    const prBadge = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-    prBadge.hidden = true;
-    this.prBadge = prBadge;
+    const chrome = terminalChrome({
+      title: selected.title,
+      copyLink: () => this.actions.copyLink(),
+      handoff: () => this.actions.handoff(),
+      retry: () => this.actions.retryLimit(),
+    });
+    this.terminalChrome = chrome;
+    this.headTitle = chrome.title;
+    this.prBadge = chrome.pr;
     this.prBadgeSig = "";
-    // The title wrapper remains title-only: the mobile shell hides that repeated
-    // chrome to reclaim its sole control row (#2354), while the PR link must stay
-    // reachable there. The "Live · master" meta that used to sit beside the title
-    // was removed as chrome nobody wanted to look at (#2458); the badge is not
-    // that — it carries an action (follow the PR), not ambient state.
-    const copyLink = h(
-      "button",
-      { type: "button", class: "af-ghost af-term-action af-copy-link", title: "Copy link to this session" },
-      icon("link"), h("span", { class: "af-copy-link-label" }, "Copy link"),
-    );
-    copyLink.setAttribute("aria-label", "Copy link");
-    copyLink.addEventListener("click", () => this.actions.copyLink());
-    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
-
-    // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
-    // that state — ◆ glyph, "Limit reached" label, "[limit] resets …" title prefix
-    // — and offered nothing to do about it, so the session sat until someone found
-    // a terminal and opened the TUI.
-    //
-    // Shown only while the selection is limit-blocked, mirroring the TUI, which
-    // advertises `c` only for a limit-blocked row (ui/menu.go) rather than showing
-    // a dead control on every session.
-    //
-    // Hidden via `hidden`, and patched by patchMainHead — NOT decided once here.
-    // renderMain runs only on a SELECTION change, and the common path is a session
-    // hitting the wall while it is already selected, which is no selection change
-    // at all (#1932, the same trap the archive/restore verb hit). A render-time
-    // decision would mean the button appears only if you look away and back.
-    const retryBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
-    retryBtn.title = "Resume this session from its usage-limit wall";
-    retryBtn.addEventListener("click", () => this.actions.retryLimit());
-    this.retryBtn = retryBtn;
+    this.retryBtn = chrome.retry;
     this.retryVisible = isLimitReached(selected);
-    retryBtn.hidden = !this.retryVisible;
-
-    // Handoff, for continuing a session under a different agent (#2013) — the web
-    // half of the TUI's `F`. A limit-blocked session now shows BOTH exits the ledger
-    // called for: Retry (wait for the window) and Handoff (switch agents); a normal
-    // local session shows Handoff alone. Same build-once / patch-in-place treatment
-    // as Retry — gated by the daemon-projected can_handoff, toggled in patchMainHead.
-    const handoffBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Handoff");
-    handoffBtn.title = "Continue this session under a different agent";
-    handoffBtn.addEventListener("click", () => this.actions.handoff());
-    this.handoffBtn = handoffBtn;
+    chrome.retry.hidden = !this.retryVisible;
+    this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
-    handoffBtn.hidden = !this.handoffVisible;
-
-    // Empty while the selected row is visible; patchMainHead fills it only when the
-    // shared rail derivation says filtering/scoping removed that row. Keeping the
-    // container stable avoids touching the terminal host as that condition flips.
-    const headActions = h("div", { class: "af-term-actions" });
-    headActions.hidden = true;
-    this.headActions = headActions;
+    chrome.handoff.hidden = !this.handoffVisible;
+    this.headActions = chrome.actions;
     this.headActionSig = "";
-
-    // The tab bar is the flexible middle of the single pane-header row (#2224):
-    // title first, the same horizontally scrolling bar, then the fixed Retry escape
-    // when a limit wall makes it visible. Keeping the real bar node here (rather
-    // than projecting a second mobile/desktop copy) preserves one drag/drop and
-    // popover-anchoring path at every width.
-    const tabBar = h("div", { class: "af-tabbar" });
+    const tabBar = chrome.tabs;
     this.tabBar = tabBar;
-    tabBar.setAttribute("role", "tablist");
-    tabBar.setAttribute("aria-label", "Session tabs");
     // The drag source is wired ONCE here on the (stable) bar container via delegation,
     // not per button — so EVERY tab, including one created after load, is a drag source
     // by construction, with no per-button binding to forget on a re-render (#1737).
@@ -2006,16 +1981,14 @@ export class AppShell {
     // delegation again, giving a finger the same two capabilities (#2899).
     this.attachTabTouchDrag(tabBar);
 
-    // Retry and the filtered-selection fallback are fixed pane-level actions. Their
-    // hidden containers create no flex items on the common path, while visible
-    // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, copyLink, tabBar, headActions, handoffBtn, retryBtn);
+    const head = chrome.head;
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
 
     this.main.className = "af-main af-main-term";
+    this.main.dataset.afTheme = currentMode();
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
     // selection change, so this reparent is rare and never happens mid-type.
     if (warningText === "") {
@@ -2088,11 +2061,11 @@ export class AppShell {
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
-      children.push(this.newTabControl(selected));
+      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
     } else {
       const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
       reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
-      children.push(reason);
+      this.terminalChrome?.newTabSlot.replaceChildren(reason);
     }
     // Replacing every child resets a horizontally scrolled bar to its left edge.
     // Preserve the stable container's viewport so activating an off-screen tab does
@@ -2534,6 +2507,7 @@ export class AppShell {
       return;
     }
     this.headTitle.textContent = selected.title;
+    if (this.terminalChrome) this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
     const warningText = archiveWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {

@@ -213,6 +213,7 @@ export class ConfigPane {
   readonly el: HTMLElement;
 
   private entries: ConfigEntry[] = [];
+  private registration = { open: false, agent: "" };
   private path = "";
   private status: ConfigStatus | null = null;
   /** The Accounts section's data (#3385). It is rendered by this view but is not
@@ -244,10 +245,17 @@ export class ConfigPane {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status
+      && accounts.status.name === "" && !accounts.status.error;
+    if (registrationSucceeded) {
+      const submitted = this.accountInput(accounts.status!.agent);
+      if (submitted) submitted.value = "";
+    }
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
-    this.entries = entries;
+    // Retired web appearance keys from older daemons are never editable here.
+    this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
@@ -277,7 +285,6 @@ export class ConfigPane {
    * that drops its own focus cannot be operated twice from the keyboard.
    */
   private rerenderKeepingUserState(): void {
-    const accountsOpen = !!this.el.querySelector(".af-accounts-list:not([hidden])");
     const active = document.activeElement;
     // The account register fields (#3385) are rebuilt like everything else, and
     // they hold a name the user is part-way through typing. Capturing every
@@ -285,6 +292,8 @@ export class ConfigPane {
     // from another action (a register elsewhere, a login closing) from eating a
     // draft the user never submitted.
     const accountDrafts = this.readAccountDrafts();
+    const accountAgentFocused = active?.getAttribute("aria-label") === "Account agent";
+    const accountSummaryFocused = active === this.el.querySelector(".af-account-disclosure summary");
     const focusedAccount =
       active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
     const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement
@@ -306,11 +315,6 @@ export class ConfigPane {
     // reader this change exists for, and a plain focus() would yank them back to the
     // field the moment a save or an external refresh landed.
     this.restoreAccountDrafts(accountDrafts);
-    if (accountsOpen) {
-      const list = this.el.querySelector<HTMLElement>(".af-accounts-list");
-      if (list) list.hidden = false;
-      this.el.querySelector(".af-accounts > .af-recovery")?.remove();
-    }
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -318,6 +322,10 @@ export class ConfigPane {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (accountAgentFocused) {
+      this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
+    } else if (accountSummaryFocused) {
+      this.el.querySelector<HTMLElement>(".af-account-disclosure summary")?.focus({ preventScroll: true });
     } else if (focusedAccount !== null) {
       const field = this.accountInput(focusedAccount);
       // preventScroll for the same reason as above: focus() would otherwise undo
@@ -373,7 +381,7 @@ export class ConfigPane {
     if (this.path !== "") {
       // Name the file being edited: a user with AF_HOME set is otherwise left
       // guessing which config.toml this is.
-      head.append(h("span", { class: "af-config-path" }, this.path));
+      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} · ${this.path}`));
     }
     // The conversational assistant (#2467): a chat that helps configure the service,
     // the web counterpart of the TUI's config-agent takeover. Opening it is the
@@ -393,7 +401,7 @@ export class ConfigPane {
         continue;
       }
       const folded = tier === TIER_ADVANCED && !this.showAdvanced;
-      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name));
+      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name.charAt(0).toUpperCase() + name.slice(1)));
 
       if (tier === TIER_ADVANCED) {
         const toggle = h(
@@ -432,7 +440,7 @@ export class ConfigPane {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts),
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
     );
   }
 
@@ -512,6 +520,8 @@ export class ConfigPane {
 
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
 
+    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
+
     // ONE gate, both gestures. There are two ways to commit this field — the
     // button and Enter — and they must agree. Enter used to call save()
     // unconditionally while the button honored `disabled`, so pressing Enter on
@@ -527,6 +537,7 @@ export class ConfigPane {
 
     const syncSave = () => {
       save.disabled = !canCommit(input.value, e.value);
+      dirty.hidden = save.disabled;
     };
 
     input.addEventListener("input", () => {
@@ -543,6 +554,6 @@ export class ConfigPane {
     save.addEventListener("click", commit);
     syncSave();
 
-    return h("div", { class: "af-config-control" }, input, save);
+    return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 }

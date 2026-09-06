@@ -286,7 +286,6 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// upgrade supervisor is validating, so it follows the same admission rule.
 	"ApplyTheme":   blockedDuringProbation,
 	"GetConfig":    allowedDuringProbation,
-	"GetTheme":     allowedDuringProbation,
 	"ListBackends": allowedDuringProbation,
 	// A read of the daemon host's directory names (#2788): no manager, no daemon
 	// state, nothing an upgrade window is protecting. It sits with ListProjects

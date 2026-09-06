@@ -113,7 +113,9 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto("/");
       await expect(page.locator(".af-app")).toBeVisible();
       await page.getByRole("tab", { name: "Tasks", exact: true }).click();
-      await page.getByRole("button", { name: "Disable", exact: true }).first().click();
+      const task = page.locator(".af-task-row").first();
+      await task.locator(".af-term-more").click();
+      await task.getByRole("button", { name: "Disable", exact: true }).click();
       await expect(page.locator(".af-toast-show")).toBeVisible();
       await still(page, info, "notice");
       await page.getByRole("button", { name: "Dismiss", exact: true }).click();
@@ -151,8 +153,10 @@ for (const theme of ["light", "dark"] as const) {
           await expect(page.getByRole("textbox", { name: "Task name", exact: true })).toHaveValue("Retained task");
         } else {
           await page.route(`**/v1/${operation === "kill" ? "KillSession" : "ArchiveSession"}`, route => route.fulfill(refusal));
-          await page.locator(".af-row").filter({ has: page.getByRole("button", { name: new RegExp(`^${operation === "kill" ? "Kill" : "Archive"} session`) }) }).first().hover();
-          await page.locator(`button[title^="${operation === "kill" ? "Kill" : "Archive"} session"]`).first().click();
+          const row = page.locator(".af-row").first();
+          await row.hover();
+          await row.getByRole("button", { name: /^Actions for / }).click();
+          await row.getByRole("button", { name: new RegExp(`^${operation === "kill" ? "Kill" : "Archive"} session`) }).click();
           await page.locator(".af-modal-card button[type=submit]").click();
           await expect(page.locator(".af-modal-error")).toBeVisible();
         }

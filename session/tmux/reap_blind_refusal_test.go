@@ -31,6 +31,7 @@ func TestBlindVanishedSessionRefusalTellsOperatorHowToTell(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	marked := spawnMarkedSessionWithEscapee(t, name, home, generation)
+	vanishSessionWithObservableEscapee(t, name, marked)
 
 	err := reapVanishedSessionProcesses(name, home, nil, nil, false)
 	require.Error(t, err, "a blind sweep with no captured predecessor must refuse")

@@ -13,9 +13,9 @@ The specimens consume the generated CSS. TUI examples show the prescribed cell l
 and colours in HTML; they are not a running Bubble Tea app. Example controls are inert,
 except native disclosure menus. System selects one of these same two themes.
 
-The web stills show the real rail and header after P2 slice A; the remaining
+The web stills show the real rail, header, terminal and tabs after P2 slices A/B; the remaining
 components are awaiting their slices. Web has six [recorder beats](../dev/demo-assets.md)
-in both themes, plus filter, project-menu and phone drawer/control captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
+in both themes, plus filter, project-menu, terminal-action, keyboard, split and phone captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
 screen/theme matrix. Missing captures are labelled. Empty/error specimens illustrate the rules; the [P4 recovery matrix](recovery-stills.md)
 provides asserted recordings. Click a still for the full screen.
 
@@ -80,7 +80,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-focus"><strong>tidy-tests · Agent · Keyboard</strong><pre>$ ./test.sh
 2 tests passed</pre><span>ctrl+] · Return to sessions</span></div></section>
-<figure><a href="../../assets/web/agent-tab.png"><img loading="lazy" src="../../assets/web/agent-tab.png" alt="Current web agent-tab screen in light theme"></a><figcaption>Current recorder still · agent-tab · light</figcaption></figure>
+<figure><a href="../../assets/web/agent-tab.png"><img loading="lazy" src="../../assets/web/agent-tab.png" alt="Current web agent-tab screen in light theme"></a><figcaption>Rules applied · Real web screen · agent-tab · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>┌ tidy-tests · Agent · Keyboard ┐
@@ -93,7 +93,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-focus"><strong>tidy-tests · Agent · Keyboard</strong><pre>$ ./test.sh
 2 tests passed</pre><span>ctrl+] · Return to sessions</span></div></section>
-<figure><a href="../../assets/web/agent-tab-dark.png"><img loading="lazy" src="../../assets/web/agent-tab-dark.png" alt="Current web agent-tab screen in dark theme"></a><figcaption>Current recorder still · agent-tab · dark</figcaption></figure>
+<figure><a href="../../assets/web/agent-tab-dark.png"><img loading="lazy" src="../../assets/web/agent-tab-dark.png" alt="Current web agent-tab screen in dark theme"></a><figcaption>Rules applied · Real web screen · agent-tab · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>┌ tidy-tests · Agent · Keyboard ┐
@@ -109,7 +109,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong><span style="color:var(--af-accent)">PR #128 · Open</span></div><pre>$ git diff --stat
 2 files changed</pre></section>
-<figure><a href="../../assets/web/review.png"><img loading="lazy" src="../../assets/web/review.png" alt="Current web review screen in light theme"></a><figcaption>Current recorder still · review · light</figcaption></figure>
+<figure><a href="../../assets/web/review.png"><img loading="lazy" src="../../assets/web/review.png" alt="Current web review screen in light theme"></a><figcaption>Rules applied · Real web screen · review · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>  1 · Agent
@@ -121,7 +121,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong><span style="color:var(--af-accent)">PR #128 · Open</span></div><pre>$ git diff --stat
 2 files changed</pre></section>
-<figure><a href="../../assets/web/review-dark.png"><img loading="lazy" src="../../assets/web/review-dark.png" alt="Current web review screen in dark theme"></a><figcaption>Current recorder still · review · dark</figcaption></figure>
+<figure><a href="../../assets/web/review-dark.png"><img loading="lazy" src="../../assets/web/review-dark.png" alt="Current web review screen in dark theme"></a><figcaption>Rules applied · Real web screen · review · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>  1 · Agent
@@ -135,7 +135,7 @@ Keyboard: navigation</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-dialog"><strong>New session</strong><label>Title<input value="tidy-tests" readonly></label><label>Prompt<textarea readonly>Cover appending a second item…</textarea></label><div class="sg-bar"><button type="button">Cancel</button><button type="button" class="sg-primary">Create</button></div></div></section>
-<figure><a href="../../assets/web/new-session.png"><img loading="lazy" src="../../assets/web/new-session.png" alt="Current web new-session screen in light theme"></a><figcaption>Current recorder still · new-session · light</figcaption></figure>
+<figure><a href="../../assets/web/new-session.png"><img loading="lazy" src="../../assets/web/new-session.png" alt="Current web new-session screen in light theme"></a><figcaption>Rules applied · Real web screen · new-session · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>╭ New session ───────────────╮
@@ -148,7 +148,7 @@ Keyboard: navigation</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-dialog"><strong>New session</strong><label>Title<input value="tidy-tests" readonly></label><label>Prompt<textarea readonly>Cover appending a second item…</textarea></label><div class="sg-bar"><button type="button">Cancel</button><button type="button" class="sg-primary">Create</button></div></div></section>
-<figure><a href="../../assets/web/new-session-dark.png"><img loading="lazy" src="../../assets/web/new-session-dark.png" alt="Current web new-session screen in dark theme"></a><figcaption>Current recorder still · new-session · dark</figcaption></figure>
+<figure><a href="../../assets/web/new-session-dark.png"><img loading="lazy" src="../../assets/web/new-session-dark.png" alt="Current web new-session screen in dark theme"></a><figcaption>Rules applied · Real web screen · new-session · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>╭ New session ───────────────╮
@@ -164,7 +164,7 @@ Keyboard: navigation</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-selected"><strong>nightly-tests · Enabled</strong><br><span>Next run · Tomorrow at 12:00 UTC</span><br><small>cron · 0 12 * * *</small><br><button type="button" class="sg-primary">Edit task</button></div></section>
-<figure><a href="../../assets/web/tasks.png"><img loading="lazy" src="../../assets/web/tasks.png" alt="Current web tasks screen in light theme"></a><figcaption>Current recorder still · tasks · light</figcaption></figure>
+<figure><a href="../../assets/web/tasks.png"><img loading="lazy" src="../../assets/web/tasks.png" alt="Current web tasks screen in light theme"></a><figcaption>Rules applied · Real web screen · tasks · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>Tasks
@@ -176,7 +176,7 @@ Keyboard: navigation</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-selected"><strong>nightly-tests · Enabled</strong><br><span>Next run · Tomorrow at 12:00 UTC</span><br><small>cron · 0 12 * * *</small><br><button type="button" class="sg-primary">Edit task</button></div></section>
-<figure><a href="../../assets/web/tasks-dark.png"><img loading="lazy" src="../../assets/web/tasks-dark.png" alt="Current web tasks screen in dark theme"></a><figcaption>Current recorder still · tasks · dark</figcaption></figure>
+<figure><a href="../../assets/web/tasks-dark.png"><img loading="lazy" src="../../assets/web/tasks-dark.png" alt="Current web tasks screen in dark theme"></a><figcaption>Rules applied · Real web screen · tasks · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>Tasks
@@ -191,7 +191,7 @@ Keyboard: navigation</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><strong>Config · Local daemon</strong><br><small>/work/config.toml</small><label>Appearance<select disabled><option>System</option><option>Light</option><option>Dark</option></select></label><label>Editor binary<span>Program used by editor tabs</span><input value="code-server" readonly></label><span>Saved · Applies to new tabs</span><hr><strong>Accounts</strong><p>work · Logged in</p><button type="button">Add account</button></section>
-<figure><a href="../../assets/web/config-accounts.png"><img loading="lazy" src="../../assets/web/config-accounts.png" alt="Current web config-accounts screen in light theme"></a><figcaption>Current recorder still · config-accounts · light</figcaption></figure>
+<figure><a href="../../assets/web/config-accounts.png"><img loading="lazy" src="../../assets/web/config-accounts.png" alt="Current web config-accounts screen in light theme"></a><figcaption>Rules applied · Real web screen · config-accounts · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>Config · Local daemon
@@ -205,7 +205,7 @@ Accounts
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><strong>Config · Local daemon</strong><br><small>/work/config.toml</small><label>Appearance<select disabled><option>System</option><option>Light</option><option>Dark</option></select></label><label>Editor binary<span>Program used by editor tabs</span><input value="code-server" readonly></label><span>Saved · Applies to new tabs</span><hr><strong>Accounts</strong><p>work · Logged in</p><button type="button">Add account</button></section>
-<figure><a href="../../assets/web/config-accounts-dark.png"><img loading="lazy" src="../../assets/web/config-accounts-dark.png" alt="Current web config-accounts screen in dark theme"></a><figcaption>Current recorder still · config-accounts · dark</figcaption></figure>
+<figure><a href="../../assets/web/config-accounts-dark.png"><img loading="lazy" src="../../assets/web/config-accounts-dark.png" alt="Current web config-accounts screen in dark theme"></a><figcaption>Rules applied · Real web screen · config-accounts · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>Config · Local daemon
@@ -222,7 +222,7 @@ Accounts
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><label>Title<input class="sg-focus" value="tidy-tests" readonly></label><div class="sg-bar"><button class="sg-primary" type="button">Create</button><button type="button">Cancel</button><button disabled>Creating…</button><button class="sg-error" type="button">Delete session</button></div><details><summary>Project · todo-cli</summary><p>todo-cli · Selected</p><p>Register project…</p></details></section>
-<figure><a href="../../assets/web/new-session.png"><img loading="lazy" src="../../assets/web/new-session.png" alt="Current web new-session screen in light theme"></a><figcaption>Current recorder still · new-session · light</figcaption></figure>
+<figure><a href="../../assets/web/new-session.png"><img loading="lazy" src="../../assets/web/new-session.png" alt="Current web new-session screen in light theme"></a><figcaption>Rules applied · Real web screen · new-session · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>Project
@@ -235,7 +235,7 @@ Creating… · Please wait</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><label>Title<input class="sg-focus" value="tidy-tests" readonly></label><div class="sg-bar"><button class="sg-primary" type="button">Create</button><button type="button">Cancel</button><button disabled>Creating…</button><button class="sg-error" type="button">Delete session</button></div><details><summary>Project · todo-cli</summary><p>todo-cli · Selected</p><p>Register project…</p></details></section>
-<figure><a href="../../assets/web/new-session-dark.png"><img loading="lazy" src="../../assets/web/new-session-dark.png" alt="Current web new-session screen in dark theme"></a><figcaption>Current recorder still · new-session · dark</figcaption></figure>
+<figure><a href="../../assets/web/new-session-dark.png"><img loading="lazy" src="../../assets/web/new-session-dark.png" alt="Current web new-session screen in dark theme"></a><figcaption>Rules applied · Real web screen · new-session · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>Project
@@ -251,7 +251,7 @@ Creating… · Please wait</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><strong class="sg-empty-title">No sessions yet</strong><p>Create a session in todo-cli.</p><button class="sg-primary" type="button">New session</button><hr><strong class="sg-empty-title">No project selected</strong><p>Choose a project to see its sessions.</p><button type="button">Choose project</button></section>
-<figure><a href="../../assets/web/dashboard.png"><img loading="lazy" src="../../assets/web/dashboard.png" alt="Current web dashboard screen in light theme"></a><figcaption>Current recorder still · dashboard · light · Context only; see the P4 recovery matrix</figcaption></figure>
+<figure><a href="../../assets/web/dashboard.png"><img loading="lazy" src="../../assets/web/dashboard.png" alt="Current web dashboard screen in light theme"></a><figcaption>Rules applied · Real web screen · dashboard · light · Context only; see the P4 recovery matrix</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>No sessions yet
@@ -264,7 +264,7 @@ Choose a project to continue.</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><strong class="sg-empty-title">No sessions yet</strong><p>Create a session in todo-cli.</p><button class="sg-primary" type="button">New session</button><hr><strong class="sg-empty-title">No project selected</strong><p>Choose a project to see its sessions.</p><button type="button">Choose project</button></section>
-<figure><a href="../../assets/web/dashboard-dark.png"><img loading="lazy" src="../../assets/web/dashboard-dark.png" alt="Current web dashboard screen in dark theme"></a><figcaption>Current recorder still · dashboard · dark · Context only; see the P4 recovery matrix</figcaption></figure>
+<figure><a href="../../assets/web/dashboard-dark.png"><img loading="lazy" src="../../assets/web/dashboard-dark.png" alt="Current web dashboard screen in dark theme"></a><figcaption>Rules applied · Real web screen · dashboard · dark · Context only; see the P4 recovery matrix</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>No sessions yet
@@ -280,7 +280,7 @@ Choose a project to continue.</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><strong class="sg-error sg-empty-title">Cannot reach the daemon</strong><p>Sessions could not be loaded. Check the daemon, then retry.</p><button type="button">Retry</button><hr><strong>Login expired</strong><p>Sign in again to reconnect.</p><button type="button">Sign in</button></section>
-<figure><a href="../../assets/web/config-accounts.png"><img loading="lazy" src="../../assets/web/config-accounts.png" alt="Current web config-accounts screen in light theme"></a><figcaption>Current recorder still · config-accounts · light · Context only; see the P4 recovery matrix</figcaption></figure>
+<figure><a href="../../assets/web/config-accounts.png"><img loading="lazy" src="../../assets/web/config-accounts.png" alt="Current web config-accounts screen in light theme"></a><figcaption>Rules applied · Real web screen · config-accounts · light · Context only; see the P4 recovery matrix</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>Cannot reach the daemon
@@ -293,7 +293,7 @@ Login expired · Sign in again</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><strong class="sg-error sg-empty-title">Cannot reach the daemon</strong><p>Sessions could not be loaded. Check the daemon, then retry.</p><button type="button">Retry</button><hr><strong>Login expired</strong><p>Sign in again to reconnect.</p><button type="button">Sign in</button></section>
-<figure><a href="../../assets/web/config-accounts-dark.png"><img loading="lazy" src="../../assets/web/config-accounts-dark.png" alt="Current web config-accounts screen in dark theme"></a><figcaption>Current recorder still · config-accounts · dark · Context only; see the P4 recovery matrix</figcaption></figure>
+<figure><a href="../../assets/web/config-accounts-dark.png"><img loading="lazy" src="../../assets/web/config-accounts-dark.png" alt="Current web config-accounts screen in dark theme"></a><figcaption>Rules applied · Real web screen · config-accounts · dark · Context only; see the P4 recovery matrix</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>Cannot reach the daemon
@@ -309,7 +309,7 @@ Login expired · Sign in again</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-bar"><span>ctrl+] · Return to sessions</span><span>? · Help</span></div><p>Connecting…</p></section>
-<figure><a href="../../assets/web/agent-tab.png"><img loading="lazy" src="../../assets/web/agent-tab.png" alt="Current web agent-tab screen in light theme"></a><figcaption>Current recorder still · agent-tab · light</figcaption></figure>
+<figure><a href="../../assets/web/agent-tab.png"><img loading="lazy" src="../../assets/web/agent-tab.png" alt="Current web agent-tab screen in light theme"></a><figcaption>Rules applied · Real web screen · agent-tab · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>ctrl+] return · ? help
@@ -319,7 +319,7 @@ Connecting…</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-bar"><span>ctrl+] · Return to sessions</span><span>? · Help</span></div><p>Connecting…</p></section>
-<figure><a href="../../assets/web/agent-tab-dark.png"><img loading="lazy" src="../../assets/web/agent-tab-dark.png" alt="Current web agent-tab screen in dark theme"></a><figcaption>Current recorder still · agent-tab · dark</figcaption></figure>
+<figure><a href="../../assets/web/agent-tab-dark.png"><img loading="lazy" src="../../assets/web/agent-tab-dark.png" alt="Current web agent-tab screen in dark theme"></a><figcaption>Rules applied · Real web screen · agent-tab · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>ctrl+] return · ? help

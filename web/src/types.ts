@@ -262,36 +262,6 @@ export interface SnapshotResponse {
 	delivery_alarms?: unknown[];
 }
 
-/** apiproto.Theme: the daemon-resolved semantic palette. Browser light/dark is
- * deliberately absent; theme.ts derives both modes from these source slots. */
-export interface DaemonTheme {
-  name?: string;
-  foreground: string;
-  foreground_strong: string;
-  foreground_muted: string;
-  foreground_dim: string;
-  background: string;
-  background_subtle: string;
-  background_panel: string;
-  accent: string;
-  success: string;
-  warning: string;
-  error: string;
-  info: string;
-  purple: string;
-  selection_background: string;
-  selection_foreground: string;
-  pane_border_default: string;
-  pane_border_selected: string;
-  pane_border_interactive: string;
-  pane_border_preview: string;
-}
-
-/** GetThemeResponse (daemon/control_types.go). */
-export interface ThemeResponse {
-  theme: DaemonTheme;
-}
-
 /**
  * The subset of task.Task (task/task.go) the tasks view reads and mutates (#1592
  * Phase 5 PR8). Field names and JSON tags match the Go struct EXACTLY so this

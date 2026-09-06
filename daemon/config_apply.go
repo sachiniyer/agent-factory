@@ -139,7 +139,7 @@ func withoutKeys(keys, drop []string) []string {
 // plain `af` launch calls this after resolving a hand edit: applying the complete
 // file there would also mutate listeners/auth and could hide a failed rebind from
 // the user who merely opened the TUI. The event is an invalidation signal; open
-// web clients fetch GetTheme after receiving it.
+// web clients refresh data without changing their fixed palettes.
 func (m *Manager) ApplyTheme() (bool, error) {
 	m.configApplyMu.Lock()
 	defer m.configApplyMu.Unlock()
@@ -196,7 +196,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// limit_auto_resume, limit_retry_interval, …) read it at their next op entry.
 	// branch_prefix rides along in the swapped config, but its runtime consumers
 	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
-	// the next-start notice. GetTheme deliberately reads this live snapshot.
+	// the next-start notice.
 	m.live.Store(newCfg)
 	if themeChanged {
 		m.publishEvent(agentproto.EventThemeChanged, nil)

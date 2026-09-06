@@ -13,6 +13,7 @@
 // render.go paints (see styles.css .af-dot-*).
 
 import { InFlightOp, Liveness, Status, type IdleReason, type SessionData } from "./types.js";
+import { formatDuration } from "./time.js";
 import type { IconName } from "./icon.js";
 
 /** The visual kind of a status dot, one per color bucket the TUI paints. Drives
@@ -106,14 +107,7 @@ function idleReasonLabel(reason: IdleReason | undefined): string {
 }
 
 function formatPaneChurnAge(churn: Date, now: Date): string {
-  const ageMs = Math.max(0, now.getTime() - churn.getTime());
-  const minute = 60_000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (ageMs < minute) return "<1m";
-  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
-  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
-  return `${Math.floor(ageMs / day)}d`;
+  return formatDuration(now.getTime() - churn.getTime());
 }
 
 const READY_ICON: IconName = "circle";
