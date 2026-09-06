@@ -29,7 +29,23 @@
 .af-recovery-action:focus-visible { outline: 2px solid var(--af-accent); outline-offset: 2px; }
 .af-recovery-action:hover { text-decoration: underline; }
 .af-recovery-notice { padding: var(--af-space-2); }
-.af-recovery-login { width: 100%; min-height: 100dvh; box-sizing: border-box; }
+/* Every login-phase condition uses the same centred vertical surface, including
+   roots that also carry the legacy af-login flex class. */
+.af-recovery-login {
+  width: 100%;
+  min-height: 100dvh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--af-space-2);
+  text-align: center;
+}
+.af-recovery-login > * { max-width: 32rem; }
+.af-recovery-login > p { margin: 0; }
+.af-recovery-login .af-title { font-size: var(--af-type-display); margin: 0; }
+.af-recovery-login .af-login-form { width: 100%; text-align: left; }
 .af-recovery-login .af-login-form { max-width: 32rem; }
 .af-recovery-login label, .af-recovery-login p { color: var(--af-ink); font-size: var(--af-type-body); }
 .af-recovery-login input { color: var(--af-ink); background: var(--af-surface-raised); border-color: var(--af-border); }
@@ -44,3 +60,5 @@
 }
 .af-recovery-notice > strong { display: block; font-size: var(--af-type-display); font-weight: 600; }
 .af-toast:has(.af-recovery) { padding: 0; background: none; border: 0; box-shadow: none; }
+.af-toast:has(.af-recovery) { transition: none; transform: none; }
+.af-toast.af-toast-show:has(.af-recovery) { pointer-events: auto; }

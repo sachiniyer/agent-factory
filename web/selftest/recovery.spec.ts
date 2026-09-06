@@ -17,6 +17,24 @@ async function still(page: Page, info: TestInfo, name: string): Promise<void> {
   expect(pixels).toMatchSnapshot(golden);
 
 }
+async function centeredColumn(page: Page, field?: string): Promise<void> {
+  const root = page.locator(".af-recovery-login");
+  const heading = root.locator("h1");
+  const title = await heading.boundingBox();
+  expect(title).not.toBeNull();
+  const viewport = page.viewportSize()!;
+  expect(Math.abs(title!.x + title!.width / 2 - viewport.width / 2)).toBeLessThan(2);
+  const extent = await root.evaluate(element => {
+    const children = [...element.children].map(child => child.getBoundingClientRect());
+    return { top: Math.min(...children.map(rect => rect.top)), bottom: Math.max(...children.map(rect => rect.bottom)) };
+  });
+  expect(Math.abs((extent.top + extent.bottom) / 2 - viewport.height / 2)).toBeLessThan(2);
+  if (field) {
+    const target = await page.locator(field).boundingBox();
+    expect(target).not.toBeNull();
+    expect(title!.y + title!.height).toBeLessThanOrEqual(target!.y);
+  }
+}
 async function emptyData(page: Page, project = true): Promise<void> {
   await page.routeWebSocket("**/v1/events*", () => {});
   await page.route("**/v1/Snapshot", route => route.fulfill({ json: envelope({ instances: [] }) }));
@@ -38,6 +56,7 @@ for (const theme of ["light", "dark"] as const) {
         const screen = page.locator(".af-recovery").filter({ has: page.getByRole("heading", { name: scene, exact: true }) });
         await expect(screen).toBeVisible();
         await expect(screen.getByRole("button")).toHaveCount(1);
+        await expect(page.locator(".af-rail-empty, .af-rail-empty-project")).toHaveCount(0);
         await still(page, info, scene);
         await screen.getByRole("button").click();
         await expect(page.locator(".af-modal-card")).toBeVisible();
@@ -48,6 +67,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto("/");
       await expect(page.getByRole("heading", { name: "Cannot reach the daemon" })).toBeVisible();
       await expect(page.getByRole("button")).toHaveCount(1);
+      await centeredColumn(page, ".af-recovery-action");
       await still(page, info, "no-daemon");
       await page.unroute("**/v1/auth-info");
       await page.getByRole("button", { name: "Retry", exact: true }).click();
@@ -60,7 +80,44 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto("/");
       await expect(page.getByRole("heading", { name: "Login expired" })).toBeVisible();
       await expect(page.locator("#af-token")).toBeVisible();
+      await centeredColumn(page, "#af-token");
       await still(page, info, "login-expired");
+    });
+    test("Connecting column", async ({ page }, info) => {
+      let release!: () => void;
+      const waiting = new Promise<void>(resolve => { release = resolve; });
+      await page.route("**/v1/auth-info", async route => { await waiting; await route.continue(); });
+      await page.goto("/", { waitUntil: "domcontentloaded" });
+      await expect(page.getByRole("heading", { name: "Connecting…" })).toBeVisible();
+      await centeredColumn(page);
+      await still(page, info, "connecting");
+      release();
+    });
+    test("Sign-in column", async ({ page }, info) => {
+      await page.route("**/v1/auth-info", route => route.fulfill({ json: envelope({ auth_required: true }) }));
+      await page.goto("/");
+      await expect(page.locator("#af-token")).toBeVisible();
+      await centeredColumn(page, "#af-token");
+      await still(page, info, "sign-in");
+    });
+    test("Tokenless column", async ({ page }, info) => {
+      await page.goto("/");
+      await expect(page.locator(".af-app")).toBeVisible();
+      await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+      await expect(page.locator(".af-login-form button")).toBeVisible();
+      await centeredColumn(page, ".af-login-form button");
+      await still(page, info, "tokenless");
+    });
+    test("Persistent notice dismisses", async ({ page }, info) => {
+      await page.route("**/v1/UpdateTask", route => route.fulfill(refusal));
+      await page.goto("/");
+      await expect(page.locator(".af-app")).toBeVisible();
+      await page.getByRole("tab", { name: "Tasks", exact: true }).click();
+      await page.getByRole("button", { name: "Disable", exact: true }).first().click();
+      await expect(page.locator(".af-toast-show")).toBeVisible();
+      await still(page, info, "notice");
+      await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+      await expect(page.locator(".af-toast-show")).toHaveCount(0);
     });
     test("No accounts", async ({ page }, info) => {
       await page.route("**/v1/ListAccounts", route => route.fulfill({ json: envelope({ entries: [], agents: ["claude"] }) }));

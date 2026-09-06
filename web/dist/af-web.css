@@ -2796,6 +2796,26 @@ button:disabled,
   width: 100%;
   min-height: 100dvh;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--af-space-2);
+  text-align: center;
+}
+.af-recovery-login > * {
+  max-width: 32rem;
+}
+.af-recovery-login > p {
+  margin: 0;
+}
+.af-recovery-login .af-title {
+  font-size: var(--af-type-display);
+  margin: 0;
+}
+.af-recovery-login .af-login-form {
+  width: 100%;
+  text-align: left;
 }
 .af-recovery-login .af-login-form {
   max-width: 32rem;
@@ -2836,6 +2856,13 @@ button:disabled,
   background: none;
   border: 0;
   box-shadow: none;
+}
+.af-toast:has(.af-recovery) {
+  transition: none;
+  transform: none;
+}
+.af-toast.af-toast-show:has(.af-recovery) {
+  pointer-events: auto;
 }
 
 /* node_modules/@xterm/xterm/css/xterm.css */

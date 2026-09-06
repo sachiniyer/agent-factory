@@ -1,4 +1,4 @@
-import { recoveryScreen, mutationNotice, scopeRecovery } from "./recovery.js";
+import { recoveryScreen, scopeRecovery } from "./recovery.js";
 // The view layer of the web client (#1592 Phase 5). It renders two views into
 // #app: the paste-token login (design §1.2) and the authed app — a left rail of
 // live sessions (PR3) beside a main pane that now hosts the live attach terminal
@@ -211,6 +211,7 @@ export interface Actions {
    *  attaches exactly like Enter on the selected row (#1693). */
   open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
+  dismissNotice?(): void;
   retryConnection?(): void;
   retryTasks?(): void;
   newSession(): void;
@@ -1238,7 +1239,10 @@ export class AppShell {
 
     if (this.lastError !== state.tabError) {
       this.lastError = state.tabError;
-      this.toast.replaceChildren(...(state.tabError ? [mutationNotice(state.tabNotice ? "Notice" : "Operation failed", state.tabError, state.tabNotice ? "Continue working." : "Try the action again.", !state.tabNotice)] : []));
+      this.toast.replaceChildren(...(state.tabError ? [recoveryScreen({
+        condition: state.tabNotice ? "Notice" : "Operation failed", detail: state.tabError,
+        failed: !state.tabNotice, action: "Dismiss", run: () => this.actions.dismissNotice?.(),
+      })] : []));
       this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
 
@@ -1458,9 +1462,7 @@ export class AppShell {
     // from the switcher's "+ Add project", not the TUI — the union then surfaces it
     // and a session can be created into it here.
     if (!state.selectedProject) {
-      list.replaceChildren(
-        h("li", { class: "af-rail-empty" }, "No projects yet — add one from the project switcher to get started."),
-      );
+      list.replaceChildren();
       return;
     }
     const rows = visible.map((s) => {
@@ -1583,6 +1585,8 @@ export class AppShell {
    *  - otherwise nothing: rows are showing.
    */
   private railNotice(state: AppState, scoped: SessionData[], visible: SessionData[]): HTMLElement | null {
+    // The pane owns zero-data guidance; keep only the rail count for that state.
+    if (scoped.length === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {

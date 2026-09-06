@@ -4722,14 +4722,10 @@ test("task-only project (redesign PR2, Fix 1): a repo with a task but no session
   await projectItem(page, "mock-repo-3").click();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-3");
 
-  // Its rail is the clean empty state (no sessions), not a blank rail. It has no
-  // archived sessions either, so the empty state stays a bare one-liner — no
-  // "N archived hidden" hint to explain something that isn't there.
-  const empty = page.locator(".af-rail-empty-project");
-  await expect(empty).toContainText("No active sessions in");
-  await expect(empty).toContainText("mock-repo-3");
-  await expect(empty.locator(".af-rail-empty-new")).toBeVisible();
-  await expect(empty).not.toContainText("archived hidden");
+  // P4: the pane owns the condition/action; the rail keeps only its count.
+  await expect(page.locator(".af-rail-empty-project")).toHaveCount(0);
+  await expect(page.locator(".af-main .af-recovery h1")).toHaveText("No sessions");
+  await expect(page.locator(".af-main .af-recovery button")).toHaveText("New session");
 
   // The delete-project action is DISABLED here — there are no live sessions to archive,
   // so it can never be a silent no-op (Greptile Fix 2). An archived-only repo, by the
@@ -6259,17 +6255,17 @@ test("empty state (#1592 PR9, #2456): an empty Snapshot + registry renders the z
   // state renders as designed rather than a broken/blank shell. Post-#2456 the copy
   // points at the switcher's add action, not the TUI.
   await expect(page.locator(".af-app")).toBeVisible();
-  await expect(page.locator(".af-rail-empty")).toContainText("No projects yet");
+  await expect(page.locator(".af-rail-empty")).toHaveCount(0);
+  await expect(page.locator(".af-main .af-recovery h1")).toHaveText("No project registered");
   // #2479: the zero-projects rail names no shell command AND offers no button that
   // cannot act — with no projects the New-session modal's Create is disabled, so a
   // New button here would dead-end. The coherent action is the switcher's
   // "+ Add project" (asserted just below, #2456/#2546), not a rail button.
-  await expect(page.locator(".af-rail-empty")).not.toContainText("af sessions create");
-  await expect(page.locator(".af-rail-empty")).not.toContainText("in the TUI");
+  await expect(page.locator(".af-main .af-recovery button")).toHaveText("Add project");
   await expect(page.locator(".af-rail-empty .af-rail-empty-new")).toHaveCount(0);
   await expect(page.locator(".af-rail-count")).toHaveText("0");
-  // With nothing selected the main pane is the "Select a session" placeholder.
-  await expect(page.locator(".af-main-empty")).toContainText("Select a session");
+  // With no project registered the recovery pane offers registration.
+  await expect(page.locator(".af-main-empty")).toContainText("No project registered");
 
   // #2456: the zero-projects switcher is still OPENABLE (the dead end lane-detail-backlog
   // removed its dead-end "+ New" for), and its ONE coherent action is the "+ Add project"

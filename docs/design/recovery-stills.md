@@ -18,3 +18,11 @@ to reproduce the captures; every image is also attached to the test report.
 | Archive failed | ![Light Archive failed](../assets/recovery/web-archive-failed-light.png) | ![Dark Archive failed](../assets/recovery/web-archive-failed-dark.png) |
 | Kill failed | ![Light Kill failed](../assets/recovery/web-kill-failed-light.png) | ![Dark Kill failed](../assets/recovery/web-kill-failed-dark.png) |
 | Task save failed | ![Light Task save failed](../assets/recovery/web-task-save-failed-light.png) | ![Dark Task save failed](../assets/recovery/web-task-save-failed-dark.png) |
+| Connecting… | ![Light Connecting…](../assets/recovery/web-connecting-light.png) | ![Dark Connecting…](../assets/recovery/web-connecting-dark.png) |
+| Sign in | ![Light Sign in](../assets/recovery/web-sign-in-light.png) | ![Dark Sign in](../assets/recovery/web-sign-in-dark.png) |
+| Tokenless login | ![Light Tokenless login](../assets/recovery/web-tokenless-light.png) | ![Dark Tokenless login](../assets/recovery/web-tokenless-dark.png) |
+| Persistent notice with Dismiss | ![Light Persistent notice with Dismiss](../assets/recovery/web-notice-light.png) | ![Dark Persistent notice with Dismiss](../assets/recovery/web-notice-dark.png) |
+
+Login scenes assert a centred content column and a heading above the field/action.
+Zero-data scenes assert the rail has no duplicate empty message. Persistent notices
+have an explicit Dismiss button, whose click is asserted.

@@ -1883,6 +1883,7 @@ const actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  dismissNotice: clearTabError,
   retryConnection: () => { void bootstrap(); },
   retryTasks: refreshTasks,
   notice: surfaceNotice,

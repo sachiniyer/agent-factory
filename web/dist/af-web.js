@@ -14413,7 +14413,13 @@ var AppShell = class {
     }
     if (this.lastError !== state.tabError) {
       this.lastError = state.tabError;
-      this.toast.replaceChildren(...state.tabError ? [mutationNotice(state.tabNotice ? "Notice" : "Operation failed", state.tabError, state.tabNotice ? "Continue working." : "Try the action again.", !state.tabNotice)] : []);
+      this.toast.replaceChildren(...state.tabError ? [recoveryScreen({
+        condition: state.tabNotice ? "Notice" : "Operation failed",
+        detail: state.tabError,
+        failed: !state.tabNotice,
+        action: "Dismiss",
+        run: () => this.actions.dismissNotice?.()
+      })] : []);
       this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
     if (this.lastLive !== state.live) {
@@ -14534,9 +14540,7 @@ var AppShell = class {
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
     if (!state.selectedProject) {
-      list.replaceChildren(
-        h2("li", { class: "af-rail-empty" }, "No projects yet \u2014 add one from the project switcher to get started.")
-      );
+      list.replaceChildren();
       return;
     }
     const rows = visible.map((s) => {
@@ -14636,6 +14640,7 @@ var AppShell = class {
    *  - otherwise nothing: rows are showing.
    */
   railNotice(state, scoped, visible) {
+    if (scoped.length === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -16621,6 +16626,7 @@ var actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  dismissNotice: clearTabError,
   retryConnection: () => {
     void bootstrap();
   },
