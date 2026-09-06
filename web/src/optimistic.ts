@@ -136,9 +136,17 @@ export class OptimisticSessions {
    * uncertain reply must never infer ownership from a coincidentally equal title. */
   reject(ticket: MutationTicket, uncertain = false): "stale" | "confirmed" | "uncertain" | "reverted" {
     if (!this.isCurrent(ticket)) return "stale";
-    const confirmed = this.pending.get(ticket.sequence)!.confirmed;
+    const op = this.pending.get(ticket.sequence)!;
+    if (uncertain && !op.confirmed && op.kind !== "create") {
+      // A lost lifecycle reply cannot justify restoring the old row. Keep its
+      // feedback until a fresh snapshot or completion event supplies authority.
+      // Like a successful reply, this settled RPC now awaits that projection.
+      this.revision++;
+      op.acknowledged = true;
+      return "uncertain";
+    }
     this.fail(ticket);
-    return confirmed ? "confirmed" : uncertain ? "uncertain" : "reverted";
+    return op.confirmed ? "confirmed" : uncertain ? "uncertain" : "reverted";
   }
 
   event(event: WireEvent): boolean {

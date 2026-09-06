@@ -341,3 +341,40 @@ test("a completed same-title snapshot never claims ownership of a pending create
   assert.equal(model.reject(ticket, true), "uncertain");
   assert.deepEqual(model.project(), [first, second, completed]);
 });
+
+
+for (const kind of ["archive", "kill"] as const) {
+  test(`uncertain ${kind} retains feedback until a fresh snapshot reconciles completion`, () => {
+    const model = state();
+    const ticket = model.begin(kind, first)!;
+    const beforeLostReply = model.snapshotFence();
+    assert.equal(model.reject(ticket, true), "uncertain");
+    assert.equal(model.isCurrent(ticket), true);
+    assert.equal(model.project()[0].in_flight_op, kind === "archive" ? InFlightOp.Archiving : InFlightOp.Killing);
+    assert.equal(model.snapshot([first, second], beforeLostReply), false);
+    const completed = kind === "kill" ? [second] : [{ ...first, liveness: Liveness.Archived }, second];
+    assert.equal(model.snapshot(completed, model.snapshotFence()), true);
+    assert.equal(model.isCurrent(ticket), false);
+    assert.deepEqual(model.project(), completed);
+  });
+
+  test(`uncertain ${kind} also reconciles a later completion event`, () => {
+    const model = state();
+    const ticket = model.begin(kind, first)!;
+    model.reject(ticket, true);
+    const data = kind === "archive" ? { ...first, liveness: Liveness.Archived } : first;
+    model.event({ type: kind === "archive" ? "session.archived" : "session.killed", data });
+    assert.equal(model.isCurrent(ticket), false);
+    assert.deepEqual(model.project(), kind === "archive" ? [data, second] : [second]);
+  });
+
+  test(`a fresh snapshot can restore the live ${kind} row without claiming the lost RPC failed`, () => {
+    const model = state();
+    const ticket = model.begin(kind, first)!;
+    assert.equal(model.reject(ticket, true), "uncertain");
+    assert.equal(model.snapshot([first, second], model.snapshotFence()), true);
+    assert.deepEqual(model.project(), [first, second]);
+    // The caller's persistent uncertain-outcome notice owns the explanation.
+    assert.equal(model.isCurrent(ticket), false);
+  });
+}

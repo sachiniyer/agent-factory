@@ -32,6 +32,7 @@ import {
   killSession,
   getConfig,
   isMutationCommittedError,
+  isMutationOutcomeUncertain,
   handoffSession,
   listBackends,
   listDirectory,
@@ -809,7 +810,7 @@ function newSession(): void {
             }
           })
           .catch((e) => {
-            const uncertain = isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
+            const uncertain = isMutationOutcomeUncertain(e);
             const outcome = optimisticSessions.reject(mutation, uncertain);
             if (outcome === "stale") return;
             applySessions(optimisticSessions.project());
@@ -871,12 +872,14 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
           if (mutation) {
             const outcome = isMutationCommittedError(e)
               ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
-              : optimisticSessions.reject(mutation);
+              : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
             if (outcome === "stale") return;
             applySessions(optimisticSessions.project());
             requestResync();
             if (outcome !== "reverted") {
-              surfaceMutationError(e);
+              surfaceMutationError(outcome === "uncertain"
+                ? new Error(`The ${action} outcome could not be confirmed. Check the session before trying again. ${errorText(e)}`)
+                : e);
               return;
             }
             m.setBusy(false);

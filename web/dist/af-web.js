@@ -6355,7 +6355,10 @@ var ApiError = class extends Error {
   }
 };
 function isMutationCommittedError(e) {
-  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE;
+  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE && e.status !== 502 && e.status !== 504;
+}
+function isMutationOutcomeUncertain(e) {
+  return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 async function af(method, body, token2) {
   const headers = { "Content-Type": "application/json" };
@@ -6379,7 +6382,8 @@ async function af(method, body, token2) {
   }
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), env?.error != null);
+    const daemonRejected = env?.error != null && resp.status !== 502 && resp.status !== 504;
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), daemonRejected);
   }
   if (env && env.error != null) {
     throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), true);
@@ -12785,9 +12789,14 @@ var OptimisticSessions = class {
    * uncertain reply must never infer ownership from a coincidentally equal title. */
   reject(ticket, uncertain = false) {
     if (!this.isCurrent(ticket)) return "stale";
-    const confirmed = this.pending.get(ticket.sequence).confirmed;
+    const op = this.pending.get(ticket.sequence);
+    if (uncertain && !op.confirmed && op.kind !== "create") {
+      this.revision++;
+      op.acknowledged = true;
+      return "uncertain";
+    }
     this.fail(ticket);
-    return confirmed ? "confirmed" : uncertain ? "uncertain" : "reverted";
+    return op.confirmed ? "confirmed" : uncertain ? "uncertain" : "reverted";
   }
   event(event) {
     const result = applyEvent(this.authoritative, event);
@@ -16121,7 +16130,7 @@ function newSession() {
             surfaceTabError(new Error(skew));
           }
         }).catch((e) => {
-          const uncertain = isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
+          const uncertain = isMutationOutcomeUncertain(e);
           const outcome = optimisticSessions.reject(mutation, uncertain);
           if (outcome === "stale") return;
           applySessions(optimisticSessions.project());
@@ -16168,12 +16177,12 @@ function openConfirm(action, session) {
           } else if (modal === m) closeModal();
         }).catch((e) => {
           if (mutation) {
-            const outcome = isMutationCommittedError(e) ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation);
+            const outcome = isMutationCommittedError(e) ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
             if (outcome === "stale") return;
             applySessions(optimisticSessions.project());
             requestResync();
             if (outcome !== "reverted") {
-              surfaceMutationError(e);
+              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action} outcome could not be confirmed. Check the session before trying again. ${errorText(e)}`) : e);
               return;
             }
             m.setBusy(false);

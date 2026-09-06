@@ -161,3 +161,71 @@ test("tab create retries a fenced snapshot before resolving and attaching its ne
   await expect(page.locator(".af-term-host .xterm-helper-textarea")).toBeFocused();
   await expect(page.locator(".af-toast")).not.toHaveClass(/af-toast-show/);
 });
+
+for (const status of [502, 504]) {
+  test(`JSON gateway ${status} after create never offers an immediate duplicate retry`, async ({ page, request }) => {
+    const f = await fixture(page, request);
+    const pending = latch();
+    const title = `Gateway ${status} create`;
+    await page.route("**/v1/CreateSession", async route => {
+      await pending.promise;
+      await route.fulfill({ status, json: { data: null, error: { message: "Upstream response unavailable" } } });
+    });
+    const requested = page.waitForRequest("**/v1/CreateSession");
+    await submitCreate(page, title);
+    await requested;
+    const created = { ...f.a, id: `gateway-created-${status}`, title, in_flight_op: InFlightOp.None };
+    f.state.rows.push(created);
+    f.event("session.created", created);
+    await expect(f.row(title).filter({ has: page.locator(".af-row-actions button") })).toHaveCount(1);
+    pending.release();
+    await expect(page.locator(".af-toast .af-recovery-notice")).toContainText("Check sessions before creating again");
+    await expect(page.locator(".af-toast .af-recovery-notice")).toContainText("Upstream response unavailable");
+    await expect(page.locator(".af-modal-card")).toHaveCount(0);
+    await expect(f.row(title)).toHaveCount(1);
+  });
+}
+
+for (const operation of ["archive", "kill"] as const) {
+  test(`lost ${operation} reply before completion stays uncertain until a later snapshot`, async ({ page, request }) => {
+    const f = await fixture(page, request);
+    const pending = latch();
+    const snapshotRequested = latch();
+    const releaseSnapshot = latch();
+    const snapshotCompleted = latch();
+    const method = operation === "archive" ? "ArchiveSession" : "KillSession";
+    await page.route(`**/v1/${method}`, async route => {
+      await pending.promise;
+      await route.abort("failed");
+    });
+    const row = f.row(f.a.title);
+    await row.getByRole("button", { name: /^Actions for / }).click();
+    await row.getByRole("button", { name: new RegExp(`^${operation === "archive" ? "Archive" : "Kill"} session`) }).click();
+    const requested = page.waitForRequest(`**/v1/${method}`);
+    await page.locator(".af-modal-card button[type=submit]").click();
+    await requested;
+    await expect(row).toContainText(`[deleting] ${f.a.title}`);
+    f.state.snapshotHook = async route => {
+      snapshotRequested.release();
+      await releaseSnapshot.promise;
+      await f.fulfillSnapshot(route);
+      snapshotCompleted.release();
+    };
+    pending.release();
+    const notice = page.locator(".af-toast .af-recovery-notice");
+    await expect(notice).toContainText(`The ${operation} outcome could not be confirmed`);
+    await expect(notice).toContainText("Check the session before trying again");
+    await expect(page.locator(".af-modal-card")).toHaveCount(0);
+    await expect(row).toContainText(`[deleting] ${f.a.title}`);
+    await snapshotRequested.promise;
+    f.state.rows = operation === "archive"
+      ? [{ ...f.a, liveness: Liveness.Archived, lifecycle_action: "restore", in_flight_op: InFlightOp.None }, f.b]
+      : [f.b];
+    releaseSnapshot.release();
+    await snapshotCompleted.promise;
+    // Completion arrives solely through this snapshot; no event owns the result.
+    await expect(row).toHaveCount(0);
+    await expect(page.locator(".af-modal-card")).toHaveCount(0);
+    await expect(notice).toBeVisible();
+  });
+}
