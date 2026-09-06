@@ -421,3 +421,12 @@ API when you want to call the daemon from a language or tool without shelling
 out to `af`, from inside an agent, or from a small local service. Both emit the
 identical `{data, error}` envelope, so a consumer written against one reads the
 other unchanged.
+
+### Task completion choices
+
+`POST /v1/ListOnComplete` accepts `{}` and returns
+`{"data":{"values":["keep","archive","kill"]},"error":null}`. Values follow
+`task.OnCompleteValues()` order, least destructive first. Clients should render
+this catalog rather than copy the enum. Send `on_complete` on the task in
+`AddTask`, or on `update` in `UpdateTask`; empty means keep. Completion policies
+apply only to spawned sessions, so tasks with `target_session` must use empty.

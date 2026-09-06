@@ -965,6 +965,12 @@ export async function probeWebTab(path: string, token: string, timeoutMs: number
 // through to the daemon's first-match, the task analogue of the #1678 id-scoping
 // class the session write-path fixed.
 
+/** Fetches the daemon's lifecycle choices in presentation order. */
+export async function listOnComplete(token: string): Promise<string[]> {
+  const resp = await af<{ values: string[] }>("ListOnComplete", {}, token);
+  return resp.values;
+}
+
 /** Fetches every task across all repos (mirrors `af tasks list`). Returns [] for an
  *  empty daemon (never null); throws ApiError on transport/auth failure so callers
  *  share one error path. The read side of the task single-writer model (#1029 PR3). */

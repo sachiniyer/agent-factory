@@ -384,6 +384,13 @@ var httpRoutes = []HTTPRoute{
 	// Tasks.
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/ListOnComplete",
+		Description: "List task spawned-session lifecycle choices, least destructive first.",
+		requestType: reflect.TypeOf(ListOnCompleteRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListOnComplete) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/ListTasks",
 		Description: "List every task across all repos.",
 		requestType: reflect.TypeOf(ListTasksRequest{}),

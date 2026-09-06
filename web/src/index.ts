@@ -36,6 +36,7 @@ import {
   handoffSession,
   listBackends,
   listDirectory,
+  listOnComplete,
   listProjects,
   listPrograms,
   suggestSessionName,
@@ -1695,6 +1696,7 @@ function openAddTask(): void {
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
+      loadOnComplete: () => listOnComplete(token ?? ""),
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -1740,6 +1742,7 @@ function openEditTask(task: TaskData): void {
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
+      loadOnComplete: () => listOnComplete(token ?? ""),
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -1756,6 +1759,7 @@ function openEditTask(task: TaskData): void {
             cron_expr: input.trigger === "cron" ? input.cron : "",
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
+            on_complete: input.onComplete ?? "",
             project_path: input.projectPath,
             program: input.program,
           },

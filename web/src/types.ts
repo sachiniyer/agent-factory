@@ -273,6 +273,7 @@ export interface SnapshotResponse {
  * `last_run_*` fields are absent until the task first runs.
  */
 export interface TaskData {
+  on_complete?: string;
   id: string;
   name?: string;
   prompt: string;
@@ -341,6 +342,7 @@ export interface TaskData {
  * match the Go TaskUpdate struct EXACTLY (the daemon rejects unknown keys).
  */
 export interface TaskUpdate {
+  on_complete?: string;
   name?: string;
   prompt?: string;
   cron_expr?: string;

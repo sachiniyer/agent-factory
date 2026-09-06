@@ -526,6 +526,18 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await page.keyboard.press("Escape");
   await task.getByRole("button", { name: "Edit", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("button", { name: "Save", exact: true })).toBeInViewport({ ratio: 1 });
+  const onDone = page.getByRole("combobox", { name: "On done", exact: true });
+  await expect(onDone).toBeEnabled();
+  await onDone.selectOption("archive");
+  await page.getByRole("textbox", { name: "Target session", exact: true }).fill("reused");
+  await expect(onDone).toBeHidden();
+  await expect(page.getByText("Not applicable — the target session is meant to be reused.", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "Target session", exact: true }).fill("");
+  await expect(onDone).toBeVisible();
+  await expect(onDone).toHaveValue("archive");
+  await onDone.selectOption("keep");
+  await onDone.scrollIntoViewIfNeeded();
+  await onDone.focus();
   await shot("edit-task");
   await page.keyboard.press("Escape");
   await page.locator('.af-viewtab[data-view="config"]').click();

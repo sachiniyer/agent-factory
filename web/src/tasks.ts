@@ -41,6 +41,7 @@ export interface AddTaskInput {
   watchCmd: string;
   prompt: string;
   targetSession: string;
+  onComplete?: string;
   program: string;
 }
 
@@ -86,11 +87,21 @@ export function buildTask(input: AddTaskInput): TaskData {
     cron_expr: input.trigger === "cron" ? input.cron : "",
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
+    on_complete: taskOnCompleteValue(input),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
     created_at: new Date().toISOString(),
   };
+}
+
+/** Targeted tasks reuse a session, so a spawned-session policy cannot apply. */
+export function onCompleteUnavailableReason(targetSession: string): string | null {
+  return targetSession.trim() ? "Not applicable — the target session is meant to be reused." : null;
+}
+
+function taskOnCompleteValue(input: AddTaskInput): string {
+  return input.targetSession.trim() || input.onComplete === "keep" ? "" : input.onComplete ?? "";
 }
 
 /** The task's trigger as a one-line summary, mirroring the TUI's row detail
@@ -795,6 +806,7 @@ function taskFormModal(opts: {
    *  imported so this module stays free of the API/token layer, and re-run on every
    *  project change: the program a repo defaults to is a per-repo fact. */
   loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+  loadOnComplete: () => Promise<string[]>;
   onSubmit: (input: AddTaskInput) => void;
   onCancel: () => void;
 }): ModalHandle {
@@ -868,6 +880,35 @@ function taskFormModal(opts: {
   const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
   targetInput.setAttribute("aria-label", "Target session");
 
+  const onCompleteSelect = h("select", { class: "af-input", disabled: true });
+  onCompleteSelect.setAttribute("aria-label", "On done");
+  // Preserve the seed while loading or if the catalog is unavailable. Do not
+  // invent selectable choices from a local enum copy.
+  const seedOnComplete = opts.seed?.on_complete || "keep";
+  onCompleteSelect.append(h("option", { value: seedOnComplete }, seedOnComplete[0].toUpperCase() + seedOnComplete.slice(1)));
+  const onCompleteField = field("On done", onCompleteSelect);
+  const onCompleteReason = h("p", { class: "af-muted" });
+  const onCompleteReasonField = fieldGroup("On done", onCompleteReason);
+  const syncOnComplete = (): void => {
+    const reason = onCompleteUnavailableReason(targetInput.value);
+    onCompleteField.hidden = reason !== null;
+    onCompleteReasonField.hidden = reason === null;
+    onCompleteReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncOnComplete);
+  void opts.loadOnComplete().then((values) => {
+    const choices = [...values];
+    if (!choices.includes(seedOnComplete)) choices.push(seedOnComplete);
+    onCompleteSelect.replaceChildren();
+    for (const value of choices) {
+      onCompleteSelect.append(h("option", { value }, value[0].toUpperCase() + value.slice(1)));
+    }
+    onCompleteSelect.value = seedOnComplete;
+    onCompleteSelect.disabled = false;
+  }).catch(() => {
+    onCompleteSelect.title = "Could not load choices. The current value will be preserved.";
+  });
+
   // The program field (#1970). Its options come from the daemon, never from a list
   // here, so an agent added server-side shows up with no change to the web.
   const programSelect = h("select", { class: "af-input" });
@@ -936,6 +977,7 @@ function taskFormModal(opts: {
   // Kicked off after the seed so the catalog's re-render preserves the seeded
   // program as the current selection rather than clobbering it with the default.
   loadProgramsFor(projectSelect.value);
+  syncOnComplete();
 
   body.append(
     field("Name", nameInput),
@@ -945,6 +987,8 @@ function taskFormModal(opts: {
     watchField,
     field("Prompt", promptArea),
     field("Target session", targetInput),
+    onCompleteField,
+    onCompleteReasonField,
     field("Program", programSelect),
   );
 
@@ -984,6 +1028,7 @@ function taskFormModal(opts: {
       watchCmd,
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
+      onComplete: targetInput.value.trim() || onCompleteSelect.value === "keep" ? "" : onCompleteSelect.value,
       program: programSelect.value,
     });
   });
@@ -1001,6 +1046,7 @@ export function addTaskModal(
     onSubmit: (input: AddTaskInput) => void;
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    loadOnComplete: () => Promise<string[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -1009,6 +1055,7 @@ export function addTaskModal(
     projects,
     defaultProject,
     loadPrograms: callbacks.loadPrograms,
+    loadOnComplete: callbacks.loadOnComplete,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });
@@ -1024,6 +1071,7 @@ export function editTaskModal(
     onSubmit: (input: AddTaskInput) => void;
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    loadOnComplete: () => Promise<string[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -1033,6 +1081,7 @@ export function editTaskModal(
     defaultProject: task.project_path,
     seed: task,
     loadPrograms: callbacks.loadPrograms,
+    loadOnComplete: callbacks.loadOnComplete,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });

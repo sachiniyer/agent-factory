@@ -6589,6 +6589,10 @@ async function probeWebTab(path, token2, timeoutMs) {
     clearTimeout(timer);
   }
 }
+async function listOnComplete(token2) {
+  const resp = await af("ListOnComplete", {}, token2);
+  return resp.values;
+}
 async function listTasks(token2) {
   const resp = await af("ListTasks", {}, token2);
   return resp.tasks ?? [];
@@ -13130,11 +13134,18 @@ function buildTask(input) {
     cron_expr: input.trigger === "cron" ? input.cron : "",
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
+    on_complete: taskOnCompleteValue(input),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
     created_at: (/* @__PURE__ */ new Date()).toISOString()
   };
+}
+function onCompleteUnavailableReason(targetSession) {
+  return targetSession.trim() ? "Not applicable \u2014 the target session is meant to be reused." : null;
+}
+function taskOnCompleteValue(input) {
+  return input.targetSession.trim() || input.onComplete === "keep" ? "" : input.onComplete ?? "";
 }
 function triggerSummary(t) {
   if (t.watch_cmd && t.watch_cmd.trim() !== "") {
@@ -13690,6 +13701,32 @@ function taskFormModal(opts) {
   promptArea.setAttribute("aria-label", "Prompt");
   const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
   targetInput.setAttribute("aria-label", "Target session");
+  const onCompleteSelect = h("select", { class: "af-input", disabled: true });
+  onCompleteSelect.setAttribute("aria-label", "On done");
+  const seedOnComplete = opts.seed?.on_complete || "keep";
+  onCompleteSelect.append(h("option", { value: seedOnComplete }, seedOnComplete[0].toUpperCase() + seedOnComplete.slice(1)));
+  const onCompleteField = field("On done", onCompleteSelect);
+  const onCompleteReason = h("p", { class: "af-muted" });
+  const onCompleteReasonField = fieldGroup("On done", onCompleteReason);
+  const syncOnComplete = () => {
+    const reason = onCompleteUnavailableReason(targetInput.value);
+    onCompleteField.hidden = reason !== null;
+    onCompleteReasonField.hidden = reason === null;
+    onCompleteReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncOnComplete);
+  void opts.loadOnComplete().then((values) => {
+    const choices = [...values];
+    if (!choices.includes(seedOnComplete)) choices.push(seedOnComplete);
+    onCompleteSelect.replaceChildren();
+    for (const value of choices) {
+      onCompleteSelect.append(h("option", { value }, value[0].toUpperCase() + value.slice(1)));
+    }
+    onCompleteSelect.value = seedOnComplete;
+    onCompleteSelect.disabled = false;
+  }).catch(() => {
+    onCompleteSelect.title = "Could not load choices. The current value will be preserved.";
+  });
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
   const keepProgram = opts.seed?.program ?? "";
@@ -13734,6 +13771,7 @@ function taskFormModal(opts) {
     programSelect.value = s.program ?? "";
   }
   loadProgramsFor(projectSelect.value);
+  syncOnComplete();
   body.append(
     field("Name", nameInput),
     field("Project", projectSelect),
@@ -13742,6 +13780,8 @@ function taskFormModal(opts) {
     watchField,
     field("Prompt", promptArea),
     field("Target session", targetInput),
+    onCompleteField,
+    onCompleteReasonField,
     field("Program", programSelect)
   );
   const card = handle.el.firstElementChild;
@@ -13777,6 +13817,7 @@ function taskFormModal(opts) {
       watchCmd,
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
+      onComplete: targetInput.value.trim() || onCompleteSelect.value === "keep" ? "" : onCompleteSelect.value,
       program: programSelect.value
     });
   });
@@ -13790,6 +13831,7 @@ function addTaskModal(projects, defaultProject2, callbacks) {
     projects,
     defaultProject: defaultProject2,
     loadPrograms: callbacks.loadPrograms,
+    loadOnComplete: callbacks.loadOnComplete,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -13802,6 +13844,7 @@ function editTaskModal(projects, task, callbacks) {
     defaultProject: task.project_path,
     seed: task,
     loadPrograms: callbacks.loadPrograms,
+    loadOnComplete: callbacks.loadOnComplete,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -16704,6 +16747,7 @@ function openAddTask() {
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
+      loadOnComplete: () => listOnComplete(token ?? ""),
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -16734,6 +16778,7 @@ function openEditTask(task) {
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
+      loadOnComplete: () => listOnComplete(token ?? ""),
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -16749,6 +16794,7 @@ function openEditTask(task) {
             cron_expr: input.trigger === "cron" ? input.cron : "",
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
+            on_complete: input.onComplete ?? "",
             project_path: input.projectPath,
             program: input.program
           },

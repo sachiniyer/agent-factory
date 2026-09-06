@@ -1373,15 +1373,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/tasks.ts On done picker and buildTask; web/src/index.ts UpdateTask on_complete value"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/api.go af tasks add/update --on-complete"
       },
       "verdict": "unclear",
-      "notes": "The spawned-session lifecycle verb (task.Task/TaskUpdate.OnComplete, #2595): keep/archive/kill applied when a run finishes. The CLI sets it via --on-complete; the TUI task form and web do not expose it. Exactly the task.max-concurrent-runs shape — the TUI can edit tasks so this is a missing FIELD (#1935-adjacent), and the web cannot edit tasks at all (#1935). Whether the UIs should surface it is the same owner call, so it is recorded here rather than filed. The DEFAULT (keep) is the historical behavior, so a surface that cannot set it still produces correct tasks — which is why this is a field gap and not a broken create."
+      "notes": "Web gap resolved by #3959: the add/edit modal renders ListOnComplete values from task.OnCompleteValues in daemon order, preserves existing values, stores keep as empty, and replaces the selector with a reason for target-session tasks. The CLI exposes --on-complete. The TUI control is not present on this branch’s origin/master base; that remaining field gap is still recorded honestly."
     },
     {
       "id": "task.remove",
@@ -1624,6 +1624,7 @@
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListDirectory": "project.browse",
       "POST /v1/ListProjects": "project.list",
+      "POST /v1/ListOnComplete": "task.on-complete",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RegisterAccount": "session.accounts",
@@ -1714,6 +1715,7 @@
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
       "ListDirectory": "project.browse",
+      "ListOnComplete": "task.on-complete",
       "ListPrograms": "enum.agent-programs",
       "ListProjects": "project.list",
       "ListTasks": "task.list",
@@ -2373,9 +2375,6 @@
         },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
-        },
-        "update.on_complete": {
-          "gap": "task.on-complete"
         }
       },
       "AddTask": {
@@ -2426,9 +2425,6 @@
         },
         "task.repo_id": {
           "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
-        },
-        "task.on_complete": {
-          "gap": "task.on-complete"
         }
       },
       "RenameTab": {
