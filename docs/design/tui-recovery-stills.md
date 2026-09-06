@@ -17,6 +17,7 @@ changes reviewable in tests. Existing surrounding TUI chrome is outside P4.
 | No project registered | ![No project registered, light](../assets/recovery/tui-model-driver/no-project-light.svg) | ![No project registered, dark](../assets/recovery/tui-model-driver/no-project-dark.svg) |
 | Zero tasks | ![Zero tasks, light](../assets/recovery/tui-model-driver/zero-tasks-light.svg) | ![Zero tasks, dark](../assets/recovery/tui-model-driver/zero-tasks-dark.svg) |
 | Zero accounts | ![Zero accounts, light](../assets/recovery/tui-model-driver/zero-accounts-light.svg) | ![Zero accounts, dark](../assets/recovery/tui-model-driver/zero-accounts-dark.svg) |
+| Remote accounts; login refused | ![Remote accounts, light](../assets/recovery/tui-model-driver/remote-accounts-light.svg) | ![Remote accounts, dark](../assets/recovery/tui-model-driver/remote-accounts-dark.svg) |
 | Tasks unavailable | ![Tasks unavailable, light](../assets/recovery/tui-model-driver/tasks-unavailable-light.svg) | ![Tasks unavailable, dark](../assets/recovery/tui-model-driver/tasks-unavailable-dark.svg) |
 | Projects unavailable | ![Projects unavailable, light](../assets/recovery/tui-model-driver/projects-unavailable-light.svg) | ![Projects unavailable, dark](../assets/recovery/tui-model-driver/projects-unavailable-dark.svg) |
 | Cannot reach the daemon | ![Cannot reach the daemon, light](../assets/recovery/tui-model-driver/no-daemon-light.svg) | ![Cannot reach the daemon, dark](../assets/recovery/tui-model-driver/no-daemon-dark.svg) |

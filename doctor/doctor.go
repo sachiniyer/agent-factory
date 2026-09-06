@@ -484,6 +484,7 @@ func Run(opts Options) (*Report, error) {
 	// dead one left behind (#3845). Both read the temp-dir sweep the
 	// stale-temp-home check has already taken, through the same memo.
 	checkLeakedDaemonBinaries(ctx, report)
+	checkStrandedPlaytestSandboxes(report)
 	checkDeadSocketHomes(ctx, report)
 	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)

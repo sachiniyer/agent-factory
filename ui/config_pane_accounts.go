@@ -7,6 +7,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 // The Accounts section of the config overlay (#3385) — the owner's ask, in his
@@ -77,13 +79,16 @@ type AccountRequest struct {
 // accountsSection is the pane's account state: the rows the daemon reported, the
 // register field, and the pending request.
 type accountsSection struct {
-	rows   []AccountRow
-	loaded bool
-	empty  bool
+	rows    []AccountRow
+	loaded  bool
+	loading bool
+	busy    bool
+	empty   bool
 	// unavailable is why the accounts could not be read, rendered in place of the
 	// rows. A section that silently shows nothing is indistinguishable from "you
 	// have no accounts", and those need different actions from the operator.
-	unavailable string
+	unavailable  string
+	loginRefusal string
 
 	// registering is the inline name field for a "+ register" row. It is a
 	// separate field from the config pane's value input on purpose: sharing one
@@ -127,6 +132,7 @@ const accountsHeadingNote = "agent identities, not config keys · af runs the ag
 // register affordance still has to be offered. An error replaces the rows rather
 // than emptying them silently.
 func (c *ConfigPane) SetAccounts(accounts []AccountRow, agents []string, err error) {
+	c.accounts.loading = false
 	c.accounts.rows = nil
 	c.accounts.unavailable = ""
 	c.accounts.loaded = true
@@ -155,10 +161,16 @@ func (c *ConfigPane) SetAccounts(accounts []AccountRow, agents []string, err err
 	c.rebuildRows()
 }
 
-// AccountsLoaded reports whether SetAccounts has run. The host uses it to decide
-// whether to render the section at all — an overlay opened before the daemon
-// answered shows the config rows it already has rather than an empty Accounts
-// heading that looks like "you have none".
+// SetAccountsLoading clears an earlier opening's rows while the remote read runs.
+func (c *ConfigPane) SetAccountsLoading() {
+	c.SetAccounts(nil, nil, nil)
+	c.accounts.loading = true
+	c.accounts.empty = false
+	c.SetAccountStatus("", false)
+}
+
+// AccountsLoaded reports whether the section has been initialized, either with
+// a completed read or the loading state. Before initialization it stays hidden.
 func (c *ConfigPane) AccountsLoaded() bool { return c.accounts.loaded }
 
 // TakeAccountRequest reports what the user asked for since the last call,
@@ -176,6 +188,28 @@ func (c *ConfigPane) TakeAccountRequest() AccountRequest {
 func (c *ConfigPane) SetAccountStatus(text string, isError bool) {
 	c.accounts.status = text
 	c.accounts.statusIsError = isError
+}
+
+// AccountStatus returns the current feedback so a late result can preserve a
+// newer status rather than replace it with an earlier operation's outcome.
+func (c *ConfigPane) AccountStatus() string { return c.accounts.status }
+
+// AccountsBusy reports whether a remote registration and its refresh are pending.
+func (c *ConfigPane) AccountsBusy() bool { return c.accounts.busy }
+
+// SetAccountsBusy prevents a second registration editor or submission while the
+// first mutation runs. The completion handler or closing the pane releases it.
+func (c *ConfigPane) SetAccountsBusy(busy bool) {
+	c.accounts.busy = busy
+	if busy {
+		c.cancelRegister()
+	}
+}
+
+// SetAccountLoginRefusal explains why login is unavailable on the attached host.
+// Registration stays available; the selected account shows this in place.
+func (c *ConfigPane) SetAccountLoginRefusal(reason string) {
+	c.accounts.loginRefusal = reason
 }
 
 // accountRows renders the section into the pane's flattened row list. It is
@@ -210,7 +244,13 @@ func (c *ConfigPane) handleAccountKey(msg tea.KeyMsg) bool {
 	switch msg.String() {
 	case "enter":
 		if account.Register {
+			if c.accounts.busy {
+				return true
+			}
 			c.beginRegister(account.Agent)
+			return true
+		}
+		if c.accounts.loginRefusal != "" {
 			return true
 		}
 		// The login is a full-screen terminal handover the host performs, so the
@@ -301,6 +341,9 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 
 	if account.Register {
 		label := "+ register a " + account.Agent + " account"
+		if c.accounts.busy {
+			return c.renderBusyAccountRow(label, cursor)
+		}
 		if selected {
 			b.WriteString(configSelectedStyle.Render(label))
 		} else {
@@ -338,8 +381,12 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 	// The selected row explains itself, in the same place a config row's purpose
 	// goes. What it must convey is that af runs the AGENT's flow and never sees
 	// the credential — the property the whole feature rests on.
-	out.WriteString(c.wrapIndented(accountRowPurpose(account), configPurposeStyle))
-	if account.RegistrationOnly {
+	if c.accounts.loginRefusal != "" {
+		out.WriteString(c.wrapIndented(c.accounts.loginRefusal, configErrorStyle))
+	} else {
+		out.WriteString(c.wrapIndented(accountRowPurpose(account), configPurposeStyle))
+	}
+	if account.RegistrationOnly && c.accounts.loginRefusal == "" {
 		out.WriteString(c.wrapIndented(
 			"A session cannot be scoped to a "+account.Agent+" account yet; registering and logging in work.",
 			configHintStyle))
@@ -369,4 +416,22 @@ func accountRowPurpose(account AccountRow) string {
 // renderAccountsUnavailable renders the section's failure line in place of rows.
 func (c *ConfigPane) renderAccountsUnavailable() string {
 	return DialogRecoveryContent("Cannot load accounts", "Accounts could not be read: "+c.accounts.unavailable, "Reopen settings to retry.", true, c.width)
+}
+
+// renderBusyAccountRow keeps disabled labels readable and uses the shared dashed
+// outline. Fit each physical line separately so viewport height stays accurate.
+func (c *ConfigPane) renderBusyAccountRow(label, cursor string) string {
+	style := theme.Disabled().Background(activeTheme.SurfaceRaised)
+	if c.width > 0 {
+		style = style.MaxWidth(max(1, c.width-2))
+	}
+	var out strings.Builder
+	for i, line := range strings.Split(style.Render(label), "\n") {
+		prefix := "  "
+		if i == 1 {
+			prefix = cursor
+		}
+		out.WriteString(c.fitPaneLine(prefix+line) + "\n")
+	}
+	return out.String()
 }

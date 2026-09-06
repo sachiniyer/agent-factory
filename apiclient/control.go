@@ -288,28 +288,28 @@ func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsRespon
 	return resp, nil
 }
 
+// There is deliberately no AccountLogin wrapper here (#3949), for the same
+// reason as ListProjects below: the daemon exposes the route and the web calls
+// it over HTTP directly, but it has no Go consumer. The config pane's Accounts
+// section reaches daemon.AccountLogin through the gob control client on the local
+// socket, and that is the honest shape rather than an oversight — its response
+// names a tmux session on the DAEMON'S host, so a client on another machine could
+// read the outcome but could never attach to the pane. That is why both the pane
+// and `af accounts login` refuse a remote daemon outright instead of pretending
+// otherwise. ListAccounts above stays because the create flow's account picker
+// has to ask the daemon the session will actually be created on
+// (app/account_picker.go), as does the config pane's Accounts section (#3950).
+//
+// RegisterAccount was removed alongside AccountLogin in #3949 when neither had
+// a Go consumer. Unlike login, registration needs no terminal on the daemon
+// host: #3950 deliberately restores it for the config pane's remote target.
+
 // RegisterAccount creates an account's credential directory on the daemon host
-// without logging in. HTTP twin of RegisterAccount.
+// without logging in, for the config pane's Accounts section.
 func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {
 	var resp daemon.RegisterAccountResponse
 	if err := c.call("RegisterAccount", daemon.RegisterAccountRequest{Agent: agent, Name: name}, &resp); err != nil {
 		return daemon.RegisterAccountResponse{}, err
-	}
-	return resp, nil
-}
-
-// AccountLogin opens an agent's own login flow in a bare tmux session scoped to
-// one account, registering the account if needed. HTTP twin of AccountLogin.
-//
-// The response names a tmux session and socket on the DAEMON'S host, which is
-// the honest shape of the thing: the flow runs where the credential directory
-// is. A client on another machine can read the outcome through this; it cannot
-// attach to the pane, and `af accounts login` refuses a remote daemon for that
-// reason rather than pretending otherwise.
-func (c *Client) AccountLogin(agent, name string) (daemon.AccountLoginResponse, error) {
-	var resp daemon.AccountLoginResponse
-	if err := c.call("AccountLogin", daemon.AccountLoginRequest{Agent: agent, Name: name}, &resp); err != nil {
-		return daemon.AccountLoginResponse{}, err
 	}
 	return resp, nil
 }

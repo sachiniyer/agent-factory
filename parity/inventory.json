@@ -1369,8 +1369,8 @@
       "id": "task.on-complete",
       "title": "Declare what happens to a task run's session when it finishes",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/task_pane.go taskFocusOnComplete + setOnCompleteFromValue/onCompleteValue -> ui/task_pane_edit.go renderOnCompleteSelector (the \"On done\" row); a create lands via app/home_tasks.go task.Task{OnComplete: draft.OnComplete}, an edit via task.DiffTask -> TaskUpdate.OnComplete"
       },
       "web": {
         "status": "no",
@@ -1380,8 +1380,9 @@
         "status": "yes",
         "pointer": "api/api.go af tasks add/update --on-complete"
       },
-      "verdict": "unclear",
-      "notes": "The spawned-session lifecycle verb (task.Task/TaskUpdate.OnComplete, #2595): keep/archive/kill applied when a run finishes. The CLI sets it via --on-complete; the TUI task form and web do not expose it. Exactly the task.max-concurrent-runs shape — the TUI can edit tasks so this is a missing FIELD (#1935-adjacent), and the web cannot edit tasks at all (#1935). Whether the UIs should surface it is the same owner call, so it is recorded here rather than filed. The DEFAULT (keep) is the historical behavior, so a surface that cannot set it still produces correct tasks — which is why this is a field gap and not a broken create."
+      "verdict": "real-gap",
+      "issue": "#3959",
+      "notes": "The spawned-session lifecycle verb (task.Task/TaskUpdate.OnComplete, #2595): keep/archive/kill applied when a run finishes. TUI half CLOSED; the web half is #3959, so this row is no longer 'unclear' — the owner call it was waiting on is made. Picked as the highest-impact open row by USE rather than by count: 7 of the 20 tasks on the maintainer's own daemon carry on_complete=archive, and none of them could be set or even READ from the surface where automations are managed (m). The DEFAULT (keep) is the historical behavior, so a surface without the field still produced correct tasks — but not truthful ones: a task set to kill, which permanently deletes the run's session and prunes its owned branch, rendered in the TUI form identically to one that keeps it. The form's 'On done' row offers task.OnCompleteValues() verbatim rather than a copy (#1970's rule), seeds through task.CanonicalOnComplete so a legacy empty record and an explicit 'keep' open on one option, stores keep back as \"\" (task.canonicalizeOnComplete) so an untouched task's record stays byte-identical, and asks task.CanonicalTargetSession — the same function ValidateTrigger and deliverTaskPrompt ask — before offering a verb at all: on_complete governs a session the task CREATED, and a target-session task delivers into one the user named for reuse, so the row renders that reason in place of the picker rather than letting a user assemble the pair the daemon refuses. The verb rides the same two paths every other task field uses — the AddTask task.Task literal and the task.DiffTask patch — so there is no second write path to drift. The web half is a field addition rather than a missing editor (its modal has edited tasks since #1935); it was not folded in here because web/selftest/goldens/edit-task*.png are pixel-exact and CI cannot regenerate them."
     },
     {
       "id": "task.remove",
@@ -2169,9 +2170,6 @@
           },
           "task.repo_id": {
             "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
-          },
-          "task.on_complete": {
-            "gap": "task.on-complete"
           }
         }
       },
@@ -2211,7 +2209,7 @@
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "update.on_complete": {
-            "gap": "task.on-complete"
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's On-done row (ui/task_pane_edit.go renderOnCompleteSelector) writes task.Task.OnComplete and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           }
         },
         "cli": {

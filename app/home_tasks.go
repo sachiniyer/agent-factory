@@ -16,7 +16,10 @@ import (
 // handleTaskCreate processes a pending task creation from the inline form.
 func (m *home) handleTaskCreate() tea.Cmd {
 	sp := m.automations.TaskPane()
-	name, prompt, cronExpr, watchCmd, targetSession, projectPath, program := sp.ConsumePendingCreate()
+	draft := sp.ConsumePendingCreate()
+	name, prompt := draft.Name, draft.Prompt
+	cronExpr, watchCmd := draft.Cron, draft.WatchCmd
+	targetSession, projectPath, program := draft.TargetSession, draft.Path, draft.Program
 	committed := false
 	defer func() {
 		if !committed {
@@ -71,10 +74,15 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		CronExpr:      cronExpr,
 		WatchCmd:      watchCmd,
 		TargetSession: targetSession,
-		ProjectPath:   absPath,
-		Program:       program,
-		Enabled:       true,
-		CreatedAt:     time.Now(),
+		// The spawned-session lifecycle the form collected (#2595). Already in
+		// its stored form ("" for keep, and "" whenever the draft names a target
+		// session), so a task created here is byte-identical to one created
+		// before the field was reachable unless the user chose otherwise.
+		OnComplete:  draft.OnComplete,
+		ProjectPath: absPath,
+		Program:     program,
+		Enabled:     true,
+		CreatedAt:   time.Now(),
 	}
 	// Route the create through the daemon (#1029 PR 6): it is the sole writer of
 	// tasks.json among clients (#960) and re-arms its own scheduler/watchers in

@@ -200,7 +200,10 @@ refused by name and version, and af never falls back to reading or writing your
 own machine's config for a remote target. The config *assistant* (`C`) is
 local-only and says so: it hand-edits the config file next to it, which is your
 machine's, so it refuses a remote target instead of quietly editing the wrong
-host.
+host. The editor’s
+Accounts section also lists and registers accounts on that daemon; login stays
+local-only, with the CLI's refusal naming the remote daemon inside the Accounts
+section (#3950).
 
 An invalid or missing token is rejected with a **401** on every request and on
 the WebSocket handshake; a remote read surfaces that error rather than silently
