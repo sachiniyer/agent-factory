@@ -47,11 +47,22 @@ palettes, and update the matching `app/testdata/design` / `app/testdata/recovery
 goldens. Without capture environment variables, tests compare the actual output
 to those goldens. Keep captured ANSI beside the gallery for source inspection.
 
+## Codex review corrections
+
+Search results now use Lost, Dead and Archived roles; Config key and account
+selections use Ink on SurfaceRaised. The blurred sidebar title uses Surface on
+InkMuted, with a 4.5:1 contrast gate in both palettes. Regression tests pin these
+role assignments. Only the affected accounts, config, zero-accounts, search,
+pane, keyboard and preview SVG/ANSI pairs were refreshed in the make-created
+playtest sandbox; all 58 driver goldens pass. The search fixture now includes
+lost, dead and archived results.
+
 ## Performance and verification
 
-`make perf-container` passed at 1,000 sessions after merging master through
-`d7705ac0` (#3929 and #3928). The approved TUI stills are unchanged. Full frame averaged **74.481 ms**
-(range 61.333–95.673); key-to-render averaged **103.291 ms** (61.199–171.667).
+One `make perf-container` pass at 1,000 sessions verified the Codex corrections
+on top of the master merge through `d7705ac0` (#3929 and #3928). Full frame
+averaged **78.161 ms** (range 74.646–80.518); key-to-render averaged **66.919 ms**
+(62.425–70.430).
 Every sample meets P5's stricter 480 / 351 ms limits. The harness still reports
 P1's original looser CI ceilings; these are not the thresholds used to accept P5.
 [Raw samples](../assets/design/tui-a/perf/tui-runs.json) and the

@@ -65,3 +65,15 @@ func TestAutomationTitleMatchesInstanceTitle(t *testing.T) {
 			got, tree.InstanceTitleColor)
 	}
 }
+
+func TestReviewedSelectionAndBlurredTitleRoles(t *testing.T) {
+	ApplyTheme(config.DefaultThemeConfig())
+	roles := theme.Roles()
+	if configSelectedStyle.GetForeground() != roles.Ink || configSelectedStyle.GetBackground() != roles.SurfaceRaised {
+		t.Fatal("config key and account selections must use ink on surface-raised")
+	}
+	// surface on ink-muted is contrast-checked by designtokens.validate.
+	if blurredTitle.GetForeground() != roles.Surface || blurredTitle.GetBackground() != roles.InkMuted {
+		t.Fatal("blurred sidebar title must use the contrast-checked surface on ink-muted pair")
+	}
+}

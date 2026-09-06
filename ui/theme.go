@@ -90,7 +90,7 @@ func applyThemeStyles() {
 		Foreground(activeTheme.Surface)
 	blurredTitle = lipgloss.NewStyle().
 		Background(activeTheme.InkMuted).
-		Foreground(activeTheme.Ink)
+		Foreground(activeTheme.Surface)
 	projectRowStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.Ink)
 	projectRowActiveStyle = lipgloss.NewStyle().

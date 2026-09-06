@@ -111,7 +111,7 @@ var mainTitle = lipgloss.NewStyle().
 // ring): same shape, receded color.
 var blurredTitle = lipgloss.NewStyle().
 	Background(activeTheme.InkMuted).
-	Foreground(activeTheme.Ink)
+	Foreground(activeTheme.Surface)
 
 // Sidebar is the unified left navigation pane with collapsible sections. It is
 // a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —

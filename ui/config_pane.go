@@ -120,7 +120,7 @@ var (
 	configKeyStyle      = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	configValueStyle    = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	configPurposeStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
-	configSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Ink)
+	configSelectedStyle = lipgloss.NewStyle().Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
 	configErrorStyle    = lipgloss.NewStyle().Foreground(activeTheme.Dead)
 	configOKStyle       = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	configNoticeStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)

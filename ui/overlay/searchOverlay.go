@@ -263,6 +263,9 @@ func (s *SearchOverlay) Render() string {
 	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 	statusRunning := lipgloss.NewStyle().Foreground(t.Running)
 	statusReady := lipgloss.NewStyle().Foreground(t.Ready)
+	statusLost := lipgloss.NewStyle().Foreground(t.Lost)
+	statusDead := lipgloss.NewStyle().Foreground(t.Dead)
+	statusArchived := lipgloss.NewStyle().Foreground(t.Archived)
 	statusLoading := lipgloss.NewStyle().Foreground(t.InkMuted)
 	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
 	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
@@ -319,8 +322,13 @@ func (s *SearchOverlay) Render() string {
 				// A usage-limit-blocked session (#1146) gets a distinct red diamond
 				// so "blocked on limit" never reads as a live/gone dot.
 				statusStr = statusLimit.Render("◆")
-			case session.LiveLost, session.LiveDead, session.LiveArchived,
-				session.LivenessUnset:
+			case session.LiveLost:
+				statusStr = statusLost.Render("○")
+			case session.LiveDead:
+				statusStr = statusDead.Render("○")
+			case session.LiveArchived:
+				statusStr = statusArchived.Render("○")
+			case session.LivenessUnset:
 				statusStr = normalStyle.Render("○")
 			}
 		}

@@ -74,7 +74,13 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.confirmActionWithDetail("Kill Apply design roles? Its running process will stop.", "The worktree and conversation remain available.", nil)
 				case "search":
 					h.state = stateSearch
-					h.searchOverlay = overlay.NewSearchOverlay([]*session.Instance{inst})
+					results := []*session.Instance{inst}
+					for title, status := range []session.Status{session.Lost, session.Dead, session.Archived} {
+						result := newLoadingInstance(t, []string{"Lost session", "Dead session", "Archived session"}[title])
+						result.SetStatusForTest(status)
+						results = append(results, result)
+					}
+					h.searchOverlay = overlay.NewSearchOverlay(results)
 					h.searchOverlay.SetMaxSize(100, 30)
 				case "project-picker":
 					h.state = stateSwitchProject
