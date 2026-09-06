@@ -57,8 +57,10 @@ JSON decoded → the accepted resync marker and two animation frames. This is a
 supplemental update measurement; the original `rail_ms` still measures initial
 construction, with its observer unchanged. Before reconnecting, the harness retains
 all 1,000 row nodes. After resync it asserts identical row identities and zero DOM
-writes inside the 996 unchanged seeded rows, including attribute writes. The four
-live rows may receive real status updates. The DOM audit runs only during this
+writes inside the 996 unchanged seeded rows, including attribute writes and row
+insertions/removals. The audit requires all 996 unique fixture IDs in both the
+Snapshot and DOM; decorated display titles cannot produce an empty cohort. The
+four live rows may receive real status updates. The DOM audit runs only during this
 resync, so it adds no observation overhead to the initial rail or echo measurements.
 
 TUI frame time is a user-observable full-frame turnaround, **not isolated Go View

@@ -9,6 +9,7 @@ declare global {
       railStart: number; echoStart: number; echo: string;
       sockets: WebSocket[];
       snapshotRows: Element[]; rowWrites: number; stopRowAudit: () => void;
+      seededIds: string[]; seededRowCount: number;
     };
   }
 }
@@ -25,6 +26,7 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
         values: {} as Record<string, number>, shifts: 0, snapshots: 0,
         railStart: 0, echoStart: 0, echo: "", sockets: [] as WebSocket[],
         snapshotRows: [] as Element[], rowWrites: 0, stopRowAudit: () => {},
+        seededIds: [] as string[], seededRowCount: 0,
       };
       // Two animation frames bracket a rendering opportunity after the observable
       // DOM write. All timestamps use the browser's monotonic clock, not RPC time.
@@ -79,6 +81,14 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
     const payload = await snapshot.json();
     expect(payload.error).toBeFalsy();
     expect(payload.data.instances).toHaveLength(1000);
+    // Exact identities minted by seed.mjs; rendered titles carry status prefixes.
+    const expectedSeededIds = Array.from({ length: 996 }, (_, i) =>
+      `00000000-0000-4000-8000-${String(i + 4).padStart(12, "0")}`);
+    const expectedIds = new Set(expectedSeededIds);
+    const seededIds = payload.data.instances.map((s: { id: string }) => s.id)
+      .filter((id: string) => expectedIds.has(id)) as string[];
+    expect([...seededIds].sort(), "Snapshot contains every exact synthetic fixture ID once")
+      .toEqual(expectedSeededIds);
     const selected = payload.data.instances.find((s: { title: string }) => s.title === "add-json-export");
     const diff = selected.tabs.find((t: { name: string }) => t.name.startsWith("diff"));
     expect(diff.id).toBeTruthy();
@@ -92,17 +102,23 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
     const loadShift = await page.evaluate(() => window.perfProbe.shifts);
     // Reconnect the actual event stream: the client fetches and applies a real
     // daemon Snapshot. No browser-side fixture substitutes for the API response.
-    const snapshots = await page.evaluate(() => {
+    const snapshots = await page.evaluate((seededIds: string[]) => {
       const p = window.perfProbe;
       p.shifts = 0;
       p.snapshotRows = [...document.querySelectorAll(".af-rail-list .af-row")];
       p.rowWrites = 0;
-      const seededRows = new Set(p.snapshotRows.filter(row =>
-        row.querySelector(".af-row-title")?.textContent?.startsWith("perf-"),
-      ));
+      p.seededIds = seededIds;
+      const ids = new Set(seededIds);
+      const rowId = (row: Element): string =>
+        row.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId ?? "";
+      const seededRows = new Set(p.snapshotRows.filter(row => ids.has(rowId(row))));
+      p.seededRowCount = seededRows.size;
+      const uniqueIds = new Set([...seededRows].map(rowId));
+      if (seededRows.size !== 996 || uniqueIds.size !== 996) {
+        throw new Error(`Expected 996 seeded rows before audit; found ${seededRows.size} rows / ${uniqueIds.size} IDs`);
+      }
       const isSeededRow = (row: Element): boolean =>
-        seededRows.has(row) || (row.matches(".af-row") &&
-          !!row.querySelector(".af-row-title")?.textContent?.startsWith("perf-"));
+        seededRows.has(row) || (row.matches(".af-row") && ids.has(rowId(row)));
       const countWrites = (records: MutationRecord[]) => {
         for (const mutation of records) {
           const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
@@ -137,7 +153,7 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
       document.querySelector("#app")!.removeAttribute("data-af-resync-settled");
       p.sockets.find(s => s.url.includes("/v1/events") && s.readyState === WebSocket.OPEN)!.close();
       return p.snapshots;
-    });
+    }, seededIds);
     const nextName = `diff-performance-update-${run}`;
     const renamed = await page.request.post(`${process.env.AF_WEB_BASE_URL}/v1/RenameTab`, {
       data: { id: selected.id, title: selected.title, repo_id: "", tab_id: diff.id, tab_name: diff.name, new_name: nextName },
@@ -154,9 +170,18 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
       const p = window.perfProbe;
       const current = [...document.querySelectorAll(".af-rail-list .af-row")];
       p.stopRowAudit();
-      return { sameNodes: current.length === p.snapshotRows.length && current.every((row, i) => row === p.snapshotRows[i]), writes: p.rowWrites };
+      const ids = new Set(p.seededIds);
+      const currentIds = current.map(row =>
+        row.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId ?? "")
+        .filter(id => ids.has(id));
+      return { initialCohort: p.seededRowCount, currentCohort: currentIds.length,
+        currentUniqueIds: new Set(currentIds).size,
+        sameNodes: current.length === p.snapshotRows.length && current.every((row, i) => row === p.snapshotRows[i]),
+        writes: p.rowWrites };
     });
     console.log(`Snapshot row audit run ${run + 1}:`, JSON.stringify(rowAudit));
+    expect.soft(rowAudit.currentCohort, "accepted snapshot retains 996 audited fixture rows").toBe(996);
+    expect.soft(rowAudit.currentUniqueIds, "accepted snapshot retains each audited fixture ID once").toBe(996);
     expect.soft(rowAudit.sameNodes, "accepted 1000-session snapshots retain every row node").toBe(true);
     expect.soft(rowAudit.writes, "unchanged seeded rows receive no DOM writes").toBe(0);
     // One real typed byte; a fresh character each run avoids matching scrollback.
