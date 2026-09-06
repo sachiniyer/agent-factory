@@ -625,10 +625,11 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 	return t, nil
 }
 
-// repoIDForPath resolves a project path to its owning repo's canonical ID,
-// returning "" when the path does not resolve to a repository. It never falls
-// back to hashing the path: an ID that no repo actually has is worse than no ID
-// at all, because a caller cannot tell the two apart.
+// repoIDForPath returns only a Git-proven repository ID, leaving non-Git and
+// unavailable paths unbound with an empty ID instead of a display fallback hash.
+//
+// An ID that no repo actually has is worse than no ID at all, because a caller
+// cannot tell the two apart.
 func repoIDForPath(projectPath string) string {
 	if strings.TrimSpace(projectPath) == "" {
 		return ""

@@ -558,14 +558,14 @@ func RepoIDFromRoot(root string) string {
 	return hex.EncodeToString(hash[:6])
 }
 
-// RepoIDForPath resolves an available path to its repository identity and
-// falls back to the historical raw-path hash when it cannot be resolved. It is
-// for compatibility/display paths that must keep unavailable records
-// addressable; admission decisions that need a proven repository use
-// RepoFromPath directly and surface its error.
+// RepoIDForPath returns Git identity or a symlink-resolved display hash, preserving
+// the raw hash on filesystem failure without proving repository membership.
 func RepoIDForPath(path string) string {
 	if repo, err := RepoFromPath(path); err == nil {
 		return repo.ID
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
 	}
 	return RepoIDFromRoot(path)
 }
@@ -627,7 +627,8 @@ type ResolvedProject struct {
 	Root string
 }
 
-// ResolveProjectPath maps a recorded project path to its owning repository.
+// ResolveProjectPath returns Git/ancestor identity or a symlink-resolved display
+// hash (the cleaned hash on filesystem failure), with empty Root for fallbacks.
 //
 // An EXISTING path — including a subdirectory or a linked worktree — resolves
 // through git to the repository identity, which is why identity matching
@@ -642,9 +643,9 @@ type ResolvedProject struct {
 //
 // The walk answers what git itself would say about the path if it existed, so
 // it cannot be more wrong than the path is. When nothing up the chain resolves,
-// fall back to the leaf hash — path equality, which at least keeps an orphan
-// addressable at its own recorded path — and report Root "" so callers can tell
-// this identity is derived rather than real.
+// resolve available symlinks before hashing the leaf, retaining the cleaned
+// hash on failure to keep unavailable records addressable, and report Root ""
+// so callers can tell this identity is derived rather than real.
 //
 // This is the ONE path→project-identity mechanism. It backs both the CLI's
 // project scoping (api/scope.go, #1893) and the TUI task pane's repo filter
@@ -655,6 +656,11 @@ func ResolveProjectPath(projectPath string) ResolvedProject {
 		return ResolvedProject{ID: repo.ID, Root: repo.Root}
 	}
 	cleaned := filepath.Clean(projectPath)
+	// Walk the physical ancestry of an available alias, not the repository
+	// that happens to contain the symlink to a non-Git destination.
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		cleaned = resolved
+	}
 	// Only walk an ABSOLUTE path. A relative one has no meaning independent of
 	// the current directory, so climbing it reaches "." and resolves to whatever
 	// repository the caller happens to be standing in — adopting a record into
