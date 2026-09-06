@@ -168,17 +168,17 @@ func TestGridSolveMaxPanesFitting(t *testing.T) {
 }
 
 func TestGridSolveAutomationsThresholds(t *testing.T) {
-	full := layout.Grid{}.Solve(layout.AutomationsFullMinWidth, 40)
+	full := layout.Grid{Automations: 1, Projects: 1}.Solve(layout.AutomationsFullMinWidth, 40)
 	require.True(t, full.AutomationsVisible)
 	assert.False(t, full.AutomationsCompact)
 	assert.Equal(t, layout.AutomationsRows, full.Automations.H)
 
-	narrowCompact := layout.Grid{}.Solve(layout.AutomationsFullMinWidth-1, 40)
+	narrowCompact := layout.Grid{Automations: 1, Projects: 1}.Solve(layout.AutomationsFullMinWidth-1, 40)
 	require.True(t, narrowCompact.AutomationsVisible)
 	assert.True(t, narrowCompact.AutomationsCompact, "strip compacts below %d cols", layout.AutomationsFullMinWidth)
 	assert.Equal(t, layout.AutomationsCompactRows, narrowCompact.Automations.H)
 
-	shortCompact := layout.Grid{}.Solve(120, layout.AutomationsFullMinHeight-1)
+	shortCompact := layout.Grid{Automations: 1, Projects: 1}.Solve(120, layout.AutomationsFullMinHeight-1)
 	require.True(t, shortCompact.AutomationsVisible)
 	assert.True(t, shortCompact.AutomationsCompact, "strip compacts below %d rows", layout.AutomationsFullMinHeight)
 	assert.Equal(t, layout.AutomationsCompactRows, shortCompact.Automations.H)
@@ -191,9 +191,9 @@ func TestGridSolveAutomationsThresholds(t *testing.T) {
 // automations can't both fit — at which point the half-rail cap keeps the
 // tree the priority. The rail still tiles exactly.
 func TestGridSolveAutomationsGrowsToContent(t *testing.T) {
-	// Zero automations keeps the AutomationsRows floor (a recognizable strip).
+	// Zero automations reserves no strip; onboarding lives in the task manager.
 	none := layout.Grid{Automations: 0}.Solve(120, 60)
-	assert.Equal(t, layout.AutomationsRows, none.Automations.H, "no automations keeps the floor")
+	assert.Zero(t, none.Automations.H, "empty automations reserve no rows")
 
 	// A handful of automations on a tall rail: the section is exactly title +
 	// one row per automation + the reserved expansion line + the reserved
@@ -270,7 +270,7 @@ func TestGridSolveMinimalMode(t *testing.T) {
 		})
 	}
 
-	above := layout.Grid{}.Solve(layout.MinimalWidth, layout.MinimalHeight)
+	above := layout.Grid{Automations: 1, Projects: 1}.Solve(layout.MinimalWidth, layout.MinimalHeight)
 	assert.True(t, above.AutomationsVisible, "automations return at exactly %dx%d",
 		layout.MinimalWidth, layout.MinimalHeight)
 }
@@ -465,11 +465,11 @@ func TestGridSolveAutomationsInRail(t *testing.T) {
 		w, h  int
 		panes int
 	}{
-		{"wide", layout.Grid{Panes: 1}, 160, 48, 1},
-		{"canonical-80x24", layout.Grid{Panes: 1}, 80, 24, 1},
-		{"compact", layout.Grid{Panes: 1}, 79, 22, 1},
-		{"two-pane", layout.Grid{Panes: 2}, 160, 48, 2},
-		{"three-pane", layout.Grid{Panes: 3}, 220, 48, 3},
+		{"wide", layout.Grid{Panes: 1, Automations: 1, Projects: 1}, 160, 48, 1},
+		{"canonical-80x24", layout.Grid{Panes: 1, Automations: 1, Projects: 1}, 80, 24, 1},
+		{"compact", layout.Grid{Panes: 1, Automations: 1, Projects: 1}, 79, 22, 1},
+		{"two-pane", layout.Grid{Panes: 2, Automations: 1, Projects: 1}, 160, 48, 2},
+		{"three-pane", layout.Grid{Panes: 3, Automations: 1, Projects: 1}, 220, 48, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := tc.grid.Solve(tc.w, tc.h)

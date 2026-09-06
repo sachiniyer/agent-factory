@@ -314,7 +314,7 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 		if errors.Is(msg.err, errDaemonUnresponsive) && !isRemoteTarget() {
 			return m, m.offerDaemonRestart(msg.target.title)
 		}
-		return m, m.handleError(fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
+		return m, m.showRecovery("Cannot kill session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
 	}
 
 	// A refresh may already have removed the row, or replaced it with a new
@@ -527,7 +527,7 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 		if inst != nil && inst.GetInFlightOp() == session.OpArchiving {
 			_ = inst.Transition(session.ClearOp())
 		}
-		return m, m.handleError(fmt.Errorf("failed to archive session '%s': %w", msg.target.title, msg.err))
+		return m, m.showRecovery("Cannot archive session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to archive session '%s': %w", msg.target.title, msg.err))
 	}
 	if inst != nil {
 		// SetArchived is an unconditional projection-mirror: it copies the

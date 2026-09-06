@@ -218,8 +218,6 @@ func (p failAccountSwapProcessPty) Start(cmd *exec.Cmd) (*os.File, error) {
 	return f, err
 }
 
-func (p failAccountSwapProcessPty) Close() {}
-
 func shortLivedProcessExec(processName string) cmd_test.MockCmdExec {
 	var newSessions int
 	inner := countingExec(map[string]bool{}, &newSessions)
@@ -457,8 +455,6 @@ func (p *captureAccountSwapEnvironmentPty) Start(command *exec.Cmd) (*os.File, e
 	p.cmd = command
 	return nil, fmt.Errorf("stop after capturing recovered launch environment")
 }
-
-func (*captureAccountSwapEnvironmentPty) Close() {}
 
 func TestSynchronizeAccountSwapRuntimeMetadataRestoresSessionEnvPassthrough(t *testing.T) {
 	const passthrough = "AF_TEST_ACCOUNT_SWAP_RECOVERY_TOKEN"

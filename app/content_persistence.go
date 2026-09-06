@@ -50,18 +50,13 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 // destructive action and surface it via handleError; the dirty pane preserves
 // the edit so the user can retry from where they left off.
 //
-// Recovery semantics on a task-save failure (#934): when the final reload
-// succeeds, we replace BOTH the sidebar and TaskPane from disk so they agree on
-// committed state. Reloading clears the TaskPane's dirty flag; a failed edit is
-// discarded, and the returned error makes that loss visible. If the reload
-// itself fails (#2324), each successful task update has already advanced its
-// diff baseline, while each failed update remains dirty and retryable. That is
-// the only state that neither resends an old successful field nor treats an
-// unpersisted edit as saved.
+// Task-save failures retain edited values and the dirty field-level patch for
+// retry. The sidebar still reloads committed data; the editor remains the draft.
 func (m *home) saveContentPaneState() error {
 	// Accumulate failures across both panes so a hooks error and a task error
 	// can never clobber one another (#1001).
 	var saveErr error
+	failedEdit := false
 
 	hp := m.hooksPane
 	if hp.IsDirty() {
@@ -115,6 +110,7 @@ func (m *home) saveContentPaneState() error {
 				sp.AcknowledgeSavedEdit(edit.ID)
 			} else {
 				sp.RestoreFailedEdit(edit.ID)
+				failedEdit = true
 			}
 			log.ErrorLog.Printf("failed to update task: %v", err)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", edit.ID, err))
@@ -145,12 +141,17 @@ func (m *home) saveContentPaneState() error {
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
 		m.store.SetTasks(tasks)
-		sp.SetTasks(tasks)
+		if !failedEdit {
+			sp.SetTasks(tasks)
+		}
 		// The task count feeds the rail's automations-section height (#1126);
 		// reflow so an add/delete grows or shrinks the section immediately.
 		m.relayout()
 	} else {
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
+	}
+	if failedEdit {
+		m.recovery = &recoveryNotice{"Cannot save task", "Your changes are retained. " + saveErr.Error(), "Press any key to continue."}
 	}
 	return saveErr
 }

@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,10 +11,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
+
+// Layout tests exercise populated rail sections. Empty sections deliberately
+// reserve no rows under the P4 recipe.
+func newPopulatedLayoutHome(t *testing.T) *home {
+	h := newTestHome(t)
+	h.store.SetTasks([]task.Task{{ID: "layout-task", Name: "Layout task"}})
+	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: "/project"}})
+	return h
+}
 
 // resizeHome drives the real WindowSizeMsg path.
 func resizeHome(h *home, w, hgt int) {
@@ -39,7 +54,7 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		{120, 40},
 		{80, 24},
 	} {
-		h := newTestHome(t)
+		h := newPopulatedLayoutHome(t)
 		alpha := addTreeInstance(t, h, "alpha")
 		h.sidebar.SetSelectedInstance(0)
 		_ = h.selectionChanged()
@@ -90,7 +105,7 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 // task manager (that is the tasks overlay — #1096 play-test); the status-bar
 // hints follow.
 func TestLayoutCutover_FocusRingCycles(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	alpha := addTreeInstance(t, h, "alpha")
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
@@ -129,7 +144,7 @@ func TestLayoutCutover_FocusRingCycles(t *testing.T) {
 // section moves the ring back to the tree (the pre-cutover "esc back" flow
 // re-homed).
 func TestLayoutCutover_AutomationsEscReturnsFocusToTree(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	resizeHome(h, 100, 30)
 	h.focusRegion(layout.RegionAutomations)
 	require.True(t, h.automations.Focused())
@@ -141,7 +156,7 @@ func TestLayoutCutover_AutomationsEscReturnsFocusToTree(t *testing.T) {
 }
 
 func TestLayoutCutover_AutomationsFocusConsumesHiddenPaneVerbs(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	alpha := addTreeInstance(t, h, "alpha")
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
@@ -171,7 +186,7 @@ func TestLayoutCutover_AutomationsFocusConsumesHiddenPaneVerbs(t *testing.T) {
 // config form, with no second keypress to leave the list. Esc steps back out of
 // the form to the list (overlay still open), and a second Esc closes it.
 func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	resizeHome(h, 100, 30)
 	tasks := []task.Task{
 		{ID: "1", Name: "alpha-task", CronExpr: "0 3 * * *", Enabled: true},
@@ -179,6 +194,7 @@ func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 	}
 	h.store.SetTasks(tasks)
 	h.automations.TaskPane().SetTasks(tasks)
+	h.relayout()
 
 	h.focusRegion(layout.RegionAutomations)
 	h.automations.ScrollDown() // cursor onto beta-task
@@ -217,7 +233,7 @@ func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 // ladder: <80 cols the strip becomes a 1-line summary; <60×15 it disappears
 // and the ring skips it; below 40×10 the whole window is the fallback banner.
 func TestLayoutCutover_DegradationLadder(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	alpha := addTreeInstance(t, h, "alpha")
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
@@ -267,7 +283,7 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 		{name: "72x20", width: 72, height: 20},
 	} {
 		t.Run(size.name, func(t *testing.T) {
-			h := newTestHome(t)
+			h := newPopulatedLayoutHome(t)
 			resizeHome(h, size.width, size.height)
 			h.hooksPane.SetCommands([]string{"make setup"})
 
@@ -292,7 +308,7 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 // and task creation lives on the manager's own `n` key — the "m, then n"
 // muscle memory survives the overlay move (#1096 play-test fix 1).
 func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	resizeHome(h, 100, 30)
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")}, keys.KeyTaskList)
@@ -312,7 +328,33 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 // focused, Esc returns to the tree, and e opens/closes the hooks overlay.
 func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	eh := newE2EHarness(t)
-	eh.addStartedInstance("alpha")
+	// Exercise macOS's symlinked temp-root shape on every platform.
+	linkedRoot := filepath.Join(t.TempDir(), "linked-repo")
+	require.NoError(t, os.Symlink(eh.home.repoRoot, linkedRoot))
+	eh.home.repoRoot = linkedRoot
+	alpha := eh.addStartedInstance("alpha")
+	// This is a healthy-workspace test. The harness default deliberately fails
+	// snapshots; sustained poll failures correctly show daemon recovery.
+	// Return a frozen snapshot, never read the live model from the fetch goroutine.
+	snapshot := daemon.SnapshotResponse{Instances: []session.InstanceData{alpha.ToInstanceData()}}
+	eh.home.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return snapshot, nil }
+	// The same poll reloads tasks from disk. Persist the rail fixture so it cannot
+	// disappear mid-focus-cycle, and let the poll populate the task editor too.
+	// Match production's resolved RepoContext.ID, not a hash of the raw path:
+	// macOS temp paths can name /var while Git resolves them under /private/var.
+	repo, err := config.RepoFromPath(eh.home.repoRoot)
+	require.NoError(t, err)
+	eh.home.repoID = repo.ID
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "layout-task", Name: "Layout task", Prompt: "Check the layout",
+		CronExpr: "0 3 * * *", ProjectPath: eh.home.repoRoot, Program: "claude",
+	}))
+	// Exercise the poll before any timing-dependent UI steps, so a fast run
+	// cannot conceal an unstubbed fetch or an incomplete persisted fixture.
+	_, _ = eh.home.Update(eh.home.fetchSnapshotCmd()())
+	require.False(t, eh.home.snapshotUnavailable)
+	require.Same(t, alpha, eh.home.store.GetInstanceByTitle("alpha"))
+	require.Equal(t, 1, eh.home.store.NumTasks())
 	eh.home.sidebar.SetSelectedInstance(0)
 	eh.start()
 
@@ -339,10 +381,17 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	assert.False(t, managerFocused,
 		"focusing the section must not focus the manager — it opens as an overlay")
 
-	// Enter opens the tasks overlay; Esc closes it (manager focus released).
+	// Enter opens the selected task's editor. Esc returns to the list, then
+	// another Esc closes the overlay (manager focus released).
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	eh.waitUntil(e2eAsyncTimeout, "Enter opens the tasks overlay", func() bool {
 		return eh.homeState() == stateTasks
+	})
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	eh.waitUntil(e2eAsyncTimeout, "Esc returns from the task editor to its list", func() bool {
+		var editing bool
+		eh.query(func(h *home) { editing = h.automations.TaskPane().IsEditing() })
+		return !editing
 	})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	eh.waitUntil(e2eAsyncTimeout, "Esc closes the tasks overlay", func() bool {
@@ -378,7 +427,7 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 // ContentModeTasks behavior). With focus back on the tree or pane A the jump
 // works as before.
 func TestLayoutCutover_DigitJumpGatedByFocusRegion(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	addTreeInstance(t, h, "alpha") // real agent + shell tab pair
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()

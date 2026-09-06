@@ -145,6 +145,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
 	case tea.MouseMsg:
+		if m.recovery != nil {
+			m.recovery = nil
+			return m, nil
+		}
 		// First-class mouse (#1024 R4, closes #1025): every event is
 		// resolved through the zone registry the last View() rebuilt and
 		// dispatched to the region actually under the cursor — clicks
@@ -154,6 +158,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		if m.recovery != nil {
+			m.recovery = nil
+			return m, nil
+		}
 		return m.handleKeyPress(msg)
 	case tea.WindowSizeMsg:
 		return m, m.updateHandleWindowSizeEvent(msg)
@@ -329,7 +337,19 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// placeholder, which is never persisted, and the daemon is the sole
 			// writer (#960 PR 4). Removing the in-memory row is the whole cleanup.
 
-			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
+			if msg.draft != nil {
+				m.failedCreate = &msg
+				if userStillWatching {
+					m.restoreFailedCreate()
+				}
+			}
+			detail := "Your input is retained. " + msg.err.Error()
+			action := "Press any key to return to the form."
+			if !userStillWatching {
+				detail += " The next create in this project reopens the failed draft."
+				action = "Press any key to continue."
+			}
+			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged())
 		}
 
 		started := msg.instance

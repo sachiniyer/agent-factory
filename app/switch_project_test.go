@@ -47,6 +47,7 @@ func TestSelectProjectRowSwitchesProject(t *testing.T) {
 		{Name: filepath.Base(repoBRoot), Root: repoBRoot, SessionCount: 0},
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 1, Active: true},
 	})
+	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
 	require.Equal(t, layout.RegionProjects, h.ring.Active())
 
@@ -506,6 +507,7 @@ func TestProjectsSectionEscReturnsToTree(t *testing.T) {
 	h.projects.SetProjects([]ui.SidebarProject{
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 0, Active: true},
 	})
+	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
 	require.True(t, h.projects.Focused())
 

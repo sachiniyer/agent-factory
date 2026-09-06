@@ -89,6 +89,7 @@ func TestProjectsSection_FocusedSelectSwitches(t *testing.T) {
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 1, Active: true},
 		{Name: filepath.Base(repoBRoot), Root: repoBRoot, SessionCount: 0},
 	})
+	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
 	require.Equal(t, layout.RegionProjects, h.ring.Active())
 
@@ -128,6 +129,7 @@ func TestProjectsSection_CursorSurvivesRefreshReorder(t *testing.T) {
 		{Name: "aaa-active", Root: h.repoRoot, SessionCount: 1, Active: true},
 		{Name: filepath.Base(repoBRoot), Root: repoBRoot, SessionCount: 0},
 	})
+	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
 	require.True(t, h.projects.SelectByRoot(repoBRoot))
 	sel, _ := h.projects.SelectedProject()

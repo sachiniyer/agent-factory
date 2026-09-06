@@ -19,8 +19,6 @@ func (p forbiddenStartupPty) Start(*exec.Cmd) (*os.File, error) {
 	return nil, fmt.Errorf("unreachable")
 }
 
-func (forbiddenStartupPty) Close() {}
-
 func TestFromInstanceData_StartupUnknownLoadsInert(t *testing.T) {
 	data := deadInstanceData(t, Running, "af_uncertain", "af_uncertain__shell")
 	data.StartupStateUnknown = true
