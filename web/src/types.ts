@@ -262,6 +262,12 @@ export interface SnapshotResponse {
 	delivery_alarms?: unknown[];
 }
 
+/** One lifecycle choice served by the daemon, including its consequence. */
+export interface OnCompleteOption {
+  value: string;
+  hint: string;
+}
+
 /**
  * The subset of task.Task (task/task.go) the tasks view reads and mutates (#1592
  * Phase 5 PR8). Field names and JSON tags match the Go struct EXACTLY so this
@@ -273,6 +279,7 @@ export interface SnapshotResponse {
  * `last_run_*` fields are absent until the task first runs.
  */
 export interface TaskData {
+  on_complete?: string;
   id: string;
   name?: string;
   prompt: string;
@@ -341,6 +348,7 @@ export interface TaskData {
  * match the Go TaskUpdate struct EXACTLY (the daemon rejects unknown keys).
  */
 export interface TaskUpdate {
+  on_complete?: string;
   name?: string;
   prompt?: string;
   cron_expr?: string;

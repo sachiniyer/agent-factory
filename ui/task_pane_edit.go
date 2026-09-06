@@ -603,14 +603,7 @@ func (s *TaskPane) wrapOnCompleteText(text string) string {
 // and prunes the branch it owned (#2595). "permanently" carries that, rather
 // than capitals, which this repo reserves for env vars and literal flag names.
 func onCompleteHint(value string) string {
-	switch value {
-	case task.OnCompleteArchive:
-		return "archives the run's session — restorable"
-	case task.OnCompleteKill:
-		return "deletes the run's session and its branch — permanent"
-	default:
-		return "leaves the run's session in place"
-	}
+	return task.OnCompleteHint(value)
 }
 
 // renderProgramSelector renders the agent selector as a single line showing

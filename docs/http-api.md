@@ -443,3 +443,16 @@ API when you want to call the daemon from a language or tool without shelling
 out to `af`, from inside an agent, or from a small local service. Both emit the
 identical `{data, error}` envelope, so a consumer written against one reads the
 other unchanged.
+
+### Task completion choices
+
+`POST /v1/ListOnComplete` accepts `{}` and returns
+a shared-envelope payload whose `values` array contains `{value, hint}` options,
+for example `{"value":"kill","hint":"deletes the run's session and its branch — permanent"}`.
+Values follow
+`task.OnCompleteValues()` order, least destructive first. Clients should render
+this catalog rather than copy the enum or consequence wording. The default is
+the first option. Send `on_complete` on the task in `AddTask`, or on `update` in
+`UpdateTask`; send the selected verb unchanged. The store canonicalizes keep to
+empty on both create and update. Completion policies apply only to spawned
+sessions, so tasks with `target_session` must use empty.
