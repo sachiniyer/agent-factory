@@ -673,6 +673,9 @@ export class AttachTerminal {
     // Bubbles from xterm's focused helper textarea, so this one listener catches
     // the copy chord AND every menu/context-menu copy aimed at the terminal (#2831).
     container.addEventListener("copy", this.onCopy);
+    // A mounted host often already has cell metrics. Start its attach without
+    // waiting for another animation frame; unmeasurable hosts still retry below.
+    this.fitVisibleHost();
     this.scheduleVisibleFit();
   }
 
@@ -1156,7 +1159,9 @@ export class AttachTerminal {
       return;
     }
     this.initialConnectStarted = true;
-    this.connect();
+    // Let SplitView finish assigning this terminal before onStatus can re-enter
+    // its store subscriber. This still starts the socket before the next paint.
+    queueMicrotask(() => this.connect());
   }
 
   private onMessage(data: unknown): void {
