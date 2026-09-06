@@ -282,14 +282,14 @@ func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, coun
 	if i == len(p.all) {
 		text := "+ Add project…"
 		if selected {
-			return "  " + selectedStyle.Render("▸ "+text)
+			return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(text)
 		}
 		return "    " + addStyle.Render(text)
 	}
 	proj := p.all[i]
 	count := countStyle.Render(fmt.Sprintf(" (%d)", proj.SessionCount))
 	if selected {
-		return "  " + selectedStyle.Render("▸ "+proj.Name) + count
+		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name) + count
 	}
 	return "    " + normalStyle.Render(proj.Name) + count
 }

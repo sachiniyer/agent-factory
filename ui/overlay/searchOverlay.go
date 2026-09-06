@@ -255,6 +255,13 @@ func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
 
 // Render renders the search overlay.
 func (s *SearchOverlay) Render() string {
+	frame, _, _ := s.renderFrame()
+	return frame
+}
+
+// renderFrame returns the exact first result row along with the same plan that
+// painted it; pointer zones never infer row identity from user-controlled text.
+func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	t := ui.CurrentTheme()
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
@@ -295,6 +302,7 @@ func (s *SearchOverlay) Render() string {
 			fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
 	}
 
+	firstResultLine := len(lines)
 	for i := plan.startIdx; i < plan.endIdx; i++ {
 		r := s.results[i]
 
@@ -332,7 +340,7 @@ func (s *SearchOverlay) Render() string {
 		}
 
 		if i == s.selectedIdx {
-			line := "  " + statusStr + " " + selectedStyle.Render("▸ "+r.Instance.Title)
+			line := "  " + statusStr + " " + ui.SelectionMarker("▸ ") + selectedStyle.Render(r.Instance.Title)
 			if branch != "" {
 				line += normalStyle.Render(" (" + branch + ")")
 			}
@@ -361,5 +369,5 @@ func (s *SearchOverlay) Render() string {
 	if plan.styleHeight > 0 && len(lines) >= plan.contentHeight {
 		style = style.Height(plan.styleHeight)
 	}
-	return style.Render(strings.Join(lines, "\n"))
+	return style.Render(strings.Join(lines, "\n")), style.GetBorderTopSize() + style.GetPaddingTop() + firstResultLine, plan
 }

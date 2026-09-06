@@ -501,7 +501,7 @@ func (s *TaskPane) renderTriggerSelector() string {
 	option := func(name string, sel bool) string {
 		switch {
 		case sel && focused:
-			return selectedStyle.Render("▸ " + name)
+			return SelectionMarker("▸ ") + selectedStyle.Render(name)
 		case sel:
 			return dimSelectedStyle.Render("▸ " + name)
 		default:
@@ -529,7 +529,7 @@ func (s *TaskPane) renderProgramSelector() string {
 		value = s.editProgramOptions[s.editProgramIdx]
 	}
 	if focused {
-		return selectedStyle.Render("◂ "+value+" ▸") + hintStyle.Render("   ←/→ change agent")
+		return SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸") + hintStyle.Render("   ←/→ change agent")
 	}
 	return dimSelectedStyle.Render(value)
 }

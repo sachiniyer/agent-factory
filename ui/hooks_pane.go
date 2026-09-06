@@ -183,9 +183,9 @@ func (h *HooksPane) String() string {
 	for i, cmd := range h.commands {
 		isSelected := i == h.selectedIdx
 		if h.editing && isSelected {
-			b.WriteString(editStyle.Render("▸ "+h.editBuffer) + InputCaret())
+			b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
 		} else if isSelected && h.hasFocus {
-			b.WriteString(selectedStyle.Render("▸ " + cmd))
+			b.WriteString(SelectionMarker("▸ ") + selectedStyle.Render(cmd))
 		} else {
 			b.WriteString(normalStyle.Render("  " + cmd))
 		}
@@ -193,7 +193,7 @@ func (h *HooksPane) String() string {
 	}
 
 	if h.adding {
-		b.WriteString(editStyle.Render("▸ "+h.editBuffer) + InputCaret())
+		b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
 		b.WriteString("\n")
 	}
 

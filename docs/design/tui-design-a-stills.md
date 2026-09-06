@@ -21,9 +21,9 @@ Shared daemon config retirement is tracked in
 
 ## Capture provenance
 
-These 64 stills are deterministic real app-model `Update`/`View` output,
+These 70 stills are deterministic real app-model `Update`/`View` output,
 converted from ANSI cells by P4's SVG writer. They are not live-daemon screen
-recordings. `TestDesignDriverScenes` adds nineteen chrome scenes to P4's thirteen
+recordings. `TestDesignDriverScenes` adds twenty-two chrome scenes to P4's thirteen
 recovery scenes. Both run only in the isolated sandbox created by
 `make playtest-container-detached`; no host TUI, app tests or daemon tests run.
 The supplementary P4 live tmux scenario passed retained failed creation,
@@ -54,20 +54,27 @@ selections use Ink on SurfaceRaised. The blurred sidebar title uses Surface on
 InkMuted, with a 4.5:1 contrast gate in both palettes. Regression tests pin these
 role assignments. Only the affected accounts, config, zero-accounts, search,
 pane, keyboard and preview SVG/ANSI pairs were refreshed in the make-created
-playtest sandbox; all 64 driver goldens pass. The search fixture now includes
+playtest sandbox; all 70 driver goldens pass. The search fixture now includes
 lost, dead and archived results.
 
 The final whole-PR [role audit](../assets/design/tui-a/role-audit.txt) records
 every changed file, role pair and staged B/C boundary. It additionally fixes
 blank working/in-flight search cells, archive-failure Dead text, muted Config
 location, retained selection ink and token-only placeholder contrast.
+The fourth-round sweep of [all style constructions](../assets/design/tui-a/style-constructions.txt)
+also separates Accent selection markers from Ink labels and gives input carets
+the validated Surface-on-Accent pair. Refreshed both-theme captures cover
+search, selection, project picker, hooks, tasks, config/accounts and zero-accounts;
+new trigger, program and schedule-type scenes expose focused field markers.
+Search hit regions now use render-plan positions, with a regression test for
+session titles identical to scroll indicators.
 
 ## Performance and verification
 
 One `make perf-container` pass at 1,000 sessions verified the Codex corrections
-on top of the master merge through `d7705ac0` (#3929 and #3928). Full frame
-averaged **65.880 ms** (range 58.376–70.261); key-to-render averaged **84.821 ms**
-(70.399–92.373).
+on top of the gate update at `0e1476fb`. Full frame
+averaged **60.369 ms** (range 44.905–69.887); key-to-render averaged **58.556 ms**
+(55.737–61.159).
 Every sample meets P5's stricter 480 / 351 ms limits. The harness still reports
 P1's original looser CI ceilings; these are not the thresholds used to accept P5.
 [Raw samples](../assets/design/tui-a/perf/tui-runs.json) and the
@@ -117,3 +124,6 @@ stills were self-reviewed before requesting review.
 | Alarm | ![Alarm, light](../assets/design/tui-a/alarm-light.svg) | ![Alarm, dark](../assets/design/tui-a/alarm-dark.svg) |
 | task schedule | ![task schedule light](../assets/design/tui-a/task-schedule-light.svg) | ![task schedule dark](../assets/design/tui-a/task-schedule-dark.svg) |
 | task weekdays | ![task weekdays light](../assets/design/tui-a/task-weekdays-light.svg) | ![task weekdays dark](../assets/design/tui-a/task-weekdays-dark.svg) |
+| task-trigger | ![task-trigger light](../assets/design/tui-a/task-trigger-light.svg) | ![task-trigger dark](../assets/design/tui-a/task-trigger-dark.svg) |
+| task-program | ![task-program light](../assets/design/tui-a/task-program-light.svg) | ![task-program dark](../assets/design/tui-a/task-program-dark.svg) |
+| task-schedule-type | ![task-schedule-type light](../assets/design/tui-a/task-schedule-type-light.svg) | ![task-schedule-type dark](../assets/design/tui-a/task-schedule-type-dark.svg) |

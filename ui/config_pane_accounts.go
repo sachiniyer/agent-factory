@@ -295,7 +295,7 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 
 	cursor := "  "
 	if selected {
-		cursor = configSelectedStyle.Render("› ")
+		cursor = SelectionMarker("› ")
 	}
 	b.WriteString(cursor)
 

@@ -542,7 +542,7 @@ func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
 func (p *schedulePicker) renderTypeSelector(selected, dim lipgloss.Style) string {
 	label := scheduleTypes[p.typ].label
 	if p.focused && p.activeCell() == cellType {
-		return selected.Render("◂ " + label + " ▸")
+		return SelectionMarker("◂ ") + selected.Render(label) + SelectionMarker(" ▸")
 	}
 	return dim.Render(label)
 }

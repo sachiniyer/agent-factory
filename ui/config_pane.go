@@ -605,7 +605,7 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 
 	cursor := "  "
 	if selected {
-		cursor = configSelectedStyle.Render("› ")
+		cursor = SelectionMarker("› ")
 	}
 	b.WriteString(cursor)
 

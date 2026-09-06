@@ -556,7 +556,7 @@ func (s *TaskPane) renderListMode() string {
 
 		isSelected := i == s.selectedIdx
 		if isSelected && s.hasFocus {
-			b.WriteString(selectedStyle.Render(fitLine("▸ "+header, s.width)))
+			b.WriteString(fitLine(SelectionMarker("▸ ")+selectedStyle.Render(header), s.width))
 		} else {
 			b.WriteString(style.Render(fitLine("  "+header, s.width)))
 		}

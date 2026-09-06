@@ -26,7 +26,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(mode == "dark")
 				h := newTestHome(t)
@@ -64,11 +64,21 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.configPane.SetFocus(true)
 				case "hooks":
 					h.state = stateHooks
+					h.hooksPane.SetCommands([]string{"make test", "make lint"})
+					h.hooksPane.SetFocus(true)
 
 				case "tasks":
 					h.state = stateTasks
 					h.automations.TaskPane().SetTasks([]task.Task{{ID: "design", Name: "Daily design review", Enabled: true}})
 					h.automations.TaskPane().SetFocus(true)
+				case "task-trigger", "task-program", "task-schedule-type":
+					h.state = stateTasks
+					pane := h.automations.TaskPane()
+					pane.EnterCreateMode(h.repoRoot)
+					count := map[string]int{"task-trigger": 1, "task-program": 6, "task-schedule-type": 2}[scene]
+					for n := 0; n < count; n++ {
+						pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+					}
 				case "task-create", "task-schedule", "task-weekdays":
 					h.state = stateTasks
 					h.automations.TaskPane().EnterCreateMode(h.repoRoot)

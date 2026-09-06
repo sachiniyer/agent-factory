@@ -1,7 +1,7 @@
-P5 A whole-PR role audit (base d7705ac0, final third-round correction)
+P5 A whole-PR role audit (base 03de5767, fourth-round correction)
 
 Review scope: every changed path below, including prior-round changes; not only
-three inline locations. Production diffs reviewed against interface-design.md.
+the latest inline locations. Production diffs reviewed against interface-design.md.
 Tests/generator reviewed for semantic assertions and fixed-palette ownership;
 docs/nav and raw evidence reviewed for provenance and no page-tree leak.
 
@@ -26,9 +26,10 @@ Contrast: generator validates all text roles on Surface and SurfaceRaised at
 4.5:1, border at 3:1; Surface on Accent and the blurred title Surface on InkMuted
 are explicitly checked at 4.5:1 in both themes. Examined every background setter,
 foreground assignment, reverse/faint modifier and generated style assignment in
-changed production files. A cell-level pass through all 64 current SVGs finds
-26 actual emitted foreground/background combinations, listed below: every one
-exceeds 4.5:1, including border cells. SGR token tolerance remains +/-1 channel.
+changed production files. A cell-level pass through all 70 current SVGs finds
+28 actual emitted foreground/background combinations, listed below: every one
+meets the token contract within the approved termenv channel tolerance.
+Dark Accent on SurfaceRaised emits 4.491:1; token contrast remains >=4.5:1. SGR token tolerance remains +/-1 channel.
 
 Literal ownership: ui/theme/literals_test.go scans all production ui/ and app/;
 only generated ui/theme/theme.go is exempt. Test PTY strings and captured SVG/ANSI
@@ -40,31 +41,46 @@ confirmation border/text emphasis), heading/hint hierarchy, footer/preview copy,
 branch/tab glyph nits and density cuts. C owns Light/Dark/System and migration;
 shared daemon retirement is #3936. This audit does not claim B/C shipped in A.
 
+Fourth-round review: inspected every Lip Gloss construction and colour setter
+under ui/ and app/, including files outside the PR diff (see style-constructions.txt).
+Selection markers use Accent on SurfaceRaised independently of Ink labels;
+Config/accounts and field selectors share that rule. The implicit reverse-video
+input caret now uses Surface on Accent, an already contrast-checked pair.
+Structural expand/collapse arrows and inactive field annotations are not active
+selection cursors. Styling without explicit colours inherits the containing
+surface; PTY-owned output remains outside the chrome contract.
+
+Search pointer geometry now comes from the same render pass and window plan.
+No title parser is used for hit testing. Tests cover a result title exactly equal
+to the upper scroll indicator in compact and normal geometry.
+
 Emitted pairs across every gallery SVG:
-#2c6171 on #f8f9fc: 6.528:1 (24 stills)
+#2c6171 on #eceff3: 5.959:1 (11 stills)
+#2c6171 on #f8f9fc: 6.528:1 (27 stills)
 #2e3440 on #90c3d3: 6.502:1 (6 stills)
 #2e3440 on #b7c0ce: 6.807:1 (3 stills)
-#2e3440 on #eceff3: 10.829:1 (18 stills)
-#2e3440 on #f8f9fc: 11.863:1 (31 stills)
+#2e3440 on #eceff3: 10.829:1 (22 stills)
+#2e3440 on #f8f9fc: 11.863:1 (34 stills)
 #405430 on #eceff3: 7.200:1 (6 stills)
 #405430 on #f8f9fc: 7.888:1 (1 stills)
-#4c5669 on #f8f9fc: 7.018:1 (25 stills)
+#4c5669 on #f8f9fc: 7.018:1 (28 stills)
 #657083 on #f8f9fc: 4.751:1 (9 stills)
 #705014 on #f8f9fc: 7.008:1 (1 stills)
 #883b43 on #eceff3: 6.612:1 (1 stills)
 #883b43 on #f8f9fc: 7.244:1 (11 stills)
-#90c3d3 on #2e3440: 6.502:1 (24 stills)
+#90c3d3 on #2e3440: 6.502:1 (27 stills)
+#90c3d3 on #434c5e: 4.491:1 (11 stills)
 #a1aaba on #2e3440: 5.337:1 (9 stills)
-#b7c0ce on #2e3440: 6.807:1 (25 stills)
+#b7c0ce on #2e3440: 6.807:1 (28 stills)
 #d5e2cc on #2e3440: 9.266:1 (1 stills)
 #d5e2cc on #434c5e: 6.401:1 (6 stills)
 #d8dee9 on #2e3440: 9.245:1 (1 stills)
 #e3c8cd on #2e3440: 7.975:1 (11 stills)
 #e3c8cd on #434c5e: 5.509:1 (1 stills)
 #ebcb8b on #2e3440: 7.998:1 (1 stills)
-#eceff3 on #2e3440: 10.829:1 (30 stills)
-#eceff3 on #434c5e: 7.480:1 (18 stills)
-#eceff4 on #2e3440: 10.836:1 (10 stills)
+#eceff3 on #2e3440: 10.829:1 (33 stills)
+#eceff3 on #434c5e: 7.480:1 (22 stills)
+#eceff4 on #2e3440: 10.836:1 (13 stills)
 #f8f9fc on #2c6171: 6.528:1 (6 stills)
 #f8f9fc on #4c5669: 7.018:1 (3 stills)
 
@@ -105,8 +121,14 @@ app/testdata/design/sessions-dark.svg
 app/testdata/design/sessions-light.svg
 app/testdata/design/task-create-dark.svg
 app/testdata/design/task-create-light.svg
+app/testdata/design/task-program-dark.svg
+app/testdata/design/task-program-light.svg
 app/testdata/design/task-schedule-dark.svg
 app/testdata/design/task-schedule-light.svg
+app/testdata/design/task-schedule-type-dark.svg
+app/testdata/design/task-schedule-type-light.svg
+app/testdata/design/task-trigger-dark.svg
+app/testdata/design/task-trigger-light.svg
 app/testdata/design/task-weekdays-dark.svg
 app/testdata/design/task-weekdays-light.svg
 app/testdata/design/tasks-dark.svg
@@ -219,6 +241,7 @@ docs/assets/design/tui-a/sessions-dark.ansi
 docs/assets/design/tui-a/sessions-dark.svg
 docs/assets/design/tui-a/sessions-light.ansi
 docs/assets/design/tui-a/sessions-light.svg
+docs/assets/design/tui-a/style-constructions.txt
 docs/assets/design/tui-a/task-create-dark.ansi
 docs/assets/design/tui-a/task-create-dark.svg
 docs/assets/design/tui-a/task-create-light.ansi
@@ -227,6 +250,10 @@ docs/assets/design/tui-a/task-edit-save-failed-dark.ansi
 docs/assets/design/tui-a/task-edit-save-failed-dark.svg
 docs/assets/design/tui-a/task-edit-save-failed-light.ansi
 docs/assets/design/tui-a/task-edit-save-failed-light.svg
+docs/assets/design/tui-a/task-program-dark.ansi
+docs/assets/design/tui-a/task-program-dark.svg
+docs/assets/design/tui-a/task-program-light.ansi
+docs/assets/design/tui-a/task-program-light.svg
 docs/assets/design/tui-a/task-save-failed-dark.ansi
 docs/assets/design/tui-a/task-save-failed-dark.svg
 docs/assets/design/tui-a/task-save-failed-light.ansi
@@ -235,6 +262,14 @@ docs/assets/design/tui-a/task-schedule-dark.ansi
 docs/assets/design/tui-a/task-schedule-dark.svg
 docs/assets/design/tui-a/task-schedule-light.ansi
 docs/assets/design/tui-a/task-schedule-light.svg
+docs/assets/design/tui-a/task-schedule-type-dark.ansi
+docs/assets/design/tui-a/task-schedule-type-dark.svg
+docs/assets/design/tui-a/task-schedule-type-light.ansi
+docs/assets/design/tui-a/task-schedule-type-light.svg
+docs/assets/design/tui-a/task-trigger-dark.ansi
+docs/assets/design/tui-a/task-trigger-dark.svg
+docs/assets/design/tui-a/task-trigger-light.ansi
+docs/assets/design/tui-a/task-trigger-light.svg
 docs/assets/design/tui-a/task-weekdays-dark.ansi
 docs/assets/design/tui-a/task-weekdays-dark.svg
 docs/assets/design/tui-a/task-weekdays-light.ansi
@@ -274,6 +309,8 @@ internal/designtokens/validate.go
 mkdocs.yml
 ui/alarm.go
 ui/automations.go
+ui/caret.go
+ui/caret_test.go
 ui/config_pane.go
 ui/config_pane_accounts.go
 ui/err.go
@@ -287,12 +324,16 @@ ui/overlay/projectPickerOverlay.go
 ui/overlay/promptOverlay.go
 ui/overlay/searchOverlay.go
 ui/overlay/search_roles_test.go
+ui/overlay/search_zone_collision_test.go
 ui/overlay/selectionOverlay.go
+ui/overlay/selection_marker_test.go
 ui/overlay/textOverlay.go
 ui/overlay/zones.go
 ui/projects.go
 ui/recovery.go
 ui/schedule_picker.go
+ui/selection_marker.go
+ui/selection_marker_test.go
 ui/sidebar_deferral_test.go
 ui/sidebar_model.go
 ui/sidebar_render.go

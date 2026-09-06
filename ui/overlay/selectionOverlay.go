@@ -137,7 +137,7 @@ func (s *SelectionOverlay) Render() string {
 	for i := start; i < end; i++ {
 		item := s.items[i]
 		if i == s.selectedIdx {
-			lines = append(lines, truncateOverlayLine(selectedStyle.Render("▸ "+item), textRect.W))
+			lines = append(lines, truncateOverlayLine(ui.SelectionMarker("▸ ")+selectedStyle.Render(item), textRect.W))
 		} else {
 			lines = append(lines, truncateOverlayLine(normalStyle.Render("  "+item), textRect.W))
 		}

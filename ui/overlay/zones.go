@@ -2,7 +2,6 @@ package overlay
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
 
@@ -112,60 +111,19 @@ func (s *SelectionOverlay) RegisterZones(reg *zones.Registry, origin layout.Poin
 
 // RegisterZones registers one full-width clickable zone per visible search
 // result, keyed by the result's index in the full result list; clicking a
-// row selects and submits it. The scan walks the same window Render shows
-// (Render slides a maxVisible-row window to keep the selection visible), so
-// a scrolled list registers exactly the rows on screen — matching the first
-// visible row against results[0] instead used to register nothing once the
-// selection moved past the first page (Greptile P1 on the original PR).
+// row selects and submits it. Geometry comes from the same render pass as the
+// frame, so user titles cannot masquerade as chrome or shift pointer targets.
 func (s *SearchOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) {
 	if reg == nil {
 		return
 	}
-	rendered := s.Render()
+	rendered, firstRow, plan := s.renderFrame()
 	width := renderedWidth(rendered)
-	lines := strings.Split(rendered, "\n")
-	plan := s.renderPlan(searchOverlayStyle())
-	startIdx, endIdx := plan.startIdx, plan.endIdx
-	next := startIdx
-	for i, line := range lines {
-		if next >= endIdx {
-			break
-		}
-		title, ok := searchRowTitle(line)
-		if !ok {
-			continue
-		}
-		want := s.results[next].Instance.Title
-		if title == want || strings.HasPrefix(title, want+" (") {
-			reg.Register(zones.OverlaySearchRow(next), layout.Rect{
-				X: origin.X, Y: origin.Y + i, W: width, H: 1,
-			})
-			next++
-		}
+	for idx := plan.startIdx; idx < plan.endIdx; idx++ {
+		reg.Register(zones.OverlaySearchRow(idx), layout.Rect{
+			X: origin.X, Y: origin.Y + firstRow + idx - plan.startIdx, W: width, H: 1,
+		})
 	}
-}
-
-// searchRowTitle parses a rendered search-result line down to its title text
-// (plus the optional " (branch)" suffix the caller strips by prefix match).
-// Result rows are the only lines that begin with a status glyph after the
-// border/padding, which is what distinguishes them from the query and hint
-// lines.
-func searchRowTitle(line string) (string, bool) {
-	plain := strings.Trim(xansi.Strip(line), "│")
-	// Two frame-padding cells, two row-indent cells, the blank status cell
-	// and its separator identify working rows without inventing a glyph.
-	if strings.HasPrefix(plain, "      ") {
-		title := strings.TrimPrefix(strings.TrimSpace(plain), "▸ ")
-		return title, title != ""
-	}
-	t := strings.TrimSpace(plain)
-	r, size := utf8.DecodeRuneInString(t)
-	if r != '●' && r != '○' && r != '◌' && r != '◆' && r != '▧' {
-		return "", false
-	}
-	t = strings.TrimLeft(t[size:], " ")
-	t = strings.TrimPrefix(t, "▸ ")
-	return t, true
 }
 
 // SetSelectedIndex moves the search selection onto the given result index

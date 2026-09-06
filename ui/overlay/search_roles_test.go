@@ -8,6 +8,7 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/theme"
@@ -41,6 +42,9 @@ func TestSearchLivenessRoles(t *testing.T) {
 							glyph = ""
 						}
 						plain := xansi.Strip(row)
+						if selected == 0 {
+							require.Contains(t, row, ui.SelectionMarker("▸ "))
+						}
 						if glyph == "" {
 							require.NotContains(t, plain, "●")
 							require.NotContains(t, plain, "○")
@@ -50,9 +54,7 @@ func TestSearchLivenessRoles(t *testing.T) {
 						} else {
 							require.Contains(t, row, lipgloss.NewStyle().Foreground(state.Color).Render(glyph))
 						}
-						title, ok := searchRowTitle(row)
-						require.True(t, ok)
-						require.Equal(t, "Result", title)
+						require.Contains(t, plain, "Result")
 					}
 				}
 			}
