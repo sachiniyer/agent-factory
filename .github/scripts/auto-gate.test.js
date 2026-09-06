@@ -3537,6 +3537,41 @@ test("a transient Codex failure alone arms degradation only after the head", asy
   assert.equal(autoGate.codexEvidence.isCodexUsageLimitArtifact({ body: `${CODEX_TRANSIENT_FAILURE} P2`, in_reply_to_id: 1 }), false);
 });
 
+test("automatic summary verdict closes a transient failure outage at the row time", () => {
+  const { aggregate, render } = require("./codex-outage.js");
+  const at = (minute) => `2026-09-06T13:${minute}:00Z`;
+  const failure = codexRateLimit(at("10"), CODEX_TRANSIENT_FAILURE);
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: at("20"), commentTime: at("40"),
+  });
+  summary.html_url = "https://github.com/sachiniyer/agent-factory/pull/3953#issuecomment-summary";
+  const collect = (artifact) => aggregate([{
+    number: 3953, head: { sha: HEAD_SHA }, merged_at: at("25"),
+    artifacts: [failure, artifact],
+  }], at("30"));
+  const episodes = collect(summary);
+  assert.equal(episodes.length, 1);
+  assert.equal(episodes[0].end, new Date(at("20")).toISOString());
+  assert.equal(episodes[0].recovery, summary.html_url);
+  assert.deepEqual(episodes[0].merged, []);
+  assert.match(render(episodes, at("30")), /availability — recovered/);
+
+  // An edit after the outage must not refresh a stale row. Only a completed,
+  // timestamped row for this head can recover; a future row is not evidence yet.
+  for (const options of [
+    { commitCell: `\`${OTHER_SHA.slice(0, 7)}\`` },
+    { status: "🔄 **Running**" },
+    { rowTime: null },
+    { rowTime: at("05") },
+    { rowTime: at("35") },
+  ]) {
+    const invalid = codexSummaryTable(HEAD_SHA, {
+      rowTime: at("20"), commentTime: at("40"), ...options,
+    });
+    assert.equal(collect(invalid).at(-1).end, null, JSON.stringify(options));
+  }
+});
+
 test("degraded evaluation writes outage duration to the Actions job summary", async () => {
   const core = fakeCore();
   let summary = "";

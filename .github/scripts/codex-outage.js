@@ -17,9 +17,14 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
     for (const artifact of pull.artifacts) {
       if (artifact.user?.login !== evidence.CODEX_REVIEWER) continue;
       const body = artifact.body || '';
-      const verdict = evidence.parseReviewedCommit(body);
+      const headVerdict = evidence.parseVerdictArtifact(artifact, pull.head.sha);
+      const verdict = evidence.parseReviewedCommit(body) || headVerdict;
       const limit = evidence.isCodexUsageLimitArtifact(artifact);
-      const at = (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at;
+      // Automatic reviews may recover only through a completed summary row.
+      // Its own time records recovery; later edits to the table do not.
+      const at = headVerdict?.kind === 'summary-row'
+        ? new Date(headVerdict.time).toISOString()
+        : (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at;
       if ((!verdict && !limit) || !Number.isFinite(time(at)) || time(at) > time(now) || time(at) < time(since)) continue;
       events.push({ time: at, verdict, url: artifact.html_url, body });
     }
