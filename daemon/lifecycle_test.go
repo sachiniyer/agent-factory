@@ -292,9 +292,9 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// for the same reason — the Add-project view a client builds out of the two
 	// must not have to wait on a probation it has no stake in.
 	"ListDirectory":           allowedDuringProbation,
-	"ListProjects":            allowedDuringProbation,
+	"ListOnComplete":          allowedDuringProbation, // Pure task constants; no manager or protected daemon state.
 	"ListPrograms":            allowedDuringProbation,
-	"ListOnComplete":          allowedDuringProbation,
+	"ListProjects":            allowedDuringProbation,
 	"ListTasks":               allowedDuringProbation,
 	"Ping":                    allowedDuringProbation,
 	"Preview":                 allowedDuringProbation,
