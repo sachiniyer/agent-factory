@@ -145,7 +145,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 			"the keys rejection must not point at the ignored config.json path")
 	})
 
-	t.Run("rejecting the TOML-only theme table points at config.toml", func(t *testing.T) {
+	t.Run("retired theme table names appearance", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", home)
 		repoRoot := t.TempDir()
@@ -153,8 +153,8 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "global setting")
-		assert.Contains(t, err.Error(), TomlConfigFileName)
+		assert.Contains(t, err.Error(), "retired")
+		assert.Contains(t, err.Error(), "appearance")
 		assert.NotContains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)),
 			"the theme rejection must not point at the ignored config.json path")
 	})

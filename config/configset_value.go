@@ -24,13 +24,6 @@ func canonicalizeConfigValue(key string, spec settableKeySpec, structured bool, 
 	if !structured {
 		return canonicalizeScalar(spec.kind, raw)
 	}
-	if key == "theme" && !strings.HasPrefix(strings.TrimSpace(raw), "{") {
-		var preset ThemeConfig
-		if err := preset.UnmarshalText([]byte(raw)); err != nil {
-			return "", "", err
-		}
-		return preset.Preset(), "theme = " + encodeTOMLString(preset.Preset()) + "\n", nil
-	}
 	return canonicalizeStructuredValue(key, raw)
 }
 
@@ -43,8 +36,7 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 }
 
 // canonicalizeStructuredValueAgainst is the global writer's locked variant.
-// A partial theme object overlays the palette that is current inside the file
-// lock, never an unrelated preset. Whole program-overrides maps preserve an
+// Whole program-overrides maps preserve an
 // omitted auto-detected default as an empty TOML tombstone so the loader cannot
 // seed that command back in after the user removed it.
 func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preserveBuiltInRemovals bool) (canonical, encoded string, err error) {
@@ -52,12 +44,6 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 		return "", "", fmt.Errorf("expected compact JSON for %s, got null", key)
 	}
 	holder := &Config{}
-	if key == "theme" {
-		holder.Theme = DefaultThemeConfig()
-		if current != nil {
-			holder.Theme = current.Theme
-		}
-	}
 	field, ok := writableConfigFieldByTomlKey(holder, key)
 	if !ok {
 		return "", "", fmt.Errorf("%q does not name a writable global config field", key)
@@ -79,23 +65,11 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 	}
 
 	target := field.Addr().Interface()
-	var decodedTheme themeConfigJSON
-	if key == "theme" {
-		// ThemeConfig implements encoding.TextUnmarshaler for preset strings.
-		// Decode custom JSON through a method-free alias so an object retains its
-		// established field-by-field shape instead of being routed to that scalar
-		// hook and rejected.
-		decodedTheme = themeConfigJSON(holder.Theme)
-		target = &decodedTheme
-	}
 	if err := decodeCompactJSON(key, raw, target); err != nil {
 		return "", "", err
 	}
 	if err := rejectStructuredNulls(key, raw); err != nil {
 		return "", "", err
-	}
-	if key == "theme" {
-		field.Set(reflect.ValueOf(ThemeConfig(decodedTheme)))
 	}
 	if err := validateStructuredConfigValue(key, field); err != nil {
 		return "", "", err
@@ -135,8 +109,6 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 	}
 	return canonical, encoded, nil
 }
-
-type themeConfigJSON ThemeConfig
 
 // rootAgentConfigJSON preserves JSON field presence while a structured value is
 // encoded. RootAgent.Enabled deliberately lacks omitempty for full Config
@@ -219,18 +191,6 @@ func writableConfigFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool)
 
 func validateStructuredConfigValue(key string, field reflect.Value) error {
 	switch key {
-	case "theme":
-		for i := range field.NumField() {
-			if !field.Type().Field(i).IsExported() {
-				continue
-			}
-			raw := strings.TrimSpace(field.Field(i).String())
-			name := structTagName(field.Type().Field(i).Tag.Get("toml"))
-			if !themeHexColorRE.MatchString(raw) {
-				return fmt.Errorf("theme.%s must be a #RRGGBB color, got %q", name, field.Field(i).String())
-			}
-			field.Field(i).SetString("#" + strings.ToUpper(raw[1:]))
-		}
 	case "program_overrides":
 		for agent, command := range field.Interface().(map[string]string) {
 			if err := ValidateProgramEnum("program_overrides key", "program_overrides key", agent, command); err != nil {

@@ -104,7 +104,6 @@ func TestNonRepoSharedKeysAreRejectedFromAnInRepoFile(t *testing.T) {
 	// A shaped TOML body per key. Tables need a literal, so they are spelled out
 	// rather than generated — and they are exactly the ones worth pinning.
 	bodies := map[string]string{
-		"theme":          "[theme]\nselected_fg = \"#ffffff\"\n",
 		"keys":           "[keys]\nquit = \"Q\"\n",
 		"root_agent":     "[root_agent]\nenabled = true\n",
 		"root_agents":    "[root_agents]\n\"/audit/probe\" = { program = \"claude\" }\n",

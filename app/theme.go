@@ -3,12 +3,11 @@ package app
 import (
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
-func applyTheme(cfg config.ThemeConfig) {
-	ui.ApplyTheme(cfg)
+func applyTheme() {
+	ui.ApplyTheme()
 	t := ui.CurrentTheme()
 	hooksOverlayStyle = ui.DialogStyle()
 	splitDividerStyle = lipgloss.NewStyle().

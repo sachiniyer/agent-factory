@@ -43,6 +43,16 @@ import (
 // This mirrors the error-propagation contract already adopted by
 // LoadRepoConfig, where only os.IsNotExist yields defaults.
 func LoadConfig() (*Config, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	// All successful normal paths converge here after releasing conversion locks,
+	// including a concurrent winner adopted by conversion or materialization.
+	return persistAppearanceMigration(cfg)
+}
+
+func loadConfig() (*Config, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config directory: %w", err)
@@ -388,12 +398,17 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 
 		legacyMetadata, _ := metadataForSource(data, prettyConfigPath, FormatJSON)
 		tomlBytes, err := marshalGlobalConfigTOML(cfg, legacyMetadata.shape)
+		if err == nil && len(appearanceMigrationKeys(legacyMetadata.shape)) > 0 {
+			tomlBytes, err = preserveJSONUnknownTOML(tomlBytes, legacyMetadata.shape)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
 		if err := locked.write(tomlBytes, 0644); err != nil {
 			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
 		}
+
+		warnAppearanceMigration(prettyConfigPath, appearanceMigrationKeys(legacyMetadata.shape), cfg.Appearance)
 
 		// Never overwrite an existing backup: a downgrade can regenerate a
 		// defaults config.json that a *second* conversion would otherwise

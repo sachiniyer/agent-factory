@@ -1,0 +1,6 @@
+# Global config: ~/.agent-factory/config.toml (or $AF_HOME/config.toml).
+# This setting is not accepted in a repository's .agent-factory/config.toml.
+# TUI appearance on next launch: "light", "dark", or "system" (default).
+# System follows terminal background, falling back to dark.
+# The browser has an independent Light / Dark / System header preference.
+appearance = "system"

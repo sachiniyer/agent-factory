@@ -187,7 +187,6 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
-	"theme":                   {structured: true},
 	"session_env_passthrough": {structured: true},
 	"root_agents":             {structured: true},
 	"root_agent":              {structured: true},
@@ -396,6 +395,9 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 // guarantees the written file still loads. Returns an actionable error for an
 // unknown key, a wrong-typed or invalid value, or an I/O failure.
 func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, err
+	}
 	if key == "auto_yes" {
 		return nil, RemovedAutoYesError()
 	}
@@ -458,6 +460,9 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 // A key that is settable but does not admit the personal layer (a global-only or
 // repo-contract key) is rejected with an actionable message, never written.
 func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, err
+	}
 	if key == "auto_yes" {
 		return nil, RemovedAutoYesError()
 	}
@@ -553,8 +558,7 @@ type scalarWrite struct {
 	// structured replaces a whole table/list value rather than one scalar line.
 	structured bool
 	// rawStructured retains the user's structured JSON until the global file
-	// lock is held. Theme omissions must merge with the palette current inside
-	// that lock, and default program-removal tombstones are encoded there too.
+	// lock is held, so program-removal tombstones use the current snapshot.
 	rawStructured string
 	// clear removes the key line instead of writing it. Set for an empty list
 	// value (`af config set cors_allowed_origins ""`): a nil/absent list and an
@@ -614,11 +618,7 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 		}
 	}
 	if w.structured {
-		if w.key == "theme" && !strings.HasPrefix(strings.TrimSpace(w.rawStructured), "{") {
-			w.canonical, w.encoded, err = canonicalizeConfigValue(w.key, settableKeySpec{}, true, w.rawStructured)
-		} else {
-			w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, before, true)
-		}
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, before, true)
 		if err != nil {
 			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
 		}

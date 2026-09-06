@@ -53,6 +53,10 @@ import (
 // The response type is the same either way, so the command's printing, --json
 // envelope, warnings and effect notice are one code path over both transports.
 func globalConfigSet(key, value string) (daemon.SetConfigValueResponse, error) {
+	if err := config.RetiredThemeKeyError(key); err != nil {
+		return daemon.SetConfigValueResponse{}, err
+	}
+
 	if !apiclient.IsRemoteTarget() {
 		return daemon.SetGlobalConfigValue(key, value)
 	}
@@ -92,6 +96,10 @@ func globalConfigSet(key, value string) (daemon.SetConfigValueResponse, error) {
 // removes BOTH storage spellings of whichever alias it is given, so there is no
 // skew spelling to choose between.
 func globalConfigUnset(key string) (daemon.UnsetConfigValueResponse, error) {
+	if err := config.RetiredThemeKeyError(key); err != nil {
+		return daemon.UnsetConfigValueResponse{}, err
+	}
+
 	if !apiclient.IsRemoteTarget() {
 		return daemon.UnsetGlobalConfigValue(key)
 	}

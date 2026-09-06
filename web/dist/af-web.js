@@ -17045,10 +17045,6 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
-  if (ev.type === "theme.changed") {
-    requestResync();
-    return;
-  }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();
     return;

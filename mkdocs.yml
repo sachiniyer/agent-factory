@@ -178,12 +178,13 @@ nav:
       - Design notes:
           - Interface design: design/interface-design.md
           - Interface style guide: design/style-guide.md
-          - Focused-session phone header evidence: assets/design/3967/README.md
           - Web recovery states: design/recovery-stills.md
           - TUI recovery states: design/tui-recovery-stills.md
           - TUI design roles: design/tui-design-a-stills.md
           - TUI overlays and density: design/tui-design-b-stills.md
           - TUI appearance: design/tui-design-c-stills.md
+          - Palette retirement play-test: assets/design/daemon-palette-retirement/report.md
+          - Focused-session phone header evidence: assets/design/3967/README.md
           - TUI daemon theme boundary: design/tui-theme-daemon-follow-up.md
           - TUI rewrite: design/tui-rewrite.md
           - Agent handoff: design/agent-handoff.md

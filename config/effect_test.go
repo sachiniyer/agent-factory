@@ -68,12 +68,6 @@ func TestKeyEffectClassClassifiesDottedLeavesByBase(t *testing.T) {
 	}
 }
 
-func TestThemeIsAppliedLiveToTheDaemonPaletteProjection(t *testing.T) {
-	if KeyEffectClass("theme") != EffectAppliedLive {
-		t.Fatalf("theme effect class = %v, want EffectAppliedLive", KeyEffectClass("theme"))
-	}
-}
-
 // TestEffectNoticeReportsAFailedListenerRebindAsDeferred is the #3397 contract: a
 // key whose live rebind FAILED is not live, whatever its effect class says, because
 // bind-new-before-close left the old listener serving. The notice must not

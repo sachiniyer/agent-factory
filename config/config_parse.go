@@ -51,6 +51,7 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents, warnS
 		return nil, err
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatJSON); err == nil {
+		config.Appearance = migratedAppearance(metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 		if warnRootAgents {
 			warnLegacyRootAgents(metadata.shape, prettyConfigPath)
@@ -66,13 +67,13 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents, warnS
 		known := knownJSONConfigKeys()
 		for key := range topLevel {
 			switch {
-			case key == "auto_yes":
+			case key == "auto_yes" || key == "theme" || key == "appearance":
 				// Compatibility warning emitted above. Do not follow it with the
 				// generic unknown-key warning for the same removed setting.
 			case key == "keys":
 				log.WarningLog.Printf("config %s: \"keys\" is ignored in config.json — the keymap is TOML-only; move it to a [keys] table in %s", prettyConfigPath, TomlConfigFileName)
 			case !known[key]:
-				log.WarningLog.Printf("config %s: unknown key %q is not recognized by this version of af and will be dropped on conversion to %s", prettyConfigPath, key, TomlConfigFileName)
+				log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, key)
 			}
 		}
 	}
@@ -108,16 +109,6 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
-	// A table is a custom palette, not the named default it overlays. Clear the
-	// preset metadata before decoding so a later save preserves the user's table
-	// rather than collapsing it to theme = "nord".
-	var shape map[string]any
-	if err := toml.Unmarshal(decodedData, &shape); err == nil {
-		if _, isTable := shape["theme"].(map[string]any); isTable {
-			config.Theme.preset = ""
-			config.Theme.explicitPreset = false
-		}
-	}
 	if err := toml.Unmarshal(decodedData, config); err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}
@@ -130,6 +121,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatTOML); err == nil {
 		applyGroupedConfigAliases(config, tables, metadata.shape)
+		config.Appearance = migratedAppearance(metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 		warnLegacyRootAgents(metadata.shape, prettyConfigPath)
 		warnLegacyConfigAliases(metadata.shape, prettyConfigPath, FormatTOML)
@@ -194,7 +186,7 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 	}
 	for _, keyErr := range strictErr.Errors {
 		key := keyErr.Key()
-		if removedAutoYesKeyPath(key) {
+		if removedAutoYesKeyPath(key) || (len(key) > 0 && key[0] == "theme") {
 			// Compatibility warning emitted by parseConfigTOML. Avoid a second,
 			// generic warning that loses the migration recipe.
 			continue
@@ -280,7 +272,6 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 
 	sanitizeLimitPatterns(config)
 	config.Appearance = NormalizeAppearance(config.Appearance)
-	sanitizeThemeColors(config, prettyConfigPath)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)
 	config.DetachKeys = sanitizeDetachKeys(config.DetachKeys, prettyConfigPath)

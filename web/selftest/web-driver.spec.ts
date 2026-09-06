@@ -1138,8 +1138,8 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
   await ctx.close();
 
   // The same decision can change while a tokenless client is already open: a
-  // live config apply may begin requiring tokens and publish theme.changed. The
-  // resulting palette 401 must return to a paste-token form, not preserve the
+  // live config apply may begin requiring tokens. A subsequent snapshot 401
+  // must return to a paste-token form, not preserve the
   // stale auth_required=false choice and offer an empty-credential retry loop.
   const transitionCtx = await browser.newContext();
   const live = await transitionCtx.newPage();

@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -268,13 +267,6 @@ func TestSetGlobalConfigValuePreservesUnknownStructuredMembers(t *testing.T) {
 		name, input, key, value, preserved string
 	}{
 		{
-			name:      "theme direct member",
-			input:     "[theme]\nfuture_policy = 'keep'\n",
-			key:       "theme",
-			value:     `{"accent":"#112233"}`,
-			preserved: "future_policy = 'keep'",
-		},
-		{
 			name:      "root agent direct member",
 			input:     "[root_agent]\nprogram = 'claude'\nfuture_policy = 'keep'\n",
 			key:       "root_agent",
@@ -313,8 +305,8 @@ func TestSetGlobalConfigValueRefusesToDiscardUnknownMemberOnShapeChange(t *testi
 		t.Fatal(err)
 	}
 	_, err = SetGlobalConfigValue("theme", "zenburn")
-	if err == nil || !strings.Contains(err.Error(), "theme.future_policy") {
-		t.Fatalf("shape-changing set error = %v, want unknown member path", err)
+	if err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("shape-changing set error = %v, want retirement diagnostic", err)
 	}
 	after, readErr := os.ReadFile(path)
 	if readErr != nil {
@@ -728,7 +720,6 @@ func TestSetGlobalConfigValueStillRejectsMachineManagedSchemaVersion(t *testing.
 // value and return exactly what CurrentValue will render on refresh.
 func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want := DefaultConfig()
-	want.Theme.Accent = "#112233"
 	if want.ProgramOverrides == nil {
 		want.ProgramOverrides = map[string]string{}
 	}
@@ -740,7 +731,6 @@ func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want.Keys = map[string]any{"quit": "Q"}
 
 	for _, key := range []string{
-		"theme",
 		"program_overrides",
 		"session_env_passthrough",
 		"limit_patterns",
@@ -772,59 +762,6 @@ func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
 				t.Fatalf("%s round-tripped as %q (ok=%v), want %q", key, roundTrip, ok, value)
 			}
 		})
-	}
-}
-
-func TestSetGlobalConfigValueThemePresetRoundTripsWithoutExpandingToATable(t *testing.T) {
-	path := writeTempConfig(t, "# custom theme\n[theme]\naccent = '#112233'\n")
-
-	res, err := SetGlobalConfigValue("theme", "zenburn")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Value != "zenburn" {
-		t.Fatalf("theme echo = %q, want zenburn", res.Value)
-	}
-	written, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(written), "theme = 'zenburn'") || strings.Contains(string(written), "[theme]") {
-		t.Fatalf("named preset did not replace the custom table as a scalar:\n%s", written)
-	}
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Theme.Preset() != "zenburn" {
-		t.Fatalf("loaded preset = %q, want zenburn", cfg.Theme.Preset())
-	}
-	if shown, ok := CurrentValue(cfg, "theme"); !ok || shown != "zenburn" {
-		t.Fatalf("theme editor value = %q (ok=%v), want zenburn", shown, ok)
-	}
-}
-
-func TestSetGlobalConfigValuePartialThemeMergesTheCurrentPalette(t *testing.T) {
-	writeTempConfig(t, "theme = 'zenburn'\n")
-	before, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := before.Theme
-	want.Accent = "#123456"
-	want.preset = ""
-	want.explicitPreset = false
-
-	res, err := SetGlobalConfigValue("theme", `{"accent":"#123456"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(after.Theme, want) {
-		t.Fatalf("partial theme edit reset omitted slots:\n got: %#v\nwant: %#v\necho: %s", after.Theme, want, res.Value)
 	}
 }
 
@@ -900,8 +837,8 @@ func TestSetGlobalConfigValueStructuredValidationRejectsBeforeWrite(t *testing.T
 	cases := []struct {
 		key, value, want string
 	}{
-		{"theme", `{"accent":"red"}`, "#RRGGBB"},
-		{"theme", `{"accent":null}`, "must not be null"},
+		{"theme", `{"accent":"red"}`, "retired"},
+		{"theme", `{"accent":null}`, "retired"},
 		{"program_overrides", `{"not-an-agent":"cmd"}`, "must be one of"},
 		{"session_env_passthrough", `["SECRET=value"]`, "exact POSIX name"},
 		{"limit_patterns", `{"claude":"("}`, "regular expression"},

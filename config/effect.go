@@ -80,10 +80,6 @@ var keyEffectClasses = map[string]EffectClass{
 	"docker.mount_agent_credentials": EffectAppliedLive,
 	"ssh.host_key_verification":      EffectAppliedLive,
 	"sandbox.ssh":                    EffectAppliedLive,
-	// The daemon exposes theme to browser renderers from its live config. An
-	// ApplyConfig request makes it live immediately; a direct file edit gets that
-	// request when the next TUI launches against an already-running daemon.
-	"theme": EffectAppliedLive,
 	// The network listener keys apply live since #2480 PR2: require_token /
 	// require_loopback_token / cors_allowed_origins are read per request
 	// (livePosture), and listen_addr / preview_listen_addr rebind in place

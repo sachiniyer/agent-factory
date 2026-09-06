@@ -112,18 +112,7 @@ func TestCurrentValueRoundTripsThroughConfigSet(t *testing.T) {
 			valueAfter := fieldAfter.Interface()
 
 			// Compare the Go values, not their rendering — see the doc comment.
-			// Theme's unexported preset metadata records whether the source used a
-			// named scalar or a custom table. Sending its displayed JSON deliberately
-			// chooses the table shape, so compare the nineteen user-facing slots; a
-			// named preset gets its own scalar-shape round-trip test.
 			equal := reflect.DeepEqual(valueBefore, valueAfter)
-			if e.Key == "theme" {
-				before := valueBefore.(ThemeConfig)
-				after := valueAfter.(ThemeConfig)
-				before.preset, before.explicitPreset = "", false
-				after.preset, after.explicitPreset = "", false
-				equal = reflect.DeepEqual(before, after)
-			}
 			if !equal {
 				t.Fatalf("saving %s untouched CHANGED it: the editor showed %q, and writing that back turned %#v into %#v.\n"+
 					"an editor must be able to save a field the user never touched without altering it", e.Key, shown, valueBefore, valueAfter)

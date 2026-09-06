@@ -295,9 +295,6 @@ type Config struct {
 	UpgradeClearUnverifiableArtifacts bool `json:"upgrade_clear_unverifiable_artifacts" toml:"upgrade_clear_unverifiable_artifacts"`
 	// Appearance is global-only; a cloned repository cannot choose TUI colours.
 	Appearance string `json:"-" toml:"appearance"`
-	// Theme is retained solely for the legacy daemon operation until #3936.
-	// Renderers ignore its presets and table; legacy JSON remains frozen.
-	Theme ThemeConfig `json:"-" toml:"theme"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
 	// titled "root" in-place at the repo root (the `af sessions create
@@ -640,7 +637,6 @@ func DefaultConfig() *Config {
 		UpdateChannel:          UpdateChannelStable,
 		SSHHostKeyVerification: SSHHostKeyStrict,
 		Appearance:             "system",
-		Theme:                  DefaultThemeConfig(),
 		WorktreeRoot:           WorktreeRootSibling,
 		BranchPrefix: func() string {
 			user, err := user.Current()

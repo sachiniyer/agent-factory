@@ -46,13 +46,14 @@ On the TUI, `app/home_view.go` composes rail, Automations, Projects, workspace,
 status bar and overlays; `app/render.go` places overlays and dividers;
 `app/help.go` provides the full keyboard reference. `ui/sidebar_render.go`,
 `ui/tabbed_window.go`, `ui/task_pane.go`, `ui/config_pane.go`, `ui/statusbar.go`
-and `ui/menu.go` establish the component inventory. `ui/theme.go` rebuilds
-lipgloss styles from the configured palette; `app/theme.go` propagates it.
+and `ui/menu.go` establish the component inventory. The pre-retirement
+`ui/theme.go` rebuilt styles from a configurable palette; P5 now uses fixed roles.
 `ui/tree/render.go` and web `status.ts` already agree on the no-glyph running
-state. P2/P5 must remove the existing palette knobs while replacing local colour
-literals. `config/theme.go` currently exposes Nord/Zenburn presets and a 19-slot
-custom table; `web/src/theme.ts` derives browser colours from that daemon palette.
-Those are cut, not extended. The new package is not a second active theme.
+state. P2/P5 replace local colour literals with fixed roles. The pre-retirement
+`config/theme.go` exposed Nord/Zenburn presets and a 19-slot custom table; the
+browser also derived colours from that shared palette. Both clients now select
+Light/Dark/System locally. The [#3936 contract](tui-theme-daemon-follow-up.md)
+covers the remaining shared config migration and RPC retirement.
 
 The [recorder documentation](../dev/demo-assets.md) identifies real UI and seeded
 agent stand-ins. The [style guide](style-guide.md) pairs specimens with those
@@ -333,8 +334,8 @@ P1 and the cold-reader walkthrough must check that disclosure remains discoverab
 
 | Cut | Evidence and argument | Retained route and acceptance |
 | --- | --- | --- |
-| Palette presets, custom colour table and serialized theme field | `config/theme.go` exposes `theme = "nord"`, `theme = "zenburn"` and a custom 19-colour `[theme]` table; the Config still gives that object a full editor row. It asks users to maintain design decisions the product should own. | Replace with Light / Dark / System in P2/P5. No colour keys or alternate route through CLI/assistant. Old colour settings are retired, not projected into the new palette. |
-| Daemon-derived per-token browser palette | `web/src/theme.ts` transforms the configurable daemon palette into many CSS variables. This adds overrides, contrast repair and extra shades to a choice that should only select a mode. | Fixed generated light/dark values. System chooses one of them; remove palette projection and rename Auto to System. |
+| Palette presets, custom colour table and serialized theme field | Before retirement, `config/theme.go` exposed Nord/Zenburn presets and a custom 19-colour table with a Config editor row. These are legacy migration inputs only under the [#3936 contract](tui-theme-daemon-follow-up.md). That asked users to maintain design decisions the product should own. | Replace with Light / Dark / System in P2/P5. No colour keys or alternate route through CLI/assistant. Old colour settings are retired, not projected into the new palette. |
+| Daemon-derived per-token browser palette | Before retirement, `web/src/theme.ts` transformed the configurable daemon palette into many CSS variables, adding overrides, contrast repair and extra shades to a mode choice. | Fixed generated light/dark values. System chooses one of them; remove palette projection and rename Auto to System. |
 | Mechanical churn detail on every unselected session | Every demo row repeats “pane changed” and truncates the useful tail. It spends a line without explaining the next action. | Selected row/detail view retains reason, time and full failure. Scanning still distinguishes all six states. |
 | Persistent row-level destructive buttons | Tasks repeats Remove beside every row; session archive/kill icons occupy the selected row. Destructive emphasis interrupts ordinary selection. | Selected-item actions menu, keyboard shortcuts and target-specific confirmation; no lifecycle operation removed. |
 | Equal-weight default fields in create | Program/backend/account inherit defaults but receive three full input rows in the still. Prompt is the actual new work. | Compact explicit default summary with edit disclosure; account ambiguity and non-default choices always visible. |
@@ -346,7 +347,7 @@ P1 and the cold-reader walkthrough must check that disclosure remains discoverab
 
 | Cut | Evidence and argument | Retained route and acceptance |
 | --- | --- | --- |
-| Custom theme slots and preset selection | `ThemeConfig` and `ui.ApplyTheme` allow background/foreground variants, accent, success, warning, error, info, purple, selection and four pane-border overrides. A smaller operator surface does not need a colour configuration language. | Remove the custom table and Nord/Zenburn choices in P5; expose only Light / Dark / System. Use terminal detection for System and dark if unavailable. No colour config keys remain. |
+| Custom theme slots and preset selection | The pre-retirement `ThemeConfig` and `ui.ApplyTheme` allowed background/foreground variants, accent, success, warning, error, info, purple, selection and four pane-border overrides. A smaller operator surface does not need a colour configuration language. | Remove the custom table and Nord/Zenburn choices in P5; expose only Light / Dark / System. Use terminal detection for System and dark if unavailable. No colour config keys remain. |
 | Always-reserved empty Automations block | The poster spends several rows on zero tasks and a clipped creation hint while sessions are the operator's work. | Tasks remains reachable through its current management key and help; nonempty/failing task summaries can be disclosed. |
 | Always-reserved single-project block | One project in the poster occupies another bottom rail section. It adds no choice until switching is requested. | Project name in context header and project picker; multiple projects remain searchable and switchable. |
 | Repeated preview/origin/tab prose | Poster header repeats Agent and original-session identity across a long title. | Session · Tab · Preview in the common frame; origin available in details when different. |
