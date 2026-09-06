@@ -500,11 +500,12 @@ jobs:
   # Every way of NOT knowing the diff answers "run it". A skipped expensive job is
   # a hole; a needlessly-run one is just slow.
   web-selftest-scope:
-    name: Web selftest scope
+    name: Web and performance scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       run: ${{ steps.scope.outputs.run }}
+      perf_run: ${{ steps.scope.outputs.perf_run }}
     steps:
       # depth 2 is exactly what the diff below needs and no more: on a
       # pull_request event the checked-out HEAD is refs/pull/N/merge, whose first
@@ -524,6 +525,7 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
             echo "::notice::event is ${GITHUB_EVENT_NAME}, not pull_request — running the web selftest."
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "perf_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -535,6 +537,7 @@ jobs:
           if ! base="$(git rev-parse --verify --quiet HEAD^1)"; then
             echo "::warning::no base parent on HEAD — running the web selftest rather than guessing."
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "perf_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # --no-renames is load-bearing, not stylistic. With rename detection on,
@@ -547,6 +550,7 @@ jobs:
           # for a pure rename, `--no-renames` prints both.
           git diff --no-renames --name-only "$base" HEAD > changed-paths.txt
           node .github/scripts/web-selftest-scope.js changed-paths.txt >> "$GITHUB_OUTPUT"
+          node .github/scripts/web-selftest-scope.js changed-paths.txt perf >> "$GITHUB_OUTPUT"
 
   # The web client's acceptance proof (#1592 Phase 5 PR6, docs/dev/web-selftest.md),
   # called as a reusable workflow so that Build can list it in `needs` — a job in
@@ -566,6 +570,26 @@ jobs:
     needs: [web-selftest-scope]
     if: needs.web-selftest-scope.outputs.run == 'true'
     uses: ./.github/workflows/web-selftest.yml
+
+  perf:
+    name: Performance and visual baselines
+    needs: [web-selftest-scope]
+    if: needs.web-selftest-scope.outputs.perf_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: Recompute budgets and pixel-diff demo stills
+        timeout-minutes: 35
+        run: make perf-container
+      - name: Upload samples and visual diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baselines
+          path: web/test-results/
+          if-no-files-found: warn
+          retention-days: 14
 
   # We cross-compile and ship darwin/arm64 and darwin/amd64 binaries from
   # stable-release.yml, but every job in this repo ran on ubuntu — so no test had
@@ -652,11 +676,11 @@ jobs:
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
     #
-    # `skipped` is deliberately NOT a failure here: web-selftest skips whenever its
-    # scope job says the PR cannot reach the web client, and that is the normal
+    # `skipped` is deliberately NOT a failure here: web-selftest and perf skip
+    # whenever the scope job says the PR is outside their watched paths, a normal
     # answer on most PRs. A skipped *scope* job would be a different matter, but it
     # has no `if:` and so only skips when the run itself is going away.
-    needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest]
+    needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest, perf]
     if: always()
     steps:
       - name: Gate on the jobs this check stands in for
@@ -666,7 +690,7 @@ jobs:
           # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
           # parsed as subtraction, so the dotted form silently yields an empty string.
           echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }} registry-free=${{ needs['registry-free'].result }}"
-          echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }}"
+          echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }} perf=${{ needs.perf.result }}"
           exit 1
 
       - uses: actions/checkout@v6

@@ -168,6 +168,7 @@ nav:
       - Surface parity: dev/surface-parity.md
       - Web client selftest: dev/web-selftest.md
       - Manual TUI testing: dev/tui-manual-testing.md
+      - Performance baselines: dev/perf-baselines.md
       - Demo assets: dev/demo-assets.md
       - Release process: dev/release-process.md
       - Release testing plan: dev/release-testing-plan.md
