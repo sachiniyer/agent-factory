@@ -165,7 +165,8 @@ You can still do it by hand, and af runs exactly these:
 Those variables do not all have the same shape, and mixing them up is the easy
 mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.
 GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it, so the account
-directory af prints holds the credential at <dir>/.gemini/gemini-credentials.json.
+directory af prints holds the credential at <dir>/.gemini/oauth_creds.json or
+<dir>/.gemini/gemini-credentials.json.
 Point the variable at the printed directory, never at a .gemini path inside it.
 
 Select an account for a session with:
