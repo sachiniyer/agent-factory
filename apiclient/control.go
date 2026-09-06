@@ -289,7 +289,9 @@ func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsRespon
 }
 
 // RegisterAccount creates an account's credential directory on the daemon host
-// without logging in. HTTP twin of RegisterAccount.
+// without logging in. The config pane calls this for remote targets (#3950);
+// unlike AccountLogin, registration needs no terminal on the daemon host.
+// This is the deliberate caller that was missing when #3949 removed the wrapper.
 func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {
 	var resp daemon.RegisterAccountResponse
 	if err := c.call("RegisterAccount", daemon.RegisterAccountRequest{Agent: agent, Name: name}, &resp); err != nil {
@@ -298,21 +300,9 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 	return resp, nil
 }
 
-// AccountLogin opens an agent's own login flow in a bare tmux session scoped to
-// one account, registering the account if needed. HTTP twin of AccountLogin.
-//
-// The response names a tmux session and socket on the DAEMON'S host, which is
-// the honest shape of the thing: the flow runs where the credential directory
-// is. A client on another machine can read the outcome through this; it cannot
-// attach to the pane, and `af accounts login` refuses a remote daemon for that
-// reason rather than pretending otherwise.
-func (c *Client) AccountLogin(agent, name string) (daemon.AccountLoginResponse, error) {
-	var resp daemon.AccountLoginResponse
-	if err := c.call("AccountLogin", daemon.AccountLoginRequest{Agent: agent, Name: name}, &resp); err != nil {
-		return daemon.AccountLoginResponse{}, err
-	}
-	return resp, nil
-}
+// There is deliberately no AccountLogin wrapper (#3949). Both the TUI Accounts
+// section and CLI refuse remote login: its tmux terminal lives on the daemon's
+// host. Local login uses the gob control client; the web calls HTTP directly.
 
 // There is deliberately no ListProjects here. The web reads the registry over HTTP
 // (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),

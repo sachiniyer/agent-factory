@@ -726,6 +726,8 @@ func (c *ConfigPane) renderHints() string {
 		verb := "↵ log in"
 		if account.Register {
 			verb = "↵ register"
+		} else if c.accounts.loginRefusal != "" {
+			verb = "login unavailable"
 		}
 		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
 			{text: "↑/↓ move", drop: 2},

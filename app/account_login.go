@@ -32,9 +32,9 @@ import (
 // The daemon seams, as vars so the TUI tests can drive every branch without a
 // daemon. Same shape as spawnConfigAgent/reapConfigAgent above.
 var (
-	listAccountsForPane = daemon.ListAccounts
-	registerAccount     = daemon.RegisterAccount
-	startAccountLogin   = daemon.AccountLogin
+	listAccountsForPane = targetedListAccountsForPane
+	registerAccount     = targetedRegisterAccount
+	startAccountLogin   = targetedAccountLogin
 )
 
 // SetAccountSeamsForTest swaps the three daemon calls behind the Accounts
@@ -62,6 +62,7 @@ func SetAccountSeamsForTest(
 // operator who came to change a key should not be turned away because a daemon
 // call failed.
 func (m *home) loadAccountsIntoPane() {
+	m.configPane.SetAccountLoginRefusal(remoteAccountLoginRefusal())
 	resp, err := listAccountsForPane(daemon.ListAccountsRequest{})
 	if err != nil {
 		log.WarningLog.Printf("accounts: could not read the registered accounts for the config pane: %v", err)

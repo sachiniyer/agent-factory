@@ -83,7 +83,8 @@ type accountsSection struct {
 	// unavailable is why the accounts could not be read, rendered in place of the
 	// rows. A section that silently shows nothing is indistinguishable from "you
 	// have no accounts", and those need different actions from the operator.
-	unavailable string
+	unavailable  string
+	loginRefusal string
 
 	// registering is the inline name field for a "+ register" row. It is a
 	// separate field from the config pane's value input on purpose: sharing one
@@ -178,6 +179,12 @@ func (c *ConfigPane) SetAccountStatus(text string, isError bool) {
 	c.accounts.statusIsError = isError
 }
 
+// SetAccountLoginRefusal explains why login is unavailable on the attached host.
+// Registration stays available; the selected account shows this in place.
+func (c *ConfigPane) SetAccountLoginRefusal(reason string) {
+	c.accounts.loginRefusal = reason
+}
+
 // accountRows renders the section into the pane's flattened row list. It is
 // appended AFTER the config tiers: the config keys are what the overlay is for,
 // and a credential section above them would push them down the screen.
@@ -211,6 +218,9 @@ func (c *ConfigPane) handleAccountKey(msg tea.KeyMsg) bool {
 	case "enter":
 		if account.Register {
 			c.beginRegister(account.Agent)
+			return true
+		}
+		if c.accounts.loginRefusal != "" {
 			return true
 		}
 		// The login is a full-screen terminal handover the host performs, so the
@@ -335,8 +345,12 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 	// The selected row explains itself, in the same place a config row's purpose
 	// goes. What it must convey is that af runs the AGENT's flow and never sees
 	// the credential — the property the whole feature rests on.
-	out.WriteString(c.wrapIndented(accountRowPurpose(account), configPurposeStyle))
-	if account.RegistrationOnly {
+	if c.accounts.loginRefusal != "" {
+		out.WriteString(c.wrapIndented(c.accounts.loginRefusal, configErrorStyle))
+	} else {
+		out.WriteString(c.wrapIndented(accountRowPurpose(account), configPurposeStyle))
+	}
+	if account.RegistrationOnly && c.accounts.loginRefusal == "" {
 		out.WriteString(c.wrapIndented(
 			"A session cannot be scoped to a "+account.Agent+" account yet; registering and logging in work.",
 			configHintStyle))
