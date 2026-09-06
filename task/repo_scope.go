@@ -43,13 +43,8 @@ type repoResolution struct {
 	known bool
 }
 
-// newRepoScope canonicalizes the target side.
-//
-// repoRoot is normally a main-worktree root, but a bare repository has no main
-// worktree and RepoContext.Root remains the requesting checkout (#3358). Resolve
-// an existing root through Git before hashing; a caller that passes something
-// unavailable still degrades to the raw path equality this filter used before,
-// never to "no tasks".
+// newRepoScope uses Git identity or the symlink-resolved display fallback,
+// retaining the raw target hash when filesystem resolution fails.
 func newRepoScope(repoRoot string) *repoScope {
 	return newRepoScopeWithID(repoRoot, config.RepoIDForPath(repoRoot))
 }
@@ -124,6 +119,8 @@ func (s *repoScope) resolve(projectPath string) repoResolution {
 // until restart and destroys nothing.
 var projectIDMemo sync.Map // map[string]string
 
+// resolveProjectID uses ResolveProjectPath for display identity and caches only
+// results with a proven repository root, never unresolved fallback hashes.
 func resolveProjectID(projectPath string) string {
 	if cached, ok := projectIDMemo.Load(projectPath); ok {
 		return cached.(string)

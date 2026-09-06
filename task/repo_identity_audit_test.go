@@ -46,6 +46,9 @@ func TestProjectPathIdentityAudit(t *testing.T) {
 			t.Run(shape.name+"/"+spelling.name, func(t *testing.T) {
 				path := shape.path + spelling.suffix
 				targetID, displayID, writerID := h(path), h(filepath.Clean(path)), ""
+				if shape.name == "non-git" || shape.name == "non-git-symlink" {
+					targetID, displayID = h(plain), h(plain)
+				}
 				if shape.projectRoot != "" {
 					displayID = h(shape.projectRoot)
 				}
@@ -83,4 +86,43 @@ func TestProjectPathIdentityAudit(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestProjectPathFallbackDisplayDoesNotMigrate(t *testing.T) {
+	base := testguard.CanonicalTempDir(t)
+	plain, alias := filepath.Join(base, "plain"), filepath.Join(base, "alias")
+	require.NoError(t, os.Mkdir(plain, 0755))
+	require.NoError(t, os.Symlink(plain, alias))
+	oldID := config.RepoIDFromRoot(alias)
+	tasksPath := setupTestTasks(t, []Task{
+		{ID: "legacy01", Name: "legacy", ProjectPath: alias},
+		{ID: "retain01", Name: "retained", ProjectPath: alias, RepoID: oldID},
+	})
+	// setupTestTasks writes the old array format; finish its schema upgrade
+	// before measuring whether display resolution changes any stored identity.
+	_, err := LoadTasks()
+	require.NoError(t, err)
+	before, err := os.ReadFile(tasksPath)
+	require.NoError(t, err)
+	got, err := LoadTasksForRepo(plain)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "legacy01", got[0].ID)
+	assert.Empty(t, got[0].RepoID, "display must not stamp an invented binding")
+	retained, err := LoadTasksForKnownRepo(alias, oldID)
+	require.NoError(t, err)
+	// Exact path matching keeps the legacy row addressable too.
+	require.Len(t, retained, 2)
+	after, err := os.ReadFile(tasksPath)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "display cannot rewrite retained IDs or legacy rows")
+
+	// Fallbacks must be recomputed: removing an alias restores its historical
+	// unavailable-path hash rather than retaining a cached directory identity.
+	assert.Equal(t, config.RepoIDFromRoot(plain), resolveProjectID(alias))
+	_, cached := projectIDMemo.Load(alias)
+	assert.False(t, cached)
+	require.NoError(t, os.Remove(alias))
+	assert.Equal(t, oldID, resolveProjectID(alias))
+	assert.Equal(t, oldID, newRepoScope(alias).id)
 }

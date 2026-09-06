@@ -18,8 +18,12 @@ func TestProjectPathFallbackSpelling(t *testing.T) {
 	require.NoError(t, os.Symlink(plain, alias))
 	for _, path := range []string{plain, plain + "/./", plain + "/", alias, alias + "/./", alias + "/", filepath.Join(base, "missing"), base + "/missing/./"} {
 		t.Run(path, func(t *testing.T) {
-			assert.Equal(t, RepoIDFromRoot(path), RepoIDForPath(path))
-			assert.Equal(t, ResolvedProject{ID: RepoIDFromRoot(filepath.Clean(path))}, ResolveProjectPath(path))
+			target, recorded := path, filepath.Clean(path)
+			if path == plain || path == plain+"/./" || path == plain+"/" || path == alias || path == alias+"/./" || path == alias+"/" {
+				target, recorded = plain, plain
+			}
+			assert.Equal(t, RepoIDFromRoot(target), RepoIDForPath(path))
+			assert.Equal(t, ResolvedProject{ID: RepoIDFromRoot(recorded)}, ResolveProjectPath(path))
 		})
 	}
 }
