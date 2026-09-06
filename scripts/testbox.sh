@@ -23,6 +23,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/container/playtest-lifetime.sh
+source "$REPO_ROOT/scripts/container/playtest-lifetime.sh"
 IMAGE="${AF_TESTBOX_IMAGE:-agent-factory-testbox}"
 # The web-driver-selftest uses a SEPARATE, heavier image (Go + Node + Chromium);
 # see scripts/container/Dockerfile.web-selftest. Kept distinct so it never bloats
@@ -473,11 +475,14 @@ fix_cache_perms() {
 # (#1596, regression of the #1498 opt-out). Override to `true` to exercise the
 # real auto-update path in the sandbox.
 start_playtest_detached() {
-    local rc=0
+    local rc=0 lifetime
+    lifetime="$(playtest_lifetime "${AF_PLAYTEST_MAX_LIFETIME:-}")" || return
+    reap_playtest_sandboxes
     watch_image_start "$PLAYTEST_NAME"
     engine_run -d \
         "${RUN_FLAGS[@]}" \
         --name "$PLAYTEST_NAME" \
+        -e "AF_PLAYTEST_MAX_LIFETIME=$lifetime" \
         -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
         -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
         -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \
@@ -490,8 +495,10 @@ start_playtest_detached() {
 # ensure_playtest_up — start the detached sandbox if it is not already
 # running, then block until every driver prerequisite has been scaffolded.
 ensure_playtest_up() {
+    reap_playtest_sandboxes
     if ! "$ENGINE" inspect -f '{{.State.Running}}' "$PLAYTEST_NAME" 2>/dev/null | grep -q true; then
-        "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
+        # A same-name container is never grounds for deletion. Docker reports
+        # collisions; only the age-scoped labelled sweep may reap old runs.
         build_image
         fix_cache_perms
         echo "testbox: starting sandbox '$PLAYTEST_NAME' (af builds on boot)..." >&2
