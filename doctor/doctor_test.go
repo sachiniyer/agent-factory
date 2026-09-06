@@ -34,7 +34,7 @@ import (
 // daemon, the real ~/.agent-factory, or the developer's tmux server.
 
 func TestMain(m *testing.M) {
-	playtestDockerOutput = func(context.Context, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
+	playtestEngineOutput = func(context.Context, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
 	// server (doctor tests drive real tmux via IsolateTmux).

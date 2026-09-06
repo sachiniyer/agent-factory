@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -62,10 +64,10 @@ func TestDoctorStrandedSandboxesReadOnly(t *testing.T) {
 	young := sandboxFixture(now.Add(-time.Minute))
 	unlabelled := old
 	unlabelled.Config.Labels = nil
-	original := playtestDockerOutput
-	t.Cleanup(func() { playtestDockerOutput = original })
+	original := playtestEngineOutput
+	t.Cleanup(func() { playtestEngineOutput = original })
 	calls := 0
-	playtestDockerOutput = func(ctx context.Context, args ...string) ([]byte, error) {
+	playtestEngineOutput = func(ctx context.Context, args ...string) ([]byte, error) {
 		_, bounded := ctx.Deadline()
 		require.True(t, bounded)
 		calls++
@@ -82,7 +84,7 @@ func TestDoctorStrandedSandboxesReadOnly(t *testing.T) {
 		}
 	}
 	report := &Report{}
-	checkStrandedPlaytestSandboxes(&scanContext{opts: Options{Fix: true}, snapAt: now}, report)
+	checkStrandedPlaytestSandboxes(report)
 	findings := findByCheck(report, "stranded-playtest-sandbox")
 	require.Len(t, findings, 1)
 	require.Contains(t, findings[0].Detail, "abc123")
@@ -106,14 +108,60 @@ func TestDoctorSandboxInspectionFailures(t *testing.T) {
 		{"missing inspect entries", "null", nil, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			original := playtestDockerOutput
-			t.Cleanup(func() { playtestDockerOutput = original })
-			playtestDockerOutput = func(context.Context, ...string) ([]byte, error) { return []byte(tt.out), tt.err }
+			original := playtestEngineOutput
+			t.Cleanup(func() { playtestEngineOutput = original })
+			playtestEngineOutput = func(context.Context, ...string) ([]byte, error) { return []byte(tt.out), tt.err }
 			report := &Report{}
-			checkStrandedPlaytestSandboxes(&scanContext{snapAt: time.Now()}, report)
+			checkStrandedPlaytestSandboxes(report)
 			require.Equal(t, tt.incomplete, len(report.Incomplete) > 0)
 			require.Empty(t, report.Findings)
 			require.Zero(t, report.UnresolvedCount())
+		})
+	}
+}
+
+func TestDoctorSandboxWithoutProcessSnapshot(t *testing.T) {
+	original := playtestEngineOutput
+	t.Cleanup(func() { playtestEngineOutput = original })
+	playtestEngineOutput = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] == "ps" {
+			return []byte("abc123\n"), nil
+		}
+		return json.Marshal([]playtestContainer{sandboxFixture(time.Now().Add(-7 * time.Hour))})
+	}
+	report := &Report{}
+	// A failed process scan leaves snapAt zero, but container inspection is
+	// independent and must still diagnose expired sandboxes.
+	checkStrandedPlaytestSandboxes(report)
+	require.Len(t, findByCheck(report, "stranded-playtest-sandbox"), 1)
+}
+
+func TestDoctorSandboxContainerEngineSelection(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		docker bool
+		podman bool
+		want   string
+	}{
+		{"docker preferred", true, true, "docker"},
+		{"podman fallback", false, true, "podman"},
+		{"neither installed", false, false, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			t.Setenv("PATH", bin)
+			for engine, present := range map[string]bool{"docker": tt.docker, "podman": tt.podman} {
+				if present {
+					require.NoError(t, os.WriteFile(filepath.Join(bin, engine), []byte("#!/bin/sh\nprintf '%s' '"+engine+"'\n"), 0o700))
+				}
+			}
+			out, err := defaultPlaytestEngineOutput(context.Background(), "ps", "-aq")
+			if tt.want == "" {
+				require.ErrorIs(t, err, exec.ErrNotFound)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.want, string(out))
+			}
 		})
 	}
 }
