@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -326,15 +328,23 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 // focused, Esc returns to the tree, and e opens/closes the hooks overlay.
 func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	eh := newE2EHarness(t)
+	// Exercise macOS's symlinked temp-root shape on every platform.
+	linkedRoot := filepath.Join(t.TempDir(), "linked-repo")
+	require.NoError(t, os.Symlink(eh.home.repoRoot, linkedRoot))
+	eh.home.repoRoot = linkedRoot
 	alpha := eh.addStartedInstance("alpha")
 	// This is a healthy-workspace test. The harness default deliberately fails
-	// snapshots; once the 750ms poll fires that correctly shows daemon recovery.
+	// snapshots; sustained poll failures correctly show daemon recovery.
 	// Return a frozen snapshot, never read the live model from the fetch goroutine.
 	snapshot := daemon.SnapshotResponse{Instances: []session.InstanceData{alpha.ToInstanceData()}}
 	eh.home.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return snapshot, nil }
 	// The same poll reloads tasks from disk. Persist the rail fixture so it cannot
 	// disappear mid-focus-cycle, and let the poll populate the task editor too.
-	eh.home.repoID = config.RepoIDFromRoot(eh.home.repoRoot)
+	// Match production's resolved RepoContext.ID, not a hash of the raw path:
+	// macOS temp paths can name /var while Git resolves them under /private/var.
+	repo, err := config.RepoFromPath(eh.home.repoRoot)
+	require.NoError(t, err)
+	eh.home.repoID = repo.ID
 	require.NoError(t, task.AddTask(task.Task{
 		ID: "layout-task", Name: "Layout task", Prompt: "Check the layout",
 		CronExpr: "0 3 * * *", ProjectPath: eh.home.repoRoot, Program: "claude",
