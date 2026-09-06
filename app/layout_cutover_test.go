@@ -9,7 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -323,8 +326,25 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 // focused, Esc returns to the tree, and e opens/closes the hooks overlay.
 func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	eh := newE2EHarness(t)
-	eh.home.store.SetTasks([]task.Task{{ID: "layout-task", Name: "Layout task"}})
-	eh.addStartedInstance("alpha")
+	alpha := eh.addStartedInstance("alpha")
+	// This is a healthy-workspace test. The harness default deliberately fails
+	// snapshots; once the 750ms poll fires that correctly shows daemon recovery.
+	// Return a frozen snapshot, never read the live model from the fetch goroutine.
+	snapshot := daemon.SnapshotResponse{Instances: []session.InstanceData{alpha.ToInstanceData()}}
+	eh.home.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return snapshot, nil }
+	// The same poll reloads tasks from disk. Persist the rail fixture so it cannot
+	// disappear mid-focus-cycle, and let the poll populate the task editor too.
+	eh.home.repoID = config.RepoIDFromRoot(eh.home.repoRoot)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "layout-task", Name: "Layout task", Prompt: "Check the layout",
+		CronExpr: "0 3 * * *", ProjectPath: eh.home.repoRoot, Program: "claude",
+	}))
+	// Exercise the poll before any timing-dependent UI steps, so a fast run
+	// cannot conceal an unstubbed fetch or an incomplete persisted fixture.
+	_, _ = eh.home.Update(eh.home.fetchSnapshotCmd()())
+	require.False(t, eh.home.snapshotUnavailable)
+	require.Same(t, alpha, eh.home.store.GetInstanceByTitle("alpha"))
+	require.Equal(t, 1, eh.home.store.NumTasks())
 	eh.home.sidebar.SetSelectedInstance(0)
 	eh.start()
 
@@ -351,10 +371,17 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	assert.False(t, managerFocused,
 		"focusing the section must not focus the manager — it opens as an overlay")
 
-	// Enter opens the tasks overlay; Esc closes it (manager focus released).
+	// Enter opens the selected task's editor. Esc returns to the list, then
+	// another Esc closes the overlay (manager focus released).
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	eh.waitUntil(e2eAsyncTimeout, "Enter opens the tasks overlay", func() bool {
 		return eh.homeState() == stateTasks
+	})
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	eh.waitUntil(e2eAsyncTimeout, "Esc returns from the task editor to its list", func() bool {
+		var editing bool
+		eh.query(func(h *home) { editing = h.automations.TaskPane().IsEditing() })
+		return !editing
 	})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	eh.waitUntil(e2eAsyncTimeout, "Esc closes the tasks overlay", func() bool {
