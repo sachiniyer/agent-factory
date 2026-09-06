@@ -556,6 +556,7 @@ export function currentMode(): ThemeMode {
 
 function applyCurrentMode(): void {
   const root = document.documentElement;
+  for (const screen of document.querySelectorAll(".af-recovery")) screen.setAttribute("data-af-theme", currentMode());
   for (const [name, value] of Object.entries(activeThemes[currentMode()].tokens)) root.style.setProperty(name, value);
 }
 

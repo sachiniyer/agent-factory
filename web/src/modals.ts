@@ -1,3 +1,4 @@
+import { mutationNotice } from "./recovery.js";
 // The web client's modal overlays (#1592 Phase 5 PR5): the new-session form, the
 // send-prompt box, and the kill/archive confirms — the write surface that
 // completes the v1 loop (list → attach → type → create/kill). They mirror the
@@ -59,7 +60,7 @@ export function modalChrome(opts: {
   errorLine: HTMLElement;
 } {
   const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
+  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
   errorLine.hidden = true;
 
   const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
@@ -100,7 +101,7 @@ export function modalChrome(opts: {
     },
     setError(msg: string | null) {
       if (msg) {
-        errorLine.textContent = msg;
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
       } else {
         errorLine.textContent = "";
