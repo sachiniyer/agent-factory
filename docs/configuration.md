@@ -17,7 +17,7 @@ Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you 
 
 You can also read and write config from the CLI. Bare `af config get <key>` / `af config list` read the current repository's effective config; outside Git they fall back to global values. Add `--repo <repository-path>` to inspect another repository, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --repo . --explain` show the source of one merged-table leaf. `--project` remains accepted as a deprecated read alias. The repository path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
 
-`af config set <key> <value>` writes any global config key **in place**, preserving unrelated comments and ordering and validating the value before it writes. Scalars use their ordinary text form. Tables and the `session_env_passthrough` list use the same compact JSON shown by `af config get` and the two config panes, for example `af config set keys '{"quit":"Q"}'`; `theme` also accepts the named `nord` and `zenburn` presets. `program_overrides` and `limit_patterns` retain their convenient dotted single-entry forms, while `network.cors_allowed_origins` and `limit_account_candidates` remain comma-separated lists. The canonical network spellings are `network.listen_addr`, `network.preview_listen_addr`, `network.require_token`, `network.require_loopback_token`, and `network.cors_allowed_origins`; the old flat spellings `listen_addr`, `preview_listen_addr`, `require_token`, `require_loopback_token`, and `cors_allowed_origins` remain permanent TOML/CLI aliases and the permanent JSON spellings. The grouped spellings `docker.mount_agent_credentials`, `ssh.host_key_verification`, and `sandbox.ssh` are canonical too; their old flat spellings remain permanent aliases, and if both forms occur in TOML the grouped value wins. Without `--project`, `set` edits the global config; with `--project <id-or-path>` it writes a permitted personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. A global write uses the same apply-on-save path as the TUI and web panes: most keys apply to the running daemon with no session loss, while each command prints the exact notice for values that wait for the next daemon or `af` launch. A `--project` write and a raw hand-edit are read the next time the relevant operation resolves that project's config. Both `set` and `unset` check the rewrite before saving it: the edited file must still load, and it must still mean what it meant — a rewrite that would move any value other than the key you named is refused, naming that value, with nothing written. That matters for a multiline value such as an `on_archive_command` shell script, whose text can legitimately contain a line shaped like `key = value` or `[section]`; such lines are string contents and are never edited (#3662).
+`af config set <key> <value>` writes any global config key **in place**, preserving unrelated comments and ordering and validating the value before it writes. Scalars use their ordinary text form. Tables and the `session_env_passthrough` list use the same compact JSON shown by `af config get` and the two config panes, for example `af config set keys '{"quit":"Q"}'`. `program_overrides` and `limit_patterns` retain their convenient dotted single-entry forms, while `network.cors_allowed_origins` and `limit_account_candidates` remain comma-separated lists. The canonical network spellings are `network.listen_addr`, `network.preview_listen_addr`, `network.require_token`, `network.require_loopback_token`, and `network.cors_allowed_origins`; the old flat spellings `listen_addr`, `preview_listen_addr`, `require_token`, `require_loopback_token`, and `cors_allowed_origins` remain permanent TOML/CLI aliases and the permanent JSON spellings. The grouped spellings `docker.mount_agent_credentials`, `ssh.host_key_verification`, and `sandbox.ssh` are canonical too; their old flat spellings remain permanent aliases, and if both forms occur in TOML the grouped value wins. Without `--project`, `set` edits the global config; with `--project <id-or-path>` it writes a permitted personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. A global write uses the same apply-on-save path as the TUI and web panes: most keys apply to the running daemon with no session loss, while each command prints the exact notice for values that wait for the next daemon or `af` launch. A `--project` write and a raw hand-edit are read the next time the relevant operation resolves that project's config. Both `set` and `unset` check the rewrite before saving it: the edited file must still load, and it must still mean what it meant — a rewrite that would move any value other than the key you named is refused, naming that value, with nothing written. That matters for a multiline value such as an `on_archive_command` shell script, whose text can legitimately contain a line shaped like `key = value` or `[section]`; such lines are string contents and are never edited (#3662).
 
 **A symlinked global config is followed, not replaced.** If `~/.agent-factory/config.toml` is a symlink — a dotfiles repository being the usual reason — the global-config writers resolve it and rewrite the file it points at, leaving the link in place; `af config migrate` puts its `.bak` beside that real file too, where a dotfiles `git status` will show it. af logs one line per link per process saying where the write landed. A **broken** link is an error naming both ends rather than a silent replacement: af cannot tell whether you meant it to create the missing target or to write a real file at the link's own path, so it stops and lets you decide. This applies to the **global** config only. In-repo `.agent-factory/config.toml` follows a link **within the repository** and refuses one that leaves it. When the link resolves to a file still inside the repo, af rewrites that target and leaves the link in place, exactly as it does for the global file — renaming over the link instead would replace it with a regular file and strand its target holding stale content, which is the bug #1092 closed. When the link resolves outside the repository, the save is refused, naming both ends and writing nothing; reads of that file are refused the same way. That containment rule is the difference, not a blanket refusal to follow: the in-repo file is checked into a repository whose contents a clone does not control, so a link someone else committed must never be able to aim af's write at a path outside your clone. **af's own managed files refuse a symlinked path outright** (#3672). The daemon bearer token, the daemon PID file, the editor-origin secret, the autostart unit/plist, the VS Code owner record, the in-place executable swap, the auto-update check cache, the event-queue cursor, and the plugin and skill files af regenerates all stop with an error naming both ends and write nothing. These are af's own files at paths af chose, so neither answer above fits: replacing the link would silently destroy an arrangement af never asked about, and writing through it would be a promise ("af will maintain a file wherever you point this") that none of them ever made. The refusal covers deletion too, which is the asymmetry that prompted it — an autostart unit written through a link but cleaned up by unlinking the link would have left af's content behind in the target, still being read by systemd. **`tasks.json` is the exception and follows a link**, like the global config: it is the one store in the af home that users write by hand, so keeping it in a dotfiles repository is the same reasonable arrangement, and af rewrites the target and leaves the link alone. Everything else af writes — its own state files, the TUI state, the project registry — keeps the historical behaviour of replacing a link.
 
@@ -91,7 +91,6 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `sandbox.ssh` | Free-form ssh command that reaches a `backend = "sandbox"` host. Global-only because af executes it on the daemon host; a repository may select the sandbox backend but cannot choose this command. See [backends.md → Sandbox backend](backends.md#sandbox-backend). |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
 | `appearance` | TUI Light / Dark / System; `light`, `dark`, or `system` (default). Applied on the next TUI launch. |
-| `theme` | Retired for web and TUI appearance. Use the TUI `appearance` setting or browser header. See [Appearance migration](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
 ### Agent approval behavior
@@ -267,43 +266,68 @@ that lets the repo-selected image receive it. New and respawned panes use the
 current list. A pane that was already running before an upgrade keeps the
 environment it started with until that process is restarted.
 
-### Theme colors (`theme`)
+<a id="theme-colors-theme"></a>
+
+### Appearance and legacy theme migration
 
 Appearance has exactly **Light**, **Dark** and **System**, using two fixed product
 palettes. For the TUI, set the global TOML key `appearance = "system"`, or use
 `af config set appearance light` (also `dark` or `system`). The Config pane shows
-the same choice. Changes apply on the next TUI launch, not to the daemon's
-palette or an already-open terminal. This preference belongs to the machine
-where the TUI runs; a remote Config editor still edits its named remote target.
-It is global-only and is not accepted from a repository's configuration.
+the same choice. Changes apply on the next TUI launch. This preference belongs
+to the machine where the TUI runs; a remote Config editor still edits its named
+remote target. It is global-only and is not accepted from a repository's config.
 Read it with `af config get appearance`; `af config list` includes it as well.
-The default value is `system`.
+The default is `system`. See the [global example](../examples/config.toml).
 
 System detects the terminal background through OSC 11, with `COLORFGBG` as the
 terminal library's fallback and **dark** when no background is available.
-Explicit Light/Dark bypass detection. The browser keeps its separate local
-header preference and follows OS appearance for System. Both use the saved
-values `light`, `dark`, and `system`; legacy `auto`, absent and unrecognized
-choices resolve to System. Reading an old value does not rewrite the file;
-saving a supported choice replaces it. No legacy palette is projected.
+Explicit Light/Dark bypass detection. The browser keeps its independent local
+header preference and follows OS appearance for System. The CLI edits the TUI
+preference; it has no persistent visual renderer and does not set the browser
+preference. Agent-owned ANSI output remains unchanged.
 
-Remove `theme = "nord"`, `theme = "zenburn"` or the old `[theme]` color table
-when migrating. These settings no longer affect either renderer. The TUI hides
-them even in older daemon manifests; Appearance is the replacement, not a
-per-colour editor. Agent-owned ANSI output remains unchanged.
+Legacy global config migrates once on a normal config read, without a separate
+`af config migrate` command:
 
-The unused `POST /v1/GetTheme` endpoint is retired. The legacy daemon
-`ApplyTheme` operation and its config compatibility readers are deliberately
-unchanged here; [#3936](https://github.com/sachiniyer/agent-factory/issues/3936)
-owns their removal and the remaining daemon/CLI/assistant schema cleanup.
+| Legacy value | Saved replacement when no valid `appearance` exists |
+| --- | --- |
+| `appearance = "auto"` | `appearance = "system"` |
+| `theme = "light"` | `appearance = "light"` |
+| `theme = "dark"` | `appearance = "dark"` |
+| `theme = "auto"` or `theme = "system"` | `appearance = "system"` |
+| `theme = "nord"` or `theme = "zenburn"` | `appearance = "system"` |
+| Custom `[theme]` table | `appearance = "system"` |
 
-The retired table keys are `foreground`, `foreground_strong`,
-`foreground_muted`, `foreground_dim`, `background`, `background_subtle`,
-`background_panel`, `accent`, `success`, `warning`, `error`, `info`, `purple`,
-`selection_background`, `selection_foreground`, `pane_border_default`,
-`pane_border_selected`, `pane_border_interactive` and `pane_border_preview`.
-They are not projected into replacement colors. Older binaries may still
-accept them; current web/TUI renderers ignore them.
+Legacy JSON `theme` strings and objects follow the same mapping: strings map
+like their TOML equivalents, and objects map like custom tables. TOML inline
+tables (`theme = { accent = "#ffffff" }`) and dotted table keys
+(`theme.accent = "#ffffff"`) also follow the custom `[theme]` table mapping.
+
+An existing valid `appearance` (`light`, `dark`, or `system`) wins over every
+legacy theme value. Migration removes the legacy key/table, logs the old key
+and the new `appearance` value, and persists the result idempotently: subsequent
+reads do not repeat the rewrite or migration log. Legacy `appearance = "auto"`
+normalizes to `system`; new writes accept only `light`, `dark`, and `system`.
+No preset or custom color is projected into either client's fixed roles.
+
+Read-only diagnostics preserve their no-write contract: `LoadConfigReadOnly`
+and `af config validate` do not persist migration changes.
+
+CLI access to `theme` and every `theme.*` key is explicitly rejected with a
+retirement error directing users to `appearance`; these keys are also removed
+from Config panes and assistant color-editor routes. This includes:
+
+- `theme.foreground`, `theme.foreground_strong`, `theme.foreground_muted`, `theme.foreground_dim`
+- `theme.background`, `theme.background_subtle`, `theme.background_panel`
+- `theme.accent`, `theme.success`, `theme.warning`, `theme.error`, `theme.info`, `theme.purple`
+- `theme.selection_background`, `theme.selection_foreground`
+- `theme.pane_border_default`, `theme.pane_border_selected`, `theme.pane_border_interactive`, `theme.pane_border_preview`
+
+The renderer-read `POST /v1/GetTheme` endpoint is retired. The launch-only
+`ApplyTheme` RPC is removed entirely: the TUI reads `appearance` locally.
+Launching a TUI must never apply pending listener/auth configuration edits.
+Explicit apply-on-save through `af config set` or the Config panes remains the
+operator action that applies daemon configuration.
 
 ### Root agents (always-ensured)
 
@@ -505,7 +529,7 @@ delete_cmd = "./infra/delete.sh"
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
-| `auto_update`, `network.require_token`, `network.require_loopback_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`, `daemon_poll_interval`, `debug_pprof`, `branch_prefix`, `on_archive_command`, `default_accounts`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `appearance`, `theme`, `root_agents`, `root_agent`, `limit_auto_resume`, `limit_account_candidates`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `docker.mount_agent_credentials`, `ssh.host_key_verification`, `sandbox.ssh`, `session_env_passthrough`, `upgrade_clear_unverifiable_artifacts` | Operator-only. Setting them in-repo is rejected with an error naming the key. Most are global only; `branch_prefix`, `on_archive_command`, `default_accounts`, `root_agent`, and `limit_account_candidates` also admit the machine-local personal-project layer. `default_accounts` is rejected in-repo because it names an identity: a committed account name is meaningless for everyone else who clones the repository, and a repo must never choose whose quota its sessions spend. `limit_account_candidates` is rejected in-repo for the same reason, and it is the stronger case: it names the accounts af may move a session ONTO by itself. The daemon network-surface keys (`network.require_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `on_archive_command` and `vscode_server_binary` are rejected in-repo because they name code the daemon host executes. `debug_pprof` is global-only for the adjacent reason: a profile is a dump of the daemon's live memory, so a repo-settable version would let merely cloning a repository arrange for one to be servable on the machine that runs it. `session_env_passthrough`, `docker.mount_agent_credentials`, and `ssh.host_key_verification` are global-only so a cloned repo cannot grant its own docker image access to the daemon environment or the operator's credentials, nor waive ssh host-key verification (a repo-settable waiver + repo-settable `ssh.host` is a one-commit MITM) — a repo selects the image/host, only the operator relaxes the safeguard. `sandbox.ssh` is the strongest case of the same rule: af EXECUTES it on the daemon host, so a repo-settable version would be arbitrary code execution from a cloned repository rather than merely a widened permission — a repo selects `backend = "sandbox"`, only the operator says what command reaches the sandbox. All eight legacy flat spellings listed above remain accepted aliases so existing configs do not break. `upgrade_clear_unverifiable_artifacts` is global-only for the same reason as the rest of the upgrade surface: it governs what af may move aside next to its own executable, which a cloned repository has no business deciding. See [remote-http-auth.md](remote-http-auth.md). |
+| `auto_update`, `network.require_token`, `network.require_loopback_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`, `daemon_poll_interval`, `debug_pprof`, `branch_prefix`, `on_archive_command`, `default_accounts`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `appearance`, `root_agents`, `root_agent`, `limit_auto_resume`, `limit_account_candidates`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `docker.mount_agent_credentials`, `ssh.host_key_verification`, `sandbox.ssh`, `session_env_passthrough`, `upgrade_clear_unverifiable_artifacts` | Operator-only. Setting them in-repo is rejected with an error naming the key. Most are global only; `branch_prefix`, `on_archive_command`, `default_accounts`, `root_agent`, and `limit_account_candidates` also admit the machine-local personal-project layer. `default_accounts` is rejected in-repo because it names an identity: a committed account name is meaningless for everyone else who clones the repository, and a repo must never choose whose quota its sessions spend. `limit_account_candidates` is rejected in-repo for the same reason, and it is the stronger case: it names the accounts af may move a session ONTO by itself. The daemon network-surface keys (`network.require_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `on_archive_command` and `vscode_server_binary` are rejected in-repo because they name code the daemon host executes. `debug_pprof` is global-only for the adjacent reason: a profile is a dump of the daemon's live memory, so a repo-settable version would let merely cloning a repository arrange for one to be servable on the machine that runs it. `session_env_passthrough`, `docker.mount_agent_credentials`, and `ssh.host_key_verification` are global-only so a cloned repo cannot grant its own docker image access to the daemon environment or the operator's credentials, nor waive ssh host-key verification (a repo-settable waiver + repo-settable `ssh.host` is a one-commit MITM) — a repo selects the image/host, only the operator relaxes the safeguard. `sandbox.ssh` is the strongest case of the same rule: af EXECUTES it on the daemon host, so a repo-settable version would be arbitrary code execution from a cloned repository rather than merely a widened permission — a repo selects `backend = "sandbox"`, only the operator says what command reaches the sandbox. All eight legacy flat spellings listed above remain accepted aliases so existing configs do not break. `upgrade_clear_unverifiable_artifacts` is global-only for the same reason as the rest of the upgrade surface: it governs what af may move aside next to its own executable, which a cloned repository has no business deciding. See [remote-http-auth.md](remote-http-auth.md). |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 
