@@ -3537,6 +3537,38 @@ test("a transient Codex failure alone arms degradation only after the head", asy
   assert.equal(autoGate.codexEvidence.isCodexUsageLimitArtifact({ body: `${CODEX_TRANSIENT_FAILURE} P2`, in_reply_to_id: 1 }), false);
 });
 
+test("transient failure notices do not diagnose a usage limit", async () => {
+  for (const author of ["sachiniyer", "detail-app"]) {
+    for (const approved of [false, true]) {
+      const result = await evaluateGate({ author, issueComments: [
+        codexRateLimit("2026-07-09T01:20:00Z", CODEX_TRANSIENT_FAILURE),
+        ...(approved ? [prComment("sachiniyer", "## Review — approve", "2026-07-09T01:30:00Z")] : []),
+      ] });
+      assert.equal(result.degradedForUnavailableReviewer, true);
+      assert.doesNotMatch(JSON.stringify(result), /usage.limit|out of quota/i);
+      assert.match(result.notes.join("\n"), /transient failure/);
+      const github = fakeGateGithub({ author, checkRuns: happyCheckRuns() });
+      await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result, manual: false });
+      assert.doesNotMatch(JSON.stringify(github.createdChecks), /usage.limit|out of quota/i);
+    }
+  }
+});
+
+test("completed summary rows for older heads supersede outages by row time", async () => {
+  for (const [rowTime, status, expected] of [
+    ["2026-07-09T01:25:00Z", "✅ **Completed**", false],
+    ["2026-07-09T01:15:00Z", "✅ **Completed**", true],
+    ["2026-07-09T01:25:00Z", "🔄 **Running**", true],
+    [null, "✅ **Completed**", true],
+  ]) {
+    const result = await evaluateGate({ issueComments: [
+      codexRateLimit("2026-07-09T01:20:00Z"),
+      codexSummaryTable(OTHER_SHA, { rowTime, status, commentTime: "2026-07-09T01:30:00Z" }),
+    ] });
+    assert.equal(result.degradedForUnavailableReviewer, expected, `${rowTime} ${status}`);
+  }
+});
+
 test("automatic summary verdict closes a transient failure outage at the row time", () => {
   const { aggregate, render } = require("./codex-outage.js");
   const at = (minute) => `2026-09-06T13:${minute}:00Z`;

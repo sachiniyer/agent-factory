@@ -168,12 +168,18 @@ publishing the same green pass until #3825.
 review". Unknown error` is also reviewer-unavailable evidence (#3951), with the
 same strictly-after-`headCurrentSince` timing rule and maintainer-review
 requirement as usage-limit answers. The shared outage-record predicate counts
-this failure too. A real review quoting the message remains a review.
+this failure too and records `failure` separately from `usage-limit`, so gate
+notices and the health record name the observed cause. An episode can include
+both causes. A real review quoting the message remains a review.
 
 `<!-- codex-pull-request-review-summary -->` identifies the maintained
-“Codex Review Summary” activity comment. It is excluded from latest-response
-selection even when it has no parseable rows: an edit cannot supersede an earlier
-head-current limit answer. Existing verdict-row parsing uses each row's own time.
+“Codex Review Summary” activity comment. Its edit time is excluded from
+latest-response selection: an edit cannot supersede an earlier head-current
+unavailable answer. Parseable Completed rows participate using their own times,
+even for an older commit, because they prove Codex answered again. Running rows
+and rows without a commit or timestamp remain excluded. A completed row older
+than the unavailable answer does not supersede it. Verdict parsing for the
+current head continues to use the row's own time.
 
 Usage-limit evidence includes Codex inline review replies (`in_reply_to_id` set),
 including replies carried by an empty `COMMENTED` review (#3900). The reply's

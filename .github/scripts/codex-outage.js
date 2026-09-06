@@ -19,14 +19,14 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       const body = artifact.body || '';
       const headVerdict = evidence.parseVerdictArtifact(artifact, pull.head.sha);
       const verdict = evidence.parseReviewedCommit(body) || headVerdict;
-      const limit = evidence.isCodexUsageLimitArtifact(artifact);
+      const unavailable = evidence.classifyCodexUnavailableArtifact(artifact);
       // Automatic reviews may recover only through a completed summary row.
       // Its own time records recovery; later edits to the table do not.
       const at = headVerdict?.kind === 'summary-row'
         ? new Date(headVerdict.time).toISOString()
         : (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at;
-      if ((!verdict && !limit) || !Number.isFinite(time(at)) || time(at) > time(now) || time(at) < time(since)) continue;
-      events.push({ time: at, verdict, url: artifact.html_url, body });
+      if ((!verdict && !unavailable) || !Number.isFinite(time(at)) || time(at) > time(now) || time(at) < time(since)) continue;
+      events.push({ time: at, verdict, url: artifact.html_url, body, kind: unavailable?.kind });
     }
   }
   // Verdict wins a timestamp tie. A real verdict is recovery even if it reports
@@ -43,10 +43,11 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       }
     } else {
       if (!active) {
-        active = { start: event.time, end: null, latest: null, merged: [] };
+        active = { start: event.time, end: null, latest: null, merged: [], causes: [] };
         episodes.push(active);
       }
-      active.latest = { time: event.time, url: event.url, body: event.body };
+      if (!active.causes.includes(event.kind)) active.causes.push(event.kind);
+      active.latest = { time: event.time, url: event.url, body: event.body, kind: event.kind };
     }
   }
   for (const episode of episodes) {
@@ -73,10 +74,11 @@ function render(episodes, now) {
     : 'Codex reviewer availability — recovered';
   const lines = [`## ${heading}`, '', 'Owned by Master Health Watch. Policy and evidence: #3932.',
     `Last sweep: ${now}. History scanned since ${SCAN_SINCE}.`,
-    'Degraded merges are reconstructed from pre-merge limit notices and absence of a verdict covering the merged head (the #3932 method).', ''];
+    'Degraded merges are reconstructed from pre-merge reviewer-unavailable notices and absence of a verdict covering the merged head (the #3932 method).', ''];
   for (const episode of [...episodes].reverse()) {
     lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
-      `Latest limit notice: [${episode.latest.time}](${episode.latest.url})`,
+      `Observed causes: ${(episode.causes || []).map(kind => kind === 'failure' ? 'transient failure' : 'usage limit').join(', ') || 'not recorded'}.`,
+      `Latest reviewer-unavailable notice: [${episode.latest.time}](${episode.latest.url})`,
       `> ${episode.latest.body.replace(/\n/g, '\n> ')}`,
       `Degraded merges: ${episode.merged.length}${episode.merged.length ? ` (${episode.merged.map(n => `#${n}`).join(', ')})` : ''}.`,
       episode.end ? `Recovered: ${episode.end} — [first real verdict](${episode.recovery}). Final degraded-merge count: ${episode.merged.length}.` : 'Status: unavailable.', '');
@@ -96,7 +98,7 @@ function readRecord(comment) {
   } catch { return null; }
 }
 
-async function gateNotice({ github, context, since, now = new Date().toISOString() }) {
+async function gateNotice({ github, context, since, kind = "usage-limit", now = new Date().toISOString() }) {
   let suffix = ' (repository record not yet updated; duration observed on this PR)';
   let start = since;
   try {
@@ -112,7 +114,7 @@ async function gateNotice({ github, context, since, now = new Date().toISOString
   } catch {
     suffix = ' (repository record unavailable; duration observed on this PR)';
   }
-  return `Codex usage-limited since ${start}, ${hours(start, now)}h ago${suffix}`;
+  return `Codex ${kind === "failure" ? "unavailable after a transient failure" : "usage-limited"} since ${start}, ${hours(start, now)}h ago${suffix}`;
 }
 
 // api paginates GET collections; failures abort before any record write. The

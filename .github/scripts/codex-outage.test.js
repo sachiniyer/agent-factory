@@ -132,3 +132,15 @@ test('transient failure starts an outage through the shared artifact predicate',
   const pulls = [{ number: 3951, head: { sha: head }, merged_at: t(3), artifacts: [failure, verdict(4)] }];
   assert.deepEqual(aggregate(pulls, t(5)).map(e => [e.start, e.end, e.merged]), [[t(2), t(4), [3951]]]);
 });
+
+test('outage history records failure and quota causes without a false diagnosis', () => {
+  const failure = comment(2, 'Codex Review: Something went wrong. Unknown error');
+  const episodes = aggregate([{ number: 3953, head: { sha: head }, artifacts: [failure] }], t(5));
+  assert.deepEqual(episodes[0].causes, ['failure']);
+  assert.match(render(episodes, t(5)), /transient failure/);
+  assert.doesNotMatch(render(episodes, t(5)), /limit notice|usage.limit/);
+  const mixed = aggregate([{ number: 3953, head: { sha: head }, artifacts: [failure, comment(3, limits[0])] }], t(5));
+  assert.deepEqual(mixed[0].causes, ['failure', 'usage-limit']);
+  assert.equal(mixed[0].latest.kind, 'usage-limit');
+  assert.match(render(mixed, t(5)), /transient failure, usage limit/);
+});
