@@ -1115,7 +1115,7 @@ function authInfoBody(required: boolean): string {
 // string (apiproto.EnvelopeError). This is the shape that used to render as the
 // literal text "[object Object]" on every error surface.
 function failureBody(message: string): string {
-  return JSON.stringify({ data: null, error: { message } });
+  return JSON.stringify({ data: null, error: { message, daemon_rejected: true } });
 }
 
 test("the tokenless path follows the daemon's answer, not loopback detection (#1696)", async ({ browser }) => {
@@ -3460,7 +3460,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
         // (apiproto.EnvelopeError). This mock used to send a bare string, mirroring
         // the client's old (wrong) type — so the two agreed with each other and
         // disagreed with the daemon, which is how "[object Object]" survived.
-        body: JSON.stringify({ data: null, error: { message: "simulated tab-close failure" } }),
+        body: JSON.stringify({ data: null, error: { message: "simulated tab-close failure", daemon_rejected: true } }),
       });
       return;
     }
@@ -6103,7 +6103,7 @@ test("add-project directory picker (#2788): descend, ascend, pick a repo — and
     await route.fulfill({
       status: 500,
       contentType: "application/json",
-      body: JSON.stringify({ data: null, error: { message: `cannot read ${browseRoot}/${level1}/${level2}/${plainDir}: permission denied` } }),
+      body: JSON.stringify({ data: null, error: { message: `cannot read ${browseRoot}/${level1}/${level2}/${plainDir}: permission denied`, daemon_rejected: true } }),
     });
   });
   await dirRow(plainDir).locator(".af-dirpicker-item").click();
@@ -10110,7 +10110,7 @@ test("#1813: a refused rename surfaces the daemon's OWN message, verbatim, in th
     route.fulfill({
       status: 400,
       contentType: "application/json",
-      body: JSON.stringify({ data: null, error: { message: REFUSAL } }),
+      body: JSON.stringify({ data: null, error: { message: REFUSAL, daemon_rejected: true } }),
     }),
   );
 
