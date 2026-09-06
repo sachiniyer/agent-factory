@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/sachiniyer/agent-factory/task"
@@ -267,6 +268,38 @@ func TestTaskPaneOnCompleteRowSurvivesAnEightyCellPane(t *testing.T) {
 	tp.SetSize(80, 40)
 	assert.False(t, strings.HasSuffix(onDoneRow(t, tp), "…"),
 		"the target-session refusal is clipped at 80 cells")
+}
+
+// An 80-column terminal gives the task modal only 48 content cells. Keep
+// the complete consequence in view even when the form must scroll vertically.
+func TestTaskPaneOnCompleteExplanationFitsNarrowModal(t *testing.T) {
+	for _, tc := range []struct {
+		verb, target, explanation string
+	}{
+		{task.OnCompleteKeep, "", "leaves the run's session in place"},
+		{task.OnCompleteArchive, "", "archives the run's session — restorable"},
+		{task.OnCompleteKill, "", "deletes the run's session and its branch — permanent"},
+		{"", "pending", "n/a — a target session is not this task's to reap"},
+	} {
+		t.Run(tc.verb+tc.target, func(t *testing.T) {
+			tp := editTaskWithOnComplete(t, tc.verb, tc.target)
+			tp.SetSize(48, 12)
+			tabTo(tp, taskFocusOnComplete)
+			out := xansi.Strip(tp.String())
+			assert.Contains(t, out, "On done:")
+			assert.Contains(t, strings.Join(strings.Fields(out), " "), tc.explanation,
+				"the full consequence must survive wrapping and focus scrolling")
+			for _, line := range strings.Split(out, "\n") {
+				assert.LessOrEqual(t, xansi.StringWidth(line), 48)
+			}
+			assert.LessOrEqual(t, len(strings.Split(out, "\n")), 12)
+			if tc.target == "" {
+				assert.Contains(t, out, "◂ "+tc.verb+" ▸")
+			} else {
+				assert.NotContains(t, out, "◂")
+			}
+		})
+	}
 }
 
 // onDoneRow returns the rendered form's On-done line.

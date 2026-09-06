@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -563,7 +564,7 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 	t := CurrentTheme()
 	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	if !s.onCompleteApplies() {
-		return hintStyle.Render("n/a — a target session is not this task's to reap")
+		return hintStyle.Render(s.wrapOnCompleteText("n/a — a target session is not this task's to reap"))
 	}
 
 	focused := s.focusIndex == taskFocusOnComplete
@@ -575,10 +576,26 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 		value = s.editOnCompleteOptions[s.editOnCompleteIdx]
 	}
 	if focused {
-		return SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸") +
-			hintStyle.Render("   ←/→ "+onCompleteHint(value))
+		picker := SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸")
+		hint := "←/→ " + onCompleteHint(value)
+		if s.width > 0 && 9+lipgloss.Width(picker)+3+lipgloss.Width(hint) > s.width {
+			return picker + "\n         " + hintStyle.Render(s.wrapOnCompleteText(hint))
+		}
+		return picker + hintStyle.Render("   "+hint)
 	}
 	return dimSelectedStyle.Render(value)
+}
+
+// Keep consequences readable in the actual modal content width, which is
+// narrower than the terminal. Continuations align with the value after the
+// nine-cell label; the form's focus range includes these lines so scrolling
+// keeps the whole explanation visible when this field is selected.
+func (s *TaskPane) wrapOnCompleteText(text string) string {
+	if s.width <= 0 {
+		return text
+	}
+	width := max(1, s.width-9)
+	return strings.ReplaceAll(xansi.Wrap(text, width, ""), "\n", "\n         ")
 }
 
 // onCompleteHint says what the SELECTED verb does to the session a run created,
