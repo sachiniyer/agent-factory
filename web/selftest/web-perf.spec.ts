@@ -97,15 +97,36 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
       p.shifts = 0;
       p.snapshotRows = [...document.querySelectorAll(".af-rail-list .af-row")];
       p.rowWrites = 0;
-      const audit = new MutationObserver(records => {
+      const seededRows = new Set(p.snapshotRows.filter(row =>
+        row.querySelector(".af-row-title")?.textContent?.startsWith("perf-"),
+      ));
+      const isSeededRow = (row: Element): boolean =>
+        seededRows.has(row) || (row.matches(".af-row") &&
+          !!row.querySelector(".af-row-title")?.textContent?.startsWith("perf-"));
+      const countWrites = (records: MutationRecord[]) => {
         for (const mutation of records) {
           const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
           const row = target?.closest(".af-row");
-          if (row?.querySelector(".af-row-title")?.textContent?.startsWith("perf-")) p.rowWrites++;
+          if (row && isSeededRow(row)) p.rowWrites++;
+          // Whole-list replacements target the list, not a row. Count each
+          // seeded row removed/inserted, including rows inside wrapper nodes.
+          // Retained identities also recognize old rows whose children cleared.
+          if (mutation.type !== "childList") continue;
+          for (const node of [...mutation.removedNodes, ...mutation.addedNodes]) {
+            if (!(node instanceof Element)) continue;
+            if (isSeededRow(node)) p.rowWrites++;
+            for (const descendant of node.querySelectorAll(".af-row")) {
+              if (isSeededRow(descendant)) p.rowWrites++;
+            }
+          }
         }
-      });
+      };
+      const audit = new MutationObserver(countWrites);
       audit.observe(document.querySelector(".af-rail-list")!, { subtree: true, childList: true, characterData: true, attributes: true });
-      p.stopRowAudit = () => audit.disconnect();
+      p.stopRowAudit = () => {
+        countWrites(audit.takeRecords());
+        audit.disconnect();
+      };
       const settled = new MutationObserver(() => {
         if (!document.querySelector("#app[data-af-resync-settled]")) return;
         const start = p.railStart;
@@ -135,8 +156,9 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
       p.stopRowAudit();
       return { sameNodes: current.length === p.snapshotRows.length && current.every((row, i) => row === p.snapshotRows[i]), writes: p.rowWrites };
     });
-    expect(rowAudit.sameNodes, "accepted 1000-session snapshots retain every row node").toBe(true);
-    expect(rowAudit.writes, "unchanged seeded rows receive no DOM writes").toBe(0);
+    console.log(`Snapshot row audit run ${run + 1}:`, JSON.stringify(rowAudit));
+    expect.soft(rowAudit.sameNodes, "accepted 1000-session snapshots retain every row node").toBe(true);
+    expect.soft(rowAudit.writes, "unchanged seeded rows receive no DOM writes").toBe(0);
     // One real typed byte; a fresh character each run avoids matching scrollback.
     const key = ["~", "^", "%"][run];
     await expect(page.locator(".af-term-host .xterm-rows")).not.toContainText(key);
