@@ -333,7 +333,7 @@ const MANUAL_MERGE_AUTHOR_REASON =
 // approval there restores the manual pass instead (#3825). The remedy below
 // carries that difference, since it is only ever rendered on the manual path.
 const AWAITING_MAINTAINER_REVIEW_REASON =
-  "awaiting maintainer review — post `## Review — approve` on this head; Codex is usage-limited " +
+  "awaiting maintainer review — post `## Review — approve` on this head; Codex is unavailable " +
   "so no verdict can arrive, and a maintainer approval bound to this head clears it";
 // What a manual-merge blocker needs beyond its reason: who can post the marker,
 // and what posting it does on a path that never auto-merges. The reason names the
@@ -871,7 +871,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const awaitingMaintainerReview = degradedForUnavailableReviewer && !approval;
   if (degradedForUnavailableReviewer) {
     const outage = await require("./codex-outage.js").gateNotice({
-      github, context, since: codex.reviewerUnavailableSince,
+      github, context, since: codex.reviewerUnavailableSince, kind: codex.reviewerUnavailableKind,
     });
     const note = `${outage}; ${approval ? "merging on maintainer approval" : "awaiting maintainer approval"}`;
     notes.push(note);
@@ -921,7 +921,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     // without opening the PR.
     notes.push(
       `Maintainer approval from ${approval.user?.login || "an allowed author"} covers this head` +
-        `${approval.html_url ? ` (${approval.html_url})` : ""}; Codex is usage-limited, so the ` +
+        `${approval.html_url ? ` (${approval.html_url})` : ""}; Codex is unavailable, so the ` +
         "review requirement is satisfied by that approval and the gate lands this on the " +
         "ordinary path",
     );
@@ -975,6 +975,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     manualMergeReasons,
     manualMergeBlockers,
     degradedForUnavailableReviewer,
+    reviewerUnavailableKind: codex.reviewerUnavailableKind,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
     headRefName: pr.headRefName,
@@ -1114,7 +1115,7 @@ async function reportDecision({ github, context, core, result, manual = false })
       : result.manualMergeRequired
         ? manualMergePasses
           ? result.degradedForUnavailableReviewer
-            ? "PASS: reviewer usage-limited; maintainer review and manual merge required"
+            ? `PASS: reviewer ${result.reviewerUnavailableKind === "failure" ? "unavailable after a transient failure" : "usage-limited"}; maintainer review and manual merge required`
             : "PASS: maintainer review and manual merge required"
           : `BLOCKED: ${firstManualMergeBlocker(result) || "a manual merge has an unanswered blocker"}`
         : result.shouldMerge
@@ -4222,6 +4223,7 @@ async function evaluateCodex({
   // caller uses it to tell that reason apart from every independent blocker.
   let reviewerUnavailable = false;
   let reviewerUnavailableSince = null;
+  let reviewerUnavailableKind = null;
   let reviewerUnavailableReason = "";
   const { owner, repo } = context.repo;
   // Two anchors, because the rules below ask two different questions and one
@@ -4306,6 +4308,15 @@ async function evaluateCodex({
   // Replies precede their empty enclosing review on a timestamp tie: GitHub
   // posts both in the same second. Later reviews still supersede the answer.
   const codexUsageLimitArtifacts = [...codexInlineReplies, ...codexReviewArtifacts]
+    // A completed row proves Codex answered again, even for an older head.
+    // Ignore table edits and incomplete rows; only the row's own time counts.
+    .flatMap((artifact) => {
+      if (!String(artifact.body || "").trimStart().startsWith(CODEX_SUMMARY_MARKER)) return [artifact];
+      return completedCodexSummaryRows(artifact)
+        .map((row) => ({
+          body: "", created_at: new Date(row.time).toISOString(),
+        }));
+    })
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
   // Both artifact shapes, each carrying its OWN time: the prose line's is its
   // comment's, the summary row's is the row's. Sorted by that rather than by
@@ -4337,7 +4348,9 @@ async function evaluateCodex({
     // one on #3371), so requiring their absence cannot suppress it. Such a body
     // already fails parseReviewedCommit, so it is not a verdict either, and the
     // gate lands on "keep blocking" rather than on a false degradation.
-    const rateLimited = isCodexUsageLimitArtifact(latestCodexArtifact, isInlineReply);
+    const unavailable = classifyCodexUnavailableArtifact(latestCodexArtifact, isInlineReply);
+    const rateLimited = Boolean(unavailable);
+    const cause = unavailable?.kind === "failure" ? "unavailable after a transient failure" : "usage-limited";
     // …and it has to be evidence about THIS head, on the same freshness rule the
     // verdict below is held to. A usage-limit answer only proves the reviewer was
     // out of quota when it answered; a head pushed after it may simply not have
@@ -4350,13 +4363,13 @@ async function evaluateCodex({
       rateLimited && headCurrentSince != null && rateLimitTime > headCurrentSince;
     const inlineSource = isInlineReply ? ` (inline comment ${latestCodexArtifact.id})` : "";
     if (reviewerUnavailable && isInlineReply) {
-      notes.push(`Codex usage-limit answer${inlineSource}`);
+      notes.push(`Codex ${unavailable.kind === "failure" ? "transient failure" : "usage-limit"} answer${inlineSource}`);
     }
     const suffix = !rateLimited
       ? ""
       : reviewerUnavailable
-        ? `; the latest Codex response was usage-limited${inlineSource}`
-        : "; the latest Codex response was usage-limited but predates this head, so it is not " +
+        ? `; the latest Codex response was ${cause}${inlineSource}`
+        : `; the latest Codex response was ${cause} but predates this head, so it is not ` +
           "evidence about this head";
     // Split, because the two states need different actions from a reader: one
     // says wait for or request a review, the other says a review ran and this
@@ -4367,6 +4380,7 @@ async function evaluateCodex({
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
       reviewerUnavailableSince = new Date(rateLimitTime).toISOString();
+      reviewerUnavailableKind = unavailable.kind;
     }
     reasons.push(missingVerdictReason);
   } else {
@@ -4615,6 +4629,7 @@ async function evaluateCodex({
     reviewerUnavailable,
     reviewerUnavailableReason,
     reviewerUnavailableSince,
+    reviewerUnavailableKind,
     findingBlockers,
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
@@ -4624,11 +4639,20 @@ async function evaluateCodex({
 
 // Shared by the health watch and gate. Keep review-shaped quotations out of
 // outage evidence, including finding-shaped inline replies.
-function isCodexUsageLimitArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
+function classifyCodexUnavailableArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
   const body = artifact?.body || "";
   const looksLikeReviewArtifact = CODEX_REVIEW_RE.test(body) && REVIEWED_COMMIT_RE.test(body);
-  return codexReportsReviewUsageLimit(body) && !looksLikeReviewArtifact &&
-    !(isInlineReply && CODEX_BODY_FINDING_RE.test(body));
+  // #3951: the transient failure carries the review heading but no verdict.
+  // Share this classification with codex-outage.js; preserve the quote/finding guards.
+  const failed = /^\s*Codex Review: Something went wrong\b/i.test(body);
+  if (looksLikeReviewArtifact || (isInlineReply && CODEX_BODY_FINDING_RE.test(body))) return null;
+  if (failed) return { kind: "failure" };
+  return codexReportsReviewUsageLimit(body) ? { kind: "usage-limit" } : null;
+}
+
+// Compatibility predicate for callers that only need availability, not cause.
+function isCodexUsageLimitArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
+  return Boolean(classifyCodexUnavailableArtifact(artifact, isInlineReply));
 }
 
 function parseReviewedCommit(body) {
@@ -4670,6 +4694,14 @@ function parseSummaryRows(body) {
     });
   }
   return rows;
+}
+
+// Availability recovery is head-independent. Both the gate and health record
+// use authenticated maintained rows, never the summary comment's edit time.
+function completedCodexSummaryRows(artifact) {
+  const body = String(artifact.body || "");
+  if (!body.trimStart().startsWith(CODEX_SUMMARY_MARKER)) return [];
+  return parseSummaryRows(body).filter(row => row.completed && row.commit != null && row.time != null);
 }
 
 // A Codex artifact's verdict for this head, or null. Prose first: it is the
@@ -4957,8 +4989,8 @@ function formatError(error) {
 }
 
 module.exports = {
-  codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact,
-    parseReviewedCommit, parseVerdictArtifact },
+  codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact, classifyCodexUnavailableArtifact,
+    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,
