@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OptimisticSessions } from "./optimistic.js";
+import { readFileSync } from "node:fs";
+import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
 import { InFlightOp, Liveness, type SessionData } from "./types.js";
 
 const first: SessionData = { id: "one", title: "One", branch: "main", liveness: Liveness.Ready,
@@ -378,3 +379,38 @@ for (const kind of ["archive", "kill"] as const) {
     assert.equal(model.isCurrent(ticket), false);
   });
 }
+
+test("the newest create keeps selection when an older create resolves last", async () => {
+  const model = state();
+  const selection = new CreateSelectionIntent();
+  let selectedId = first.id;
+  const submit = (title: string) => {
+    const intent = selection.submit();
+    const ticket = model.beginCreate({ ...input, title });
+    let resolve!: (row: SessionData) => void;
+    const reply = new Promise<SessionData>(done => { resolve = done; });
+    const completed = reply.then(row => {
+      if (model.succeed(ticket, row) && selection.isCurrent(intent)) selectedId = row.id;
+    });
+    return { resolve, completed };
+  };
+  const a = submit("A");
+  const b = submit("B");
+  b.resolve({ ...first, id: "b", title: "B" });
+  await b.completed;
+  assert.equal(selectedId, "b");
+  a.resolve({ ...first, id: "a", title: "A" });
+  await a.completed;
+  assert.equal(selectedId, "b", "the older create must not steal the newer selection");
+  assert.deepEqual(model.project().map(row => row.id), ["one", "two", "b", "a"]);
+
+  const intent = selection.submit();
+  selection.navigate(); // Away and back must also invalidate an outstanding create.
+  selection.navigate();
+  assert.equal(selection.isCurrent(intent), false);
+
+  // index mounts DOM on import; pin the production wiring alongside the rule.
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  assert.match(source, /const navigationAtSubmit = createSelectionIntent\.submit\(\);/);
+  assert.match(source, /const maySelect = createSelectionIntent\.isCurrent\(navigationAtSubmit\)/);
+});

@@ -6,6 +6,8 @@ Every endpoint the Agent Factory daemon serves over its local Unix socket, gener
 
 For the transport, socket path, authentication model, response envelope, and status codes, see the [HTTP API guide](../http-api.md). Run `af api` to print this catalog with a ready-to-run curl example for each route and the resolved socket path for your machine.
 
+Ordinary daemon HTTP errors include optional boolean `error.daemon_rejected: true`. An unmarked `5xx` or unfamiliar error envelope leaves a mutation's outcome uncertain; check its state before retrying. Only boolean `true` counts; the web client also treats `502`/`504` as uncertain even with a marker. The existing `error.code: "mutation_committed"` takes precedence over that boolean and means the mutation must not be retried. See the [response envelope contract](../http-api.md#response-envelope) for details.
+
 ## Endpoints
 
 Request fields are the JSON keys of each route's request body; a `—` means the route takes no body (or an empty `{}`).

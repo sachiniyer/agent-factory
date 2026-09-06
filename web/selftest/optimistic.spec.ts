@@ -36,7 +36,7 @@ for (const operation of ["create", "archive", "kill"] as const) {
     await page.route(`**/v1/${method}`, async route => {
       await pending;
       await route.fulfill({ status: 503, json: {
-        data: null, error: { message: "The daemon refused this operation. Your input is retained." },
+        data: null, error: { message: "The daemon refused this operation. Your input is retained.", daemon_rejected: true },
       } });
     });
     const requested = page.waitForRequest(`**/v1/${method}`);
