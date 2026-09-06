@@ -34,10 +34,12 @@
 
 import { expect, type Browser, type Locator, type Page, test } from "@playwright/test";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { openAfterInitialResync } from "./initial-resync.js";
 import { DEMO_VIEWPORT } from "./demo-viewport.js";
 
 const visual = process.env.AF_PERF_MODE === "1";
+const visualStyle = visual ? readFileSync(new URL("./visual.css", import.meta.url), "utf8") : "";
 
 const SHOT_DIR = required("AF_DEMO_SHOT_DIR");
 const VIDEO_DIR = required("AF_DEMO_VIDEO_DIR");
@@ -136,21 +138,50 @@ interface Pass {
 function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: string) => Promise<void> {
   return async (name: string) => {
     if (visual) {
-      // A completed transcript precedes the daemon's idle observation. Phone
-      // drawers and non-session views hide the rail but still expose its counts
-      // in chrome. Check the retained rows even when hidden (#3940); login and
-      // unavailable scenes have no app/seeded rail to settle.
-      if (await page.locator(".af-app").count()) {
-        const states = page.locator(".af-rail-list .af-operator-state");
-        const message = `${name}${suffix}: all seeded sessions must report Needs you before capture`;
-        if (seededRows !== undefined) await expect(states, message).toHaveCount(seededRows);
-        else await expect(states, message).not.toHaveCount(0);
-        await expect(states, message).toHaveText(Array(seededRows ?? await states.count()).fill("Needs you"));
+      const deadline = performance.now() + 30_000;
+      const remaining = (limit: number): number => {
+        const left = deadline - performance.now();
+        if (left <= 0) throw new Error("Capture readiness deadline expired");
+        return Math.max(1, Math.min(limit, left));
+      };
+      const observe = () => page.evaluate(() => ({
+        states: [...document.querySelectorAll(".af-rail-list .af-operator-state")].map(el => el.textContent),
+        project: document.querySelector(".af-project-item-current .af-project-item-meta")?.textContent ?? null,
+        filter: [...document.querySelectorAll(".af-filter-item-count")].map(el => el.textContent),
+      }));
+      let lastObserved: Awaited<ReturnType<typeof observe>> | null = null;
+      try {
+        await expect(async () => {
+          lastObserved = await observe();
+          // A new single-image capture must recheck readiness, including hidden
+          // rail/menu summaries. Login/unavailable scenes have no app to settle.
+          if (await page.locator(".af-app").count()) {
+            const states = page.locator(".af-rail-list .af-operator-state");
+            const message = `${name}${suffix}: all seeded sessions must report Needs you before capture`;
+            if (seededRows !== undefined) await expect(states, message).toHaveCount(seededRows, { timeout: remaining(1_000) });
+            else await expect(states, message).not.toHaveCount(0, { timeout: remaining(1_000) });
+            const count = seededRows ?? await states.count();
+            await expect(states, message).toHaveText(Array(count).fill("Needs you"), { timeout: remaining(1_000) });
+            // projectMeta's settled golden is "4 sessions", without a working
+            // suffix or an invented waiting label. Assert it even when hidden.
+            await expect(page.locator(".af-project-item-current .af-project-item-meta"), message)
+              .toHaveText(`${count} session${count === 1 ? "" : "s"}`, { timeout: remaining(1_000) });
+            await expect(page.locator(".af-filter-item-count"), message)
+              .toHaveText([String(count), "0", "0", "0", "0"], { timeout: remaining(1_000) });
+          }
+          // toHaveScreenshot retries internally without rechecking readiness.
+          // Capture exactly one image instead; only this outer bounded retry
+          // may take another, after repeating every state assertion above.
+          const pixels = await page.screenshot({
+            animations: "disabled", caret: "hide", style: visualStyle,
+            timeout: remaining(5_000),
+          });
+          expect(pixels).toMatchSnapshot(`${name}${suffix}.png`, { maxDiffPixels: 0, threshold: 0.2 });
+        }).toPass({ timeout: remaining(30_000) });
+      } catch (error) {
+        try { lastObserved = await observe(); } catch { /* Keep the last observation if the page closed. */ }
+        throw new Error(`${name}${suffix}: capture did not settle within 30s; last observed ${JSON.stringify(lastObserved)}`, { cause: error });
       }
-      await expect(page).toHaveScreenshot(`${name}${suffix}.png`, {
-        animations: "disabled", caret: "hide",
-        stylePath: "./selftest/visual.css",
-      });
     } else {
       await page.screenshot({ path: join(SHOT_DIR, `${name}${suffix}.png`) });
     }
@@ -374,6 +405,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
       return;
     }
     await page.setViewportSize({ width: 375, height: 812 });
+    await settleTerminal(page);
     await expect(page.locator(".af-nav-toggle")).toBeVisible();
     await shot("phone-session");
     await recordTerminalChrome(page, shot, "phone-");

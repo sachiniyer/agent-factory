@@ -55,6 +55,8 @@ import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { KeyedRows, orderChildren } from "./keyed-rows.js";
+import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES, currentMode } from "./theme.js";
@@ -1139,6 +1141,7 @@ export class AppShell {
   dispose(): void {
     window.clearInterval(this.idleAgeTimer);
     this.terminalChrome?.dispose();
+    for (const menu of this.railMenus.values()) menu.dispose();
   }
 
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
@@ -1421,60 +1424,70 @@ export class AppShell {
   private renderRail(state: AppState): void {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = visibleRailSessions(state);
-    // Every rebuild replaces the row controls. Drop the old reference first so a
-    // selected row hidden by the project/status filter cannot leave patchMainHead
-    // mutating a detached button.
-    this.lifecycleBtn = null;
-    this.lifecycleAction = null;
-    // The count is what the rail SHOWS, not what the project holds — a count that
-    // disagrees with the rows under it is just a bug the user has to reconcile. The
-    // filter menu carries the per-state totals for what's hidden.
-    this.railCount.textContent = String(visible.length);
-    this.renderFilterMenu(state, scoped);
-    const openIds = new Set(this.railMenus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.dataset.sessionId));
-    const active = document.activeElement as HTMLElement | null;
-    const focusedId = active?.closest<HTMLElement>("[data-session-id]")?.dataset.sessionId;
-    const focusedName = active?.getAttribute("aria-label");
-    for (const menu of this.railMenus) menu.dispose();
-    this.railMenus = [];
-    const list = this.railList;
-    // No project selected ⇒ there are no projects at all (nothing has been created):
-    // the global empty rail. Post-#2456 the coherent first step is registering a repo
-    // from the switcher's "+ Add project", not the TUI — the union then surfaces it
-    // and a session can be created into it here.
-    if (!state.selectedProject) {
-      list.replaceChildren();
-      return;
+    const count = String(visible.length);
+    if (this.railCount.textContent !== count) this.railCount.textContent = count;
+    const filterSignature = JSON.stringify([kindCounts(scoped), state.statusFilter]);
+    if (filterSignature !== this.lastFilterSignature) {
+      this.lastFilterSignature = filterSignature;
+      this.renderFilterMenu(state, scoped);
     }
-    const rows = visible.map((s) => {
-      const selected = s.id === state.selectedId;
-      return sessionRow(
-        s,
-        selected,
-        (id) => this.runRailExit(() => this.actions.open(id)),
-        (target) => this.rowActions(target, selected),
-      );
-    });
-    const notice = this.railNotice(state, scoped, visible);
-    list.replaceChildren(...(notice ? [notice, ...rows] : rows));
-    for (const menu of this.railMenus) if (openIds.has(menu.el.dataset.sessionId)) menu.open();
-    if (focusedId && focusedName) {
-      const host = list.querySelector(`[data-session-id="${CSS.escape(focusedId)}"]`);
-      host?.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+    const activeBefore = document.activeElement as HTMLElement | null;
+    let restoreChangedFocus: (() => void) | undefined;
+    const rows = this.railRows.reconcile(
+      state.selectedProject ? visible : [], sessionKey,
+      s => JSON.stringify([s, s.id === state.selectedId]),
+      (s, previous) => {
+        const key = sessionKey(s);
+        const oldMenu = this.railMenus.get(key);
+        const wasOpen = oldMenu && !oldMenu.panel.hidden;
+        const active = document.activeElement as HTMLElement | null;
+        const focusedName = previous?.contains(active) ? active?.getAttribute("aria-label") : null;
+        oldMenu?.dispose();
+        this.railMenus.delete(key);
+        const row = sessionRow(s, s.id === state.selectedId,
+          id => this.runRailExit(() => this.actions.open(id)),
+          target => this.rowActions(target, s.id === state.selectedId), previous);
+        if (wasOpen) this.railMenus.get(key)?.open();
+        if (focusedName) restoreChangedFocus = () =>
+          row.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+        return row;
+      },
+      key => { this.railMenus.get(key)?.dispose(); this.railMenus.delete(key); },
+    );
+    // Preserve the notice too: its controls may own focus during a snapshot.
+    const noticeSignature = JSON.stringify([state.selectedProject, scoped.length,
+      scoped.some(s => !isArchived(s)), scoped.filter(isArchived).length,
+      visible.length, state.statusFilter]);
+    if (noticeSignature !== this.lastRailNoticeSignature) {
+      this.lastRailNoticeSignature = noticeSignature;
+      this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
+    orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    restoreChangedFocus?.();
+    if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
+      activeBefore.focus({ preventScroll: true });
+    }
+    const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : undefined;
+    this.lifecycleBtn = selectedMenu?.panel.querySelector<HTMLElement>(".af-rail-lifecycle") ?? null;
+    this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
   }
+
+  private railRows = new KeyedRows<SessionData, HTMLElement>();
+  private lastFilterSignature = "";
+  private lastRailNoticeSignature = "";
+  private cachedRailNotice: HTMLElement | null = null;
 
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
-  private railMenus: ReturnType<typeof actionsDisclosure>[] = [];
+  private railMenus = new Map<string, ReturnType<typeof actionsDisclosure>>();
   private rowActions(session: ManagedSession, selected: boolean): HTMLElement {
     const host = h("div", { class: "af-row-actions" });
     const buttons = this.sessionActionButtons(session, "rail", selected);
     if (!buttons.length) return host;
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
-    this.railMenus.push(menu);
+    this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("…");
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
@@ -2945,6 +2958,7 @@ function sessionRow(
   selected: boolean,
   openSession: (id: string) => void,
   buildActions: (session: ManagedSession) => HTMLElement,
+  previous?: HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
   const operator = operatorKind(s);
@@ -2978,7 +2992,11 @@ function sessionRow(
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
     actionable ? "" : " af-row-inert"
   }${creating ? " af-row-creating" : ""}`;
-  const row = h("li", { class: cls });
+  const row = previous ?? h("li", { class: cls });
+  row.className = cls;
+  row.replaceChildren();
+  row.onclick = null;
+  row.removeAttribute("aria-disabled");
   row.dataset.state = status.kind ?? "working";
   // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
   // one. The empty fixed-width slot matches the TUI's blank status cell and keeps
@@ -3013,7 +3031,7 @@ function sessionRow(
     // while an id-less row has no unambiguous mutation target.
     row.setAttribute("aria-disabled", "true");
   } else if (actionable) {
-    row.addEventListener("click", () => openSession(s.id));
+    row.onclick = () => openSession(s.id);
   }
   return row;
 }

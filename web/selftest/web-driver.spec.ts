@@ -6719,16 +6719,13 @@ async function assertActiveTerminalReclaimsPeerGeometry(
     .toBeLessThan(repaired.scrollTop);
 }
 
-test("#2933: session churn rebuilds the rail without taking the reader back to the top", REAL_FIXTURE, async ({
+test("#2933: session churn patches the rail without taking the reader back to the top", REAL_FIXTURE, async ({
   browser,
 }) => {
-  // The rail rebuilds with replaceChildren whenever the sessions array reference
-  // changes — which is on STATUS CHURN, not on anything the user did. replaceChildren
-  // clamps a scroll container to 0 (#1894), so a reader scrolled down the rail was
-  // being returned to the top by other people's sessions.
-  //
-  // Asserted at the mechanism, not the symptom: a MutationObserver proves the rebuild
-  // really happened, so a run where no event arrived cannot pass by accident.
+  // Churn must preserve scroll whether the client rebuilds or patches rows.
+  // Observe descendants: keyed snapshots retain the list children (#3914), so
+  // requiring their replacement would reject the intended optimization.
+  // An actual row mutation still proves the out-of-band event arrived.
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -6758,12 +6755,12 @@ test("#2933: session churn rebuilds the rail without taking the reader back to t
 
     await p.evaluate(() => {
       const el = document.querySelector(".af-rail-list");
-      const w = window as unknown as { __railRebuilds: number };
-      w.__railRebuilds = 0;
+      const w = window as unknown as { __railPatches: number };
+      w.__railPatches = 0;
       if (el) {
         new MutationObserver(() => {
-          w.__railRebuilds += 1;
-        }).observe(el, { childList: true });
+          w.__railPatches += 1;
+        }).observe(el, { childList: true, subtree: true });
       }
     });
 
@@ -6778,15 +6775,15 @@ test("#2933: session churn rebuilds the rail without taking the reader back to t
     created = true;
 
     await expect
-      .poll(() => p.evaluate(() => (window as unknown as { __railRebuilds: number }).__railRebuilds), {
-        message: "the out-of-band change must actually rebuild the rail",
+      .poll(() => p.evaluate(() => (window as unknown as { __railPatches: number }).__railPatches), {
+        message: "the out-of-band change must actually patch a rail row",
         timeout: 20_000,
       })
       .toBeGreaterThan(0);
 
     expect(
       await list.evaluate((el) => el.scrollTop),
-      "a rebuild driven by churn must keep the reader's place",
+      "a patch driven by churn must keep the reader's place",
     ).toBe(parked);
   } finally {
     if (created) {
