@@ -52,6 +52,17 @@ monitor scanout. The observer and driver add overhead; comparisons keep it fixed
 | TUI full frame | Driver sends `,` → config overlay's completed footer appears in tmux capture; includes dispatch, View/layout, renderer flush, shell/driver and capture overhead |
 | TUI key-to-render | Driver sends Escape → overlay footer disappears and the 1,000-session rail is visible again; same end-to-end transport |
 
+The accepted resync also records `snapshot_rail_ms` in `web-runs.json`: Snapshot
+JSON decoded → the accepted resync marker and two animation frames. This is a
+supplemental update measurement; the original `rail_ms` still measures initial
+construction, with its observer unchanged. Before reconnecting, the harness retains
+all 1,000 row nodes. After resync it asserts identical row identities and zero DOM
+writes inside the 996 unchanged seeded rows, including attribute writes and row
+insertions/removals. The audit requires all 996 unique fixture IDs in both the
+Snapshot and DOM; decorated display titles cannot produce an empty cohort. The
+four live rows may receive real status updates. The DOM audit runs only during this
+resync, so it adds no observation overhead to the initial rail or echo measurements.
+
 TUI frame time is a user-observable full-frame turnaround, **not isolated Go View
 CPU time**. The two TUI cases exercise opening and dismissing a full overlay over
 the populated session model. The 5ms driver poll interval bounds observation
