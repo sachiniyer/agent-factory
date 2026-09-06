@@ -75,9 +75,13 @@ selected project and is remembered by this browser; a dot on the funnel marks a
 non-default filter. If it hides everything, the empty state reports hidden rows.
 
 On a phone, **Toggle sessions** opens the rail drawer. Selecting a session closes
-it; tapping the backdrop dismisses it. With a session selected, project and view
-controls move into the drawer. **More** holds the install, theme, and Disconnect
-controls on narrow screens.
+it; tapping the backdrop dismisses it. Project context and the view switch remain
+in the app header. **More app controls** holds install, Light · Dark · System and
+Disconnect. The pane has its own title, static Keyboard label and Actions row;
+long titles truncate with … and tabs scroll horizontally. Controls have at least
+44px touch targets.
+
+![Focused session on a phone, with project navigation above the pane title and tabs](assets/web/phone-session.png)
 
 **Share a link to a session.** Click the link icon (**Copy link**) beside the selected session's
 header title to copy its link, or copy the address bar: it follows your selection.

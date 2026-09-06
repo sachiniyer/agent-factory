@@ -17,7 +17,6 @@ import {
   supportsTabManagement,
   tabBarSig,
   tabCreationUnavailableReason,
-  usesCondensedSessionChrome,
   canCreateTabKind,
   canCloseTabs,
   canMutateTabRoster,
@@ -229,26 +228,6 @@ test("archiving the selected session changes the sig — the bar must rebuild to
 
 test("no selection collapses to the empty sig", () => {
   assert.equal(tabBarSig(state({ selectedId: null })), "");
-});
-
-test("mobile session chrome condenses only for a real selection on the sessions surface (#2354)", () => {
-  const selected = state({ view: "sessions" });
-  assert.equal(usesCondensedSessionChrome(selected), true, "a selected session gives its row to hamburger + tabs");
-  assert.equal(
-    usesCondensedSessionChrome(state({ view: "tasks" })),
-    false,
-    "another top-level view keeps app navigation in flow",
-  );
-  assert.equal(
-    usesCondensedSessionChrome(state({ view: "sessions", selectedId: null })),
-    false,
-    "no selection keeps navigation",
-  );
-  assert.equal(
-    usesCondensedSessionChrome(state({ view: "sessions", selectedId: "gone" })),
-    false,
-    "a stale id must not hide navigation over the empty pane",
-  );
 });
 
 test("the signature is delimiter-safe: a tab name containing separators can't hide a change", () => {

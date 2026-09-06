@@ -7170,7 +7170,7 @@ function icon(name, className = "") {
 }
 
 // src/components.ts
-function actionsDisclosure(label = "Session actions") {
+function actionsDisclosure(label = "Session actions", enabled = () => true) {
   const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "\u2026"));
   trigger.setAttribute("aria-label", label);
   trigger.setAttribute("aria-expanded", "false");
@@ -7182,25 +7182,51 @@ function actionsDisclosure(label = "Session actions") {
     if (!el2.contains(event.target)) close();
   };
   const close = (restoreFocus = false) => {
-    panel.hidden = true;
+    panel.hidden = enabled();
     trigger.setAttribute("aria-expanded", "false");
     document.removeEventListener("mousedown", outside);
     if (restoreFocus) trigger.focus();
   };
   const open = () => {
+    if (!enabled()) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     document.addEventListener("mousedown", outside);
   };
   trigger.addEventListener("click", () => panel.hidden ? open() : close());
   el2.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !panel.hidden) {
+    if (event.key === "Escape" && enabled() && !panel.hidden) {
       event.preventDefault();
       event.stopPropagation();
       close(true);
     }
   });
   return { el: el2, panel, trigger, open, close, dispose: close };
+}
+function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)")) {
+  const menu = actionsDisclosure("More app controls", () => phone.matches);
+  menu.el.className = "af-appbar-tools-wrap";
+  menu.trigger.className = "af-appbar-more";
+  menu.trigger.replaceChildren(icon("ellipsis"));
+  menu.trigger.title = "More app controls";
+  menu.trigger.setAttribute("aria-controls", "af-appbar-tools");
+  menu.panel.className = "af-appbar-tools";
+  menu.panel.id = "af-appbar-tools";
+  menu.panel.setAttribute("aria-label", "App controls");
+  menu.panel.append(...controls);
+  const sync = () => {
+    const hadFocus = menu.panel.contains(document.activeElement);
+    menu.close();
+    menu.trigger.hidden = !phone.matches;
+    menu.panel.hidden = phone.matches;
+    if (phone.matches && hadFocus) menu.trigger.focus();
+  };
+  phone.addEventListener("change", sync);
+  sync();
+  return { ...menu, dispose: () => {
+    phone.removeEventListener("change", sync);
+    menu.dispose();
+  } };
 }
 function terminalChrome(opts) {
   const menu = actionsDisclosure();
@@ -7212,7 +7238,7 @@ function terminalChrome(opts) {
     });
     return button;
   };
-  const title = h("span", { class: "af-term-title" }, opts.title);
+  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -14212,7 +14238,7 @@ var AppShell = class {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      setAppbarToolsOpen(false);
+      this.appControls.close();
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -14230,63 +14256,14 @@ var AppShell = class {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
-    const appbarTools = h(
-      "div",
-      { class: "af-appbar-tools", id: "af-appbar-tools" },
+    this.appControls = appbarControls([
       ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
-    );
-    appbarTools.setAttribute("role", "group");
-    appbarTools.setAttribute("aria-label", "App controls");
-    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, icon("ellipsis"));
-    appbarMore.setAttribute("aria-label", "More app controls");
-    appbarMore.setAttribute("title", "More app controls");
-    appbarMore.setAttribute("aria-controls", "af-appbar-tools");
-    appbarMore.setAttribute("aria-expanded", "false");
-    const appbarToolsWrap = h("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
-    let appbarToolsOpen = false;
-    function setAppbarToolsOpen(open) {
-      if (appbarToolsOpen === open) {
-        return;
-      }
-      appbarToolsOpen = open;
-      appbarToolsWrap.classList.toggle("af-appbar-tools-open", open);
-      appbarMore.setAttribute("aria-expanded", open ? "true" : "false");
-      if (open) {
-        document.addEventListener("mousedown", onAppbarToolsMouseDown);
-        document.addEventListener("keydown", onAppbarToolsKeyDown, true);
-        window.addEventListener("resize", onAppbarToolsResize);
-      } else {
-        document.removeEventListener("mousedown", onAppbarToolsMouseDown);
-        document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
-        window.removeEventListener("resize", onAppbarToolsResize);
-      }
-    }
-    const onAppbarToolsMouseDown = (e) => {
-      if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target)) {
-        setAppbarToolsOpen(false);
-      }
-    };
-    const onAppbarToolsKeyDown = (e) => {
-      if (e.key !== "Escape") {
-        return;
-      }
-      e.stopPropagation();
-      setAppbarToolsOpen(false);
-      appbarMore.focus();
-    };
-    const onAppbarToolsResize = () => setAppbarToolsOpen(false);
-    appbarMore.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const opening = !appbarToolsOpen;
-      if (opening) {
-        this.closeProjectMenu();
-      }
-      setAppbarToolsOpen(opening);
-    });
+    ]);
+    this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect2.addEventListener("click", () => {
-      setAppbarToolsOpen(false);
+      this.appControls.close();
       this.actions.disconnect();
     });
     const header = h(
@@ -14296,7 +14273,7 @@ var AppShell = class {
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
-      appbarToolsWrap
+      this.appControls.el
     );
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
@@ -14383,16 +14360,13 @@ var AppShell = class {
   viewTabs;
   // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
+  appControls;
   themeOpts = /* @__PURE__ */ new Map();
   lastThemeChoice = null;
   sessionsBody;
   tasksPane;
   configPane;
   lastView = null;
-  // Whether the selected sessions surface is using the phone's condensed shell.
-  // Kept separately from lastView/lastSelectedId because either can flip this one
-  // presentation decision. The root class is media-query inert on desktop.
-  lastCondensedSessionChrome = null;
   lastTasks = null;
   lastTasksError;
   lastTasksProject = null;
@@ -14524,6 +14498,7 @@ var AppShell = class {
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
+    this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
@@ -14564,12 +14539,6 @@ var AppShell = class {
   /** Applies the latest state, touching only what changed. */
   update(state, prioritizeTerminal = false) {
     this.syncDocumentTitle(state);
-    const condensedSessionChrome = usesCondensedSessionChrome(state);
-    if (this.lastCondensedSessionChrome !== condensedSessionChrome) {
-      this.lastCondensedSessionChrome = condensedSessionChrome;
-      this.el.classList.toggle("af-session-selected", condensedSessionChrome);
-      this.actions.layoutChanged();
-    }
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -15626,6 +15595,7 @@ var AppShell = class {
       return;
     }
     this.headTitle.textContent = selected.title;
+    this.headTitle.title = selected.title;
     if (this.terminalChrome) this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
     const warningText = archiveWarningText(selected);
     if (this.archiveWarning) {
@@ -15718,9 +15688,6 @@ function documentTitle(state) {
 }
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
-}
-function usesCondensedSessionChrome(state) {
-  return state.view === "sessions" && !!state.selectedId && state.sessions.some((session) => session.id === state.selectedId);
 }
 function tabBarSig(state) {
   const selected = selectedSession(state);

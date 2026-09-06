@@ -34,6 +34,19 @@ matrix, including Light · Dark · System. Empty/error web specimens link to the
 </div>
 {{end}}{{end}}
 
+## Phone layout
+
+At widths up to 768px, keep project context and Sessions · Tasks · Config in the
+app header, alongside the session drawer toggle. Fold install, Light · Dark ·
+System and Disconnect into one … disclosure. Keep these controls available when
+a session is focused.
+
+Give the pane title, static Keyboard ownership label and Actions disclosure their
+own row. Session titles truncate with …; preserve the complete name in accessible
+text and the title tooltip. Tabs stay on one horizontally scrolling row. Controls
+have a minimum 44px touch target, using the existing spacing tokens. Use the same
+colours, glyphs and focus model as desktop.
+
 ## Implementation reference
 
 The examples above are the specification; this compact reference is for implementers,
@@ -73,6 +86,10 @@ real-agent recorder. Stand-in and model fixtures are identified at their source.
 Run `make docs`, then `go run ./scripts/gen-design --check` and `mkdocs build --strict`.
 The docs drift gate checks the web CSS, Go theme, docs CSS copy and this page together.
 Edit the token source and specimen sources, never these generated outputs.
+Every web UI PR must verify a focused session at phone widths (360, 390 and 430px)
+in both themes, including title truncation, overflow keyboard access and 44px
+controls. Regenerate affected container goldens and keep pixel-exact checks and
+performance budgets passing.
 
 ## Recovery screens · P4
 
