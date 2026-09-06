@@ -13,8 +13,9 @@ The specimens consume the generated CSS. TUI examples show the prescribed cell l
 and colours in HTML; they are not a running Bubble Tea app. Example controls are inert,
 except native disclosure menus. System selects one of these same two themes.
 
-The stills are the current product, unchanged. Web has six [recorder beats](../dev/demo-assets.md)
-in both themes. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
+The web stills show the real rail and header after P2 slice A; the remaining
+components are awaiting their slices. Web has six [recorder beats](../dev/demo-assets.md)
+in both themes, plus filter, project-menu and phone drawer/control captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
 screen/theme matrix. Missing captures are labelled. Empty/error specimens illustrate the rules; the [P4 recovery matrix](recovery-stills.md)
 provides asserted recordings. Click a still for the full screen.
 
@@ -24,7 +25,7 @@ provides asserted recordings. Click a still for the full screen.
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-state-row"><span class="sg-state-name">tidy-tests</span><span class="sg-state-label" style="color:var(--af-running)">Running</span></div><div class="sg-state-row sg-selected"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-ready)">●</span><span class="sg-state-name">add-json-export</span><span class="sg-state-label" style="color:var(--af-ready)">Ready</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-lost)">◌</span><span class="sg-state-name">remote-build</span><span class="sg-state-label" style="color:var(--af-lost)">Lost</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-dead)">○</span><span class="sg-state-name">fix-empty-add</span><span class="sg-state-label" style="color:var(--af-dead)">Dead</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-archived)">▧</span><span class="sg-state-name">document-cli</span><span class="sg-state-label" style="color:var(--af-archived)">Archived</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-limit-reached)">◆</span><span class="sg-state-name">nightly-review</span><span class="sg-state-label" style="color:var(--af-limit-reached)">Limit reached</span></div></section>
-<figure><a href="../../assets/web/dashboard.png"><img loading="lazy" src="../../assets/web/dashboard.png" alt="Current web dashboard screen in light theme"></a><figcaption>Current recorder still · dashboard · light</figcaption></figure>
+<figure><a href="../../assets/web/dashboard.png"><img loading="lazy" src="../../assets/web/dashboard.png" alt="Current web dashboard screen in light theme"></a><figcaption>Rules applied · Real web screen · dashboard · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>    tidy-tests · <span style="color:var(--af-running)">Running</span>
@@ -38,7 +39,7 @@ provides asserted recordings. Click a still for the full screen.
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-state-row"><span class="sg-state-name">tidy-tests</span><span class="sg-state-label" style="color:var(--af-running)">Running</span></div><div class="sg-state-row sg-selected"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-ready)">●</span><span class="sg-state-name">add-json-export</span><span class="sg-state-label" style="color:var(--af-ready)">Ready</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-lost)">◌</span><span class="sg-state-name">remote-build</span><span class="sg-state-label" style="color:var(--af-lost)">Lost</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-dead)">○</span><span class="sg-state-name">fix-empty-add</span><span class="sg-state-label" style="color:var(--af-dead)">Dead</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-archived)">▧</span><span class="sg-state-name">document-cli</span><span class="sg-state-label" style="color:var(--af-archived)">Archived</span></div><div class="sg-state-row"><span class="sg-state-glyph" aria-hidden="true" style="color:var(--af-limit-reached)">◆</span><span class="sg-state-name">nightly-review</span><span class="sg-state-label" style="color:var(--af-limit-reached)">Limit reached</span></div></section>
-<figure><a href="../../assets/web/dashboard-dark.png"><img loading="lazy" src="../../assets/web/dashboard-dark.png" alt="Current web dashboard screen in dark theme"></a><figcaption>Current recorder still · dashboard · dark</figcaption></figure>
+<figure><a href="../../assets/web/dashboard-dark.png"><img loading="lazy" src="../../assets/web/dashboard-dark.png" alt="Current web dashboard screen in dark theme"></a><figcaption>Rules applied · Real web screen · dashboard · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>    tidy-tests · <span style="color:var(--af-running)">Running</span>
@@ -55,7 +56,7 @@ provides asserted recordings. Click a still for the full screen.
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-bar"><strong>todo-cli</strong><span class="sg-active">Sessions</span><span>Tasks</span><span>Config</span><span>Connected</span></div></section>
-<figure><a href="../../assets/web/dashboard.png"><img loading="lazy" src="../../assets/web/dashboard.png" alt="Current web dashboard screen in light theme"></a><figcaption>Current recorder still · dashboard · light</figcaption></figure>
+<figure><a href="../../assets/web/dashboard.png"><img loading="lazy" src="../../assets/web/dashboard.png" alt="Current web dashboard screen in light theme"></a><figcaption>Rules applied · Real web screen · dashboard · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>todo-cli · Sessions · Connected
@@ -65,7 +66,7 @@ Keyboard: navigation</pre></section>
 
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-bar"><strong>todo-cli</strong><span class="sg-active">Sessions</span><span>Tasks</span><span>Config</span><span>Connected</span></div></section>
-<figure><a href="../../assets/web/dashboard-dark.png"><img loading="lazy" src="../../assets/web/dashboard-dark.png" alt="Current web dashboard screen in dark theme"></a><figcaption>Current recorder still · dashboard · dark</figcaption></figure>
+<figure><a href="../../assets/web/dashboard-dark.png"><img loading="lazy" src="../../assets/web/dashboard-dark.png" alt="Current web dashboard screen in dark theme"></a><figcaption>Rules applied · Real web screen · dashboard · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>todo-cli · Sessions · Connected
