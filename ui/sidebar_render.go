@@ -26,13 +26,24 @@ const chromeLines = 2
 func (s *Sidebar) String() string {
 	s.syncFromStore()
 
-	// Render every visible row up front and measure real heights: instance
-	// rows are multi-line (title + branch, plus an optional PR line) while tab
-	// rows are single-line, so the window math cannot assume one line per item.
+	// Measure rows that can enter this viewport. Every row occupies at least
+	// one line, so rows beyond the later of the selection/current scroll start
+	// plus a whole viewport cannot be reached by fitWindow. Give that suffix a
+	// one-line lower bound instead of styling thousands of invisible rows.
+	// Rows before/around selection retain exact heights and existing scrolling.
+	lastMeasured := len(s.visibleItems) - 1
+	if s.height > chromeLines {
+		lastMeasured = max(s.scrollOffset, s.selectedIdx) + s.height - chromeLines
+	}
 	rows := make([]string, len(s.visibleItems))
 	heights := make([]int, len(s.visibleItems))
 	totalLines := 0
 	for i, item := range s.visibleItems {
+		if i > lastMeasured {
+			heights[i] = 1
+			totalLines++
+			continue
+		}
 		isSelected := i == s.selectedIdx
 		switch {
 		case item.IsHeader:

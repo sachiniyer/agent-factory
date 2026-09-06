@@ -110,10 +110,10 @@ func (s *SelectionOverlay) windowForTextHeight(textHeight int) (start, end int, 
 // Render renders the selection overlay
 func (s *SelectionOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 
 	style := selectionOverlayStyle()
 	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
@@ -132,18 +132,18 @@ func (s *SelectionOverlay) Render() string {
 	}
 
 	if showAbove {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more above"), textRect.W))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more above"), textRect.W))
 	}
 	for i := start; i < end; i++ {
 		item := s.items[i]
 		if i == s.selectedIdx {
-			lines = append(lines, truncateOverlayLine(selectedStyle.Render("▸ "+item), textRect.W))
+			lines = append(lines, truncateOverlayLine(ui.SelectionMarker("▸ ")+selectedStyle.Render(item), textRect.W))
 		} else {
 			lines = append(lines, truncateOverlayLine(normalStyle.Render("  "+item), textRect.W))
 		}
 	}
 	if showBelow {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more below"), textRect.W))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more below"), textRect.W))
 	}
 
 	if !compact {

@@ -15,7 +15,7 @@ import (
 )
 
 var tabPaneStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.Foreground)
+	Foreground(activeTheme.Ink)
 
 // tabContentState holds the rendered content of the tab pane.
 //

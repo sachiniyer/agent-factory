@@ -1,0 +1,1637 @@
+
+app/account_login.go:106 handleAccountRegister
+  108 condition err != nil
+
+app/account_login.go:161 handleAccountLogin
+
+app/account_picker.go:145 item
+  147 condition c.projectDefault
+  150 condition c.registrationOnly
+  153 condition c.unregistered
+  155 condition c.value != ambientAccount && !c.loggedIn
+  158 condition len(marks) == 0
+
+app/account_picker.go:337 handleAccountRegistry
+  338 condition m.state != stateNew || m.namingInstance == nil || m.namingInstance != msg.naming
+  341 condition sessionenv.AgentForCommand(m.pendingProgram) != msg.agent
+  344 condition msg.err != nil
+  355 condition !accountRosterHas(msg.resp.Agents, msg.agent)
+  359 condition len(choices) == 1
+  371 condition choice.value == m.pendingAccount
+
+app/account_picker.go:421 handleStateSelectAccount
+  422 condition m.selectionOverlay == nil
+  428 condition !m.selectionOverlay.HandleKeyPress(msg)
+  441 condition !submitted || idx < 0 || idx >= len(choices)
+  445 condition choice.registrationOnly
+  455 condition choice.unregistered
+  466 condition m.pendingAccount != ambientAccount && !choice.loggedIn
+
+app/account_picker.go:509 registrationOnlyRefusal
+  510 condition ok
+
+app/account_picker.go:532 accountSkewRefusal
+  533 condition requested == ambientAccount
+  536 condition started == nil
+  541 condition started.Account == requested
+  550 condition started.Account == ""
+
+app/adopted_ops.go:61 owns
+  62 condition inst == nil
+  66 condition op == session.OpNone
+
+app/adopted_ops.go:112 vetoesReconcile
+  113 condition inst.GetInFlightOp() == session.OpNone
+
+app/backend_picker.go:109 item
+  111 case daemon.BackendUnavailable
+  113 case daemon.BackendUnknown
+
+app/config_agent.go:97 handleConfigAgent
+  104 condition m.configAgentSpawning
+  115 condition apiclient.IsRemoteTarget()
+
+app/config_agent.go:284 handleConfigAgentDone
+  286 condition msg.err != nil
+  291 condition rerr != nil
+  306 condition err != nil
+  311 condition msg.err != nil
+
+app/daemon_restart.go:85 handleDaemonRestarted
+  86 condition msg.err != nil
+
+app/detach_trace.go:74 dumpSlowDetach
+  80 condition err != nil
+  88 condition err != nil
+  94 condition err != nil
+  103 condition err != nil
+  107 condition err != nil
+  111 condition err != nil
+  116 condition !detachTraceEnabled
+
+app/handle_actions.go:162 handleKill
+  164 condition selected == nil
+  171 condition selected.IsTearingDown()
+  174 condition !selected.CanKill()
+  192 condition inst != nil
+  212 condition selected.Capabilities().Workspace == session.WorkspaceLocalWorktree
+  222 condition hasWorktree && impact.RemoveWorktree && impact.Path != ""
+  224 condition w != ""
+  228 condition pr != nil && pr.Branch == impact.Branch
+  231 condition line != ""
+  232 condition severe
+  245 condition severeLine != ""
+  254 condition m.confirmationOverlay != nil
+  262 condition reserved && m.confirmationOverlay != nil
+
+app/handle_actions.go:302 handleInstanceKilled
+  304 condition msg.err != nil
+  305 condition inst != nil && inst.GetInFlightOp() == session.OpKilling
+  314 condition errors.Is(msg.err, errDaemonUnresponsive) && !isRemoteTarget()
+  323 condition inst != nil
+
+app/handle_actions.go:395 handleRestore
+  397 condition selected == nil
+  403 condition selected.IsTearingDown()
+  407 condition lifecycleAction == session.LifecycleActionNone
+  415 condition lifecycleAction != session.LifecycleActionRestore
+  418 condition selected.GetInFlightOp() == session.OpRestoring
+
+app/handle_actions.go:467 confirmReprovisioningRestore
+  473 condition inst == nil
+  476 condition inst.LifecycleAction() != session.LifecycleActionRestore
+  479 condition inst.GetInFlightOp() == session.OpRestoring
+
+app/handle_actions.go:521 handleInstanceArchived
+  524 condition msg.err != nil && !committedWarning
+  527 condition inst != nil && inst.GetInFlightOp() == session.OpArchiving
+  532 condition inst != nil
+  542 condition committedWarning
+
+app/handle_actions.go:622 handleInstanceRestored
+  625 condition msg.err != nil && !committedWarning
+  626 condition inst != nil && inst.GetInFlightOp() == session.OpRestoring
+  631 condition inst != nil && (inst.GetLiveness() == session.LiveLost || inst.GetLiveness() == session.LiveDead)
+  635 condition committedWarning
+
+app/handle_actions.go:769 interactiveGuard
+  770 condition inst == nil || inst.IsCreating()
+  773 condition inst.IsTearingDown()
+  776 condition inst.UserKilled()
+  779 condition inst.GetInFlightOp() == session.OpRestoring
+  785 condition inst.GetLiveness() == session.LiveLost
+  795 condition inst.GetLiveness() == session.LiveDead
+  798 condition inst.GetLiveness() == session.LiveArchived
+  806 condition !inst.TmuxAlive()
+
+app/handle_actions.go:883 webTabAttachGuard
+  884 condition inst == nil
+  888 condition tabIdx < 0 || tabIdx >= len(tabs)
+  892 case session.TabKindWeb
+  895 case session.TabKindVSCode
+
+app/handle_handoff.go:90 handleStateSelectHandoffAgent
+  92 condition !shouldClose
+  107 condition !submitted || idx < 0 || idx >= len(choices)
+  113 condition selected == nil
+  127 condition m.resolveSessionActionTarget(pickerTarget) == nil
+
+app/handle_input.go:331 startNewInstance
+  332 condition m.restoreFailedCreate()
+  351 condition m.repoRoot == ""
+  362 condition m.pendingProgram == "" && m.appConfig != nil
+  371 condition remote
+  373 condition err != nil
+  376 condition !configured
+  426 condition err != nil
+
+app/handle_input.go:463 noActiveProjectNotice
+
+app/handle_mouse.go:572 dragStatusText
+  573 condition m.tabDrag == nil || !m.tabDrag.active
+  577 condition label == ""
+  580 condition m.tabDrag.targetRegion == ""
+
+app/handle_panes.go:304 pruneDeadPanes
+  308 condition !m.store.ContainsInstance(inst) || (inst != nil && inst.GetLiveness() == session.LiveArchived)
+
+app/handle_tabs.go:33 showNewTabPicker
+  35 condition selected == nil || selected.HasInFlightOp()
+  38 condition !selected.Capabilities().TabManagement
+
+app/handle_tabs.go:94 createNewTab
+  95 condition selected == nil
+  98 condition selected.HasInFlightOp()
+  101 condition !selected.Capabilities().TabManagement
+  107 condition !ok
+  111 condition err != nil
+  119 condition kind == session.TabKindVSCode
+  124 condition attachErr != nil
+
+app/help.go:121 renderHelpSections
+  128 condition w > keyWidth
+  136 condition contentWidth > 0
+  139 condition descWidth < 1
+  147 mapping lines = append(lines, headerStyle.Render(s.title))
+  149 condition contentWidth <= 0
+  151 mapping lines = append(lines, keyStyle.Render(r.key)+pad+descStyle.Render("- "+r.desc))
+  160 mapping keyBlock := lipgloss.NewStyle(). 	Width(keyColumnWidth). 	PaddingRight(helpKeyColumnGutter(keyColumnWidth)). 	Render(keyStyle.Render(r.key))
+  164 mapping dashBlock := descStyle.Render("- ")
+  165 mapping descBlock := lipgloss.NewStyle().Width(descWidth).Render(descStyle.Render(r.desc))
+  171 condition len(lines) > 0 && lines[len(lines)-1] == ""
+
+app/help.go:235 firstRunActionLine
+  236 return return descStyle.Render(actions)
+
+app/help.go:298 toContentWidth
+  305 mapping pageLine := descStyle.Render("Page: ")
+  306 condition aliases != ""
+  307 mapping pageLine += descStyle.Render(aliases + " · ")
+  309 mapping pageLine += keyStyle.Render(helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown))
+  310 mapping lineControls := descStyle.Render("Line: ") + keyStyle.Render(navKeys)
+  311 condition aliases != ""
+  312 mapping lineControls += descStyle.Render(" · " + aliases + " jump")
+  314 mapping header := lipgloss.JoinVertical(lipgloss.Left, 	titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)), 	"", 	"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.", 	"", 	pageLine, 	lineControls, 	descStyle.Render("Close: esc · ")+keyStyle.Render(helpKey(keys.KeyHelp))+descStyle.Render(" toggles help"), )
+
+app/help.go:391 toContent
+  403 mapping tabHelp := keyStyle.Render("1-9/"+jumpAny) + descStyle.Render(fmt.Sprintf(" - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; %s new tab, %s close; tabs live in the tree)", jumpAny, openPane, newTab, closeTab))
+  404 condition !h.instance.Capabilities().TabManagement
+  405 mapping tabHelp = keyStyle.Render("1-9/"+jumpAny) + descStyle.Render(fmt.Sprintf(" - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; tabs live in the tree)", jumpAny, openPane))
+  407 mapping content := lipgloss.JoinVertical(lipgloss.Left, 	titleStyle.Render("Session created"), 	"", 	descStyle.Render("New session created:"), 	descStyle.Render(fmt.Sprintf("• Git branch: %s (isolated worktree)", 		lipgloss.NewStyle().Bold(true).Render(h.instance.GetBranch()))), 	descStyle.Render("• Agent process running in background tmux session"), 	"", 	headerStyle.Render("Managing:"), 	keyStyle.Render(helpKey(keys.KeyEnter))+descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))), 	keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render("     - Attach to the session full-screen"), 	keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("     - Detach from a full-screen session"), 	tabHelp, 	keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Kill (delete) the selected session"), 	"", 	headerStyle.Render("Actions:"), 	firstRunActionLine("enter continue · esc close"), )
+
+app/help.go:428 toContent
+  429 mapping lines := []string{ 	titleStyle.Render("Attaching to session"), 	"", 	descStyle.Render("The attached program owns input and scrolling."), 	descStyle.Render("AF's ") + keyStyle.Render(helpKey(keys.KeyShiftUp)+"/"+helpKey(keys.KeyShiftDown)) + descStyle.Render(" preview scrolling works only in navigation mode."), }
+  435 condition agent != ""
+  436 mapping lines = append(lines, descStyle.Render(fmt.Sprintf("%s owns attached scrolling: %s.", agent, controls)))
+  438 mapping lines = append(lines, 	"", 	firstRunActionLine("enter attach full-screen · esc cancel"), 	descStyle.Render("Detach later with ")+keyStyle.Render(tmux.DetachKeyDisplay), )
+
+app/help.go:446 toContent
+  447 mapping content := lipgloss.JoinVertical(lipgloss.Left, 	titleStyle.Render("Interactive pane"), 	"", 	descStyle.Render("You are typing into this pane's terminal: every key — including tab —"), 	descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"), 	descStyle.Render("keyboard, and the sessions rail stays visible."), 	"", 	descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to return to navigation."), 	descStyle.Render("Full-screen attach is still available on ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" (from nav mode)."), )
+
+app/home_model.go:771 setPaneAutoHideStatus
+  772 condition p == nil || paneCount <= 1
+  776 condition ok
+
+app/home_model.go:812 paneStatusLabel
+  813 condition p == nil || p.Instance() == nil || p.Instance().Title == ""
+  817 condition !ok
+
+app/home_tasks.go:17 handleTaskCreate
+  22 condition !committed
+  27 condition name == ""
+  35 condition hasCron == hasWatch
+  38 condition hasCron
+  39 condition strings.TrimSpace(prompt) == ""
+  42 condition err != nil
+  57 condition err != nil
+  60 condition program == ""
+  64 condition err != nil
+  85 condition addErr != nil && !apiclient.IsMutationCommitted(addErr)
+  97 condition err == nil
+  105 condition addErr != nil
+  110 condition reloadErr != nil
+
+app/home_view.go:143 View
+  145 condition m.quitting
+  148 condition m.attachTransitioning
+  154 condition m.lastLayout.Fallback
+  158 condition m.recovery != nil
+  162 condition m.snapshotUnavailable && m.state == stateDefault
+  174 condition m.lastLayout.AutomationsVisible
+  177 condition m.lastLayout.ProjectsVisible
+  189 condition len(m.visiblePanes) == 0
+  204 case m.store.NumInstances() > 0
+  206 case m.repoRoot == "" && m.projects.Degraded()
+  208 case m.repoRoot == "" && !m.projects.HasProjects()
+  210 case m.repoRoot == ""
+  220 condition i > 0
+  223 condition w != nil
+  235 condition banner != ""
+  242 condition m.state == stateHelp
+  243 condition m.textOverlay == nil
+  246 return return placeOverlay(m.textOverlay.Render(), mainView)
+  247 condition m.state == stateConfirm
+  248 condition m.confirmationOverlay == nil
+  251 mapping fg := m.confirmationOverlay.Render()
+  254 condition m.state == stateSearch
+  255 condition m.searchOverlay == nil
+  258 mapping fg := m.searchOverlay.Render()
+  261 condition m.state == stateSwitchProject
+  262 condition m.projectPickerOverlay == nil
+  265 return return placeOverlay(m.projectPickerOverlay.Render(), mainView)
+  266 condition m.state == stateSelectProgram || m.state == stateSelectHandoffAgent || 	m.state == stateSelectBackend || m.state == stateSelectAccount
+  268 condition m.selectionOverlay == nil
+  271 mapping fg := m.selectionOverlay.Render()
+  274 condition m.state == stateSelectTabKind
+  275 condition m.selectionOverlay == nil
+  279 mapping fg := m.selectionOverlay.Render()
+  282 condition m.state == statePromptInput || m.state == stateJumpTab
+  286 condition m.promptOverlay == nil
+  290 return return placeOverlay(m.promptOverlay.Render(), mainView)
+  291 condition m.state == stateHooks
+  293 condition m.state == stateTasks
+  295 condition m.state == stateConfigEditor
+
+app/interactive.go:64 activateInteractive
+  67 condition q == p
+  72 condition !stillOpen
+  88 condition m.state != stateDefault
+  94 condition err != nil
+  110 condition !m.ensureLiveTermPaneFor(p)
+
+app/kill_confirm.go:279 detachedHeadCommitWarning
+  280 condition err == nil
+  284 condition !errors.As(err, &exitErr) || exitErr.ExitCode() != 1
+  288 condition err != nil
+  292 condition err != nil
+  296 condition refSurvivesWorktreeCleanup(strings.TrimSpace(ref), branchName, deleteBranch)
+
+app/kill_confirm.go:359 unmergedSevereLine
+  362 condition n == 1
+  366 condition baseLabel != ""
+
+app/live_termpane.go:419 liveSessionName
+  422 condition inst == nil || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree || !inst.Started()
+  428 condition inst.HasInFlightOp()
+  432 case session.LiveDead
+  432 case session.LiveLost
+
+app/pane_preview.go:207 expireStalePanePreview
+  209 condition txn == nil || txn.ownerPaneID != msg.ownerPaneID || txn.seq != msg.seq || 	!samePaneBinding(txn.target, msg.target)
+  214 condition w == nil
+
+app/pane_preview.go:252 cancelPanePreview
+  254 condition txn == nil
+  260 condition w != nil
+  265 condition focusOwner
+  266 condition p != nil
+
+app/pane_preview.go:369 commitPanePreviewReplace
+  371 condition txn == nil
+  374 condition err != nil
+  378 condition owner == nil
+  382 condition existing != nil && existing != owner
+  394 condition w != nil
+  398 condition !m.store.RebindOpenPane(owner, txn.target.instance, txn.target.tab)
+
+app/pane_preview.go:433 previewCommitError
+  434 condition inst == nil
+  437 condition inst.HasInFlightOp()
+  441 case session.LiveDead
+  443 case session.LiveLost
+  445 case session.LiveArchived
+
+app/pane_preview.go:515 paneBindingLabel
+  516 condition binding.instance == nil
+  520 condition !ok
+  522 condition binding.tab >= 0 && binding.tab < len(labels)
+  526 condition label == ""
+
+app/render.go:52 renderFittedPaneOverlay
+  53 condition r.W < 1
+  56 condition r.H < 1
+  62 mapping fg := sizedOverlayStyle(hooksOverlayStyle, r).Render(renderContent())
+  67 condition (!tooWide && !tooTall) || (r.W == 1 && r.H == 1)
+  68 condition tooWide || tooTall
+  73 condition tooWide && r.W > 1
+  75 condition r.W < 1
+  79 condition tooTall && r.H > 1
+  81 condition r.H < 1
+
+app/render.go:153 configOverlayContentRect
+  154 return return m.modalContentRect(hooksOverlayStyle, m.preferredOverlayWidth(64), m.preferredOverlayHeight())
+
+app/render.go:157 hooksOverlayContentRect
+  158 return return m.modalContentRect(hooksOverlayStyle, m.preferredOverlayWidth(50), m.preferredOverlayHeight())
+
+app/render.go:161 tasksOverlayContentRect
+  162 return return m.modalContentRect(hooksOverlayStyle, m.preferredOverlayWidth(52), m.preferredOverlayHeight())
+
+app/render.go:258 paneOverlayContentRect
+  259 mapping r := layout.Rect{ 	W: styleRect.W - hooksOverlayStyle.GetHorizontalPadding(), 	H: styleRect.H - hooksOverlayStyle.GetVerticalPadding(), }
+  263 condition styleRect.W > 0 && r.W < 1
+  266 condition styleRect.H > 0 && r.H < 1
+
+app/render.go:279 renderDivider
+  280 condition i < 0 || i >= len(m.lastLayout.Dividers)
+  284 condition r.Empty()
+  288 return return splitDividerStyle.Render(col)
+
+app/render.go:294 renderRailRule
+  296 condition r.Empty()
+  299 return return splitDividerStyle.Render(strings.Repeat("─", r.W))
+
+app/render.go:305 renderProjectsRule
+  307 condition r.Empty()
+  310 return return splitDividerStyle.Render(strings.Repeat("─", r.W))
+
+app/switch_project.go:405 handleAddProject
+  407 condition err != nil
+  410 condition config.RepoProbeUnanswered(err)
+
+app/switch_project.go:488 deleteProjectConfirmMessage
+  499 case total == 0
+  501 case inPlace == 0
+  504 case archived == 0
+
+app/switch_project.go:522 deleteProjectResultMessage
+  524 case archived == 0 && killed == 0
+  526 case killed == 0
+  528 case archived == 0
+
+app/sync.go:183 materializeSnapshot
+  186 condition err != nil
+
+app/sync.go:209 fetchColdStartSnapshot
+  214 condition err == nil
+  217 condition !daemon.IsDaemonStartingErr(err)
+  220 condition !announced
+  226 condition time.Now().After(deadline)
+
+app/sync.go:420 reconcileSnapshot
+  444 condition selected != nil
+  452 condition inst == nil
+  453 condition m.addInstanceFromSnapshot(d)
+  458 condition !sameSession(inst, d)
+  472 condition m.adoptedSnapshotOps.vetoesReconcile(inst)
+  480 condition m.swapInstanceFromSnapshot(d)
+  498 condition inst.GetLiveness() == session.LiveArchived && snapshotLiveness(inst.GetLiveness(), d) != session.LiveArchived
+  499 condition m.swapInstanceFromSnapshot(d)
+  510 condition m.updateInstanceFromSnapshot(inst, d)
+  521 condition ok
+  527 condition m.adoptedSnapshotOps.vetoesReconcile(inst)
+  553 condition m.pruneDeadPanes()
+  563 condition selectedTitle != ""
+  564 condition inst != nil
+
+app/sync.go:591 addInstanceFromSnapshot
+  593 condition err != nil
+
+app/sync.go:606 swapInstanceFromSnapshot
+  608 condition err != nil
+  627 condition old != nil
+  630 condition !m.store.ReplaceInstanceByTitle(d.Title, inst)
+  634 condition m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs)
+
+app/sync.go:647 updateInstanceFromSnapshot
+  657 condition inst.GetLiveness() != lv
+  665 condition inst.ReconcileUserKilledSnapshot(d.UserKilled)
+  670 condition tombstoned
+  680 condition !preserveKillRetry && m.reconcileSnapshotOp(inst, snapshotOp, lv)
+  691 condition lv == session.LiveLimitReached
+  692 condition !curReset.Equal(d.LimitResetAt)
+  700 condition inst.ReconcileAgentModelChange(d.ModelChange)
+  707 condition inst.ReconcileArchiveWarning(d.ArchiveWarning)
+  713 condition inst.ReconcileLostRestoreFailure(d.LostRestoreFailure)
+  719 condition inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt)
+  727 condition inst.ReconcileRootRecreateContext(d.RootRecreateContext)
+  736 condition inst.Capabilities().TabManagement
+  747 condition err != nil
+  750 condition tabsChanged
+  758 condition !sameTabSlotKeys(oldKeys, paneTabKeys(inst))
+  759 condition m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs)
+  767 condition m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs)
+  777 condition prInfoDiffersFromData(inst, d.PRInfo)
+
+app/sync.go:789 reconcileSnapshotOp
+  790 condition op != session.OpNone
+  795 case session.OpArchiving
+  795 case session.OpKilling
+  796 condition lv == session.LiveArchived || lv == session.LiveLost
+  801 case session.OpRestoring
+  802 condition lv != session.LiveArchived
+  807 case session.OpReplacing
+  814 case session.OpRespawning
+
+app/sync.go:834 adoptSnapshotOp
+  835 condition inst.GetInFlightOp() == op
+  843 condition inst.GetInFlightOp() != session.OpNone
+  849 case session.OpCreating
+  851 case session.OpKilling
+  853 case session.OpArchiving
+  854 condition lv == session.LiveArchived
+  859 case session.OpRestoring
+  861 case session.OpReplacing
+  863 case session.OpRespawning
+  883 condition err != nil
+
+app/theme.go:10 applyTheme
+  13 mapping hooksOverlayStyle = lipgloss.NewStyle(). 	Border(lipgloss.RoundedBorder()). 	BorderForeground(t.Accent). 	Padding(1, 2)
+  17 mapping splitDividerStyle = lipgloss.NewStyle(). 	Foreground(t.Border)
+  19 mapping titleStyle = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(t.Accent)
+  20 mapping headerStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  21 mapping keyStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  22 mapping descStyle = lipgloss.NewStyle().Foreground(t.Ink)
+
+app/tui_state.go:67 restoreTUIViewPanes
+  75 condition m.pendingTUIViewFocus != nil && m.pendingTUIViewFocus.Region == tuiFocusRegionPane
+  80 condition inst == nil || inst.GetLiveness() == session.LiveArchived
+  84 condition !ok
+  88 condition key == ""
+  91 condition seen[key]
+  96 condition pane == nil
+  99 condition pane == nil
+  106 condition savedFocusPaneKey != "" && savedFocusPaneKey == key
+
+app/tui_state.go:120 restoreTUISelection
+  121 condition state.Selected == nil
+  125 condition inst == nil || inst.GetLiveness() == session.LiveArchived
+  130 condition state.ActiveTab != nil && sameTUIStateInstance(*state.Selected, *state.ActiveTab)
+
+ui/alarm.go:63 View
+  64 condition !b.Active() || b.rect.Empty()
+  69 condition target == ""
+  75 condition a.PendingUnknown
+  83 condition extra > 0
+  86 condition runewidth.StringWidth(msg) > b.rect.W
+  89 mapping line := alarmStyle.Width(b.rect.W).Render(msg)
+
+ui/automations.go:243 nextRunSummary
+  245 condition tsk.IsWatch()
+  246 condition s != ""
+  249 condition tsk.Enabled && tsk.CronExpr != "" && !tsk.Unschedulable
+  264 case tsk.NextRunAt != nil
+  269 case notArmed(tsk)
+  274 case tsk.Arming == task.ArmingArmed
+  295 condition err == nil
+  296 condition next.IsZero()
+  313 condition tsk.LastRunAt != nil
+  324 condition !tsk.IsWatch() && strings.HasPrefix(tsk.LastRunStatus, "errored:")
+
+ui/automations.go:339 titleRow
+  340 mapping glyph, glyphStyle := "[✓]", automationsEnabledStyle
+  341 condition !tsk.Enabled
+  342 mapping glyph, glyphStyle = "[✗]", automationsDisabledStyle
+  353 condition tsk.Unassessable
+  354 mapping glyph, glyphStyle = "[?]", automationsUnknownStyle
+  356 condition needsAttention(tsk)
+  357 mapping glyph, glyphStyle = "[!]", automationsOverdueStyle
+  359 mapping marker := " "
+  360 mapping nameStyle := automationItemTitleStyle
+  361 condition expanded
+  362 mapping marker = SelectionMarker("▾")
+  363 mapping nameStyle = nameStyle.Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
+  364 mapping glyphStyle = glyphStyle.Background(activeTheme.SurfaceRaised)
+  365 condition !needsAttention(tsk)
+  366 mapping glyphStyle = glyphStyle.Foreground(activeTheme.Ink)
+  370 condition name == ""
+  374 condition expanded
+  375 mapping gap = nameStyle.Render(gap)
+  377 return return fitLine(marker+glyphStyle.Render(glyph)+gap+nameStyle.Render(name), a.rect.W)
+
+ui/automations.go:383 rowDetail
+  389 condition fragment != ""
+  393 condition tsk.IsWatch()
+  396 condition trigger != ""
+  399 condition next != ""
+
+ui/automations.go:446 attentionFragment
+  447 condition tsk.Unschedulable
+  460 case task.ReasonNoTrigger
+  462 case task.ReasonInvalidExpression
+  468 condition tsk.Overdue
+  469 condition tsk.MissedOccurrences <= 0
+  472 condition tsk.MissedOccurrencesCapped
+  477 condition notArmed(tsk)
+  482 condition tsk.Unassessable
+
+ui/automations.go:492 detailRow
+  494 condition detail == ""
+  498 return return automationDetailStyle.Render(fitLine(indent+detail, a.rect.W))
+
+ui/automations.go:534 titleLine
+  535 return return railTitleLine(header, a.rect.W, nameStyle, automationsHintStyle, 	railHintSeparator+railActionHint(keys.KeyTaskList, "manage"), 	railHintSeparator+railActionHint(keys.KeyHooks, "hooks"), )
+
+ui/automations.go:542 View
+
+ui/automations.go:544 String
+  545 condition a.rect.Empty()
+  550 condition a.zones != nil
+  555 condition a.selected >= len(tasks)
+  558 condition a.selected < 0
+  563 condition a.compact || a.rect.H <= 1
+  569 condition attention > 0
+  598 mapping style := automationsTitleDimStyle
+  599 condition a.focused
+  600 mapping style = automationsTitleStyle
+  602 return return layout.ClampToRect(a.titleLine(header, style), a.rect)
+  605 mapping nameStyle := automationsTitleDimStyle
+  606 condition a.focused
+  607 mapping nameStyle = automationsTitleStyle
+  609 mapping title := a.titleLine(railHeader{ 	noun:   "Automations", 	counts: fmt.Sprintf("(%d)", len(tasks)), }, nameStyle)
+  627 condition a.rect.H >= layout.AutomationsRows
+  637 condition visible < 0
+  641 condition a.focused && effVisible > 1
+  644 condition a.offset > a.selected
+  647 condition effVisible > 0 && a.selected >= a.offset+effVisible
+  650 condition a.offset > max
+  653 condition a.offset < 0
+  657 condition len(lines) >= contentH
+  663 condition expanded && len(lines) < contentH
+  664 condition detail != ""
+  668 condition a.zones != nil
+
+ui/caret.go:24 InputCaret
+  28 condition lipgloss.ColorProfile() == termenv.Ascii
+  31 return return caretStyle.Render(" ")
+
+ui/config_input_style.go:10 renderConfigInput
+  12 mapping input.TextStyle = configSelectedStyle
+  13 mapping input.PromptStyle = configSelectedStyle
+  14 mapping input.PlaceholderStyle = configSelectedStyle.Foreground(t.InkMuted)
+  15 mapping input.CompletionStyle = input.PlaceholderStyle
+  16 mapping input.Cursor.TextStyle = configSelectedStyle
+  18 mapping input.Cursor.Style = lipgloss.NewStyle().Foreground(t.Accent).Background(t.Surface)
+
+ui/config_pane.go:469 String
+  483 condition above > 0
+  488 condition len(visible) > 0
+  491 condition below > 0
+
+ui/config_pane.go:501 renderHeader
+  504 condition c.location != ""
+
+ui/config_pane.go:517 renderRowLines
+  522 case row.account != nil
+  525 case row.entry != nil
+  529 mapping lines = append(lines, configHeadingStyle.Render(row.heading))
+  530 condition row.heading == accountsHeading
+  531 condition c.accounts.unavailable != ""
+  533 condition c.accounts.empty
+  536 mapping lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(accountsHeadingNote, configHintStyle), "\n"), "\n")...)
+  540 condition i == c.selectedIdx
+
+ui/config_pane.go:602 renderEntryRow
+  607 condition selected
+  613 condition selected && c.editing
+  616 condition budget < lipgloss.Width(keyText)
+  620 mapping key := configKeyStyle.Render(keyText)
+  621 condition selected
+  622 mapping key = configSelectedStyle.Render(keyText)
+  625 mapping valueStyle := configValueStyle
+  626 condition selected
+  627 mapping valueStyle = configSelectedStyle
+  631 condition selected && c.editing
+  646 condition selected
+  648 condition len(e.Enum) > 0 && e.Type != "table"
+
+ui/config_pane.go:655 wrapIndented
+  658 condition width < 20
+  661 mapping wrapped := style.Width(width).Render(text)
+
+ui/config_pane.go:677 renderStatus
+  681 condition c.accounts.status != ""
+  682 condition c.accounts.statusIsError
+  683 return return c.wrap(c.accounts.status, configErrorStyle)
+  685 return return c.wrap(c.accounts.status, configOKStyle)
+  687 condition c.status == ""
+  694 condition c.statusIsError
+  699 condition c.restartNotice != ""
+
+ui/config_pane.go:707 wrap
+  709 condition width < 20
+  712 return return strings.TrimSuffix(style.Width(width).Render(text), "\n") + "\n"
+
+ui/config_pane.go:718 renderHints
+  719 condition c.editing
+  720 return return "\n" + configHintStyle.Render(c.fitHints([]configHint{ 	{text: "↵ save", drop: 1}, 	{text: "esc cancel"}, })) + "\n"
+  725 condition c.accounts.registering
+  726 return return "\n" + configHintStyle.Render(c.fitHints([]configHint{ 	{text: "↵ register", drop: 1}, 	{text: "esc cancel"}, })) + "\n"
+  731 condition account != nil
+  733 condition account.Register
+  736 return return "\n" + configHintStyle.Render(c.fitHints([]configHint{ 	{text: "↑/↓ move", drop: 2}, 	{text: verb, drop: 3}, 	{text: "C assistant", drop: 4}, 	{text: "esc close"}, })) + "\n"
+  744 condition c.showAdvanced
+  752 return return "\n" + configHintStyle.Render(c.fitHints([]configHint{ 	{text: "↑/↓ move", drop: 2}, 	{text: "↵ edit", drop: 3}, 	{text: advanced, drop: 1}, 	{text: "C assistant", drop: 4}, 	{text: "esc close"}, })) + "\n"
+
+ui/config_pane_accounts.go:292 renderAccountRow
+  297 condition selected
+  302 condition account.Register
+  304 condition selected
+  309 condition selected && c.accounts.registering && c.accounts.registerFor == account.Agent
+  317 condition selected
+  322 mapping stateStyle := accountStateOffStyle
+  324 condition account.LoggedIn
+  325 mapping stateStyle, stateText = accountStateOKStyle, "logged in"
+  327 condition selected
+  328 mapping stateStyle = configSelectedStyle
+  333 condition !selected
+  342 condition account.RegistrationOnly
+
+ui/config_pane_accounts.go:357 accountRowPurpose
+  358 condition account.LoggedIn
+
+ui/config_pane_width.go:306 truncateConfigPreview
+  322 condition len(runes) > maxConfigPreviewRunes
+  348 condition compositorWidth(value) <= budget
+  352 condition budget < compositorWidth(tail)
+  360 condition width+rw > limit
+
+ui/config_pane_width.go:472 joinHints
+  475 condition h.drop != 0 && h.drop <= shedThrough
+
+ui/config_target.go:229 remoteConfigLocation
+  231 condition path == ""
+
+ui/config_target.go:248 remoteConfigRefusal
+  249 condition !apiclient.IsRouteNotServed(err)
+
+ui/err.go:96 String
+  97 condition e.width <= 0 || e.height <= 0
+  101 condition e.err != nil
+  104 mapping style := theme.Styles().Body
+  105 condition e.retainedIsFailure
+  106 mapping style = theme.Styles().Error
+  108 return return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, style.Render(err))
+
+ui/err.go:111 statusLine
+  113 condition runewidth.StringWidth(line) <= e.width
+  116 condition hint != ""
+  119 condition prefixWidth > 3
+
+ui/err.go:140 truncateStatusText
+  147 condition width < tailWidth
+  151 condition runewidth.StringWidth(text) <= width+tailWidth
+
+ui/fallback.go:15 TerminalTooSmall
+
+ui/fallback.go:35 renderCenteredFallback
+  36 condition width <= 0 || height <= 0
+  40 mapping rendered := style.Width(width).Align(lipgloss.Center).Render(text)
+  42 condition len(lines) >= height
+
+ui/fit.go:28 fitLine
+  29 condition width <= 0
+  32 condition layout.Cells(s) <= width
+  36 condition width < layout.Cells(tail)
+  40 condition strings.Contains(out, "\x1b")
+
+ui/fit.go:46 fitBlockToSize
+  51 condition height <= 0 || len(lines) <= height
+  54 condition pinnedFooter < 0
+  57 condition pinnedFooter > height
+  62 condition bodyRows > 0
+  64 condition len(lines) > height
+  65 mapping fitted[bodyRows-1] = taskFormMoreStyle.Render(fitLine("  ↓ more", width))
+  68 condition pinnedFooter > 0
+
+ui/hooks_pane.go:159 String
+  161 mapping tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+  162 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  163 mapping normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  164 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  165 mapping editStyle := selectedStyle
+  166 mapping descStyle := lipgloss.NewStyle().Foreground(t.InkMuted).Italic(true)
+  174 condition len(h.commands) == 0 && !h.adding
+  176 condition h.width > 0 && lipgloss.Width(msg) > h.width
+  185 condition h.editing && isSelected
+  187 condition isSelected && h.hasFocus && !h.adding
+  195 condition h.adding
+  201 condition h.hasFocus
+  202 condition h.editing || h.adding
+  206 condition h.width > 0 && lipgloss.Width(hint) > h.width
+
+ui/menu.go:426 addInstanceOptions
+  432 condition m.instance != nil
+  436 condition lifecycleAction == session.LifecycleActionNone
+  438 condition canKill
+  453 condition lifecycleAction == session.LifecycleActionRestore
+  463 condition m.scrollAvailable
+  476 condition m.instance != nil && m.instance.LimitReached() && m.instance.GetInFlightOp() == session.OpNone
+  486 condition m.instance.Capabilities().Handoff
+  499 condition m.instance != nil && !m.instance.Capabilities().TabManagement
+  507 condition m.splitPaneAvailable
+
+ui/menu.go:682 String
+  683 condition m.width <= 0 || m.height <= 0
+  686 condition m.statusText != ""
+  687 mapping line := menuStyle.Render(fitLine(m.statusText, m.width))
+  697 condition lipgloss.Width(line) <= m.width
+  708 condition m.zones != nil
+
+ui/menu.go:747 renderHints
+  750 condition i >= g.start && i < g.end
+  768 condition drop[k] || i == skip
+  777 condition paired
+  787 condition m.keyDown == k
+  788 mapping localActionStyle = localActionStyle.Underline(true)
+  789 mapping localKeyStyle = localKeyStyle.Underline(true)
+  790 mapping localDescStyle = localDescStyle.Underline(true)
+  796 condition !first
+  797 condition group != prevGroup
+  806 mapping keyText, descText := localKeyStyle, localDescStyle
+  807 condition inActionGroup
+  808 mapping keyText, descText = localActionStyle, localActionStyle
+  812 condition paired
+  835 condition k != keys.KeyJumpTab
+  840 return return menuStyle.Render(s.String()), spans
+
+ui/overlay/confirmationOverlay.go:119 frameStyle
+  120 return return lipgloss.NewStyle(). 	Border(lipgloss.RoundedBorder()). 	BorderForeground(c.borderColor). 	Padding(confirmationOverlayVerticalPadding, confirmationOverlayHorizontalPadding)
+
+ui/overlay/confirmationOverlay.go:130 textRect
+  131 mapping style := c.frameStyle()
+  132 mapping fit := fitOverlayContent(c.width, 0, c.maxWidth, c.maxHeight, style)
+  133 condition fit.W > 0
+  134 mapping style = style.Width(fit.W)
+  136 return return overlayTextRect(fit, style)
+
+ui/overlay/confirmationOverlay.go:140 Render
+  141 mapping style := c.frameStyle()
+  143 mapping fit := fitOverlayContent(c.width, 0, c.maxWidth, c.maxHeight, style)
+  144 condition fit.W > 0
+  145 mapping style = style.Width(fit.W)
+  147 mapping textRect := overlayTextRect(fit, style)
+  149 condition fit.H > 0 && renderedLineCount(content) >= textRect.H
+  150 mapping style = style.Height(fit.H)
+  154 return return style.Render(content)
+
+ui/overlay/confirmationOverlay.go:311 refusalContent
+  312 mapping hint := wrapOverlayLines(lipgloss.NewStyle().Bold(true).Render("esc")+" cancel", width)
+  317 condition short < 1
+  327 condition len(wrapped) <= budget
+  333 condition gap > 0 && len(lines) > 0
+  337 condition len(lines) > height
+
+ui/overlay/confirmationOverlay.go:346 refusalNotices
+  348 condition short == 1
+
+ui/overlay/confirmationOverlay.go:359 instruction
+  360 mapping bold := lipgloss.NewStyle().Bold(true).Render
+  361 condition compact
+  366 condition c.enterConfirms()
+
+ui/overlay/confirmationOverlay.go:407 moreLinesNotice
+  408 condition n == 1
+
+ui/overlay/fit.go:47 truncateOverlayLine
+  48 condition width <= 0
+  51 condition layout.Cells(s) <= width
+  55 condition strings.Contains(out, "\x1b")
+
+ui/overlay/overlay.go:493 render
+  494 condition w.chars == ""
+  507 condition j >= len(r)
+  515 condition advance > 0
+  525 condition short > 0
+  529 return return w.style.Styled(b.String())
+
+ui/overlay/projectPickerOverlay.go:202 Render
+  204 mapping titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  205 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  206 mapping normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  207 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  208 mapping queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  209 mapping countStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  210 mapping addStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  211 mapping errStyle := lipgloss.NewStyle().Foreground(t.Dead)
+  213 mapping style := searchOverlayStyle()
+  214 mapping fit := fitOverlayContent(p.width, 0, p.maxWidth, p.maxHeight, style)
+  215 condition fit.W <= 0
+  218 condition fit.W <= 0
+  221 mapping textRect := overlayTextRect(fit, style)
+  225 mapping lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch project"), cw))
+  227 mapping warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+  228 condition p.degraded && !p.adding
+  232 mapping lines = append(lines, truncateOverlayLine(warnStyle.Render("registry unreadable · list may be incomplete"), cw))
+  235 condition p.adding
+  236 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("Add project — enter a repo path:"), cw))
+  237 mapping lines = append(lines, truncateOverlayLine("  "+queryStyle.Render(p.pathInput)+ui.InputCaret(), cw))
+  238 condition p.addErr != ""
+  239 mapping lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.addErr), cw))
+  243 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
+  244 return return finishRender(style, fit, textRect, lines)
+  251 condition p.degraded
+  254 condition avail < 1
+  258 condition showAbove
+  259 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
+  262 mapping lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
+  264 condition showBelow
+  265 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
+  270 condition layout.Cells(hint) > cw
+  273 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
+  275 return return finishRender(style, fit, textRect, lines)
+
+ui/overlay/projectPickerOverlay.go:280 renderRow
+  282 condition i == len(p.all)
+  284 condition selected
+  285 return return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(text)
+  287 return return "    " + addStyle.Render(text)
+  290 mapping count := countStyle.Render(fmt.Sprintf(" (%d)", proj.SessionCount))
+  291 condition selected
+  292 return return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount))
+  294 return return "    " + normalStyle.Render(proj.Name) + count
+
+ui/overlay/projectPickerOverlay.go:299 finishRender
+  300 mapping style = style.Width(fit.W)
+  301 condition fit.H > 0 && len(lines) >= textRect.H
+  302 mapping style = style.Height(fit.H)
+  304 return return style.Render(strings.Join(lines, "\n"))
+
+ui/overlay/promptOverlay.go:55 NewPromptOverlay
+  66 mapping ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+
+ui/overlay/promptOverlay.go:119 Render
+  121 mapping titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  122 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  125 mapping placeholder := lipgloss.NewStyle().Foreground(t.InkMuted)
+  126 mapping p.textarea.FocusedStyle.Placeholder = placeholder
+  127 mapping p.textarea.BlurredStyle.Placeholder = placeholder
+  129 mapping style := lipgloss.NewStyle(). 	Border(lipgloss.RoundedBorder()). 	BorderForeground(t.Accent). 	Padding(1, 2)
+  133 mapping fit := fitOverlayContent(p.width, 0, p.maxWidth, p.maxHeight, style)
+  134 condition fit.W <= 0
+  137 condition fit.W <= 0
+  140 mapping textRect := overlayTextRect(fit, style)
+  143 condition textRect.H > 0
+  145 condition rows < 1
+  152 mapping lines := []string{truncateOverlayLine(titleStyle.Render(p.title), textRect.W), ""}
+  157 condition layout.Cells(hint) > textRect.W
+  160 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
+  162 mapping style = style.Width(fit.W)
+  163 condition fit.H > 0 && len(lines) >= textRect.H
+  164 mapping style = style.Height(fit.H)
+  166 return return style.Render(strings.Join(lines, "\n"))
+
+ui/overlay/searchOverlay.go:199 searchOverlayStyle
+  200 return return lipgloss.NewStyle(). 	Border(lipgloss.RoundedBorder()). 	BorderForeground(ui.CurrentTheme().Accent). 	Padding(1, 2)
+
+ui/overlay/searchOverlay.go:264 renderFrame
+  266 mapping titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  267 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  268 mapping normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  269 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  270 mapping queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  272 mapping style := searchOverlayStyle()
+  273 mapping plan := s.renderPlan(style)
+  276 mapping lines = append(lines, truncateOverlayLine(titleStyle.Render("Search sessions"), plan.contentWidth))
+  277 condition !plan.compact
+  280 mapping lines = append(lines, truncateOverlayLine("/ "+queryStyle.Render(s.query)+ui.InputCaret(), plan.contentWidth))
+  281 condition !plan.compact
+  285 condition len(s.results) == 0
+  286 condition s.query == ""
+  287 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  type to search…"), plan.contentWidth))
+  289 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  No matches found"), plan.contentWidth))
+  293 condition plan.showAbove
+  294 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render( 	fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
+  304 mapping statusStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  305 mapping glyph := " "
+  306 condition r.Instance.GetInFlightOp() == session.OpNone
+  308 case session.LiveRunning
+  308 case session.LivenessUnset
+  309 case session.LiveReady
+  310 mapping glyph, statusStyle = "●", statusStyle.Foreground(t.Ready)
+  311 case session.LiveLimitReached
+  312 mapping glyph, statusStyle = "◆", statusStyle.Foreground(t.LimitReached)
+  313 case session.LiveLost
+  314 mapping glyph, statusStyle = "◌", statusStyle.Foreground(t.Lost)
+  315 case session.LiveDead
+  316 mapping glyph, statusStyle = "○", statusStyle.Foreground(t.Dead)
+  317 case session.LiveArchived
+  318 mapping glyph, statusStyle = "▧", statusStyle.Foreground(t.Archived)
+  321 condition i == s.selectedIdx
+  322 mapping statusStyle = statusStyle.Background(t.SurfaceRaised)
+  324 mapping statusStr := statusStyle.Render(glyph + " ")
+  328 condition branch != ""
+  329 mapping label += hintStyle.Render(" (" + branch + ")")
+  332 condition i == s.selectedIdx
+  333 mapping line := "  " + statusStr + ui.SelectionMarker("▸ ") + selectedStyle.Render(r.Instance.Title)
+  334 condition branch != ""
+  335 mapping line += selectedStyle.Render(" (" + branch + ")")
+  339 mapping lines = append(lines, truncateOverlayLine("  "+statusStr+normalStyle.Render("  "+label), plan.contentWidth))
+  343 condition plan.showBelow
+  345 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render( 	fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
+  349 condition !plan.compact
+  353 condition plan.compact || layout.Cells(hint) > plan.contentWidth
+  356 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), plan.contentWidth))
+  358 mapping style = style.Width(plan.styleWidth)
+  359 condition plan.styleHeight > 0 && len(lines) >= plan.contentHeight
+  360 mapping style = style.Height(plan.styleHeight)
+  362 return return style.Render(strings.Join(lines, "\n")), style.GetBorderTopSize() + style.GetPaddingTop() + firstResultLine, plan
+
+ui/overlay/selectionOverlay.go:86 selectionOverlayStyle
+  87 return return lipgloss.NewStyle(). 	Border(lipgloss.RoundedBorder()). 	BorderForeground(ui.CurrentTheme().Accent). 	Padding(1, 2)
+
+ui/overlay/selectionOverlay.go:111 Render
+  113 mapping titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+  114 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  115 mapping normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  116 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  118 mapping style := selectionOverlayStyle()
+  119 mapping fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
+  120 condition fit.W <= 0
+  123 condition fit.W <= 0
+  126 mapping textRect := overlayTextRect(fit, style)
+  129 mapping lines := []string{truncateOverlayLine(titleStyle.Render(s.title), textRect.W)}
+  130 condition !compact
+  134 condition showAbove
+  135 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more above"), textRect.W))
+  139 condition i == s.selectedIdx
+  140 mapping lines = append(lines, truncateOverlayLine(ui.SelectionMarker("▸ ")+selectedStyle.Render(item), textRect.W))
+  142 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  "+item), textRect.W))
+  145 condition showBelow
+  146 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more below"), textRect.W))
+  149 condition !compact
+  161 condition compact
+  165 condition layout.Cells(candidate) <= textRect.W
+  170 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
+  172 mapping style = style.Width(fit.W)
+  173 condition fit.H > 0 && len(lines) >= textRect.H
+  174 mapping style = style.Height(fit.H)
+  176 return return style.Render(strings.Join(lines, "\n"))
+
+ui/overlay/textOverlay.go:76 Render
+  78 mapping style := lipgloss.NewStyle(). 	Border(lipgloss.RoundedBorder()). 	BorderForeground(ui.CurrentTheme().Accent). 	Padding(textOverlayVerticalPadding, textOverlayHorizontalPadding). 	Width(t.width)
+  86 condition t.Scrollable()
+  87 mapping style = style.Height(t.innerHeight())
+  91 return return style.Render(t.visibleContent())
+
+ui/overlay/textOverlay.go:197 visibleContent
+  199 condition inner <= 0
+  204 condition len(lines) <= inner
+  208 condition end > len(lines)
+  212 condition t.scroll > 0 && len(visible) > 0
+  215 condition end < len(lines) && len(visible) > 0
+
+ui/overlay/textOverlay.go:240 textOverlayScrollMarker
+  241 condition width < 1
+  244 return return lipgloss.NewStyle(). 	Foreground(ui.CurrentTheme().InkMuted). 	Render(lipgloss.PlaceHorizontal(width, lipgloss.Center, marker))
+
+ui/overlay/zones.go:35 RegisterZones
+  36 condition reg == nil
+  40 condition c.enterConfirms()
+  48 mapping lines := strings.Split(c.Render(), "\n")
+  53 condition yi < 0
+  55 condition yi >= 0
+  59 condition ni < 0
+  61 condition ni >= 0
+  65 condition yi < 0 && ni < 0
+  68 condition yi >= 0
+  74 condition ni >= 0
+
+ui/overlay/zones.go:86 RegisterZones
+  87 condition reg == nil
+  90 mapping rendered := s.Render()
+  93 mapping style := selectionOverlayStyle()
+  94 mapping fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
+  95 mapping textRect := overlayTextRect(fit, style)
+  99 condition next >= endIdx
+  103 condition t == "▸ "+s.items[next] || t == s.items[next]
+
+ui/projects.go:266 titleLine
+  267 return return railTitleLine(header, p.rect.W, nameStyle, projectsHintStyle, 	railHintSeparator+projectsSwitchHint(), )
+
+ui/projects.go:275 projectRow
+  276 mapping marker := "  "
+  277 condition proj.Active
+  278 mapping marker = projectRowActiveStyle.Render("▹") + " "
+  281 condition name == ""
+  287 condition selected
+  289 condition proj.Active
+  292 return return SelectionMarker(cursor) + projectRowSelectedStyle.Render(label)
+  294 condition proj.Active
+  295 return return marker + projectRowStyle.Bold(true).Render(label)
+  297 return return marker + projectRowStyle.Render(label)
+
+ui/projects.go:301 View
+
+ui/projects.go:303 String
+  304 condition p.rect.Empty()
+  309 condition p.zones != nil
+  313 condition p.selected >= len(p.projects)
+  316 condition p.selected < 0
+  323 condition p.compact || p.rect.H <= 1
+  324 mapping style := projectsTitleDimStyle
+  325 condition p.focused
+  326 mapping style = projectsTitleStyle
+  329 condition p.degraded
+  332 return return layout.ClampToRect( 	p.titleLine(railHeader{noun: "Projects:", counts: count}, style), p.rect)
+  336 mapping nameStyle := projectsTitleDimStyle
+  337 condition p.focused
+  338 mapping nameStyle = projectsTitleStyle
+  340 mapping title := p.titleLine(railHeader{ 	noun:   "Projects", 	counts: fmt.Sprintf("(%d)", len(p.projects)), }, nameStyle)
+  345 condition p.degraded
+  351 mapping lines = append(lines, projectsHintStyle.Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
+  352 condition len(p.projects) == 0
+  353 mapping lines = append(lines, projectRowStyle.Render(fitLine("  No other projects yet", p.rect.W)))
+  361 condition p.rect.H >= layout.ProjectsRows
+  369 condition p.degraded
+  372 condition visible < 0
+  375 condition p.offset > p.selected
+  378 condition visible > 0 && p.selected >= p.offset+visible
+  381 condition p.offset > max
+  384 condition p.offset < 0
+  388 condition len(lines) >= contentH
+  394 condition p.zones != nil
+
+ui/rail_header.go:108 railTitleLine
+  109 mapping render := func(title, hint string) string { 	return nameStyle.Render(title) + hintStyle.Render(hint) }
+  110 return return nameStyle.Render(title) + hintStyle.Render(hint)
+  119 condition fits(full, joined)
+  124 condition len(hints) > 0
+  127 condition shrunk != "" && fits(shrunk, sticky)
+  131 condition fits(counts, sticky)
+  134 condition primary != "" && fits(primary, sticky)
+  139 return return nameStyle.Render(fitLine(counts+sticky, w))
+
+ui/recovery.go:13 RecoveryContent
+  14 condition width < 1
+  17 mapping styles := theme.Styles()
+  18 mapping title := styles.Title
+  19 condition failed
+  20 mapping title = styles.Error.Bold(true)
+  22 mapping lines := []string{title.Width(width).Align(lipgloss.Center).Render(truncateStatusText(condition, width))}
+  23 condition detail != ""
+  24 mapping lines = append(lines, styles.Body.Width(width).Align(lipgloss.Center).Render(sanitizeError(detail)))
+  26 condition action != ""
+  27 mapping lines = append(lines, "", styles.Body.Width(width).Align(lipgloss.Center).Render(action))
+
+ui/recovery.go:33 RecoveryScreen
+  34 condition r.Empty()
+  38 condition detail != "" && lipgloss.Height(content) > r.H
+  42 mapping body := theme.Styles().Body.Width(r.W).Align(lipgloss.Center)
+  43 mapping next := body.Render(action)
+  45 condition action != ""
+  49 condition budget > 0
+  50 mapping details := strings.Split(body.Render(sanitizeError(detail)), "\n")
+  51 condition len(details) > budget
+  56 condition action != ""
+  61 return return layout.ClampToRect(theme.Styles().Body.Render(lipgloss.Place(r.W, r.H, 	lipgloss.Center, lipgloss.Center, content)), r)
+
+ui/schedule_picker.go:90 newSchedulePicker
+  93 mapping raw.PlaceholderStyle = taskPlaceholderStyle
+
+ui/schedule_picker.go:481 render
+  483 mapping labelStyle := lipgloss.NewStyle().Bold(true)
+  484 mapping dimStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  485 mapping previewStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  486 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  487 mapping dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  489 mapping lines := []string{labelStyle.Render("Schedule:") + " " + p.renderTypeSelector(selectedStyle, dimSelectedStyle)}
+  491 condition preview != ""
+  491 mapping preview := p.renderPreviewLine(previewStyle, dimStyle)
+  494 condition p.focused
+  495 mapping lines = append(lines, indentSub+dimStyle.Render(p.hint()))
+
+ui/schedule_picker.go:521 renderPreviewLine
+  522 condition p.kind() == schedule.Custom
+  524 condition err != nil
+  534 condition next.IsZero()
+  535 return return indentSub + preview.Render("No upcoming run")
+  537 return return indentSub + preview.Render("Next run "+next.Format("Jan 02 15:04"))
+  539 return return indentSub + preview.Render(p.Describe()) + dim.Render("  ·  "+p.Cron())
+
+ui/schedule_picker.go:542 renderTypeSelector
+  544 condition p.focused && p.activeCell() == cellType
+  545 return return SelectionMarker("◂ ") + selected.Render(label) + SelectionMarker(" ▸")
+  547 return return dim.Render(label)
+
+ui/schedule_picker.go:551 renderContextLines
+  553 mapping plain := lipgloss.NewStyle().Foreground(t.Ink)
+  555 case schedule.EveryNMinutes
+  556 return return []string{indentSub + plain.Render("Every") + p.chip(cellInterval, p.interval) + plain.Render("minutes")}
+  557 case schedule.EveryNHours
+  558 return return []string{indentSub + plain.Render("Every") + p.chip(cellInterval, p.interval) + plain.Render("hours")}
+  559 case schedule.Hourly
+  560 return return []string{indentSub + plain.Render("At minute") + p.chip(cellMinute, p.minuteStr)}
+  561 case schedule.Daily
+  563 case schedule.Weekly
+  564 return return []string{ 	indentSub + p.renderTimeLine(plain), 	indentSub + plain.Render("Days") + p.renderWeekdayRow(), }
+  568 case schedule.Monthly
+  569 return return []string{ 	indentSub + p.renderTimeLine(plain), 	indentSub + plain.Render("Day") + p.chip(cellDayOfMonth, p.domStr), }
+  574 return return []string{indentSub + plain.Render("Cron ") + p.raw.View()}
+
+ui/schedule_picker.go:578 renderTimeLine
+  580 condition p.meridiemPM
+  583 return return plain.Render("At") + p.chip(cellHour, p.hourStr) + plain.Render(":") + 	p.chip(cellMinute, p.minuteStr) + p.chip(cellMeridiem, meridiem)
+
+ui/schedule_picker.go:587 renderWeekdayRow
+  593 mapping style := lipgloss.NewStyle().Foreground(t.Ink)
+  594 condition p.weekdays[i]
+  598 mapping style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
+  600 condition active && i == p.weekdayCursor
+  601 mapping style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
+
+ui/schedule_picker.go:610 chip
+  612 condition strings.TrimSpace(text) == ""
+  615 mapping style := lipgloss.NewStyle().Foreground(t.Ink)
+  616 condition p.focused && p.activeCell() == cell
+  617 mapping style = lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  619 return return style.Render(" " + text + " ")
+
+ui/schedule_picker.go:624 hint
+  626 case cellRaw
+  628 case cellWeekdays
+  630 case cellType
+  630 case cellMeridiem
+
+ui/selection_marker.go:7 SelectionMarker
+  9 return return lipgloss.NewStyle().Bold(true).Foreground(t.Accent).Background(t.SurfaceRaised).Render(marker)
+
+ui/sidebar_model.go:271 View
+
+ui/sidebar_render.go:26 String
+  35 condition s.height > chromeLines
+  42 condition i > lastMeasured
+  49 case item.IsHeader
+  51 case item.IsRootSep
+  55 case item.Kind == SectionInstances && item.IsTab
+  69 condition s.height > 0 && totalLines > avail
+  77 condition start < len(s.visibleItems) && s.visibleItems[start].IsRootSep
+  99 condition s.width > 0 && titleWidth > s.width
+  103 condition !s.focused
+  111 condition hiddenAbove > 0
+  119 condition hiddenBelow > 0
+  136 condition s.width > 0 && s.height > 0
+  140 condition s.height > 0
+  141 condition len(lines) > s.height
+
+ui/sidebar_render.go:246 renderWindowIndicator
+  249 condition w > 0 && runewidth.StringWidth(text) > w
+  254 condition w < runewidth.StringWidth(tail)
+  259 return return windowIndicatorStyle.Padding(0, narrowAwarePad(w)).Render( 	lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
+
+ui/sidebar_render.go:296 renderHeader
+  299 condition sec.Kind == kind
+  306 condition expanded
+  313 case SectionInstances
+  318 case SectionArchived
+  322 mapping style := sectionHeaderStyle
+  323 condition selected
+  324 mapping style = sectionHeaderSelectedStyle
+  329 condition w > 0 && runewidth.StringWidth(text) > w
+  334 condition w < runewidth.StringWidth(tail)
+  339 return return style.Padding(0, narrowAwarePad(w)).Render( 	lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
+
+ui/sidebar_render.go:348 renderRootSeparator
+  350 condition w < 1
+  353 return return sepStyle.Render(strings.Repeat("─", w))
+
+ui/sidebar_render.go:356 renderInstance
+  358 condition idx < 0 || idx >= len(instances)
+  362 return return s.renderer.Render(inst, idx+1, selected, s.proj.NumRepos() > 1, s.instanceExpanded(inst))
+
+ui/statusbar.go:59 View
+
+ui/tab_pane.go:483 updateAgent
+  485 condition !guardOK(guard)
+  491 case instance == nil
+  495 case instance.IsCreating()
+  499 case instance.IsTearingDown()
+  506 case instance.GetLiveness() == session.LiveDead
+  513 case instance.GetLiveness() == session.LiveLost
+  527 condition ok && history.AwaitingHistory()
+  533 condition p.scroll.Active()
+  543 condition p.normalCaptureGeneration != captureGeneration || 	!guardOK(guard) || !p.isCurrentViewLocked(instance, 0)
+  547 condition err != nil
+  550 condition errors.Is(err, tmux.ErrSessionGone)
+  559 condition len(snapshot.Content) == 0 && !instance.Started()
+
+ui/tab_pane.go:570 webTabPlaceholder
+
+ui/tab_pane.go:578 vscodeTabPlaceholder
+
+ui/tab_pane.go:598 updateShell
+  600 condition !guardOK(guard)
+  605 condition instance == nil
+  613 condition instance.IsTearingDown()
+  618 condition !instance.Started()
+  628 condition activeTab >= 0 && activeTab < len(tabs)
+  629 condition ok
+  639 condition caps.Workspace == session.WorkspaceRemote
+  640 condition caps.TerminalTab
+  659 condition !instance.TabAlive(activeTab)
+  667 condition ok && history.AwaitingHistory()
+  675 condition p.scroll.Active()
+  685 condition p.normalCaptureGeneration != captureGeneration || 	!guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab)
+  689 condition err != nil
+  692 condition errors.Is(err, tmux.ErrSessionGone)
+
+ui/tab_pane.go:710 String
+  713 condition p.width <= 0 || p.height <= 0
+  719 condition p.scroll.Active()
+  723 condition p.content.fallback
+  729 return return layout.ClampToRect( 	renderCenteredFallback(tabPaneStyle, 		paneFallbackContent(p.content.text, p.width), p.width, p.height), rect)
+  755 condition len(lines) > p.height
+  762 return return layout.ClampToRect(tabPaneStyle.Render(strings.Join(lines, "\n")), rect)
+
+ui/tab_pane.go:811 canEnterScrollModeLocked
+  812 condition instance.IsTearingDown()
+  820 condition activeTab == 0
+  822 case session.LiveDead
+  825 case session.LiveLost
+  832 condition activeTab >= 0 && activeTab < len(tabs)
+  833 condition ok
+  842 condition activeTab != 0 && !instance.TabAlive(activeTab)
+
+ui/tab_pane.go:850 ResetToNormalMode
+  857 condition wasScrolling
+  861 condition instance == nil || !wasScrolling
+  868 condition activeTab != 0
+  882 case instance.IsCreating()
+  884 case instance.IsTearingDown()
+  886 case instance.GetLiveness() == session.LiveDead
+  888 case instance.GetLiveness() == session.LiveLost
+
+ui/tabbed_window.go:338 innerSize
+  339 mapping width = w.rect.W - windowStyle.GetHorizontalFrameSize()
+  340 mapping height = w.rect.H - windowStyle.GetVerticalFrameSize() - paneHeaderRows
+  343 condition width < 0
+  346 condition height < 0
+
+ui/tabbed_window.go:584 renderHeader
+  586 condition w.preview != nil && w.preview.instance != nil
+  590 condition inst != nil
+  593 condition w.selectionHint != ""
+  599 condition w.IsInScrollMode()
+  605 mapping style := paneHeaderStyle
+  607 case w.interactive
+  608 mapping style = paneHeaderInteractiveStyle
+  609 case w.focused
+  610 mapping style = paneHeaderFocusedStyle
+  611 case w.boundInstance() == nil
+  612 mapping style = paneHeaderDimStyle
+  616 mapping header := style.Render(fitLine(text, width))
+
+ui/tabbed_window.go:622 View
+
+ui/tabbed_window.go:624 frameStyle
+  626 case w.preview != nil
+  627 return return previewWindowStyle
+  628 case w.interactive
+  629 return return interactiveWindowStyle
+  630 case w.dropTarget
+  631 return return dropTargetWindowStyle
+  632 case w.sidebarSelected && !w.focused
+  633 return return selectedWindowStyle
+  635 return return blurredWindowStyle
+
+ui/tabbed_window.go:639 String
+  640 condition w.rect.Empty()
+  651 condition liveShowing
+  654 mapping content = w.live.Render(iw, ih, w.interactive)
+  662 return return layout.ClampToRect(w.frameStyle().Render(inner), w.rect)
+
+ui/task_pane.go:144 initForm
+  147 mapping name.PlaceholderStyle = taskPlaceholderStyle
+  155 mapping prompt.FocusedStyle.CursorLine = lipgloss.NewStyle()
+  156 mapping prompt.FocusedStyle.Placeholder = taskPlaceholderStyle
+  157 mapping prompt.BlurredStyle.Placeholder = taskPlaceholderStyle
+  168 mapping watch.PlaceholderStyle = taskPlaceholderStyle
+  174 mapping target.PlaceholderStyle = taskPlaceholderStyle
+  179 mapping path.PlaceholderStyle = taskPlaceholderStyle
+  183 condition tsk != nil
+  194 condition !s.editTriggerIsWatch && strings.TrimSpace(tsk.CronExpr) != ""
+
+ui/task_pane.go:506 taskDeliverySummary
+  507 condition tsk.TargetSession != ""
+
+ui/task_pane.go:513 renderListMode
+  514 condition s.unavailable != ""
+  517 condition len(s.tasks) == 0
+  521 mapping tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+  522 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  523 mapping enabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  524 mapping disabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  525 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  526 mapping detailStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  527 mapping erroredStyle := lipgloss.NewStyle().Foreground(t.Dead)
+  535 condition detailWidth < 1
+  541 mapping style := enabledStyle
+  542 condition !tsk.Enabled
+  544 mapping style = disabledStyle
+  551 condition tsk.Name != ""
+  559 condition isSelected && s.hasFocus
+  572 condition strings.HasPrefix(tsk.LastRunStatus, "errored:")
+  578 condition isSelected
+  579 condition snippet != ""
+  584 condition tsk.LastRunAt != nil
+  588 condition programLabel == ""
+  592 condition tsk.LastRunStatus != ""
+  596 condition strings.HasPrefix(statusLabel, "errored:")
+  615 condition s.listNotice != ""
+  616 mapping noticeStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
+  618 condition noticeWidth < 1
+  625 condition i == 0
+  634 condition s.hasFocus
+  639 condition s.selectedTaskIsWatch()
+  643 condition s.width > 0 && lipgloss.Width(hint) > s.width
+
+ui/task_pane.go:656 promptSnippet
+  658 condition len(fields) == 0
+  663 condition maxWidth > 1 && len(runes) > maxWidth
+
+ui/task_pane_edit.go:23 validateForm
+  24 condition strings.TrimSpace(s.editName.Value()) == ""
+  27 condition s.editTriggerIsWatch
+  28 condition strings.TrimSpace(s.editWatch.Value()) == ""
+  35 condition msg != ""
+  38 condition strings.TrimSpace(s.editPrompt.Value()) == ""
+  48 condition rawPath == ""
+  52 condition err != nil
+  55 condition err != nil
+  56 condition config.RepoProbeUnanswered(err)
+
+ui/task_pane_edit.go:227 renderEditMode
+  229 mapping editTitleStyle := lipgloss.NewStyle(). 	Foreground(t.Accent). 	Bold(true). 	MarginBottom(1)
+  234 mapping labelStyle := lipgloss.NewStyle().Bold(true)
+  235 mapping groupStyle := lipgloss.NewStyle().Bold(true).Foreground(t.InkMuted)
+  236 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  237 mapping errorStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
+  239 mapping buttonStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  240 mapping focusedButtonStyle := buttonStyle. 	Background(t.Accent). 	Foreground(t.Surface)
+  245 condition inputWidth < 1
+  250 condition promptWidth < 1
+  254 condition s.height > 0
+  264 condition s.editTriggerIsWatch
+  270 mapping label := func(text string) string { 	return labelStyle.Render(fmt.Sprintf("%-9s", text)) }
+  271 return return labelStyle.Render(fmt.Sprintf("%-9s", text))
+  277 mapping fieldErr := func(field int) string { 	if s.editError != "" && s.editErrorField == field { 		return errorStyle.Render(fitLine("  ! "+s.editError, s.width)) + "\n" 	} 	return "" }
+  278 condition s.editError != "" && s.editErrorField == field
+  279 return return errorStyle.Render(fitLine("  ! "+s.editError, s.width)) + "\n"
+  293 condition stop == s.focusIndex
+  298 condition stop == s.focusIndex
+  303 condition s.creating
+  328 condition s.editTriggerIsWatch
+  341 condition s.editTriggerIsWatch
+  372 condition s.creating
+  376 condition s.focusIndex == taskFocusSave
+  385 condition s.creating
+  387 condition s.width > 0 && lipgloss.Width(hint) > s.width
+  393 condition s.width > 0 && lipgloss.Width(hint) > s.width
+  413 condition s.selectedTaskIsWatch()
+  422 condition s.width <= 0 || lipgloss.Width(tier) <= s.width
+
+ui/task_pane_edit.go:439 clampFormToHeight
+  442 condition maxH <= 0 || len(lines) <= maxH
+  445 condition maxH < 3
+  451 condition visible > len(body)
+  458 condition off > len(body)-visible
+  461 condition off < 0
+  464 condition focusStart >= 0
+  467 condition focusEnd > off+visible
+  470 condition focusStart < off
+  481 condition off > 0 && !inFocusRange(off)
+  482 mapping win[0] = taskFormMoreStyle.Render("  ↑ more")
+  484 condition last < len(body)-1 && !inFocusRange(last)
+  485 mapping win[visible-1] = taskFormMoreStyle.Render("  ↓ more")
+
+ui/task_pane_edit.go:493 renderTriggerSelector
+  496 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  497 mapping dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  498 mapping normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+  499 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  501 mapping option := func(name string, sel bool) string { 	switch { 	case sel && focused: 		return SelectionMarker("▸ ") + selectedStyle.Render(name) 	case sel: 		return dimSelectedStyle.Render("▸ " + name) 	default: 		return normalStyle.Render("  " + name) 	} }
+  503 case sel && focused
+  504 return return SelectionMarker("▸ ") + selectedStyle.Render(name)
+  505 case sel
+  506 return return dimSelectedStyle.Render("▸ " + name)
+  508 return return normalStyle.Render("  " + name)
+  512 condition focused
+  513 mapping out += hintStyle.Render("   ←/→ switch")
+
+ui/task_pane_edit.go:520 renderProgramSelector
+  523 mapping selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  524 mapping dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  525 mapping hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+  528 condition s.editProgramIdx >= 0 && s.editProgramIdx < len(s.editProgramOptions)
+  531 condition focused
+  532 return return SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸") + hintStyle.Render("   ←/→ change agent")
+  534 return return dimSelectedStyle.Render(value)
+
+ui/termpane/render.go:34 renderGridWindow
+  35 condition width <= 0 || height <= 0
+  41 condition y > 0
+  45 mapping prev := uv.Style{}
+  47 mapping content, cellWidth, style := " ", 1, uv.Style{}
+  48 condition c != nil && c.Width > 0 && c.Content != ""
+  49 mapping content, cellWidth, style = c.Content, c.Width, c.Style
+  51 condition x+cellWidth > width
+  57 condition cursor.show && row == cursor.y && x <= cursor.x && cursor.x < x+cellWidth
+  58 mapping style.Attrs ^= uv.AttrReverse
+  61 mapping prev = style
+  65 condition !prev.IsZero()
+
+ui/theme.go:27 ApplyTheme
+
+ui/theme.go:50 applyThemeStyles
+  51 mapping windowStyle = lipgloss.NewStyle(). 	BorderForeground(activeTheme.Border). 	Border(lipgloss.RoundedBorder())
+  54 mapping blurredWindowStyle = windowStyle. 	BorderForeground(activeTheme.Border)
+  56 mapping selectedWindowStyle = windowStyle. 	BorderForeground(activeTheme.Accent)
+  58 mapping interactiveWindowStyle = windowStyle. 	Border(lipgloss.DoubleBorder()). 	BorderForeground(activeTheme.Accent)
+  61 mapping previewWindowStyle = windowStyle. 	BorderForeground(activeTheme.Border)
+  63 mapping dropTargetWindowStyle = windowStyle. 	BorderForeground(activeTheme.Accent)
+  66 mapping paneHeaderStyle = lipgloss.NewStyle(). 	Bold(true). 	Foreground(activeTheme.Ink)
+  69 mapping paneHeaderFocusedStyle = lipgloss.NewStyle(). 	Bold(true). 	Background(activeTheme.SurfaceRaised). 	Foreground(activeTheme.Ink)
+  73 mapping paneHeaderDimStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.InkMuted)
+  75 mapping paneHeaderInteractiveStyle = lipgloss.NewStyle(). 	Bold(true). 	Background(activeTheme.SurfaceRaised). 	Foreground(activeTheme.Ink)
+  80 mapping sectionHeaderStyle = lipgloss.NewStyle(). 	Bold(true). 	Foreground(activeTheme.Ink)
+  83 mapping sectionHeaderSelectedStyle = lipgloss.NewStyle(). 	Bold(true). 	Background(activeTheme.SurfaceRaised). 	Foreground(activeTheme.Ink)
+  87 mapping windowIndicatorStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.InkMuted)
+  89 mapping mainTitle = lipgloss.NewStyle(). 	Background(activeTheme.Accent). 	Foreground(activeTheme.Surface)
+  92 mapping blurredTitle = lipgloss.NewStyle(). 	Background(activeTheme.InkMuted). 	Foreground(activeTheme.Surface)
+  95 mapping projectRowStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.Ink)
+  97 mapping projectRowActiveStyle = lipgloss.NewStyle(). 	Bold(true). 	Foreground(activeTheme.Accent)
+  100 mapping projectRowSelectedStyle = lipgloss.NewStyle(). 	Background(activeTheme.SurfaceRaised). 	Foreground(activeTheme.Ink)
+  104 mapping automationsTitleStyle = lipgloss.NewStyle(). 	Bold(true). 	Foreground(activeTheme.Accent)
+  107 mapping automationsTitleDimStyle = lipgloss.NewStyle(). 	Bold(true). 	Foreground(activeTheme.InkMuted)
+  110 mapping automationsEnabledStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.Ink)
+  112 mapping automationsDisabledStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.InkMuted)
+  114 mapping automationItemTitleStyle = lipgloss.NewStyle(). 	Foreground(tree.InstanceTitleColor)
+  116 mapping automationDetailStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.InkMuted)
+  118 mapping automationsHintStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.InkMuted)
+  121 mapping keyStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+  122 mapping descStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+  123 mapping sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
+  124 mapping actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Accent)
+  125 mapping menuStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+  127 mapping tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+  129 mapping taskPlaceholderStyle = lipgloss.NewStyle(). 	Foreground(activeTheme.InkMuted)
+  131 mapping taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+  133 mapping alarmStyle = lipgloss.NewStyle(). 	Background(activeTheme.Surface). 	Foreground(activeTheme.Dead). 	Bold(true)
+  137 mapping errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
+
+ui/theme/theme.go:81 States
+  83 return return []State{ 	{Name: "running", Label: "Running", Glyph: "", Color: c["running"]}, 	{Name: "ready", Label: "Ready", Glyph: "●", Color: c["ready"]}, 	{Name: "lost", Label: "Lost", Glyph: "◌", Color: c["lost"]}, 	{Name: "dead", Label: "Dead", Glyph: "○", Color: c["dead"]}, 	{Name: "archived", Label: "Archived", Glyph: "▧", Color: c["archived"]}, 	{Name: "limit-reached", Label: "Limit reached", Glyph: "◆", Color: c["limit-reached"]}, }
+
+ui/theme/theme.go:97 Styles
+  100 condition rounded == 1
+  105 mapping body := lipgloss.NewStyle().Foreground(c["ink"]).Background(c["surface"])
+  106 return return StyleSet{ 	Body:     body, 	Muted:    body.Foreground(c["ink-muted"]), 	Title:    body.Bold(true), 	Selected: body.Background(c["surface-raised"]).Bold(true), 	Focus:    body.Border(lipgloss.NormalBorder()).BorderForeground(c["accent"]), 	Dialog:   body.Background(c["surface-raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(0, m["space-3"]), 	Error:    body.Foreground(c["dead"]), }
+
+ui/tree/labels.go:62 TabGlyph
+  64 case session.TabKindAgent
+  65 return return AgentTabGlyph
+  66 case session.TabKindShell
+  67 return return ShellTabGlyph
+  68 case session.TabKindWeb
+  68 case session.TabKindVSCode
+  69 return return WebTabGlyph
+  71 return return ProcessTabGlyph
+
+ui/tree/labels.go:97 TabLabels
+  98 condition instance != nil
+  99 condition len(tabs) > 0
+
+ui/tree/labels.go:124 TabLabelAt
+  125 condition instance == nil
+  129 condition idx < 0 || idx >= len(tabs)
+  134 condition candidateIdx != idx && labelForTab(candidate) == label
+
+ui/tree/labels.go:148 labelForTab
+  149 return return TabGlyph(tab.Kind) + " " + textForTab(tab)
+
+ui/tree/render.go:184 ApplyTheme
+  185 mapping readyStyle = lipgloss.NewStyle().Foreground(t.Ready)
+  186 mapping deadStyle = lipgloss.NewStyle().Foreground(t.Dead)
+  187 mapping lostStyle = lipgloss.NewStyle().Foreground(t.Lost)
+  188 mapping archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
+  189 mapping limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
+  192 mapping titleStyle = lipgloss.NewStyle(). 	Padding(1, 1, 0, 1). 	Foreground(InstanceTitleColor)
+  195 mapping listDescStyle = lipgloss.NewStyle(). 	Padding(0, 1, 1, 1). 	Foreground(t.ForegroundMuted)
+  198 mapping selectedTitleStyle = lipgloss.NewStyle(). 	Padding(1, 1, 0, 1). 	Background(t.SelectionBackground). 	Foreground(t.SelectionForeground)
+  202 mapping selectedDescStyle = lipgloss.NewStyle(). 	Padding(0, 1, 1, 1). 	Background(t.SelectionBackground). 	Foreground(t.SelectionForeground)
+  206 mapping tabRowStyle = lipgloss.NewStyle(). 	Foreground(InstanceTitleColor)
+  208 mapping tabRowActiveStyle = lipgloss.NewStyle(). 	Foreground(InstanceTitleColor)
+  210 mapping tabRowSelectedStyle = lipgloss.NewStyle(). 	Background(t.SelectionBackground). 	Foreground(t.SelectionForeground)
+
+ui/tree/render.go:303 Render
+  306 condition Expandable(i)
+  307 condition expanded
+  317 mapping titleS := selectedTitleStyle
+  318 mapping descS := selectedDescStyle
+  319 condition !selected
+  320 mapping titleS = titleStyle
+  321 mapping descS = listDescStyle
+  335 case op != session.OpNone
+  345 mapping join = blankIcon
+  348 case session.LiveRunning
+  349 mapping join = blankIcon
+  350 case session.LiveReady
+  351 mapping join = readyStyle.Render(readyIcon)
+  352 case session.LiveDead
+  353 mapping join = deadStyle.Render(deadIcon)
+  354 case session.LiveLost
+  355 mapping join = lostStyle.Render(lostIcon)
+  356 case session.LiveArchived
+  357 mapping join = archivedStyle.Render(archivedIcon)
+  358 case session.LiveLimitReached
+  359 mapping join = limitStyle.Render(limitIcon)
+  360 case session.LivenessUnset
+  363 mapping join = blankIcon
+  375 condition placeholder
+  377 condition !selected
+  381 condition i.Capabilities().Workspace == session.WorkspaceRemote
+  391 condition liveness == session.LiveLost
+  394 condition op == session.OpKilling || op == session.OpArchiving
+  396 condition !selected
+  400 condition !selected
+  413 condition liveness == session.LiveArchived && !selected
+  421 condition liveness == session.LiveLimitReached
+  430 condition note != ""
+  436 condition archiveWarning != ""
+  443 condition i.AgentModelChange() != nil
+  447 condition prefix != ""
+  451 condition widthAvail <= 0
+  456 condition runewidth.StringWidth(titleText) > widthAvail
+  461 condition widthAvail < runewidth.StringWidth(tail)
+  475 condition r.width <= 9
+  480 condition prefix != ""
+  491 mapping title := titleS.Render(layout.RowWithRightAffix(titleContent, " "+join, r.width))
+  495 mapping remainingWidth -= runewidth.StringWidth(branchIcon)
+  502 condition i.Started() && hasMultipleRepos
+  504 condition err != nil
+  511 condition reason != session.IdleReasonNone
+  513 condition reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil
+  516 condition branch == ""
+  529 condition remainingWidth <= 0
+  531 condition branchWidth > remainingWidth
+  538 condition remainingWidth > 0
+  542 mapping branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, description, spaces)
+  545 condition archiveWarning == ""
+  546 mapping lines = append(lines, descS.Render(branchLine))
+  550 mapping lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
+  552 condition location != ""
+  559 mapping glyph := "  "
+  560 condition index == 0
+  561 mapping glyph = "⚠ "
+  563 mapping warningPrefix := strings.Repeat(" ", prefixWidth) + glyph
+  565 condition warningWidth <= 0
+  567 condition runewidth.StringWidth(warningText) > warningWidth
+  570 mapping warningStyle := descS.Foreground(archiveWarningColor)
+  571 condition index < len(warningTexts)-1
+  572 mapping warningStyle = warningStyle.PaddingBottom(0)
+  574 mapping lines = append(lines, warningStyle.Render(warningPrefix+warningText))
+
+ui/tree/render.go:591 idleReasonDetail
+  593 condition label == ""
+  597 condition !churnAt.IsZero()
+  599 condition reason == session.IdleReasonSettledAfterPaneChange
+
+ui/tree/render.go:642 RenderTab
+  644 condition isLast
+  647 mapping marker := ""
+  648 condition active
+  649 mapping marker = activeTabMarker
+  655 condition r.width > 0 && runewidth.StringWidth(body+marker) > r.width
+  659 condition r.width < runewidth.StringWidth(tail)
+  682 condition avail > 0
+  682 mapping avail := r.width - runewidth.StringWidth(prefix) - runewidth.StringWidth(marker)
+  688 mapping body = runewidth.Truncate(body+marker, r.width, tail)
+  689 mapping marker = ""
+  692 mapping style := tabRowStyle
+  693 condition active
+  694 mapping style = tabRowActiveStyle
+  696 condition selected
+  697 mapping style = tabRowSelectedStyle
+  700 condition r.width <= 9
+  713 return return style.Padding(0, pad).Render( 	layout.RowKeepingTail(body, marker, r.width))
+
+ui/workspace.go:14 EmptyWorkspace
+
+ui/workspace.go:48 emptyWorkspaceContent
+  49 condition r.Empty()
+  52 mapping iw := r.W - blurredWindowStyle.GetHorizontalFrameSize()
+  53 mapping ih := r.H - blurredWindowStyle.GetVerticalFrameSize()
+  54 condition iw < 0
+  57 condition ih < 0
+  62 mapping rendered = append(rendered, paneHeaderDimStyle.Render(fitLine(line, iw)))
+  66 return return layout.ClampToRect(blurredWindowStyle.Render(inner), r)

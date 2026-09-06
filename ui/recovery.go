@@ -15,16 +15,16 @@ func RecoveryContent(condition, detail, action string, failed bool, width int) s
 		return ""
 	}
 	styles := theme.Styles()
-	title := styles["title"]
+	title := styles.Title
 	if failed {
-		title = styles["error"].Bold(true)
+		title = styles.Error.Bold(true)
 	}
 	lines := []string{title.Width(width).Align(lipgloss.Center).Render(truncateStatusText(condition, width))}
 	if detail != "" {
-		lines = append(lines, styles["body"].Width(width).Align(lipgloss.Center).Render(sanitizeError(detail)))
+		lines = append(lines, styles.Body.Width(width).Align(lipgloss.Center).Render(sanitizeError(detail)))
 	}
 	if action != "" {
-		lines = append(lines, "", styles["body"].Width(width).Align(lipgloss.Center).Render(action))
+		lines = append(lines, "", styles.Body.Width(width).Align(lipgloss.Center).Render(action))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -39,7 +39,7 @@ func RecoveryScreen(r layout.Rect, condition, detail, action string, failed bool
 		// Raw daemon errors can be much taller than a narrow terminal. Keep
 		// the condition and next action visible; only the detail gives way.
 		heading := RecoveryContent(condition, "", "", failed, r.W)
-		body := theme.Styles()["body"].Width(r.W).Align(lipgloss.Center)
+		body := theme.Styles().Body.Width(r.W).Align(lipgloss.Center)
 		next := body.Render(action)
 		budget := r.H - lipgloss.Height(heading)
 		if action != "" {
@@ -58,6 +58,6 @@ func RecoveryScreen(r layout.Rect, condition, detail, action string, failed bool
 		}
 		content = strings.Join(parts, "\n")
 	}
-	return layout.ClampToRect(theme.Styles()["body"].Render(lipgloss.Place(r.W, r.H,
+	return layout.ClampToRect(theme.Styles().Body.Render(lipgloss.Place(r.W, r.H,
 		lipgloss.Center, lipgloss.Center, content)), r)
 }

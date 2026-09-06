@@ -118,11 +118,11 @@ func (p *PromptOverlay) SetMaxSize(width, height int) {
 // Render renders the prompt overlay.
 func (p *PromptOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	// Themed styles are resolved per render, like every sibling overlay, so a
 	// theme change lands without rebuilding the overlay.
-	placeholder := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	placeholder := lipgloss.NewStyle().Foreground(t.InkMuted)
 	p.textarea.FocusedStyle.Placeholder = placeholder
 	p.textarea.BlurredStyle.Placeholder = placeholder
 
