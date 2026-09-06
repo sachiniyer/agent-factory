@@ -207,6 +207,7 @@ export interface Actions {
   open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
   newSession(): void;
+  copyLink(): void;
   /** Opens the kill-confirm modal for this stably-addressed rail row. */
   kill(session: KillableSession): void;
   /** Opens the archive-confirm modal for this rail row. */
@@ -1942,6 +1943,13 @@ export class AppShell {
     // reachable there. The "Live · master" meta that used to sit beside the title
     // was removed as chrome nobody wanted to look at (#2458); the badge is not
     // that — it carries an action (follow the PR), not ambient state.
+    const copyLink = h(
+      "button",
+      { type: "button", class: "af-ghost af-term-action af-copy-link", title: "Copy link to this session" },
+      icon("link"), h("span", { class: "af-copy-link-label" }, "Copy link"),
+    );
+    copyLink.setAttribute("aria-label", "Copy link");
+    copyLink.addEventListener("click", () => this.actions.copyLink());
     const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
 
     // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
@@ -2016,7 +2024,7 @@ export class AppShell {
     // Retry and the filtered-selection fallback are fixed pane-level actions. Their
     // hidden containers create no flex items on the common path, while visible
     // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, copyLink, tabBar, headActions, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
