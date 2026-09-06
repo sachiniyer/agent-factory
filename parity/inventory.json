@@ -1276,6 +1276,24 @@
       "notes": "Closed by #1935: the Edit action opens the add-task form seeded from the task and submits the changed fields to UpdateTask. project_path is now in the web TS TaskUpdate (web/src/types.ts) and sent by the edit call site, so every field the create form collects is editable."
     },
     {
+      "id": "task.edit.prompt-file",
+      "title": "Apply a reviewed task prompt from a local file",
+      "tui": {
+        "status": "n/a",
+        "pointer": "ui/task_pane_edit.go edits prompt text directly"
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": "web/src/tasks.ts editTaskModal edits prompt text directly"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go tasksUpdateCmd reads --prompt-file into patch.Prompt"
+      },
+      "verdict": "deliberate",
+      "notes": "#3935 adds a CLI file-input convenience for applying a reviewed repository prompt verbatim without shell substitution stripping trailing newlines. TUI and web retain direct prompt editing; file-path input is deliberately CLI-only and reads the caller's filesystem, including for remote daemon updates. All three send the existing prompt field through UpdateTask."
+    },
+    {
       "id": "task.edit.project-path",
       "title": "Change which project a task belongs to",
       "tui": {
@@ -1928,6 +1946,7 @@
       "af tasks update --program": "task.edit",
       "af tasks update --project-path": "task.edit.project-path",
       "af tasks update --prompt": "task.edit",
+      "af tasks update --prompt-file": "task.edit.prompt-file",
       "af tasks update --target-session": "task.edit",
       "af tasks update --watch-cmd": "task.edit",
       "af token --help": "meta.discovery",

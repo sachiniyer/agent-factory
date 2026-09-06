@@ -844,6 +844,7 @@ func init() {
 
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateNameFlag, "name", "", "New task name")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdatePromptFlag, "prompt", "", "New prompt")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdatePromptFileFlag, "prompt-file", "", "Read the new prompt verbatim from a local file (mutually exclusive with --prompt)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateCronFlag, "cron", "", "New cron expression (clears watch-cmd)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateWatchCmdFlag, "watch-cmd", "", "New watch command (clears cron)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateTargetSessionFlag, "target-session", "", "New target session; pass an empty value to revert to a new session per run")

@@ -74,6 +74,48 @@ reuse the conversation. There is no concurrency cap here: that flag applies
 only to watch tasks creating a session per event. A silent watcher produces
 no prompt, even while its state says `watching`.
 
+## Versioned task prompts
+
+Repository-owned prompts live in `.agent-factory/tasks/`. The Master Health
+Watch prompt is [master-health-watch.md](https://github.com/sachiniyer/agent-factory/blob/master/.agent-factory/tasks/master-health-watch.md),
+for task `4ab7ba4f`. `examples/tasks/` contains watch scripts, not task prompt
+copies. The daemon still stores the delivered prompt; it does not automatically
+reload this file. Edit the file in a PR, review the diff, and apply it only after
+merge from the updated master checkout.
+
+With an `af` build containing `--prompt-file`, Captain runs this on the
+maintainer's box (not from a feature worktree):
+
+```bash
+cd /home/siyer/Desktop/claude-squad
+# First bring this master checkout to the reviewed, merged commit.
+AF_DAEMON_URL= af tasks update 4ab7ba4f --repo /home/siyer/Desktop/claude-squad --prompt-file /home/siyer/Desktop/claude-squad/.agent-factory/tasks/master-health-watch.md
+```
+
+`--prompt-file <path>` reads the caller's local file verbatim, preserving trailing
+newlines, and is mutually exclusive with `--prompt`. Missing, unreadable, empty,
+and whitespace-only files are rejected before any write. For remote updates the
+file is still read on the caller's machine. The empty `AF_DAEMON_URL`
+above clears any remote target in the environment.
+
+The live task will be **behind the checked-in file from merge until Captain
+applies it**. The comparison is expected to report drift during that window.
+For this initial rollout the old live prompt does not yet carry the new step,
+so automatic drift reporting starts only after the first application. The
+read-only comparison can also be run manually from the master checkout:
+
+```bash
+go run ./scripts/prompt-drift 4ab7ba4f .agent-factory/tasks/master-health-watch.md
+```
+
+The helper uses `af tasks get <id> --json` and compares exact prompt bytes. It
+prints a `FINDING` and exits 1 on drift or an unreadable task/file, and is silent
+with exit 0 on equality. It never applies changes or executes prompt contents.
+The prompt instructs the watch to report this through its existing dedupe and
+issue conventions and continue its existing checks. After application the
+comparison goes quiet. Tests inject task JSON and temporary files; they never
+execute the watch's commands.
+
 ## Task fields
 
 Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CLI) or the TUI Tasks pane (`m` to open, `n` to create).
@@ -375,7 +417,7 @@ af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill]
 af tasks get <id>
 af tasks show <id>             # human-readable: schedule health and audit trail
-af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
+af tasks update <id> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
 af tasks restart <id>          # enabled watch tasks only; reloads an edited script
 af tasks trigger <id>          # cron tasks only
 af tasks remove <id>
