@@ -44,7 +44,7 @@ produced.
   any of them. Toggle it with `s` (open) and `x` (hide).
 
 <figure markdown>
-![The TUI showing several Agent Factory sessions in the sidebar with the selected session's Agent tab beside them](assets/tui/tui-sessions.svg)
+![The TUI showing a selected session and its Agent pane](assets/tui/pane-dark.png)
 </figure>
 
 An idle row also says **why** it's idle, as far as the daemon can mechanically
@@ -115,7 +115,7 @@ For a named long-running command or a web preview with a URL/port, use
   automations](tasks.md).
 
 <figure markdown>
-![The TUI tasks view listing scheduled and watch automations](assets/tui/tui-tasks.svg)
+![The TUI tasks view listing scheduled and watch automations](assets/tui/tasks-dark.png)
 </figure>
 
 - **`c`** retries a session that's parked on a [usage limit](usage-limits.md).

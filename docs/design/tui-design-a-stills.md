@@ -1,5 +1,9 @@
 # TUI design system: slice A
 
+The gallery files were regenerated from master after P2/P5 for
+[#3917](https://github.com/sachiniyer/agent-factory/issues/3917). The slice history
+below records the original implementation; the images now show the final design.
+
 Slice A applies the fixed generated light/dark roles throughout the TUI and
 removes the private Config/account ANSI palette and raw overlay backdrop colours.
 `theme.Roles()` and `theme.Styles()` expose typed fields. The source guard in

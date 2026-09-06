@@ -83,7 +83,7 @@ long titles truncate with … and tabs scroll horizontally. Controls have at lea
 
 ![Focused session on a phone, with project navigation above the pane title and tabs](assets/web/phone-session.png)
 
-**Share a link to a session.** Click **Copy link** beside the selected session's
+**Share a link to a session.** Click the link icon (**Copy link**) beside the selected session's
 header title to copy its link, or copy the address bar: it follows your selection.
 Links use the stable session ID (`/#/session/<id>`) and open on this daemon,
 switching projects and revealing Archived when needed. Login preserves the target;
@@ -99,17 +99,17 @@ Click **+ New** in the rail. If there are no projects, add one through the proje
 switcher first; creation stays disabled until a project is available.
 
 <figure markdown>
-![New session form with Title, Project, Program, Backend, Account, and Prompt fields](assets/web/new-session.png#only-light)
-![New session form with Title, Project, Program, Backend, Account, and Prompt fields](assets/web/new-session-dark.png#only-dark)
-<figcaption>Choose where the session runs and which identity it uses before creating it.</figcaption>
+![New session form with Title, Project, Prompt, Account, and an Edit defaults disclosure](assets/web/new-session.png#only-light)
+![New session form with Title, Project, Prompt, Account, and an Edit defaults disclosure](assets/web/new-session-dark.png#only-dark)
+<figcaption>Describe the work, choose an identity, and expand Edit defaults to change Program or Backend.</figcaption>
 </figure>
 
 | Field | What to choose |
 | --- | --- |
 | Title | A session name. Leave it empty to use the suggested name, if one has loaded. |
 | Project | The repository to work in; starts with the selected project. |
-| Program | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
-| Backend | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
+| Program (Edit defaults) | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
+| Backend (Edit defaults) | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
 | Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Ambient identity** sends no account; the daemon still applies configured defaults. |
 | Prompt | Optional initial instructions to send to the agent. |
 
@@ -119,8 +119,9 @@ creation if selected. Register and sign in to accounts in [Config](#config-view)
 **Create** checks required fields in the browser; missing values show inline
 errors and leave the form and its values open. After those checks pass, the modal
 closes before sending the request. A pending row tracks creation, then the session
-opens attached on success. Daemon-side failures appear in a brief toast; reopen
-**+ New** and re-enter the form to retry. **Cancel**, the backdrop, or `Escape`
+opens attached on success. A confirmed daemon refusal reopens the retained form
+with an inline error when no newer form is open; otherwise it shows a notice.
+If the outcome is uncertain, check the session list before retrying. **Cancel**, the backdrop, or `Escape`
 closes the form before submission.
 
 ### Watch and interact with the agent
@@ -143,13 +144,14 @@ marks the pane you are driving. See the [keyboard reference](#keyboard-reference
 for tab and view navigation.
 
 The pane header's **Retry** appears for a session waiting on a usage limit and
-requests another attempt. **Handoff** appears when the session supports swapping
+requests another attempt. Open the pane header’s **Actions** menu (shown as **…**
+on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
 session can offer both; see [usage limits](usage-limits.md).
 
-The selected rail row also exposes **Archive** and **Kill**; other actionable rows
-show them on hover or keyboard focus. Each opens a confirmation:
+Open a rail row’s **…** menu for **Archive** and **Kill**. Other actionable rows
+reveal the menu on hover or keyboard focus. Each opens a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
   the archive. For Docker, SSH, or remote-hook sessions, it pushes the branch to
@@ -174,12 +176,12 @@ whose button you clicked, even when a different session is selected.
 </figure>
 
 Click an existing process tab, such as **diff** in the still, to attach it. To
-inspect changes yourself, choose **+ New tab → Terminal** and run `git diff` in
+inspect changes yourself, choose **Actions → + New tab → Terminal** and run `git diff` in
 the shell. The still's diff is terminal output, not a separate diff-view control.
 Tabs run in the session's worktree. Click **Agent** to return to the agent, or the
 **PR** badge to open its pull request.
 
-**+ New tab** also offers **VS Code**, which opens an editor for the worktree;
+**Actions → + New tab** also offers **VS Code**, which opens an editor for the worktree;
 see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a
 closable tab closes it; the Agent tab cannot be closed independently. Double-click
 a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
@@ -201,7 +203,7 @@ Choose **Tasks** in the app bar to manage automations for the selected project.
 <figure markdown>
 ![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks.png#only-light)
 ![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks-dark.png#only-dark)
-<figcaption>Read the next run and last outcome, then edit or trigger a task from its row.</figcaption>
+<figcaption>Read the next run and last outcome, choose Edit, or open Actions for other operations.</figcaption>
 </figure>
 
 Each row shows its name, cron schedule or watch command, optional target session,
@@ -211,18 +213,21 @@ tick, with explanatory text in the row.
 
 | Control | Action |
 | --- | --- |
-| Enable · Disable | Turn the task on or off. |
+| Actions → Enable · Disable | Turn the task on or off. |
 | Edit | Open the existing task's form to change it. |
-| Trigger | Run an enabled cron task now; absent for watch and disabled tasks. |
-| Remove | Delete the task. |
+| Actions → Trigger | Run an enabled cron task now; absent for watch and disabled tasks. |
+| Actions → Remove | Delete the task after confirmation. |
 | + Add | Open a form to create a task. |
 
 In the form, enter **Name**, choose **Project**, and choose a **Trigger**. A
 **Cron schedule** uses a schedule picker with time, interval, or weekday controls
-as appropriate; **Custom** accepts a raw cron expression. **Watch command** shows
+as appropriate; **Custom (cron)** accepts a raw cron expression. **Watch command** shows
 a command field instead. **Prompt** supplies the instructions (required for cron);
 a watch prompt may use `{{line}}` for the matched line. **Target session** is
-optional; **Program** selects the agent for a new session. Submit with **Add** or
+optional; **Program** selects the agent for a new session. **On done** chooses
+Keep, Archive or Kill for a session spawned by the task; its hint explains the
+consequence. A task targeting an existing session cannot apply that cleanup.
+Submit with **Add** or
 **Save**, or leave with **Cancel**. Invalid values show an inline error.
 See [Tasks and automation](tasks.md) for scheduling semantics.
 

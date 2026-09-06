@@ -768,7 +768,7 @@ web-demo)
     # fight over it. That is the right trade for a target a maintainer runs by
     # hand every few months.
     DEMO_OUT="$REPO_ROOT/docs/assets/web"
-    mkdir -p "$DEMO_OUT"
+    mkdir -p "$DEMO_OUT" "$REPO_ROOT/docs/assets/tui"
     rc=0
     WEB_DEMO_NAME="af-web-demo-$RUN_TOKEN"
     watch_image_start "$WEB_DEMO_NAME"
@@ -776,10 +776,12 @@ web-demo)
         --name "$WEB_DEMO_NAME" \
         -v "$REPO_ROOT":/src:ro \
         -v "$DEMO_OUT":/work/demo-out \
+        -v "$REPO_ROOT/docs/assets/tui":/work/tui-out \
         -v af-web-selftest-gomod:/cache/gomod \
         -v af-web-selftest-gobuild:/cache/gobuild \
         --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
         --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
+        -e AF_TUI_STILLS_ONLY \
         -e AF_DEMO_TARGET_SECONDS \
         -e AF_DEMO_MAX_GIF_BYTES \
         -e AF_DEMO_MAX_MP4_BYTES \

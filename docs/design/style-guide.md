@@ -13,11 +13,12 @@ The specimens consume the generated CSS. TUI examples show the prescribed cell l
 and colours in HTML; they are not a running Bubble Tea app. Example controls are inert,
 except native disclosure menus. System selects one of these same two themes.
 
-The web stills show the real rail, header, terminal and tabs after P2 slices A/B; the remaining
-components are awaiting their slices. Web has six [recorder beats](../dev/demo-assets.md)
-in both themes, plus filter, project-menu, terminal-action, keyboard, split and phone captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
-screen/theme matrix. Missing captures are labelled. Empty/error specimens illustrate the rules; the [P4 recovery matrix](recovery-stills.md)
-provides asserted recordings. Click a still for the full screen.
+The web stills show the redesigned product after P2, recorded with the repository's
+[container recorder](../dev/demo-assets.md). TUI stills are real app-model Update/View
+frames after P5, with deterministic fixtures in both themes; they are not live agent
+recordings. The [TUI appearance gallery](tui-design-c-stills.md) covers the complete
+matrix, including Light · Dark · System. Empty/error web specimens link to the
+[P4 recovery matrix](recovery-stills.md). Click a still for the full screen.
 
 
 <h3>Rail</h3>
@@ -34,7 +35,7 @@ provides asserted recordings. Click a still for the full screen.
   <span style="color:var(--af-dead)">○</span> fix-empty-add · <span style="color:var(--af-dead)">Dead</span>
   <span style="color:var(--af-archived)">▧</span> document-cli · <span style="color:var(--af-archived)">Archived</span>
   <span style="color:var(--af-limit-reached)">◆</span> nightly-review · <span style="color:var(--af-limit-reached)">Limit reached</span></pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Rail evidence"></a><figcaption>Recorder poster: sessions rail. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/sessions-dense-light.svg"><img loading="lazy" src="../../assets/tui/sessions-dense-light.png" alt="App-model driver · sessions dense · light"></a><figcaption>App-model driver · sessions dense Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -48,7 +49,7 @@ provides asserted recordings. Click a still for the full screen.
   <span style="color:var(--af-dead)">○</span> fix-empty-add · <span style="color:var(--af-dead)">Dead</span>
   <span style="color:var(--af-archived)">▧</span> document-cli · <span style="color:var(--af-archived)">Archived</span>
   <span style="color:var(--af-limit-reached)">◆</span> nightly-review · <span style="color:var(--af-limit-reached)">Limit reached</span></pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Rail evidence"></a><figcaption>Recorder poster: sessions rail. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/sessions-dense-dark.svg"><img loading="lazy" src="../../assets/tui/sessions-dense-dark.png" alt="App-model driver · sessions dense · dark"></a><figcaption>App-model driver · sessions dense Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Header</h3>
@@ -61,7 +62,7 @@ provides asserted recordings. Click a still for the full screen.
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>todo-cli · Sessions · Connected
 Keyboard: navigation</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Header evidence"></a><figcaption>Recorder poster: rail header and project context. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/single-project-light.svg"><img loading="lazy" src="../../assets/tui/single-project-light.png" alt="App-model driver · single project · light"></a><figcaption>App-model driver · single project Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -71,7 +72,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>todo-cli · Sessions · Connected
 Keyboard: navigation</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Header evidence"></a><figcaption>Recorder poster: rail header and project context. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/single-project-dark.svg"><img loading="lazy" src="../../assets/tui/single-project-dark.png" alt="App-model driver · single project · dark"></a><figcaption>App-model driver · single project Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Terminal chrome</h3>
@@ -87,7 +88,7 @@ Keyboard: navigation</pre></section>
 │ $ ./test.sh                  │
 │ 2 tests passed               │
 └ ctrl+] · Return to sessions ─┘</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Terminal chrome evidence"></a><figcaption>Recorder poster: preview frame; agent output is not recoloured by this spec. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/keyboard-light.svg"><img loading="lazy" src="../../assets/tui/keyboard-light.png" alt="App-model driver · keyboard · light"></a><figcaption>App-model driver · keyboard Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -100,7 +101,7 @@ Keyboard: navigation</pre></section>
 │ $ ./test.sh                  │
 │ 2 tests passed               │
 └ ctrl+] · Return to sessions ─┘</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Terminal chrome evidence"></a><figcaption>Recorder poster: preview frame; agent output is not recoloured by this spec. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/keyboard-dark.svg"><img loading="lazy" src="../../assets/tui/keyboard-dark.png" alt="App-model driver · keyboard · dark"></a><figcaption>App-model driver · keyboard Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Tabs and review</h3>
@@ -115,7 +116,7 @@ Keyboard: navigation</pre></section>
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>  1 · Agent
 <span class="sg-selected">› 2 · diff · PR #128</span>
   2 files changed</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Tabs and review evidence"></a><figcaption>Recorder poster: selected child tab and review content. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/pane-light.svg"><img loading="lazy" src="../../assets/tui/pane-light.png" alt="App-model driver · pane · light"></a><figcaption>App-model driver · pane Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -127,7 +128,7 @@ Keyboard: navigation</pre></section>
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>  1 · Agent
 <span class="sg-selected">› 2 · diff · PR #128</span>
   2 files changed</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Tabs and review evidence"></a><figcaption>Recorder poster: selected child tab and review content. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/pane-dark.svg"><img loading="lazy" src="../../assets/tui/pane-dark.png" alt="App-model driver · pane · dark"></a><figcaption>App-model driver · pane Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Dialogs and overlays</h3>
@@ -143,7 +144,7 @@ Keyboard: navigation</pre></section>
 │ Prompt: Cover appending…   │
 │ enter create · esc cancel  │
 ╰───────────────────────────╯</pre></section>
-<figure><figcaption>No recorder still of a TUI creation overlay is committed; web still documents the corresponding workflow.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/prompt-light.svg"><img loading="lazy" src="../../assets/tui/prompt-light.png" alt="App-model driver · prompt · light"></a><figcaption>App-model driver · prompt Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -156,7 +157,7 @@ Keyboard: navigation</pre></section>
 │ Prompt: Cover appending…   │
 │ enter create · esc cancel  │
 ╰───────────────────────────╯</pre></section>
-<figure><figcaption>No recorder still of a TUI creation overlay is committed; web still documents the corresponding workflow.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/prompt-dark.svg"><img loading="lazy" src="../../assets/tui/prompt-dark.png" alt="App-model driver · prompt · dark"></a><figcaption>App-model driver · prompt Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Tasks</h3>
@@ -171,7 +172,7 @@ Keyboard: navigation</pre></section>
 <span class="sg-selected">› nightly-tests · Enabled</span>
   Next run · Tomorrow at 12:00 UTC
   enter edit · r run now · esc back</pre></section>
-<figure><a href="../../assets/tui/tui-tasks.svg"><img loading="lazy" src="../../assets/tui/tui-tasks.svg" alt="Current TUI Tasks evidence"></a><figcaption>Existing Tasks SVG still; not a light/dark recorder pair. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/tasks-light.svg"><img loading="lazy" src="../../assets/tui/tasks-light.png" alt="App-model driver · tasks · light"></a><figcaption>App-model driver · tasks Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -183,7 +184,7 @@ Keyboard: navigation</pre></section>
 <span class="sg-selected">› nightly-tests · Enabled</span>
   Next run · Tomorrow at 12:00 UTC
   enter edit · r run now · esc back</pre></section>
-<figure><a href="../../assets/tui/tui-tasks.svg"><img loading="lazy" src="../../assets/tui/tui-tasks.svg" alt="Current TUI Tasks evidence"></a><figcaption>Existing Tasks SVG still; not a light/dark recorder pair. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/tasks-dark.svg"><img loading="lazy" src="../../assets/tui/tasks-dark.png" alt="App-model driver · tasks · dark"></a><figcaption>App-model driver · tasks Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Config and accounts</h3>
@@ -200,7 +201,7 @@ Keyboard: navigation</pre></section>
   Saved · Applies to new tabs
 Accounts
   work · Logged in</pre></section>
-<figure><figcaption>No recorder still of TUI Config is committed; inspect ui/config_pane.go and ui/config_pane_accounts.go.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/appearance-light.svg"><img loading="lazy" src="../../assets/tui/appearance-light.png" alt="App-model driver · appearance · light"></a><figcaption>App-model driver · appearance Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -214,7 +215,7 @@ Accounts
   Saved · Applies to new tabs
 Accounts
   work · Logged in</pre></section>
-<figure><figcaption>No recorder still of TUI Config is committed; inspect ui/config_pane.go and ui/config_pane_accounts.go.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/appearance-dark.svg"><img loading="lazy" src="../../assets/tui/appearance-dark.png" alt="App-model driver · appearance · dark"></a><figcaption>App-model driver · appearance Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Buttons, fields and menus</h3>
@@ -230,7 +231,7 @@ Accounts
   Register project…
 enter select · esc cancel
 Creating… · Please wait</pre></section>
-<figure><figcaption>No recorder still of TUI picker or menu states is committed.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/project-picker-light.svg"><img loading="lazy" src="../../assets/tui/project-picker-light.png" alt="App-model driver · project picker · light"></a><figcaption>App-model driver · project picker Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -243,7 +244,7 @@ Creating… · Please wait</pre></section>
   Register project…
 enter select · esc cancel
 Creating… · Please wait</pre></section>
-<figure><figcaption>No recorder still of TUI picker or menu states is committed.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/project-picker-dark.svg"><img loading="lazy" src="../../assets/tui/project-picker-dark.png" alt="App-model driver · project picker · dark"></a><figcaption>App-model driver · project picker Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Empty states</h3>
@@ -259,7 +260,7 @@ Press n to create a session.
 
 No project selected
 Choose a project to continue.</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Empty states evidence"></a><figcaption>Poster shows empty Automations and the surrounding workspace; no zero-session recorder still is committed. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/zero-sessions-light.svg"><img loading="lazy" src="../../assets/tui/zero-sessions-light.png" alt="App-model driver · zero sessions · light"></a><figcaption>App-model driver · zero sessions Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -272,7 +273,7 @@ Press n to create a session.
 
 No project selected
 Choose a project to continue.</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Empty states evidence"></a><figcaption>Poster shows empty Automations and the surrounding workspace; no zero-session recorder still is committed. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/zero-sessions-dark.svg"><img loading="lazy" src="../../assets/tui/zero-sessions-dark.png" alt="App-model driver · zero sessions · dark"></a><figcaption>App-model driver · zero sessions Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Errors and notices</h3>
@@ -288,7 +289,7 @@ Sessions could not be loaded.
 Check the daemon, then retry.
 
 Login expired · Sign in again</pre></section>
-<figure><figcaption>No recorder still of TUI errors is committed; inspect ui/err.go and app/home_view.go.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/no-daemon-light.svg"><img loading="lazy" src="../../assets/tui/no-daemon-light.png" alt="App-model driver · no daemon · light"></a><figcaption>App-model driver · no daemon Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -301,7 +302,7 @@ Sessions could not be loaded.
 Check the daemon, then retry.
 
 Login expired · Sign in again</pre></section>
-<figure><figcaption>No recorder still of TUI errors is committed; inspect ui/err.go and app/home_view.go.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/no-daemon-dark.svg"><img loading="lazy" src="../../assets/tui/no-daemon-dark.png" alt="App-model driver · no daemon · dark"></a><figcaption>App-model driver · no daemon Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <h3>Help and status bar</h3>
@@ -314,7 +315,7 @@ Login expired · Sign in again</pre></section>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>ctrl+] return · ? help
 Connecting…</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Help and status bar evidence"></a><figcaption>Recorder poster: bottom shortcut strip. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/help-light.svg"><img loading="lazy" src="../../assets/tui/help-light.png" alt="App-model driver · help · light"></a><figcaption>App-model driver · help Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
@@ -324,7 +325,7 @@ Connecting…</pre></section>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>ctrl+] return · ? help
 Connecting…</pre></section>
-<figure><a href="../../assets/tui/demo-poster.png"><img loading="lazy" src="../../assets/tui/demo-poster.png" alt="Current TUI Help and status bar evidence"></a><figcaption>Recorder poster: bottom shortcut strip. Original colours preserved beside both theme specimens.</figcaption></figure>
+<figure><a href="../../assets/design/tui-c/help-dark.svg"><img loading="lazy" src="../../assets/tui/help-dark.png" alt="App-model driver · help · dark"></a><figcaption>App-model driver · help Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 
@@ -391,10 +392,10 @@ disclosures may take at most 120ms; reduced motion and all TUI changes are immed
 
 ## Capture coverage
 
-The [existing Sessions SVG](../assets/tui/tui-sessions.svg) supplements the recorder
-poster and shows an older palette. The [Tasks SVG](../assets/tui/tui-tasks.svg) supplies
-Tasks context. Neither establishes light/dark recorder coverage. P1 owns the baseline
-matrix; P2/P5 own applying tokens and matching new stills; P6 refreshes the public tour.
+The [Sessions still](../assets/tui/tui-sessions.svg) and
+[Tasks still](../assets/tui/tui-tasks.svg) use the same refreshed app-model driver
+as the light/dark matrix. The [TUI video](../assets/tui/demo.mp4) uses the separate
+real-agent recorder. Stand-in and model fixtures are identified at their source.
 
 ## Regeneration
 
