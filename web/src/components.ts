@@ -61,12 +61,16 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   retry.title = "Resume this session from its usage-limit wall";
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under a different agent";
-  const copy = action("Copy link", "af-copy-link", opts.copyLink);
-  copy.title = "Copy link to this session";
+  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
+  copy.title = "Copy link";
   copy.setAttribute("aria-label", "Copy link");
+  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
+  desktopCopy.append(icon("link"));
+  desktopCopy.title = "Copy link";
+  desktopCopy.setAttribute("aria-label", "Copy link");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   menu.panel.append(newTabSlot, copy, handoff);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, keyboard, retry, actions, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, actions, menu.el);
   return { head, title, tabs, pr, keyboard, retry, handoff, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 

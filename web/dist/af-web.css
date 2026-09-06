@@ -1191,6 +1191,13 @@ button:disabled,
   align-items: center;
   gap: var(--af-space-1);
 }
+.af-copy-link-desktop {
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  justify-content: center;
+}
+.af-term-menu .af-copy-link-phone {
+  display: none;
+}
 .af-term-action {
   flex: 0 0 auto;
   padding: var(--af-space-1) var(--af-space-2);
@@ -2320,6 +2327,12 @@ button:disabled,
   font-size: var(--af-fs-xs);
 }
 @media (max-width: 768px) {
+  .af-copy-link-desktop {
+    display: none;
+  }
+  .af-term-menu .af-copy-link-phone {
+    display: inline-flex;
+  }
   .af-appbar {
     position: relative;
     z-index: var(--af-z-appbar);

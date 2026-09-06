@@ -8122,12 +8122,16 @@ function terminalChrome(opts) {
   retry.title = "Resume this session from its usage-limit wall";
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under a different agent";
-  const copy = action("Copy link", "af-copy-link", opts.copyLink);
-  copy.title = "Copy link to this session";
+  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
+  copy.title = "Copy link";
   copy.setAttribute("aria-label", "Copy link");
+  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
+  desktopCopy.append(icon("link"));
+  desktopCopy.title = "Copy link";
+  desktopCopy.setAttribute("aria-label", "Copy link");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   menu.panel.append(newTabSlot, copy, handoff);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, keyboard, retry, actions2, menu.el);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, actions2, menu.el);
   return { head, title, tabs, pr, keyboard, retry, handoff, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {

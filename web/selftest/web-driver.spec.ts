@@ -8421,7 +8421,15 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
             await sessionActions.focus();
             await p.keyboard.press("Enter");
             await expect(sessionMenu).toBeVisible();
-            await expect(sessionMenu.getByRole("button", { name: "Copy link", exact: true })).toBeVisible();
+            const copyLink = head.getByRole("button", { name: "Copy link", exact: true });
+            await expect(copyLink).toHaveCount(1);
+            await expect(copyLink).toHaveAttribute("title", "Copy link");
+            if (width <= 768) {
+              await expect(sessionMenu.getByRole("button", { name: "Copy link", exact: true })).toBeVisible();
+            } else {
+              await expect(head.locator(".af-copy-link-desktop")).toBeVisible();
+              await expect(copyLink).toHaveText("");
+            }
             await p.keyboard.press("Escape");
             await expect(sessionMenu).toBeHidden();
             await expect(sessionActions).toBeFocused();

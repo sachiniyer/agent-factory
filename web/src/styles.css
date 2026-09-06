@@ -1474,6 +1474,12 @@ button:disabled,
   gap: var(--af-space-1);
 }
 
+.af-copy-link-desktop {
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  justify-content: center;
+}
+.af-term-menu .af-copy-link-phone { display: none; }
+
 .af-term-action {
   flex: 0 0 auto;
   padding: var(--af-space-1) var(--af-space-2);
@@ -2990,6 +2996,9 @@ button:disabled,
  * so the main pane keeps the full body width whether the drawer is open or shut, and the
  * terminal's own ResizeObserver never sees a width change when it toggles. */
 @media (max-width: 768px) {
+  .af-copy-link-desktop { display: none; }
+  .af-term-menu .af-copy-link-phone { display: inline-flex; }
+
   /* The decorative brand yields entirely. The remaining controls keep DOM/focus
    * order in the grid: drawer + top-level views, then a wider project row + rare
    * tools. Width allocation is structural rather than whichever flex child happens
