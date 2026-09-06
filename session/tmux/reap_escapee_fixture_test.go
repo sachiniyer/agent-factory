@@ -38,18 +38,17 @@ func runMarkedEscapee(pidFile string) error {
 	if _, err := syscall.Setsid(); err != nil {
 		return err
 	}
-	sleeper, err := exec.LookPath("sleep")
-	if err != nil {
-		return err
-	}
 	if err := os.WriteFile(pidFile+".tmp", []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(pidFile+".tmp", pidFile); err != nil {
 		return err
 	}
-	// exec keeps the published identity, markers and ignored SIGHUP disposition.
-	return syscall.Exec(sleeper, []string{"sleep", "300"}, os.Environ())
+	// Stay in this image after publishing readiness. An exec here races the
+	// parent's environment read: Darwin can return EIO while replacing the
+	// argument pages even though this marked helper remains alive (#3963).
+	time.Sleep(300 * time.Second)
+	return nil
 }
 
 // Killing tmux is asynchronous with respect to pane exit and reparenting.
