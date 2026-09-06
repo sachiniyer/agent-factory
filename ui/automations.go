@@ -22,25 +22,25 @@ var automationsTitleStyle = lipgloss.NewStyle().
 
 var automationsTitleDimStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
 var automationsEnabledStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.Info)
+	Foreground(activeTheme.Ink)
 
 var automationsDisabledStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
 // automationsOverdueStyle paints the overdue marker and its detail text in the
 // theme's warning color. It is a color and a static glyph and nothing else — no
 // spinner, no blink (#1766): state reads from a glyph in this app.
 var automationsOverdueStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.Warning)
+	Foreground(activeTheme.Dead)
 
 // automationsUnknownStyle paints a row whose health could not be established.
 // Muted rather than warning-colored on purpose: an unknown is not a failure, and
 // coloring it like one trains people to ignore the rows that are.
 var automationsUnknownStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
 // automationItemTitleStyle paints an automation's title in the SAME adaptive
 // color the instances tree uses for instance titles (tree.InstanceTitleColor),
@@ -53,10 +53,10 @@ var automationItemTitleStyle = lipgloss.NewStyle().
 // line — the recede gray the tree uses for its branch/description lines, so the
 // detail reads as secondary to the title it hangs under (#1126).
 var automationDetailStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
 var automationsHintStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundDim)
+	Foreground(activeTheme.InkMuted)
 
 // AutomationsPane is the bottom section of the left rail (#1087 revised RFC
 // §2.1's bottom strip): one row per task — the enabled glyph and the task
@@ -359,21 +359,22 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	marker := " "
 	nameStyle := automationItemTitleStyle
 	if expanded {
-		marker = "▾"
-		nameStyle = nameStyle.Bold(true)
+		marker = SelectionMarker("▾")
+		nameStyle = nameStyle.Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
+		glyphStyle = glyphStyle.Background(activeTheme.SurfaceRaised)
+		if !needsAttention(tsk) {
+			glyphStyle = glyphStyle.Foreground(activeTheme.Ink)
+		}
 	}
 	name := tsk.Name
 	if name == "" {
 		name = "(unnamed)"
 	}
-	w := a.rect.W
-	if w <= itemPrefixWidth {
-		// Too narrow to split the styled segments cleanly: fall back to one
-		// fitted plain line so the row never overflows the rail.
-		return automationItemTitleStyle.Render(fitLine(marker+glyph+"  "+name, w))
+	gap := "  "
+	if expanded {
+		gap = nameStyle.Render(gap)
 	}
-	return marker + glyphStyle.Render(glyph) + "  " +
-		nameStyle.Render(fitLine(name, w-itemPrefixWidth))
+	return fitLine(marker+glyphStyle.Render(glyph)+gap+nameStyle.Render(name), a.rect.W)
 }
 
 // rowDetail is the text an expanded row reveals: the trigger (cron expression
