@@ -165,7 +165,7 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
   const page = await context.newPage();
   const video = page.video();
   // Freeze wall-clock age labels only; timers and performance.now still advance.
-  if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
+  await prepareVisual(page);
   const shot = screenshotFor(page, pass.suffix);
 
   try {
@@ -329,7 +329,7 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
 async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<unknown>, prefix: string): Promise<void> {
   const actions = page.getByRole("button", { name: "Session actions", exact: true });
   await actions.click();
-  await expect(page.locator(".af-term-menu")).toBeVisible();
+  await expect(page.locator(".af-term-head .af-term-menu")).toBeVisible();
   await shot(`${prefix}session-actions`);
   await page.locator(".af-tab-new").click();
   await expect(page.locator(".af-tab-menu")).toBeVisible();
@@ -347,7 +347,7 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
 async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "suffix">, phone: boolean): Promise<void> {
   const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
   const page = await context.newPage();
-  if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
+  await prepareVisual(page);
   const shot = screenshotFor(page, pass.suffix);
   try {
     await openAfterInitialResync(page, async () => { await page.goto("/"); });
@@ -355,6 +355,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await settleTerminal(page);
     if (!phone) {
       await recordTerminalChrome(page, shot, "");
+      await recordControls(page, shot);
       await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
       await expect(page.locator(".af-filter-menu")).toBeVisible();
       await shot("session-filter");
@@ -363,6 +364,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
       await expect(page.locator(".af-project-menu")).toBeVisible();
       await shot("project-menu");
       await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      await recordLogin(page, shot);
       return;
     }
     await page.setViewportSize({ width: 375, height: 812 });
@@ -383,6 +385,22 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await page.getByRole("button", { name: "More app controls", exact: true }).click();
     await expect(page.locator(".af-appbar-tools")).toBeVisible();
     await shot("phone-controls");
+    await page.getByRole("button", { name: "More app controls", exact: true }).click();
+    await page.locator(".af-rail-new").click();
+    await page.getByLabel("Session title", { exact: true }).fill("review-followup");
+    await shot("phone-create");
+    await page.keyboard.press("Escape");
+    await page.locator(".af-nav-toggle").click();
+    await page.locator('.af-viewtab[data-view="tasks"]').click();
+    await shot("phone-tasks");
+    await page.locator('.af-viewtab[data-view="config"]').click();
+    await expect(async () => { await page.locator(".af-accounts").scrollIntoViewIfNeeded(); }).toPass({ timeout: 5000 });
+    await shot("phone-config");
+    await page.locator(".af-account-disclosure summary").click();
+    await page.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    await page.getByLabel("New claude account name", { exact: true }).fill("team");
+    await page.locator(".af-accounts-register:visible").scrollIntoViewIfNeeded();
+    await shot("phone-add-account");
   } finally {
     await context.close();
   }
@@ -425,7 +443,7 @@ async function recordSplits(browser: Browser): Promise<void> {
   for (const pass of [{ suffix: "", colorScheme: "light" }, { suffix: "-dark", colorScheme: "dark" }] as const) {
     const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
     const page = await context.newPage();
-    if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
+    await prepareVisual(page);
     try {
       await openAfterInitialResync(page, async () => { await page.goto("/"); });
       await row(page, SESSION_JSON).click();
@@ -441,4 +459,87 @@ async function recordSplits(browser: Browser): Promise<void> {
       await context.close();
     }
   }
+}
+
+/** C: disclosure and confirmation evidence, without committing destructive actions. */
+async function recordControls(page: Page, shot: (name: string) => Promise<unknown>): Promise<void> {
+  await page.locator(".af-rail-new").click();
+  await expect(page.locator(".af-defaults summary")).toContainText("Program:");
+  await page.getByLabel("Session title", { exact: true }).fill("review-followup");
+  await shot("create-compact");
+  if (!await page.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await page.locator(".af-defaults summary").click();
+  await shot("create-defaults");
+  await page.keyboard.press("Escape");
+  await row(page, SESSION_JSON).getByRole("button", { name: `Actions for ${SESSION_JSON}`, exact: true }).click();
+  await shot("session-lifecycle");
+  await row(page, SESSION_JSON).getByRole("button", { name: `Kill session “${SESSION_JSON}”`, exact: true }).click();
+  await shot("kill-confirmation");
+  await page.keyboard.press("Escape");
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const task = page.locator(".af-task-row").first();
+  await task.locator(".af-term-more").click();
+  await shot("task-actions");
+  await task.getByRole("button", { name: "Remove", exact: true }).click();
+  await shot("remove-task");
+  await page.keyboard.press("Escape");
+  await task.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Save", exact: true })).toBeInViewport({ ratio: 1 });
+  await shot("edit-task");
+  await page.keyboard.press("Escape");
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await page.locator(".af-account-disclosure summary").click();
+  await page.getByLabel("Account agent", { exact: true }).selectOption("claude");
+  await page.getByLabel("New claude account name", { exact: true }).fill("team");
+  await page.locator(".af-accounts-register:visible").scrollIntoViewIfNeeded();
+  await shot("add-account");
+  await page.getByLabel("New claude account name", { exact: true }).fill("invalid/name");
+  await page.locator(".af-accounts-register:visible").getByRole("button", { name: "Register", exact: true }).click();
+  await expect(page.locator(".af-accounts-register:visible [role=alert]")).toBeVisible();
+  await expect(page.getByLabel("New claude account name", { exact: true })).toHaveValue("invalid/name");
+  await page.locator(".af-accounts-register:visible [role=alert]").scrollIntoViewIfNeeded();
+  await shot("account-error");
+  await page.route("**/v1/config-assistant", (route) => route.fulfill({status: 503, contentType: "application/json", body: JSON.stringify({data: null, error: {message: "Assistant unavailable. Check the configured agent and try again."}})}));
+  await page.getByRole("button", { name: "Configure with assistant", exact: true }).click();
+  await expect(page.locator(".af-assistant-error")).toBeVisible();
+  await shot("assistant-error");
+  await page.keyboard.press("Escape");
+  await page.unroute("**/v1/config-assistant");
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await row(page, SESSION_JSON).click();
+  await settleTerminal(page);
+  await page.getByRole("button", { name: "Switch project", exact: true }).click();
+  await page.locator(".af-project-add").click();
+  await expect(page.locator(".af-dirpicker")).toBeVisible();
+  await shot("add-project");
+  await page.keyboard.press("Escape");
+}
+
+async function recordLogin(page: Page, shot: (name: string) => Promise<unknown>): Promise<void> {
+  await page.route("**/v1/auth-info", (route) => route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({data: {auth_required: true}, error: null})}));
+  await page.goto("/");
+  await expect(page.locator("#af-token")).toBeVisible();
+  await shot("login");
+  await page.unroute("**/v1/auth-info");
+  await page.route("**/v1/auth-info", (route) => route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({data: {auth_required: false}, error: null})}));
+  await page.route("**/v1/Snapshot", (route) => route.abort("connectionrefused"));
+  await page.reload();
+  await expect(page.locator(".af-error")).toBeVisible();
+  await shot("unavailable");
+}
+
+async function prepareVisual(page: Page): Promise<void> {
+  if (!visual) return;
+  await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
+  // Schedule dates are daemon-derived. Normalize only this recorder projection,
+  // so the next calendar day cannot invalidate an otherwise identical screenshot.
+  await page.route("**/v1/ListTasks", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    for (const task of body.data?.tasks ?? []) {
+      if (task.next_run_at) task.next_run_at = "2000-01-03T14:00:00Z";
+      // The demo seeds this task at the next hour to avoid a run while recording.
+      if (task.name === "nightly-tests") task.cron_expr = "0 14 * * *";
+    }
+    await route.fulfill({ response, json: body });
+  });
 }

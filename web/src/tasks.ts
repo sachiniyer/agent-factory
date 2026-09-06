@@ -1,3 +1,4 @@
+import { actionsDisclosure } from "./components.js";
 // The TASKS view of the web client (#1592 Phase 5 PR8): the browser analogue of the
 // TUI's automations / task pane (ui/task_pane.go, ui/automations.go). It lists the
 // scheduled tasks the daemon owns — name, cron/watch trigger, enabled, target
@@ -241,6 +242,7 @@ export function taskArmingSummary(t: TaskData): string {
  */
 export class TasksPane {
   readonly el: HTMLElement;
+  private menus: ReturnType<typeof actionsDisclosure>[] = [];
   private lastTasks: TaskData[] | null = null;
   private lastProject: string | null = null;
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
@@ -264,8 +266,24 @@ export class TasksPane {
     this.lastToken = token;
     this.lastTasks = tasks;
     this.lastProject = selectedProject;
+    const openIds = new Set(this.menus.filter((menu) => !menu.panel.hidden)
+      .map((menu) => menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId));
+    const active = document.activeElement as HTMLElement | null;
+    const focusedId = active?.closest<HTMLElement>("[data-task-id]")?.dataset.taskId;
+    const focusedName = active?.getAttribute("aria-label") || active?.textContent;
+    for (const menu of this.menus) menu.dispose();
+    this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
     rebuildKeepingScroll(this.el, previous, token, () => this.render(scoped));
+    for (const menu of this.menus) {
+      if (openIds.has(menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId)) menu.open();
+    }
+    if (focusedId && focusedName) {
+      const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
+      const control = [...(row?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+        .find((button) => (button.getAttribute("aria-label") || button.textContent) === focusedName);
+      control?.focus({ preventScroll: true });
+    }
   }
 
   private render(tasks: TaskData[]): void {
@@ -339,13 +357,13 @@ export class TasksPane {
         " · ",
       );
     }
-    const arming = taskArmingSummary(t);
-    if (arming !== "") {
-      metaParts.push(arming, " · ");
-    }
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
-    const main = h("div", { class: "af-task-main" }, name, trigger, meta);
+    const next = h("div", { class: "af-task-next" }, taskArmingSummary(t));
+    const main = h("div", { class: "af-task-main" }, name, next, trigger, meta);
+    if (t.last_run_status?.startsWith("errored:")) {
+      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), next);
+    }
 
     const toggleBtn = h(
       "button",
@@ -357,18 +375,24 @@ export class TasksPane {
     const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
     editBtn.addEventListener("click", () => this.actions.edit(t));
 
-    const actionEls: HTMLElement[] = [toggleBtn, editBtn];
+    const menu = actionsDisclosure(`Actions for ${t.name}`);
+    this.menus.push(menu);
+    const actionEls: HTMLElement[] = [toggleBtn];
     if (canTrigger(t)) {
       const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
       triggerBtn.addEventListener("click", () => this.actions.trigger(t));
       actionEls.push(triggerBtn);
     }
-    const removeBtn = h("button", { type: "button", class: "af-danger af-task-action" }, "Remove");
+    const removeBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Remove");
     removeBtn.addEventListener("click", () => this.actions.remove(t));
     actionEls.push(removeBtn);
 
-    const actions = h("div", { class: "af-task-actions" }, ...actionEls);
-    return h("li", { class: "af-task-row" }, enabledDot, main, actions);
+    menu.panel.append(...actionEls);
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    const actions = h("div", { class: "af-task-actions" }, editBtn, menu.el);
+    const row = h("li", { class: "af-task-row" }, enabledDot, main, actions);
+    row.dataset.taskId = t.id;
+    return row;
   }
 }
 

@@ -24,7 +24,9 @@ hand-captured, cropped, or retouched:
 | `parallel-work.png` · `comparison-review.png` · `scheduled-triage.png` · `event-intake.png` | Use-case and comparison stills; task forms are filled but not submitted |
 | `session-filter.png` · `project-menu.png` · `phone-session.png` · `phone-drawer.png` · `phone-controls.png` · `phone-project-menu.png` · `phone-filter.png` | Rail/header disclosure and phone evidence, recorded in a separate context after the hero pass |
 | `session-actions.png` · `tab-types.png` · `terminal-keyboard.png` · the same three with `phone-` · `split-panes.png` | Terminal actions, tab creation, keyboard ownership and split chrome |
-| the same twenty-four, `-dark` | One still per scene, dark theme |
+| `create-compact.png` · `create-defaults.png` · `session-lifecycle.png` · `kill-confirmation.png` · `task-actions.png` · `remove-task.png` · `edit-task.png` · `add-account.png` · `account-error.png` · `assistant-error.png` · `add-project.png` · `login.png` · `unavailable.png` | Form disclosures, confirmations and recovery; failure and sign-in responses are controlled recorder fixtures |
+| `phone-create.png` · `phone-tasks.png` · `phone-config.png` · `phone-add-account.png` | Phone forms and management views |
+| the same forty-one, `-dark` | One still per scene, dark theme |
 
 `docs/assets/tui/` holds the TUI's own media, produced by a different recorder
 (`scripts/container/record-demo.sh`, which drives real Codex sessions through

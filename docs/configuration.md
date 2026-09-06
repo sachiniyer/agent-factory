@@ -45,7 +45,6 @@ limit_account_candidates = []
 global_agent_skills = false
 limit_retry_interval = "30m"
 session_env_passthrough = []
-theme = "nord"
 
 [network]
 listen_addr = "127.0.0.1:8443"
@@ -91,7 +90,7 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `ssh.host_key_verification` | How the `backend = "ssh"` runtime verifies a remote host key: `strict` (default — verify, refuse an unknown or changed key), `accept-new` (trust-on-first-use: record an unknown key, still refuse a changed one), or `insecure` (no verification). Global-only: a repo selects `ssh.host`, but only the operator relaxes verification (a repo-settable waiver + repo-settable host would be a one-commit MITM). `accept-new` writes learned keys to an af-owned store under the AF home, never `~/.ssh/known_hosts`. See [backends.md → SSH backend](backends.md#ssh-backend). |
 | `sandbox.ssh` | Free-form ssh command that reaches a `backend = "sandbox"` host. Global-only because af executes it on the daemon host; a repository may select the sandbox backend but cannot choose this command. See [backends.md → Sandbox backend](backends.md#sandbox-backend). |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
-| `theme` | Optional interface palette. Defaults to the named Nord preset; `zenburn` preserves the previous default, and a custom table accepts `#RRGGBB` values. The TUI and web share the palette while the browser keeps its local light/dark choice. See [Theme colors](#theme-colors-theme). |
+| `theme` | Retired for browser appearance. Use Light, Dark or System in the browser header. See [Appearance migration](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
 ### Agent approval behavior
@@ -269,36 +268,25 @@ environment it started with until that process is restarted.
 
 ### Theme colors (`theme`)
 
-The terminal and browser palettes default to Nord, whose Polar Night surfaces,
-Snow Storm text, and Frost cyan accent form the shared semantic source. Choose
-the former default by name without copying its nineteen slots:
+Browser appearance now has exactly **Light**, **Dark** and **System** in the
+header. System follows OS appearance; an unavailable preference falls back to
+dark. The choice is local to each browser. Saved `auto` choices migrate to System;
+saved Light and Dark choices keep their meaning.
 
-```toml
-theme = "zenburn"
-```
+The web uses two fixed product palettes. Remove `theme = "nord"`,
+`theme = "zenburn"` or the old `[theme]` color table from your configuration when
+migrating. These settings no longer affect browser chrome or terminal colors.
+No color editor, Config key or assistant instruction can customize the web
+palette. Existing agent-owned ANSI output is preserved.
 
-The browser derives both light and dark tokens from the same daemon palette;
-its Auto/Light/Dark choice remains a local browser preference. For a custom
-palette, override any slot in the global `[theme]` table. Omitted or malformed
-slots fall back independently to the readable Nord default rather than making
-the configuration or interface unusable.
-
-```toml
-[theme]
-accent = "#88C0D0"
-success = "#A3BE8C"
-warning = "#EBCB8B"
-error = "#CC8A91"
-pane_border_preview = "#B48EAD"
-```
-
-All custom values must be `#RRGGBB`. Unknown preset names fail validation with
-the available names; invalid custom values are ignored with a warning and the
-Nord default for that slot is used. The web additionally checks derived text
-colors against WCAG AA and state/focus colors against the 3:1 non-text floor,
-falling back to a readable built-in value when a custom combination misses it.
-`theme` is global-only and TOML-only, like `[keys]`: in-repo configs reject it
-so a cloned repository cannot recolor your interfaces.
+The retired table keys are `foreground`, `foreground_strong`,
+`foreground_muted`, `foreground_dim`, `background`, `background_subtle`,
+`background_panel`, `accent`, `success`, `warning`, `error`, `info`, `purple`,
+`selection_background`, `selection_foreground`, `pane_border_default`,
+`pane_border_selected`, `pane_border_interactive` and `pane_border_preview`.
+They are not projected into replacement colors. During the staged TUI migration
+(#3906), an older daemon/TUI may still accept these keys for its own interface;
+the web ignores them and hides the serialized theme field from older manifests.
 
 ### Root agents (always-ensured)
 

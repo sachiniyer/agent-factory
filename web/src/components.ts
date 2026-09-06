@@ -6,12 +6,12 @@ import { icon } from "./icon.js";
 import type { ITheme } from "@xterm/xterm";
 
 /** A disclosure owns only visibility and focus; callers own the operations. */
-export function actionsDisclosure() {
+export function actionsDisclosure(label = "Session actions") {
   const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "…"));
-  trigger.setAttribute("aria-label", "Session actions");
+  trigger.setAttribute("aria-label", label);
   trigger.setAttribute("aria-expanded", "false");
   const panel = h("div", { class: "af-term-menu", role: "group" });
-  panel.setAttribute("aria-label", "Session actions");
+  panel.setAttribute("aria-label", label);
   panel.hidden = true;
   const el = h("div", { class: "af-term-more-wrap" }, trigger, panel);
   const outside = (event: MouseEvent) => {
@@ -23,12 +23,12 @@ export function actionsDisclosure() {
     document.removeEventListener("mousedown", outside);
     if (restoreFocus) trigger.focus();
   };
-  trigger.addEventListener("click", () => {
-    if (!panel.hidden) return close();
+  const open = () => {
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     document.addEventListener("mousedown", outside);
-  });
+  };
+  trigger.addEventListener("click", () => panel.hidden ? open() : close());
   el.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !panel.hidden) {
       event.preventDefault();
@@ -36,7 +36,7 @@ export function actionsDisclosure() {
       close(true);
     }
   });
-  return { el, panel, trigger, close, dispose: close };
+  return { el, panel, trigger, open, close, dispose: close };
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
@@ -69,8 +69,8 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
-  menu.panel.append(newTabSlot, copy, handoff);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, actions, menu.el);
+  menu.panel.append(newTabSlot, copy, handoff, actions);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
   return { head, title, tabs, pr, keyboard, retry, handoff, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 
@@ -87,14 +87,13 @@ export function paneChrome(onClose: () => void) {
 
 /** xterm requires resolved colors. ANSI colors remain the terminal's own palette. */
 export function terminalSurface(container: HTMLElement, palette: ITheme): ITheme {
-  if (!container.closest(".af-main-term[data-af-theme]")) return palette;
   const style = getComputedStyle(container);
   const token = (name: string) => style.getPropertyValue(name).trim();
   return {
     ...palette,
     background: token("--af-surface"), foreground: token("--af-ink"),
     cursor: token("--af-ink"), cursorAccent: token("--af-surface"),
-    selectionBackground: token("--af-surface-raised"),
+    selectionBackground: token("--af-surface-raised"), selectionForeground: token("--af-ink"),
   };
 }
 
@@ -195,4 +194,18 @@ export function modalChrome(opts: {
     },
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };
+}
+
+/** Label and field share one native association across dialogs and settings. */
+export function field(label: string, control: HTMLElement): HTMLElement {
+  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
+}
+
+/** Compact inherited choices; callers update the summary without replacing fields. */
+export function defaultsDisclosure() {
+  const summaryText = h("span", { class: "af-defaults-summary" });
+  const summary = h("summary", {}, "Edit defaults · ", summaryText);
+  const body = h("div", { class: "af-defaults-body" });
+  const el = h("details", { class: "af-defaults" }, summary, body);
+  return { el, body, summaryText };
 }

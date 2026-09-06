@@ -98,10 +98,11 @@ reason to move a budget.
 
 ## Demo stills and intentional redesigns
 
-`playwright.visual.config.ts` drives the **same twenty-four demo stills** as the
+`playwright.visual.config.ts` drives the **same forty-one demo stills** as the
 recorder: the ten workflow scenes plus rail disclosures, phone layouts,
-terminal actions, tab types, keyboard ownership and split panes, all in light
-and dark (48 goldens). It omits video, conversion and video pacing. It waits for final
+terminal actions, tab types, keyboard ownership, split panes, form disclosures,
+confirmations, account registration and controlled recovery fixtures, all in light
+and dark (82 goldens). It omits video, conversion and video pacing. It waits for final
 stand-in output, a stable terminal and the visible rail's settled `Needs you`
 states before shooting; completed terminal output alone precedes the daemon's
 idle observation on fast runners. Goldens are committed under
@@ -109,7 +110,10 @@ idle observation on fast runners. Goldens are committed under
 stabilized image, permits **zero differing pixels** above its 0.2 per-pixel color
 distance threshold, and uploads actual/expected/diff images on failure.
 
-The browser wall clock is fixed at 2000-01-01 so relative pane ages clamp to zero;
+The visual recorder normalizes the daemon-derived next-run timestamps to
+2000-01-03 and the seeded nightly task’s cron to 14:00, so crossing an hour
+cannot change the task editor still. The normal demo keeps the real dates and schedule. No timing measurement uses
+this fixture. The browser wall clock is fixed at 2000-01-01 so relative pane ages clamp to zero;
 its timers still advance. Only nondeterministic regions are suppressed: terminal
 cursor and task schedule/next-run metadata (which depends on the daemon's current
 clock). The surrounding task rows, names, controls and layout remain checked.

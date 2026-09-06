@@ -1,13 +1,13 @@
-// Rail/header and terminal/tabs are migrated; widen to all chrome in P2 slice C.
+// All product chrome is migrated; generated tokens are the only color source.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const migrated = /\.af-(?:appbar[\w-]*|brand|nav-toggle|nav-scrim|project[\w-]*|viewnav|viewtab[\w-]*|theme[\w-]*|install[\w_-]*|rail[\w-]*|filter[\w-]*|row[\w-]*|operator-state|idle-reason|branch-icon|dot[\w-]*|main-term|term[\w-]*|tab[\w-]*|pr-badge|copy-link[\w-]*|split[\w-]*|pane[\w-]*|divider[\w-]*|drop[\w-]*|archive-warning)(?![\w-])/;
+const migrated = /./;
 const tokens = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
 const tokenNames = new Set([...tokens.matchAll(/(--af-[\w-]+):/g)].map((m) => m[1]));
 // Fonts and stacking levels are fixed structural rules, outside the 23-token budget.
-const structural = new Set(["--af-font-ui", "--af-font-mono", "--af-z-appbar", "--af-z-drawer", "--af-z-popover"]);
+const structural = new Set(["--af-font-ui", "--af-font-mono", "--af-z-appbar", "--af-z-drawer", "--af-z-popover", "--af-z-modal"]);
 
 function violations(css: string): string[] {
   const errors: string[] = [];
@@ -36,7 +36,7 @@ function violations(css: string): string[] {
   return errors;
 }
 
-test("rail, header, terminal and tabs resolve colors and metrics through generated design tokens", () => {
+test("all chrome resolves colors and metrics through generated design tokens", () => {
   assert.deepEqual(violations(readFileSync(new URL("./styles.css", import.meta.url), "utf8")), []);
 });
 

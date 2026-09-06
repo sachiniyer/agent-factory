@@ -30,7 +30,6 @@ import {
   fetchSnapshot,
   killSession,
   getConfig,
-  getTheme,
   isMutationCommittedError,
   handoffSession,
   listBackends,
@@ -61,7 +60,7 @@ import { emptyAccountsState } from "./accounts.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
-import { eventRequestsPaletteRefresh, EventStream, type EventStreamStatus } from "./events.js";
+import { EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
   confirmDeleteProjectModal,
@@ -69,6 +68,7 @@ import {
   handoffModal,
   type ModalHandle,
   newSessionModal,
+  removeTaskModal,
 } from "./modals.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
@@ -91,14 +91,11 @@ import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import {
-  applyDaemonTheme,
   bootStampTheme,
   connectionAttemptMayCommit,
   hasConnectedToken,
-  paletteFetchFailurePlan,
   persistThemeChoice,
   refreshThemeMode,
-  resetDaemonTheme,
   stampTheme,
   type ThemeChoice,
 } from "./theme.js";
@@ -183,10 +180,6 @@ const store = new Store<AppState>({
 let token: string | null = null;
 let stream: EventStream | null = null;
 const connectionGate = createLatestRequestGate();
-const paletteRefreshGate = createLatestRequestGate();
-const PALETTE_RETRY_MS = 1000;
-let paletteRetryTimer: number | null = null;
-let hasDaemonPalette = false;
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
@@ -391,16 +384,6 @@ async function connect(candidate: string): Promise<void> {
   // sentinel (no-auth client, #1696) is never stored — bootstrap re-probes
   // /v1/auth-info on every load, so a tokenless daemon needs nothing on disk.
   storeToken(candidate);
-  // Palette and mode have separate owners (#3220): the daemon supplies the
-  // semantic colors, while the browser keeps its local Auto/Light/Dark choice.
-  // Apply before mounting the app phase so the first authenticated paint and a
-  // newly constructed xterm use the same palette. A failed additive read keeps
-  // the built-in Nord floor rather than blocking an otherwise valid login.
-  await refreshDaemonPalette(candidate);
-  // A token can rotate after Snapshot accepted it but before GetTheme returns.
-  // That rejection routes through disconnect(), which clears token and returns to
-  // login; do not let this older connect continue mounting the authenticated app.
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
@@ -419,8 +402,7 @@ async function connect(candidate: string): Promise<void> {
   // choice on an empty registered repo would fall back on connect. Degrades to none on
   // a transport failure — the projects.changed resync refetches it.
   const registeredProjects = await fetchRegisteredProjects(candidate);
-  // A delayed palette retry can reject the credential while tasks/projects are
-  // loading. Fence the FINAL app commit, not only the first palette response.
+  // Fence the final app commit against a disconnect during tasks/projects loading.
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
@@ -472,8 +454,6 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
   closeConfigAssistant();
   token = null;
   clearToken();
-  resetDaemonTheme();
-  hasDaemonPalette = false;
   store.set({
     phase: "login",
     view: "sessions",
@@ -1852,9 +1832,13 @@ function doRemoveTask(task: TaskData): void {
   if (tok === null) {
     return;
   }
-  void removeTask(task, tok)
-    .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+  openModal(removeTaskModal(task.name || task.id, () => {
+    if (!modal || token !== tok) return;
+    const handle = modal;
+    handle.setBusy(true);
+    void removeTask(task, tok).then(() => { closeModal(); return refreshTasks(); })
+      .catch((error) => { handle.setBusy(false); handle.setError(errorText(error)); });
+  }, closeModal));
 }
 
 /** The action callbacks the shell + login view invoke. */
@@ -1885,7 +1869,7 @@ function watchSystemTheme(): void {
     return; // no matchMedia (very old / headless): nothing to follow
   }
   const onChange = (): void => {
-    if (store.get().themeChoice === "auto") {
+    if (store.get().themeChoice === "system") {
       refreshThemeMode();
       splitView.applyTheme();
     }
@@ -2016,56 +2000,10 @@ function startStream(tok: string): void {
     onEvent,
     onResync: () => {
       requestResync();
-      void refreshDaemonPalette(tok);
     },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
   });
   stream.start();
-}
-
-function clearPaletteRetry(): void {
-  if (paletteRetryTimer === null) return;
-  window.clearTimeout(paletteRetryTimer);
-  paletteRetryTimer = null;
-}
-
-/** Refreshes the daemon-owned palette for both CSS chrome and every open xterm.
- *  Called during login and on every events-stream open, including reconnects after
- *  a daemon restart. Transient failures retain the last good palette and retry. */
-async function refreshDaemonPalette(tok: string): Promise<void> {
-  clearPaletteRetry();
-  const request = paletteRefreshGate.begin();
-  let paletteChanged = false;
-  try {
-    const theme = await getTheme(tok);
-    if (token !== tok || !request.isCurrent()) return;
-    applyDaemonTheme(theme);
-    hasDaemonPalette = true;
-    paletteChanged = true;
-  } catch (error) {
-    if (token !== tok || !request.isCurrent()) return;
-    const status = error instanceof ApiError ? error.status : 0;
-    const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
-    if (plan.reauthenticate) {
-      // Reuse the one credential-rejection path: stop every authenticated stream,
-      // forget the stored bearer, reset the palette, and show the login surface.
-      // Retrying the same rejected token once a second can never recover.
-      disconnect(describeError(error), true);
-      return;
-    }
-    if (plan.reset) {
-      resetDaemonTheme();
-      hasDaemonPalette = false;
-      paletteChanged = true;
-    }
-    if (plan.retry) {
-      paletteRetryTimer = window.setTimeout(() => {
-        paletteRetryTimer = null;
-        if (token === tok) void refreshDaemonPalette(tok);
-      }, PALETTE_RETRY_MS);
-    }
-  }
-  if (paletteChanged) splitView.applyTheme();
 }
 
 function stopStream(): void {
@@ -2086,8 +2024,6 @@ function stopStream(): void {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
-  paletteRefreshGate.invalidate();
-  clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -2115,8 +2051,9 @@ function stopStream(): void {
  * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
-  if (eventRequestsPaletteRefresh(ev)) {
-    if (hasConnectedToken(token)) void refreshDaemonPalette(token);
+  if (ev.type === "theme.changed") {
+    // Older daemons publish this after live config/auth changes. Refresh data, never colors.
+    requestResync();
     return;
   }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns
@@ -2226,9 +2163,10 @@ function requestResync(): void {
         // (#3081). stopStream clears it before a new stream owns the connection.
         root?.setAttribute("data-af-resync-settled", "");
       })
-      .catch(() => {
-        // Transport/auth failure: the events stream owns reconnection; a later
-        // reconnect fires onResync again. Nothing to surface here.
+      .catch((error) => {
+        if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
+        if (shouldForgetToken(error)) disconnect(describeError(error), true);
+        // Transport failures retain state; the events stream owns reconnection.
       });
   }, 150);
 }
