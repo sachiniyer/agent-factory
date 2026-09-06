@@ -197,10 +197,7 @@ type searchRenderPlan struct {
 }
 
 func searchOverlayStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.CurrentTheme().Accent).
-		Padding(1, 2)
+	return ui.DialogStyle()
 }
 
 func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
@@ -263,10 +260,11 @@ func (s *SearchOverlay) Render() string {
 // painted it; pointer zones never infer row identity from user-controlled text.
 func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	titleStyle := ui.DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	hintStyle := ui.DialogHintStyle()
+	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 
 	style := searchOverlayStyle()
@@ -291,7 +289,7 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	}
 
 	if plan.showAbove {
-		lines = append(lines, truncateOverlayLine(hintStyle.Render(
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render(
 			fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
 	}
 
@@ -342,7 +340,7 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 
 	if plan.showBelow {
 		remaining := len(s.results) - plan.endIdx
-		lines = append(lines, truncateOverlayLine(hintStyle.Render(
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render(
 			fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
 	}
 
@@ -359,5 +357,5 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	if plan.styleHeight > 0 && len(lines) >= plan.contentHeight {
 		style = style.Height(plan.styleHeight)
 	}
-	return style.Render(strings.Join(lines, "\n")), style.GetBorderTopSize() + style.GetPaddingTop() + firstResultLine, plan
+	return ui.RenderDialog(style, strings.Join(lines, "\n")), style.GetBorderTopSize() + style.GetPaddingTop() + firstResultLine, plan
 }

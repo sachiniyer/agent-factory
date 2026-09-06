@@ -56,7 +56,7 @@ func TestInstanceRendererSurfacesIdleReasonBeforeBranch(t *testing.T) {
 
 	r := NewInstanceRenderer()
 	r.SetWidth(80)
-	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), "")
 	var secondary string
 	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, branchIcon) {

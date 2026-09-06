@@ -279,9 +279,9 @@ func (g Grid) Solve(width, height int) Layout {
 			autoRows = AutomationsCompactRows
 		}
 
-		// Empty sections reserve no rail rows; their create actions remain in
-		// the task manager and project switch command.
-		if g.Projects == 0 {
+		// Empty tasks and a single project reserve no rail rows. Management
+		// remains in the task overlay and project picker; context names the project.
+		if g.Projects <= 1 {
 			l.ProjectsVisible = false
 			projRows = 0
 		}

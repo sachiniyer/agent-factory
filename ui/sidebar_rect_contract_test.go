@@ -21,8 +21,8 @@ const joinedFamily = "\U0001F468\u200d\U0001F469\u200d\U0001F467\u200d\U0001F466
 // they are unexported there. Pinned against the rendered output rather than
 // imported, which is the point: the assertion is about what reaches the screen.
 const (
-	readyDot        = "\u25cf" // tree.readyIcon, without its trailing pad space
-	activeTabMarker = " *"     // tree.activeTabMarker
+	readyDot        = "\u25cf"  // tree.readyIcon, without its trailing pad space
+	activeTabMarker = " · open" // tree.activeTabMarker
 )
 
 // #3614, through the real sidebar rather than through the clamp alone. Both

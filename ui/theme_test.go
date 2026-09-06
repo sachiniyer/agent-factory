@@ -16,23 +16,15 @@ func TestAccentColorValue(t *testing.T) {
 	}
 }
 
-// TestAccentSitesUseConstant guards against the half-finished migration that
-// left accent surfaces on unrelated literals while the rest of the TUI used
-// the configured accent. These are the most prominent accent surfaces.
-// Pane borders are semantic state colors and are covered in tabbed-window
-// tests.
-func TestAccentSitesUseConstant(t *testing.T) {
-	cases := []struct {
-		name string
-		got  lipgloss.TerminalColor
-	}{
-		{"sidebar title banner background", mainTitle.GetBackground()},
-		{"automations strip title", automationsTitleStyle.GetForeground()},
-		{"menu action group", actionGroupStyle.GetForeground()},
-	}
-	for _, c := range cases {
-		if c.got != lipgloss.TerminalColor(AccentColor) {
-			t.Errorf("%s = %v, want AccentColor (%s)", c.name, c.got, AccentColor)
+// Headings and actionable shortcuts use ink; focus does not add a palette.
+func TestChromeCopyUsesInk(t *testing.T) {
+	for name, got := range map[string]lipgloss.TerminalColor{
+		"rail title":        mainTitle.GetForeground(),
+		"automations title": automationsTitleStyle.GetForeground(),
+		"menu action":       actionGroupStyle.GetForeground(),
+	} {
+		if got != CurrentTheme().Ink {
+			t.Errorf("%s uses %v, want ink", name, got)
 		}
 	}
 }
@@ -72,9 +64,9 @@ func TestReviewedSelectionAndBlurredTitleRoles(t *testing.T) {
 	if configSelectedStyle.GetForeground() != roles.Ink || configSelectedStyle.GetBackground() != roles.SurfaceRaised {
 		t.Fatal("config key and account selections must use ink on surface-raised")
 	}
-	// surface on ink-muted is contrast-checked by designtokens.validate.
-	if blurredTitle.GetForeground() != roles.Surface || blurredTitle.GetBackground() != roles.InkMuted {
-		t.Fatal("blurred sidebar title must use the contrast-checked surface on ink-muted pair")
+	// Plain ink on surface removes the decorative chip while preserving contrast.
+	if blurredTitle.GetForeground() != roles.Ink || blurredTitle.GetBackground() != roles.Surface {
+		t.Fatal("blurred sidebar title must use the contrast-checked ink on surface pair")
 	}
 }
 

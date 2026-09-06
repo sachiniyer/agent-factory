@@ -104,14 +104,14 @@ var windowIndicatorStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.InkMuted)
 
 var mainTitle = lipgloss.NewStyle().
-	Background(AccentColor).
-	Foreground(activeTheme.Surface)
+	Background(activeTheme.Surface).
+	Bold(true).Underline(true).Foreground(activeTheme.Ink)
 
-// blurredTitle is the title chip with tree focus elsewhere (#1024 PR 4 focus
-// ring): same shape, receded color.
+// blurredTitle keeps context in ink when focus is elsewhere; the active
+// heading alone has an underline.
 var blurredTitle = lipgloss.NewStyle().
-	Background(activeTheme.InkMuted).
-	Foreground(activeTheme.Surface)
+	Background(activeTheme.Surface).
+	Foreground(activeTheme.Ink)
 
 // Sidebar is the unified left navigation pane with collapsible sections. It is
 // a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —

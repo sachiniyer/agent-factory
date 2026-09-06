@@ -129,7 +129,7 @@ func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
 			h := newTestHome(t)
 			h.repoRoot = "" // registry mode: launched outside a repo (#2477)
 			if tc.hasProject {
-				h.projects.SetProjects([]ui.SidebarProject{{Name: "elsewhere", Root: "/repos/elsewhere"}})
+				h.projects.SetProjects([]ui.SidebarProject{{Name: "elsewhere", Root: "/repos/elsewhere"}, {Name: "another", Root: "/repos/another"}})
 			}
 			resizeHome(h, 120, 30)
 			h.focusRegion(tc.focus)

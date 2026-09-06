@@ -38,7 +38,7 @@ func TestPaneHeaderStateCopyUsesSentenceCaseAtCompactSizes(t *testing.T) {
 
 			previewView := h.View()
 			requireViewSized(t, previewView, size.width, size.height)
-			assert.Contains(t, previewView, "Preview beta",
+			assert.Contains(t, previewView, "beta · Agent · Preview",
 				"%dx%d: preview state follows the TUI sentence-case convention", size.width, size.height)
 			assert.NotContains(t, previewView, "PREVIEW beta",
 				"%dx%d: preview state must not caps-shout", size.width, size.height)

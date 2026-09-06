@@ -290,7 +290,7 @@ func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
 	require.Equal(t, "daemon-vscode-id", tabs[1].ID,
 		"the projection must adopt the create response identity before the next snapshot")
 	require.Equal(t, 1, h.store.ActiveTab(), "the fresh VS Code tab must be selected")
-	require.Equal(t, []string{"◆ Agent", "◱ vscode"}, tree.TabLabels(inst),
+	require.Equal(t, []string{"Agent", "◱ vscode"}, tree.TabLabels(inst),
 		"the resolved daemon name is the tab's addressable label, matching CLI creation")
 }
 
@@ -472,7 +472,7 @@ func TestFreshInstanceSingleTabSlotUI(t *testing.T) {
 	inst := freshLocalInstance(t, "fresh-ui")
 	selectInstance(h, inst)
 
-	require.Equal(t, []string{"◆ Agent"}, tree.TabLabels(inst),
+	require.Equal(t, []string{"Agent"}, tree.TabLabels(inst),
 		"a fresh instance renders exactly one tab slot — the agent tab")
 
 	_, _ = h.handleTabJump(2)
@@ -490,7 +490,7 @@ func TestFreshInstanceSingleTabSlotUI(t *testing.T) {
 	stubTabDaemonSeams(t, inst)
 	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 	require.Equal(t, 2, inst.TabCount())
-	require.Equal(t, []string{"◆ Agent", "› Terminal"}, tree.TabLabels(inst),
+	require.Equal(t, []string{"Agent", "› Terminal"}, tree.TabLabels(inst),
 		"after t the terminal is a real second slot")
 	require.Equal(t, 1, h.store.ActiveTab(), "t selects the fresh terminal")
 

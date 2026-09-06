@@ -369,6 +369,16 @@ func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
 // consumes its outcomes: an add request (validate + register + switch), a chosen
 // existing project (switch), or a cancel (close).
 func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "D" {
+		if proj, ok := m.projectPickerOverlay.HighlightedProject(); ok {
+			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
+			if m.state == stateConfirm && m.confirmationOverlay != nil {
+				m.confirmationOverlay.OnCancel = func() { m.state = stateSwitchProject }
+			}
+			return model, cmd
+		}
+	}
+
 	shouldClose := m.projectPickerOverlay.HandleKeyPress(msg)
 
 	// Add-project submit: validate app-side (the overlay must not shell out to

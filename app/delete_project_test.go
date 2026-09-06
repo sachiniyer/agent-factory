@@ -16,7 +16,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 func TestDeleteProjectCarriesRetainedRecordedIdentity(t *testing.T) {
@@ -107,13 +106,9 @@ func armDeleteProjectDialogAt(t *testing.T, data []session.InstanceData, w, hgt 
 	h.relayout()
 	require.Len(t, h.projects.Projects(), 1, "the snapshot must yield exactly the test project")
 
-	h.focusRegion(layout.RegionProjects)
-	require.Equal(t, layout.RegionProjects, h.ring.Active())
-
-	// 'D' on the focused Projects section — the binding handleProjectsFocus routes
-	// to handleDeleteProject in prod.
-	model, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
-	require.True(t, consumed, "the delete-project key must be consumed by the focused Projects section")
+	h.showProjectPickerOverlay()
+	// A single project has no rail block; its picker retains deletion.
+	model, _ := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
 	h = model.(*home)
 	require.Equal(t, stateConfirm, h.state, "delete project must open a confirmation")
 	require.NotNil(t, h.confirmationOverlay)

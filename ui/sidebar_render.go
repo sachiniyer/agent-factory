@@ -94,7 +94,7 @@ func (s *Sidebar) String() string {
 	// widths the 15-cell " Agent Factory " (or the padded chip itself) would
 	// otherwise push the row past s.width — the same #646 overflow class the
 	// section headers hit. The chip doubles as the tree's focus-ring indicator:
-	// the accent background recedes to gray when focus is elsewhere.
+	// underline disappears when focus is elsewhere.
 	titleWidth := s.contentWidth() + 2
 	if s.width > 0 && titleWidth > s.width {
 		titleWidth = s.width

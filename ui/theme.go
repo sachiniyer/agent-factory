@@ -50,13 +50,13 @@ func CurrentTheme() Theme {
 func applyThemeStyles() {
 	windowStyle = lipgloss.NewStyle().
 		BorderForeground(activeTheme.Border).
-		Border(lipgloss.RoundedBorder())
+		Border(lipgloss.NormalBorder())
 	blurredWindowStyle = windowStyle.
 		BorderForeground(activeTheme.Border)
 	selectedWindowStyle = windowStyle.
 		BorderForeground(activeTheme.Accent)
 	interactiveWindowStyle = windowStyle.
-		Border(lipgloss.DoubleBorder()).
+		Border(lipgloss.NormalBorder()).
 		BorderForeground(activeTheme.Accent)
 	previewWindowStyle = windowStyle.
 		BorderForeground(activeTheme.Border)
@@ -87,11 +87,11 @@ func applyThemeStyles() {
 	windowIndicatorStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.InkMuted)
 	mainTitle = lipgloss.NewStyle().
-		Background(activeTheme.Accent).
-		Foreground(activeTheme.Surface)
+		Background(activeTheme.Surface).
+		Bold(true).Underline(true).Foreground(activeTheme.Ink)
 	blurredTitle = lipgloss.NewStyle().
-		Background(activeTheme.InkMuted).
-		Foreground(activeTheme.Surface)
+		Background(activeTheme.Surface).
+		Foreground(activeTheme.Ink)
 	projectRowStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.Ink)
 	projectRowActiveStyle = lipgloss.NewStyle().
@@ -102,11 +102,11 @@ func applyThemeStyles() {
 		Foreground(activeTheme.Ink)
 
 	automationsTitleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(activeTheme.Accent)
+		Bold(true).Underline(true).
+		Foreground(activeTheme.Ink)
 	automationsTitleDimStyle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(activeTheme.InkMuted)
+		Foreground(activeTheme.Ink)
 	automationsEnabledStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.Ink)
 	automationsDisabledStyle = lipgloss.NewStyle().
@@ -118,10 +118,10 @@ func applyThemeStyles() {
 	automationsHintStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.InkMuted)
 
-	keyStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
-	descStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+	keyStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	descStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
-	actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Accent)
+	actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	menuStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
 	tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)

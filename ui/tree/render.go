@@ -258,18 +258,21 @@ const branchIcon = "⎇"
 
 // ArrowCell returns the (x, y) cell of the ▾/▸ expand/collapse arrow within
 // an instance row block rendered at content width w, for mouse hit-testing
-// (#1024 R4): block line 0 is the title style's top-padding line, so the
-// arrow sits on line 1, one cell after the row's left padding + the prefix's
+// (#1024 R4): detailed blocks retain top padding; collapsed rows have none.
+// The arrow follows that row offset, one cell after left padding + the prefix's
 // leading space. ok is false at ultra-narrow widths, where Render drops the
 // arrow from the prefix entirely (the #646 fallback) — the sidebar registers
 // no arrow zone then. Kept next to Render so the prefix layout and the hit
 // target can't drift apart; the render test pins them together against actual
 // output.
-func ArrowCell(w int) (x, y int, ok bool) {
+func ArrowCell(w int, detailed bool) (x, y int, ok bool) {
 	if w <= 9 {
 		return 0, 0, false
 	}
-	return 2, 1, true
+	if detailed {
+		return 2, 1, true
+	}
+	return 2, 0, true
 }
 
 // instancePrefix renders the display-only tree prefix on instance rows. It
@@ -319,6 +322,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if !selected {
 		titleS = titleStyle
 		descS = listDescStyle
+	}
+
+	// Unexpanded, unselected sessions start with one row. The selected group
+	// retains its branch and operation details; failures remain visible below.
+	if !selected && !expanded {
+		titleS = titleS.PaddingTop(0)
 	}
 
 	// Status glyph. Read the two axes directly (#1195): a row with ANY in-flight op
@@ -394,7 +403,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if op == session.OpKilling || op == session.OpArchiving {
 		titleText = "[deleting] " + titleText
 		if !selected {
-			titleS = titleS.Foreground(deletingTitleColor)
+			titleS = titleS.Foreground(InstanceTitleColor)
 		}
 		// Unselected deleting rows recede together; selection retains ink.
 		if !selected {
@@ -411,7 +420,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// the same row — the ▧ glyph, the dimming below, and the "▼ Archived (n)"
 	// section header — so the name stays full-width like a live row's.
 	if liveness == session.LiveArchived && !selected {
-		titleS = titleS.Foreground(deletingTitleColor)
+		titleS = titleS.Foreground(InstanceTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}
 	// A usage-limit-blocked row (#1146) is prefixed with a [limit] marker and its
@@ -508,10 +517,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 	}
 	description := branch
+	restoreFailed := false
 	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
 		detail := idleReasonDetail(reason, churnAt, time.Now())
 		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
 			detail = restoreFailure.Detail()
+			restoreFailed = true
+			descS = descS.Foreground(archiveWarningColor)
 		}
 		if branch == "" {
 			description = detail
@@ -525,6 +537,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
+	if !selected && !expanded && archiveWarning == "" && !restoreFailed {
+		description = ""
+	}
 	branchWidth := runewidth.StringWidth(description)
 	if remainingWidth <= 0 {
 		description = ""
@@ -543,11 +558,15 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	lines := []string{title}
 	if archiveWarning == "" {
-		lines = append(lines, descS.Render(branchLine))
+		if description != "" {
+			lines = append(lines, descS.Render(branchLine))
+		}
 	} else {
 		// Move the ordinary description's bottom padding to the warning so the
 		// notice is part of the same row block rather than separated by whitespace.
-		lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
+		if description != "" {
+			lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
+		}
 		warningTexts := []string{archiveWarning}
 		if location := retainedArchiveLocation(archiveWarning); location != "" {
 			// Put the recovery location before the prose-heavy warning. A typical
@@ -619,17 +638,9 @@ func formatPaneChurnAge(churnAt, now time.Time) string {
 	return fmt.Sprintf("%dd", int(age/(24*time.Hour)))
 }
 
-// activeTabMarker is the tmux-style cue RenderTab appends to the tab row the
-// content pane is showing. It is the ONLY thing that marks a tab active —
-// tabRowActiveStyle is deliberately the same as tabRowStyle — which is why
-// RenderTab reserves its width before truncating rather than letting it be
-// truncated away (#1983).
-//
-// The reservation became load-bearing when #1813 gave every tab label a kind
-// glyph: labelForTab returned "Agent" and now returns "◆ Agent", so every label
-// is 2 cells wider and the truncation that drops this marker bites 2 columns
-// earlier on every row. The renderer's arithmetic did not change; its input did.
-const activeTabMarker = " *"
+// activeTabMarker names the tab shown in the pane even when the rail cursor
+// previews another tab. Reserve it before truncating the label.
+const activeTabMarker = " · open"
 
 // RenderTab renders one tab child row of an expanded instance: an indented
 // ├/└ connector, the 1-based slot number (matching the 1-9 jump keys), the
@@ -682,11 +693,8 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		if avail := r.width - runewidth.StringWidth(prefix) - runewidth.StringWidth(marker); avail > 0 {
 			body = prefix + runewidth.Truncate(label, avail, tail)
 		} else {
-			// Below that the row is narrower than its own connector and marker, so
-			// there is no name left to spend and the marker goes too: clamp the row
-			// to the container and let it degrade, exactly as it did before.
-			body = runewidth.Truncate(body+marker, r.width, tail)
-			marker = ""
+			// At tight widths the connector yields before the named state cue.
+			body = runewidth.Truncate(prefix, max(0, r.width-runewidth.StringWidth(marker)), "")
 		}
 	}
 	style := tabRowStyle

@@ -46,12 +46,13 @@ func TestPaneHeaderSetsOffItsClausesWithADash(t *testing.T) {
 	require.Same(t, beta, h.store.GetSelectedInstance())
 
 	view := h.View()
-	assert.Contains(t, view, "Preview beta · ◆ Agent — original alpha · ◆ Agent",
-		"the preview's origin is a clause, not a parenthetical aside")
+	assert.Contains(t, view, "beta · Agent · Preview")
+	assert.NotContains(t, view, "original alpha")
+	assert.Equal(t, "alpha · Agent", h.paneWindows[paneA.ID()].PreviewOrigin())
 
 	h.cancelPanePreview(false)
 	view = h.View()
-	assert.Contains(t, view, "alpha · ◆ Agent — selected: beta · ◆ Agent",
+	assert.Contains(t, view, "alpha · Agent — selected: beta · Agent",
 		"the clause boundary must be a dash so the identity and the clause read apart")
 	assert.NotContains(t, view, "· selected: ",
 		"the selection clause must not read as another identity fragment")

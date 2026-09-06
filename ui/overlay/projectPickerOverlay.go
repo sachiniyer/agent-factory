@@ -108,6 +108,15 @@ func (p *ProjectPickerOverlay) SelectedProject() (Project, bool) {
 	return Project{}, false
 }
 
+// HighlightedProject names the existing row under the cursor, excluding the
+// add-project field so typing a path never dispatches a destructive shortcut.
+func (p *ProjectPickerOverlay) HighlightedProject() (Project, bool) {
+	if !p.adding && p.selectedIdx >= 0 && p.selectedIdx < len(p.all) {
+		return p.all[p.selectedIdx], true
+	}
+	return Project{}, false
+}
+
 // rowCount is the number of navigable rows: every project plus the trailing
 // "+ Add project…" row, which is always present.
 func (p *ProjectPickerOverlay) rowCount() int { return len(p.all) + 1 }
@@ -201,10 +210,11 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 // Render renders the project picker overlay.
 func (p *ProjectPickerOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	titleStyle := ui.DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	hintStyle := ui.DialogHintStyle()
+	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 	countStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	addStyle := lipgloss.NewStyle().Foreground(t.Ink)
@@ -256,17 +266,20 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 	start, end, showAbove, showBelow := budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
 	if showAbove {
-		lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
 		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
 	}
 	if showBelow {
-		lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
 	}
 
 	lines = append(lines, "")
-	hint := "j/k navigate · enter switch · esc cancel"
+	hint := "j/k navigate · enter add · esc cancel"
+	if _, ok := p.HighlightedProject(); ok {
+		hint = "j/k navigate · enter switch · D delete · esc cancel"
+	}
 	if layout.Cells(hint) > cw {
 		hint = "j/k · enter · esc"
 	}
@@ -301,5 +314,5 @@ func finishRender(style lipgloss.Style, fit, textRect layout.Rect, lines []strin
 	if fit.H > 0 && len(lines) >= textRect.H {
 		style = style.Height(fit.H)
 	}
-	return style.Render(strings.Join(lines, "\n"))
+	return ui.RenderDialog(style, strings.Join(lines, "\n"))
 }
