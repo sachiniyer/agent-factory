@@ -314,8 +314,6 @@ func (pt *MockPtyFactory) Start(cmd *exec.Cmd) (*os.File, error) {
 	return f, err
 }
 
-func (pt *MockPtyFactory) Close() {}
-
 // TestPreviewContentWithoutScrolling tests that the preview pane correctly displays content
 // for a new instance without requiring scrolling
 func TestPreviewContentWithoutScrolling(t *testing.T) {

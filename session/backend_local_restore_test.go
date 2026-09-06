@@ -160,8 +160,6 @@ func (p *recordingPtyFactory) Start(c *exec.Cmd) (*os.File, error) {
 	return f, nil
 }
 
-func (p *recordingPtyFactory) Close() {}
-
 // TestLocalBackendStartRestoreReinjectsSystemPrompt is a regression test for
 // issue #511. After a reboot the tmux server is gone, so Restore takes the
 // lazy-respawn path added in #386/#444 and spawns a fresh tmux session using

@@ -690,8 +690,6 @@ func (f refusingTrackedPtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan err
 	return ptmx, done, nil
 }
 
-func (refusingTrackedPtyFactory) Close() {}
-
 // TestSystemdRunRefusalIsActionableButCleanupUnsafe covers the severe failure
 // mode where the wrapper binary exists but the user manager refuses the
 // transient scope. Pty used to discard that exit status, so Start waited two
