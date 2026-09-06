@@ -32,8 +32,22 @@ fi
 copy_src_tree /src /work --exclude=web/node_modules --exclude=web/test-results
 cd /work
 
-# The ONLY path out of the container: testbox.sh bind-mounts docs/assets/web
-# here. Nothing is written into it until every conversion below has succeeded
+# Raster previews use the same font named by the model's ANSI-to-SVG writer.
+# Keep this out of perf mode so the web golden environment stays unchanged.
+render_tui_stills() {
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends fonts-dejavu-core
+    AF_TUI_STILLS_OUT=/work/tui-stage node /work/web/render-tui-stills.mjs
+    cp /work/tui-stage/*.png /work/tui-out/
+}
+if [ "${AF_TUI_STILLS_ONLY:-0}" = 1 ]; then
+    (cd /work/web && npm ci --no-audit --no-fund)
+    render_tui_stills
+    exit 0
+fi
+
+# testbox.sh bind-mounts docs/assets/web here and the TUI preview directory
+# at /work/tui-out. Nothing is written into it until every conversion below has succeeded
 # (the media is staged first), so a run that dies halfway leaves the committed
 # assets exactly as it found them rather than half-replaced.
 OUT=/work/demo-out
@@ -541,6 +555,10 @@ if ! awk -v v="$mp4_seconds" -v m="$MAX_SECONDS" 'BEGIN { exit !(v <= m) }'; the
     exit 1
 fi
 
+# Keep the published tour budget intact before replacing any public media.
+bash /src/scripts/container/optimize-demo-stills.sh "$SHOTS"
+render_tui_stills
+
 # --- publish ----------------------------------------------------------------
 # Only now, once every conversion and budget has passed.
 echo ">>> writing $OUT ..."
@@ -551,3 +569,4 @@ chmod 0644 "$OUT"/*
 ls -l "$OUT"
 printf '>>> done · %ss mp4 (%s bytes) · %s stills\n' \
     "$mp4_seconds" "$mp4_bytes" "$(find "$SHOTS" -name '*.png' | wc -l)"
+

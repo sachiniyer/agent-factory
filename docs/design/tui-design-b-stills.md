@@ -1,5 +1,9 @@
 # TUI design system: slice B
 
+The gallery files were regenerated from master after P2/P5 for
+[#3917](https://github.com/sachiniyer/agent-factory/issues/3917). The slice history
+below records the original implementation; the images now show the final design.
+
 The TUI uses one rounded, raised dialog frame with two horizontal cells of
 inset. Pickers, prompts, confirmations, help, and the Config/Accounts, hooks and
 task forms share it. Titles and actionable hints use ink. Nested text resets
