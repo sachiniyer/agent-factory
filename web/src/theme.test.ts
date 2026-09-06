@@ -112,10 +112,6 @@ test("tinted semantic states consume their contrast-safe text tokens", () => {
   const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
   for (const selector of [
-    ".af-project-item-current .af-project-item-name",
-    ".af-theme-opt-active",
-    ".af-rail-empty-new",
-    ".af-rail-new:hover",
     ".af-tasks-add:hover",
   ]) {
     assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-accent-text\\)`, "s"));
@@ -126,10 +122,10 @@ test("tinted semantic states consume their contrast-safe text tokens", () => {
   assert.match(css, /\.af-config-notice\s*\{[^}]*color:\s*var\(--af-accent-text\)/s);
   assert.match(
     css,
-    /\.af-project-item-current \.af-project-item-path,\s*\.af-project-item-current \.af-project-item-meta\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s,
+    /\.af-project-item-current \.af-project-item-path,\s*\.af-project-item-current \.af-project-item-meta\s*\{[^}]*color:\s*var\(--af-ink-muted\)/s,
   );
-  assert.match(css, /\.af-row-selected\s*\{[^}]*color:\s*var\(--af-selected-text\)/s);
-  assert.match(css, /\.af-row-selected \.af-row-branch\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s);
+  assert.match(css, /\.af-row-selected\s*\{[^}]*color:\s*var\(--af-ink\)/s);
+  assert.match(css, /\.af-row-selected \.af-row-branch\s*\{[^}]*color:\s*var\(--af-ink-muted\)/s);
 });
 
 for (const mode of ["light", "dark"] as const) {

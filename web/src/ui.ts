@@ -21,7 +21,8 @@
 import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
-import { VIEWS } from "./nav.js";
+import { h } from "./dom.js";
+import { viewNavigation } from "./components.js";
 import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -41,7 +42,6 @@ import {
   isCreating,
   idleReasonDetail,
   isLimitReached,
-  isRootSession,
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
@@ -56,7 +56,7 @@ import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
-import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
+import { type ThemeChoice, THEME_CHOICES, currentMode } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -552,18 +552,6 @@ export function tabRealId(tab: { id?: string }): string {
   return tab.id && tab.id !== "" ? tab.id : "";
 }
 
-/** The appbar label for a top-level view. */
-function viewLabel(view: View): string {
-  switch (view) {
-    case "sessions":
-      return "Sessions";
-    case "tasks":
-      return "Tasks";
-    case "config":
-      return "Config";
-  }
-}
-
 /** The appbar label for a theme choice (redesign PR1). */
 function themeLabel(choice: ThemeChoice): string {
   switch (choice) {
@@ -574,28 +562,6 @@ function themeLabel(choice: ThemeChoice): string {
     case "dark":
       return "Dark";
   }
-}
-
-/** Minimal hyperscript: create an element, apply props, append children. Keeps the
- *  views declarative without a framework and without innerHTML. */
-function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  props: Partial<HTMLElementTagNameMap[K]> & { class?: string } = {},
-  ...children: (Node | string)[]
-): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (key === "class") {
-      el.className = value as string;
-    } else {
-      // Assign DOM properties (className, textContent, type, value, disabled…).
-      (el as unknown as Record<string, unknown>)[key] = value;
-    }
-  }
-  for (const child of children) {
-    el.append(child);
-  }
-  return el;
 }
 
 /**
@@ -755,7 +721,7 @@ export class AppShell {
   // the three body surfaces they toggle between. The sessions body (rail+terminal)
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
-  private readonly viewTabs = new Map<View, HTMLElement>();
+  private readonly viewTabs: Map<View, HTMLElement>;
   // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
   // the active one highlighted in update().
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
@@ -930,17 +896,8 @@ export class AppShell {
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
-    const viewNav = h("div", { class: "af-viewnav" });
-    viewNav.setAttribute("role", "tablist");
-    viewNav.setAttribute("aria-label", "Views");
-    for (const v of VIEWS) {
-      const tab = h("button", { type: "button", class: "af-viewtab" }, viewLabel(v));
-      tab.setAttribute("role", "tab");
-      tab.setAttribute("data-view", v);
-      tab.addEventListener("click", () => this.actions.switchView(v));
-      this.viewTabs.set(v, tab);
-      viewNav.append(tab);
-    }
+    const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
+    this.viewTabs = tabs;
 
     // The project switcher (redesign PR2): a button showing the current project and a
     // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
@@ -1150,6 +1107,10 @@ export class AppShell {
     // The modal host is a persistent overlay layer index.ts mounts modals into; it
     // sits above the app body and is empty except while a modal is open.
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
+    // Local scopes keep daemon inline overrides out of migrated chrome until C.
+    header.dataset.afTheme = currentMode();
+    rail.dataset.afTheme = currentMode();
+    this.navScrim.dataset.afTheme = currentMode();
     this.idleAgeTimer = window.setInterval(() => refreshIdleReasonAges(this.railList), 15_000);
   }
 
@@ -1453,13 +1414,6 @@ export class AppShell {
         (target) => this.rowActions(target, selected),
       );
     });
-    // A subtle hairline under the pinned root agent (#2513), matching the TUI. Only
-    // when root actually leads the visible list AND a non-root row follows it, so
-    // there's never a dangling rule on an empty or root-only list. Root sorts first
-    // (compareSessionsForRail) and is unique, so it is visible[0] whenever present.
-    if (visible.length > 1 && isRootSession(visible[0])) {
-      rows.splice(1, 0, h("li", { class: "af-rail-sep", ariaHidden: "true" }));
-    }
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
   }
@@ -2981,7 +2935,7 @@ function sessionRow(
     h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
     " · ",
   ];
-  if (idleDetail) {
+  if (selected && idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, `${idleDetail} · `);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (s.last_pane_churn_at) {
@@ -3004,6 +2958,7 @@ function sessionRow(
     actionable ? "" : " af-row-inert"
   }${creating ? " af-row-creating" : ""}`;
   const row = h("li", { class: cls });
+  row.dataset.state = status.kind ?? "working";
   // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
   // one. The empty fixed-width slot matches the TUI's blank status cell and keeps
   // every title aligned without inventing a working indicator.

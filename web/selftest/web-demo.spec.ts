@@ -300,6 +300,48 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
   }
 }
 
+/** Slice A evidence: the disclosures and phone drawer are real screens too. */
+async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "suffix">, phone: boolean): Promise<void> {
+  const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
+  const page = await context.newPage();
+  const shot = (name: string) => page.screenshot({ path: join(SHOT_DIR, `${name}${pass.suffix}.png`) });
+  try {
+    await openAfterInitialResync(page, async () => { await page.goto("/"); });
+    await row(page, SESSION_JSON).click();
+    await settleTerminal(page);
+    if (!phone) {
+      await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+      await expect(page.locator(".af-filter-menu")).toBeVisible();
+      await shot("session-filter");
+      await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+      await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      await expect(page.locator(".af-project-menu")).toBeVisible();
+      await shot("project-menu");
+      await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      return;
+    }
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(page.locator(".af-nav-toggle")).toBeVisible();
+    await shot("phone-session");
+    await page.locator(".af-nav-toggle").click();
+    await expect(page.locator(".af-rail")).toBeVisible();
+    await shot("phone-drawer");
+    await page.getByRole("button", { name: "Switch project", exact: true }).click();
+    await expect(page.locator(".af-project-menu")).toBeVisible();
+    await shot("phone-project-menu");
+    await page.getByRole("button", { name: "Switch project", exact: true }).click();
+    await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+    await expect(page.locator(".af-filter-menu")).toBeVisible();
+    await shot("phone-filter");
+    await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+    await page.getByRole("button", { name: "More app controls", exact: true }).click();
+    await expect(page.locator(".af-appbar-tools")).toBeVisible();
+    await shot("phone-controls");
+  } finally {
+    await context.close();
+  }
+}
+
 test("web demo · default theme", async ({ browser }) => {
   await record(browser, {
     suffix: "",
@@ -320,4 +362,13 @@ test("web demo · dark", async ({ browser }) => {
     createsSession: false,
     seededRows: 4,
   });
+});
+
+// Phone attaches resize daemon-owned PTYs. Capture them only AFTER both hero
+// passes, so narrow scrollback reflow cannot contaminate the dark desktop stills.
+test("web chrome · both themes", async ({ browser }) => {
+  for (const phone of [false, true]) {
+    await recordChrome(browser, { suffix: "", colorScheme: "light" }, phone);
+    await recordChrome(browser, { suffix: "-dark", colorScheme: "dark" }, phone);
+  }
 });

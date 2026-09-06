@@ -556,6 +556,10 @@ export function currentMode(): ThemeMode {
 
 function applyCurrentMode(): void {
   const root = document.documentElement;
+  // P2 slice A: fixed scopes for migrated chrome; C retires the legacy palette.
+  for (const chrome of document.querySelectorAll<HTMLElement>("[data-af-theme]")) {
+    chrome.dataset.afTheme = currentMode();
+  }
   for (const [name, value] of Object.entries(activeThemes[currentMode()].tokens)) root.style.setProperty(name, value);
 }
 

@@ -1469,12 +1469,17 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(readyDot).not.toHaveClass(/af-dot-spin/);
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
   await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
+  await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
   // Positive non-delivery is Broken even though the underlying process is Ready.
   const promptBroken = row(p, "probe-broken-prompt");
   await expect(promptBroken).toHaveClass(/af-row-operator-broken/);
   await expect(promptBroken.locator(".af-operator-state")).toHaveText("Broken");
+  await expect(promptBroken.locator(".af-idle-reason")).toHaveCount(0);
+  await promptBroken.click();
   await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
   // Error/terminal states keep distinct STATIC shapes.
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
@@ -6503,8 +6508,10 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // The light rail surface is the Snow Storm-derived token.
-  expect(lightRail).toBe("rgb(227, 231, 239)");
+  // Slice A uses the fixed generated surface in both modes.
+  expect(lightRail).toBe("rgb(248, 249, 252)");
+  expect(darkRail).toBe("rgb(46, 52, 64)");
+  expect(await bgColor(page, ".af-appbar")).toBe(lightRail);
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
 
   // The palette comes from the daemon, not this toggle. Replace GetTheme with the
@@ -6581,6 +6588,11 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
   expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
   expect(await cssVar(page, "--af-accent")).toBe("#8CD0D3");
+  // Legacy chrome/PTY still follow GetTheme until C, but migrated rail/header
+  // scopes must resist daemon inline overrides without breaking mode switching.
+  expect(await bgColor(page, ".af-rail")).toBe(darkRail);
+  expect(await bgColor(page, ".af-appbar")).toBe(darkRail);
+  await expect(page.locator(".af-rail")).toHaveAttribute("data-af-theme", "dark");
 
   // A daemon restart can change config without reloading this page. Force the
   // self-healing events socket through its real reconnect path, switch the mocked
