@@ -276,6 +276,8 @@ the same choice. Changes apply on the next TUI launch, not to the daemon's
 palette or an already-open terminal. This preference belongs to the machine
 where the TUI runs; a remote Config editor still edits its named remote target.
 It is global-only and is not accepted from a repository's configuration.
+Read it with `af config get appearance`; `af config list` includes it as well.
+The default value is `system`.
 
 System detects the terminal background through OSC 11, with `COLORFGBG` as the
 terminal library's fallback and **dark** when no background is available.
