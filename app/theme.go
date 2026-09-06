@@ -15,9 +15,9 @@ func applyTheme(cfg config.ThemeConfig) {
 		BorderForeground(t.Accent).
 		Padding(1, 2)
 	splitDividerStyle = lipgloss.NewStyle().
-		Foreground(t.BackgroundSubtle)
+		Foreground(t.Border)
 	titleStyle = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(t.Accent)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Info)
-	keyStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	descStyle = lipgloss.NewStyle().Foreground(t.Foreground)
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	keyStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	descStyle = lipgloss.NewStyle().Foreground(t.Ink)
 }

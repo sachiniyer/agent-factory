@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -587,13 +588,9 @@ func TestInstanceRendererCreatingRowShowsBareName(t *testing.T) {
 	assert.NotContains(t, title, "Session name:", "creating rows must not prefix the input label")
 }
 
-// TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED
-// deleting row must dim its branch line along with the title. Before the fix
-// only titleS picked up deletingTitleColor, so the high-contrast
-// selectedDescStyle left the secondary line brighter than the dimmed title.
-// (Unselected rows never showed the bug: listDescStyle is already the same
-// gray as deletingTitleColor.)
-func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
+// Selected deleting rows retain Ink on SurfaceRaised; the [deleting] label
+// communicates lifecycle state without overriding selection contrast.
+func TestInstanceRendererDeletingRetainsSelectionRoles(t *testing.T) {
 	// Force a real color profile and a fixed background so lipgloss emits the
 	// foreground escapes the assertions match on; the Ascii profile used by
 	// default in non-TTY test runs strips all styling.
@@ -613,8 +610,8 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// SGR foreground params of the default Nord muted foreground.
-	dimFG := termenv.RGBColor("#C3CBD6").Sequence(false)
+	// SGR foreground params of the generated dark muted role.
+	dimFG := termenv.RGBColor(theme.Colors()["ink-muted"].Dark).Sequence(false)
 
 	r := NewInstanceRenderer()
 	r.SetWidth(effectiveWidth(36))
@@ -635,8 +632,8 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 
 	inst.SetStatusForTest(session.Deleting)
 	after := renderLines()
-	assert.Contains(t, after[1], dimFG, "selected deleting title must be dimmed")
-	assert.Contains(t, after[2], dimFG, "selected deleting branch line must be dimmed")
+	assert.NotContains(t, after[1], dimFG, "selected deleting title keeps ink")
+	assert.NotContains(t, after[2], dimFG, "selected deleting branch keeps ink")
 }
 
 // TestInstanceRendererTreeArrow pins the tree affordance on instance rows

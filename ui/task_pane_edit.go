@@ -232,14 +232,14 @@ func (s *TaskPane) renderEditMode() string {
 		MarginBottom(1)
 
 	labelStyle := lipgloss.NewStyle().Bold(true)
-	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(t.ForegroundDim)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	errorStyle := lipgloss.NewStyle().Foreground(t.Error).Bold(true)
+	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(t.InkMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	errorStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
 
-	buttonStyle := lipgloss.NewStyle().Foreground(t.Foreground)
+	buttonStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	focusedButtonStyle := buttonStyle.
 		Background(t.Accent).
-		Foreground(t.Background)
+		Foreground(t.Surface)
 
 	inputWidth := s.width - 9
 	if inputWidth < 1 {
@@ -493,15 +493,15 @@ func (s *TaskPane) clampFormToHeight(content string, focusStart, focusEnd int) s
 func (s *TaskPane) renderTriggerSelector() string {
 	focused := s.focusIndex == taskFocusTrigger
 	t := CurrentTheme()
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 
 	option := func(name string, sel bool) string {
 		switch {
 		case sel && focused:
-			return selectedStyle.Render("▸ " + name)
+			return SelectionMarker("▸ ") + selectedStyle.Render(name)
 		case sel:
 			return dimSelectedStyle.Render("▸ " + name)
 		default:
@@ -520,16 +520,16 @@ func (s *TaskPane) renderTriggerSelector() string {
 func (s *TaskPane) renderProgramSelector() string {
 	focused := s.focusIndex == taskFocusProgram
 	t := CurrentTheme()
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 
 	value := programDefaultLabel
 	if s.editProgramIdx >= 0 && s.editProgramIdx < len(s.editProgramOptions) {
 		value = s.editProgramOptions[s.editProgramIdx]
 	}
 	if focused {
-		return selectedStyle.Render("◂ "+value+" ▸") + hintStyle.Render("   ←/→ change agent")
+		return SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸") + hintStyle.Render("   ←/→ change agent")
 	}
 	return dimSelectedStyle.Render(value)
 }

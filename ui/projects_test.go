@@ -41,7 +41,7 @@ func TestProjectsPaneRendersHeaderAndRows(t *testing.T) {
 }
 
 // TestProjectsPaneMarksActiveProject: the active (scoped-to) project's row leads
-// with the "●" accent marker; the others do not.
+// with the "▹" accent marker; the others do not.
 func TestProjectsPaneMarksActiveProject(t *testing.T) {
 	p := newTestProjects(testProjectRows())
 	p.SetRect(layout.Rect{X: 0, Y: 0, W: 30, H: 8})
@@ -58,8 +58,8 @@ func TestProjectsPaneMarksActiveProject(t *testing.T) {
 	}
 	require.NotEmpty(t, activeLine)
 	require.NotEmpty(t, inactiveLine)
-	assert.Contains(t, activeLine, "●", "the active project row is marked")
-	assert.NotContains(t, inactiveLine, "●", "inactive project rows are unmarked")
+	assert.Contains(t, activeLine, "▹", "the active project row is marked")
+	assert.NotContains(t, inactiveLine, "▹", "inactive project rows are unmarked")
 }
 
 // TestProjectsPaneCursorNavAndSelection: while focused, up/down move the cursor

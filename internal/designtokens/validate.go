@@ -69,6 +69,10 @@ func validate(t Tokens) error {
 			return err
 		}
 	}
+	// The blurred sidebar title reverses muted text into a readable chip.
+	if err := contrastPair(t, "surface", "ink-muted", 4.5); err != nil {
+		return err
+	}
 	return contrastPair(t, "surface", "accent", 4.5)
 }
 

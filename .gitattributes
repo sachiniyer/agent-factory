@@ -1,3 +1,5 @@
 # Terminal captures preserve cell padding and trailing viewport rows.
 app/testdata/recovery/*.ansi whitespace=-blank-at-eol,-blank-at-eof
 docs/assets/recovery/tui-live-driver/*.txt whitespace=-blank-at-eol,-blank-at-eof
+docs/assets/design/tui-a/*.ansi whitespace=-blank-at-eol,-blank-at-eof
+docs/assets/design/tui-a/live/*.txt whitespace=-blank-at-eol,-blank-at-eof

@@ -490,9 +490,9 @@ func (m *home) layoutTextOverlay() {
 
 var (
 	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ui.CurrentTheme().Accent)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Info)
-	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Warning)
-	descStyle   = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Foreground)
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
+	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
+	descStyle   = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Ink)
 )
 
 // showHelpScreen displays the help screen overlay if it hasn't been shown

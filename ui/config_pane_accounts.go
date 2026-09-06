@@ -102,10 +102,10 @@ type accountsSection struct {
 }
 
 var (
-	accountStateOKStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	accountStateOffStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	accountRegisterStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
-	accountAgentNameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	accountStateOKStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	accountStateOffStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	accountRegisterStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	accountAgentNameStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 )
 
 // accountsHeading is what the section calls itself. Short, because the pane
@@ -295,7 +295,7 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 
 	cursor := "  "
 	if selected {
-		cursor = configSelectedStyle.Render("› ")
+		cursor = SelectionMarker("› ")
 	}
 	b.WriteString(cursor)
 
@@ -307,8 +307,8 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 			b.WriteString(accountRegisterStyle.Render(label))
 		}
 		if selected && c.accounts.registering && c.accounts.registerFor == account.Agent {
-			b.WriteString("  ")
-			b.WriteString(c.accounts.input.View())
+			b.WriteString(configSelectedStyle.Render("  "))
+			b.WriteString(renderConfigInput(&c.accounts.input))
 		}
 		return c.fitPaneLine(b.String()) + "\n"
 	}
@@ -319,12 +319,15 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 	} else {
 		b.WriteString(accountAgentNameStyle.Render(label))
 	}
-	b.WriteString("  ")
+	stateStyle := accountStateOffStyle
+	stateText := "not logged in"
 	if account.LoggedIn {
-		b.WriteString(accountStateOKStyle.Render("logged in"))
-	} else {
-		b.WriteString(accountStateOffStyle.Render("not logged in"))
+		stateStyle, stateText = accountStateOKStyle, "logged in"
 	}
+	if selected {
+		stateStyle = configSelectedStyle
+	}
+	b.WriteString(stateStyle.Render("  " + stateText))
 	line := c.fitPaneLine(b.String()) + "\n"
 
 	if !selected {
