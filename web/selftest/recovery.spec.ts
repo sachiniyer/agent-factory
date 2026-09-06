@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { test, expect, type Page, type TestInfo } from "@playwright/test";
 
 const envelope = (data: unknown) => ({ data, error: null });
-const refusal = { status: 503, json: { data: null, error: { message: "The daemon refused this operation. Your input is retained." } } };
+const refusal = { status: 503, json: { data: null, error: { message: "The daemon refused this operation. Your input is retained.", daemon_rejected: true } } };
 async function still(page: Page, info: TestInfo, name: string): Promise<void> {
   const path = info.outputPath(`${name}.png`);
   await page.screenshot({ path, fullPage: true, animations: "disabled" });

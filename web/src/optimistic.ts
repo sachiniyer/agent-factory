@@ -201,3 +201,12 @@ export class OptimisticSessions {
     return { epoch: this.epoch, sequence: ++this.sequence };
   }
 }
+
+/** Orders create selection against subsequent submissions and navigation. */
+export class CreateSelectionIntent {
+  private generation = 0;
+
+  navigate(): void { this.generation++; }
+  submit(): number { return ++this.generation; }
+  isCurrent(intent: number): boolean { return intent === this.generation; }
+}

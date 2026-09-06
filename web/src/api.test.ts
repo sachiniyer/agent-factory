@@ -1081,8 +1081,8 @@ test("fetchPreviewOrigin: every failure degrades to '' rather than throwing", as
 });
 
 test("create refusal provenance distinguishes daemon rejection from lost or gateway replies", async () => {
-  for (const status of [400, 503]) {
-    stubFetchResponse({ ok: false, status, json: async () => ({ data: null, error: { message: "refused" } }) });
+  for (const status of [400, 500, 503]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({ data: null, error: { message: "refused", daemon_rejected: true } }) });
     await assert.rejects(createSession(createInput(), "tok"), error =>
       error instanceof ApiError && error.daemonRejected && error.message === "refused");
   }
@@ -1101,7 +1101,7 @@ test("JSON gateway error envelopes cannot establish rejection or committed mutat
   for (const status of [502, 504]) {
     for (const code of [undefined, "mutation_committed"]) {
       stubFetchResponse({ ok: false, status, json: async () => ({
-        data: null, error: { message: "Upstream response unavailable", code },
+        data: null, error: { message: "Upstream response unavailable", code, daemon_rejected: true },
       }) });
       await assert.rejects(archiveSession("stable-id", "session", "tok"), error => {
         assert.ok(error instanceof ApiError);
@@ -1116,14 +1116,53 @@ test("JSON gateway error envelopes cannot establish rejection or committed mutat
 });
 
 test("structured daemon lifecycle refusals remain definitive and retryable", async () => {
-  for (const status of [400, 503]) {
+  for (const status of [400, 500, 503]) {
     stubFetchResponse({ ok: false, status, json: async () => ({
-      data: null, error: { message: "The daemon refused the operation" },
+      data: null, error: { message: "The daemon refused the operation", daemon_rejected: true },
     }) });
     await assert.rejects(killSession("stable-id", "session", "tok"), error => {
       assert.ok(error instanceof ApiError);
       assert.equal(error.daemonRejected, true);
       assert.equal(isMutationOutcomeUncertain(error), false);
+      return true;
+    });
+  }
+});
+
+for (const status of [500, 503]) {
+  test(`an unmarked JSON ${status} proxy reply leaves the mutation outcome uncertain`, async () => {
+    stubFetchResponse({ ok: false, status, json: async () => ({
+      data: null, error: { message: "Upstream response unavailable" },
+    }) });
+    await assert.rejects(createSession(createInput(), "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, false);
+      assert.equal(isMutationOutcomeUncertain(error), true);
+      return true;
+    });
+  });
+}
+
+test("only a boolean daemon marker establishes rejection, and committed outcomes still win", async () => {
+  for (const daemon_rejected of [false, "true", 1]) {
+    stubFetchResponse({ ok: false, status: 503, json: async () => ({
+      data: null, error: { message: "unknown origin", daemon_rejected },
+    }) });
+    await assert.rejects(archiveSession("stable-id", "session", "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, false);
+      assert.equal(isMutationOutcomeUncertain(error), true);
+      return true;
+    });
+  }
+  for (const status of [500, 502, 504]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({
+      data: null, error: { message: "committed", daemon_rejected: true, code: "mutation_committed" },
+    }) });
+    await assert.rejects(archiveSession("stable-id", "session", "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, false);
+      assert.equal(isMutationOutcomeUncertain(error), true);
       return true;
     });
   }
