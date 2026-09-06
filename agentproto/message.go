@@ -146,9 +146,6 @@ const (
 	EventSessionKilled   EventType = "session.killed"
 	EventSessionArchived EventType = "session.archived"
 	EventSessionRestored EventType = "session.restored"
-	// EventThemeChanged signals a legacy TUI palette generation change. It carries
-	// no payload; the web refreshes data without changing its fixed palette.
-	EventThemeChanged EventType = "theme.changed"
 	// EventProjectsChanged signals that the set of "active projects" (repos with
 	// live sessions or a root_agents opt-in) changed as a whole — e.g. a
 	// DeleteProject archived a repo's sessions and dropped its opt-in (#1735). It

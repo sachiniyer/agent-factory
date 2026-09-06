@@ -238,7 +238,7 @@ func expectedMerge(entry ManifestEntry) MergePolicy {
 	switch entry.Key {
 	case "program_overrides", "limit_patterns", "root_agents", "keys", "default_accounts":
 		return MergeMapByKey
-	case "theme", "docker", "ssh", "root_agent":
+	case "docker", "ssh", "root_agent":
 		return MergeTableByField
 	case "network.cors_allowed_origins", "post_worktree_commands", "limit_account_candidates":
 		return MergeListReplace

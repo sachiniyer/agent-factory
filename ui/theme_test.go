@@ -5,7 +5,6 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
@@ -31,11 +30,8 @@ func TestChromeCopyUsesInk(t *testing.T) {
 
 func TestLegacyPaletteCannotOverrideRoles(t *testing.T) {
 	original := CurrentTheme()
-	legacy := config.DefaultThemeConfig()
-	legacy.Accent = "ignored"
-	legacy.Foreground = "ignored"
-	ApplyTheme(legacy)
-	t.Cleanup(func() { ApplyTheme(config.DefaultThemeConfig()) })
+	ApplyTheme()
+	t.Cleanup(func() { ApplyTheme() })
 	if CurrentTheme() != original {
 		t.Fatal("legacy palette changed fixed roles")
 	}
@@ -59,7 +55,7 @@ func TestAutomationTitleMatchesInstanceTitle(t *testing.T) {
 }
 
 func TestReviewedSelectionAndBlurredTitleRoles(t *testing.T) {
-	ApplyTheme(config.DefaultThemeConfig())
+	ApplyTheme()
 	roles := theme.Roles()
 	if configSelectedStyle.GetForeground() != roles.Ink || configSelectedStyle.GetBackground() != roles.SurfaceRaised {
 		t.Fatal("config key and account selections must use ink on surface-raised")

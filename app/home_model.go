@@ -475,7 +475,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		os.Exit(1)
 	}
 	ui.ApplyAppearance(appConfig.Appearance)
-	applyTheme(appConfig.Theme)
+	applyTheme()
 
 	// Apply configured detach key. The loader (sanitizeDetachKeys) already
 	// warns-and-defaults a bad hand-edited value, so this parse normally

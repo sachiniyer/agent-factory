@@ -3,7 +3,6 @@ package ui
 import (
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
@@ -11,21 +10,19 @@ import (
 // Theme contains fixed generated roles used by existing component boundaries.
 type Theme = theme.Palette
 
-var activeTheme = themeFromConfig(config.DefaultThemeConfig())
+var activeTheme = theme.Roles()
 
 // AccentColor is the shared selection and focus accent.
 var AccentColor = activeTheme.Accent
 
 func init() {
-	ApplyTheme(config.DefaultThemeConfig())
+	ApplyTheme()
 }
 
-func themeFromConfig(_ config.ThemeConfig) Theme { return theme.Roles() }
-
-// ApplyTheme rebuilds styles from fixed generated roles. Legacy palette input
-// is intentionally ignored; ApplyAppearance selects the fixed light/dark mode.
-func ApplyTheme(cfg config.ThemeConfig) {
-	activeTheme = themeFromConfig(cfg)
+// ApplyTheme rebuilds styles from fixed generated roles after ApplyAppearance
+// selects the client-local light/dark mode.
+func ApplyTheme() {
+	activeTheme = theme.Roles()
 	AccentColor = activeTheme.Accent
 	tree.ApplyTheme(tree.Theme{
 		Foreground:          activeTheme.Ink,

@@ -384,6 +384,10 @@ func RequestApplyConfig() (ApplyConfigResponse, error) {
 // reopen exactly the split #3231 closes. It never STARTS a daemon, like
 // RequestApplyConfig.
 func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
+	if err := config.RetiredThemeKeyError(key); err != nil {
+		return SetConfigValueResponse{}, err
+	}
+
 	var resp SetConfigValueResponse
 	if socketPath, err := DaemonSocketPath(); err == nil {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
@@ -452,6 +456,10 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 // daemon's mutation-admission gate. With no daemon it performs the same locked
 // local edit and best-effort live apply used by SetGlobalConfigValue.
 func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
+	if err := config.RetiredThemeKeyError(key); err != nil {
+		return UnsetConfigValueResponse{}, err
+	}
+
 	var resp UnsetConfigValueResponse
 	if socketPath, err := DaemonSocketPath(); err == nil {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
@@ -505,24 +513,6 @@ func isRPCMethodMissing(err error) bool {
 	}
 	return strings.HasPrefix(string(srv), "rpc: can't find method") ||
 		strings.HasPrefix(string(srv), "rpc: can't find service")
-}
-
-// RequestApplyTheme asks a RUNNING daemon to reload only the palette. Like the
-// full apply path it never starts a daemon; a later daemon start reads the file.
-// No daemon and a pre-ApplyTheme daemon are therefore benign. Once a daemon
-// answers the socket, however, its refusal is final: ping distinguishes that
-// active answer from absence so the caller cannot mount a TUI with a palette
-// newer than the one the daemon is still serving to web clients.
-func RequestApplyTheme() (ApplyThemeResponse, error) {
-	var resp ApplyThemeResponse
-	err := callDaemonNoEnsure("ApplyTheme", ApplyThemeRequest{}, &resp)
-	if err == nil || isRPCMethodMissing(err) {
-		return resp, nil
-	}
-	if _, pingErr := pingDaemonResponse(); pingErr != nil {
-		return resp, nil
-	}
-	return resp, err
 }
 
 // CreateSession asks the daemon to create, start, and persist a session.

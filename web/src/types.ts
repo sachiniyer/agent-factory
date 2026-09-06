@@ -396,7 +396,6 @@ export type EventType =
   | "session.killed"
   | "session.archived"
   | "session.restored"
-  | "theme.changed"
   | "projects.changed"
   | "task.created"
   | "task.updated"

@@ -5,13 +5,11 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 func TestTabbedWindowFrameStyleUsesPaneBorderThemeSlots(t *testing.T) {
-	defaultTheme := config.DefaultThemeConfig()
-	t.Cleanup(func() { ApplyTheme(defaultTheme) })
+	t.Cleanup(func() { ApplyTheme() })
 
 	c := theme.Colors()
 

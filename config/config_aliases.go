@@ -242,3 +242,6 @@ func globalOnlyGroupedAliasInShape(shape map[string]any) (string, bool) {
 	}
 	return "", false
 }
+
+// marshalConfigTOML encodes the canonical config before grouped aliases are applied.
+func marshalConfigTOML(cfg *Config) ([]byte, error) { return toml.Marshal(cfg) }

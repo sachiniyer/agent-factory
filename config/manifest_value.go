@@ -58,13 +58,6 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	// Preserve a user's named theme choice as the string shape they wrote. The
-	// normalized ThemeConfig still carries the complete palette for consumers,
-	// but turning "zenburn" into a large custom table in an editor would erase
-	// the preset choice on the next save.
-	if key == "theme" && cfg.Theme.explicitPreset && cfg.Theme.matchesPreset() {
-		return cfg.Theme.Preset(), true
-	}
 	// An empty program override is the on-disk tombstone for removing an
 	// auto-detected built-in command. ResolveProgram already treats it as no
 	// override; hide that storage detail so both panes refresh to the map the
@@ -145,7 +138,7 @@ type ConfigEntry struct {
 	//
 	// It no longer answers WHEN the change takes effect: #2480 made that per-key and
 	// honest (config.EffectClass / EffectNotice in effect.go), because the answer is
-	// not uniform — a running daemon applies most keys (including theme) in place,
+	// not uniform — a running daemon applies most keys in place,
 	// root_agents and branch_prefix wait for the next daemon start, and client-only
 	// keys such as update_channel are picked up by af's own next launch. The old
 	// per-key boolean could not express those outcomes; the notice does.
@@ -188,8 +181,7 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 // effect.go), because the honest answer differs by key — a running daemon applies
 // some in place (the network listener keys among them since #2480 PR2), root_agents
 // and branch_prefix wait for the next daemon start, and client-only keys such as
-// update_channel are picked up by af's own next launch. Theme is applied live to
-// the daemon palette projection so browser and TUI renderers do not diverge. It
+// update_channel and appearance are picked up by af's own next launch. It
 // deliberately never tells the user to run a command (#2479).
 
 // editorValue renders one config field in the editor form. It deliberately does

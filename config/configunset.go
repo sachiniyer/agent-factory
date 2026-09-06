@@ -22,6 +22,9 @@ type UnsetResult struct {
 // UnsetProjectConfigValue removes key's personal override for a project so the
 // value falls back to the lower layers again (#2216 Phase 5).
 func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, err
+	}
 	if key == "auto_yes" {
 		return nil, RemovedAutoYesError()
 	}
@@ -121,6 +124,9 @@ func projectConfigHasNoTopLevelKeys(content string) bool {
 // resurrect a conflicting flat value, so an alias is one effective setting for
 // unset just as it is for get and set.
 func UnsetGlobalConfigValue(key string) (*UnsetResult, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, err
+	}
 	if key == "auto_yes" {
 		return nil, RemovedAutoYesError()
 	}
