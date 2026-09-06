@@ -4,83 +4,39 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
-// Theme is the active TUI palette after resolving config.ThemeConfig into
-// lipgloss colors. The default is the Nord preset (#3220).
-type Theme struct {
-	Foreground            lipgloss.Color
-	ForegroundStrong      lipgloss.Color
-	ForegroundMuted       lipgloss.Color
-	ForegroundDim         lipgloss.Color
-	Background            lipgloss.Color
-	BackgroundSubtle      lipgloss.Color
-	BackgroundPanel       lipgloss.Color
-	Accent                lipgloss.Color
-	Success               lipgloss.Color
-	Warning               lipgloss.Color
-	Error                 lipgloss.Color
-	Info                  lipgloss.Color
-	Purple                lipgloss.Color
-	SelectionBackground   lipgloss.Color
-	SelectionForeground   lipgloss.Color
-	PaneBorderDefault     lipgloss.Color
-	PaneBorderSelected    lipgloss.Color
-	PaneBorderInteractive lipgloss.Color
-	PaneBorderPreview     lipgloss.Color
-}
+// Theme contains fixed generated roles used by existing component boundaries.
+type Theme = theme.Palette
 
 var activeTheme = themeFromConfig(config.DefaultThemeConfig())
 
-// AccentColor is the compatibility name for the main TUI accent. It now comes
-// from the active theme palette (Nord Frost #88C0D0 by default) instead of
-// the old fixed teal.
+// AccentColor is the shared selection and focus accent.
 var AccentColor = activeTheme.Accent
 
 func init() {
 	ApplyTheme(config.DefaultThemeConfig())
 }
 
-func themeFromConfig(cfg config.ThemeConfig) Theme {
-	return Theme{
-		Foreground:            lipgloss.Color(cfg.Foreground),
-		ForegroundStrong:      lipgloss.Color(cfg.ForegroundStrong),
-		ForegroundMuted:       lipgloss.Color(cfg.ForegroundMuted),
-		ForegroundDim:         lipgloss.Color(cfg.ForegroundDim),
-		Background:            lipgloss.Color(cfg.Background),
-		BackgroundSubtle:      lipgloss.Color(cfg.BackgroundSubtle),
-		BackgroundPanel:       lipgloss.Color(cfg.BackgroundPanel),
-		Accent:                lipgloss.Color(cfg.Accent),
-		Success:               lipgloss.Color(cfg.Success),
-		Warning:               lipgloss.Color(cfg.Warning),
-		Error:                 lipgloss.Color(cfg.Error),
-		Info:                  lipgloss.Color(cfg.Info),
-		Purple:                lipgloss.Color(cfg.Purple),
-		SelectionBackground:   lipgloss.Color(cfg.SelectionBackground),
-		SelectionForeground:   lipgloss.Color(cfg.SelectionForeground),
-		PaneBorderDefault:     lipgloss.Color(cfg.PaneBorderDefault),
-		PaneBorderSelected:    lipgloss.Color(cfg.PaneBorderSelected),
-		PaneBorderInteractive: lipgloss.Color(cfg.PaneBorderInteractive),
-		PaneBorderPreview:     lipgloss.Color(cfg.PaneBorderPreview),
-	}
-}
+func themeFromConfig(_ config.ThemeConfig) Theme { return theme.Roles() }
 
-// ApplyTheme installs the configured TUI palette and rebuilds package-level
-// lipgloss styles that captured the previous colors at init time.
+// ApplyTheme rebuilds styles from fixed generated roles. Legacy palette input
+// is intentionally ignored; appearance selection is added in P5 slice C.
 func ApplyTheme(cfg config.ThemeConfig) {
 	activeTheme = themeFromConfig(cfg)
 	AccentColor = activeTheme.Accent
 	tree.ApplyTheme(tree.Theme{
-		Foreground:          activeTheme.Foreground,
-		ForegroundStrong:    activeTheme.ForegroundStrong,
-		ForegroundMuted:     activeTheme.ForegroundMuted,
-		ForegroundDim:       activeTheme.ForegroundDim,
-		SelectionBackground: activeTheme.SelectionBackground,
-		SelectionForeground: activeTheme.SelectionForeground,
-		Success:             activeTheme.Success,
-		Warning:             activeTheme.Warning,
-		Error:               activeTheme.Error,
+		Foreground:          activeTheme.Ink,
+		ForegroundStrong:    activeTheme.Ink,
+		ForegroundMuted:     activeTheme.InkMuted,
+		ForegroundDim:       activeTheme.InkMuted,
+		SelectionBackground: activeTheme.SurfaceRaised,
+		SelectionForeground: activeTheme.Ink,
+		Success:             activeTheme.Ready,
+		Warning:             activeTheme.Lost,
+		Error:               activeTheme.Dead,
 	})
 	applyThemeStyles()
 }
@@ -92,91 +48,91 @@ func CurrentTheme() Theme {
 
 func applyThemeStyles() {
 	windowStyle = lipgloss.NewStyle().
-		BorderForeground(activeTheme.PaneBorderDefault).
+		BorderForeground(activeTheme.Border).
 		Border(lipgloss.RoundedBorder())
 	blurredWindowStyle = windowStyle.
-		BorderForeground(activeTheme.PaneBorderDefault)
+		BorderForeground(activeTheme.Border)
 	selectedWindowStyle = windowStyle.
-		BorderForeground(activeTheme.PaneBorderSelected)
+		BorderForeground(activeTheme.Accent)
 	interactiveWindowStyle = windowStyle.
 		Border(lipgloss.DoubleBorder()).
-		BorderForeground(activeTheme.PaneBorderInteractive)
+		BorderForeground(activeTheme.Accent)
 	previewWindowStyle = windowStyle.
-		BorderForeground(activeTheme.PaneBorderPreview)
+		BorderForeground(activeTheme.Border)
 	dropTargetWindowStyle = windowStyle.
-		BorderForeground(activeTheme.Warning)
+		BorderForeground(activeTheme.Accent)
 
 	paneHeaderStyle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(activeTheme.Foreground)
+		Foreground(activeTheme.Ink)
 	paneHeaderFocusedStyle = lipgloss.NewStyle().
 		Bold(true).
-		Background(activeTheme.SelectionBackground).
-		Foreground(activeTheme.SelectionForeground)
+		Background(activeTheme.SurfaceRaised).
+		Foreground(activeTheme.Ink)
 	paneHeaderDimStyle = lipgloss.NewStyle().
-		Foreground(activeTheme.ForegroundMuted)
+		Foreground(activeTheme.InkMuted)
 	paneHeaderInteractiveStyle = lipgloss.NewStyle().
 		Bold(true).
-		Background(activeTheme.Success).
-		Foreground(activeTheme.Background)
+		Background(activeTheme.SurfaceRaised).
+		Foreground(activeTheme.Ink)
 
 	sectionHeaderStyle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(activeTheme.Foreground)
+		Foreground(activeTheme.Ink)
 	sectionHeaderSelectedStyle = lipgloss.NewStyle().
 		Bold(true).
-		Background(activeTheme.SelectionBackground).
-		Foreground(activeTheme.SelectionForeground)
+		Background(activeTheme.SurfaceRaised).
+		Foreground(activeTheme.Ink)
 	windowIndicatorStyle = lipgloss.NewStyle().
-		Foreground(activeTheme.ForegroundMuted)
+		Foreground(activeTheme.InkMuted)
 	mainTitle = lipgloss.NewStyle().
 		Background(activeTheme.Accent).
-		Foreground(activeTheme.Background)
+		Foreground(activeTheme.Surface)
 	blurredTitle = lipgloss.NewStyle().
-		Background(activeTheme.ForegroundDim).
-		Foreground(activeTheme.ForegroundStrong)
+		Background(activeTheme.InkMuted).
+		Foreground(activeTheme.Ink)
 	projectRowStyle = lipgloss.NewStyle().
-		Foreground(activeTheme.Foreground)
+		Foreground(activeTheme.Ink)
 	projectRowActiveStyle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(activeTheme.Accent)
 	projectRowSelectedStyle = lipgloss.NewStyle().
-		Background(activeTheme.SelectionBackground).
-		Foreground(activeTheme.SelectionForeground)
+		Background(activeTheme.SurfaceRaised).
+		Foreground(activeTheme.Ink)
 
 	automationsTitleStyle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(activeTheme.Accent)
 	automationsTitleDimStyle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(activeTheme.ForegroundMuted)
+		Foreground(activeTheme.InkMuted)
 	automationsEnabledStyle = lipgloss.NewStyle().
-		Foreground(activeTheme.Info)
+		Foreground(activeTheme.Ink)
 	automationsDisabledStyle = lipgloss.NewStyle().
-		Foreground(activeTheme.ForegroundMuted)
+		Foreground(activeTheme.InkMuted)
 	automationItemTitleStyle = lipgloss.NewStyle().
 		Foreground(tree.InstanceTitleColor)
 	automationDetailStyle = lipgloss.NewStyle().
-		Foreground(activeTheme.ForegroundMuted)
+		Foreground(activeTheme.InkMuted)
 	automationsHintStyle = lipgloss.NewStyle().
-		Foreground(activeTheme.ForegroundDim)
+		Foreground(activeTheme.InkMuted)
 
-	keyStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundDim)
-	descStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundMuted)
-	sepStyle = lipgloss.NewStyle().Foreground(activeTheme.BackgroundSubtle)
+	keyStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+	descStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+	sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
 	actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Accent)
-	menuStyle = lipgloss.NewStyle().Foreground(activeTheme.Purple)
+	menuStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
-	tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Foreground)
+	tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
 	taskPlaceholderStyle = lipgloss.NewStyle().
 		Faint(true).
-		Foreground(activeTheme.ForegroundDim)
-	taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundDim)
+		Foreground(activeTheme.InkMuted)
+	taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 
 	alarmStyle = lipgloss.NewStyle().
-		Background(activeTheme.Error).
-		Foreground(activeTheme.SelectionForeground).
+		Background(activeTheme.Surface).
+		Foreground(activeTheme.Dead).
 		Bold(true)
-	errStyle = lipgloss.NewStyle().Foreground(activeTheme.Error)
+	errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
 }

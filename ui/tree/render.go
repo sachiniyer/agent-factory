@@ -8,10 +8,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 const readyIcon = "● "
@@ -164,27 +164,27 @@ var placeholderTitleColor lipgloss.TerminalColor
 var archiveWarningColor lipgloss.TerminalColor
 
 func init() {
-	t := config.DefaultThemeConfig()
+	t := theme.Colors()
 	ApplyTheme(Theme{
-		Foreground:          lipgloss.Color(t.Foreground),
-		ForegroundStrong:    lipgloss.Color(t.ForegroundStrong),
-		ForegroundMuted:     lipgloss.Color(t.ForegroundMuted),
-		ForegroundDim:       lipgloss.Color(t.ForegroundDim),
-		SelectionBackground: lipgloss.Color(t.SelectionBackground),
-		SelectionForeground: lipgloss.Color(t.SelectionForeground),
-		Success:             lipgloss.Color(t.Success),
-		Warning:             lipgloss.Color(t.Warning),
-		Error:               lipgloss.Color(t.Error),
+		Foreground:          t["ink"],
+		ForegroundStrong:    t["ink"],
+		ForegroundMuted:     t["ink-muted"],
+		ForegroundDim:       t["ink-muted"],
+		SelectionBackground: t["surface-raised"],
+		SelectionForeground: t["ink"],
+		Success:             t["ready"],
+		Warning:             t["lost"],
+		Error:               t["dead"],
 	})
 }
 
 // ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
 func ApplyTheme(t Theme) {
 	readyStyle = lipgloss.NewStyle().Foreground(t.Success)
-	deadStyle = lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	deadStyle = lipgloss.NewStyle().Foreground(theme.Colors()["dead"])
 	lostStyle = lipgloss.NewStyle().Foreground(t.Warning)
-	archivedStyle = lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	limitStyle = lipgloss.NewStyle().Foreground(t.Error)
+	archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
+	limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
 
 	InstanceTitleColor = t.Foreground
 	titleStyle = lipgloss.NewStyle().

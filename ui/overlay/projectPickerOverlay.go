@@ -201,14 +201,14 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 // Render renders the project picker overlay.
 func (p *ProjectPickerOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
-	countStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	addStyle := lipgloss.NewStyle().Foreground(t.Success)
-	errStyle := lipgloss.NewStyle().Foreground(t.Error)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	countStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	addStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	errStyle := lipgloss.NewStyle().Foreground(t.Dead)
 
 	style := searchOverlayStyle()
 	fit := fitOverlayContent(p.width, 0, p.maxWidth, p.maxHeight, style)
@@ -224,7 +224,7 @@ func (p *ProjectPickerOverlay) Render() string {
 	var lines []string
 	lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch project"), cw))
 	lines = append(lines, "")
-	warnStyle := lipgloss.NewStyle().Foreground(t.Warning)
+	warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
 	if p.degraded && !p.adding {
 		// A failed registry read may hide every registered sessionless
 		// project — say so rather than render the remainder as complete

@@ -110,10 +110,10 @@ func (s *SelectionOverlay) windowForTextHeight(textHeight int) (start, end int, 
 // Render renders the selection overlay
 func (s *SelectionOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 
 	style := selectionOverlayStyle()
 	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)

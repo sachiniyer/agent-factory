@@ -242,6 +242,6 @@ func textOverlayScrollMarker(width int, marker string) string {
 		width = 1
 	}
 	return lipgloss.NewStyle().
-		Foreground(ui.CurrentTheme().ForegroundDim).
+		Foreground(ui.CurrentTheme().InkMuted).
 		Render(lipgloss.PlaceHorizontal(width, lipgloss.Center, marker))
 }

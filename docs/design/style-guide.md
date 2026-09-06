@@ -397,3 +397,10 @@ asserted container selftest scenes; the surrounding chrome remains owned by P2.
 
 The [TUI recovery matrix](tui-recovery-stills.md) contains app-model driver
 captures in both themes, supplemented by an isolated real tmux onboarding run.
+
+## TUI roles · P5 slice A
+
+The [TUI role gallery](tui-design-a-stills.md) applies the generated roles to
+58 app-model driver stills. Slice A replaces the configurable TUI palette and
+private ANSI colours; the common overlay recipe and density cuts follow in B,
+and the Light/Dark/System selector and migration in C.

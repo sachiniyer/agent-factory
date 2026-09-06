@@ -93,25 +93,25 @@ func partitionByArchived(instances []*session.Instance) (live, archived []int) {
 
 var sectionHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.Foreground)
+	Foreground(activeTheme.Ink)
 
 var sectionHeaderSelectedStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(activeTheme.SelectionBackground).
-	Foreground(activeTheme.SelectionForeground)
+	Background(activeTheme.SurfaceRaised).
+	Foreground(activeTheme.Ink)
 
 var windowIndicatorStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
 var mainTitle = lipgloss.NewStyle().
 	Background(AccentColor).
-	Foreground(activeTheme.Background)
+	Foreground(activeTheme.Surface)
 
 // blurredTitle is the title chip with tree focus elsewhere (#1024 PR 4 focus
 // ring): same shape, receded color.
 var blurredTitle = lipgloss.NewStyle().
-	Background(activeTheme.ForegroundDim).
-	Foreground(activeTheme.ForegroundStrong)
+	Background(activeTheme.InkMuted).
+	Foreground(activeTheme.Ink)
 
 // Sidebar is the unified left navigation pane with collapsible sections. It is
 // a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —

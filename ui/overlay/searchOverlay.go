@@ -256,17 +256,17 @@ func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
 // Render renders the search overlay.
 func (s *SearchOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
-	statusRunning := lipgloss.NewStyle().Foreground(t.Success)
-	statusReady := lipgloss.NewStyle().Foreground(t.Warning)
-	statusLoading := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	statusRunning := lipgloss.NewStyle().Foreground(t.Running)
+	statusReady := lipgloss.NewStyle().Foreground(t.Ready)
+	statusLoading := lipgloss.NewStyle().Foreground(t.InkMuted)
 	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
 	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
-	statusLimit := lipgloss.NewStyle().Foreground(t.Error)
+	statusLimit := lipgloss.NewStyle().Foreground(t.LimitReached)
 
 	style := searchOverlayStyle()
 	plan := s.renderPlan(style)

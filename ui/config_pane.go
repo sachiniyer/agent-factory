@@ -116,15 +116,15 @@ func (r configRow) isSelectable() bool {
 
 var (
 	configTitleStyle    = lipgloss.NewStyle().Bold(true)
-	configHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
-	configKeyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	configValueStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
-	configPurposeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	configSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	configErrorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	configOKStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	configNoticeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	configHintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	configHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Ink)
+	configKeyStyle      = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configValueStyle    = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configPurposeStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Ink)
+	configErrorStyle    = lipgloss.NewStyle().Foreground(activeTheme.Dead)
+	configOKStyle       = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configNoticeStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configHintStyle     = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 )
 
 // NewConfigPane builds the pane wired to the real write path.

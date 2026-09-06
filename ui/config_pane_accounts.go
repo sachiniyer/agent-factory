@@ -102,10 +102,10 @@ type accountsSection struct {
 }
 
 var (
-	accountStateOKStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	accountStateOffStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	accountRegisterStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
-	accountAgentNameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	accountStateOKStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	accountStateOffStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	accountRegisterStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	accountAgentNameStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 )
 
 // accountsHeading is what the section calls itself. Short, because the pane

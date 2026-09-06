@@ -30,11 +30,11 @@ const watchRunNowRefusal = "watch tasks run on their watch command's output, not
 // cron "e.g. 0 9 * * 1-5") can never be mistaken for a typed value.
 var taskPlaceholderStyle = lipgloss.NewStyle().
 	Faint(true).
-	Foreground(activeTheme.ForegroundDim)
+	Foreground(activeTheme.InkMuted)
 
 // taskFormMoreStyle dims the ↑/↓ markers flagging fields scrolled out of a
 // height-clamped edit form (#1098).
-var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundDim)
+var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
 // (name, trigger, prompt) then Delivery (target session, path, program).
@@ -520,12 +520,12 @@ func (s *TaskPane) renderListMode() string {
 	}
 	t := CurrentTheme()
 	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	enabledStyle := lipgloss.NewStyle().Foreground(t.Info)
-	disabledStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	detailStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	erroredStyle := lipgloss.NewStyle().Foreground(t.Error)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	enabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	disabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	detailStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	erroredStyle := lipgloss.NewStyle().Foreground(t.Dead)
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Tasks"))
@@ -613,7 +613,7 @@ func (s *TaskPane) renderListMode() string {
 	// long task list would otherwise scroll it off.
 	pinnedFooter := 1
 	if s.listNotice != "" {
-		noticeStyle := lipgloss.NewStyle().Foreground(t.Error).Bold(true)
+		noticeStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
 		noticeWidth := s.width - 4
 		if noticeWidth < 1 {
 			noticeWidth = 1

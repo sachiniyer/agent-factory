@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -613,8 +614,8 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// SGR foreground params of the default Nord muted foreground.
-	dimFG := termenv.RGBColor("#C3CBD6").Sequence(false)
+	// SGR foreground params of the generated dark muted role.
+	dimFG := termenv.RGBColor(theme.Colors()["ink-muted"].Dark).Sequence(false)
 
 	r := NewInstanceRenderer()
 	r.SetWidth(effectiveWidth(36))

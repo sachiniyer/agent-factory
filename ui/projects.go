@@ -42,10 +42,10 @@ var projectsTitleStyle = lipgloss.NewStyle().
 
 var projectsTitleDimStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
 var projectsHintStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundDim)
+	Foreground(activeTheme.InkMuted)
 
 // projectRowStyle / projectRowActiveStyle / projectRowSelectedStyle render the
 // Projects rows: the plain row, the active (scoped-to) project's accent marker,
