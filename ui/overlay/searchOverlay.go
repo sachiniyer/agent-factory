@@ -304,7 +304,7 @@ func (s *SearchOverlay) Render() string {
 		// otherwise a total switch over the liveness — every value explicit (incl.
 		// LimitReached, #1146, which gets its own red diamond so it never reads as a
 		// live dot), no silent default. Running/Ready get the filled dot; every
-		// other liveness gets the hollow ○.
+		// other liveness keeps its fixed semantic glyph.
 		var statusStr string
 		switch {
 		case r.Instance.GetInFlightOp() == session.OpCreating:
@@ -323,11 +323,11 @@ func (s *SearchOverlay) Render() string {
 				// so "blocked on limit" never reads as a live/gone dot.
 				statusStr = statusLimit.Render("◆")
 			case session.LiveLost:
-				statusStr = statusLost.Render("○")
+				statusStr = statusLost.Render("◌")
 			case session.LiveDead:
 				statusStr = statusDead.Render("○")
 			case session.LiveArchived:
-				statusStr = statusArchived.Render("○")
+				statusStr = statusArchived.Render("▧")
 			case session.LivenessUnset:
 				statusStr = normalStyle.Render("○")
 			}
