@@ -1,3 +1,4 @@
+import { field } from "./components.js";
 import { recoveryScreen } from "./recovery.js";
 // The Accounts section of the web config view (#3385) — the owner's ask, in his
 // words: "I'd like to be able to do the logging in from the config tab of the TUI
@@ -97,7 +98,7 @@ const ACCOUNTS_NOTE =
  * text in a name field — is read at submit time from the input itself, so a
  * re-render caused by someone else's event cannot resurrect a stale draft.
  */
-export function renderAccountsSection(state: AccountsState, actions: AccountActions): HTMLElement {
+export function renderAccountsSection(state: AccountsState, actions: AccountActions, registration = { open: false, agent: "" }): HTMLElement {
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
 
@@ -134,21 +135,40 @@ export function renderAccountsSection(state: AccountsState, actions: AccountActi
   const list = h("div", { class: "af-accounts-list" });
   for (const agent of state.agents) {
     const mine = state.entries.filter((e) => e.agent === agent);
-    list.append(h("div", { class: "af-accounts-agent" }, agent));
+    if (mine.length) list.append(h("div", { class: "af-accounts-agent" }, agent));
     for (const entry of mine) {
       list.append(renderAccountRow(entry, state.status, actions));
     }
-    list.append(renderRegisterRow(agent, state.status, actions));
+
   }
-  if (state.entries.length === 0) {
-    list.hidden = true;
+  const add = h("details", { class: "af-account-disclosure" });
+  add.open = registration.open;
+  add.addEventListener("toggle", () => { registration.open = add.open; });
+  const agentSelect = h("select", { class: "af-input" });
+  agentSelect.setAttribute("aria-label", "Account agent");
+  for (const agent of state.agents) agentSelect.append(h("option", { value: agent }, agent));
+  agentSelect.value = state.agents.includes(registration.agent) ? registration.agent : state.agents[0];
+  registration.agent = agentSelect.value;
+  const forms = state.agents.map((agent) => renderRegisterRow(agent, state.status, actions));
+  const sync = () => {
+    registration.agent = agentSelect.value;
+    forms.forEach((form, i) => { form.hidden = state.agents[i] !== registration.agent; });
+  };
+  agentSelect.addEventListener("change", sync);
+  sync();
+  add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
+  section.append(list, add);
+  if (state.entries.length === 0 && !registration.open) {
+    add.hidden = true;
     const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
       empty.remove();
-      list.hidden = false;
-      list.querySelector<HTMLInputElement>("input")?.focus();
+      add.hidden = false;
+      add.open = true;
+      registration.open = true;
+      add.querySelector<HTMLInputElement>(".af-accounts-register:not([hidden]) input")?.focus();
     } });
-    section.replaceChildren(empty, list);
-  } else section.append(list);
+    section.prepend(empty);
+  }
   return section;
 }
 
@@ -221,7 +241,7 @@ function renderRegisterRow(agent: string, status: AccountStatus | null, actions:
     // is how a UI comes to accept a name the writer rejects — the same argument
     // the config form makes about the validator.
     actions.register(agent, name);
-    input.value = "";
+    // Keep the entered name available if the daemon refuses registration.
   };
 
   input.addEventListener("keydown", (e) => {
@@ -233,7 +253,7 @@ function renderRegisterRow(agent: string, status: AccountStatus | null, actions:
   const button = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
   button.addEventListener("click", submit);
 
-  row.append(h("div", { class: "af-accounts-label" }, input), button);
+  row.append(h("div", { class: "af-accounts-label" }, field("Name", input)), button);
   // A registration's outcome belongs on the form that produced it, and the name
   // it was for is gone from the input by then — so it is matched on the agent
   // with an empty name, which is what the shell records for a register failure.

@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { viewNavigation, terminalChrome } from "./components.js";
+import { viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
 import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -184,7 +184,7 @@ export interface AppState {
    *  daemon host, not a manifest key, and merging the two would be the category
    *  error #3385 asks this surface to avoid. */
   accounts: AccountsState;
-  /** the persisted theme preference (redesign PR1): Auto follows the OS, Light/Dark
+  /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
    *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
   themeChoice: ThemeChoice;
@@ -564,8 +564,8 @@ export function tabRealId(tab: { id?: string }): string {
 /** The appbar label for a theme choice (redesign PR1). */
 function themeLabel(choice: ThemeChoice): string {
   switch (choice) {
-    case "auto":
-      return "Auto";
+    case "system":
+      return "System";
     case "light":
       return "Light";
     case "dark":
@@ -736,7 +736,7 @@ export class AppShell {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   private readonly viewTabs: Map<View, HTMLElement>;
-  // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
+  // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
   private lastThemeChoice: ThemeChoice | null = null;
@@ -896,7 +896,7 @@ export class AppShell {
     const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect.setAttribute("title", "Disconnect and forget the saved token");
 
-    // The theme toggle: a compact Auto/Light/Dark segmented control. A click routes
+    // The theme toggle: a compact Light/Dark/System segmented control. A click routes
     // through actions.setTheme, which persists the choice and re-themes the terminals.
     const themeToggle = h("div", { class: "af-theme-toggle" });
     themeToggle.setAttribute("role", "group");
@@ -1420,6 +1420,12 @@ export class AppShell {
     // filter menu carries the per-state totals for what's hidden.
     this.railCount.textContent = String(visible.length);
     this.renderFilterMenu(state, scoped);
+    const openIds = new Set(this.railMenus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.dataset.sessionId));
+    const active = document.activeElement as HTMLElement | null;
+    const focusedId = active?.closest<HTMLElement>("[data-session-id]")?.dataset.sessionId;
+    const focusedName = active?.getAttribute("aria-label");
+    for (const menu of this.railMenus) menu.dispose();
+    this.railMenus = [];
     const list = this.railList;
     // No project selected ⇒ there are no projects at all (nothing has been created):
     // the global empty rail. Post-#2456 the coherent first step is registering a repo
@@ -1440,13 +1446,30 @@ export class AppShell {
     });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
+    for (const menu of this.railMenus) if (openIds.has(menu.el.dataset.sessionId)) menu.open();
+    if (focusedId && focusedName) {
+      const host = list.querySelector(`[data-session-id="${CSS.escape(focusedId)}"]`);
+      host?.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+    }
   }
 
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
+  private railMenus: ReturnType<typeof actionsDisclosure>[] = [];
   private rowActions(session: ManagedSession, selected: boolean): HTMLElement {
-    return h("div", { class: "af-row-actions" }, ...this.sessionActionButtons(session, "rail", selected));
+    const host = h("div", { class: "af-row-actions" });
+    const buttons = this.sessionActionButtons(session, "rail", selected);
+    if (!buttons.length) return host;
+    const menu = actionsDisclosure(`Actions for ${session.title}`);
+    menu.el.dataset.sessionId = session.id;
+    this.railMenus.push(menu);
+    menu.trigger.replaceChildren("…");
+    menu.panel.append(...buttons);
+    menu.el.addEventListener("click", (event) => event.stopPropagation());
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    host.append(menu.el);
+    return host;
   }
 
   /** Builds both rail and fallback-header controls from the same daemon capabilities.
@@ -1490,7 +1513,7 @@ export class AppShell {
       const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        ...(surface === "rail" ? [icon("octagon-x")] : ["Kill"]),
+        "Kill",
       );
       const killLabel = `Kill session “${killSession.title}”`;
       killBtn.setAttribute("aria-label", killLabel);
@@ -1520,7 +1543,7 @@ export class AppShell {
     const label = `${verb} “${sessionTitle}”`;
     btn.dataset.action = action;
     if (surface === "rail") {
-      btn.replaceChildren(icon(action === "restore" ? "archive-restore" : "archive"));
+      btn.textContent = verb.replace(" session", "");
     } else {
       btn.textContent = verb.replace(" session", "");
     }

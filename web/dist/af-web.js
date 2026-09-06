@@ -6387,10 +6387,6 @@ async function fetchSnapshot(token2) {
   const resp = await af("Snapshot", { repo_id: "" }, token2);
   return resp.instances ?? [];
 }
-async function getTheme(token2) {
-  const resp = await af("GetTheme", {}, token2);
-  return resp.theme;
-}
 function probeToken(token2) {
   return fetchSnapshot(token2);
 }
@@ -6675,402 +6671,61 @@ function h(tag, props = {}, ...children) {
   return el2;
 }
 
-// src/theme.ts
-var THEME_CHOICES = ["auto", "light", "dark"];
-var STORAGE_KEY = "af-theme";
-var HEX = /^#[0-9A-Fa-f]{6}$/;
-var BLACK = "#000000";
-var WHITE = "#FFFFFF";
-var NORD_THEME = {
-  name: "nord",
-  foreground: "#D8DEE9",
-  foreground_strong: "#ECEFF4",
-  foreground_muted: "#C3CBD6",
-  foreground_dim: "#A7B0BE",
-  background: "#2E3440",
-  background_subtle: "#3B4252",
-  background_panel: "#434C5E",
-  accent: "#88C0D0",
-  success: "#A3BE8C",
-  warning: "#EBCB8B",
-  error: "#CC8A91",
-  info: "#81A1C1",
-  purple: "#B590AF",
-  selection_background: "#4C566A",
-  selection_foreground: "#ECEFF4",
-  pane_border_default: "#4C566A",
-  pane_border_selected: "#88C0D0",
-  pane_border_interactive: "#A3BE8C",
-  pane_border_preview: "#B48EAD"
+// src/terminal_ansi.ts
+var TERMINAL_ANSI = {
+  "light": {
+    "black": "#2E3440",
+    "red": "#944049",
+    "green": "#51693C",
+    "yellow": "#7C5A15",
+    "blue": "#426486",
+    "magenta": "#7F5478",
+    "cyan": "#2D6271",
+    "white": "#434C5E",
+    "brightBlack": "#000000",
+    "brightRed": "#76333A",
+    "brightGreen": "#415430",
+    "brightYellow": "#634811",
+    "brightBlue": "#35506B",
+    "brightMagenta": "#664360",
+    "brightCyan": "#244E5A",
+    "brightWhite": "#171A20"
+  },
+  "dark": {
+    "black": "#B4BCC8",
+    "red": "#D9B2B9",
+    "green": "#A3BE8C",
+    "yellow": "#EBCB8B",
+    "blue": "#81A1C1",
+    "magenta": "#B590AF",
+    "cyan": "#90C4D3",
+    "white": "#D8DEE9",
+    "brightBlack": "#959CA5",
+    "brightRed": "#E1C1C7",
+    "brightGreen": "#B5CBA3",
+    "brightYellow": "#EFD5A2",
+    "brightBlue": "#9AB4CD",
+    "brightMagenta": "#C4A6BF",
+    "brightCyan": "#A6D0DC",
+    "brightWhite": "#FFFFFF"
+  }
 };
-function rgb(hex2) {
-  if (!HEX.test(hex2)) return null;
-  return [
-    Number.parseInt(hex2.slice(1, 3), 16),
-    Number.parseInt(hex2.slice(3, 5), 16),
-    Number.parseInt(hex2.slice(5, 7), 16)
-  ];
-}
-function hex([r, g, b]) {
-  return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
-}
-function mix(a, b, amount) {
-  const aa = rgb(a);
-  const bb = rgb(b);
-  if (!aa || !bb) return NORD_THEME.foreground;
-  return hex(aa.map((v, i) => v + (bb[i] - v) * amount));
-}
-function rgbToHSL(color) {
-  const value = rgb(color) ?? rgb(NORD_THEME.accent);
-  const [r, g, b] = value.map((part) => part / 255);
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const lightness = (max + min) / 2;
-  if (max === min) return [0, 0, lightness];
-  const delta = max - min;
-  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
-  let hue = 0;
-  if (max === r) hue = (g - b) / delta + (g < b ? 6 : 0);
-  else if (max === g) hue = (b - r) / delta + 2;
-  else hue = (r - g) / delta + 4;
-  return [hue / 6, saturation, lightness];
-}
-function hslToHex(hue, saturation, lightness) {
-  if (saturation === 0) return hex([255 * lightness, 255 * lightness, 255 * lightness]);
-  const q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
-  const p = 2 * lightness - q;
-  const channel = (offset) => {
-    let value = hue + offset;
-    if (value < 0) value += 1;
-    if (value > 1) value -= 1;
-    if (value < 1 / 6) return p + (q - p) * 6 * value;
-    if (value < 1 / 2) return q;
-    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
-    return p;
-  };
-  return hex([255 * channel(1 / 3), 255 * channel(0), 255 * channel(-1 / 3)]);
-}
-function rgba(color, alpha) {
-  const value = rgb(color) ?? rgb(NORD_THEME.background);
-  return `rgba(${value[0]}, ${value[1]}, ${value[2]}, ${alpha})`;
-}
-function luminance(color) {
-  const value = rgb(color);
-  if (!value) return 0;
-  const linear = value.map((part) => {
-    const channel = part / 255;
-    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-}
-function contrastRatio(a, b) {
-  const first = luminance(a);
-  const second = luminance(b);
-  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
-}
-function passes(color, backgrounds, minimum) {
-  return HEX.test(color) && backgrounds.every((background) => contrastRatio(color, background) >= minimum);
-}
-function shiftToContrast(color, backgrounds, minimum, toward) {
-  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
-  for (let step = 1; step <= 100; step++) {
-    const candidate = mix(color, toward, step / 100);
-    if (passes(candidate, backgrounds, minimum)) return candidate;
-  }
-  return color.toUpperCase();
-}
-function adjustLightnessToContrast(color, backgrounds, minimum) {
-  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
-  const [hue, saturation, lightness] = rgbToHSL(color);
-  for (let step = 1; step <= 100; step++) {
-    const amount = step / 100;
-    const darker = hslToHex(hue, saturation, lightness * (1 - amount));
-    if (passes(darker, backgrounds, minimum)) return darker;
-    const lighter = hslToHex(hue, saturation, lightness + (1 - lightness) * amount);
-    if (passes(lighter, backgrounds, minimum)) return lighter;
-  }
-  return null;
-}
-function readable(candidate, backgrounds, minimum, fallback, toward) {
-  if (passes(candidate, backgrounds, minimum)) return candidate.toUpperCase();
-  const safeFallback = shiftToContrast(fallback, backgrounds, minimum, toward);
-  if (passes(safeFallback, backgrounds, minimum)) return safeFallback;
-  for (const endpoint of [BLACK, WHITE]) {
-    const shifted = shiftToContrast(fallback, backgrounds, minimum, endpoint);
-    if (passes(shifted, backgrounds, minimum)) return shifted;
-  }
-  const minimumContrast = (color) => Math.min(...backgrounds.map((background) => contrastRatio(color, background)));
-  return minimumContrast(BLACK) >= minimumContrast(WHITE) ? BLACK : WHITE;
-}
-var themeKeys = Object.keys(NORD_THEME).filter((key) => key !== "name");
-function normalizeTheme(value) {
-  const out = { ...NORD_THEME, name: typeof value?.name === "string" ? value.name : void 0 };
-  for (const key of themeKeys) {
-    const candidate = value?.[key];
-    out[key] = typeof candidate === "string" && HEX.test(candidate) ? candidate.toUpperCase() : NORD_THEME[key];
-  }
-  return out;
-}
-function hasConnectedToken(token2) {
-  return token2 !== null;
-}
+
+// src/theme.ts
+var THEME_CHOICES = ["light", "dark", "system"];
+var STORAGE_KEY = "af-theme";
 function connectionAttemptMayCommit(request, installedToken, candidate) {
   return request.isCurrent() && installedToken === candidate;
 }
-function paletteFetchFailurePlan(status, hasLoadedPalette) {
-  const unsupported = status === 404 || status === 405 || status === 501;
-  const rejectedCredential = status === 401 || status === 403;
-  return {
-    reset: unsupported || !hasLoadedPalette,
-    retry: !unsupported && !rejectedCredential,
-    reauthenticate: rejectedCredential
-  };
-}
-function semantic(candidate, fallback, surfaces, minimum, toward) {
-  return readable(candidate, surfaces, minimum, fallback, toward);
-}
-function deriveTheme(input, mode) {
-  const source = normalizeTheme(input);
-  const dark = mode === "dark";
-  let canvas = dark ? source.background : source.foreground;
-  let surface = dark ? source.background_subtle : mix(source.foreground, source.foreground_strong, 0.55);
-  let raised = dark ? source.background_panel : source.foreground_strong;
-  let inset = dark ? mix(source.background, source.background_subtle, 0.22) : mix(source.foreground, source.background, 0.06);
-  let surfaces = [canvas, surface, inset, raised];
-  const resetSurfaceSystem = () => {
-    canvas = dark ? NORD_THEME.background : NORD_THEME.foreground;
-    surface = dark ? NORD_THEME.background_subtle : mix(NORD_THEME.foreground, NORD_THEME.foreground_strong, 0.55);
-    raised = dark ? NORD_THEME.background_panel : NORD_THEME.foreground_strong;
-    inset = dark ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22) : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
-    surfaces = [canvas, surface, inset, raised];
-  };
-  const sourceSurfaceText = dark ? source.foreground : source.background;
-  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
-  const hasSharedSurfaceText = [sourceSurfaceText, fallbackSurfaceText, BLACK, WHITE].some(
-    (candidate) => passes(candidate, surfaces, 4.5)
-  );
-  if (!hasSharedSurfaceText) {
-    resetSurfaceSystem();
-  }
-  const toward = dark ? source.foreground_strong : source.background;
-  const subtleAlpha = dark ? 0.12 : 0.09;
-  const tintAlpha = dark ? 0.2 : 0.16;
-  const provisionalText = readable(
-    dark ? source.foreground : source.background,
-    surfaces,
-    4.5,
-    fallbackSurfaceText,
-    toward
-  );
-  const lightSemantic = (candidate, fallback, backgrounds, minimum, neutral) => adjustLightnessToContrast(candidate, backgrounds, minimum) ?? adjustLightnessToContrast(fallback, backgrounds, minimum) ?? readable(fallback, backgrounds, minimum, neutral, neutral);
-  const provisionalSemantic = (candidate, fallback) => {
-    if (dark) return semantic(candidate, fallback, surfaces, 4.5, toward);
-    return lightSemantic(candidate, fallback, surfaces, 4.5, provisionalText);
-  };
-  const hasSharedFillText = (color, alphas) => {
-    const fills = surfaces.flatMap((background) => alphas.map((alpha) => mix(background, color, alpha)));
-    return passes(BLACK, fills, 4.5) || passes(WHITE, fills, 4.5);
-  };
-  const provisionalAccent = provisionalSemantic(source.accent, NORD_THEME.accent);
-  const provisionalDanger = provisionalSemantic(source.error, NORD_THEME.error);
-  if (!hasSharedFillText(provisionalAccent, [subtleAlpha, tintAlpha]) || !hasSharedFillText(provisionalDanger, [subtleAlpha])) {
-    resetSurfaceSystem();
-  }
-  const text = readable(
-    dark ? source.foreground : source.background,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground : NORD_THEME.background,
-    toward
-  );
-  const text2 = readable(
-    dark ? source.foreground_muted : source.background_subtle,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground_muted : NORD_THEME.background_subtle,
-    toward
-  );
-  const text3 = readable(
-    dark ? source.foreground_dim : source.background_panel,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground_dim : NORD_THEME.background_panel,
-    toward
-  );
-  const modeSemantic = (candidate, fallback, minimum) => {
-    if (dark) return semantic(candidate, fallback, surfaces, minimum, toward);
-    return lightSemantic(candidate, fallback, surfaces, minimum, text);
-  };
-  const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
-  const danger = modeSemantic(source.error, NORD_THEME.error, 4.5);
-  const ready = modeSemantic(source.success, NORD_THEME.success, 3);
-  const statusNeedsYou = modeSemantic(source.success, NORD_THEME.success, 4.5);
-  const lost = modeSemantic(source.warning, NORD_THEME.warning, 3);
-  const limit = modeSemantic(source.error, NORD_THEME.error, 3);
-  const dead = semantic(text2, NORD_THEME.foreground_muted, surfaces, 3, toward);
-  const termColor = (candidate, fallback) => dark ? semantic(candidate, fallback, [canvas], 4.5, toward) : lightSemantic(candidate, fallback, [canvas], 4.5, text);
-  const termGreen = termColor(source.success, NORD_THEME.success);
-  const termAmber = termColor(source.warning, NORD_THEME.warning);
-  const termBlue = termColor(source.info, NORD_THEME.info);
-  const border = dark ? semantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, toward) : lightSemantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, text);
-  const borderSelected = modeSemantic(source.pane_border_selected, NORD_THEME.pane_border_selected, 3);
-  const borderInteractive = modeSemantic(source.pane_border_interactive, NORD_THEME.pane_border_interactive, 3);
-  const borderPreview = modeSemantic(source.pane_border_preview, NORD_THEME.pane_border_preview, 3);
-  const onAccentCandidates = [source.selection_foreground, source.background, text, BLACK, WHITE];
-  const onAccent = onAccentCandidates.find((candidate) => passes(candidate, [accent], 4.5)) ?? text;
-  const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
-  const hoverCandidate = mix(accent, hoverToward, 0.12);
-  const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
-  const semanticFillText = (candidate, fillSurfaces) => {
-    const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
-    return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
-  };
-  const accentFillSurfaces = surfaces.flatMap((background) => [
-    mix(background, accent, subtleAlpha),
-    mix(background, accent, tintAlpha)
-  ]);
-  const accentText = semanticFillText(accent, accentFillSurfaces);
-  const selectedText = semanticFillText(text, accentFillSurfaces);
-  const selectedTextMuted = semanticFillText(text2, accentFillSurfaces);
-  const selectedStatusNeedsYou = semanticFillText(statusNeedsYou, accentFillSurfaces);
-  const selectedStatusWorking = semanticFillText(text2, accentFillSurfaces);
-  const selectedStatusWaiting = semanticFillText(danger, accentFillSurfaces);
-  const selectedStatusBroken = semanticFillText(danger, accentFillSurfaces);
-  const selectedStatusInactive = semanticFillText(text2, accentFillSurfaces);
-  const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
-  const dangerText = semanticFillText(danger, dangerFillSurfaces);
-  const effectBase = dark ? canvas : text;
-  const selectionAlpha = dark ? 0.72 : 0.45;
-  const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
-  const selectionForeground = readable(
-    source.selection_foreground,
-    [selectionSurface],
-    4.5,
-    NORD_THEME.selection_foreground,
-    text
-  );
-  const tokens = {
-    "--af-bg-canvas": canvas,
-    "--af-bg-surface": surface,
-    "--af-bg-inset": inset,
-    "--af-bg-raised": raised,
-    "--af-bg-term": canvas,
-    "--af-border": border,
-    "--af-border-subtle": mix(surface, border, 0.35),
-    "--af-border-strong": border,
-    "--af-border-selected": borderSelected,
-    "--af-border-interactive": borderInteractive,
-    "--af-border-preview": borderPreview,
-    "--af-text": text,
-    "--af-text-2": text2,
-    "--af-text-3": text3,
-    "--af-accent": accent,
-    "--af-accent-text": accentText,
-    "--af-accent-hover": accentHover,
-    "--af-accent-subtle": rgba(accent, subtleAlpha),
-    "--af-accent-tint": rgba(accent, tintAlpha),
-    "--af-on-accent": onAccent,
-    "--af-danger": danger,
-    "--af-danger-text": dangerText,
-    "--af-danger-subtle": rgba(danger, subtleAlpha),
-    "--af-focus-ring": accent,
-    "--af-text-muted": text2,
-    "--af-status-needs-you": statusNeedsYou,
-    "--af-status-working": text2,
-    "--af-status-waiting": danger,
-    "--af-status-broken": danger,
-    "--af-status-inactive": text2,
-    "--af-selected-text": selectedText,
-    "--af-selected-text-muted": selectedTextMuted,
-    "--af-selected-status-needs-you": selectedStatusNeedsYou,
-    "--af-selected-status-working": selectedStatusWorking,
-    "--af-selected-status-waiting": selectedStatusWaiting,
-    "--af-selected-status-broken": selectedStatusBroken,
-    "--af-selected-status-inactive": selectedStatusInactive,
-    "--af-dot-ready": ready,
-    "--af-dot-lost": lost,
-    "--af-dot-dead": dead,
-    "--af-dot-archived": dead,
-    "--af-dot-limit": limit,
-    "--af-term-green": termGreen,
-    "--af-term-amber": termAmber,
-    "--af-term-blue": termBlue,
-    "--af-term-dim": text3,
-    "--af-shadow-1": `0 1px 2px ${rgba(effectBase, dark ? 0.4 : 0.08)}`,
-    "--af-shadow-2": `0 4px 10px ${rgba(effectBase, dark ? 0.45 : 0.12)}`,
-    "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
-    "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42)
-  };
-  const ansiDistinct = (color, avoid) => {
-    const normalized = color.toUpperCase();
-    const rejected = new Set(avoid.map((value) => value.toUpperCase()));
-    if (!rejected.has(normalized) && passes(normalized, [canvas], 4.5)) return normalized;
-    let best = normalized;
-    let bestDistance = -1;
-    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
-      for (let step = 1; step <= 255; step++) {
-        const candidate = mix(normalized, endpoint, step / 255);
-        if (rejected.has(candidate) || !passes(candidate, [canvas], 4.5)) continue;
-        const value = rgb(candidate);
-        const distance = Math.min(
-          ...avoid.map((occupied) => {
-            const other = rgb(occupied);
-            return value.reduce((sum, channel, index) => sum + (channel - other[index]) ** 2, 0);
-          })
-        );
-        if (distance > bestDistance) {
-          best = candidate;
-          bestDistance = distance;
-        }
-      }
-    }
-    return best;
-  };
-  const bright = (color) => ansiDistinct(color, [color]);
-  const ansiBlack = dark ? text3 : text;
-  const ansiWhite = ansiDistinct(dark ? text : text3, [ansiBlack]);
-  const brightBlack = ansiDistinct(ansiBlack, [ansiBlack, ansiWhite]);
-  const brightWhite = ansiDistinct(ansiWhite, [ansiWhite, ansiBlack, brightBlack]);
-  const xterm = {
-    background: tokens["--af-bg-term"],
-    foreground: text,
-    cursor: text,
-    cursorAccent: canvas,
-    selectionBackground: rgba(source.selection_background, selectionAlpha),
-    selectionForeground,
-    black: ansiBlack,
-    red: danger,
-    green: termGreen,
-    yellow: termAmber,
-    blue: termBlue,
-    magenta: termColor(source.purple, NORD_THEME.purple),
-    cyan: accent,
-    white: ansiWhite,
-    brightBlack,
-    brightRed: bright(danger),
-    brightGreen: bright(termGreen),
-    brightYellow: bright(termAmber),
-    brightBlue: bright(termBlue),
-    brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
-    brightCyan: bright(accent),
-    brightWhite
-  };
-  return { tokens, xterm };
-}
-var activeThemes = {
-  light: deriveTheme(NORD_THEME, "light"),
-  dark: deriveTheme(NORD_THEME, "dark")
-};
-function isChoice(value) {
-  return value === "auto" || value === "light" || value === "dark";
+function normalizeThemeChoice(value) {
+  return value === "light" || value === "dark" ? value : "system";
 }
 function readThemeChoice() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (isChoice(raw)) return raw;
+    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
   } catch {
+    return "system";
   }
-  return "auto";
 }
 function persistThemeChoice(choice) {
   try {
@@ -7078,55 +6733,40 @@ function persistThemeChoice(choice) {
   } catch {
   }
 }
-function prefersDark() {
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  } catch {
-    return false;
-  }
-}
 function currentMode() {
   const attr = document.documentElement.getAttribute("data-theme");
   if (attr === "light" || attr === "dark") return attr;
-  return prefersDark() ? "dark" : "light";
-}
-function applyCurrentMode() {
-  const root2 = document.documentElement;
-  for (const chrome of document.querySelectorAll("[data-af-theme], .af-recovery")) {
-    chrome.dataset.afTheme = currentMode();
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {
+    return "dark";
   }
-  for (const [name, value] of Object.entries(activeThemes[currentMode()].tokens)) root2.style.setProperty(name, value);
+}
+function surface(mode) {
+  const probe = document.createElement("span");
+  probe.dataset.afTheme = mode;
+  probe.hidden = true;
+  document.documentElement.append(probe);
+  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  probe.remove();
+  return color;
 }
 function themeColorMetaContents(choice) {
-  const light = activeThemes.light.tokens["--af-bg-surface"];
-  const dark = activeThemes.dark.tokens["--af-bg-surface"];
-  if (choice === "auto") return { light, dark };
-  const forced = choice === "dark" ? dark : light;
-  return { light: forced, dark: forced };
+  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
 }
-function syncThemeColorMeta(choice) {
-  const colors = themeColorMetaContents(choice);
+function refreshThemeMode() {
+  const mode = currentMode();
+  document.documentElement.dataset.afTheme = mode;
+  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
+  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
   for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
     meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
   }
 }
-function refreshThemeMode() {
-  applyCurrentMode();
-  syncThemeColorMeta(document.documentElement.hasAttribute("data-theme") ? currentMode() : "auto");
-}
-function applyDaemonTheme(theme) {
-  activeThemes = { light: deriveTheme(theme, "light"), dark: deriveTheme(theme, "dark") };
-  refreshThemeMode();
-}
-function resetDaemonTheme() {
-  applyDaemonTheme(NORD_THEME);
-}
 function stampTheme(choice) {
-  const root2 = document.documentElement;
-  if (choice === "auto") root2.removeAttribute("data-theme");
-  else root2.setAttribute("data-theme", choice);
-  applyCurrentMode();
-  syncThemeColorMeta(choice);
+  if (choice === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", choice);
+  refreshThemeMode();
 }
 function bootStampTheme() {
   const choice = readThemeChoice();
@@ -7134,7 +6774,7 @@ function bootStampTheme() {
   return choice;
 }
 function xtermTheme(mode) {
-  return activeThemes[mode].xterm;
+  return TERMINAL_ANSI[mode];
 }
 function currentXtermTheme() {
   return xtermTheme(currentMode());
@@ -7169,13 +6809,510 @@ function scopeRecovery(element) {
   return element;
 }
 
+// src/nav.ts
+var VIEWS = ["sessions", "tasks", "config"];
+function cycleView(current, delta) {
+  const i = VIEWS.indexOf(current);
+  const n = VIEWS.length;
+  return VIEWS[(i + delta + n) % n];
+}
+function nextSelection(orderedIds, selectedId, delta) {
+  if (orderedIds.length === 0) {
+    return null;
+  }
+  const cur = selectedId ? orderedIds.indexOf(selectedId) : -1;
+  let next;
+  if (cur === -1) {
+    next = delta > 0 ? 0 : orderedIds.length - 1;
+  } else {
+    next = Math.min(Math.max(cur + delta, 0), orderedIds.length - 1);
+  }
+  return orderedIds[next] ?? null;
+}
+function decideKey(key, ctx, mods = {}) {
+  if (ctx.modalOpen) {
+    return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
+  }
+  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
+    if (ctx.view !== "sessions" || !ctx.selectedId) {
+      return { kind: "none" };
+    }
+    if (key === "j") {
+      return { kind: "cyclePane", delta: 1 };
+    }
+    if (key === "k") {
+      return { kind: "cyclePane", delta: -1 };
+    }
+    return { kind: "closePane" };
+  }
+  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
+    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
+  }
+  if (ctx.focus === "terminal") {
+    return { kind: "none" };
+  }
+  if (key === "[") {
+    return { kind: "switchView", view: cycleView(ctx.view, -1) };
+  }
+  if (key === "]") {
+    return { kind: "switchView", view: cycleView(ctx.view, 1) };
+  }
+  if (ctx.view !== "sessions") {
+    return { kind: "none" };
+  }
+  if (key === "Enter") {
+    return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
+  }
+  if (ctx.selectedId) {
+    if (key.length === 1 && key >= "1" && key <= "9") {
+      const index = key.charCodeAt(0) - "1".charCodeAt(0);
+      if (index < ctx.tabCount && index !== ctx.activeTab) {
+        return { kind: "switchTab", index };
+      }
+      return { kind: "none" };
+    }
+    if (key === "t") {
+      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
+    }
+    if (key === "w") {
+      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
+    }
+  }
+  let delta;
+  if (key === "ArrowDown" || key === "j") {
+    delta = 1;
+  } else if (key === "ArrowUp" || key === "k") {
+    delta = -1;
+  } else {
+    return { kind: "none" };
+  }
+  const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
+  return next ? { kind: "select", id: next } : { kind: "none" };
+}
+
+// node_modules/lucide/dist/esm/icons/archive-restore.mjs
+var ArchiveRestore = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
+  ["path", { d: "M20 8v11a2 2 0 0 1-2 2h-2" }],
+  ["path", { d: "m9 15 3-3 3 3" }],
+  ["path", { d: "M12 12v9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/archive.mjs
+var Archive = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
+  ["path", { d: "M10 12h4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/arrow-right.mjs
+var ArrowRight = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "m12 5 7 7-7 7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/bot.mjs
+var Bot = [
+  ["path", { d: "M12 8V4H8" }],
+  ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
+  ["path", { d: "M2 14h2" }],
+  ["path", { d: "M20 14h2" }],
+  ["path", { d: "M15 13v2" }],
+  ["path", { d: "M9 13v2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/check.mjs
+var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
+
+// node_modules/lucide/dist/esm/icons/chevron-down.mjs
+var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
+
+// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
+var CircleDashed = [
+  ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
+  ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
+  ["path", { d: "M17.609 3.721a10 10 0 0 1 2.69 2.7" }],
+  ["path", { d: "M2.182 13.9a10 10 0 0 1 0-3.8" }],
+  ["path", { d: "M20.279 17.609a10 10 0 0 1-2.7 2.69" }],
+  ["path", { d: "M21.818 10.1a10 10 0 0 1 0 3.8" }],
+  ["path", { d: "M3.721 6.391a10 10 0 0 1 2.7-2.69" }],
+  ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
+var CircleQuestionMark = [
+  ["circle", { cx: "12", cy: "12", r: "10" }],
+  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
+// node_modules/lucide/dist/esm/icons/circle.mjs
+var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
+
+// node_modules/lucide/dist/esm/icons/diamond.mjs
+var Diamond = [
+  [
+    "path",
+    {
+      d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/ellipsis.mjs
+var Ellipsis = [
+  ["circle", { cx: "12", cy: "12", r: "1" }],
+  ["circle", { cx: "19", cy: "12", r: "1" }],
+  ["circle", { cx: "5", cy: "12", r: "1" }]
+];
+
+// node_modules/lucide/dist/esm/icons/external-link.mjs
+var ExternalLink = [
+  ["path", { d: "M15 3h6v6" }],
+  ["path", { d: "M10 14 21 3" }],
+  ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
+var FolderGit2 = [
+  ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
+  [
+    "path",
+    {
+      d: "M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"
+    }
+  ],
+  ["circle", { cx: "13", cy: "12", r: "2" }],
+  ["circle", { cx: "20", cy: "19", r: "2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder.mjs
+var Folder = [
+  [
+    "path",
+    {
+      d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/funnel.mjs
+var Funnel = [
+  [
+    "path",
+    {
+      d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/git-branch.mjs
+var GitBranch = [
+  ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
+  ["circle", { cx: "18", cy: "6", r: "3" }],
+  ["circle", { cx: "6", cy: "18", r: "3" }]
+];
+
+// node_modules/lucide/dist/esm/icons/link.mjs
+var Link = [
+  ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
+  ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
+];
+
+// node_modules/lucide/dist/esm/icons/menu.mjs
+var Menu = [
+  ["path", { d: "M4 5h16" }],
+  ["path", { d: "M4 12h16" }],
+  ["path", { d: "M4 19h16" }]
+];
+
+// node_modules/lucide/dist/esm/icons/octagon-x.mjs
+var OctagonX = [
+  ["path", { d: "m15 9-6 6" }],
+  [
+    "path",
+    {
+      d: "M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"
+    }
+  ],
+  ["path", { d: "m9 9 6 6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
+var PanelsTopLeft = [
+  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
+  ["path", { d: "M3 9h18" }],
+  ["path", { d: "M9 21V9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/plus.mjs
+var Plus = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "M12 5v14" }]
+];
+
+// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
+var RefreshCw = [
+  ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
+  ["path", { d: "M21 3v5h-5" }],
+  ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
+  ["path", { d: "M8 16H3v5" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square-check-big.mjs
+var SquareCheckBig = [
+  ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
+  ["path", { d: "m9 11 3 3L22 4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square.mjs
+var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
+
+// node_modules/lucide/dist/esm/icons/terminal.mjs
+var Terminal = [
+  ["path", { d: "M12 19h8" }],
+  ["path", { d: "m4 17 6-6-6-6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
+var TriangleAlert = [
+  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
+  ["path", { d: "M12 9v4" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
+// node_modules/lucide/dist/esm/icons/x.mjs
+var X = [
+  ["path", { d: "M18 6 6 18" }],
+  ["path", { d: "m6 6 12 12" }]
+];
+
+// src/icon.ts
+var ICONS = {
+  archive: Archive,
+  "archive-restore": ArchiveRestore,
+  "arrow-right": ArrowRight,
+  bot: Bot,
+  check: Check,
+  "chevron-down": ChevronDown,
+  circle: Circle,
+  "circle-dashed": CircleDashed,
+  "circle-question": CircleQuestionMark,
+  diamond: Diamond,
+  ellipsis: Ellipsis,
+  "external-link": ExternalLink,
+  folder: Folder,
+  "folder-git": FolderGit2,
+  funnel: Funnel,
+  "git-branch": GitBranch,
+  link: Link,
+  menu: Menu,
+  "octagon-x": OctagonX,
+  panels: PanelsTopLeft,
+  plus: Plus,
+  reload: RefreshCw,
+  square: Square,
+  "square-check": SquareCheckBig,
+  terminal: Terminal,
+  "triangle-alert": TriangleAlert,
+  x: X
+};
+function icon(name, className = "") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", `af-icon${className ? ` ${className}` : ""}`);
+  svg.setAttribute("data-icon", name);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const [tag, attrs] of ICONS[name]) {
+    const child = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [attr, value] of Object.entries(attrs)) {
+      child.setAttribute(attr, String(value));
+    }
+    svg.append(child);
+  }
+  return svg;
+}
+
+// src/components.ts
+function actionsDisclosure(label = "Session actions") {
+  const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "\u2026"));
+  trigger.setAttribute("aria-label", label);
+  trigger.setAttribute("aria-expanded", "false");
+  const panel = h("div", { class: "af-term-menu", role: "group" });
+  panel.setAttribute("aria-label", label);
+  panel.hidden = true;
+  const el2 = h("div", { class: "af-term-more-wrap" }, trigger, panel);
+  const outside = (event) => {
+    if (!el2.contains(event.target)) close();
+  };
+  const close = (restoreFocus = false) => {
+    panel.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("mousedown", outside);
+    if (restoreFocus) trigger.focus();
+  };
+  const open = () => {
+    panel.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    document.addEventListener("mousedown", outside);
+  };
+  trigger.addEventListener("click", () => panel.hidden ? open() : close());
+  el2.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !panel.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+    }
+  });
+  return { el: el2, panel, trigger, open, close, dispose: close };
+}
+function terminalChrome(opts) {
+  const menu = actionsDisclosure();
+  const action = (label, className, run) => {
+    const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
+    button.addEventListener("click", () => {
+      menu.close();
+      run();
+    });
+    return button;
+  };
+  const title = h("span", { class: "af-term-title" }, opts.title);
+  const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
+  const tabs = h("div", { class: "af-tabbar", role: "tablist" });
+  tabs.setAttribute("aria-label", "Session tabs");
+  const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
+  pr.hidden = true;
+  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
+  keyboard.hidden = true;
+  const actions2 = h("div", { class: "af-term-actions" });
+  actions2.hidden = true;
+  const retry = action("Retry", "", opts.retry);
+  retry.title = "Resume this session from its usage-limit wall";
+  const handoff = action("Handoff", "", opts.handoff);
+  handoff.title = "Continue this session under a different agent";
+  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
+  copy.title = "Copy link";
+  copy.setAttribute("aria-label", "Copy link");
+  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
+  desktopCopy.append(icon("link"));
+  desktopCopy.title = "Copy link";
+  desktopCopy.setAttribute("aria-label", "Copy link");
+  const newTabSlot = h("div", { class: "af-term-new-slot" });
+  menu.panel.append(newTabSlot, copy, handoff, actions2);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
+  return { head, title, tabs, pr, keyboard, retry, handoff, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+}
+function paneChrome(onClose) {
+  const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
+  const label = h("span", { class: "af-pane-label" });
+  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
+  const close = h("button", { type: "button", class: "af-pane-close", title: "Close pane" }, icon("x"));
+  close.setAttribute("aria-label", "Close pane");
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClose();
+  });
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+}
+function terminalSurface(container, palette) {
+  const style = getComputedStyle(container);
+  const token2 = (name) => style.getPropertyValue(name).trim();
+  return {
+    ...palette,
+    background: token2("--af-surface"),
+    foreground: token2("--af-ink"),
+    cursor: token2("--af-ink"),
+    cursorAccent: token2("--af-surface"),
+    selectionBackground: token2("--af-surface-raised"),
+    selectionForeground: token2("--af-ink")
+  };
+}
+function viewNavigation(onSelect) {
+  const el2 = h("div", { class: "af-viewnav", role: "tablist" });
+  el2.setAttribute("aria-label", "Views");
+  const tabs = /* @__PURE__ */ new Map();
+  const labels = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
+  for (const view of VIEWS) {
+    const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
+    tab.dataset.view = view;
+    tab.addEventListener("click", () => onSelect(view));
+    tabs.set(view, tab);
+    el2.append(tab);
+  }
+  return { el: el2, tabs };
+}
+function modalChrome(opts) {
+  const body = h("div", { class: "af-modal-body" });
+  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
+  errorLine.hidden = true;
+  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
+  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
+  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
+  const card = h(
+    "div",
+    { class: "af-modal-card", role: "dialog" },
+    h("h2", { class: "af-modal-title" }, opts.title),
+    body,
+    errorLine,
+    footer
+  );
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-label", opts.title);
+  card.tabIndex = -1;
+  card.addEventListener("click", (e) => e.stopPropagation());
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  cancelBtn.addEventListener("click", () => opts.onCancel());
+  const handle = {
+    el: backdrop,
+    setBusy(busy) {
+      confirmBtn.disabled = busy;
+      cancelBtn.disabled = busy;
+      card.classList.toggle("af-modal-busy", busy);
+    },
+    setError(msg) {
+      if (msg) {
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
+        errorLine.hidden = false;
+      } else {
+        errorLine.textContent = "";
+        errorLine.hidden = true;
+      }
+    },
+    close() {
+      backdrop.remove();
+    }
+  };
+  return { handle, body, confirmBtn, cancelBtn, errorLine };
+}
+function field(label, control) {
+  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
+}
+function defaultsDisclosure() {
+  const summaryText = h("span", { class: "af-defaults-summary" });
+  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Edit defaults \xB7"), " ", summaryText);
+  const body = h("div", { class: "af-defaults-body" });
+  const el2 = h("details", { class: "af-defaults" }, summary, body);
+  const setSummary = (fragments) => {
+    summaryText.replaceChildren(...fragments.flatMap((fragment, index) => [h("span", { class: "af-defaults-fragment" }, `${fragment}${index < fragments.length - 1 ? " \xB7" : ""}`), " "]));
+  };
+  return { el: el2, body, setSummary };
+}
+
 // src/accounts.ts
 function emptyAccountsState() {
   return { entries: [], agents: [], error: "", status: null, loaded: false };
 }
 var ACCOUNT_INPUT_ATTR = "data-account-input";
 var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential. Signing in is a device code \xB7 the pane prints a URL, you finish it in your own browser.";
-function renderAccountsSection(state, actions2) {
+function renderAccountsSection(state, actions2, registration = { open: false, agent: "" }) {
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
   if (state.loaded === false && !state.error) {
@@ -7208,21 +7345,43 @@ function renderAccountsSection(state, actions2) {
   const list = h("div", { class: "af-accounts-list" });
   for (const agent of state.agents) {
     const mine = state.entries.filter((e) => e.agent === agent);
-    list.append(h("div", { class: "af-accounts-agent" }, agent));
+    if (mine.length) list.append(h("div", { class: "af-accounts-agent" }, agent));
     for (const entry of mine) {
       list.append(renderAccountRow(entry, state.status, actions2));
     }
-    list.append(renderRegisterRow(agent, state.status, actions2));
   }
-  if (state.entries.length === 0) {
-    list.hidden = true;
+  const add = h("details", { class: "af-account-disclosure" });
+  add.open = registration.open;
+  add.addEventListener("toggle", () => {
+    registration.open = add.open;
+  });
+  const agentSelect = h("select", { class: "af-input" });
+  agentSelect.setAttribute("aria-label", "Account agent");
+  for (const agent of state.agents) agentSelect.append(h("option", { value: agent }, agent));
+  agentSelect.value = state.agents.includes(registration.agent) ? registration.agent : state.agents[0];
+  registration.agent = agentSelect.value;
+  const forms = state.agents.map((agent) => renderRegisterRow(agent, state.status, actions2));
+  const sync = () => {
+    registration.agent = agentSelect.value;
+    forms.forEach((form, i) => {
+      form.hidden = state.agents[i] !== registration.agent;
+    });
+  };
+  agentSelect.addEventListener("change", sync);
+  sync();
+  add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
+  section.append(list, add);
+  if (state.entries.length === 0 && !registration.open) {
+    add.hidden = true;
     const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
       empty.remove();
-      list.hidden = false;
-      list.querySelector("input")?.focus();
+      add.hidden = false;
+      add.open = true;
+      registration.open = true;
+      add.querySelector(".af-accounts-register:not([hidden]) input")?.focus();
     } });
-    section.replaceChildren(empty, list);
-  } else section.append(list);
+    section.prepend(empty);
+  }
   return section;
 }
 function renderAccountRow(entry, status, actions2) {
@@ -7275,7 +7434,6 @@ function renderRegisterRow(agent, status, actions2) {
       return;
     }
     actions2.register(agent, name);
-    input.value = "";
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -7285,7 +7443,7 @@ function renderRegisterRow(agent, status, actions2) {
   });
   const button = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
   button.addEventListener("click", submit);
-  row.append(h("div", { class: "af-accounts-label" }, input), button);
+  row.append(h("div", { class: "af-accounts-label" }, field("Name", input)), button);
   appendStatus(row, status, agent, "");
   return row;
 }
@@ -7374,6 +7532,7 @@ var ConfigPane = class {
   }
   el;
   entries = [];
+  registration = { open: false, agent: "" };
   path = "";
   status = null;
   /** The Accounts section's data (#3385). It is rendered by this view but is not
@@ -7398,10 +7557,15 @@ var ConfigPane = class {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
+    if (registrationSucceeded) {
+      const submitted = this.accountInput(accounts.status.agent);
+      if (submitted) submitted.value = "";
+    }
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
-    this.entries = entries;
+    this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
@@ -7428,9 +7592,10 @@ var ConfigPane = class {
    * that drops its own focus cannot be operated twice from the keyboard.
    */
   rerenderKeepingUserState() {
-    const accountsOpen = !!this.el.querySelector(".af-accounts-list:not([hidden])");
     const active = document.activeElement;
     const accountDrafts = this.readAccountDrafts();
+    const accountAgentFocused = active?.getAttribute("aria-label") === "Account agent";
+    const accountSummaryFocused = active === this.el.querySelector(".af-account-disclosure summary");
     const focusedAccount = active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
     const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement ? { start: active.selectionStart, end: active.selectionEnd } : null;
     const wasEditing = this.editingInput !== null && active === this.editingInput;
@@ -7439,11 +7604,6 @@ var ConfigPane = class {
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreAccountDrafts(accountDrafts);
-    if (accountsOpen) {
-      const list = this.el.querySelector(".af-accounts-list");
-      if (list) list.hidden = false;
-      this.el.querySelector(".af-accounts > .af-recovery")?.remove();
-    }
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -7451,6 +7611,10 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (accountAgentFocused) {
+      this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
+    } else if (accountSummaryFocused) {
+      this.el.querySelector(".af-account-disclosure summary")?.focus({ preventScroll: true });
     } else if (focusedAccount !== null) {
       const field2 = this.accountInput(focusedAccount);
       field2?.focus({ preventScroll: true });
@@ -7496,7 +7660,7 @@ var ConfigPane = class {
       h("span", { class: "af-view-count" }, String(this.entries.length))
     );
     if (this.path !== "") {
-      head.append(h("span", { class: "af-config-path" }, this.path));
+      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} \xB7 ${this.path}`));
     }
     const assistantBtn = h(
       "button",
@@ -7512,7 +7676,7 @@ var ConfigPane = class {
         continue;
       }
       const folded = tier === TIER_ADVANCED && !this.showAdvanced;
-      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name));
+      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name.charAt(0).toUpperCase() + name.slice(1)));
       if (tier === TIER_ADVANCED) {
         const toggle = h(
           "button",
@@ -7544,7 +7708,7 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts)
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
     );
   }
   /** One key: its name, purpose, control, and — when it is the row just written
@@ -7609,6 +7773,7 @@ var ConfigPane = class {
     }
     input.setAttribute("aria-label", e.key);
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
     const commit = () => {
       if (!canCommit(input.value, e.value)) {
         return;
@@ -7617,6 +7782,7 @@ var ConfigPane = class {
     };
     const syncSave = () => {
       save.disabled = !canCommit(input.value, e.value);
+      dirty.hidden = save.disabled;
     };
     input.addEventListener("input", () => {
       this.editing = e.key;
@@ -7631,7 +7797,7 @@ var ConfigPane = class {
     });
     save.addEventListener("click", commit);
     syncSave();
-    return h("div", { class: "af-config-control" }, input, save);
+    return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 };
 
@@ -8244,490 +8410,6 @@ function wrappedCellPosition(index, cols) {
 }
 function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
-}
-
-// src/nav.ts
-var VIEWS = ["sessions", "tasks", "config"];
-function cycleView(current, delta) {
-  const i = VIEWS.indexOf(current);
-  const n = VIEWS.length;
-  return VIEWS[(i + delta + n) % n];
-}
-function nextSelection(orderedIds, selectedId, delta) {
-  if (orderedIds.length === 0) {
-    return null;
-  }
-  const cur = selectedId ? orderedIds.indexOf(selectedId) : -1;
-  let next;
-  if (cur === -1) {
-    next = delta > 0 ? 0 : orderedIds.length - 1;
-  } else {
-    next = Math.min(Math.max(cur + delta, 0), orderedIds.length - 1);
-  }
-  return orderedIds[next] ?? null;
-}
-function decideKey(key, ctx, mods = {}) {
-  if (ctx.modalOpen) {
-    return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
-  }
-  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
-    if (ctx.view !== "sessions" || !ctx.selectedId) {
-      return { kind: "none" };
-    }
-    if (key === "j") {
-      return { kind: "cyclePane", delta: 1 };
-    }
-    if (key === "k") {
-      return { kind: "cyclePane", delta: -1 };
-    }
-    return { kind: "closePane" };
-  }
-  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
-    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
-  }
-  if (ctx.focus === "terminal") {
-    return { kind: "none" };
-  }
-  if (key === "[") {
-    return { kind: "switchView", view: cycleView(ctx.view, -1) };
-  }
-  if (key === "]") {
-    return { kind: "switchView", view: cycleView(ctx.view, 1) };
-  }
-  if (ctx.view !== "sessions") {
-    return { kind: "none" };
-  }
-  if (key === "Enter") {
-    return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
-  }
-  if (ctx.selectedId) {
-    if (key.length === 1 && key >= "1" && key <= "9") {
-      const index = key.charCodeAt(0) - "1".charCodeAt(0);
-      if (index < ctx.tabCount && index !== ctx.activeTab) {
-        return { kind: "switchTab", index };
-      }
-      return { kind: "none" };
-    }
-    if (key === "t") {
-      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
-    }
-    if (key === "w") {
-      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
-    }
-  }
-  let delta;
-  if (key === "ArrowDown" || key === "j") {
-    delta = 1;
-  } else if (key === "ArrowUp" || key === "k") {
-    delta = -1;
-  } else {
-    return { kind: "none" };
-  }
-  const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
-  return next ? { kind: "select", id: next } : { kind: "none" };
-}
-
-// node_modules/lucide/dist/esm/icons/archive-restore.mjs
-var ArchiveRestore = [
-  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
-  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
-  ["path", { d: "M20 8v11a2 2 0 0 1-2 2h-2" }],
-  ["path", { d: "m9 15 3-3 3 3" }],
-  ["path", { d: "M12 12v9" }]
-];
-
-// node_modules/lucide/dist/esm/icons/archive.mjs
-var Archive = [
-  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
-  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
-  ["path", { d: "M10 12h4" }]
-];
-
-// node_modules/lucide/dist/esm/icons/arrow-right.mjs
-var ArrowRight = [
-  ["path", { d: "M5 12h14" }],
-  ["path", { d: "m12 5 7 7-7 7" }]
-];
-
-// node_modules/lucide/dist/esm/icons/bot.mjs
-var Bot = [
-  ["path", { d: "M12 8V4H8" }],
-  ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
-  ["path", { d: "M2 14h2" }],
-  ["path", { d: "M20 14h2" }],
-  ["path", { d: "M15 13v2" }],
-  ["path", { d: "M9 13v2" }]
-];
-
-// node_modules/lucide/dist/esm/icons/check.mjs
-var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
-
-// node_modules/lucide/dist/esm/icons/chevron-down.mjs
-var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
-
-// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
-var CircleDashed = [
-  ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
-  ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
-  ["path", { d: "M17.609 3.721a10 10 0 0 1 2.69 2.7" }],
-  ["path", { d: "M2.182 13.9a10 10 0 0 1 0-3.8" }],
-  ["path", { d: "M20.279 17.609a10 10 0 0 1-2.7 2.69" }],
-  ["path", { d: "M21.818 10.1a10 10 0 0 1 0 3.8" }],
-  ["path", { d: "M3.721 6.391a10 10 0 0 1 2.7-2.69" }],
-  ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
-];
-
-// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
-var CircleQuestionMark = [
-  ["circle", { cx: "12", cy: "12", r: "10" }],
-  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
-  ["path", { d: "M12 17h.01" }]
-];
-
-// node_modules/lucide/dist/esm/icons/circle.mjs
-var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
-
-// node_modules/lucide/dist/esm/icons/diamond.mjs
-var Diamond = [
-  [
-    "path",
-    {
-      d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/ellipsis.mjs
-var Ellipsis = [
-  ["circle", { cx: "12", cy: "12", r: "1" }],
-  ["circle", { cx: "19", cy: "12", r: "1" }],
-  ["circle", { cx: "5", cy: "12", r: "1" }]
-];
-
-// node_modules/lucide/dist/esm/icons/external-link.mjs
-var ExternalLink = [
-  ["path", { d: "M15 3h6v6" }],
-  ["path", { d: "M10 14 21 3" }],
-  ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
-var FolderGit2 = [
-  ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
-  [
-    "path",
-    {
-      d: "M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"
-    }
-  ],
-  ["circle", { cx: "13", cy: "12", r: "2" }],
-  ["circle", { cx: "20", cy: "19", r: "2" }]
-];
-
-// node_modules/lucide/dist/esm/icons/folder.mjs
-var Folder = [
-  [
-    "path",
-    {
-      d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/funnel.mjs
-var Funnel = [
-  [
-    "path",
-    {
-      d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/git-branch.mjs
-var GitBranch = [
-  ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
-  ["circle", { cx: "18", cy: "6", r: "3" }],
-  ["circle", { cx: "6", cy: "18", r: "3" }]
-];
-
-// node_modules/lucide/dist/esm/icons/link.mjs
-var Link = [
-  ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
-  ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
-];
-
-// node_modules/lucide/dist/esm/icons/menu.mjs
-var Menu = [
-  ["path", { d: "M4 5h16" }],
-  ["path", { d: "M4 12h16" }],
-  ["path", { d: "M4 19h16" }]
-];
-
-// node_modules/lucide/dist/esm/icons/octagon-x.mjs
-var OctagonX = [
-  ["path", { d: "m15 9-6 6" }],
-  [
-    "path",
-    {
-      d: "M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"
-    }
-  ],
-  ["path", { d: "m9 9 6 6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
-var PanelsTopLeft = [
-  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
-  ["path", { d: "M3 9h18" }],
-  ["path", { d: "M9 21V9" }]
-];
-
-// node_modules/lucide/dist/esm/icons/plus.mjs
-var Plus = [
-  ["path", { d: "M5 12h14" }],
-  ["path", { d: "M12 5v14" }]
-];
-
-// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
-var RefreshCw = [
-  ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
-  ["path", { d: "M21 3v5h-5" }],
-  ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
-  ["path", { d: "M8 16H3v5" }]
-];
-
-// node_modules/lucide/dist/esm/icons/square-check-big.mjs
-var SquareCheckBig = [
-  ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
-  ["path", { d: "m9 11 3 3L22 4" }]
-];
-
-// node_modules/lucide/dist/esm/icons/square.mjs
-var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
-
-// node_modules/lucide/dist/esm/icons/terminal.mjs
-var Terminal = [
-  ["path", { d: "M12 19h8" }],
-  ["path", { d: "m4 17 6-6-6-6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
-var TriangleAlert = [
-  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
-  ["path", { d: "M12 9v4" }],
-  ["path", { d: "M12 17h.01" }]
-];
-
-// node_modules/lucide/dist/esm/icons/x.mjs
-var X = [
-  ["path", { d: "M18 6 6 18" }],
-  ["path", { d: "m6 6 12 12" }]
-];
-
-// src/icon.ts
-var ICONS = {
-  archive: Archive,
-  "archive-restore": ArchiveRestore,
-  "arrow-right": ArrowRight,
-  bot: Bot,
-  check: Check,
-  "chevron-down": ChevronDown,
-  circle: Circle,
-  "circle-dashed": CircleDashed,
-  "circle-question": CircleQuestionMark,
-  diamond: Diamond,
-  ellipsis: Ellipsis,
-  "external-link": ExternalLink,
-  folder: Folder,
-  "folder-git": FolderGit2,
-  funnel: Funnel,
-  "git-branch": GitBranch,
-  link: Link,
-  menu: Menu,
-  "octagon-x": OctagonX,
-  panels: PanelsTopLeft,
-  plus: Plus,
-  reload: RefreshCw,
-  square: Square,
-  "square-check": SquareCheckBig,
-  terminal: Terminal,
-  "triangle-alert": TriangleAlert,
-  x: X
-};
-function icon(name, className = "") {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", `af-icon${className ? ` ${className}` : ""}`);
-  svg.setAttribute("data-icon", name);
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "2");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("focusable", "false");
-  for (const [tag, attrs] of ICONS[name]) {
-    const child = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (const [attr, value] of Object.entries(attrs)) {
-      child.setAttribute(attr, String(value));
-    }
-    svg.append(child);
-  }
-  return svg;
-}
-
-// src/components.ts
-function actionsDisclosure() {
-  const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "\u2026"));
-  trigger.setAttribute("aria-label", "Session actions");
-  trigger.setAttribute("aria-expanded", "false");
-  const panel = h("div", { class: "af-term-menu", role: "group" });
-  panel.setAttribute("aria-label", "Session actions");
-  panel.hidden = true;
-  const el2 = h("div", { class: "af-term-more-wrap" }, trigger, panel);
-  const outside = (event) => {
-    if (!el2.contains(event.target)) close();
-  };
-  const close = (restoreFocus = false) => {
-    panel.hidden = true;
-    trigger.setAttribute("aria-expanded", "false");
-    document.removeEventListener("mousedown", outside);
-    if (restoreFocus) trigger.focus();
-  };
-  trigger.addEventListener("click", () => {
-    if (!panel.hidden) return close();
-    panel.hidden = false;
-    trigger.setAttribute("aria-expanded", "true");
-    document.addEventListener("mousedown", outside);
-  });
-  el2.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !panel.hidden) {
-      event.preventDefault();
-      event.stopPropagation();
-      close(true);
-    }
-  });
-  return { el: el2, panel, trigger, close, dispose: close };
-}
-function terminalChrome(opts) {
-  const menu = actionsDisclosure();
-  const action = (label, className, run) => {
-    const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
-    button.addEventListener("click", () => {
-      menu.close();
-      run();
-    });
-    return button;
-  };
-  const title = h("span", { class: "af-term-title" }, opts.title);
-  const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
-  const tabs = h("div", { class: "af-tabbar", role: "tablist" });
-  tabs.setAttribute("aria-label", "Session tabs");
-  const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-  pr.hidden = true;
-  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
-  keyboard.hidden = true;
-  const actions2 = h("div", { class: "af-term-actions" });
-  actions2.hidden = true;
-  const retry = action("Retry", "", opts.retry);
-  retry.title = "Resume this session from its usage-limit wall";
-  const handoff = action("Handoff", "", opts.handoff);
-  handoff.title = "Continue this session under a different agent";
-  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
-  copy.title = "Copy link";
-  copy.setAttribute("aria-label", "Copy link");
-  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
-  desktopCopy.append(icon("link"));
-  desktopCopy.title = "Copy link";
-  desktopCopy.setAttribute("aria-label", "Copy link");
-  const newTabSlot = h("div", { class: "af-term-new-slot" });
-  menu.panel.append(newTabSlot, copy, handoff);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, actions2, menu.el);
-  return { head, title, tabs, pr, keyboard, retry, handoff, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
-}
-function paneChrome(onClose) {
-  const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
-  const label = h("span", { class: "af-pane-label" });
-  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
-  const close = h("button", { type: "button", class: "af-pane-close", title: "Close pane" }, icon("x"));
-  close.setAttribute("aria-label", "Close pane");
-  close.addEventListener("click", (event) => {
-    event.stopPropagation();
-    onClose();
-  });
-  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
-}
-function terminalSurface(container, palette) {
-  if (!container.closest(".af-main-term[data-af-theme]")) return palette;
-  const style = getComputedStyle(container);
-  const token2 = (name) => style.getPropertyValue(name).trim();
-  return {
-    ...palette,
-    background: token2("--af-surface"),
-    foreground: token2("--af-ink"),
-    cursor: token2("--af-ink"),
-    cursorAccent: token2("--af-surface"),
-    selectionBackground: token2("--af-surface-raised")
-  };
-}
-function viewNavigation(onSelect) {
-  const el2 = h("div", { class: "af-viewnav", role: "tablist" });
-  el2.setAttribute("aria-label", "Views");
-  const tabs = /* @__PURE__ */ new Map();
-  const labels = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
-  for (const view of VIEWS) {
-    const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
-    tab.dataset.view = view;
-    tab.addEventListener("click", () => onSelect(view));
-    tabs.set(view, tab);
-    el2.append(tab);
-  }
-  return { el: el2, tabs };
-}
-function modalChrome(opts) {
-  const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
-  errorLine.hidden = true;
-  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
-  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
-  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
-  const card = h(
-    "div",
-    { class: "af-modal-card", role: "dialog" },
-    h("h2", { class: "af-modal-title" }, opts.title),
-    body,
-    errorLine,
-    footer
-  );
-  card.setAttribute("aria-modal", "true");
-  card.setAttribute("aria-label", opts.title);
-  card.tabIndex = -1;
-  card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
-  cancelBtn.addEventListener("click", () => opts.onCancel());
-  const handle = {
-    el: backdrop,
-    setBusy(busy) {
-      confirmBtn.disabled = busy;
-      cancelBtn.disabled = busy;
-      card.classList.toggle("af-modal-busy", busy);
-    },
-    setError(msg) {
-      if (msg) {
-        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
-        errorLine.hidden = false;
-      } else {
-        errorLine.textContent = "";
-        errorLine.hidden = true;
-      }
-    },
-    close() {
-      backdrop.remove();
-    }
-  };
-  return { handle, body, confirmBtn, cancelBtn, errorLine };
 }
 
 // src/terminal.ts
@@ -10139,9 +9821,6 @@ function openConfigAssistant(opts) {
 }
 
 // src/events.ts
-function eventRequestsPaletteRefresh(event) {
-  return event.type === "theme.changed";
-}
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
 function wsScheme2() {
@@ -10536,12 +10215,12 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let programs = programChoices(null);
   const backendSelect = h("select", { class: "af-input" });
   backendSelect.setAttribute("aria-label", "Backend");
-  const backendHint = h("p", { class: "af-modal-hint" });
+  const backendHint = h("p", { class: "af-modal-hint af-backend-hint" });
   backendHint.setAttribute("role", "status");
   let choices = backendChoices(null);
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "Account");
-  const accountHint = h("p", { class: "af-modal-hint" });
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
   accountHint.setAttribute("role", "status");
   let accounts = null;
   let programCatalog = null;
@@ -10549,9 +10228,28 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let accountAgent = "";
   let accountPicked = false;
   let busy = false;
+  const defaults = defaultsDisclosure();
+  const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
+  const accountSlot = h("div", { class: "af-defaults-account-slot" });
   const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace("Ambient identity (the agent's own login)", "ambient");
+    const accountNeedsChoice = !!accountHint.textContent || accountPicked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent);
+    defaults.setSummary([
+      `Program: ${choiceLabel(programSelect)}`,
+      `Backend: ${choiceLabel(backendSelect)}`,
+      ...accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`]
+    ]);
+    const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
+    if (accountBlock.parentElement !== accountParent) {
+      const focused = document.activeElement;
+      const ownsFocus = !!focused && accountBlock.contains(focused);
+      accountParent.append(accountBlock);
+      if (ownsFocus) focused.focus();
+    }
+    accountSlot.hidden = !accountNeedsChoice;
+    if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
     confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value);
   };
   const chromeSetBusy = handle.setBusy.bind(handle);
@@ -10658,16 +10356,13 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
-  body.append(
-    field("Title", titleInput),
-    field("Project", projectSelect),
+  defaults.body.append(
     field("Program", programSelect),
     field("Backend", backendSelect),
     backendHint,
-    field("Account", accountSelect),
-    accountHint,
-    field("Prompt", promptArea)
+    accountBlock
   );
+  body.append(field("Title", titleInput), field("Project", projectSelect), field("Prompt", promptArea), accountSlot, defaults.el);
   renderPrograms();
   renderChoices();
   renderAccounts();
@@ -10761,7 +10456,7 @@ function confirmModal(opts) {
     kill: {
       title: `Kill ${opts.sessionTitle}?`,
       confirmLabel: "Kill",
-      confirmClass: "af-danger",
+      confirmClass: "af-primary",
       body: "This permanently destroys the session and prunes its branch. This can't be undone."
     },
     archive: {
@@ -10783,7 +10478,7 @@ function confirmModal(opts) {
     confirmClass: copy.confirmClass,
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, copy.body));
+  body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     handle.setError(null);
@@ -10796,7 +10491,7 @@ function confirmDeleteProjectModal(opts) {
   const { handle, body } = modalChrome({
     title: `Delete project ${opts.projectLabel}?`,
     confirmLabel: "Delete project",
-    confirmClass: "af-danger",
+    confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
   const message = opts.sessionCount === 0 ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched \u2014 you can add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`;
@@ -10872,14 +10567,17 @@ function addProjectModal(callbacks) {
   });
   return handle;
 }
-function field(label, control) {
-  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
-}
 function projectLabel(root2) {
   const parts = root2.replace(/\/+$/, "").split("/");
   const base = parts[parts.length - 1] || root2;
   const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
   return parent ? `${base}  (${parent}/${base})` : base;
+}
+function removeTaskModal(name, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "This deletes the task and stops future runs. Existing sessions are kept."));
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
 }
 
 // src/install.ts
@@ -11007,6 +10705,26 @@ var Status = {
   Archived: 6
 };
 
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 // src/status.ts
 var OPERATOR_KIND_LABELS = {
   "needs-you": "Needs you",
@@ -11059,14 +10777,7 @@ function idleReasonLabel(reason) {
   return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
 }
 function formatPaneChurnAge(churn, now) {
-  const ageMs = Math.max(0, now.getTime() - churn.getTime());
-  const minute = 6e4;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (ageMs < minute) return "<1m";
-  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
-  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
-  return `${Math.floor(ageMs / day)}d`;
+  return formatDuration(now.getTime() - churn.getTime());
 }
 var READY_ICON = "circle";
 var DEAD_ICON = "circle";
@@ -13314,9 +13025,9 @@ function taskHealthSummary(t) {
   }
   return t.unassessable ? "Health unknown" : "";
 }
-function taskArmingSummary(t) {
+function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   if (t.next_run_at) {
-    return `next run ${t.next_run_at}`;
+    return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   return "";
 }
@@ -13327,6 +13038,7 @@ var TasksPane = class {
     this.el.setAttribute("aria-label", "Tasks");
   }
   el;
+  menus = [];
   lastError;
   lastTasks = null;
   lastProject = null;
@@ -13346,8 +13058,22 @@ var TasksPane = class {
     this.lastToken = token2;
     this.lastTasks = tasks;
     this.lastProject = selectedProject;
+    const openIds = new Set(this.menus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.closest("[data-task-id]")?.dataset.taskId));
+    const active = document.activeElement;
+    const focusedId = active?.closest("[data-task-id]")?.dataset.taskId;
+    const focusedName = active?.getAttribute("aria-label") || active?.textContent;
+    for (const menu of this.menus) menu.dispose();
+    this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
     rebuildKeepingScroll(this.el, previous, token2, () => this.render(scoped));
+    for (const menu of this.menus) {
+      if (openIds.has(menu.el.closest("[data-task-id]")?.dataset.taskId)) menu.open();
+    }
+    if (focusedId && focusedName) {
+      const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
+      const control = [...row?.querySelectorAll("button") ?? []].find((button) => (button.getAttribute("aria-label") || button.textContent) === focusedName);
+      control?.focus({ preventScroll: true });
+    }
   }
   render(tasks) {
     if (this.lastError) {
@@ -13412,13 +13138,14 @@ var TasksPane = class {
         " \xB7 "
       );
     }
-    const arming = taskArmingSummary(t);
-    if (arming !== "") {
-      metaParts.push(arming, " \xB7 ");
-    }
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
-    const main = h("div", { class: "af-task-main" }, name, trigger, meta);
+    const next = h("div", { class: "af-task-next" }, taskArmingSummary(t));
+    const detail = h("div", { class: "af-task-detail" }, next, trigger, meta);
+    const main = h("div", { class: "af-task-main" }, name, detail);
+    if (t.last_run_status?.startsWith("errored:")) {
+      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
+    }
     const toggleBtn = h(
       "button",
       { type: "button", class: "af-ghost af-task-action" },
@@ -13427,17 +13154,23 @@ var TasksPane = class {
     toggleBtn.addEventListener("click", () => this.actions.toggle(t));
     const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
     editBtn.addEventListener("click", () => this.actions.edit(t));
-    const actionEls = [toggleBtn, editBtn];
+    const menu = actionsDisclosure(`Actions for ${t.name}`);
+    this.menus.push(menu);
+    const actionEls = [toggleBtn];
     if (canTrigger(t)) {
       const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
       triggerBtn.addEventListener("click", () => this.actions.trigger(t));
       actionEls.push(triggerBtn);
     }
-    const removeBtn = h("button", { type: "button", class: "af-danger af-task-action" }, "Remove");
+    const removeBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Remove");
     removeBtn.addEventListener("click", () => this.actions.remove(t));
     actionEls.push(removeBtn);
-    const actions2 = h("div", { class: "af-task-actions" }, ...actionEls);
-    return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
+    menu.panel.append(...actionEls);
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    const actions2 = h("div", { class: "af-task-actions" }, editBtn, menu.el);
+    const row = h("li", { class: "af-task-row" }, enabledDot, main, actions2);
+    row.dataset.taskId = t.id;
+    return row;
   }
 };
 var WEEKDAY_DISPLAY = [
@@ -14026,8 +13759,8 @@ function tabRealId(tab) {
 }
 function themeLabel(choice) {
   switch (choice) {
-    case "auto":
-      return "Auto";
+    case "system":
+      return "System";
     case "light":
       return "Light";
     case "dark":
@@ -14351,7 +14084,7 @@ var AppShell = class {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   viewTabs;
-  // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
+  // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
   themeOpts = /* @__PURE__ */ new Map();
   lastThemeChoice = null;
@@ -14670,6 +14403,12 @@ var AppShell = class {
     this.lifecycleAction = null;
     this.railCount.textContent = String(visible.length);
     this.renderFilterMenu(state, scoped);
+    const openIds = new Set(this.railMenus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.dataset.sessionId));
+    const active = document.activeElement;
+    const focusedId = active?.closest("[data-session-id]")?.dataset.sessionId;
+    const focusedName = active?.getAttribute("aria-label");
+    for (const menu of this.railMenus) menu.dispose();
+    this.railMenus = [];
     const list = this.railList;
     if (!state.selectedProject) {
       list.replaceChildren();
@@ -14686,33 +14425,50 @@ var AppShell = class {
     });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...notice ? [notice, ...rows] : rows);
+    for (const menu of this.railMenus) if (openIds.has(menu.el.dataset.sessionId)) menu.open();
+    if (focusedId && focusedName) {
+      const host = list.querySelector(`[data-session-id="${CSS.escape(focusedId)}"]`);
+      host?.querySelector(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+    }
   }
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
+  railMenus = [];
   rowActions(session, selected) {
-    return h("div", { class: "af-row-actions" }, ...this.sessionActionButtons(session, "rail", selected));
+    const host = h("div", { class: "af-row-actions" });
+    const buttons = this.sessionActionButtons(session, "rail", selected);
+    if (!buttons.length) return host;
+    const menu = actionsDisclosure(`Actions for ${session.title}`);
+    menu.el.dataset.sessionId = session.id;
+    this.railMenus.push(menu);
+    menu.trigger.replaceChildren("\u2026");
+    menu.panel.append(...buttons);
+    menu.el.addEventListener("click", (event) => event.stopPropagation());
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    host.append(menu.el);
+    return host;
   }
   /** Builds both rail and fallback-header controls from the same daemon capabilities.
    *  Placement chooses only presentation and whether a mobile rail exit is needed;
    *  target narrowing, labels, and callbacks remain one path. */
-  sessionActionButtons(session, surface, selected = false) {
+  sessionActionButtons(session, surface2, selected = false) {
     const buttons = [];
     if (isActionableSession(session)) {
       const lifecycleSession = session;
-      const lifecycleClass = surface === "rail" ? "af-rail-action af-rail-lifecycle" : "af-ghost af-term-action af-term-lifecycle";
+      const lifecycleClass = surface2 === "rail" ? "af-rail-action af-rail-lifecycle" : "af-ghost af-term-action af-term-lifecycle";
       const lifecycleBtn = h("button", { type: "button", class: lifecycleClass });
       lifecycleBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         const run = lifecycleBtn.dataset.action === "restore" ? () => this.actions.restore(lifecycleSession) : () => this.actions.archive(lifecycleSession);
-        if (surface === "rail") {
+        if (surface2 === "rail") {
           this.runRailExit(run);
         } else {
           run();
         }
       });
-      this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface);
-      if (surface === "rail" && selected) {
+      this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface2);
+      if (surface2 === "rail" && selected) {
         this.lifecycleBtn = lifecycleBtn;
         this.lifecycleAction = lifecycleSession.lifecycle_action;
       }
@@ -14720,18 +14476,18 @@ var AppShell = class {
     }
     if (isKillableSession(session)) {
       const killSession2 = session;
-      const killClass = surface === "rail" ? "af-rail-action af-rail-kill" : "af-ghost af-term-action af-term-kill";
+      const killClass = surface2 === "rail" ? "af-rail-action af-rail-kill" : "af-ghost af-term-action af-term-kill";
       const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        ...surface === "rail" ? [icon("octagon-x")] : ["Kill"]
+        "Kill"
       );
       const killLabel = `Kill session \u201C${killSession2.title}\u201D`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
       killBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (surface === "rail") {
+        if (surface2 === "rail") {
           this.runRailExit(() => this.actions.kill(killSession2));
         } else {
           this.actions.kill(killSession2);
@@ -14743,12 +14499,12 @@ var AppShell = class {
   }
   /** Applies the daemon-projected verb, icon, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
-  patchLifecycleButton(btn, action, sessionTitle, surface = "rail") {
+  patchLifecycleButton(btn, action, sessionTitle, surface2 = "rail") {
     const verb = action === "restore" ? "Restore session" : "Archive session";
     const label = `${verb} \u201C${sessionTitle}\u201D`;
     btn.dataset.action = action;
-    if (surface === "rail") {
-      btn.replaceChildren(icon(action === "restore" ? "archive-restore" : "archive"));
+    if (surface2 === "rail") {
+      btn.textContent = verb.replace(" session", "");
     } else {
       btn.textContent = verb.replace(" session", "");
     }
@@ -15817,10 +15573,6 @@ var store = new Store({
 var token = null;
 var stream = null;
 var connectionGate = createLatestRequestGate();
-var paletteRefreshGate = createLatestRequestGate();
-var PALETTE_RETRY_MS = 1e3;
-var paletteRetryTimer = null;
-var hasDaemonPalette = false;
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
@@ -15931,8 +15683,6 @@ async function connect(candidate) {
   if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
-  await refreshDaemonPalette(candidate);
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   let tasksError = "";
   let tasks = [];
   try {
@@ -15985,8 +15735,6 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
   closeConfigAssistant();
   token = null;
   clearToken();
-  resetDaemonTheme();
-  hasDaemonPalette = false;
   store.set({
     phase: "login",
     view: "sessions",
@@ -16743,7 +16491,18 @@ function doRemoveTask(task) {
   if (tok === null) {
     return;
   }
-  void removeTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  openModal(removeTaskModal(task.name || task.id, () => {
+    if (!modal || token !== tok) return;
+    const handle = modal;
+    handle.setBusy(true);
+    void removeTask(task, tok).then(() => {
+      closeModal();
+      return refreshTasks();
+    }).catch((error) => {
+      handle.setBusy(false);
+      handle.setError(errorText(error));
+    });
+  }, closeModal));
 }
 function setTheme(choice) {
   if (store.get().themeChoice === choice) {
@@ -16762,7 +16521,7 @@ function watchSystemTheme() {
     return;
   }
   const onChange = () => {
-    if (store.get().themeChoice === "auto") {
+    if (store.get().themeChoice === "system") {
       refreshThemeMode();
       splitView.applyTheme();
     }
@@ -16858,56 +16617,16 @@ function startStream(tok) {
     onEvent,
     onResync: () => {
       requestResync();
-      void refreshDaemonPalette(tok);
     },
     onStatus: (s) => store.set({ live: s })
   });
   stream.start();
-}
-function clearPaletteRetry() {
-  if (paletteRetryTimer === null) return;
-  window.clearTimeout(paletteRetryTimer);
-  paletteRetryTimer = null;
-}
-async function refreshDaemonPalette(tok) {
-  clearPaletteRetry();
-  const request = paletteRefreshGate.begin();
-  let paletteChanged = false;
-  try {
-    const theme = await getTheme(tok);
-    if (token !== tok || !request.isCurrent()) return;
-    applyDaemonTheme(theme);
-    hasDaemonPalette = true;
-    paletteChanged = true;
-  } catch (error) {
-    if (token !== tok || !request.isCurrent()) return;
-    const status = error instanceof ApiError ? error.status : 0;
-    const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
-    if (plan.reauthenticate) {
-      disconnect(describeError(error), true);
-      return;
-    }
-    if (plan.reset) {
-      resetDaemonTheme();
-      hasDaemonPalette = false;
-      paletteChanged = true;
-    }
-    if (plan.retry) {
-      paletteRetryTimer = window.setTimeout(() => {
-        paletteRetryTimer = null;
-        if (token === tok) void refreshDaemonPalette(tok);
-      }, PALETTE_RETRY_MS);
-    }
-  }
-  if (paletteChanged) splitView.applyTheme();
 }
 function stopStream() {
   resyncRequestGeneration += 1;
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
-  paletteRefreshGate.invalidate();
-  clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -16927,8 +16646,8 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
-  if (eventRequestsPaletteRefresh(ev)) {
-    if (hasConnectedToken(token)) void refreshDaemonPalette(token);
+  if (ev.type === "theme.changed") {
+    requestResync();
     return;
   }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
@@ -16987,7 +16706,9 @@ function requestResync() {
       }
       applySessions(sessions);
       root?.setAttribute("data-af-resync-settled", "");
-    }).catch(() => {
+    }).catch((error) => {
+      if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
+      if (shouldForgetToken(error)) disconnect(describeError(error), true);
     });
   }, 150);
 }
