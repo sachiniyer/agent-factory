@@ -209,7 +209,7 @@ func sessionRepoID(data *session.InstanceData) string {
 		return config.RepoIDFromRoot(filepath.Clean(data.Worktree.RepoPath))
 	}
 	if data.Path != "" {
-		return config.RepoIDForPath(data.Path)
+		return session.RepoIDForStoragePath(data.Path)
 	}
 	return ""
 }
