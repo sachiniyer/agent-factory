@@ -6,6 +6,9 @@ removes the private Config/account ANSI palette and raw overlay backdrop colours
 `ui/theme/literals_test.go` rejects production colour constructors, adaptive
 palette definitions, hex strings and raw extended SGR colour values under `ui/`
 and `app/`; PTY parser test inputs and generated SVG fixtures are not chrome.
+The all-role SGR test checks foreground and background in both themes within
+one channel step of the tokens, documenting termenv's float truncation tracked
+in [termenv #217](https://github.com/muesli/termenv/issues/217); the web remains exact.
 Legacy palette input no longer changes TUI colours. Slice B owns the shared
 overlay recipe and density/copy cuts; slice C owns Light/Dark/System selection
 and migration. To meet the stricter 480 ms frame requirement, the sidebar
@@ -46,12 +49,12 @@ to those goldens. Keep captured ANSI beside the gallery for source inspection.
 
 ## Performance and verification
 
-`make perf-container` passed at 1,000 sessions. Full frame averaged **99.022 ms**
-(range 87.726–119.738); key-to-render averaged **94.648 ms** (59.264–120.135).
+`make perf-container` passed at 1,000 sessions. Full frame averaged **67.541 ms**
+(range 64.518–72.424); key-to-render averaged **57.507 ms** (54.502–60.771).
 Every sample meets P5's stricter 480 / 351 ms limits. The harness still reports
 P1's original looser CI ceilings; these are not the thresholds used to accept P5.
 [Raw samples](../assets/design/tui-a/perf/tui-runs.json) and the
-[complete report](../assets/design/tui-a/perf/metrics.md) preserve the evidence.
+[complete report](../assets/design/tui-a/perf/metrics.txt) preserve the evidence.
 Before deferring invisible rows, this slice averaged 498.625 / 247.484 ms;
 [those samples](../assets/design/tui-a/perf/before-viewport.json) motivated the
 viewport change. No baseline or budget was relaxed.

@@ -221,7 +221,8 @@ func (c *ConfigPane) rebuildRows() {
 		if len(inTier) == 0 {
 			continue
 		}
-		c.rows = append(c.rows, configRow{heading: config.TierName(tier)})
+		heading := config.TierName(tier)
+		c.rows = append(c.rows, configRow{heading: strings.ToUpper(heading[:1]) + heading[1:]})
 		for i := range inTier {
 			entry := inTier[i]
 			c.rows = append(c.rows, configRow{entry: &entry})
@@ -524,7 +525,7 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		default:
-			lines = append(lines, configHeadingStyle.Render(strings.ToUpper(row.heading)))
+			lines = append(lines, configHeadingStyle.Render(row.heading))
 			if row.heading == accountsHeading {
 				if c.accounts.unavailable != "" {
 					lines = append(lines, strings.Split(c.renderAccountsUnavailable(), "\n")...)
