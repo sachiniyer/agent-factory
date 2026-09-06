@@ -133,15 +133,19 @@ interface Pass {
   seededRows: number;
 }
 
-function screenshotFor(page: Page, suffix: string): (name: string) => Promise<void> {
+function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: string) => Promise<void> {
   return async (name: string) => {
     if (visual) {
-      // A completed transcript precedes the daemon's idle observation. Fast CI
-      // can reach a still while rows still say Working; wait for the same
-      // observable settled state on every visible rail, including after resize.
-      if (await page.locator(".af-rail-list").isVisible()) {
+      // A completed transcript precedes the daemon's idle observation. Phone
+      // drawers and non-session views hide the rail but still expose its counts
+      // in chrome. Check the retained rows even when hidden (#3940); login and
+      // unavailable scenes have no app/seeded rail to settle.
+      if (await page.locator(".af-app").count()) {
         const states = page.locator(".af-rail-list .af-operator-state");
-        await expect(states).toHaveText(Array(await states.count()).fill("Needs you"));
+        const message = `${name}${suffix}: all seeded sessions must report Needs you before capture`;
+        if (seededRows !== undefined) await expect(states, message).toHaveCount(seededRows);
+        else await expect(states, message).not.toHaveCount(0);
+        await expect(states, message).toHaveText(Array(seededRows ?? await states.count()).fill("Needs you"));
       }
       await expect(page).toHaveScreenshot(`${name}${suffix}.png`, {
         animations: "disabled", caret: "hide",
@@ -350,7 +354,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
   const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
   const page = await context.newPage();
   await prepareVisual(page);
-  const shot = screenshotFor(page, pass.suffix);
+  const shot = screenshotFor(page, pass.suffix, 4);
   try {
     await openAfterInitialResync(page, async () => { await page.goto("/"); });
     await row(page, SESSION_JSON).click();
@@ -458,7 +462,7 @@ async function recordSplits(browser: Browser): Promise<void> {
       await page.locator(".af-pane-host .xterm").first().click();
       // Splitting resizes both PTYs; wait for that repaint before checking idle.
       await settleTerminal(page);
-      await screenshotFor(page, pass.suffix)("split-panes");
+      await screenshotFor(page, pass.suffix, 4)("split-panes");
     } finally {
       await context.close();
     }

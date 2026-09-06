@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
@@ -611,7 +612,10 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 	if len(generation) > 0 {
 		args = append(args, "-e", EnvMarkerGeneration+"="+generation[0])
 	}
-	args = append(args, "nohup sleep 300 >/dev/null 2>&1 & "+recordPIDShell("$!", pidFile)+"; exec sleep 300")
+	// The child publishes its own PID only after setsid and SIGHUP protection.
+	// A shell publishing $! can race the child's first exec and nohup setup.
+	args = append(args, shellsuggest.Command(os.Args[0], markedEscapeeArg, pidFile)+
+		" </dev/null >/dev/null 2>&1 & exec sleep 300")
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
 	testguard.KeepTmuxServerOnEmpty(t)
@@ -625,18 +629,21 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 		pid, readErr = strconv.Atoi(strings.TrimSpace(string(data)))
 		return readErr == nil && pid > 1
 	}, 5*time.Second, 20*time.Millisecond, "helper pid file never appeared")
-	t.Cleanup(func() {
-		if snap, snapErr := proctree.Snapshot(); snapErr == nil {
-			if process, ok := snap[pid]; ok {
-				_ = proctree.Signal(process, syscall.SIGKILL)
-			}
-		}
-	})
-
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	marked, ok := snap[pid]
 	require.True(t, ok, "helper %d not in process snapshot", pid)
+	t.Cleanup(func() { _ = proctree.Signal(marked, syscall.SIGKILL) })
+	require.Equal(t, marked.PID, marked.SID, "marked helper must have detached before publishing its pid")
+	environ, err := proctree.Environ(marked.PID)
+	require.NoError(t, err)
+	require.Contains(t, environ, EnvMarkerSession+"="+name)
+	if home != "" {
+		require.Contains(t, environ, EnvMarkerHome+"="+home)
+	}
+	if len(generation) > 0 {
+		require.Contains(t, environ, EnvMarkerGeneration+"="+generation[0])
+	}
 	return marked
 }
 
