@@ -70,6 +70,7 @@ import {
   wrappedCellPosition,
 } from "./terminal-mouse.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
+import { terminalSurface } from "./components.js";
 import { currentXtermTheme } from "./theme.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
@@ -551,7 +552,7 @@ export class AttachTerminal {
       fontSize: 13,
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
-      theme: currentXtermTheme(),
+      theme: terminalSurface(container, currentXtermTheme()),
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5000,
@@ -1097,7 +1098,7 @@ export class AttachTerminal {
    *  from the new ITheme, so an open terminal switches light/dark without a
    *  reconnect or losing scrollback. */
   setTheme(theme: ITheme): void {
-    this.term.options.theme = theme;
+    this.term.options.theme = terminalSurface(this.container, theme);
   }
 
   // --- socket lifecycle ------------------------------------------------------

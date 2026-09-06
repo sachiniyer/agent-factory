@@ -300,7 +300,24 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
   }
 }
 
-/** Slice A evidence: the disclosures and phone drawer are real screens too. */
+async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<unknown>, prefix: string): Promise<void> {
+  const actions = page.getByRole("button", { name: "Session actions", exact: true });
+  await actions.click();
+  await expect(page.locator(".af-term-menu")).toBeVisible();
+  await shot(`${prefix}session-actions`);
+  await page.locator(".af-tab-new").click();
+  await expect(page.locator(".af-tab-menu")).toBeVisible();
+  await shot(`${prefix}tab-types`);
+  await page.locator(".af-tab-new").click();
+  await actions.click();
+  await page.locator(".af-pane-host .xterm").first().click();
+  await expect(page.locator(".af-term-keyboard")).toBeVisible();
+  await shot(`${prefix}terminal-keyboard`);
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-term-keyboard")).toBeHidden();
+}
+
+/** Chrome evidence: disclosures, keyboard ownership and phone layouts are real screens. */
 async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "suffix">, phone: boolean): Promise<void> {
   const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
   const page = await context.newPage();
@@ -310,6 +327,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await row(page, SESSION_JSON).click();
     await settleTerminal(page);
     if (!phone) {
+      await recordTerminalChrome(page, shot, "");
       await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
       await expect(page.locator(".af-filter-menu")).toBeVisible();
       await shot("session-filter");
@@ -323,6 +341,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await page.setViewportSize({ width: 375, height: 812 });
     await expect(page.locator(".af-nav-toggle")).toBeVisible();
     await shot("phone-session");
+    await recordTerminalChrome(page, shot, "phone-");
     await page.locator(".af-nav-toggle").click();
     await expect(page.locator(".af-rail")).toBeVisible();
     await shot("phone-drawer");
@@ -370,5 +389,28 @@ test("web chrome · both themes", async ({ browser }) => {
   for (const phone of [false, true]) {
     await recordChrome(browser, { suffix: "", colorScheme: "light" }, phone);
     await recordChrome(browser, { suffix: "-dark", colorScheme: "dark" }, phone);
+    if (!phone) await recordSplits(browser);
   }
 });
+
+// Split after the full-width stills and before phone attaches resize the PTYs.
+async function recordSplits(browser: Browser): Promise<void> {
+  for (const pass of [{ suffix: "", colorScheme: "light" }, { suffix: "-dark", colorScheme: "dark" }] as const) {
+    const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
+    const page = await context.newPage();
+    try {
+      await openAfterInitialResync(page, async () => { await page.goto("/"); });
+      await row(page, SESSION_JSON).click();
+      await settleTerminal(page);
+      const pane = page.locator(".af-pane").first();
+      const box = await pane.boundingBox();
+      if (!box) throw new Error("Split evidence requires a visible terminal pane");
+      await page.locator('.af-tab[data-tab-index="0"]').dragTo(pane, { targetPosition: { x: 8, y: box.height / 2 } });
+      await expect(page.locator(".af-pane")).toHaveCount(2);
+      await page.locator(".af-pane-host .xterm").first().click();
+      await page.screenshot({ path: join(SHOT_DIR, `split-panes${pass.suffix}.png`) });
+    } finally {
+      await context.close();
+    }
+  }
+}
