@@ -251,6 +251,9 @@ func flattenToOneLine(s string) string {
 // SAVE BACK are different, and conflating them is how `""` ends up in a user's
 // config.toml.
 func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
+	if e.Key == "appearance" {
+		e.Value = appearanceLabel(e.Value)
+	}
 	if e.Value == "" {
 		return "(unset)"
 	}

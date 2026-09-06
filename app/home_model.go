@@ -470,6 +470,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		fmt.Printf("Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	ui.ApplyAppearance(appConfig.Appearance)
 	applyTheme(appConfig.Theme)
 
 	// Apply configured detach key. The loader (sanitizeDetachKeys) already

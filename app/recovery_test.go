@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,6 +29,7 @@ func TestRecoveryDriverScenes(t *testing.T) {
 			t.Run(scene+"-"+theme, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(theme == "dark")
 				h := newTestHome(t)
+				ui.ApplyAppearance(theme)
 				h.termWidth, h.termHeight = 120, 36
 				h.repoRoot = "/project"
 				h.relayout()

@@ -106,6 +106,7 @@ var keyEffectClasses = map[string]EffectClass{
 	// Next af launch — af's CLI/TUI owns what these control. The daemon's release
 	// check reads auto_update and update_channel (#2212), but it only reports a
 	// release; installing is still af's, at launch. See EffectNextAfLaunch.
+	"appearance":     EffectNextAfLaunch,
 	"auto_update":    EffectNextAfLaunch,
 	"update_channel": EffectNextAfLaunch,
 	// Read at the moment an upgrade is attempted — by `af upgrade` from disk, and

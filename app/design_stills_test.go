@@ -28,10 +28,11 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(mode == "dark")
 				h := newTestHome(t)
+				ui.ApplyAppearance(mode)
 				h.termWidth, h.termHeight = 120, 36
 				h.repoRoot = "/project"
 				inst := newLoadingInstance(t, "Apply design roles")
@@ -40,6 +41,21 @@ func TestDesignDriverScenes(t *testing.T) {
 				h.sidebar.SelectInstance(inst)
 				h.relayout()
 				switch scene {
+				case "appearance", "appearance-system":
+					h.state = stateConfigEditor
+					cfg := config.DefaultConfig()
+					cfg.Appearance = mode
+					if scene == "appearance-system" {
+						cfg.Appearance = "system"
+					}
+					var rows []config.ConfigEntry
+					for _, e := range config.ManifestWithValues(cfg) {
+						if e.Key == "appearance" {
+							rows = append(rows, e)
+						}
+					}
+					h.configPane.SetEntries(rows, "Local daemon · /home/operator/.agent-factory/config.toml")
+					h.configPane.SetFocus(true)
 				case "sessions-dense":
 					for i, status := range []session.Status{session.Running, session.Ready, session.Lost, session.Dead} {
 						other := newLoadingInstance(t, fmt.Sprintf("Review change %d", i+1))

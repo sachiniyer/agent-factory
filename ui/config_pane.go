@@ -154,7 +154,7 @@ func NewConfigPane() *ConfigPane {
 // including a hand-edit made since — and so the pane stays a form regardless of
 // which daemon answered (ReadConfigForEditor).
 func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string) {
-	c.entries = entries
+	c.entries = visibleAppearanceEntries(entries)
 	c.location = location
 	c.rebuildRows()
 }
@@ -646,7 +646,7 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	if selected {
 		b.WriteString(c.wrapIndented(e.Purpose, configPurposeStyle))
 		if len(e.Enum) > 0 && e.Type != "table" {
-			b.WriteString(c.wrapIndented("one of: "+strings.Join(e.Enum, " · "), configHintStyle))
+			b.WriteString(c.wrapIndented("one of: "+configEnumLabels(e), configHintStyle))
 		}
 	}
 	return b.String()
