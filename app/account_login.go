@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -64,6 +65,11 @@ func SetAccountSeamsForTest(
 func (m *home) loadAccountsIntoPane() {
 	m.configPane.SetAccountLoginRefusal(remoteAccountLoginRefusal())
 	resp, err := listAccountsForPane(daemon.ListAccountsRequest{})
+	m.applyAccountsToPane(resp, err)
+}
+
+// applyAccountsToPane applies a completed read on the UI loop.
+func (m *home) applyAccountsToPane(resp daemon.ListAccountsResponse, err error) {
 	if err != nil {
 		log.WarningLog.Printf("accounts: could not read the registered accounts for the config pane: %v", err)
 		m.configPane.SetAccounts(nil, nil, err)
@@ -100,11 +106,12 @@ func (m *home) handleAccountRequest(req ui.AccountRequest) tea.Cmd {
 // logging in, and closing the surface the user is working in would make them
 // reopen it to do the next thing.
 //
-// It runs INLINE rather than off the event loop, unlike the login below. A
-// register is one mkdir plus a stat on the daemon host — there is no readiness
-// wait and no process to start — so the round trip is milliseconds, and an async
-// hop would buy a spinner nobody sees at the cost of a message type.
+// Local registration keeps its fast path. Remote registration and its refresh
+// run as a command: a stalled HTTP response must not block redraw, close or quit.
 func (m *home) handleAccountRegister(agent, name string) tea.Cmd {
+	if apiclient.IsRemoteTarget() {
+		return m.remoteAccountRegisterCmd(agent, name)
+	}
 	resp, err := registerAccount(daemon.RegisterAccountRequest{Agent: agent, Name: name})
 	if err != nil {
 		// The daemon's own refusal, verbatim: it holds the one name rule
@@ -114,6 +121,11 @@ func (m *home) handleAccountRegister(agent, name string) tea.Cmd {
 		return nil
 	}
 	m.loadAccountsIntoPane()
+	m.setAccountRegisteredStatus(resp)
+	return nil
+}
+
+func (m *home) setAccountRegisteredStatus(resp daemon.RegisterAccountResponse) {
 	status := fmt.Sprintf("Registered %s account %q · %s", resp.Entry.Agent, resp.Entry.Name, resp.Entry.Dir)
 	// The preconditions ride along on the same line: this is the moment the
 	// operator is about to put a real credential somewhere, which is when what the
@@ -122,7 +134,6 @@ func (m *home) handleAccountRegister(agent, name string) tea.Cmd {
 		status += " · " + notice
 	}
 	m.configPane.SetAccountStatus(status, false)
-	return nil
 }
 
 // accountLoginStartedMsg reports the outcome of an async login spawn.

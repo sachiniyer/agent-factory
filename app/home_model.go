@@ -324,6 +324,8 @@ type home struct {
 	// the same daemon — so `,` administers whichever daemon this session is
 	// attached to, as `af config set` has since #3679.
 	configPane *ui.ConfigPane
+	// Identifies the latest remote registration in this opening of the pane.
+	accountRegisterGeneration uint64
 	// menu displays the key hints inside the status bar (shared handle for
 	// SetState/keydown callers)
 	menu *ui.Menu
