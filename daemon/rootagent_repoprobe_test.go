@@ -56,12 +56,6 @@ func installUnanswerableGit(t *testing.T) (letGitAnswer func()) {
 	}
 }
 
-// captureRootEnsureLogs redirects the warning and error loggers for one test.
-func captureRootEnsureLogs(t *testing.T) (warnings, errors *logCapture) {
-	t.Helper()
-	return captureWarnings(t), captureErrors(t)
-}
-
 // TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository is the #3500
 // headline regression: one ensure pass whose repo probe never completed must
 // report the subprocess outcome, not a verdict on the configured path.
