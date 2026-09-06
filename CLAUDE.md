@@ -119,8 +119,10 @@ make remote-roundtrip-container    # mock remote round-trip
 make playtest-container            # TUI sandbox (throwaway home, mock repo)
 
 # Reclaim the docker disk the container harness holds — and only that (#2133).
-# Every target above already cleans up after itself on the way out; this one
-# also empties the Go cache volumes, which reach tens of GB on a busy box.
+# Containers use --rm on exit. Detached play-tests also exit after six hours
+# by default (AF_PLAYTEST_MAX_LIFETIME in seconds), even if their driver dies.
+# New starts reap expired labelled play-test sandboxes. This target also empties
+# the Go cache volumes, which reach tens of GB on a busy box.
 make testbox-clean
 
 # Install locally
