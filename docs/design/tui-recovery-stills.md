@@ -27,7 +27,7 @@ changes reviewable in tests. Existing surrounding TUI chrome is outside P4.
 | Failed existing task save | ![Failed existing task save, light](../assets/recovery/tui-model-driver/task-edit-save-failed-light.svg) | ![Failed existing task save, dark](../assets/recovery/tui-model-driver/task-edit-save-failed-dark.svg) |
 | Too-small terminal | ![Too-small terminal, light](../assets/recovery/tui-model-driver/too-small-light.svg) | ![Too-small terminal, dark](../assets/recovery/tui-model-driver/too-small-dark.svg) |
 
-The complementary [real tmux driver](../../scripts/tui-3915-scenario.sh) runs
+The complementary [real tmux driver](https://github.com/sachiniyer/agent-factory/blob/f030c8fe7b26353a8bc966f046df4d3858801a6c/scripts/tui-3915-scenario.sh) runs
 inside the isolated testbox with a cheap bash stand-in. It starts with no
 sessions, opens the empty task manager, submits a create rejected by the real
 daemon, verifies the name remains in the form, changes its backend, and reaches
