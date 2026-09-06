@@ -288,17 +288,31 @@ func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsRespon
 	return resp, nil
 }
 
-// There are deliberately no RegisterAccount or AccountLogin wrappers here, for the
-// same reason as ListProjects below: the daemon exposes both routes and the web calls
-// them over HTTP directly, but neither has a Go consumer. The config pane's Accounts
-// section reaches them through the gob control client (daemon.RegisterAccount,
-// daemon.AccountLogin) on the local socket, and for AccountLogin that is the honest
-// shape rather than an oversight — its response names a tmux session on the DAEMON'S
-// host, so a client on another machine could read the outcome but could never attach
-// to the pane. That is why `af accounts login` refuses a remote daemon outright
-// (commands/accountslogincmd.go) instead of pretending otherwise. ListAccounts above
-// stays because it does have a remote consumer: the create flow's account picker has
-// to ask the daemon the session will actually be created on (app/account_picker.go).
+// There is deliberately no AccountLogin wrapper here (#3949), for the same
+// reason as ListProjects below: the daemon exposes the route and the web calls
+// it over HTTP directly, but it has no Go consumer. The config pane's Accounts
+// section reaches daemon.AccountLogin through the gob control client on the local
+// socket, and that is the honest shape rather than an oversight — its response
+// names a tmux session on the DAEMON'S host, so a client on another machine could
+// read the outcome but could never attach to the pane. That is why both the pane
+// and `af accounts login` refuse a remote daemon outright instead of pretending
+// otherwise. ListAccounts above stays because the create flow's account picker
+// has to ask the daemon the session will actually be created on
+// (app/account_picker.go), as does the config pane's Accounts section (#3950).
+//
+// RegisterAccount was removed alongside AccountLogin in #3949 when neither had
+// a Go consumer. Unlike login, registration needs no terminal on the daemon
+// host: #3950 deliberately restores it for the config pane's remote target.
+
+// RegisterAccount creates an account's credential directory on the daemon host
+// without logging in, for the config pane's Accounts section.
+func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {
+	var resp daemon.RegisterAccountResponse
+	if err := c.call("RegisterAccount", daemon.RegisterAccountRequest{Agent: agent, Name: name}, &resp); err != nil {
+		return daemon.RegisterAccountResponse{}, err
+	}
+	return resp, nil
+}
 
 // There is deliberately no ListProjects here. The web reads the registry over HTTP
 // (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
