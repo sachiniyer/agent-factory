@@ -17,12 +17,12 @@ import (
 )
 
 var automationsTitleStyle = lipgloss.NewStyle().
-	Bold(true).
-	Foreground(AccentColor)
+	Bold(true).Underline(true).
+	Foreground(activeTheme.Ink)
 
 var automationsTitleDimStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.InkMuted)
+	Foreground(activeTheme.Ink)
 
 var automationsEnabledStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.Ink)
@@ -495,7 +495,31 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 		return ""
 	}
 	indent := strings.Repeat(" ", itemPrefixWidth)
-	return automationDetailStyle.Render(fitLine(indent+detail, a.rect.W))
+	// Primary scheduling facts precede secondary cron/delivery metadata.
+	var parts []string
+	if attention := attentionFragment(tsk, a.now()); attention != "" {
+		style := lipgloss.NewStyle().Foreground(activeTheme.Ink)
+		if needsAttention(tsk) {
+			style = style.Foreground(activeTheme.Dead)
+		}
+		parts = append(parts, style.Render(attention))
+	}
+	if next := a.nextRunSummary(tsk); next != "" {
+		primary, previous, found := strings.Cut(next, "last ")
+		value := lipgloss.NewStyle().Foreground(activeTheme.Ink).Render(primary)
+		if found {
+			value += automationDetailStyle.Render("last " + previous)
+		}
+		parts = append(parts, value)
+	}
+	trigger := tsk.CronExpr
+	if tsk.IsWatch() {
+		trigger = "watch: " + tsk.WatchCmd
+	}
+	if trigger != "" {
+		parts = append(parts, automationDetailStyle.Render(trigger))
+	}
+	return fitLine(indent+strings.Join(parts, " · "), a.rect.W)
 }
 
 // attentionCount returns how many of the projection's tasks carry a WARNING —

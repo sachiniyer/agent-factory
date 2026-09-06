@@ -368,5 +368,5 @@ func accountRowPurpose(account AccountRow) string {
 
 // renderAccountsUnavailable renders the section's failure line in place of rows.
 func (c *ConfigPane) renderAccountsUnavailable() string {
-	return RecoveryContent("Cannot load accounts", "Accounts could not be read: "+c.accounts.unavailable, "Reopen settings to retry.", true, c.width)
+	return DialogRecoveryContent("Cannot load accounts", "Accounts could not be read: "+c.accounts.unavailable, "Reopen settings to retry.", true, c.width)
 }

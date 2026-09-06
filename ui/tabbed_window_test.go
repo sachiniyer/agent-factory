@@ -125,7 +125,7 @@ func TestTabbedWindowHeaderEllipsizesAtNarrowWidth(t *testing.T) {
 	w := newTestTabbedWindow()
 	setWindowInstance(w, inst)
 
-	// " remote-tabbar · ◆ Agent " needs 25 cells; give it 16.
+	// " remote-tabbar · Agent " needs 25 cells; give it 16.
 	header := w.renderHeader(16)
 	assert.LessOrEqual(t, lipgloss.Width(header), 16, "header must fit the pane width")
 	assert.Contains(t, header, "…", "the cut must be marked with an ellipsis")

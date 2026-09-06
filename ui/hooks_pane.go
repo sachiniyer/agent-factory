@@ -158,12 +158,12 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 
 func (h *HooksPane) String() string {
 	t := CurrentTheme()
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	tStyle := DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	hintStyle := DialogHintStyle()
 	editStyle := selectedStyle
-	descStyle := lipgloss.NewStyle().Foreground(t.InkMuted).Italic(true)
+	descStyle := lipgloss.NewStyle().Foreground(t.Ink)
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Post-worktree hooks"))

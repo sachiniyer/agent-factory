@@ -1,0 +1,27 @@
+P5 B local verification, 2026-09-06
+
+PASS gofmt -l . (empty)
+PASS go build ./...
+PASS go vet ./...
+PASS golangci-lint run --timeout=3m --fast
+PASS scripts/lint-file-length.sh (1807 files, zero grandfathered)
+PASS go test ./ui/... ./internal/designtokens
+  Includes literal guard, all-role SGR tolerance, state/selection mappings,
+  weekday checked-state, search hit-zone collision and overflow regressions.
+PASS go run ./scripts/gen-design --check
+PASS mkdocs build --strict
+PASS 177 changed-file app tests in af-p5-3916-b, created by make playtest target
+PASS 112 design/recovery driver goldens in the same container
+PASS whole-diff role audit: 112 SVGs, 30 emitted role pairs
+PASS state-to-style enumeration and complete ui/app style construction scan
+PASS final make perf-container (1000 sessions, three samples)
+  Full frame mean/max: 66.873 / 68.649 ms; strict P5 limit 480 ms
+  Key-to-render mean/max: 68.232 / 80.148 ms; strict P5 limit 351 ms
+  Raw metrics.txt retains the harness budget column unchanged. All three raw
+  samples were separately asserted against the stricter P5 limits above.
+
+All app/driver/perf execution was container-confined. No host TUI or app/daemon
+suite, dev install, reset, global tmux teardown, or other AF home was used.
+B is carried from preserved 5dd024ca work onto merged A/master a1d3e899,
+retaining subsequent A corrections. Stills are deterministic app-model output,
+not a claim of authenticated-agent or live-daemon screen recordings.

@@ -316,6 +316,15 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleQuit()
 	}
 
+	if msg.String() == "D" && !sp.IsEditing() && !sp.IsCreating() {
+		if selected, ok := sp.SelectedTask(); ok {
+			m.confirmActionWithDetail("Delete task "+selected.Name+"? Future runs will stop.", "Sessions already created by this task remain available.", nil)
+			m.confirmationOverlay.OnConfirm = func() { sp.DeleteTask(selected.ID); m.state = stateTasks }
+			m.confirmationOverlay.OnCancel = func() { m.state = stateTasks }
+		}
+		return m, nil
+	}
+
 	consumed := sp.HandleKeyPress(msg)
 
 	if !sp.HasFocus() {

@@ -15,10 +15,7 @@ import (
 
 // hooksOverlayStyle frames the hooks editor when it is hosted as an overlay
 // (#1024 PR 4: hooks lost their persistent sidebar slot).
-var hooksOverlayStyle = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(ui.AccentColor).
-	Padding(1, 2)
+var hooksOverlayStyle = ui.DialogStyle()
 
 func (m *home) renderHooksOverlay() string {
 	return m.renderFittedPaneOverlay(
@@ -59,7 +56,7 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 	for {
 		contentRect := paneOverlayContentRect(r)
 		setSize(contentRect.W, contentRect.H)
-		fg := sizedOverlayStyle(hooksOverlayStyle, r).Render(renderContent())
+		fg := ui.RenderDialog(sizedOverlayStyle(hooksOverlayStyle, r), renderContent())
 		// Same question the compositor asks, so the same measure (#3585).
 		fgW, fgH := layout.BlockWidth(fg), lipgloss.Height(fg)
 		tooWide := m.termWidth > 0 && fgW > m.termWidth

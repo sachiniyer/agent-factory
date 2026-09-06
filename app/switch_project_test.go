@@ -506,6 +506,7 @@ func TestProjectsSectionEscReturnsToTree(t *testing.T) {
 	resizeHome(h, 100, 30)
 	h.projects.SetProjects([]ui.SidebarProject{
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 0, Active: true},
+		{Name: "other", Root: "/other"},
 	})
 	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)

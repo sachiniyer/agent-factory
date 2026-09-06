@@ -66,7 +66,7 @@ func TestE2E_PaneFlow(t *testing.T) {
 	// Pane 2's tab label is whatever the shared active-tab index resolved to
 	// after the tree walk (the index survives instance switches by design),
 	// so assert the instance halves only.
-	assert.Contains(t, view, "alpha · ◆ Agent", "pane 1 header shows its binding")
+	assert.Contains(t, view, "alpha · Agent", "pane 1 header shows its binding")
 	assert.Contains(t, view, "beta · ", "pane 2 header shows its binding")
 
 	// Tab cycles the focus ring; assert only that it MOVES off the current stop.

@@ -226,14 +226,12 @@ func (s *TaskPane) updateEditFocus() {
 
 func (s *TaskPane) renderEditMode() string {
 	t := CurrentTheme()
-	editTitleStyle := lipgloss.NewStyle().
-		Foreground(t.Accent).
-		Bold(true).
+	editTitleStyle := DialogTitleStyle().
 		MarginBottom(1)
 
 	labelStyle := lipgloss.NewStyle().Bold(true)
-	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(t.InkMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	hintStyle := DialogHintStyle()
 	errorStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
 
 	buttonStyle := lipgloss.NewStyle().Foreground(t.Ink)
@@ -494,9 +492,9 @@ func (s *TaskPane) renderTriggerSelector() string {
 	focused := s.focusIndex == taskFocusTrigger
 	t := CurrentTheme()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	hintStyle := DialogHintStyle()
 
 	option := func(name string, sel bool) string {
 		switch {
@@ -521,8 +519,8 @@ func (s *TaskPane) renderProgramSelector() string {
 	focused := s.focusIndex == taskFocusProgram
 	t := CurrentTheme()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := DialogHintStyle()
 
 	value := programDefaultLabel
 	if s.editProgramIdx >= 0 && s.editProgramIdx < len(s.editProgramOptions) {

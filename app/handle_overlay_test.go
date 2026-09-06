@@ -428,6 +428,7 @@ func TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID(t *testi
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	require.Len(t, tp.GetTasks(), 1)
 	require.Equal(t, "task-b-1474", tp.GetTasks()[0].ID)
 
@@ -676,6 +677,7 @@ func TestSaveContentPaneState_CommittedRemovalRefreshesAndWarns(t *testing.T) {
 	_, _ = h.showTasksOverlay()
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 
 	t.Cleanup(SetTaskRemoverForTest(func(id string, expect task.ProjectExpectation) error {
 		require.NoError(t, task.RemoveTask(id, expect))
@@ -750,6 +752,7 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 	// Move to the second task (gone) and delete it.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	require.True(t, tp.IsDirty(), "toggle + delete must mark the pane dirty")
 
 	// Esc releases focus → the overlay closes and saveContentPaneState runs.
