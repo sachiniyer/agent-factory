@@ -381,7 +381,22 @@ async function distanceFromBottom(viewport: Locator): Promise<number> {
 
 /** One of the quiet lifecycle glyphs revealed on the selected rail row (#2186). */
 function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Locator {
-  return row(page, title).getByRole("button", { name: `${name} “${title}”`, exact: true });
+  return row(page, title).getByRole("button", { name: `${name} “${title}”`, exact: true, includeHidden: true });
+}
+
+async function openRailActions(p: Page, title: string): Promise<void> {
+  const trigger = row(p, title).getByRole("button", { name: `Actions for ${title}`, exact: true });
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+}
+async function clickRailAction(p: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Promise<void> {
+  await openRailActions(p, title);
+  await railAction(p, title, name).click();
+}
+async function taskAction(target: Locator, label: string): Promise<void> {
+  const trigger = target.locator(".af-term-more");
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+  await target.locator("button", { hasText: label }).click();
+  if (label === "Remove") await target.page().getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
 }
 
 /** One state's checkbox in the rail's filter menu (feat: hide archived by default). */
@@ -510,6 +525,12 @@ async function resetToAgentTab(page: Page): Promise<void> {
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 }
 
+/** Secondary session operations live in the same keyboard/pointer disclosure. */
+async function openSessionActions(page: Page): Promise<void> {
+  const trigger = page.getByRole("button", { name: "Session actions", exact: true });
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+}
+
 /** Creates the menu's Terminal choice. The labelled New tab control deliberately
  *  makes every mouse-created kind explicit; the `t` keyboard shortcut remains the
  *  one-keystroke shell path. */
@@ -521,8 +542,9 @@ async function createTerminalTab(page: Page): Promise<void> {
   const boundBefore = await pane.getAttribute("data-tab-id");
   const tabsBefore = await tabbar.locator(".af-tab").count();
 
-  await tabbar.locator(".af-tab-new").click();
-  const menu = tabbar.locator(".af-tab-menu");
+  await openSessionActions(page);
+  await tabbar.locator("..").locator(".af-tab-new").click();
+  const menu = tabbar.locator("..").locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
   await expect(menu).toBeHidden();
@@ -1121,7 +1143,7 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
   // stale auth_required=false choice and offer an empty-credential retry loop.
   const transitionCtx = await browser.newContext();
   const live = await transitionCtx.newPage();
-  let rejectTheme = false;
+  let rejectSnapshot = false;
   await live.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
     window.WebSocket = new Proxy(NativeWebSocket, {
@@ -1134,8 +1156,8 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
       },
     });
   });
-  await live.route("**/v1/GetTheme", (route) => {
-    if (!rejectTheme) return route.continue();
+  await live.route("**/v1/Snapshot", (route) => {
+    if (!rejectSnapshot) return route.continue();
     return route.fulfill({
       status: 401,
       contentType: "application/json",
@@ -1143,7 +1165,7 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
     });
   });
   await openTokenless(live);
-  rejectTheme = true;
+  rejectSnapshot = true;
   await live.evaluate(() => {
     const socket = (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket;
     if (!socket) throw new Error("events WebSocket was not captured");
@@ -1204,7 +1226,7 @@ test("an unreachable daemon reports a real transport message, not [object Object
   await p.locator("#af-token").fill("some-token");
   await p.locator(".af-login-form button[type=submit]").click();
 
-  const err = p.locator(".af-error");
+  const err = p.locator(".af-recovery");
   await expect(err).toBeVisible();
   await expect(err).toContainText("Couldn't reach the daemon");
   await expect(err).not.toContainText("[object Object]");
@@ -1356,7 +1378,7 @@ test("token persistence: an unreachable daemon KEEPS the stored token", async ({
 
   await ctx.route("**/v1/Snapshot", (route) => route.abort("connectionrefused"));
   await p.reload();
-  await expect(p.locator(".af-error")).toContainText("Couldn't reach the daemon");
+  await expect(p.locator(".af-recovery")).toContainText("Couldn't reach the daemon");
   expect(await storedToken(p)).toBe("still-good");
 
   // Daemon back: the very next load resumes silently, with no paste in between.
@@ -1442,6 +1464,7 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
     list.push(
       synth("probe-working", 1), // Running → working → no dot
       synth("probe-needs-you", 2, "settled-after-pane-change"),
+      { ...synth("probe-no-branch", 2, "settled-after-pane-change"), branch: "" },
       synth("probe-broken-prompt", 2, "prompt-not-delivered"),
       synth("probe-lost", 3, "process-exited"),
       synth("probe-dead", 4, "process-exited"),
@@ -1469,12 +1492,20 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(readyDot).not.toHaveClass(/af-dot-spin/);
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
   await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
+  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("Needs you · synth-probe-needs-you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("Needs you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch-name")).toHaveCount(0);
+  await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
   // Positive non-delivery is Broken even though the underlying process is Ready.
   const promptBroken = row(p, "probe-broken-prompt");
   await expect(promptBroken).toHaveClass(/af-row-operator-broken/);
   await expect(promptBroken.locator(".af-operator-state")).toHaveText("Broken");
+  await expect(promptBroken.locator(".af-idle-reason")).toHaveCount(0);
+  await promptBroken.click();
   await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
   // Error/terminal states keep distinct STATIC shapes.
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
@@ -1521,9 +1552,9 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   // Put focus on the preceding button in DOM order, then use a real Tab keystroke to
   // enter this row. The opacity-zero action remains tabbable and :focus-within makes
   // it visible as soon as focus arrives.
-  const keyboardTarget = railAction(p, "probe-needs-you", "Archive session");
+  const keyboardTarget = row(p, "probe-needs-you").getByRole("button", { name: "Actions for probe-needs-you", exact: true });
   await keyboardTarget.evaluate((target) => {
-    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')].filter((button) => button.getClientRects().length > 0);
     const before = buttons[buttons.indexOf(target as HTMLButtonElement) - 1];
     if (!before) {
       throw new Error("archive action has no preceding tab stop");
@@ -1751,9 +1782,9 @@ test("#2458: no live indicator by the project selector, no live/branch meta by t
   await expect(page.locator(".af-term-head")).not.toContainText("Live");
 
   // The branch went with it: "Live · master" was one unit, and the head now carries
-  // the session title alone.
+  // the session title and its separator before the tab labels.
   const head = await page.locator(".af-term-head-main").textContent();
-  expect(head?.trim()).toBe(SESSION_A);
+  expect(head?.trim()).toBe(`${SESSION_A} ·`);
 });
 
 // The phone path is checked separately because the indicator was not merely
@@ -1820,8 +1851,8 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await row(page, SESSION_A).hover();
   await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");
-  await expect(railAction(page, SESSION_A, "Archive session").locator('.af-icon[data-icon="archive"]')).toHaveCount(1);
-  await expect(railAction(page, SESSION_A, "Kill session").locator('.af-icon[data-icon="octagon-x"]')).toHaveCount(1);
+  await expect(railAction(page, SESSION_A, "Archive session")).toHaveCount(1);
+  await expect(railAction(page, SESSION_A, "Kill session")).toHaveCount(1);
   await expect(railAction(page, SESSION_A, "Kill session")).not.toHaveClass(/af-danger/);
   await expect(page.locator(".af-term-head button", { hasText: "Prompt" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Archive" })).toHaveCount(0);
@@ -3294,7 +3325,7 @@ test("config: the editor renders from the manifest and writes through the real p
       .toEqual(next);
   };
 
-  await editJSON("theme", (value) => ({ ...value, accent: "#123456" }));
+  await expect(pane.locator('.af-config-row[data-key="theme"]')).toHaveCount(0);
   await editJSON("program_overrides", (value) => ({ ...value, devin: "devin --web-config-selftest" }));
   await editJSON("session_env_passthrough", (value) => [...value, "AF_WEB_CONFIG_SELFTEST"]);
   await editJSON("limit_patterns", (value) => ({ ...value, devin: "AF_WEB_CONFIG_LIMIT" }));
@@ -3322,6 +3353,35 @@ async function typeIntoAssistantAndExpectEcho(page: Page, nonce: string): Promis
   await page.keyboard.type(nonce);
   await expect(term).toContainText(nonce, { timeout: 30_000 });
 }
+
+test("accounts: one Add account disclosure preserves a refused name and keyboard focus", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const add = p.locator(".af-account-disclosure summary");
+    await expect(add).toHaveCount(1);
+    await expect(p.locator(".af-accounts-register:visible")).toHaveCount(0);
+    await add.focus();
+    await p.keyboard.press("Enter");
+    await p.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    const name = p.getByLabel("New claude account name", { exact: true });
+    await name.fill("invalid/name");
+    await name.press("Enter");
+    await expect(p.locator(".af-accounts-register:visible [role=alert]")).toBeVisible();
+    await expect(name).toHaveValue("invalid/name");
+    await expect(name).toBeFocused();
+    await name.fill("design-review-account");
+    await name.press("Enter");
+    await expect(name).toHaveValue("");
+    await name.fill("next-account-draft");
+    await p.locator(".af-config-toggle").click();
+    await expect(name).toHaveValue("next-account-draft");
+    await add.click();
+    await expect(p.locator(".af-accounts-register:visible")).toHaveCount(0);
+  } finally { await ctx.close(); }
+});
 
 test("config assistant (#2467): open → live stream → close reaps → reopen spawns fresh", REAL_FIXTURE, async () => {
   // The web counterpart of the TUI's config-agent takeover, over the bare-session PTY
@@ -4165,8 +4225,8 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   await expect(shelvedTab.locator(".af-tab-close")).toHaveCount(0);
   // Creation does not vanish: the bar names the restore step instead of looking
   // indistinguishable from a product with no tab-create feature (#2077).
-  await expect(tabbar.locator(".af-tab-new")).toHaveCount(0);
-  await expect(tabbar.locator(".af-tab-new-unavailable")).toHaveText("Restore this session to create tabs");
+  await expect(tabbar.locator("..").locator(".af-tab-new")).toHaveCount(0);
+  await expect(tabbar.locator("..").locator(".af-tab-new-unavailable")).toHaveText("Restore this session to create tabs");
 
   await shelvedTab.click();
 
@@ -4722,14 +4782,10 @@ test("task-only project (redesign PR2, Fix 1): a repo with a task but no session
   await projectItem(page, "mock-repo-3").click();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-3");
 
-  // Its rail is the clean empty state (no sessions), not a blank rail. It has no
-  // archived sessions either, so the empty state stays a bare one-liner — no
-  // "N archived hidden" hint to explain something that isn't there.
-  const empty = page.locator(".af-rail-empty-project");
-  await expect(empty).toContainText("No active sessions in");
-  await expect(empty).toContainText("mock-repo-3");
-  await expect(empty.locator(".af-rail-empty-new")).toBeVisible();
-  await expect(empty).not.toContainText("archived hidden");
+  // P4: the pane owns the condition/action; the rail keeps only its count.
+  await expect(page.locator(".af-rail-empty-project")).toHaveCount(0);
+  await expect(page.locator(".af-main .af-recovery h1")).toHaveText("No sessions");
+  await expect(page.locator(".af-main .af-recovery button")).toHaveText("New session");
 
   // The delete-project action is DISABLED here — there are no live sessions to archive,
   // so it can never be a silent no-op (Greptile Fix 2). An archived-only repo, by the
@@ -4911,9 +4967,13 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   // Enable/disable round-trips via UpdateTask: the new task is enabled (Disable
   // shown). Disabling flips it, and re-enabling flips it back — proof the toggle
   // rides UpdateTask keyed by the task's id.
-  await addedRow.locator("button", { hasText: "Disable" }).click();
+  await taskAction(addedRow, "Disable");
+  await expect(addedRow.locator("button", { hasText: "Enable" })).toHaveCount(1);
+  await addedRow.locator(".af-term-more").click();
   await expect(addedRow.locator("button", { hasText: "Enable" })).toBeVisible({ timeout: 30_000 });
-  await addedRow.locator("button", { hasText: "Enable" }).click();
+  await taskAction(addedRow, "Enable");
+  await expect(addedRow.locator("button", { hasText: "Disable" })).toHaveCount(1);
+  await addedRow.locator(".af-term-more").click();
   await expect(addedRow.locator("button", { hasText: "Disable" })).toBeVisible({ timeout: 30_000 });
 
   // Trigger-now round-trips via TriggerTask (enabled cron tasks only). Await the RPC
@@ -4921,14 +4981,14 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   // id sent matches the one AddTask minted (id-stability, not the name).
   const [triggerResp] = await Promise.all([
     page.waitForResponse("**/v1/TriggerTask"),
-    addedRow.locator("button", { hasText: "Trigger" }).click(),
+    taskAction(addedRow, "Trigger"),
   ]);
   expect((await triggerResp.json()).error, "TriggerTask must succeed (no envelope error)").toBeNull();
   expect(triggerId, "TriggerTask must send the same stable id AddTask minted").toBe(addedTaskId);
 
   // Remove round-trips via RemoveTask: the row disappears, and the id sent is again
   // the stable one (never the name).
-  await addedRow.locator("button", { hasText: "Remove" }).click();
+  await taskAction(addedRow, "Remove");
   await expect(tasks.locator(".af-task-row", { hasText: added })).toHaveCount(0, { timeout: 30_000 });
   expect(removeId, "RemoveTask must send the same stable id").toBe(addedTaskId);
 
@@ -5031,7 +5091,7 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
 
   // Clean up our task and return to the sessions view for the following flows.
   await page.route("**/v1/RemoveTask", (route) => route.continue());
-  await reloadedRow.locator("button", { hasText: "Remove" }).click();
+  await taskAction(reloadedRow, "Remove");
   await expect(page.locator(".af-tasks .af-task-row", { hasText: named })).toHaveCount(0, { timeout: 30_000 });
 
   await page.unroute("**/v1/AddTask");
@@ -5158,7 +5218,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
   await expect(reopened).toBeHidden();
 
   // Clean up and return to the sessions view for the following flows.
-  await reloadedRow.locator("button", { hasText: "Remove" }).click();
+  await taskAction(reloadedRow, "Remove");
   await expect(page.locator(".af-tasks .af-task-row", { hasText: named })).toHaveCount(0, { timeout: 30_000 });
 
   await page.unroute("**/v1/AddTask");
@@ -5206,10 +5266,10 @@ test("#2218: slow create closes immediately, shows daemon state, then opens atta
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
 
   // Leave no successful probe behind for later shared-page tests.
-  await railAction(page, created, "Kill session").click();
+  await clickRailAction(page, created, "Kill session");
   const killModal = page.locator(".af-modal-card");
   await expect(killModal).toBeVisible();
-  await killModal.locator("button.af-danger").click();
+  await killModal.locator("button.af-primary").click();
   await expect(row(page, created)).toHaveCount(0, { timeout: 30_000 });
 });
 
@@ -5232,7 +5292,8 @@ test("#2218: failing slow create shows the daemon error and leaves no phantom ro
   const envelope = (await failed.json()) as { error?: { message?: string } };
   const daemonMessage = envelope.error?.message ?? "";
   expect(daemonMessage).toContain("failed to start instance");
-  await expect(page.locator(".af-toast"), "the web must render the daemon's exact failure").toHaveText(daemonMessage);
+  await expect(page.locator(".af-modal-error"), "the retained form must explain the failure").toContainText(daemonMessage);
+  await expect(page.locator('input[aria-label="Session title"]')).toHaveValue(created);
   await expect(creating, "the failed provisional id must be removed").toHaveCount(0, { timeout: 30_000 });
 
   // A fresh authoritative Snapshot must agree: reload cannot resurrect a phantom.
@@ -5282,6 +5343,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // against the picked project), not by a list in the web. This is the only test
     // that proves the whole chain — enum → RPC → rendered options — through a real
     // daemon; the unit tests either side of it both stub their counterpart.
+    if (!await modal.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await modal.locator(".af-defaults summary").click();
     const backendSelect = modal.locator('select[aria-label="Backend"]');
     const programSelect = modal.locator('select[aria-label="Program"]');
     await expect(backendSelect).toBeVisible();
@@ -5308,21 +5370,20 @@ test.describe("create → kill (one session, two flows)", () => {
     // failure this issue is about. The reason is the daemon's own text, so this also
     // proves the CLI and the web say the same thing.
     await backendSelect.selectOption("docker");
-    // .first(): the form grew a second hint under the account field (#3844), so an
-    // unqualified locator now matches two elements and strict mode fails.
-    await expect(modal.locator(".af-modal-hint").first()).toHaveText(/docker\.image/);
+    // Hints are associated with their operation even when Account is disclosed separately.
+    await expect(modal.locator(".af-backend-hint")).toHaveText(/docker\.image/);
     await expect(modal.locator("button.af-primary")).toBeDisabled();
 
     // The repo's versioned remote_hooks config is available, and the option names
     // its launcher while retaining "hook" as the submitted CLI/config key.
     await backendSelect.selectOption("hook");
-    await expect(modal.locator(".af-modal-hint").first()).toHaveText("");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
     // Back to the repo default: the notice clears, Create is live again, and the
     // submit below sends NO backend — so this create stays local.
     await backendSelect.selectOption("");
-    await expect(modal.locator(".af-modal-hint").first()).toHaveText("");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
     // #3844 end-to-end: the account picker is populated by the DAEMON (ListAccounts
@@ -5331,15 +5392,16 @@ test.describe("create → kill (one session, two flows)", () => {
     // options — through a real daemon; the unit tests either side of it stub their
     // counterpart.
     const accountSelect = modal.locator('select[aria-label="Account"]');
-    const accountHint = modal.locator(".af-modal-hint").nth(1);
+    const accountHint = modal.locator(".af-account-hint");
     await expect(accountSelect).toBeVisible();
     // Populated asynchronously, so wait for the daemon's answer rather than the
     // ambient-identity-only placeholder the field is built with. The entry script
-    // registered two claude accounts, one holding the artifact claude's login would
-    // leave and one not — and the row says which is which, before any click.
+    // registered two claude accounts; the registration test added a third.
+    // Only web-signed-in holds the artifact claude's login would leave.
     await expect(accountSelect.locator("option")).toHaveText(
       [
         "Ambient identity (the agent's own login)",
+        "design-review-account — not logged in",
         "web-registered — not logged in",
         "web-signed-in",
       ],
@@ -5368,7 +5430,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // the field on the ambient identity, so `account` is omitted entirely and this
     // create runs on the fake agent's own environment.
     await programSelect.selectOption("");
-    await expect(accountSelect.locator("option")).toHaveCount(3, { timeout: 30_000 });
+    await expect(accountSelect.locator("option")).toHaveCount(4, { timeout: 30_000 });
     await expect(accountSelect).toHaveValue("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
@@ -5408,11 +5470,11 @@ test.describe("create → kill (one session, two flows)", () => {
     // quiet actions. Kill it and confirm.
     await row(page, createdTitle).click();
     await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-    await railAction(page, createdTitle, "Kill session").click();
+    await clickRailAction(page, createdTitle, "Kill session");
 
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
-    await modal.locator("button.af-danger").click();
+    await modal.locator("button.af-primary").click();
 
     // The killed row disappears from the rail (the killed event removes it).
     await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });
@@ -5429,7 +5491,7 @@ test("#2680: archive retires an unselected row even when the follow-up Snapshot 
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await row(page, SESSION_B).hover();
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "1");
-  await railAction(page, SESSION_B, "Archive session").click();
+  await clickRailAction(page, SESSION_B, "Archive session");
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await expect(modal).toContainText(SESSION_B);
@@ -5485,7 +5547,7 @@ test("#2680: archive retires an unselected row even when the follow-up Snapshot 
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
   await expect(
-    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+    railAction(page, SESSION_B, "Restore session"),
   ).toHaveCount(1);
   await row(page, SESSION_B).hover();
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "1");
@@ -5516,9 +5578,9 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   // slot whose accessible verb and static glyph both reverse.
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
   await expect(
-    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+    railAction(page, SESSION_B, "Restore session"),
   ).toHaveCount(1);
-  await railAction(page, SESSION_B, "Restore session").click();
+  await clickRailAction(page, SESSION_B, "Restore session");
 
   // Restore is a confirm (mirroring kill/archive), so it inherits their busy/error
   // surface; the primary button POSTs RestoreSession.
@@ -5533,19 +5595,19 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   // ...and its rail row — STILL selected, never reselected — flips its verb back to
   // Archive in place: the patchMainHead path remains load-bearing after the move.
   await expect(railAction(page, SESSION_B, "Restore session")).toHaveCount(0, { timeout: 30_000 });
-  await expect(railAction(page, SESSION_B, "Archive session").locator('.af-icon[data-icon="archive"]')).toHaveCount(1);
+  await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(1);
 
   // Re-archive from that same live-flipped button (NO reselect): restores the fixture
   // the downstream filter tests need (B archived) and re-proves both the archive leg
   // and the reverse (Archive→Restore) live flip in one flow.
-  await railAction(page, SESSION_B, "Archive session").click();
+  await clickRailAction(page, SESSION_B, "Archive session");
   const archiveModal = page.locator(".af-modal-card");
   await expect(archiveModal).toBeVisible();
   await archiveModal.locator("button.af-primary").click();
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
   await expect(
-    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+    railAction(page, SESSION_B, "Restore session"),
   ).toHaveCount(1);
 
   // Back to the default filter (archived hidden): B drops from the rail, exactly as
@@ -5759,6 +5821,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
 
     // While the selected row is visible, its rail controls are the one action
     // surface; the pane header must not duplicate them.
+    await openRailActions(p, title);
     await expect(railAction(p, title, "Archive session")).toBeVisible();
     await expect(railAction(p, title, "Kill session")).toBeVisible();
     await expect(p.locator(".af-term-actions")).toBeHidden();
@@ -5773,7 +5836,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     await expect(p.locator(".af-term-title")).toHaveText(title);
     await expect(p.locator(".af-main.af-main-term .xterm")).toBeVisible();
     const headActions = p.locator(".af-term-actions");
-    await expect(headActions).toBeVisible();
+    await p.getByRole("button", { name: "Session actions", exact: true }).click();
     await expect(headActions.getByRole("button", { name: `Archive session “${title}”`, exact: true })).toBeVisible();
     await expect(headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true })).toBeVisible();
 
@@ -5785,6 +5848,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     await expect(modal).toContainText(`Archive ${title}?`);
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(modal).toBeHidden();
+    await p.getByRole("button", { name: "Session actions", exact: true }).click();
     await headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true }).click();
     await expect(modal).toContainText(`Kill ${title}?`);
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -5898,7 +5962,7 @@ test("add + delete a registered empty project (#2456): appears while another is 
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
   await expect(delModal).toContainText("no sessions to archive");
-  await delModal.locator("button.af-danger").click();
+  await delModal.locator("button.af-primary").click();
   await expect(delModal).toBeHidden();
 
   // It actually goes away (not a lingering row whose delete silently no-ops, the
@@ -6068,7 +6132,7 @@ test("add-project directory picker (#2788): descend, ascend, pick a repo — and
   await page.locator(".af-project-menu .af-project-delete").click();
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
-  await delModal.locator("button.af-danger").click();
+  await delModal.locator("button.af-primary").click();
   await expect(delModal).toBeHidden();
   await expect(page.locator(".af-project-switch-name")).not.toHaveText(browseRepo, { timeout: 30_000 });
   await page.locator(".af-project-switch").click();
@@ -6096,7 +6160,7 @@ test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bou
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await expect(modal).toContainText("restorable");
-  await modal.locator("button.af-danger").click();
+  await modal.locator("button.af-primary").click();
 
   // The project ACTUALLY GOES AWAY: SESSION_C is archived, the repo now has no live
   // session and no task, so it drops from the derivation and selection reconciles to
@@ -6166,7 +6230,7 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   await del.click();
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
-  await delModal.locator("button.af-danger").click();
+  await delModal.locator("button.af-primary").click();
   // REFUSED (fail closed): the modal stays OPEN with an inline error naming the
   // still-starting session, and nothing was changed — no half-delete, no orphan.
   await expect(delModal.locator(".af-modal-error")).toContainText("still starting", { timeout: 15_000 });
@@ -6189,7 +6253,7 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   // delete that CONVERGED, reported as a hang. Gating the click keeps every attempt
   // idempotent AND terminating, so the loop still observes the close on a later pass.
   // The contract is unchanged — a delete that genuinely never converges still fails here.
-  const dangerBtn = delModal.locator("button.af-danger");
+  const dangerBtn = delModal.locator("button.af-primary");
   await expect(async () => {
     if ((await dangerBtn.isVisible().catch(() => false)) && (await dangerBtn.isEnabled().catch(() => false))) {
       await dangerBtn.click({ timeout: 2500 });
@@ -6260,17 +6324,17 @@ test("empty state (#1592 PR9, #2456): an empty Snapshot + registry renders the z
   // state renders as designed rather than a broken/blank shell. Post-#2456 the copy
   // points at the switcher's add action, not the TUI.
   await expect(page.locator(".af-app")).toBeVisible();
-  await expect(page.locator(".af-rail-empty")).toContainText("No projects yet");
+  await expect(page.locator(".af-rail-empty")).toHaveCount(0);
+  await expect(page.locator(".af-main .af-recovery h1")).toHaveText("No project registered");
   // #2479: the zero-projects rail names no shell command AND offers no button that
   // cannot act — with no projects the New-session modal's Create is disabled, so a
   // New button here would dead-end. The coherent action is the switcher's
   // "+ Add project" (asserted just below, #2456/#2546), not a rail button.
-  await expect(page.locator(".af-rail-empty")).not.toContainText("af sessions create");
-  await expect(page.locator(".af-rail-empty")).not.toContainText("in the TUI");
+  await expect(page.locator(".af-main .af-recovery button")).toHaveText("Add project");
   await expect(page.locator(".af-rail-empty .af-rail-empty-new")).toHaveCount(0);
   await expect(page.locator(".af-rail-count")).toHaveText("0");
-  // With nothing selected the main pane is the "Select a session" placeholder.
-  await expect(page.locator(".af-main-empty")).toContainText("Select a session");
+  // With no project registered the recovery pane offers registration.
+  await expect(page.locator(".af-main-empty")).toContainText("No project registered");
 
   // #2456: the zero-projects switcher is still OPENABLE (the dead end lane-detail-backlog
   // removed its dead-end "+ New" for), and its ONE coherent action is the "+ Add project"
@@ -6408,7 +6472,7 @@ async function tokenContrast(p: Page, foreground: string): Promise<number> {
   return p.evaluate((fg) => {
     const probe = document.createElement("span");
     probe.style.color = `var(${fg})`;
-    probe.style.backgroundColor = "var(--af-bg-surface)";
+    probe.style.backgroundColor = "var(--af-surface)";
     document.body.append(probe);
     const parse = (value: string): number[] => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
     const [fr = 0, fgChannel = 0, fb = 0] = parse(getComputedStyle(probe).color);
@@ -6427,15 +6491,7 @@ async function tokenContrast(p: Page, foreground: string): Promise<number> {
   }, foreground);
 }
 
-const CONTRAST_TOKENS = [
-  "--af-text-muted",
-  "--af-status-needs-you",
-  "--af-status-working",
-  "--af-status-waiting",
-  "--af-status-broken",
-  "--af-status-inactive",
-  "--af-focus-ring",
-] as const;
+const CONTRAST_TOKENS = ["--af-ink", "--af-ink-muted", "--af-ready", "--af-running", "--af-dead", "--af-accent"] as const;
 
 test("theme (redesign PR1): a saved dark choice is stamped before the app mounts — no flash", async () => {
   // Persist a dark choice, then install a document-start trap on #app.replaceChildren
@@ -6481,8 +6537,8 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   const darkBody = await bgColor(page, "body");
   // The web/iframe-pane tokens (fixed in this PR to match the terminal pane) resolve
   // to their dark values.
-  const darkTerm = await cssVar(page, "--af-bg-term");
-  const darkBorderSubtle = await cssVar(page, "--af-border-subtle");
+  const darkTerm = await cssVar(page, "--af-surface");
+  const darkBorderSubtle = await cssVar(page, "--af-border");
   for (const token of CONTRAST_TOKENS) {
     expect(await tokenContrast(page, token), `${token} must hold contrast in dark mode`).toBeGreaterThanOrEqual(4.5);
   }
@@ -6493,8 +6549,8 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   const lightRail = await bgColor(page, ".af-rail");
   const lightBody = await bgColor(page, "body");
-  const lightTerm = await cssVar(page, "--af-bg-term");
-  const lightBorderSubtle = await cssVar(page, "--af-border-subtle");
+  const lightTerm = await cssVar(page, "--af-surface");
+  const lightBorderSubtle = await cssVar(page, "--af-border");
   for (const token of CONTRAST_TOKENS) {
     expect(await tokenContrast(page, token), `${token} must hold contrast in light mode`).toBeGreaterThanOrEqual(4.5);
   }
@@ -6505,164 +6561,28 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // The light rail surface is the Snow Storm-derived token.
-  expect(lightRail).toBe("rgb(227, 231, 239)");
+  // Slice A uses the fixed generated surface in both modes.
+  expect(lightRail).toBe("rgb(248, 249, 252)");
+  expect(darkRail).toBe("rgb(46, 52, 64)");
+  expect(await bgColor(page, ".af-appbar")).toBe(lightRail);
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
 
-  // The palette comes from the daemon, not this toggle. Replace GetTheme with the
-  // named legacy palette, reload, and prove the same web tokens now follow it.
-  let servedPalette: "zenburn" | "nord" = "zenburn";
-  let themeRequestCount = 0;
-  let themeFailuresRemaining = 0;
-  let holdNextTheme = false;
-  let heldTheme: { route: Route; palette: "zenburn" | "nord" } | null = null;
-  await page.addInitScript(() => {
-    const NativeWebSocket = window.WebSocket;
-    const TrackingWebSocket = new Proxy(NativeWebSocket, {
-      construct(target, args) {
-        const socket = Reflect.construct(target, args) as WebSocket;
-        if (String(args[0]).includes("/v1/events")) {
-          (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket = socket;
-        }
-        return socket;
-      },
-    });
-    window.WebSocket = TrackingWebSocket;
-  });
-  const fulfillTheme = (route: Route, palette: "zenburn" | "nord"): Promise<void> => {
-    const theme =
-      palette === "zenburn"
-        ? {
-            name: "zenburn",
-            foreground: "#DCDCCC",
-            foreground_strong: "#FFFFEF",
-            foreground_muted: "#989890",
-            foreground_dim: "#656555",
-            background: "#3F3F3F",
-            background_subtle: "#494949",
-            background_panel: "#4F4F4F",
-            accent: "#8CD0D3",
-          }
-        : {
-            name: "nord",
-            foreground: "#D8DEE9",
-            foreground_strong: "#ECEFF4",
-            foreground_muted: "#C3CBD6",
-            foreground_dim: "#A7B0BE",
-            background: "#2E3440",
-            background_subtle: "#3B4252",
-            background_panel: "#434C5E",
-            accent: "#88C0D0",
-          };
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ data: { theme }, error: null }),
-    });
-  };
-  await page.route("**/v1/GetTheme", (route) => {
-    themeRequestCount += 1;
-    const palette = servedPalette;
-    if (themeFailuresRemaining > 0) {
-      themeFailuresRemaining -= 1;
-      return route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ data: null, error: { message: "temporary palette read failure" } }),
-      });
-    }
-    if (holdNextTheme) {
-      holdNextTheme = false;
-      heldTheme = { route, palette };
-      return;
-    }
-    return fulfillTheme(route, palette);
-  });
+  // Palette responses from old daemons cannot change fixed browser appearance.
+  let paletteReads = 0;
+  await page.route("**/v1/GetTheme", (route) => { paletteReads++; return route.fulfill({status: 500}); });
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
-  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
-  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
-  expect(await cssVar(page, "--af-accent")).toBe("#8CD0D3");
-
-  // A daemon restart can change config without reloading this page. Force the
-  // self-healing events socket through its real reconnect path, switch the mocked
-  // daemon palette meanwhile, and require both chrome and open xterms to be
-  // refreshed by the reconnect's resync callback.
-  const requestsBeforeReconnect = themeRequestCount;
-  servedPalette = "nord";
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeReconnect);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
-  // Frost cyan is lifted just enough to stay AA on every Nord elevation.
-  await expect.poll(() => cssVar(page, "--af-accent")).toBe("#90C4D3");
-
-  // Two quick reconnects can overlap GetTheme reads under the same credential.
-  // Hold the older Zenburn response, let a newer Nord response win, then release
-  // the stale response and prove it cannot rewind the palette generation.
-  holdNextTheme = true;
-  servedPalette = "zenburn";
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured");
-    socket.close();
-  });
-  await expect.poll(() => heldTheme !== null).toBe(true);
-  const requestsBeforeNewerRefresh = themeRequestCount;
-  servedPalette = "nord";
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("reconnected events WebSocket was not captured");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeNewerRefresh);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
-  const staleTheme = heldTheme;
-  if (!staleTheme) throw new Error("older GetTheme request was not held");
-  await fulfillTheme(staleTheme.route, staleTheme.palette);
-  await page.waitForTimeout(100);
-  expect(await cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
-
-  // Establish Zenburn as the last good palette, then prove a healthy socket can
-  // outlive one failed additive HTTP read. The failure must not reset to Nord;
-  // retry without another socket reconnect and apply Nord only on real success.
-  servedPalette = "zenburn";
-  const requestsBeforeZenburn = themeRequestCount;
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured before the retry setup");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeZenburn);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
-
-  themeFailuresRemaining = 1;
-  servedPalette = "nord";
-  const requestsBeforeTransientFailure = themeRequestCount;
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured before the retry check");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure);
-  await page.waitForTimeout(100);
-  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure + 1);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  expect(await bgColor(page, "body")).toBe("rgb(248, 249, 252)");
+  expect(paletteReads).toBe(0);
   await page.unroute("**/v1/GetTheme");
-
-  // Reset to Auto and clear the saved choice so the page is left in its default theme.
-  // Auto removes data-theme entirely (follow prefers-color-scheme).
-  await page.locator('.af-theme-opt[data-theme-opt="auto"]').click();
-  await expect
-    .poll(() => page.evaluate(() => document.documentElement.hasAttribute("data-theme")))
-    .toBe(false);
+  await page.locator('.af-theme-opt[data-theme-opt="system"]').click();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("html")).toHaveAttribute("data-af-theme", "dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator("html")).toHaveAttribute("data-af-theme", "light");
   await page.evaluate(() => localStorage.removeItem("af-theme"));
-  await page.reload();
-  await expect(page.locator(".af-app")).toBeVisible();
+
 });
 
 interface TerminalGeometry {
@@ -7904,25 +7824,25 @@ test("theme-color is declared per scheme, and an explicit theme choice repoints 
 
   const metas = p.locator('meta[name="theme-color"]');
   await expect(metas).toHaveCount(2);
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#f8f9fc");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#2e3440");
 
   // The audit item is "the chrome matches the app theme", and per-scheme metas alone
   // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
   // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
   await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
   await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#3B4252");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#2e3440");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#2e3440");
 
   await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#E3E7EF");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#f8f9fc");
 
   // Back to Auto and the metas go per-scheme again, handing the decision back to the
   // media queries.
-  await p.locator('.af-theme-opt[data-theme-opt="auto"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
+  await p.locator('.af-theme-opt[data-theme-opt="system"]').click();
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#f8f9fc");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#2e3440");
   await ctx.close();
 });
 
@@ -8201,9 +8121,11 @@ test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the 
       message: "the real four-tab roster must overflow the narrow tab bar",
     })
     .toBe(true);
-  const trigger = tabbar.locator(".af-tab-new");
+  await tabbar.evaluate((bar) => { bar.scrollLeft = bar.scrollWidth; });
+  await openSessionActions(page);
+  const trigger = tabbar.locator("..").locator(".af-tab-new");
   await trigger.click();
-  const menu = tabbar.locator(".af-tab-menu");
+  const menu = tabbar.locator("..").locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   const before = await settledHitTestableTabMenu(page, menu, trigger);
 
@@ -8390,15 +8312,36 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               expect(layout.retry.right).toBeLessThanOrEqual(layout.head.right);
             }
 
+            const sessionMenu = head.locator(".af-term-menu");
+            await expect(sessionMenu).toBeHidden();
+            const sessionActions = head.getByRole("button", { name: "Session actions", exact: true });
+            await sessionActions.focus();
+            await p.keyboard.press("Enter");
+            await expect(sessionMenu).toBeVisible();
+            const copyLink = head.getByRole("button", { name: "Copy link", exact: true });
+            await expect(copyLink).toHaveCount(1);
+            await expect(copyLink).toHaveAttribute("title", "Copy link");
+            if (width <= 768) {
+              await expect(sessionMenu.getByRole("button", { name: "Copy link", exact: true })).toBeVisible();
+            } else {
+              await expect(head.locator(".af-copy-link-desktop")).toBeVisible();
+              await expect(copyLink).toHaveText("");
+            }
+            await p.keyboard.press("Escape");
+            await expect(sessionMenu).toBeHidden();
+            await expect(sessionActions).toBeFocused();
+
             if (roster === "one") {
               expect(layout.barScrollWidth, "one tab fits without a vestigial second row").toBeLessThanOrEqual(
                 layout.barClientWidth + 1,
               );
             } else {
               expect(layout.barScrollWidth, "the long roster genuinely overflows").toBeGreaterThan(layout.barClientWidth);
-              const trigger = tabbar.locator(".af-tab-new");
+              await tabbar.evaluate((bar) => { bar.scrollLeft = bar.scrollWidth; });
+              await openSessionActions(p);
+              const trigger = tabbar.locator("..").locator(".af-tab-new");
               await trigger.click();
-              const menu = tabbar.locator(".af-tab-menu");
+              const menu = tabbar.locator("..").locator(".af-tab-menu");
               await expect(menu).toBeVisible();
               const before = await settledHitTestableTabMenu(p, menu, trigger);
               const scroll = await tabbar.evaluate((bar) => {
@@ -9095,7 +9038,7 @@ test("#3681 a zero box over a QUIET window is reported as a product defect, nami
     expect(message, "a quiet window makes a zero box the product's defect, not the reading's").toContain(
       "no rebuild in the window",
     );
-    for (const named of ["check:af-icon", "circle:af-icon", "git-branch:af-icon", "archive:af-icon", "octagon-x:af-icon"]) {
+    for (const named of ["check:af-icon", "circle:af-icon", "git-branch:af-icon", "plus:af-icon", "ellipsis:af-icon"]) {
       expect(message, `the failure must name ${named}`).toContain(named);
     }
     expect(message, "and say which of the three clauses rejected it").toContain("zero box 0x0");
@@ -9287,6 +9230,7 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
   const tabbar = page.locator(".af-tabbar");
   // The choice is named on the tab bar itself. The pre-#2077 split control exposed
   // only `+` and an unlabeled caret, so a user had to know the hidden menu existed.
+  await openSessionActions(page);
   const newTab = page.locator(".af-tab-new");
   await expect(newTab).toHaveCount(1);
   await expect(newTab).toContainText("New tab");
@@ -9354,6 +9298,7 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
 
   // Escape closes the menu without creating anything (checked after, so a stray
   // tab from a mis-click can't be mistaken for the one above).
+  await openSessionActions(page);
   await newTab.click();
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
@@ -10693,7 +10638,7 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
                 opacity: getComputedStyle(actions).opacity,
                 visibility: getComputedStyle(actions).visibility,
               },
-              buttons: Array.from(actions.querySelectorAll<HTMLButtonElement>("button")).map((button) => ({
+              buttons: Array.from(actions.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.getClientRects().length > 0).map((button) => ({
                 label: button.getAttribute("aria-label"),
                 rect: rect(button),
               })),
@@ -10893,7 +10838,7 @@ test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals
   expect(
     fit.target.buttons.map((button) => button.label),
     diagnostic,
-  ).toEqual([`Archive session “${SESSION_A}”`, `Kill session “${SESSION_A}”`]);
+  ).toEqual([`Actions for ${SESSION_A}`]);
   expect(fit.target.buttons.every((button) => button.rect.width > 0 && button.rect.height > 0), diagnostic).toBe(true);
   expect(fit.target.actionStyle, diagnostic).toMatchObject({ display: "flex", opacity: "1", visibility: "visible" });
   expect(fit.target.main.width, diagnostic).toBeGreaterThan(80);
@@ -10965,7 +10910,7 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   // Row actions MUST keep stopPropagation (otherwise they also select the row), so
   // Kill and Archive have to dismiss by intent before opening their own confirms.
   await openDrawer();
-  await railAction(p, SESSION_A, "Kill session").click();
+  await clickRailAction(p, SESSION_A, "Kill session");
   await expectDrawerClosed();
   await expect(modal).toContainText(`Kill ${SESSION_A}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -10974,7 +10919,7 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(row(p, SESSION_A)).toHaveCount(1);
 
   await openDrawer();
-  await railAction(p, SESSION_A, "Archive session").click();
+  await clickRailAction(p, SESSION_A, "Archive session");
   await expectDrawerClosed();
   await expect(modal).toContainText(`Archive ${SESSION_A}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -11002,6 +10947,7 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expectDrawerClosed();
   await expect(row(p, SESSION_B)).toHaveClass(/af-row-selected/);
   await openDrawer();
+  await openRailActions(p, SESSION_B);
   const restore = railAction(p, SESSION_B, "Restore session");
   await expect(restore).toBeVisible();
   await restore.click();

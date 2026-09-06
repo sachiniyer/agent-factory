@@ -33,86 +33,8 @@ import { h } from "./dom.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, handoffAgentChoices, programChoices } from "./programs.js";
 import type { AccountsResponse } from "./types.js";
 
-/** A live modal: its root element plus in-place patch controls index.ts drives
- *  around the async submit. close() removes it from the DOM. */
-export interface ModalHandle {
-  el: HTMLElement;
-  setBusy(busy: boolean): void;
-  setError(msg: string | null): void;
-  close(): void;
-}
-
-/** Builds the shared modal chrome: a backdrop, a titled card, a body slot, an
- *  error line, and a footer with a cancel + a primary action button. Returns the
- *  pieces the specific modals wire their behavior onto. Clicking the backdrop or
- *  pressing Escape cancels; Enter is left to the form's own submit. */
-export function modalChrome(opts: {
-  title: string;
-  confirmLabel: string;
-  confirmClass: string;
-  onCancel: () => void;
-}): {
-  handle: ModalHandle;
-  body: HTMLElement;
-  confirmBtn: HTMLButtonElement;
-  cancelBtn: HTMLButtonElement;
-  errorLine: HTMLElement;
-} {
-  const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
-  errorLine.hidden = true;
-
-  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
-  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
-  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
-
-  const card = h(
-    "div",
-    { class: "af-modal-card", role: "dialog" },
-    h("h2", { class: "af-modal-title" }, opts.title),
-    body,
-    errorLine,
-    footer,
-  );
-  card.setAttribute("aria-modal", "true");
-  card.setAttribute("aria-label", opts.title);
-  // Programmatically focusable, but NOT in the tab order (-1, not 0). Every modal
-  // that opens with a text field focuses that field; one that deliberately does
-  // not (add-project with its picker, #2788) still has to put focus INSIDE the
-  // dialog, or Tab and Enter keep driving the control behind the overlay that
-  // opened it. Focusing the card itself is the dialog-pattern answer: it is
-  // announced (role/aria-modal/aria-label above) and raises no virtual keyboard.
-  card.tabIndex = -1;
-  // Stop a click inside the card from bubbling to the backdrop's cancel handler.
-  card.addEventListener("click", (e) => e.stopPropagation());
-
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
-
-  cancelBtn.addEventListener("click", () => opts.onCancel());
-
-  const handle: ModalHandle = {
-    el: backdrop,
-    setBusy(busy: boolean) {
-      confirmBtn.disabled = busy;
-      cancelBtn.disabled = busy;
-      card.classList.toggle("af-modal-busy", busy);
-    },
-    setError(msg: string | null) {
-      if (msg) {
-        errorLine.textContent = msg;
-        errorLine.hidden = false;
-      } else {
-        errorLine.textContent = "";
-        errorLine.hidden = true;
-      }
-    },
-    close() {
-      backdrop.remove();
-    },
-  };
-  return { handle, body, confirmBtn, cancelBtn, errorLine };
-}
+import { modalChrome, field, defaultsDisclosure, type ModalHandle } from "./components.js";
+export { modalChrome, field, type ModalHandle } from "./components.js";
 
 /** Wraps the card's content in a <form> so Enter submits and the browser handles
  *  focus, calling onSubmit with preventDefault already applied. */
@@ -215,7 +137,7 @@ export function newSessionModal(
   // here, so a backend added server-side shows up with no change to the web.
   const backendSelect = h("select", { class: "af-input" });
   backendSelect.setAttribute("aria-label", "Backend");
-  const backendHint = h("p", { class: "af-modal-hint" });
+  const backendHint = h("p", { class: "af-modal-hint af-backend-hint" });
   // Announce the notice when it changes: the reason a choice is unusable must
   // reach a screen reader, not only sighted users scanning under the select.
   backendHint.setAttribute("role", "status");
@@ -228,7 +150,7 @@ export function newSessionModal(
   // no change to the web.
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "Account");
-  const accountHint = h("p", { class: "af-modal-hint" });
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
   // Announced for the same reason the backend hint is: the reason a choice is
   // unusable — or the fact that one has no credential yet — must reach a screen
   // reader, not only sighted users scanning under the select.
@@ -264,9 +186,29 @@ export function newSessionModal(
   //   projects  — nothing to create in (set once, before any catalog lands).
   //   backend   — the selection is unusable or unverified.
   // A bare `confirmBtn.disabled = …` anywhere else silently drops the other two.
+  const defaults = defaultsDisclosure();
+  const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
+  const accountSlot = h("div", { class: "af-defaults-account-slot" });
   const syncSubmitState = (): void => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    const choiceLabel = (select: HTMLSelectElement) => (select.selectedOptions[0]?.textContent ?? "Loading…")
+      .replace(/^Repo default \((.*)\)$/, "$1 (default)")
+      .replace("Ambient identity (the agent's own login)", "ambient");
+    // Ambiguity, unavailable choices and explicit overrides must remain in view.
+    const accountNeedsChoice = !!accountHint.textContent || accountPicked
+      || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent));
+    defaults.setSummary([`Program: ${choiceLabel(programSelect)}`, `Backend: ${choiceLabel(backendSelect)}`,
+      ...(accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`])]);
+    const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
+    if (accountBlock.parentElement !== accountParent) {
+      const focused = document.activeElement as HTMLElement | null;
+      const ownsFocus = !!focused && accountBlock.contains(focused);
+      accountParent.append(accountBlock);
+      if (ownsFocus) focused.focus();
+    }
+    accountSlot.hidden = !accountNeedsChoice;
+    if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
     confirmBtn.disabled = busy
       || projects.length === 0
       || !backendSelectable(choices, backendSelect.value)
@@ -441,16 +383,9 @@ export function newSessionModal(
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
 
-  body.append(
-    field("Title", titleInput),
-    field("Project", projectSelect),
-    field("Program", programSelect),
-    field("Backend", backendSelect),
-    backendHint,
-    field("Account", accountSelect),
-    accountHint,
-    field("Prompt", promptArea),
-  );
+  defaults.body.append(field("Program", programSelect), field("Backend", backendSelect), backendHint,
+    accountBlock);
+  body.append(field("Title", titleInput), field("Project", projectSelect), field("Prompt", promptArea), accountSlot, defaults.el);
 
   renderPrograms();
   renderChoices();
@@ -632,7 +567,7 @@ export function confirmModal(
     kill: {
       title: `Kill ${opts.sessionTitle}?`,
       confirmLabel: "Kill",
-      confirmClass: "af-danger",
+      confirmClass: "af-primary",
       body: "This permanently destroys the session and prunes its branch. This can't be undone.",
     },
     archive: {
@@ -656,7 +591,7 @@ export function confirmModal(
     onCancel: opts.onCancel,
   });
 
-  body.append(h("p", { class: "af-modal-text" }, copy.body));
+  body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
 
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
@@ -677,7 +612,7 @@ export function confirmDeleteProjectModal(
   const { handle, body } = modalChrome({
     title: `Delete project ${opts.projectLabel}?`,
     confirmLabel: "Delete project",
-    confirmClass: "af-danger",
+    confirmClass: "af-primary",
     onCancel: opts.onCancel,
   });
 
@@ -819,9 +754,7 @@ export function addProjectModal(callbacks: {
 }
 
 /** A labeled field row: a caption above its control. */
-export function field(label: string, control: HTMLElement): HTMLElement {
-  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
-}
+
 
 /** A friendly project label: the repo's basename with its parent for context. */
 export function projectLabel(root: string): string {
@@ -829,4 +762,12 @@ export function projectLabel(root: string): string {
   const base = parts[parts.length - 1] || root;
   const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
   return parent ? `${base}  (${parent}/${base})` : base;
+}
+
+/** Target-specific task deletion; failures retain the open confirmation. */
+export function removeTaskModal(name: string, onConfirm: () => void, onCancel: () => void): ModalHandle {
+  const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "This deletes the task and stops future runs. Existing sessions are kept."));
+  asForm(handle.el.firstElementChild as HTMLElement, onConfirm);
+  return handle;
 }

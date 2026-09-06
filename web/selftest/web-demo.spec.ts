@@ -133,6 +133,26 @@ interface Pass {
   seededRows: number;
 }
 
+function screenshotFor(page: Page, suffix: string): (name: string) => Promise<void> {
+  return async (name: string) => {
+    if (visual) {
+      // A completed transcript precedes the daemon's idle observation. Fast CI
+      // can reach a still while rows still say Working; wait for the same
+      // observable settled state on every visible rail, including after resize.
+      if (await page.locator(".af-rail-list").isVisible()) {
+        const states = page.locator(".af-rail-list .af-operator-state");
+        await expect(states).toHaveText(Array(await states.count()).fill("Needs you"));
+      }
+      await expect(page).toHaveScreenshot(`${name}${suffix}.png`, {
+        animations: "disabled", caret: "hide",
+        stylePath: "./selftest/visual.css",
+      });
+    } else {
+      await page.screenshot({ path: join(SHOT_DIR, `${name}${suffix}.png`) });
+    }
+  };
+}
+
 async function record(browser: Browser, pass: Pass): Promise<void> {
   const context = await browser.newContext({
     viewport: DEMO_VIEWPORT,
@@ -145,24 +165,8 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
   const page = await context.newPage();
   const video = page.video();
   // Freeze wall-clock age labels only; timers and performance.now still advance.
-  if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
-  const shot = async (name: string) => {
-    if (visual) {
-      // A completed transcript precedes the daemon's idle observation. Fast CI
-      // can reach a still while rows still say Working; wait for the same
-      // observable settled state on every visible rail, including after resize.
-      if (await page.locator(".af-rail-list").isVisible()) {
-        const states = page.locator(".af-rail-list .af-operator-state");
-        await expect(states).toHaveText(Array(await states.count()).fill("Needs you"));
-      }
-      await expect(page).toHaveScreenshot(`${name}${pass.suffix}.png`, {
-        animations: "disabled", caret: "hide",
-        stylePath: "./selftest/visual.css",
-      });
-    } else {
-      await page.screenshot({ path: join(SHOT_DIR, `${name}${pass.suffix}.png`) });
-    }
-  };
+  await prepareVisual(page);
+  const shot = screenshotFor(page, pass.suffix);
 
   try {
     // --- 1. the dashboard --------------------------------------------------
@@ -322,6 +326,86 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
   }
 }
 
+async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<unknown>, prefix: string): Promise<void> {
+  const actions = page.getByRole("button", { name: "Session actions", exact: true });
+  await actions.click();
+  await expect(page.locator(".af-term-head .af-term-menu")).toBeVisible();
+  await shot(`${prefix}session-actions`);
+  await page.locator(".af-tab-new").click();
+  await expect(page.locator(".af-tab-menu")).toBeVisible();
+  await shot(`${prefix}tab-types`);
+  await page.locator(".af-tab-new").click();
+  await actions.click();
+  await page.locator(".af-pane-host .xterm").first().click();
+  await expect(page.locator(".af-term-keyboard")).toBeVisible();
+  await shot(`${prefix}terminal-keyboard`);
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-term-keyboard")).toBeHidden();
+}
+
+/** Chrome evidence: disclosures, keyboard ownership and phone layouts are real screens. */
+async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "suffix">, phone: boolean): Promise<void> {
+  const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
+  const page = await context.newPage();
+  await prepareVisual(page);
+  const shot = screenshotFor(page, pass.suffix);
+  try {
+    await openAfterInitialResync(page, async () => { await page.goto("/"); });
+    await row(page, SESSION_JSON).click();
+    await settleTerminal(page);
+    if (!phone) {
+      await recordTerminalChrome(page, shot, "");
+      await recordControls(page, shot);
+      await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+      await expect(page.locator(".af-filter-menu")).toBeVisible();
+      await shot("session-filter");
+      await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+      await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      await expect(page.locator(".af-project-menu")).toBeVisible();
+      await shot("project-menu");
+      await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      await recordLogin(page, shot);
+      return;
+    }
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(page.locator(".af-nav-toggle")).toBeVisible();
+    await shot("phone-session");
+    await recordTerminalChrome(page, shot, "phone-");
+    await page.locator(".af-nav-toggle").click();
+    await expect(page.locator(".af-rail")).toBeVisible();
+    await shot("phone-drawer");
+    await page.getByRole("button", { name: "Switch project", exact: true }).click();
+    await expect(page.locator(".af-project-menu")).toBeVisible();
+    await shot("phone-project-menu");
+    await page.getByRole("button", { name: "Switch project", exact: true }).click();
+    await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+    await expect(page.locator(".af-filter-menu")).toBeVisible();
+    await shot("phone-filter");
+    await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
+    await page.getByRole("button", { name: "More app controls", exact: true }).click();
+    await expect(page.locator(".af-appbar-tools")).toBeVisible();
+    await shot("phone-controls");
+    await page.getByRole("button", { name: "More app controls", exact: true }).click();
+    await page.locator(".af-rail-new").click();
+    await page.getByLabel("Session title", { exact: true }).fill("review-followup");
+    await shot("phone-create");
+    await page.keyboard.press("Escape");
+    await page.locator(".af-nav-toggle").click();
+    await page.locator('.af-viewtab[data-view="tasks"]').click();
+    await shot("phone-tasks");
+    await page.locator('.af-viewtab[data-view="config"]').click();
+    await expect(async () => { await page.locator(".af-accounts").scrollIntoViewIfNeeded(); }).toPass({ timeout: 5000 });
+    await shot("phone-config");
+    await page.locator(".af-account-disclosure summary").click();
+    await page.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    await page.getByLabel("New claude account name", { exact: true }).fill("team");
+    await page.locator(".af-accounts-register:visible").scrollIntoViewIfNeeded();
+    await shot("phone-add-account");
+  } finally {
+    await context.close();
+  }
+}
+
 test("web demo · default theme", async ({ browser }) => {
   await record(browser, {
     suffix: "",
@@ -343,3 +427,137 @@ test("web demo · dark", async ({ browser }) => {
     seededRows: 4,
   });
 });
+
+// Phone attaches resize daemon-owned PTYs. Capture them only AFTER both hero
+// passes, so narrow scrollback reflow cannot contaminate the dark desktop stills.
+test("web chrome · both themes", async ({ browser }) => {
+  for (const phone of [false, true]) {
+    await recordChrome(browser, { suffix: "", colorScheme: "light" }, phone);
+    await recordChrome(browser, { suffix: "-dark", colorScheme: "dark" }, phone);
+    if (!phone) await recordSplits(browser);
+  }
+});
+
+// Split after the full-width stills and before phone attaches resize the PTYs.
+async function recordSplits(browser: Browser): Promise<void> {
+  for (const pass of [{ suffix: "", colorScheme: "light" }, { suffix: "-dark", colorScheme: "dark" }] as const) {
+    const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
+    const page = await context.newPage();
+    await prepareVisual(page);
+    try {
+      await openAfterInitialResync(page, async () => { await page.goto("/"); });
+      await row(page, SESSION_JSON).click();
+      await settleTerminal(page);
+      const pane = page.locator(".af-pane").first();
+      const box = await pane.boundingBox();
+      if (!box) throw new Error("Split evidence requires a visible terminal pane");
+      await page.locator('.af-tab[data-tab-index="0"]').dragTo(pane, { targetPosition: { x: 8, y: box.height / 2 } });
+      await expect(page.locator(".af-pane")).toHaveCount(2);
+      await page.locator(".af-pane-host .xterm").first().click();
+      // Splitting resizes both PTYs; wait for that repaint before checking idle.
+      await settleTerminal(page);
+      await screenshotFor(page, pass.suffix)("split-panes");
+    } finally {
+      await context.close();
+    }
+  }
+}
+
+/** C: disclosure and confirmation evidence, without committing destructive actions. */
+async function recordControls(page: Page, shot: (name: string) => Promise<unknown>): Promise<void> {
+  await page.locator(".af-rail-new").click();
+  await expect(page.locator(".af-defaults summary")).toContainText("Program:");
+  await expect(page.locator(".af-defaults summary")).not.toContainText("Account:");
+  await page.getByLabel("Session title", { exact: true }).fill("review-followup");
+  await shot("create-compact");
+  if (!await page.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await page.locator(".af-defaults summary").click();
+  await shot("create-defaults");
+  await page.keyboard.press("Escape");
+  await row(page, SESSION_JSON).getByRole("button", { name: `Actions for ${SESSION_JSON}`, exact: true }).click();
+  await shot("session-lifecycle");
+  await row(page, SESSION_JSON).getByRole("button", { name: `Kill session “${SESSION_JSON}”`, exact: true }).click();
+  await shot("kill-confirmation");
+  await page.keyboard.press("Escape");
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const task = page.locator(".af-task-row").first();
+  await expect.poll(async () => (await task.boundingBox())?.height ?? Infinity).toBeLessThanOrEqual(64);
+  await task.locator(".af-term-more").click();
+  await shot("task-actions");
+  await task.getByRole("button", { name: "Remove", exact: true }).click();
+  await shot("remove-task");
+  await page.keyboard.press("Escape");
+  await task.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Save", exact: true })).toBeInViewport({ ratio: 1 });
+  await shot("edit-task");
+  await page.keyboard.press("Escape");
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  const configInput = page.getByLabel("vscode_server_binary", { exact: true });
+  const savedValue = await configInput.inputValue();
+  await configInput.fill("/usr/local/bin/code-server");
+  const save = configInput.locator("..").locator(".af-config-save");
+  await configInput.press("Tab");
+  await expect(save).toBeFocused();
+  await expect(page.locator(".af-config-dirty:visible")).toHaveText("Unsaved");
+  await expect(save).toHaveCSS("outline-style", "solid");
+  await expect(save).toHaveCSS("outline-width", "2px");
+  await expect(save).toHaveCSS("border-width", "1px");
+  await shot("config-dirty");
+  await configInput.fill(savedValue);
+  await expect(save).toBeDisabled();
+  await expect(save).toHaveCSS("border-width", "1px");
+  await page.locator(".af-account-disclosure summary").click();
+  await page.getByLabel("Account agent", { exact: true }).selectOption("claude");
+  await page.getByLabel("New claude account name", { exact: true }).fill("team");
+  await page.locator(".af-accounts-register:visible").scrollIntoViewIfNeeded();
+  await shot("add-account");
+  await page.getByLabel("New claude account name", { exact: true }).fill("invalid/name");
+  await page.locator(".af-accounts-register:visible").getByRole("button", { name: "Register", exact: true }).click();
+  await expect(page.locator(".af-accounts-register:visible [role=alert]")).toBeVisible();
+  await expect(page.getByLabel("New claude account name", { exact: true })).toHaveValue("invalid/name");
+  await page.locator(".af-accounts-register:visible [role=alert]").scrollIntoViewIfNeeded();
+  await shot("account-error");
+  await page.route("**/v1/config-assistant", (route) => route.fulfill({status: 503, contentType: "application/json", body: JSON.stringify({data: null, error: {message: "Assistant unavailable. Check the configured agent and try again."}})}));
+  await page.getByRole("button", { name: "Configure with assistant", exact: true }).click();
+  await expect(page.locator(".af-assistant-error")).toBeVisible();
+  await shot("assistant-error");
+  await page.keyboard.press("Escape");
+  await page.unroute("**/v1/config-assistant");
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await row(page, SESSION_JSON).click();
+  await settleTerminal(page);
+  await page.getByRole("button", { name: "Switch project", exact: true }).click();
+  await page.locator(".af-project-add").click();
+  await expect(page.locator(".af-dirpicker")).toBeVisible();
+  await shot("add-project");
+  await page.keyboard.press("Escape");
+}
+
+async function recordLogin(page: Page, shot: (name: string) => Promise<unknown>): Promise<void> {
+  await page.route("**/v1/auth-info", (route) => route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({data: {auth_required: true}, error: null})}));
+  await page.goto("/");
+  await expect(page.locator("#af-token")).toBeVisible();
+  await shot("login");
+  await page.unroute("**/v1/auth-info");
+  await page.route("**/v1/auth-info", (route) => route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({data: {auth_required: false}, error: null})}));
+  await page.route("**/v1/Snapshot", (route) => route.abort("connectionrefused"));
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Cannot reach the daemon", exact: true })).toBeVisible();
+  await shot("unavailable");
+}
+
+async function prepareVisual(page: Page): Promise<void> {
+  if (!visual) return;
+  await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
+  // Schedule dates are daemon-derived. Normalize only this recorder projection,
+  // so the next calendar day cannot invalidate an otherwise identical screenshot.
+  await page.route("**/v1/ListTasks", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    for (const task of body.data?.tasks ?? []) {
+      if (task.next_run_at) task.next_run_at = "2000-01-03T14:00:00Z";
+      // The demo seeds this task at the next hour to avoid a run while recording.
+      if (task.name === "nightly-tests") task.cron_expr = "0 14 * * *";
+    }
+    await route.fulfill({ response, json: body });
+  });
+}

@@ -79,6 +79,7 @@ type AccountRequest struct {
 type accountsSection struct {
 	rows   []AccountRow
 	loaded bool
+	empty  bool
 	// unavailable is why the accounts could not be read, rendered in place of the
 	// rows. A section that silently shows nothing is indistinguishable from "you
 	// have no accounts", and those need different actions from the operator.
@@ -129,6 +130,7 @@ func (c *ConfigPane) SetAccounts(accounts []AccountRow, agents []string, err err
 	c.accounts.rows = nil
 	c.accounts.unavailable = ""
 	c.accounts.loaded = true
+	c.accounts.empty = err == nil && len(accounts) == 0
 	if err != nil {
 		c.accounts.unavailable = err.Error()
 		c.rebuildRows()
@@ -363,5 +365,5 @@ func accountRowPurpose(account AccountRow) string {
 
 // renderAccountsUnavailable renders the section's failure line in place of rows.
 func (c *ConfigPane) renderAccountsUnavailable() string {
-	return c.wrapIndented("Accounts could not be read: "+c.accounts.unavailable, configErrorStyle)
+	return RecoveryContent("Cannot load accounts", "Accounts could not be read: "+c.accounts.unavailable, "Reopen settings to retry.", true, c.width)
 }

@@ -178,5 +178,7 @@ nav:
       - Design notes:
           - Interface design: design/interface-design.md
           - Interface style guide: design/style-guide.md
+          - Web recovery states: design/recovery-stills.md
+          - TUI recovery states: design/tui-recovery-stills.md
           - TUI rewrite: design/tui-rewrite.md
           - Agent handoff: design/agent-handoff.md

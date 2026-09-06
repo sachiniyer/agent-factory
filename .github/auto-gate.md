@@ -260,3 +260,45 @@ slow, and its one-line summary is the `branch_sweep` output of the resolver job.
 Deleting a ref is the gate writing to the repository on its own, so the sweep is
 gated on `AUTO_GATE_ENABLED` like the merge itself. With that switch off nothing
 merges, so nothing new leaks either.
+
+## Reviewer outage record
+
+Master Health Watch (task `4ab7ba4f`, hourly) owns one comment on #3932,
+identified by `<!-- codex-reviewer-outage:v1 … -->`. Each run executes:
+
+```sh
+node .github/scripts/codex-outage.js sachiniyer/agent-factory
+```
+
+The helper creates that comment once, then updates it in place. It preserves
+completed outage episodes, closes each at the first real `Reviewed commit:`
+verdict, and names the start, latest notice, elapsed hours, and merged PRs.
+A later outage adds another episode to the same record. No issue is closed and
+no new issue or per-PR outage comment is opened. Run with a final `--dry-run`
+argument to inspect the proposed body without writing it.
+
+The sweep paginates PRs in updated order back to the #3932 evidence window
+(2026-09-05 UTC) on bootstrap, including open and closed PRs. Later sweeps
+retain closed episodes and scan back to the active start or last recovery, so
+history does not disappear after 24h or require rescanning all past PRs. An
+episode starts at the first observed limit, not the preceding verdict. It reads **both**
+`/pulls/N/comments` and `/issues/N/comments` unfiltered, plus review bodies.
+It reconstructs degraded merges using #3932's method: a limit before merge and
+no real verdict covering the actual merged head before merge. This is historical
+coverage accounting, not a second implementation of the merge gate; the count
+is labelled with its method in the record. Late reviews cannot undo a degraded
+merge. The shared `codexEvidence` export from `auto-gate.js` supplies detection,
+quotation exclusions and verdict parsing, including all three observed limit
+wordings. Finding predicates and the hand gate's jq are unchanged.
+
+On a degraded evaluation, Auto Gate reads this record once and writes the
+outage duration to the job summary. It labels the watch's observation time;
+between sweeps, or if the record cannot be read, it falls back to the duration
+observed on the PR and says so. The record never authorizes a merge, and an
+unreadable record never changes a gate decision. Per-head limit evidence and
+maintainer approval are still required exactly as before.
+
+The live task prompt must run the helper before its no-findings early exit.
+Until this helper lands on master, it skips that command when the file is absent.
+The watch is the only writer; do not run overlapping write sweeps. A failed API
+read aborts before updating the record, preserving the previous successful sweep.

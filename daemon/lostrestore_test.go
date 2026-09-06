@@ -347,8 +347,6 @@ func (failPtyFactory) Start(*exec.Cmd) (*os.File, error) {
 	return nil, errors.New("tmux spawn should not be reached when worktree is missing")
 }
 
-func (failPtyFactory) Close() {}
-
 // TestRestoreLostSessions_LogsVanishedWorktreeOnce covers the #1303
 // instrumentation: when a live registered Lost session points at a worktree
 // directory that disappeared and the branch is also gone, the daemon emits one

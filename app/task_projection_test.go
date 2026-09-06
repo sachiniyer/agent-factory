@@ -227,7 +227,7 @@ func TestRefreshTasksLiveProjectsOutOfBandChange(t *testing.T) {
 	require.False(t, h.refreshTasks(fresh, nil), "an unchanged task list must not report a change")
 
 	// A read error leaves the last-known list intact.
-	require.False(t, h.refreshTasks(nil, errRefreshFailed))
+	require.True(t, h.refreshTasks(nil, errRefreshFailed), "unavailable status triggers a repaint")
 	require.Len(t, h.store.GetTasks(), 1, "a failed refresh must not wipe the projected tasks")
 }
 

@@ -190,15 +190,15 @@
         "pointer": "app/home_model.go:434 -> app/theme.go applyTheme -> ui/theme.go ApplyTheme"
       },
       "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:273 GetTheme -> web/src/index.ts refreshDaemonPalette -> web/src/theme.ts deriveTheme"
+        "status": "n/a",
+        "pointer": ""
       },
       "cli": {
         "status": "n/a",
         "pointer": ""
       },
-      "verdict": "parity",
-      "notes": "#3220 deliverable 1 makes the daemon-owned semantic palette reach both visual clients. The TUI applies config.Theme directly; the web reads the same resolved palette through POST /v1/GetTheme and derives its CSS and xterm tokens from it. Auto/Light/Dark remains a browser-local mode choice, not a second palette. CLI is n/a because it has no persistent visual renderer; its config commands already expose the shared configuration data under config.read/config.write."
+      "verdict": "deliberate",
+      "notes": "#3913 retires configurable web palettes and the last GetTheme caller, so the daemon renderer-read endpoint is removed. The web selects fixed generated Light/Dark/System palettes locally (web/src/theme.ts). Legacy TUI ApplyTheme remains in use until P5 of #3906; CLI has no persistent visual renderer."
     },
     {
       "id": "config.validate",
@@ -1618,7 +1618,6 @@
       "POST /v1/DeleteProject": "project.delete",
       "POST /v1/DeliverPrompt": "-",
       "POST /v1/GetConfig": "config.read",
-      "POST /v1/GetTheme": "theme.apply",
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListAccounts": "session.accounts",
@@ -1711,7 +1710,6 @@
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
       "GetConfig": "config.read",
-      "GetTheme": "theme.apply",
       "HandoffSession": "session.handoff",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",

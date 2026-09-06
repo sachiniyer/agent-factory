@@ -163,10 +163,11 @@ var coldStartWarmupWait = 2 * time.Minute
 // reconnecting tabs to their tmux sessions by name so a restored session is
 // immediately attachable. A single unrestorable record is logged and skipped,
 // never aborting the whole cold start. Returns an error only on a hard
-// (non-warming) daemon failure, which newHome surfaces and exits on — there is
-// no standalone fallback anymore (#960 PR 6 dropped no-daemon mode).
+// (non-warming) daemon failure. Startup renders recovery and keeps normal
+// snapshot polling alive; unavailable data is never presented as an empty list.
 func (m *home) coldStartFromSnapshot() error {
 	data, err := m.fetchColdStartSnapshot(m.repoID)
+	m.snapshotUnavailable = err != nil
 	if err != nil {
 		return err
 	}
@@ -258,25 +259,40 @@ func refreshPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd
 
 // -- Sync methods --
 
-// handleSnapshot applies a fetched daemon snapshot to the projection store and reports
-// whether anything changed (the caller repaints only on a diff). On a fetch
-// error it degrades rather than dropping the sidebar: a warming daemon (#829) is
-// retried on the next tick (callDaemon already waited out the warm-up window),
-// and any other error is logged and skipped, leaving the last-known sidebar
-// intact. The Snapshot RPC is the TUI's ONLY sync path (#960 PR 4): the daemon is
-// the sole owner/writer of session state, so there is no disk-based reconcile to
-// fall back to.
+// snapshotFailureGrace keeps transient poll failures from replacing a loaded layout.
+const snapshotFailureGrace = 3 * time.Second
+
+// handleSnapshot applies the daemon's authoritative snapshot and reports whether
+// the caller needs to repaint. Failed polls retain the last-known projection;
+// non-starting failures show recovery only after the grace window. A warming
+// daemon (#829) is retried without changing the view. Success clears the outage
+// and its timer. Cold-start recovery remains immediate because no data was loaded.
+// The Snapshot RPC is the sole sync path (#960 PR 4); there is no disk fallback.
 func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
+	wasUnavailable := m.snapshotUnavailable
 	if msg.err != nil {
 		if daemon.IsDaemonStartingErr(msg.err) {
-			// Daemon still restoring (#829); the cold-start Snapshot already
-			// populated the sidebar. Retry next tick — nothing to reconcile yet.
+			// Daemon still restoring (#829). Retain the current view and
+			// failure window; only a successful snapshot ends the outage.
 			return false
 		}
+		now := time.Now
+		if m.snapshotClock != nil {
+			now = m.snapshotClock
+		}
+		at := now()
+		if m.snapshotFailureSince == nil {
+			m.snapshotFailureSince = &at
+		}
+		if at.Sub(*m.snapshotFailureSince) >= snapshotFailureGrace {
+			m.snapshotUnavailable = true
+		}
 		log.WarningLog.Printf("failed to fetch daemon snapshot: %v", msg.err)
-		return false
+		return m.snapshotUnavailable != wasUnavailable
 	}
-	changed := false
+	m.snapshotUnavailable = false
+	m.snapshotFailureSince = nil
+	changed := wasUnavailable
 	// An empty active scope owns no sessions, so there is nothing to reconcile
 	// (#2864). The daemon reads an empty repoID as "every repo" — the same
 	// all-repos answer the cold start deliberately refuses in registry mode
@@ -294,7 +310,7 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	// does not touch, so the cross-repo view a registry-mode user actually needs
 	// stays live.
 	if m.repoID != "" {
-		changed = m.reconcileSnapshot(msg.data)
+		changed = m.reconcileSnapshot(msg.data) || changed
 	}
 	if m.applyDeliveryAlarms(msg.alarms) {
 		changed = true
@@ -344,11 +360,11 @@ func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
 // deletions. Returns whether anything visible changed (the caller repaints on a
 // diff). A read error leaves the last-known list intact, matching handleSnapshot.
 func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
+	changed := m.automations.TaskPane().SetUnavailable(tasksErr)
 	if tasksErr != nil {
 		log.WarningLog.Printf("failed to refresh tasks: %v", tasksErr)
-		return false
+		return changed
 	}
-	changed := false
 	if !reflect.DeepEqual(m.store.GetTasks(), tasks) {
 		m.store.SetTasks(tasks)
 		changed = true

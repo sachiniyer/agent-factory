@@ -8,7 +8,7 @@ const srcRoot = dirname(fileURLToPath(import.meta.url));
 
 test("web components contain no raw colors outside the theme mechanism", () => {
   const files = readdirSync(srcRoot)
-    .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts") && name !== "theme.ts")
+    .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts") && name !== "terminal_ansi.ts")
     .sort();
   const rawColor = /["'`]#(?:[\da-fA-F]{3}|[\da-fA-F]{4}|[\da-fA-F]{6}|[\da-fA-F]{8})["'`]|rgba?\(/g;
   const violations: string[] = [];

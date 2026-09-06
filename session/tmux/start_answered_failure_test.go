@@ -67,8 +67,6 @@ func (f answeredFailurePtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan err
 	return ptmx, done, nil
 }
 
-func (answeredFailurePtyFactory) Close() {}
-
 // TestStartAnsweredCommandFailureDoesNotClaimPreSpawn covers a new-session (or
 // its systemd-run wrapper) that exits non-zero while exact probes answer that no
 // session exists. The launch process began, so later name absence is not proof

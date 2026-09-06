@@ -297,8 +297,7 @@ func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 // handleStateTasks routes key events to the task manager overlay and
 // processes its pending actions. Esc in list mode drops the manager's own
 // focus: the overlay closes and any dirty edits are saved — a failed save
-// reloads both views to match disk and is surfaced inline so the dropped
-// edit isn't silent. The configured quit key is root-routed before the task
+// retains the edited task and surfaces a recovery screen for retry. The configured quit key is root-routed before the task
 // form can type it into an input, and ctrl+c still quits from normal mode.
 func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	sp := m.automations.TaskPane()
@@ -337,7 +336,8 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// skip the create: the pending toggle/edit didn't persist, so we
 		// don't want handleTaskCreate's reload to silently discard it (#934).
 		if err := m.saveContentPaneState(); err != nil {
-			return m, m.handleError(err)
+			sp.RestoreCreateMode()
+			return m, m.showRecovery("Cannot save task", "Your input is retained. "+err.Error(), "Press any key to return to the form.", err)
 		}
 		return m, m.handleTaskCreate()
 	}

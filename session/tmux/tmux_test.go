@@ -83,8 +83,6 @@ func (pt *MockPtyFactory) Start(cmd *exec.Cmd) (*os.File, error) {
 	return f, err
 }
 
-func (pt *MockPtyFactory) Close() {}
-
 func NewMockPtyFactory(t *testing.T) *MockPtyFactory {
 	return &MockPtyFactory{
 		t: t,

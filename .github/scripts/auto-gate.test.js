@@ -3491,6 +3491,28 @@ test("the degraded pass with a head-bound approval still merges itself", async (
   assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
 });
 
+test("degraded evaluation writes outage duration to the Actions job summary", async () => {
+  const core = fakeCore();
+  let summary = "";
+  let writes = 0;
+  core.summary = {
+    addRaw(text) { summary += text; return this; },
+    async write() { writes++; },
+  };
+  const result = await autoGate.evaluate({
+    github: fakeGateGithub({ issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ] }),
+    context: fakeContext(), core, prNumber: 1465, setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, true);
+  assert.equal(writes, 1);
+  assert.match(summary, /Codex usage-limited since .*\d+\.\dh ago/);
+  assert.match(summary, /merging on maintainer approval/);
+  assert.doesNotMatch(summary, /NaN/);
+});
+
 // #3900: PR #3893's empty review carried its quota answer in an inline reply.
 function inlineLimitFixture(overrides = {}) {
   const reply = {

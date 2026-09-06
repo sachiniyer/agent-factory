@@ -84,7 +84,7 @@ var require_xterm = __commonJS({
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.AccessibilityManager = void 0;
-        const n = i2(9042), o = i2(9924), a = i2(844), h3 = i2(4725), c = i2(2585), l = i2(3656);
+        const n = i2(9042), o = i2(9924), a = i2(844), h2 = i2(4725), c = i2(2585), l = i2(3656);
         let d = t2.AccessibilityManager = class extends a.Disposable {
           constructor(e3, t3, i3, s3) {
             super(), this._terminal = e3, this._coreBrowserService = i3, this._renderService = s3, this._rowColumns = /* @__PURE__ */ new WeakMap(), this._liveRegionLineCount = 0, this._charsToConsume = [], this._charsToAnnounce = "", this._accessibilityContainer = this._coreBrowserService.mainDocument.createElement("div"), this._accessibilityContainer.classList.add("xterm-accessibility"), this._rowContainer = this._coreBrowserService.mainDocument.createElement("div"), this._rowContainer.setAttribute("role", "list"), this._rowContainer.classList.add("xterm-accessibility-tree"), this._rowElements = [];
@@ -178,7 +178,7 @@ var require_xterm = __commonJS({
             e3.style.height = `${this._renderService.dimensions.css.cell.height}px`;
           }
         };
-        t2.AccessibilityManager = d = s2([r(1, c.IInstantiationService), r(2, h3.ICoreBrowserService), r(3, h3.IRenderService)], d);
+        t2.AccessibilityManager = d = s2([r(1, c.IInstantiationService), r(2, h2.ICoreBrowserService), r(3, h2.IRenderService)], d);
       }, 3614: (e2, t2) => {
         function i2(e3) {
           return e3.replace(/\r?\n/g, "\r");
@@ -243,7 +243,7 @@ var require_xterm = __commonJS({
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.Linkifier = void 0;
-        const n = i2(3656), o = i2(8460), a = i2(844), h3 = i2(2585), c = i2(4725);
+        const n = i2(3656), o = i2(8460), a = i2(844), h2 = i2(2585), c = i2(4725);
         let l = t2.Linkifier = class extends a.Disposable {
           get currentLink() {
             return this._currentLink;
@@ -373,7 +373,7 @@ var require_xterm = __commonJS({
             return { x1: e3, y1: t3, x2: i3, y2: s3, cols: this._bufferService.cols, fg: r2 };
           }
         };
-        t2.Linkifier = l = s2([r(1, c.IMouseService), r(2, c.IRenderService), r(3, h3.IBufferService), r(4, c.ILinkProviderService)], l);
+        t2.Linkifier = l = s2([r(1, c.IMouseService), r(2, c.IRenderService), r(3, h2.IBufferService), r(4, c.ILinkProviderService)], l);
       }, 9042: (e2, t2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.tooMuchOutput = t2.promptLabel = void 0, t2.promptLabel = "Terminal input", t2.tooMuchOutput = "Too much output to announce, navigate to rows manually to read";
       }, 3730: function(e2, t2, i2) {
@@ -417,7 +417,7 @@ var require_xterm = __commonJS({
                   } catch (e4) {
                     o3 = true;
                   }
-                  o3 || s3.push({ text: i4, range: n2, activate: (e4, t5) => r2 ? r2.activate(e4, t5, n2) : h3(0, t5), hover: (e4, t5) => r2?.hover?.(e4, t5, n2), leave: (e4, t5) => r2?.leave?.(e4, t5, n2) });
+                  o3 || s3.push({ text: i4, range: n2, activate: (e4, t5) => r2 ? r2.activate(e4, t5, n2) : h2(0, t5), hover: (e4, t5) => r2?.hover?.(e4, t5, n2), leave: (e4, t5) => r2?.leave?.(e4, t5, n2) });
                 }
                 d = false, o2.hasExtendedAttrs() && o2.extended.urlId ? (l = t4, c = o2.extended.urlId) : (l = -1, c = -1);
               }
@@ -425,7 +425,7 @@ var require_xterm = __commonJS({
             t3(s3);
           }
         };
-        function h3(e3, t3) {
+        function h2(e3, t3) {
           if (confirm(`Do you want to navigate to ${t3}?
 
 WARNING: This link could potentially be dangerous`)) {
@@ -466,7 +466,7 @@ WARNING: This link could potentially be dangerous`)) {
         };
       }, 3236: (e2, t2, i2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.Terminal = void 0;
-        const s2 = i2(3614), r = i2(3656), n = i2(3551), o = i2(9042), a = i2(3730), h3 = i2(1680), c = i2(3107), l = i2(5744), d = i2(2950), _ = i2(1296), u = i2(428), f = i2(4269), v = i2(5114), p = i2(8934), g = i2(3230), m = i2(9312), S = i2(4725), C = i2(6731), b = i2(8055), w = i2(8969), y = i2(8460), E = i2(844), k = i2(6114), L = i2(8437), D = i2(2584), R = i2(7399), x = i2(5941), A = i2(9074), B = i2(2585), T = i2(5435), M = i2(4567), O = i2(779);
+        const s2 = i2(3614), r = i2(3656), n = i2(3551), o = i2(9042), a = i2(3730), h2 = i2(1680), c = i2(3107), l = i2(5744), d = i2(2950), _ = i2(1296), u = i2(428), f = i2(4269), v = i2(5114), p = i2(8934), g = i2(3230), m = i2(9312), S = i2(4725), C = i2(6731), b = i2(8055), w = i2(8969), y = i2(8460), E = i2(844), k = i2(6114), L = i2(8437), D = i2(2584), R = i2(7399), x = i2(5941), A = i2(9074), B = i2(2585), T = i2(5435), M = i2(4567), O = i2(779);
         class P extends w.CoreTerminal {
           get onFocus() {
             return this._onFocus.event;
@@ -575,7 +575,7 @@ WARNING: This link could potentially be dangerous`)) {
               this._onWillOpen.fire(this.element);
             } catch {
             }
-            this._renderService.hasRenderer() || this._renderService.setRenderer(this._createRenderer()), this.viewport = this._instantiationService.createInstance(h3.Viewport, this._viewportElement, this._viewportScrollArea), this.viewport.onRequestScrollLines(((e4) => this.scrollLines(e4.amount, e4.suppressScrollEvent, 1))), this.register(this._inputHandler.onRequestSyncScrollBar((() => this.viewport.syncScrollArea()))), this.register(this.viewport), this.register(this.onCursorMove((() => {
+            this._renderService.hasRenderer() || this._renderService.setRenderer(this._createRenderer()), this.viewport = this._instantiationService.createInstance(h2.Viewport, this._viewportElement, this._viewportScrollArea), this.viewport.onRequestScrollLines(((e4) => this.scrollLines(e4.amount, e4.suppressScrollEvent, 1))), this.register(this._inputHandler.onRequestSyncScrollBar((() => this.viewport.syncScrollArea()))), this.register(this.viewport), this.register(this.onCursorMove((() => {
               this._renderService.handleCursorMove(), this._syncTextArea();
             }))), this.register(this.onResize((() => this._renderService.handleResize(this.cols, this.rows)))), this.register(this.onBlur((() => this._renderService.handleBlur()))), this.register(this.onFocus((() => this._renderService.handleFocus()))), this.register(this._renderService.onDimensionsChange((() => this.viewport.syncScrollArea()))), this._selectionService = this.register(this._instantiationService.createInstance(m.SelectionService, this.element, this.screenElement, this.linkifier)), this._instantiationService.setService(S.ISelectionService, this._selectionService), this.register(this._selectionService.onRequestScrollLines(((e4) => this.scrollLines(e4.amount, e4.suppressScrollEvent)))), this.register(this._selectionService.onSelectionChange((() => this._onSelectionChange.fire()))), this.register(this._selectionService.onRequestRedraw(((e4) => this._renderService.handleSelectionChanged(e4.start, e4.end, e4.columnSelectMode)))), this.register(this._selectionService.onLinuxMouseSelection(((e4) => {
               this.textarea.value = e4, this.textarea.focus(), this.textarea.select();
@@ -824,10 +824,10 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.Viewport = void 0;
-        const n = i2(3656), o = i2(4725), a = i2(8460), h3 = i2(844), c = i2(2585);
-        let l = t2.Viewport = class extends h3.Disposable {
-          constructor(e3, t3, i3, s3, r2, o2, h4, c2) {
-            super(), this._viewportElement = e3, this._scrollArea = t3, this._bufferService = i3, this._optionsService = s3, this._charSizeService = r2, this._renderService = o2, this._coreBrowserService = h4, this.scrollBarWidth = 0, this._currentRowHeight = 0, this._currentDeviceCellHeight = 0, this._lastRecordedBufferLength = 0, this._lastRecordedViewportHeight = 0, this._lastRecordedBufferHeight = 0, this._lastTouchY = 0, this._lastScrollTop = 0, this._wheelPartialScroll = 0, this._refreshAnimationFrame = null, this._ignoreNextScrollEvent = false, this._smoothScrollState = { startTime: 0, origin: -1, target: -1 }, this._onRequestScrollLines = this.register(new a.EventEmitter()), this.onRequestScrollLines = this._onRequestScrollLines.event, this.scrollBarWidth = this._viewportElement.offsetWidth - this._scrollArea.offsetWidth || 15, this.register((0, n.addDisposableDomListener)(this._viewportElement, "scroll", this._handleScroll.bind(this))), this._activeBuffer = this._bufferService.buffer, this.register(this._bufferService.buffers.onBufferActivate(((e4) => this._activeBuffer = e4.activeBuffer))), this._renderDimensions = this._renderService.dimensions, this.register(this._renderService.onDimensionsChange(((e4) => this._renderDimensions = e4))), this._handleThemeChange(c2.colors), this.register(c2.onChangeColors(((e4) => this._handleThemeChange(e4)))), this.register(this._optionsService.onSpecificOptionChange("scrollback", (() => this.syncScrollArea()))), setTimeout((() => this.syncScrollArea()));
+        const n = i2(3656), o = i2(4725), a = i2(8460), h2 = i2(844), c = i2(2585);
+        let l = t2.Viewport = class extends h2.Disposable {
+          constructor(e3, t3, i3, s3, r2, o2, h3, c2) {
+            super(), this._viewportElement = e3, this._scrollArea = t3, this._bufferService = i3, this._optionsService = s3, this._charSizeService = r2, this._renderService = o2, this._coreBrowserService = h3, this.scrollBarWidth = 0, this._currentRowHeight = 0, this._currentDeviceCellHeight = 0, this._lastRecordedBufferLength = 0, this._lastRecordedViewportHeight = 0, this._lastRecordedBufferHeight = 0, this._lastTouchY = 0, this._lastScrollTop = 0, this._wheelPartialScroll = 0, this._refreshAnimationFrame = null, this._ignoreNextScrollEvent = false, this._smoothScrollState = { startTime: 0, origin: -1, target: -1 }, this._onRequestScrollLines = this.register(new a.EventEmitter()), this.onRequestScrollLines = this._onRequestScrollLines.event, this.scrollBarWidth = this._viewportElement.offsetWidth - this._scrollArea.offsetWidth || 15, this.register((0, n.addDisposableDomListener)(this._viewportElement, "scroll", this._handleScroll.bind(this))), this._activeBuffer = this._bufferService.buffer, this.register(this._bufferService.buffers.onBufferActivate(((e4) => this._activeBuffer = e4.activeBuffer))), this._renderDimensions = this._renderService.dimensions, this.register(this._renderService.onDimensionsChange(((e4) => this._renderDimensions = e4))), this._handleThemeChange(c2.colors), this.register(c2.onChangeColors(((e4) => this._handleThemeChange(e4)))), this.register(this._optionsService.onSpecificOptionChange("scrollback", (() => this.syncScrollArea()))), setTimeout((() => this.syncScrollArea()));
           }
           _handleThemeChange(e3) {
             this._viewportElement.style.backgroundColor = e3.background.css;
@@ -933,7 +933,7 @@ WARNING: This link could potentially be dangerous`)) {
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.BufferDecorationRenderer = void 0;
         const n = i2(4725), o = i2(844), a = i2(2585);
-        let h3 = t2.BufferDecorationRenderer = class extends o.Disposable {
+        let h2 = t2.BufferDecorationRenderer = class extends o.Disposable {
           constructor(e3, t3, i3, s3, r2) {
             super(), this._screenElement = e3, this._bufferService = t3, this._coreBrowserService = i3, this._decorationService = s3, this._renderService = r2, this._decorationElements = /* @__PURE__ */ new Map(), this._altBufferIsActive = false, this._dimensionsChanged = false, this._container = document.createElement("div"), this._container.classList.add("xterm-decoration-container"), this._screenElement.appendChild(this._container), this.register(this._renderService.onRenderedViewportChange((() => this._doRefreshDecorations()))), this.register(this._renderService.onDimensionsChange((() => {
               this._dimensionsChanged = true, this._queueRefresh();
@@ -980,7 +980,7 @@ WARNING: This link could potentially be dangerous`)) {
             this._decorationElements.get(e3)?.remove(), this._decorationElements.delete(e3), e3.dispose();
           }
         };
-        t2.BufferDecorationRenderer = h3 = s2([r(1, a.IBufferService), r(2, n.ICoreBrowserService), r(3, a.IDecorationService), r(4, n.IRenderService)], h3);
+        t2.BufferDecorationRenderer = h2 = s2([r(1, a.IBufferService), r(2, n.ICoreBrowserService), r(3, a.IDecorationService), r(4, n.IRenderService)], h2);
       }, 5871: (e2, t2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.ColorZoneStore = void 0, t2.ColorZoneStore = class {
           constructor() {
@@ -1027,13 +1027,13 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.OverviewRulerRenderer = void 0;
-        const n = i2(5871), o = i2(4725), a = i2(844), h3 = i2(2585), c = { full: 0, left: 0, center: 0, right: 0 }, l = { full: 0, left: 0, center: 0, right: 0 }, d = { full: 0, left: 0, center: 0, right: 0 };
+        const n = i2(5871), o = i2(4725), a = i2(844), h2 = i2(2585), c = { full: 0, left: 0, center: 0, right: 0 }, l = { full: 0, left: 0, center: 0, right: 0 }, d = { full: 0, left: 0, center: 0, right: 0 };
         let _ = t2.OverviewRulerRenderer = class extends a.Disposable {
           get _width() {
             return this._optionsService.options.overviewRulerWidth || 0;
           }
-          constructor(e3, t3, i3, s3, r2, o2, h4) {
-            super(), this._viewportElement = e3, this._screenElement = t3, this._bufferService = i3, this._decorationService = s3, this._renderService = r2, this._optionsService = o2, this._coreBrowserService = h4, this._colorZoneStore = new n.ColorZoneStore(), this._shouldUpdateDimensions = true, this._shouldUpdateAnchor = true, this._lastKnownBufferLength = 0, this._canvas = this._coreBrowserService.mainDocument.createElement("canvas"), this._canvas.classList.add("xterm-decoration-overview-ruler"), this._refreshCanvasDimensions(), this._viewportElement.parentElement?.insertBefore(this._canvas, this._viewportElement);
+          constructor(e3, t3, i3, s3, r2, o2, h3) {
+            super(), this._viewportElement = e3, this._screenElement = t3, this._bufferService = i3, this._decorationService = s3, this._renderService = r2, this._optionsService = o2, this._coreBrowserService = h3, this._colorZoneStore = new n.ColorZoneStore(), this._shouldUpdateDimensions = true, this._shouldUpdateAnchor = true, this._lastKnownBufferLength = 0, this._canvas = this._coreBrowserService.mainDocument.createElement("canvas"), this._canvas.classList.add("xterm-decoration-overview-ruler"), this._refreshCanvasDimensions(), this._viewportElement.parentElement?.insertBefore(this._canvas, this._viewportElement);
             const c2 = this._canvas.getContext("2d");
             if (!c2) throw new Error("Ctx cannot be null");
             this._ctx = c2, this._registerDecorationListeners(), this._registerBufferChangeListeners(), this._registerDimensionChangeListeners(), this.register((0, a.toDisposable)((() => {
@@ -1088,7 +1088,7 @@ WARNING: This link could potentially be dangerous`)) {
             })));
           }
         };
-        t2.OverviewRulerRenderer = _ = s2([r(2, h3.IBufferService), r(3, h3.IDecorationService), r(4, o.IRenderService), r(5, h3.IOptionsService), r(6, o.ICoreBrowserService)], _);
+        t2.OverviewRulerRenderer = _ = s2([r(2, h2.IBufferService), r(3, h2.IDecorationService), r(4, o.IRenderService), r(5, h2.IOptionsService), r(6, o.ICoreBrowserService)], _);
       }, 2950: function(e2, t2, i2) {
         var s2 = this && this.__decorate || function(e3, t3, i3, s3) {
           var r2, n2 = arguments.length, o2 = n2 < 3 ? t3 : null === s3 ? s3 = Object.getOwnPropertyDescriptor(t3, i3) : s3;
@@ -1102,7 +1102,7 @@ WARNING: This link could potentially be dangerous`)) {
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CompositionHelper = void 0;
         const n = i2(4725), o = i2(2585), a = i2(2584);
-        let h3 = t2.CompositionHelper = class {
+        let h2 = t2.CompositionHelper = class {
           get isComposing() {
             return this._isComposing;
           }
@@ -1164,16 +1164,16 @@ WARNING: This link could potentially be dangerous`)) {
             }
           }
         };
-        t2.CompositionHelper = h3 = s2([r(2, o.IBufferService), r(3, o.IOptionsService), r(4, o.ICoreService), r(5, n.IRenderService)], h3);
+        t2.CompositionHelper = h2 = s2([r(2, o.IBufferService), r(3, o.IOptionsService), r(4, o.ICoreService), r(5, n.IRenderService)], h2);
       }, 9806: (e2, t2) => {
         function i2(e3, t3, i3) {
           const s2 = i3.getBoundingClientRect(), r = e3.getComputedStyle(i3), n = parseInt(r.getPropertyValue("padding-left")), o = parseInt(r.getPropertyValue("padding-top"));
           return [t3.clientX - s2.left - n, t3.clientY - s2.top - o];
         }
-        Object.defineProperty(t2, "__esModule", { value: true }), t2.getCoords = t2.getCoordsRelativeToElement = void 0, t2.getCoordsRelativeToElement = i2, t2.getCoords = function(e3, t3, s2, r, n, o, a, h3, c) {
+        Object.defineProperty(t2, "__esModule", { value: true }), t2.getCoords = t2.getCoordsRelativeToElement = void 0, t2.getCoordsRelativeToElement = i2, t2.getCoords = function(e3, t3, s2, r, n, o, a, h2, c) {
           if (!o) return;
           const l = i2(e3, t3, s2);
-          return l ? (l[0] = Math.ceil((l[0] + (c ? a / 2 : 0)) / a), l[1] = Math.ceil(l[1] / h3), l[0] = Math.min(Math.max(l[0], 1), r + (c ? 1 : 0)), l[1] = Math.min(Math.max(l[1], 1), n), l) : void 0;
+          return l ? (l[0] = Math.ceil((l[0] + (c ? a / 2 : 0)) / a), l[1] = Math.ceil(l[1] / h2), l[0] = Math.min(Math.max(l[0], 1), r + (c ? 1 : 0)), l[1] = Math.min(Math.max(l[1], 1), n), l) : void 0;
         };
       }, 9504: (e2, t2, i2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.moveToCellSequence = void 0;
@@ -1183,12 +1183,12 @@ WARNING: This link could potentially be dangerous`)) {
             let s4 = 0;
             const r3 = e4 - n(e4, i4), a3 = t4 - n(t4, i4);
             for (let n2 = 0; n2 < Math.abs(r3 - a3); n2++) {
-              const a4 = "A" === o(e4, t4) ? -1 : 1, h4 = i4.buffer.lines.get(r3 + a4 * n2);
-              h4?.isWrapped && s4++;
+              const a4 = "A" === o(e4, t4) ? -1 : 1, h3 = i4.buffer.lines.get(r3 + a4 * n2);
+              h3?.isWrapped && s4++;
             }
             return s4;
           })(e3, t3, i3);
-          return c(l, h3(o(e3, t3), s3));
+          return c(l, h2(o(e3, t3), s3));
         }
         function n(e3, t3) {
           let i3 = 0, s3 = t3.buffer.lines.get(e3), r2 = s3?.isWrapped;
@@ -1199,11 +1199,11 @@ WARNING: This link could potentially be dangerous`)) {
           return e3 > t3 ? "A" : "B";
         }
         function a(e3, t3, i3, s3, r2, n2) {
-          let o2 = e3, a2 = t3, h4 = "";
-          for (; o2 !== i3 || a2 !== s3; ) o2 += r2 ? 1 : -1, r2 && o2 > n2.cols - 1 ? (h4 += n2.buffer.translateBufferLineToString(a2, false, e3, o2), o2 = 0, e3 = 0, a2++) : !r2 && o2 < 0 && (h4 += n2.buffer.translateBufferLineToString(a2, false, 0, e3 + 1), o2 = n2.cols - 1, e3 = o2, a2--);
-          return h4 + n2.buffer.translateBufferLineToString(a2, false, e3, o2);
+          let o2 = e3, a2 = t3, h3 = "";
+          for (; o2 !== i3 || a2 !== s3; ) o2 += r2 ? 1 : -1, r2 && o2 > n2.cols - 1 ? (h3 += n2.buffer.translateBufferLineToString(a2, false, e3, o2), o2 = 0, e3 = 0, a2++) : !r2 && o2 < 0 && (h3 += n2.buffer.translateBufferLineToString(a2, false, 0, e3 + 1), o2 = n2.cols - 1, e3 = o2, a2--);
+          return h3 + n2.buffer.translateBufferLineToString(a2, false, e3, o2);
         }
-        function h3(e3, t3) {
+        function h2(e3, t3) {
           const i3 = t3 ? "O" : "[";
           return s2.C0.ESC + i3 + e3;
         }
@@ -1216,23 +1216,23 @@ WARNING: This link could potentially be dangerous`)) {
         t2.moveToCellSequence = function(e3, t3, i3, s3) {
           const o2 = i3.buffer.x, l = i3.buffer.y;
           if (!i3.buffer.hasScrollback) return (function(e4, t4, i4, s4, o3, l2) {
-            return 0 === r(t4, s4, o3, l2).length ? "" : c(a(e4, t4, e4, t4 - n(t4, o3), false, o3).length, h3("D", l2));
+            return 0 === r(t4, s4, o3, l2).length ? "" : c(a(e4, t4, e4, t4 - n(t4, o3), false, o3).length, h2("D", l2));
           })(o2, l, 0, t3, i3, s3) + r(l, t3, i3, s3) + (function(e4, t4, i4, s4, o3, l2) {
             let d2;
             d2 = r(t4, s4, o3, l2).length > 0 ? s4 - n(s4, o3) : t4;
             const _2 = s4, u = (function(e5, t5, i5, s5, o4, a2) {
-              let h4;
-              return h4 = r(i5, s5, o4, a2).length > 0 ? s5 - n(s5, o4) : t5, e5 < i5 && h4 <= s5 || e5 >= i5 && h4 < s5 ? "C" : "D";
+              let h3;
+              return h3 = r(i5, s5, o4, a2).length > 0 ? s5 - n(s5, o4) : t5, e5 < i5 && h3 <= s5 || e5 >= i5 && h3 < s5 ? "C" : "D";
             })(e4, t4, i4, s4, o3, l2);
-            return c(a(e4, d2, i4, _2, "C" === u, o3).length, h3(u, l2));
+            return c(a(e4, d2, i4, _2, "C" === u, o3).length, h2(u, l2));
           })(o2, l, e3, t3, i3, s3);
           let d;
-          if (l === t3) return d = o2 > e3 ? "D" : "C", c(Math.abs(o2 - e3), h3(d, s3));
+          if (l === t3) return d = o2 > e3 ? "D" : "C", c(Math.abs(o2 - e3), h2(d, s3));
           d = l > t3 ? "D" : "C";
           const _ = Math.abs(l - t3);
           return c((function(e4, t4) {
             return t4.cols - e4;
-          })(l > t3 ? e3 : o2, i3) + (_ - 1) * i3.cols + 1 + ((l > t3 ? o2 : e3) - 1), h3(d, s3));
+          })(l > t3 ? e3 : o2, i3) + (_ - 1) * i3.cols + 1 + ((l > t3 ? o2 : e3) - 1), h2(d, s3));
         };
       }, 1296: function(e2, t2, i2) {
         var s2 = this && this.__decorate || function(e3, t3, i3, s3) {
@@ -1246,10 +1246,10 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.DomRenderer = void 0;
-        const n = i2(3787), o = i2(2550), a = i2(2223), h3 = i2(6171), c = i2(6052), l = i2(4725), d = i2(8055), _ = i2(8460), u = i2(844), f = i2(2585), v = "xterm-dom-renderer-owner-", p = "xterm-rows", g = "xterm-fg-", m = "xterm-bg-", S = "xterm-focus", C = "xterm-selection";
+        const n = i2(3787), o = i2(2550), a = i2(2223), h2 = i2(6171), c = i2(6052), l = i2(4725), d = i2(8055), _ = i2(8460), u = i2(844), f = i2(2585), v = "xterm-dom-renderer-owner-", p = "xterm-rows", g = "xterm-fg-", m = "xterm-bg-", S = "xterm-focus", C = "xterm-selection";
         let b = 1, w = t2.DomRenderer = class extends u.Disposable {
           constructor(e3, t3, i3, s3, r2, a2, l2, d2, f2, g2, m2, S2, w2) {
-            super(), this._terminal = e3, this._document = t3, this._element = i3, this._screenElement = s3, this._viewportElement = r2, this._helperContainer = a2, this._linkifier2 = l2, this._charSizeService = f2, this._optionsService = g2, this._bufferService = m2, this._coreBrowserService = S2, this._themeService = w2, this._terminalClass = b++, this._rowElements = [], this._selectionRenderModel = (0, c.createSelectionRenderModel)(), this.onRequestRedraw = this.register(new _.EventEmitter()).event, this._rowContainer = this._document.createElement("div"), this._rowContainer.classList.add(p), this._rowContainer.style.lineHeight = "normal", this._rowContainer.setAttribute("aria-hidden", "true"), this._refreshRowElements(this._bufferService.cols, this._bufferService.rows), this._selectionContainer = this._document.createElement("div"), this._selectionContainer.classList.add(C), this._selectionContainer.setAttribute("aria-hidden", "true"), this.dimensions = (0, h3.createRenderDimensions)(), this._updateDimensions(), this.register(this._optionsService.onOptionChange((() => this._handleOptionsChanged()))), this.register(this._themeService.onChangeColors(((e4) => this._injectCss(e4)))), this._injectCss(this._themeService.colors), this._rowFactory = d2.createInstance(n.DomRendererRowFactory, document), this._element.classList.add(v + this._terminalClass), this._screenElement.appendChild(this._rowContainer), this._screenElement.appendChild(this._selectionContainer), this.register(this._linkifier2.onShowLinkUnderline(((e4) => this._handleLinkHover(e4)))), this.register(this._linkifier2.onHideLinkUnderline(((e4) => this._handleLinkLeave(e4)))), this.register((0, u.toDisposable)((() => {
+            super(), this._terminal = e3, this._document = t3, this._element = i3, this._screenElement = s3, this._viewportElement = r2, this._helperContainer = a2, this._linkifier2 = l2, this._charSizeService = f2, this._optionsService = g2, this._bufferService = m2, this._coreBrowserService = S2, this._themeService = w2, this._terminalClass = b++, this._rowElements = [], this._selectionRenderModel = (0, c.createSelectionRenderModel)(), this.onRequestRedraw = this.register(new _.EventEmitter()).event, this._rowContainer = this._document.createElement("div"), this._rowContainer.classList.add(p), this._rowContainer.style.lineHeight = "normal", this._rowContainer.setAttribute("aria-hidden", "true"), this._refreshRowElements(this._bufferService.cols, this._bufferService.rows), this._selectionContainer = this._document.createElement("div"), this._selectionContainer.classList.add(C), this._selectionContainer.setAttribute("aria-hidden", "true"), this.dimensions = (0, h2.createRenderDimensions)(), this._updateDimensions(), this.register(this._optionsService.onOptionChange((() => this._handleOptionsChanged()))), this.register(this._themeService.onChangeColors(((e4) => this._injectCss(e4)))), this._injectCss(this._themeService.colors), this._rowFactory = d2.createInstance(n.DomRendererRowFactory, document), this._element.classList.add(v + this._terminalClass), this._screenElement.appendChild(this._rowContainer), this._screenElement.appendChild(this._selectionContainer), this.register(this._linkifier2.onShowLinkUnderline(((e4) => this._handleLinkHover(e4)))), this.register(this._linkifier2.onHideLinkUnderline(((e4) => this._handleLinkLeave(e4)))), this.register((0, u.toDisposable)((() => {
               this._element.classList.remove(v + this._terminalClass), this._rowContainer.remove(), this._selectionContainer.remove(), this._widthCache.dispose(), this._themeStyleElement.remove(), this._dimensionsStyleElement.remove();
             }))), this._widthCache = new o.WidthCache(this._document, this._helperContainer), this._widthCache.setFont(this._optionsService.rawOptions.fontFamily, this._optionsService.rawOptions.fontSize, this._optionsService.rawOptions.fontWeight, this._optionsService.rawOptions.fontWeightBold), this._setDefaultSpacing();
           }
@@ -1306,8 +1306,8 @@ WARNING: This link could potentially be dangerous`)) {
               const i4 = e3[0] > t3[0];
               a2.appendChild(this._createSelectionElement(n2, i4 ? t3[0] : e3[0], i4 ? e3[0] : t3[0], o2 - n2 + 1));
             } else {
-              const i4 = s3 === n2 ? e3[0] : 0, h4 = n2 === r2 ? t3[0] : this._bufferService.cols;
-              a2.appendChild(this._createSelectionElement(n2, i4, h4));
+              const i4 = s3 === n2 ? e3[0] : 0, h3 = n2 === r2 ? t3[0] : this._bufferService.cols;
+              a2.appendChild(this._createSelectionElement(n2, i4, h3));
               const c2 = o2 - n2 - 1;
               if (a2.appendChild(this._createSelectionElement(n2 + 1, 0, this._bufferService.cols, c2)), n2 !== o2) {
                 const e4 = r2 === o2 ? t3[0] : this._bufferService.cols;
@@ -1331,8 +1331,8 @@ WARNING: This link could potentially be dangerous`)) {
           }
           renderRows(e3, t3) {
             const i3 = this._bufferService.buffer, s3 = i3.ybase + i3.y, r2 = Math.min(i3.x, this._bufferService.cols - 1), n2 = this._optionsService.rawOptions.cursorBlink, o2 = this._optionsService.rawOptions.cursorStyle, a2 = this._optionsService.rawOptions.cursorInactiveStyle;
-            for (let h4 = e3; h4 <= t3; h4++) {
-              const e4 = h4 + i3.ydisp, t4 = this._rowElements[h4], c2 = i3.lines.get(e4);
+            for (let h3 = e3; h3 <= t3; h3++) {
+              const e4 = h3 + i3.ydisp, t4 = this._rowElements[h3], c2 = i3.lines.get(e4);
               if (!t4 || !c2) break;
               t4.replaceChildren(...this._rowFactory.createRow(c2, e4, e4 === s3, o2, a2, r2, n2, this.dimensions.css.cell.width, this._widthCache, -1, -1));
             }
@@ -1350,11 +1350,11 @@ WARNING: This link could potentially be dangerous`)) {
             i3 < 0 && (e3 = 0), s3 < 0 && (t3 = 0);
             const o2 = this._bufferService.rows - 1;
             i3 = Math.max(Math.min(i3, o2), 0), s3 = Math.max(Math.min(s3, o2), 0), r2 = Math.min(r2, this._bufferService.cols);
-            const a2 = this._bufferService.buffer, h4 = a2.ybase + a2.y, c2 = Math.min(a2.x, r2 - 1), l2 = this._optionsService.rawOptions.cursorBlink, d2 = this._optionsService.rawOptions.cursorStyle, _2 = this._optionsService.rawOptions.cursorInactiveStyle;
+            const a2 = this._bufferService.buffer, h3 = a2.ybase + a2.y, c2 = Math.min(a2.x, r2 - 1), l2 = this._optionsService.rawOptions.cursorBlink, d2 = this._optionsService.rawOptions.cursorStyle, _2 = this._optionsService.rawOptions.cursorInactiveStyle;
             for (let o3 = i3; o3 <= s3; ++o3) {
               const u2 = o3 + a2.ydisp, f2 = this._rowElements[o3], v2 = a2.lines.get(u2);
               if (!f2 || !v2) break;
-              f2.replaceChildren(...this._rowFactory.createRow(v2, u2, u2 === h4, d2, _2, c2, l2, this.dimensions.css.cell.width, this._widthCache, n2 ? o3 === i3 ? e3 : 0 : -1, n2 ? (o3 === s3 ? t3 : r2) - 1 : -1));
+              f2.replaceChildren(...this._rowFactory.createRow(v2, u2, u2 === h3, d2, _2, c2, l2, this.dimensions.css.cell.width, this._widthCache, n2 ? o3 === i3 ? e3 : 0 : -1, n2 ? (o3 === s3 ? t3 : r2) - 1 : -1));
             }
           }
         };
@@ -1371,7 +1371,7 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.DomRendererRowFactory = void 0;
-        const n = i2(2223), o = i2(643), a = i2(511), h3 = i2(2585), c = i2(8055), l = i2(4725), d = i2(4269), _ = i2(6171), u = i2(3734);
+        const n = i2(2223), o = i2(643), a = i2(511), h2 = i2(2585), c = i2(8055), l = i2(4725), d = i2(4269), _ = i2(6171), u = i2(3734);
         let f = t2.DomRendererRowFactory = class {
           constructor(e3, t3, i3, s3, r2, n2, o2) {
             this._document = e3, this._characterJoinerService = t3, this._optionsService = i3, this._coreBrowserService = s3, this._coreService = r2, this._decorationService = n2, this._themeService = o2, this._workCell = new a.CellData(), this._columnSelectMode = false, this.defaultSpacing = 0;
@@ -1379,7 +1379,7 @@ WARNING: This link could potentially be dangerous`)) {
           handleSelectionChanged(e3, t3, i3) {
             this._selectionStart = e3, this._selectionEnd = t3, this._columnSelectMode = i3;
           }
-          createRow(e3, t3, i3, s3, r2, a2, h4, l2, _2, f2, p) {
+          createRow(e3, t3, i3, s3, r2, a2, h3, l2, _2, f2, p) {
             const g = [], m = this._characterJoinerService.getJoinedCharacters(t3), S = this._themeService.colors;
             let C, b = e3.getNoBgTrimmedLength();
             i3 && b < a2 + 1 && (b = a2 + 1);
@@ -1409,7 +1409,7 @@ WARNING: This link could potentially be dangerous`)) {
                 w && (C.textContent = y), C = this._document.createElement("span"), w = 0, y = "";
               } else C = this._document.createElement("span");
               if (E = I.bg, k = I.fg, L = I.extended.ext, D = W, R = A, x = H, O && a2 >= M && a2 <= P && (a2 = M), !this._coreService.isCursorHidden && F && this._coreService.isCursorInitialized) {
-                if (B.push("xterm-cursor"), this._coreBrowserService.isFocused) h4 && B.push("xterm-cursor-blink"), B.push("bar" === s3 ? "xterm-cursor-bar" : "underline" === s3 ? "xterm-cursor-underline" : "xterm-cursor-block");
+                if (B.push("xterm-cursor"), this._coreBrowserService.isFocused) h3 && B.push("xterm-cursor-blink"), B.push("bar" === s3 ? "xterm-cursor-bar" : "underline" === s3 ? "xterm-cursor-underline" : "xterm-cursor-block");
                 else if (r2) switch (r2) {
                   case "outline":
                     B.push("xterm-cursor-outline");
@@ -1493,7 +1493,7 @@ WARNING: This link could potentially be dangerous`)) {
           for (; e3.length < i3; ) e3 = t3 + e3;
           return e3;
         }
-        t2.DomRendererRowFactory = f = s2([r(1, l.ICharacterJoinerService), r(2, h3.IOptionsService), r(3, l.ICoreBrowserService), r(4, h3.ICoreService), r(5, h3.IDecorationService), r(6, l.IThemeService)], f);
+        t2.DomRendererRowFactory = f = s2([r(1, l.ICharacterJoinerService), r(2, h2.IOptionsService), r(3, l.ICoreBrowserService), r(4, h2.ICoreService), r(5, h2.IDecorationService), r(6, l.IThemeService)], f);
       }, 2550: (e2, t2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.WidthCache = void 0, t2.WidthCache = class {
           constructor(e3, t3) {
@@ -1577,8 +1577,8 @@ WARNING: This link could potentially be dangerous`)) {
           }
           update(e3, t3, i3, s2 = false) {
             if (this.selectionStart = t3, this.selectionEnd = i3, !t3 || !i3 || t3[0] === i3[0] && t3[1] === i3[1]) return void this.clear();
-            const r = e3.buffers.active.ydisp, n = t3[1] - r, o = i3[1] - r, a = Math.max(n, 0), h3 = Math.min(o, e3.rows - 1);
-            a >= e3.rows || h3 < 0 ? this.clear() : (this.hasSelection = true, this.columnSelectMode = s2, this.viewportStartRow = n, this.viewportEndRow = o, this.viewportCappedStartRow = a, this.viewportCappedEndRow = h3, this.startCol = t3[0], this.endCol = i3[0]);
+            const r = e3.buffers.active.ydisp, n = t3[1] - r, o = i3[1] - r, a = Math.max(n, 0), h2 = Math.min(o, e3.rows - 1);
+            a >= e3.rows || h2 < 0 ? this.clear() : (this.hasSelection = true, this.columnSelectMode = s2, this.viewportStartRow = n, this.viewportEndRow = o, this.viewportCappedStartRow = a, this.viewportCappedEndRow = h2, this.startCol = t3[0], this.endCol = i3[0]);
           }
           isCellSelected(e3, t3, i3) {
             return !!this.hasSelection && (i3 -= e3.buffer.active.viewportY, this.columnSelectMode ? this.startCol <= this.endCol ? t3 >= this.startCol && i3 >= this.viewportCappedStartRow && t3 < this.endCol && i3 <= this.viewportCappedEndRow : t3 < this.startCol && i3 >= this.viewportCappedStartRow && t3 >= this.endCol && i3 <= this.viewportCappedEndRow : i3 > this.viewportStartRow && i3 < this.viewportEndRow || this.viewportStartRow === this.viewportEndRow && i3 === this.viewportStartRow && t3 >= this.startCol && t3 < this.endCol || this.viewportStartRow < this.viewportEndRow && i3 === this.viewportEndRow && t3 < this.endCol || this.viewportStartRow < this.viewportEndRow && i3 === this.viewportStartRow && t3 >= this.startCol);
@@ -1633,7 +1633,7 @@ WARNING: This link could potentially be dangerous`)) {
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CharSizeService = void 0;
         const n = i2(2585), o = i2(8460), a = i2(844);
-        let h3 = t2.CharSizeService = class extends a.Disposable {
+        let h2 = t2.CharSizeService = class extends a.Disposable {
           get hasValidSize() {
             return this.width > 0 && this.height > 0;
           }
@@ -1651,7 +1651,7 @@ WARNING: This link could potentially be dangerous`)) {
             e3.width === this.width && e3.height === this.height || (this.width = e3.width, this.height = e3.height, this._onCharSizeChange.fire());
           }
         };
-        t2.CharSizeService = h3 = s2([r(2, n.IOptionsService)], h3);
+        t2.CharSizeService = h2 = s2([r(2, n.IOptionsService)], h2);
         class c extends a.Disposable {
           constructor() {
             super(...arguments), this._result = { width: 0, height: 0 };
@@ -1692,7 +1692,7 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CharacterJoinerService = t2.JoinedCellData = void 0;
-        const n = i2(3734), o = i2(643), a = i2(511), h3 = i2(2585);
+        const n = i2(3734), o = i2(643), a = i2(511), h2 = i2(2585);
         class c extends n.AttributeData {
           constructor(e3, t3, i3) {
             super(), this.content = 0, this.combinedData = "", this.fg = e3.fg, this.bg = e3.bg, this.combinedData = t3, this._width = i3;
@@ -1734,14 +1734,14 @@ WARNING: This link could potentially be dangerous`)) {
             const t3 = this._bufferService.buffer.lines.get(e4);
             if (!t3 || 0 === t3.length) return [];
             const i3 = [], s3 = t3.translateToString(true);
-            let r2 = 0, n2 = 0, a2 = 0, h4 = t3.getFg(0), c2 = t3.getBg(0);
+            let r2 = 0, n2 = 0, a2 = 0, h3 = t3.getFg(0), c2 = t3.getBg(0);
             for (let e5 = 0; e5 < t3.getTrimmedLength(); e5++) if (t3.loadCell(e5, this._workCell), 0 !== this._workCell.getWidth()) {
-              if (this._workCell.fg !== h4 || this._workCell.bg !== c2) {
+              if (this._workCell.fg !== h3 || this._workCell.bg !== c2) {
                 if (e5 - r2 > 1) {
                   const e6 = this._getJoinedRanges(s3, a2, n2, t3, r2);
                   for (let t4 = 0; t4 < e6.length; t4++) i3.push(e6[t4]);
                 }
-                r2 = e5, a2 = n2, h4 = this._workCell.fg, c2 = this._workCell.bg;
+                r2 = e5, a2 = n2, h3 = this._workCell.fg, c2 = this._workCell.bg;
               }
               n2 += this._workCell.getChars().length || o.WHITESPACE_CELL_CHAR.length;
             }
@@ -1770,12 +1770,12 @@ WARNING: This link could potentially be dangerous`)) {
           _stringRangesToCellRanges(e4, t3, i3) {
             let s3 = 0, r2 = false, n2 = 0, a2 = e4[s3];
             if (a2) {
-              for (let h4 = i3; h4 < this._bufferService.cols; h4++) {
-                const i4 = t3.getWidth(h4), c2 = t3.getString(h4).length || o.WHITESPACE_CELL_CHAR.length;
+              for (let h3 = i3; h3 < this._bufferService.cols; h3++) {
+                const i4 = t3.getWidth(h3), c2 = t3.getString(h3).length || o.WHITESPACE_CELL_CHAR.length;
                 if (0 !== i4) {
-                  if (!r2 && a2[0] <= n2 && (a2[0] = h4, r2 = true), a2[1] <= n2) {
-                    if (a2[1] = h4, a2 = e4[++s3], !a2) break;
-                    a2[0] <= n2 ? (a2[0] = h4, r2 = true) : r2 = false;
+                  if (!r2 && a2[0] <= n2 && (a2[0] = h3, r2 = true), a2[1] <= n2) {
+                    if (a2[1] = h3, a2 = e4[++s3], !a2) break;
+                    a2[0] <= n2 ? (a2[0] = h3, r2 = true) : r2 = false;
                   }
                   n2 += c2;
                 }
@@ -1800,7 +1800,7 @@ WARNING: This link could potentially be dangerous`)) {
             return i3 ? e4[e4.length - 1][1] = t3[1] : e4.push(t3), e4;
           }
         };
-        t2.CharacterJoinerService = l = s2([r(0, h3.IBufferService)], l);
+        t2.CharacterJoinerService = l = s2([r(0, h2.IBufferService)], l);
       }, 5114: (e2, t2, i2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CoreBrowserService = void 0;
         const s2 = i2(844), r = i2(8460), n = i2(3656);
@@ -1895,20 +1895,20 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.RenderService = void 0;
-        const n = i2(6193), o = i2(4725), a = i2(8460), h3 = i2(844), c = i2(7226), l = i2(2585);
-        let d = t2.RenderService = class extends h3.Disposable {
+        const n = i2(6193), o = i2(4725), a = i2(8460), h2 = i2(844), c = i2(7226), l = i2(2585);
+        let d = t2.RenderService = class extends h2.Disposable {
           get dimensions() {
             return this._renderer.value.dimensions;
           }
           constructor(e3, t3, i3, s3, r2, o2, l2, d2) {
-            super(), this._rowCount = e3, this._charSizeService = s3, this._renderer = this.register(new h3.MutableDisposable()), this._pausedResizeTask = new c.DebouncedIdleTask(), this._observerDisposable = this.register(new h3.MutableDisposable()), this._isPaused = false, this._needsFullRefresh = false, this._isNextRenderRedrawOnly = true, this._needsSelectionRefresh = false, this._canvasWidth = 0, this._canvasHeight = 0, this._selectionState = { start: void 0, end: void 0, columnSelectMode: false }, this._onDimensionsChange = this.register(new a.EventEmitter()), this.onDimensionsChange = this._onDimensionsChange.event, this._onRenderedViewportChange = this.register(new a.EventEmitter()), this.onRenderedViewportChange = this._onRenderedViewportChange.event, this._onRender = this.register(new a.EventEmitter()), this.onRender = this._onRender.event, this._onRefreshRequest = this.register(new a.EventEmitter()), this.onRefreshRequest = this._onRefreshRequest.event, this._renderDebouncer = new n.RenderDebouncer(((e4, t4) => this._renderRows(e4, t4)), l2), this.register(this._renderDebouncer), this.register(l2.onDprChange((() => this.handleDevicePixelRatioChange()))), this.register(o2.onResize((() => this._fullRefresh()))), this.register(o2.buffers.onBufferActivate((() => this._renderer.value?.clear()))), this.register(i3.onOptionChange((() => this._handleOptionsChanged()))), this.register(this._charSizeService.onCharSizeChange((() => this.handleCharSizeChanged()))), this.register(r2.onDecorationRegistered((() => this._fullRefresh()))), this.register(r2.onDecorationRemoved((() => this._fullRefresh()))), this.register(i3.onMultipleOptionChange(["customGlyphs", "drawBoldTextInBrightColors", "letterSpacing", "lineHeight", "fontFamily", "fontSize", "fontWeight", "fontWeightBold", "minimumContrastRatio", "rescaleOverlappingGlyphs"], (() => {
+            super(), this._rowCount = e3, this._charSizeService = s3, this._renderer = this.register(new h2.MutableDisposable()), this._pausedResizeTask = new c.DebouncedIdleTask(), this._observerDisposable = this.register(new h2.MutableDisposable()), this._isPaused = false, this._needsFullRefresh = false, this._isNextRenderRedrawOnly = true, this._needsSelectionRefresh = false, this._canvasWidth = 0, this._canvasHeight = 0, this._selectionState = { start: void 0, end: void 0, columnSelectMode: false }, this._onDimensionsChange = this.register(new a.EventEmitter()), this.onDimensionsChange = this._onDimensionsChange.event, this._onRenderedViewportChange = this.register(new a.EventEmitter()), this.onRenderedViewportChange = this._onRenderedViewportChange.event, this._onRender = this.register(new a.EventEmitter()), this.onRender = this._onRender.event, this._onRefreshRequest = this.register(new a.EventEmitter()), this.onRefreshRequest = this._onRefreshRequest.event, this._renderDebouncer = new n.RenderDebouncer(((e4, t4) => this._renderRows(e4, t4)), l2), this.register(this._renderDebouncer), this.register(l2.onDprChange((() => this.handleDevicePixelRatioChange()))), this.register(o2.onResize((() => this._fullRefresh()))), this.register(o2.buffers.onBufferActivate((() => this._renderer.value?.clear()))), this.register(i3.onOptionChange((() => this._handleOptionsChanged()))), this.register(this._charSizeService.onCharSizeChange((() => this.handleCharSizeChanged()))), this.register(r2.onDecorationRegistered((() => this._fullRefresh()))), this.register(r2.onDecorationRemoved((() => this._fullRefresh()))), this.register(i3.onMultipleOptionChange(["customGlyphs", "drawBoldTextInBrightColors", "letterSpacing", "lineHeight", "fontFamily", "fontSize", "fontWeight", "fontWeightBold", "minimumContrastRatio", "rescaleOverlappingGlyphs"], (() => {
               this.clear(), this.handleResize(o2.cols, o2.rows), this._fullRefresh();
             }))), this.register(i3.onMultipleOptionChange(["cursorBlink", "cursorStyle"], (() => this.refreshRows(o2.buffer.y, o2.buffer.y, true)))), this.register(d2.onChangeColors((() => this._fullRefresh()))), this._registerIntersectionObserver(l2.window, t3), this.register(l2.onWindowChange(((e4) => this._registerIntersectionObserver(e4, t3))));
           }
           _registerIntersectionObserver(e3, t3) {
             if ("IntersectionObserver" in e3) {
               const i3 = new e3.IntersectionObserver(((e4) => this._handleIntersectionChange(e4[e4.length - 1])), { threshold: 0 });
-              i3.observe(t3), this._observerDisposable.value = (0, h3.toDisposable)((() => i3.disconnect()));
+              i3.observe(t3), this._observerDisposable.value = (0, h2.toDisposable)((() => i3.disconnect()));
             }
           }
           _handleIntersectionChange(e3) {
@@ -1982,10 +1982,10 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.SelectionService = void 0;
-        const n = i2(9806), o = i2(9504), a = i2(456), h3 = i2(4725), c = i2(8460), l = i2(844), d = i2(6114), _ = i2(4841), u = i2(511), f = i2(2585), v = String.fromCharCode(160), p = new RegExp(v, "g");
+        const n = i2(9806), o = i2(9504), a = i2(456), h2 = i2(4725), c = i2(8460), l = i2(844), d = i2(6114), _ = i2(4841), u = i2(511), f = i2(2585), v = String.fromCharCode(160), p = new RegExp(v, "g");
         let g = t2.SelectionService = class extends l.Disposable {
-          constructor(e3, t3, i3, s3, r2, n2, o2, h4, d2) {
-            super(), this._element = e3, this._screenElement = t3, this._linkifier = i3, this._bufferService = s3, this._coreService = r2, this._mouseService = n2, this._optionsService = o2, this._renderService = h4, this._coreBrowserService = d2, this._dragScrollAmount = 0, this._enabled = true, this._workCell = new u.CellData(), this._mouseDownTimeStamp = 0, this._oldHasSelection = false, this._oldSelectionStart = void 0, this._oldSelectionEnd = void 0, this._onLinuxMouseSelection = this.register(new c.EventEmitter()), this.onLinuxMouseSelection = this._onLinuxMouseSelection.event, this._onRedrawRequest = this.register(new c.EventEmitter()), this.onRequestRedraw = this._onRedrawRequest.event, this._onSelectionChange = this.register(new c.EventEmitter()), this.onSelectionChange = this._onSelectionChange.event, this._onRequestScrollLines = this.register(new c.EventEmitter()), this.onRequestScrollLines = this._onRequestScrollLines.event, this._mouseMoveListener = (e4) => this._handleMouseMove(e4), this._mouseUpListener = (e4) => this._handleMouseUp(e4), this._coreService.onUserInput((() => {
+          constructor(e3, t3, i3, s3, r2, n2, o2, h3, d2) {
+            super(), this._element = e3, this._screenElement = t3, this._linkifier = i3, this._bufferService = s3, this._coreService = r2, this._mouseService = n2, this._optionsService = o2, this._renderService = h3, this._coreBrowserService = d2, this._dragScrollAmount = 0, this._enabled = true, this._workCell = new u.CellData(), this._mouseDownTimeStamp = 0, this._oldHasSelection = false, this._oldSelectionStart = void 0, this._oldSelectionEnd = void 0, this._onLinuxMouseSelection = this.register(new c.EventEmitter()), this.onLinuxMouseSelection = this._onLinuxMouseSelection.event, this._onRedrawRequest = this.register(new c.EventEmitter()), this.onRequestRedraw = this._onRedrawRequest.event, this._onSelectionChange = this.register(new c.EventEmitter()), this.onSelectionChange = this._onSelectionChange.event, this._onRequestScrollLines = this.register(new c.EventEmitter()), this.onRequestScrollLines = this._onRequestScrollLines.event, this._mouseMoveListener = (e4) => this._handleMouseMove(e4), this._mouseUpListener = (e4) => this._handleMouseUp(e4), this._coreService.onUserInput((() => {
               this.hasSelection && this.clearSelection();
             })), this._trimListener = this._bufferService.buffer.lines.onTrim(((e4) => this._handleTrim(e4))), this.register(this._bufferService.buffers.onBufferActivate(((e4) => this._handleBufferActivate(e4)))), this.enable(), this._model = new a.SelectionModel(this._bufferService), this._activeSelectionMode = 0, this.register((0, l.toDisposable)((() => {
               this._removeMouseDownListeners();
@@ -2176,30 +2176,30 @@ WARNING: This link could potentially be dangerous`)) {
             const r2 = this._bufferService.buffer, n2 = r2.lines.get(e3[1]);
             if (!n2) return;
             const o2 = r2.translateBufferLineToString(e3[1], false);
-            let a2 = this._convertViewportColToCharacterIndex(n2, e3[0]), h4 = a2;
+            let a2 = this._convertViewportColToCharacterIndex(n2, e3[0]), h3 = a2;
             const c2 = e3[0] - a2;
             let l2 = 0, d2 = 0, _2 = 0, u2 = 0;
             if (" " === o2.charAt(a2)) {
               for (; a2 > 0 && " " === o2.charAt(a2 - 1); ) a2--;
-              for (; h4 < o2.length && " " === o2.charAt(h4 + 1); ) h4++;
+              for (; h3 < o2.length && " " === o2.charAt(h3 + 1); ) h3++;
             } else {
               let t4 = e3[0], i4 = e3[0];
               0 === n2.getWidth(t4) && (l2++, t4--), 2 === n2.getWidth(i4) && (d2++, i4++);
               const s4 = n2.getString(i4).length;
-              for (s4 > 1 && (u2 += s4 - 1, h4 += s4 - 1); t4 > 0 && a2 > 0 && !this._isCharWordSeparator(n2.loadCell(t4 - 1, this._workCell)); ) {
+              for (s4 > 1 && (u2 += s4 - 1, h3 += s4 - 1); t4 > 0 && a2 > 0 && !this._isCharWordSeparator(n2.loadCell(t4 - 1, this._workCell)); ) {
                 n2.loadCell(t4 - 1, this._workCell);
                 const e4 = this._workCell.getChars().length;
                 0 === this._workCell.getWidth() ? (l2++, t4--) : e4 > 1 && (_2 += e4 - 1, a2 -= e4 - 1), a2--, t4--;
               }
-              for (; i4 < n2.length && h4 + 1 < o2.length && !this._isCharWordSeparator(n2.loadCell(i4 + 1, this._workCell)); ) {
+              for (; i4 < n2.length && h3 + 1 < o2.length && !this._isCharWordSeparator(n2.loadCell(i4 + 1, this._workCell)); ) {
                 n2.loadCell(i4 + 1, this._workCell);
                 const e4 = this._workCell.getChars().length;
-                2 === this._workCell.getWidth() ? (d2++, i4++) : e4 > 1 && (u2 += e4 - 1, h4 += e4 - 1), h4++, i4++;
+                2 === this._workCell.getWidth() ? (d2++, i4++) : e4 > 1 && (u2 += e4 - 1, h3 += e4 - 1), h3++, i4++;
               }
             }
-            h4++;
-            let f2 = a2 + c2 - l2 + _2, v2 = Math.min(this._bufferService.cols, h4 - a2 + l2 + d2 - _2 - u2);
-            if (t3 || "" !== o2.slice(a2, h4).trim()) {
+            h3++;
+            let f2 = a2 + c2 - l2 + _2, v2 = Math.min(this._bufferService.cols, h3 - a2 + l2 + d2 - _2 - u2);
+            if (t3 || "" !== o2.slice(a2, h3).trim()) {
               if (i3 && 0 === f2 && 32 !== n2.getCodePoint(0)) {
                 const t4 = r2.lines.get(e3[1] - 1);
                 if (t4 && n2.isWrapped && 32 !== t4.getCodePoint(this._bufferService.cols - 1)) {
@@ -2244,7 +2244,7 @@ WARNING: This link could potentially be dangerous`)) {
             this._model.selectionStart = [0, t3.first], this._model.selectionEnd = void 0, this._model.selectionStartLength = (0, _.getRangeLength)(i3, this._bufferService.cols);
           }
         };
-        t2.SelectionService = g = s2([r(3, f.IBufferService), r(4, f.ICoreService), r(5, h3.IMouseService), r(6, f.IOptionsService), r(7, h3.IRenderService), r(8, h3.ICoreBrowserService)], g);
+        t2.SelectionService = g = s2([r(3, f.IBufferService), r(4, f.ICoreService), r(5, h2.IMouseService), r(6, f.IOptionsService), r(7, h2.IRenderService), r(8, h2.ICoreBrowserService)], g);
       }, 4725: (e2, t2, i2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.ILinkProviderService = t2.IThemeService = t2.ICharacterJoinerService = t2.ISelectionService = t2.IRenderService = t2.IMouseService = t2.ICoreBrowserService = t2.ICharSizeService = void 0;
         const s2 = i2(8343);
@@ -2261,7 +2261,7 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.ThemeService = t2.DEFAULT_ANSI_COLORS = void 0;
-        const n = i2(7239), o = i2(8055), a = i2(8460), h3 = i2(844), c = i2(2585), l = o.css.toColor("#ffffff"), d = o.css.toColor("#000000"), _ = o.css.toColor("#ffffff"), u = o.css.toColor("#000000"), f = { css: "rgba(255, 255, 255, 0.3)", rgba: 4294967117 };
+        const n = i2(7239), o = i2(8055), a = i2(8460), h2 = i2(844), c = i2(2585), l = o.css.toColor("#ffffff"), d = o.css.toColor("#000000"), _ = o.css.toColor("#ffffff"), u = o.css.toColor("#000000"), f = { css: "rgba(255, 255, 255, 0.3)", rgba: 4294967117 };
         t2.DEFAULT_ANSI_COLORS = Object.freeze((() => {
           const e3 = [o.css.toColor("#2e3436"), o.css.toColor("#cc0000"), o.css.toColor("#4e9a06"), o.css.toColor("#c4a000"), o.css.toColor("#3465a4"), o.css.toColor("#75507b"), o.css.toColor("#06989a"), o.css.toColor("#d3d7cf"), o.css.toColor("#555753"), o.css.toColor("#ef2929"), o.css.toColor("#8ae234"), o.css.toColor("#fce94f"), o.css.toColor("#729fcf"), o.css.toColor("#ad7fa8"), o.css.toColor("#34e2e2"), o.css.toColor("#eeeeec")], t3 = [0, 95, 135, 175, 215, 255];
           for (let i3 = 0; i3 < 216; i3++) {
@@ -2274,7 +2274,7 @@ WARNING: This link could potentially be dangerous`)) {
           }
           return e3;
         })());
-        let v = t2.ThemeService = class extends h3.Disposable {
+        let v = t2.ThemeService = class extends h2.Disposable {
           get colors() {
             return this._colors;
           }
@@ -2414,7 +2414,7 @@ WARNING: This link could potentially be dangerous`)) {
       }, 8055: (e2, t2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.contrastRatio = t2.toPaddedHex = t2.rgba = t2.rgb = t2.css = t2.color = t2.channels = t2.NULL_COLOR = void 0;
         let i2 = 0, s2 = 0, r = 0, n = 0;
-        var o, a, h3, c, l;
+        var o, a, h2, c, l;
         function d(e3) {
           const t3 = e3.toString(16);
           return t3.length < 2 ? "0" + t3 : t3;
@@ -2436,8 +2436,8 @@ WARNING: This link could potentially be dangerous`)) {
           }
           e3.blend = function(e4, t4) {
             if (n = (255 & t4.rgba) / 255, 1 === n) return { css: t4.css, rgba: t4.rgba };
-            const a2 = t4.rgba >> 24 & 255, h4 = t4.rgba >> 16 & 255, c2 = t4.rgba >> 8 & 255, l2 = e4.rgba >> 24 & 255, d2 = e4.rgba >> 16 & 255, _2 = e4.rgba >> 8 & 255;
-            return i2 = l2 + Math.round((a2 - l2) * n), s2 = d2 + Math.round((h4 - d2) * n), r = _2 + Math.round((c2 - _2) * n), { css: o.toCss(i2, s2, r), rgba: o.toRgba(i2, s2, r) };
+            const a2 = t4.rgba >> 24 & 255, h3 = t4.rgba >> 16 & 255, c2 = t4.rgba >> 8 & 255, l2 = e4.rgba >> 24 & 255, d2 = e4.rgba >> 16 & 255, _2 = e4.rgba >> 8 & 255;
+            return i2 = l2 + Math.round((a2 - l2) * n), s2 = d2 + Math.round((h3 - d2) * n), r = _2 + Math.round((c2 - _2) * n), { css: o.toCss(i2, s2, r), rgba: o.toRgba(i2, s2, r) };
           }, e3.isOpaque = function(e4) {
             return 255 == (255 & e4.rgba);
           }, e3.ensureContrastRatio = function(e4, t4, i3) {
@@ -2471,14 +2471,14 @@ WARNING: This link could potentially be dangerous`)) {
               case 9:
                 return { css: e4, rgba: parseInt(e4.slice(1), 16) >>> 0 };
             }
-            const h4 = e4.match(/rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(,\s*(0|1|\d?\.(\d+))\s*)?\)/);
-            if (h4) return i2 = parseInt(h4[1]), s2 = parseInt(h4[2]), r = parseInt(h4[3]), n = Math.round(255 * (void 0 === h4[5] ? 1 : parseFloat(h4[5]))), o.toColor(i2, s2, r, n);
+            const h3 = e4.match(/rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(,\s*(0|1|\d?\.(\d+))\s*)?\)/);
+            if (h3) return i2 = parseInt(h3[1]), s2 = parseInt(h3[2]), r = parseInt(h3[3]), n = Math.round(255 * (void 0 === h3[5] ? 1 : parseFloat(h3[5]))), o.toColor(i2, s2, r, n);
             if (!t3 || !a2) throw new Error("css.toColor: Unsupported css format");
             if (t3.fillStyle = a2, t3.fillStyle = e4, "string" != typeof t3.fillStyle) throw new Error("css.toColor: Unsupported css format");
             if (t3.fillRect(0, 0, 1, 1), [i2, s2, r, n] = t3.getImageData(0, 0, 1, 1).data, 255 !== n) throw new Error("css.toColor: Unsupported css format");
             return { rgba: o.toRgba(i2, s2, r, n), css: e4 };
           };
-        })(h3 || (t2.css = h3 = {})), (function(e3) {
+        })(h2 || (t2.css = h2 = {})), (function(e3) {
           function t3(e4, t4, i3) {
             const s3 = e4 / 255, r2 = t4 / 255, n2 = i3 / 255;
             return 0.2126 * (s3 <= 0.03928 ? s3 / 12.92 : Math.pow((s3 + 0.055) / 1.055, 2.4)) + 0.7152 * (r2 <= 0.03928 ? r2 / 12.92 : Math.pow((r2 + 0.055) / 1.055, 2.4)) + 0.0722 * (n2 <= 0.03928 ? n2 / 12.92 : Math.pow((n2 + 0.055) / 1.055, 2.4));
@@ -2489,20 +2489,20 @@ WARNING: This link could potentially be dangerous`)) {
         })(c || (t2.rgb = c = {})), (function(e3) {
           function t3(e4, t4, i3) {
             const s3 = e4 >> 24 & 255, r2 = e4 >> 16 & 255, n2 = e4 >> 8 & 255;
-            let o2 = t4 >> 24 & 255, a3 = t4 >> 16 & 255, h4 = t4 >> 8 & 255, l2 = _(c.relativeLuminance2(o2, a3, h4), c.relativeLuminance2(s3, r2, n2));
-            for (; l2 < i3 && (o2 > 0 || a3 > 0 || h4 > 0); ) o2 -= Math.max(0, Math.ceil(0.1 * o2)), a3 -= Math.max(0, Math.ceil(0.1 * a3)), h4 -= Math.max(0, Math.ceil(0.1 * h4)), l2 = _(c.relativeLuminance2(o2, a3, h4), c.relativeLuminance2(s3, r2, n2));
-            return (o2 << 24 | a3 << 16 | h4 << 8 | 255) >>> 0;
+            let o2 = t4 >> 24 & 255, a3 = t4 >> 16 & 255, h3 = t4 >> 8 & 255, l2 = _(c.relativeLuminance2(o2, a3, h3), c.relativeLuminance2(s3, r2, n2));
+            for (; l2 < i3 && (o2 > 0 || a3 > 0 || h3 > 0); ) o2 -= Math.max(0, Math.ceil(0.1 * o2)), a3 -= Math.max(0, Math.ceil(0.1 * a3)), h3 -= Math.max(0, Math.ceil(0.1 * h3)), l2 = _(c.relativeLuminance2(o2, a3, h3), c.relativeLuminance2(s3, r2, n2));
+            return (o2 << 24 | a3 << 16 | h3 << 8 | 255) >>> 0;
           }
           function a2(e4, t4, i3) {
             const s3 = e4 >> 24 & 255, r2 = e4 >> 16 & 255, n2 = e4 >> 8 & 255;
-            let o2 = t4 >> 24 & 255, a3 = t4 >> 16 & 255, h4 = t4 >> 8 & 255, l2 = _(c.relativeLuminance2(o2, a3, h4), c.relativeLuminance2(s3, r2, n2));
-            for (; l2 < i3 && (o2 < 255 || a3 < 255 || h4 < 255); ) o2 = Math.min(255, o2 + Math.ceil(0.1 * (255 - o2))), a3 = Math.min(255, a3 + Math.ceil(0.1 * (255 - a3))), h4 = Math.min(255, h4 + Math.ceil(0.1 * (255 - h4))), l2 = _(c.relativeLuminance2(o2, a3, h4), c.relativeLuminance2(s3, r2, n2));
-            return (o2 << 24 | a3 << 16 | h4 << 8 | 255) >>> 0;
+            let o2 = t4 >> 24 & 255, a3 = t4 >> 16 & 255, h3 = t4 >> 8 & 255, l2 = _(c.relativeLuminance2(o2, a3, h3), c.relativeLuminance2(s3, r2, n2));
+            for (; l2 < i3 && (o2 < 255 || a3 < 255 || h3 < 255); ) o2 = Math.min(255, o2 + Math.ceil(0.1 * (255 - o2))), a3 = Math.min(255, a3 + Math.ceil(0.1 * (255 - a3))), h3 = Math.min(255, h3 + Math.ceil(0.1 * (255 - h3))), l2 = _(c.relativeLuminance2(o2, a3, h3), c.relativeLuminance2(s3, r2, n2));
+            return (o2 << 24 | a3 << 16 | h3 << 8 | 255) >>> 0;
           }
           e3.blend = function(e4, t4) {
             if (n = (255 & t4) / 255, 1 === n) return t4;
-            const a3 = t4 >> 24 & 255, h4 = t4 >> 16 & 255, c2 = t4 >> 8 & 255, l2 = e4 >> 24 & 255, d2 = e4 >> 16 & 255, _2 = e4 >> 8 & 255;
-            return i2 = l2 + Math.round((a3 - l2) * n), s2 = d2 + Math.round((h4 - d2) * n), r = _2 + Math.round((c2 - _2) * n), o.toRgba(i2, s2, r);
+            const a3 = t4 >> 24 & 255, h3 = t4 >> 16 & 255, c2 = t4 >> 8 & 255, l2 = e4 >> 24 & 255, d2 = e4 >> 16 & 255, _2 = e4 >> 8 & 255;
+            return i2 = l2 + Math.round((a3 - l2) * n), s2 = d2 + Math.round((h3 - d2) * n), r = _2 + Math.round((c2 - _2) * n), o.toRgba(i2, s2, r);
           }, e3.ensureContrastRatio = function(e4, i3, s3) {
             const r2 = c.relativeLuminance(e4 >> 8), n2 = c.relativeLuminance(i3 >> 8);
             if (_(r2, n2) < s3) {
@@ -2514,10 +2514,10 @@ WARNING: This link could potentially be dangerous`)) {
                 }
                 return n3;
               }
-              const o2 = a2(e4, i3, s3), h4 = _(r2, c.relativeLuminance(o2 >> 8));
-              if (h4 < s3) {
+              const o2 = a2(e4, i3, s3), h3 = _(r2, c.relativeLuminance(o2 >> 8));
+              if (h3 < s3) {
                 const n3 = t3(e4, i3, s3);
-                return h4 > _(r2, c.relativeLuminance(n3 >> 8)) ? o2 : n3;
+                return h3 > _(r2, c.relativeLuminance(n3 >> 8)) ? o2 : n3;
               }
               return o2;
             }
@@ -2527,7 +2527,7 @@ WARNING: This link could potentially be dangerous`)) {
         })(l || (t2.rgba = l = {})), t2.toPaddedHex = d, t2.contrastRatio = _;
       }, 8969: (e2, t2, i2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CoreTerminal = void 0;
-        const s2 = i2(844), r = i2(2585), n = i2(4348), o = i2(7866), a = i2(744), h3 = i2(7302), c = i2(6975), l = i2(8460), d = i2(1753), _ = i2(1480), u = i2(7994), f = i2(9282), v = i2(5435), p = i2(5981), g = i2(2660);
+        const s2 = i2(844), r = i2(2585), n = i2(4348), o = i2(7866), a = i2(744), h2 = i2(7302), c = i2(6975), l = i2(8460), d = i2(1753), _ = i2(1480), u = i2(7994), f = i2(9282), v = i2(5435), p = i2(5981), g = i2(2660);
         let m = false;
         class S extends s2.Disposable {
           get onScroll() {
@@ -2551,7 +2551,7 @@ WARNING: This link could potentially be dangerous`)) {
             for (const t3 in e3) this.optionsService.options[t3] = e3[t3];
           }
           constructor(e3) {
-            super(), this._windowsWrappingHeuristics = this.register(new s2.MutableDisposable()), this._onBinary = this.register(new l.EventEmitter()), this.onBinary = this._onBinary.event, this._onData = this.register(new l.EventEmitter()), this.onData = this._onData.event, this._onLineFeed = this.register(new l.EventEmitter()), this.onLineFeed = this._onLineFeed.event, this._onResize = this.register(new l.EventEmitter()), this.onResize = this._onResize.event, this._onWriteParsed = this.register(new l.EventEmitter()), this.onWriteParsed = this._onWriteParsed.event, this._onScroll = this.register(new l.EventEmitter()), this._instantiationService = new n.InstantiationService(), this.optionsService = this.register(new h3.OptionsService(e3)), this._instantiationService.setService(r.IOptionsService, this.optionsService), this._bufferService = this.register(this._instantiationService.createInstance(a.BufferService)), this._instantiationService.setService(r.IBufferService, this._bufferService), this._logService = this.register(this._instantiationService.createInstance(o.LogService)), this._instantiationService.setService(r.ILogService, this._logService), this.coreService = this.register(this._instantiationService.createInstance(c.CoreService)), this._instantiationService.setService(r.ICoreService, this.coreService), this.coreMouseService = this.register(this._instantiationService.createInstance(d.CoreMouseService)), this._instantiationService.setService(r.ICoreMouseService, this.coreMouseService), this.unicodeService = this.register(this._instantiationService.createInstance(_.UnicodeService)), this._instantiationService.setService(r.IUnicodeService, this.unicodeService), this._charsetService = this._instantiationService.createInstance(u.CharsetService), this._instantiationService.setService(r.ICharsetService, this._charsetService), this._oscLinkService = this._instantiationService.createInstance(g.OscLinkService), this._instantiationService.setService(r.IOscLinkService, this._oscLinkService), this._inputHandler = this.register(new v.InputHandler(this._bufferService, this._charsetService, this.coreService, this._logService, this.optionsService, this._oscLinkService, this.coreMouseService, this.unicodeService)), this.register((0, l.forwardEvent)(this._inputHandler.onLineFeed, this._onLineFeed)), this.register(this._inputHandler), this.register((0, l.forwardEvent)(this._bufferService.onResize, this._onResize)), this.register((0, l.forwardEvent)(this.coreService.onData, this._onData)), this.register((0, l.forwardEvent)(this.coreService.onBinary, this._onBinary)), this.register(this.coreService.onRequestScrollToBottom((() => this.scrollToBottom()))), this.register(this.coreService.onUserInput((() => this._writeBuffer.handleUserInput()))), this.register(this.optionsService.onMultipleOptionChange(["windowsMode", "windowsPty"], (() => this._handleWindowsPtyOptionChange()))), this.register(this._bufferService.onScroll(((e4) => {
+            super(), this._windowsWrappingHeuristics = this.register(new s2.MutableDisposable()), this._onBinary = this.register(new l.EventEmitter()), this.onBinary = this._onBinary.event, this._onData = this.register(new l.EventEmitter()), this.onData = this._onData.event, this._onLineFeed = this.register(new l.EventEmitter()), this.onLineFeed = this._onLineFeed.event, this._onResize = this.register(new l.EventEmitter()), this.onResize = this._onResize.event, this._onWriteParsed = this.register(new l.EventEmitter()), this.onWriteParsed = this._onWriteParsed.event, this._onScroll = this.register(new l.EventEmitter()), this._instantiationService = new n.InstantiationService(), this.optionsService = this.register(new h2.OptionsService(e3)), this._instantiationService.setService(r.IOptionsService, this.optionsService), this._bufferService = this.register(this._instantiationService.createInstance(a.BufferService)), this._instantiationService.setService(r.IBufferService, this._bufferService), this._logService = this.register(this._instantiationService.createInstance(o.LogService)), this._instantiationService.setService(r.ILogService, this._logService), this.coreService = this.register(this._instantiationService.createInstance(c.CoreService)), this._instantiationService.setService(r.ICoreService, this.coreService), this.coreMouseService = this.register(this._instantiationService.createInstance(d.CoreMouseService)), this._instantiationService.setService(r.ICoreMouseService, this.coreMouseService), this.unicodeService = this.register(this._instantiationService.createInstance(_.UnicodeService)), this._instantiationService.setService(r.IUnicodeService, this.unicodeService), this._charsetService = this._instantiationService.createInstance(u.CharsetService), this._instantiationService.setService(r.ICharsetService, this._charsetService), this._oscLinkService = this._instantiationService.createInstance(g.OscLinkService), this._instantiationService.setService(r.IOscLinkService, this._oscLinkService), this._inputHandler = this.register(new v.InputHandler(this._bufferService, this._charsetService, this.coreService, this._logService, this.optionsService, this._oscLinkService, this.coreMouseService, this.unicodeService)), this.register((0, l.forwardEvent)(this._inputHandler.onLineFeed, this._onLineFeed)), this.register(this._inputHandler), this.register((0, l.forwardEvent)(this._bufferService.onResize, this._onResize)), this.register((0, l.forwardEvent)(this.coreService.onData, this._onData)), this.register((0, l.forwardEvent)(this.coreService.onBinary, this._onBinary)), this.register(this.coreService.onRequestScrollToBottom((() => this.scrollToBottom()))), this.register(this.coreService.onUserInput((() => this._writeBuffer.handleUserInput()))), this.register(this.optionsService.onMultipleOptionChange(["windowsMode", "windowsPty"], (() => this._handleWindowsPtyOptionChange()))), this.register(this._bufferService.onScroll(((e4) => {
               this._onScroll.fire({ position: this._bufferService.buffer.ydisp, source: 0 }), this._inputHandler.markRangeDirty(this._bufferService.buffer.scrollTop, this._bufferService.buffer.scrollBottom);
             }))), this.register(this._inputHandler.onScroll(((e4) => {
               this._onScroll.fire({ position: this._bufferService.buffer.ydisp, source: 0 }), this._inputHandler.markRangeDirty(this._bufferService.buffer.scrollTop, this._bufferService.buffer.scrollBottom);
@@ -2661,7 +2661,7 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.InputHandler = t2.WindowsOptionsReportType = void 0;
-        const n = i2(2584), o = i2(7116), a = i2(2015), h3 = i2(844), c = i2(482), l = i2(8437), d = i2(8460), _ = i2(643), u = i2(511), f = i2(3734), v = i2(2585), p = i2(1480), g = i2(6242), m = i2(6351), S = i2(5941), C = { "(": 0, ")": 1, "*": 2, "+": 3, "-": 1, ".": 2 }, b = 131072;
+        const n = i2(2584), o = i2(7116), a = i2(2015), h2 = i2(844), c = i2(482), l = i2(8437), d = i2(8460), _ = i2(643), u = i2(511), f = i2(3734), v = i2(2585), p = i2(1480), g = i2(6242), m = i2(6351), S = i2(5941), C = { "(": 0, ")": 1, "*": 2, "+": 3, "-": 1, ".": 2 }, b = 131072;
         function w(e3, t3) {
           if (e3 > 24) return t3.setWinLines || false;
           switch (e3) {
@@ -2717,12 +2717,12 @@ WARNING: This link could potentially be dangerous`)) {
           e3[e3.GET_WIN_SIZE_PIXELS = 0] = "GET_WIN_SIZE_PIXELS", e3[e3.GET_CELL_SIZE_PIXELS = 1] = "GET_CELL_SIZE_PIXELS";
         })(y || (t2.WindowsOptionsReportType = y = {}));
         let E = 0;
-        class k extends h3.Disposable {
+        class k extends h2.Disposable {
           getAttrData() {
             return this._curAttrData;
           }
-          constructor(e3, t3, i3, s3, r2, h4, _2, f2, v2 = new a.EscapeSequenceParser()) {
-            super(), this._bufferService = e3, this._charsetService = t3, this._coreService = i3, this._logService = s3, this._optionsService = r2, this._oscLinkService = h4, this._coreMouseService = _2, this._unicodeService = f2, this._parser = v2, this._parseBuffer = new Uint32Array(4096), this._stringDecoder = new c.StringToUtf32(), this._utf8Decoder = new c.Utf8ToUtf32(), this._workCell = new u.CellData(), this._windowTitle = "", this._iconName = "", this._windowTitleStack = [], this._iconNameStack = [], this._curAttrData = l.DEFAULT_ATTR_DATA.clone(), this._eraseAttrDataInternal = l.DEFAULT_ATTR_DATA.clone(), this._onRequestBell = this.register(new d.EventEmitter()), this.onRequestBell = this._onRequestBell.event, this._onRequestRefreshRows = this.register(new d.EventEmitter()), this.onRequestRefreshRows = this._onRequestRefreshRows.event, this._onRequestReset = this.register(new d.EventEmitter()), this.onRequestReset = this._onRequestReset.event, this._onRequestSendFocus = this.register(new d.EventEmitter()), this.onRequestSendFocus = this._onRequestSendFocus.event, this._onRequestSyncScrollBar = this.register(new d.EventEmitter()), this.onRequestSyncScrollBar = this._onRequestSyncScrollBar.event, this._onRequestWindowsOptionsReport = this.register(new d.EventEmitter()), this.onRequestWindowsOptionsReport = this._onRequestWindowsOptionsReport.event, this._onA11yChar = this.register(new d.EventEmitter()), this.onA11yChar = this._onA11yChar.event, this._onA11yTab = this.register(new d.EventEmitter()), this.onA11yTab = this._onA11yTab.event, this._onCursorMove = this.register(new d.EventEmitter()), this.onCursorMove = this._onCursorMove.event, this._onLineFeed = this.register(new d.EventEmitter()), this.onLineFeed = this._onLineFeed.event, this._onScroll = this.register(new d.EventEmitter()), this.onScroll = this._onScroll.event, this._onTitleChange = this.register(new d.EventEmitter()), this.onTitleChange = this._onTitleChange.event, this._onColor = this.register(new d.EventEmitter()), this.onColor = this._onColor.event, this._parseStack = { paused: false, cursorStartX: 0, cursorStartY: 0, decodedLength: 0, position: 0 }, this._specialColors = [256, 257, 258], this.register(this._parser), this._dirtyRowTracker = new L(this._bufferService), this._activeBuffer = this._bufferService.buffer, this.register(this._bufferService.buffers.onBufferActivate(((e4) => this._activeBuffer = e4.activeBuffer))), this._parser.setCsiHandlerFallback(((e4, t4) => {
+          constructor(e3, t3, i3, s3, r2, h3, _2, f2, v2 = new a.EscapeSequenceParser()) {
+            super(), this._bufferService = e3, this._charsetService = t3, this._coreService = i3, this._logService = s3, this._optionsService = r2, this._oscLinkService = h3, this._coreMouseService = _2, this._unicodeService = f2, this._parser = v2, this._parseBuffer = new Uint32Array(4096), this._stringDecoder = new c.StringToUtf32(), this._utf8Decoder = new c.Utf8ToUtf32(), this._workCell = new u.CellData(), this._windowTitle = "", this._iconName = "", this._windowTitleStack = [], this._iconNameStack = [], this._curAttrData = l.DEFAULT_ATTR_DATA.clone(), this._eraseAttrDataInternal = l.DEFAULT_ATTR_DATA.clone(), this._onRequestBell = this.register(new d.EventEmitter()), this.onRequestBell = this._onRequestBell.event, this._onRequestRefreshRows = this.register(new d.EventEmitter()), this.onRequestRefreshRows = this._onRequestRefreshRows.event, this._onRequestReset = this.register(new d.EventEmitter()), this.onRequestReset = this._onRequestReset.event, this._onRequestSendFocus = this.register(new d.EventEmitter()), this.onRequestSendFocus = this._onRequestSendFocus.event, this._onRequestSyncScrollBar = this.register(new d.EventEmitter()), this.onRequestSyncScrollBar = this._onRequestSyncScrollBar.event, this._onRequestWindowsOptionsReport = this.register(new d.EventEmitter()), this.onRequestWindowsOptionsReport = this._onRequestWindowsOptionsReport.event, this._onA11yChar = this.register(new d.EventEmitter()), this.onA11yChar = this._onA11yChar.event, this._onA11yTab = this.register(new d.EventEmitter()), this.onA11yTab = this._onA11yTab.event, this._onCursorMove = this.register(new d.EventEmitter()), this.onCursorMove = this._onCursorMove.event, this._onLineFeed = this.register(new d.EventEmitter()), this.onLineFeed = this._onLineFeed.event, this._onScroll = this.register(new d.EventEmitter()), this.onScroll = this._onScroll.event, this._onTitleChange = this.register(new d.EventEmitter()), this.onTitleChange = this._onTitleChange.event, this._onColor = this.register(new d.EventEmitter()), this.onColor = this._onColor.event, this._parseStack = { paused: false, cursorStartX: 0, cursorStartY: 0, decodedLength: 0, position: 0 }, this._specialColors = [256, 257, 258], this.register(this._parser), this._dirtyRowTracker = new L(this._bufferService), this._activeBuffer = this._bufferService.buffer, this.register(this._bufferService.buffers.onBufferActivate(((e4) => this._activeBuffer = e4.activeBuffer))), this._parser.setCsiHandlerFallback(((e4, t4) => {
               this._logService.debug("Unknown CSI code: ", { identifier: this._parser.identToString(e4), params: t4.toArray() });
             })), this._parser.setEscHandlerFallback(((e4) => {
               this._logService.debug("Unknown ESC code: ", { identifier: this._parser.identToString(e4) });
@@ -2764,12 +2764,12 @@ WARNING: This link could potentially be dangerous`)) {
               if (i3 = this._parser.parse(this._parseBuffer, t4)) return this._preserveStack(s3, r2, t4, 0), this._logSlowResolvingAsync(i3), i3;
             }
             this._activeBuffer.x === s3 && this._activeBuffer.y === r2 || this._onCursorMove.fire();
-            const a2 = this._dirtyRowTracker.end + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp), h4 = this._dirtyRowTracker.start + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp);
-            h4 < this._bufferService.rows && this._onRequestRefreshRows.fire(Math.min(h4, this._bufferService.rows - 1), Math.min(a2, this._bufferService.rows - 1));
+            const a2 = this._dirtyRowTracker.end + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp), h3 = this._dirtyRowTracker.start + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp);
+            h3 < this._bufferService.rows && this._onRequestRefreshRows.fire(Math.min(h3, this._bufferService.rows - 1), Math.min(a2, this._bufferService.rows - 1));
           }
           print(e3, t3, i3) {
             let s3, r2;
-            const n2 = this._charsetService.charset, o2 = this._optionsService.rawOptions.screenReaderMode, a2 = this._bufferService.cols, h4 = this._coreService.decPrivateModes.wraparound, d2 = this._coreService.modes.insertMode, u2 = this._curAttrData;
+            const n2 = this._charsetService.charset, o2 = this._optionsService.rawOptions.screenReaderMode, a2 = this._bufferService.cols, h3 = this._coreService.decPrivateModes.wraparound, d2 = this._coreService.modes.insertMode, u2 = this._curAttrData;
             let f2 = this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y);
             this._dirtyRowTracker.markDirty(this._activeBuffer.y), this._activeBuffer.x && i3 - t3 > 0 && 2 === f2.getWidth(this._activeBuffer.x - 1) && f2.setCellFromCodepoint(this._activeBuffer.x - 1, 0, 1, u2);
             let v2 = this._parser.precedingJoinState;
@@ -2782,7 +2782,7 @@ WARNING: This link could potentially be dangerous`)) {
               r2 = p.UnicodeService.extractWidth(t4);
               const i4 = p.UnicodeService.extractShouldJoin(t4), m2 = i4 ? p.UnicodeService.extractWidth(v2) : 0;
               if (v2 = t4, o2 && this._onA11yChar.fire((0, c.stringFromCodePoint)(s3)), this._getCurrentLinkId() && this._oscLinkService.addLineToLink(this._getCurrentLinkId(), this._activeBuffer.ybase + this._activeBuffer.y), this._activeBuffer.x + r2 - m2 > a2) {
-                if (h4) {
+                if (h3) {
                   const e4 = f2;
                   let t5 = this._activeBuffer.x - m2;
                   for (this._activeBuffer.x = m2, this._activeBuffer.y++, this._activeBuffer.y === this._activeBuffer.scrollBottom + 1 ? (this._activeBuffer.y--, this._bufferService.scroll(this._eraseAttrData(), true)) : (this._activeBuffer.y >= this._bufferService.rows && (this._activeBuffer.y = this._bufferService.rows - 1), this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y).isWrapped = true), f2 = this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y), m2 > 0 && f2 instanceof l.BufferLine && f2.copyCellsFrom(e4, t5, 0, m2, false); t5 < a2; ) e4.setCellFromCodepoint(t5++, 0, 1, u2);
@@ -3037,9 +3037,9 @@ WARNING: This link could potentially be dangerous`)) {
               const t4 = n2.codePointAt(e4) || 0;
               o2[a2++] = t4, e4 += t4 > 65535 ? 2 : 1;
             }
-            let h4 = a2;
-            for (let e4 = 1; e4 < i3; ++e4) o2.copyWithin(h4, 0, a2), h4 += a2;
-            return this.print(o2, 0, h4), true;
+            let h3 = a2;
+            for (let e4 = 1; e4 < i3; ++e4) o2.copyWithin(h3, 0, a2), h3 += a2;
+            return this.print(o2, 0, h3), true;
           }
           sendDeviceAttributesPrimary(e3) {
             return e3.params[0] > 0 || (this._is("xterm") || this._is("rxvt-unicode") || this._is("screen") ? this._coreService.triggerDataEvent(n.C0.ESC + "[?1;2c") : this._is("linux") && this._coreService.triggerDataEvent(n.C0.ESC + "[?6c")), true;
@@ -3199,8 +3199,8 @@ WARNING: This link could potentially be dangerous`)) {
             return true;
           }
           requestMode(e3, t3) {
-            const i3 = this._coreService.decPrivateModes, { activeProtocol: s3, activeEncoding: r2 } = this._coreMouseService, o2 = this._coreService, { buffers: a2, cols: h4 } = this._bufferService, { active: c2, alt: l2 } = a2, d2 = this._optionsService.rawOptions, _2 = (e4) => e4 ? 1 : 2, u2 = e3.params[0];
-            return f2 = u2, v2 = t3 ? 2 === u2 ? 4 : 4 === u2 ? _2(o2.modes.insertMode) : 12 === u2 ? 3 : 20 === u2 ? _2(d2.convertEol) : 0 : 1 === u2 ? _2(i3.applicationCursorKeys) : 3 === u2 ? d2.windowOptions.setWinLines ? 80 === h4 ? 2 : 132 === h4 ? 1 : 0 : 0 : 6 === u2 ? _2(i3.origin) : 7 === u2 ? _2(i3.wraparound) : 8 === u2 ? 3 : 9 === u2 ? _2("X10" === s3) : 12 === u2 ? _2(d2.cursorBlink) : 25 === u2 ? _2(!o2.isCursorHidden) : 45 === u2 ? _2(i3.reverseWraparound) : 66 === u2 ? _2(i3.applicationKeypad) : 67 === u2 ? 4 : 1e3 === u2 ? _2("VT200" === s3) : 1002 === u2 ? _2("DRAG" === s3) : 1003 === u2 ? _2("ANY" === s3) : 1004 === u2 ? _2(i3.sendFocus) : 1005 === u2 ? 4 : 1006 === u2 ? _2("SGR" === r2) : 1015 === u2 ? 4 : 1016 === u2 ? _2("SGR_PIXELS" === r2) : 1048 === u2 ? 1 : 47 === u2 || 1047 === u2 || 1049 === u2 ? _2(c2 === l2) : 2004 === u2 ? _2(i3.bracketedPasteMode) : 0, o2.triggerDataEvent(`${n.C0.ESC}[${t3 ? "" : "?"}${f2};${v2}$y`), true;
+            const i3 = this._coreService.decPrivateModes, { activeProtocol: s3, activeEncoding: r2 } = this._coreMouseService, o2 = this._coreService, { buffers: a2, cols: h3 } = this._bufferService, { active: c2, alt: l2 } = a2, d2 = this._optionsService.rawOptions, _2 = (e4) => e4 ? 1 : 2, u2 = e3.params[0];
+            return f2 = u2, v2 = t3 ? 2 === u2 ? 4 : 4 === u2 ? _2(o2.modes.insertMode) : 12 === u2 ? 3 : 20 === u2 ? _2(d2.convertEol) : 0 : 1 === u2 ? _2(i3.applicationCursorKeys) : 3 === u2 ? d2.windowOptions.setWinLines ? 80 === h3 ? 2 : 132 === h3 ? 1 : 0 : 0 : 6 === u2 ? _2(i3.origin) : 7 === u2 ? _2(i3.wraparound) : 8 === u2 ? 3 : 9 === u2 ? _2("X10" === s3) : 12 === u2 ? _2(d2.cursorBlink) : 25 === u2 ? _2(!o2.isCursorHidden) : 45 === u2 ? _2(i3.reverseWraparound) : 66 === u2 ? _2(i3.applicationKeypad) : 67 === u2 ? 4 : 1e3 === u2 ? _2("VT200" === s3) : 1002 === u2 ? _2("DRAG" === s3) : 1003 === u2 ? _2("ANY" === s3) : 1004 === u2 ? _2(i3.sendFocus) : 1005 === u2 ? 4 : 1006 === u2 ? _2("SGR" === r2) : 1015 === u2 ? 4 : 1016 === u2 ? _2("SGR_PIXELS" === r2) : 1048 === u2 ? 1 : 47 === u2 || 1047 === u2 || 1049 === u2 ? _2(c2 === l2) : 2004 === u2 ? _2(i3.bracketedPasteMode) : 0, o2.triggerDataEvent(`${n.C0.ESC}[${t3 ? "" : "?"}${f2};${v2}$y`), true;
             var f2, v2;
           }
           _updateAttrColor(e3, t3, i3, s3, r2) {
@@ -3848,10 +3848,10 @@ WARNING: This link could potentially be dangerous`)) {
         t2.ExtendedAttrs = s2;
       }, 9092: (e2, t2, i2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.Buffer = t2.MAX_BUFFER_SIZE = void 0;
-        const s2 = i2(6349), r = i2(7226), n = i2(3734), o = i2(8437), a = i2(4634), h3 = i2(511), c = i2(643), l = i2(4863), d = i2(7116);
+        const s2 = i2(6349), r = i2(7226), n = i2(3734), o = i2(8437), a = i2(4634), h2 = i2(511), c = i2(643), l = i2(4863), d = i2(7116);
         t2.MAX_BUFFER_SIZE = 4294967295, t2.Buffer = class {
           constructor(e3, t3, i3) {
-            this._hasScrollback = e3, this._optionsService = t3, this._bufferService = i3, this.ydisp = 0, this.ybase = 0, this.y = 0, this.x = 0, this.tabs = {}, this.savedY = 0, this.savedX = 0, this.savedCurAttrData = o.DEFAULT_ATTR_DATA.clone(), this.savedCharset = d.DEFAULT_CHARSET, this.markers = [], this._nullCell = h3.CellData.fromCharData([0, c.NULL_CELL_CHAR, c.NULL_CELL_WIDTH, c.NULL_CELL_CODE]), this._whitespaceCell = h3.CellData.fromCharData([0, c.WHITESPACE_CELL_CHAR, c.WHITESPACE_CELL_WIDTH, c.WHITESPACE_CELL_CODE]), this._isClearing = false, this._memoryCleanupQueue = new r.IdleTaskQueue(), this._memoryCleanupPosition = 0, this._cols = this._bufferService.cols, this._rows = this._bufferService.rows, this.lines = new s2.CircularList(this._getCorrectBufferLength(this._rows)), this.scrollTop = 0, this.scrollBottom = this._rows - 1, this.setupTabStops();
+            this._hasScrollback = e3, this._optionsService = t3, this._bufferService = i3, this.ydisp = 0, this.ybase = 0, this.y = 0, this.x = 0, this.tabs = {}, this.savedY = 0, this.savedX = 0, this.savedCurAttrData = o.DEFAULT_ATTR_DATA.clone(), this.savedCharset = d.DEFAULT_CHARSET, this.markers = [], this._nullCell = h2.CellData.fromCharData([0, c.NULL_CELL_CHAR, c.NULL_CELL_WIDTH, c.NULL_CELL_CODE]), this._whitespaceCell = h2.CellData.fromCharData([0, c.WHITESPACE_CELL_CHAR, c.WHITESPACE_CELL_WIDTH, c.WHITESPACE_CELL_CODE]), this._isClearing = false, this._memoryCleanupQueue = new r.IdleTaskQueue(), this._memoryCleanupPosition = 0, this._cols = this._bufferService.cols, this._rows = this._bufferService.rows, this.lines = new s2.CircularList(this._getCorrectBufferLength(this._rows)), this.scrollTop = 0, this.scrollBottom = this._rows - 1, this.setupTabStops();
           }
           getNullCell(e3) {
             return e3 ? (this._nullCell.fg = e3.fg, this._nullCell.bg = e3.bg, this._nullCell.extended = e3.extended) : (this._nullCell.fg = 0, this._nullCell.bg = 0, this._nullCell.extended = new n.ExtendedAttrs()), this._nullCell;
@@ -3933,10 +3933,10 @@ WARNING: This link could potentially be dangerous`)) {
             const i3 = this.getNullCell(o.DEFAULT_ATTR_DATA), s3 = [];
             let r2 = 0;
             for (let n2 = this.lines.length - 1; n2 >= 0; n2--) {
-              let h4 = this.lines.get(n2);
-              if (!h4 || !h4.isWrapped && h4.getTrimmedLength() <= e3) continue;
-              const c2 = [h4];
-              for (; h4.isWrapped && n2 > 0; ) h4 = this.lines.get(--n2), c2.unshift(h4);
+              let h3 = this.lines.get(n2);
+              if (!h3 || !h3.isWrapped && h3.getTrimmedLength() <= e3) continue;
+              const c2 = [h3];
+              for (; h3.isWrapped && n2 > 0; ) h3 = this.lines.get(--n2), c2.unshift(h3);
               const l2 = this.ybase + this.y;
               if (l2 >= n2 && l2 < n2 + c2.length) continue;
               const d2 = c2[c2.length - 1].getTrimmedLength(), _ = (0, a.reflowSmallerGetNewLineLengths)(c2, this._cols, e3), u = _.length - c2.length;
@@ -3971,10 +3971,10 @@ WARNING: This link could potentially be dangerous`)) {
               const i4 = this.lines.length;
               let n2 = i4 - 1, o2 = 0, a2 = s3[o2];
               this.lines.length = Math.min(this.lines.maxLength, this.lines.length + r2);
-              let h4 = 0;
-              for (let c3 = Math.min(this.lines.maxLength - 1, i4 + r2 - 1); c3 >= 0; c3--) if (a2 && a2.start > n2 + h4) {
+              let h3 = 0;
+              for (let c3 = Math.min(this.lines.maxLength - 1, i4 + r2 - 1); c3 >= 0; c3--) if (a2 && a2.start > n2 + h3) {
                 for (let e5 = a2.newLines.length - 1; e5 >= 0; e5--) this.lines.set(c3--, a2.newLines[e5]);
-                c3++, e4.push({ index: n2 + 1, amount: a2.newLines.length }), h4 += a2.newLines.length, a2 = s3[++o2];
+                c3++, e4.push({ index: n2 + 1, amount: a2.newLines.length }), h3 += a2.newLines.length, a2 = s3[++o2];
               } else this.lines.set(c3, t4[n2--]);
               let c2 = 0;
               for (let t5 = e4.length - 1; t5 >= 0; t5--) e4[t5].index += c2, this.lines.onInsertEmitter.fire(e4[t5]), c2 += e4[t5].amount;
@@ -4032,7 +4032,7 @@ WARNING: This link could potentially be dangerous`)) {
         const s2 = i2(3734), r = i2(511), n = i2(643), o = i2(482);
         t2.DEFAULT_ATTR_DATA = Object.freeze(new s2.AttributeData());
         let a = 0;
-        class h3 {
+        class h2 {
           constructor(e3, t3, i3 = false) {
             this.isWrapped = i3, this._combined = {}, this._extendedAttrs = {}, this._data = new Uint32Array(3 * e3);
             const s3 = t3 || r.CellData.fromCharData([0, n.NULL_CELL_CHAR, n.NULL_CELL_WIDTH, n.NULL_CELL_CODE]);
@@ -4155,7 +4155,7 @@ WARNING: This link could potentially be dangerous`)) {
             this.isWrapped = e3.isWrapped;
           }
           clone() {
-            const e3 = new h3(0);
+            const e3 = new h2(0);
             e3._data = new Uint32Array(this._data), e3.length = this.length;
             for (const t3 in this._combined) e3._combined[t3] = this._combined[t3];
             for (const t3 in this._extendedAttrs) e3._extendedAttrs[t3] = this._extendedAttrs[t3];
@@ -4196,7 +4196,7 @@ WARNING: This link could potentially be dangerous`)) {
             return s3 && s3.push(t3), r2;
           }
         }
-        t2.BufferLine = h3;
+        t2.BufferLine = h2;
       }, 4841: (e2, t2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.getRangeLength = void 0, t2.getRangeLength = function(e3, t3) {
           if (e3.start.y > e3.end.y) throw new Error(`Buffer range end (${e3.end.x}, ${e3.end.y}) cannot be before start (${e3.start.x}, ${e3.start.y})`);
@@ -4211,11 +4211,11 @@ WARNING: This link could potentially be dangerous`)) {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.getWrappedLineTrimmedLength = t2.reflowSmallerGetNewLineLengths = t2.reflowLargerApplyNewLayout = t2.reflowLargerCreateNewLayout = t2.reflowLargerGetLinesToRemove = void 0, t2.reflowLargerGetLinesToRemove = function(e3, t3, s2, r, n) {
           const o = [];
           for (let a = 0; a < e3.length - 1; a++) {
-            let h3 = a, c = e3.get(++h3);
+            let h2 = a, c = e3.get(++h2);
             if (!c.isWrapped) continue;
             const l = [e3.get(a)];
-            for (; h3 < e3.length && c.isWrapped; ) l.push(c), c = e3.get(++h3);
-            if (r >= a && r < h3) {
+            for (; h2 < e3.length && c.isWrapped; ) l.push(c), c = e3.get(++h2);
+            if (r >= a && r < h2) {
               a += l.length - 1;
               continue;
             }
@@ -4245,10 +4245,10 @@ WARNING: This link could potentially be dangerous`)) {
           e3.length = t3.length;
         }, t2.reflowSmallerGetNewLineLengths = function(e3, t3, s2) {
           const r = [], n = e3.map(((s3, r2) => i2(e3, r2, t3))).reduce(((e4, t4) => e4 + t4));
-          let o = 0, a = 0, h3 = 0;
-          for (; h3 < n; ) {
-            if (n - h3 < s2) {
-              r.push(n - h3);
+          let o = 0, a = 0, h2 = 0;
+          for (; h2 < n; ) {
+            if (n - h2 < s2) {
+              r.push(n - h2);
               break;
             }
             o += s2;
@@ -4257,7 +4257,7 @@ WARNING: This link could potentially be dangerous`)) {
             const l = 2 === e3[a].getWidth(o - 1);
             l && o--;
             const d = l ? s2 - 1 : s2;
-            r.push(d), h3 += d;
+            r.push(d), h2 += d;
           }
           return r;
         }, t2.getWrappedLineTrimmedLength = i2;
@@ -4525,13 +4525,13 @@ WARNING: This link could potentially be dangerous`)) {
           decode(e3, t3) {
             const i2 = e3.length;
             if (!i2) return 0;
-            let s2, r, n, o, a = 0, h3 = 0, c = 0;
+            let s2, r, n, o, a = 0, h2 = 0, c = 0;
             if (this.interim[0]) {
               let s3 = false, r2 = this.interim[0];
               r2 &= 192 == (224 & r2) ? 31 : 224 == (240 & r2) ? 15 : 7;
               let n2, o2 = 0;
               for (; (n2 = 63 & this.interim[++o2]) && o2 < 4; ) r2 <<= 6, r2 |= n2;
-              const h4 = 192 == (224 & this.interim[0]) ? 2 : 224 == (240 & this.interim[0]) ? 3 : 4, l2 = h4 - o2;
+              const h3 = 192 == (224 & this.interim[0]) ? 2 : 224 == (240 & this.interim[0]) ? 3 : 4, l2 = h3 - o2;
               for (; c < l2; ) {
                 if (c >= i2) return 0;
                 if (n2 = e3[c++], 128 != (192 & n2)) {
@@ -4540,7 +4540,7 @@ WARNING: This link could potentially be dangerous`)) {
                 }
                 this.interim[o2++] = n2, r2 <<= 6, r2 |= 63 & n2;
               }
-              s3 || (2 === h4 ? r2 < 128 ? c-- : t3[a++] = r2 : 3 === h4 ? r2 < 2048 || r2 >= 55296 && r2 <= 57343 || 65279 === r2 || (t3[a++] = r2) : r2 < 65536 || r2 > 1114111 || (t3[a++] = r2)), this.interim.fill(0);
+              s3 || (2 === h3 ? r2 < 128 ? c-- : t3[a++] = r2 : 3 === h3 ? r2 < 2048 || r2 >= 55296 && r2 <= 57343 || 65279 === r2 || (t3[a++] = r2) : r2 < 65536 || r2 > 1114111 || (t3[a++] = r2)), this.interim.fill(0);
             }
             const l = i2 - 4;
             let d = c;
@@ -4553,11 +4553,11 @@ WARNING: This link could potentially be dangerous`)) {
                   d--;
                   continue;
                 }
-                if (h3 = (31 & s2) << 6 | 63 & r, h3 < 128) {
+                if (h2 = (31 & s2) << 6 | 63 & r, h2 < 128) {
                   d--;
                   continue;
                 }
-                t3[a++] = h3;
+                t3[a++] = h2;
               } else if (224 == (240 & s2)) {
                 if (d >= i2) return this.interim[0] = s2, a;
                 if (r = e3[d++], 128 != (192 & r)) {
@@ -4569,8 +4569,8 @@ WARNING: This link could potentially be dangerous`)) {
                   d--;
                   continue;
                 }
-                if (h3 = (15 & s2) << 12 | (63 & r) << 6 | 63 & n, h3 < 2048 || h3 >= 55296 && h3 <= 57343 || 65279 === h3) continue;
-                t3[a++] = h3;
+                if (h2 = (15 & s2) << 12 | (63 & r) << 6 | 63 & n, h2 < 2048 || h2 >= 55296 && h2 <= 57343 || 65279 === h2) continue;
+                t3[a++] = h2;
               } else if (240 == (248 & s2)) {
                 if (d >= i2) return this.interim[0] = s2, a;
                 if (r = e3[d++], 128 != (192 & r)) {
@@ -4587,8 +4587,8 @@ WARNING: This link could potentially be dangerous`)) {
                   d--;
                   continue;
                 }
-                if (h3 = (7 & s2) << 18 | (63 & r) << 12 | (63 & n) << 6 | 63 & o, h3 < 65536 || h3 > 1114111) continue;
-                t3[a++] = h3;
+                if (h2 = (7 & s2) << 18 | (63 & r) << 12 | (63 & n) << 6 | 63 & o, h2 < 65536 || h2 > 1114111) continue;
+                t3[a++] = h2;
               }
             }
             return a;
@@ -4798,14 +4798,14 @@ WARNING: This link could potentially be dangerous`)) {
           }
         }
         t2.TransitionTable = a;
-        const h3 = 160;
+        const h2 = 160;
         t2.VT500_TRANSITION_TABLE = (function() {
           const e3 = new a(4095), t3 = Array.apply(null, Array(256)).map(((e4, t4) => t4)), i3 = (e4, i4) => t3.slice(e4, i4), s3 = i3(32, 127), r2 = i3(0, 24);
           r2.push(25), r2.push.apply(r2, i3(28, 32));
           const n2 = i3(0, 14);
           let o2;
           for (o2 in e3.setDefault(1, 0), e3.addMany(s3, 0, 2, 0), n2) e3.addMany([24, 26, 153, 154], o2, 3, 0), e3.addMany(i3(128, 144), o2, 3, 0), e3.addMany(i3(144, 152), o2, 3, 0), e3.add(156, o2, 0, 0), e3.add(27, o2, 11, 1), e3.add(157, o2, 4, 8), e3.addMany([152, 158, 159], o2, 0, 7), e3.add(155, o2, 11, 3), e3.add(144, o2, 11, 9);
-          return e3.addMany(r2, 0, 3, 0), e3.addMany(r2, 1, 3, 1), e3.add(127, 1, 0, 1), e3.addMany(r2, 8, 0, 8), e3.addMany(r2, 3, 3, 3), e3.add(127, 3, 0, 3), e3.addMany(r2, 4, 3, 4), e3.add(127, 4, 0, 4), e3.addMany(r2, 6, 3, 6), e3.addMany(r2, 5, 3, 5), e3.add(127, 5, 0, 5), e3.addMany(r2, 2, 3, 2), e3.add(127, 2, 0, 2), e3.add(93, 1, 4, 8), e3.addMany(s3, 8, 5, 8), e3.add(127, 8, 5, 8), e3.addMany([156, 27, 24, 26, 7], 8, 6, 0), e3.addMany(i3(28, 32), 8, 0, 8), e3.addMany([88, 94, 95], 1, 0, 7), e3.addMany(s3, 7, 0, 7), e3.addMany(r2, 7, 0, 7), e3.add(156, 7, 0, 0), e3.add(127, 7, 0, 7), e3.add(91, 1, 11, 3), e3.addMany(i3(64, 127), 3, 7, 0), e3.addMany(i3(48, 60), 3, 8, 4), e3.addMany([60, 61, 62, 63], 3, 9, 4), e3.addMany(i3(48, 60), 4, 8, 4), e3.addMany(i3(64, 127), 4, 7, 0), e3.addMany([60, 61, 62, 63], 4, 0, 6), e3.addMany(i3(32, 64), 6, 0, 6), e3.add(127, 6, 0, 6), e3.addMany(i3(64, 127), 6, 0, 0), e3.addMany(i3(32, 48), 3, 9, 5), e3.addMany(i3(32, 48), 5, 9, 5), e3.addMany(i3(48, 64), 5, 0, 6), e3.addMany(i3(64, 127), 5, 7, 0), e3.addMany(i3(32, 48), 4, 9, 5), e3.addMany(i3(32, 48), 1, 9, 2), e3.addMany(i3(32, 48), 2, 9, 2), e3.addMany(i3(48, 127), 2, 10, 0), e3.addMany(i3(48, 80), 1, 10, 0), e3.addMany(i3(81, 88), 1, 10, 0), e3.addMany([89, 90, 92], 1, 10, 0), e3.addMany(i3(96, 127), 1, 10, 0), e3.add(80, 1, 11, 9), e3.addMany(r2, 9, 0, 9), e3.add(127, 9, 0, 9), e3.addMany(i3(28, 32), 9, 0, 9), e3.addMany(i3(32, 48), 9, 9, 12), e3.addMany(i3(48, 60), 9, 8, 10), e3.addMany([60, 61, 62, 63], 9, 9, 10), e3.addMany(r2, 11, 0, 11), e3.addMany(i3(32, 128), 11, 0, 11), e3.addMany(i3(28, 32), 11, 0, 11), e3.addMany(r2, 10, 0, 10), e3.add(127, 10, 0, 10), e3.addMany(i3(28, 32), 10, 0, 10), e3.addMany(i3(48, 60), 10, 8, 10), e3.addMany([60, 61, 62, 63], 10, 0, 11), e3.addMany(i3(32, 48), 10, 9, 12), e3.addMany(r2, 12, 0, 12), e3.add(127, 12, 0, 12), e3.addMany(i3(28, 32), 12, 0, 12), e3.addMany(i3(32, 48), 12, 9, 12), e3.addMany(i3(48, 64), 12, 0, 11), e3.addMany(i3(64, 127), 12, 12, 13), e3.addMany(i3(64, 127), 10, 12, 13), e3.addMany(i3(64, 127), 9, 12, 13), e3.addMany(r2, 13, 13, 13), e3.addMany(s3, 13, 13, 13), e3.add(127, 13, 0, 13), e3.addMany([27, 156, 24, 26], 13, 14, 0), e3.add(h3, 0, 2, 0), e3.add(h3, 8, 5, 8), e3.add(h3, 6, 0, 6), e3.add(h3, 11, 0, 11), e3.add(h3, 13, 13, 13), e3;
+          return e3.addMany(r2, 0, 3, 0), e3.addMany(r2, 1, 3, 1), e3.add(127, 1, 0, 1), e3.addMany(r2, 8, 0, 8), e3.addMany(r2, 3, 3, 3), e3.add(127, 3, 0, 3), e3.addMany(r2, 4, 3, 4), e3.add(127, 4, 0, 4), e3.addMany(r2, 6, 3, 6), e3.addMany(r2, 5, 3, 5), e3.add(127, 5, 0, 5), e3.addMany(r2, 2, 3, 2), e3.add(127, 2, 0, 2), e3.add(93, 1, 4, 8), e3.addMany(s3, 8, 5, 8), e3.add(127, 8, 5, 8), e3.addMany([156, 27, 24, 26, 7], 8, 6, 0), e3.addMany(i3(28, 32), 8, 0, 8), e3.addMany([88, 94, 95], 1, 0, 7), e3.addMany(s3, 7, 0, 7), e3.addMany(r2, 7, 0, 7), e3.add(156, 7, 0, 0), e3.add(127, 7, 0, 7), e3.add(91, 1, 11, 3), e3.addMany(i3(64, 127), 3, 7, 0), e3.addMany(i3(48, 60), 3, 8, 4), e3.addMany([60, 61, 62, 63], 3, 9, 4), e3.addMany(i3(48, 60), 4, 8, 4), e3.addMany(i3(64, 127), 4, 7, 0), e3.addMany([60, 61, 62, 63], 4, 0, 6), e3.addMany(i3(32, 64), 6, 0, 6), e3.add(127, 6, 0, 6), e3.addMany(i3(64, 127), 6, 0, 0), e3.addMany(i3(32, 48), 3, 9, 5), e3.addMany(i3(32, 48), 5, 9, 5), e3.addMany(i3(48, 64), 5, 0, 6), e3.addMany(i3(64, 127), 5, 7, 0), e3.addMany(i3(32, 48), 4, 9, 5), e3.addMany(i3(32, 48), 1, 9, 2), e3.addMany(i3(32, 48), 2, 9, 2), e3.addMany(i3(48, 127), 2, 10, 0), e3.addMany(i3(48, 80), 1, 10, 0), e3.addMany(i3(81, 88), 1, 10, 0), e3.addMany([89, 90, 92], 1, 10, 0), e3.addMany(i3(96, 127), 1, 10, 0), e3.add(80, 1, 11, 9), e3.addMany(r2, 9, 0, 9), e3.add(127, 9, 0, 9), e3.addMany(i3(28, 32), 9, 0, 9), e3.addMany(i3(32, 48), 9, 9, 12), e3.addMany(i3(48, 60), 9, 8, 10), e3.addMany([60, 61, 62, 63], 9, 9, 10), e3.addMany(r2, 11, 0, 11), e3.addMany(i3(32, 128), 11, 0, 11), e3.addMany(i3(28, 32), 11, 0, 11), e3.addMany(r2, 10, 0, 10), e3.add(127, 10, 0, 10), e3.addMany(i3(28, 32), 10, 0, 10), e3.addMany(i3(48, 60), 10, 8, 10), e3.addMany([60, 61, 62, 63], 10, 0, 11), e3.addMany(i3(32, 48), 10, 9, 12), e3.addMany(r2, 12, 0, 12), e3.add(127, 12, 0, 12), e3.addMany(i3(28, 32), 12, 0, 12), e3.addMany(i3(32, 48), 12, 9, 12), e3.addMany(i3(48, 64), 12, 0, 11), e3.addMany(i3(64, 127), 12, 12, 13), e3.addMany(i3(64, 127), 10, 12, 13), e3.addMany(i3(64, 127), 9, 12, 13), e3.addMany(r2, 13, 13, 13), e3.addMany(s3, 13, 13, 13), e3.add(127, 13, 0, 13), e3.addMany([27, 156, 24, 26], 13, 14, 0), e3.add(h2, 0, 2, 0), e3.add(h2, 8, 5, 8), e3.add(h2, 6, 0, 6), e3.add(h2, 11, 0, 11), e3.add(h2, 13, 13, 13), e3;
         })();
         class c extends s2.Disposable {
           constructor(e3 = t2.VT500_TRANSITION_TABLE) {
@@ -4947,22 +4947,22 @@ WARNING: This link could potentially be dangerous`)) {
               this._parseStack.state = 0, o2 = this._parseStack.chunkPos + 1, this.precedingJoinState = 0, this.currentState = 15 & this._parseStack.transition;
             }
             for (let i4 = o2; i4 < t3; ++i4) {
-              switch (r2 = e3[i4], n2 = this._transitions.table[this.currentState << 8 | (r2 < 160 ? r2 : h3)], n2 >> 4) {
+              switch (r2 = e3[i4], n2 = this._transitions.table[this.currentState << 8 | (r2 < 160 ? r2 : h2)], n2 >> 4) {
                 case 2:
                   for (let s4 = i4 + 1; ; ++s4) {
-                    if (s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h3) {
+                    if (s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h2) {
                       this._printHandler(e3, i4, s4), i4 = s4 - 1;
                       break;
                     }
-                    if (++s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h3) {
+                    if (++s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h2) {
                       this._printHandler(e3, i4, s4), i4 = s4 - 1;
                       break;
                     }
-                    if (++s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h3) {
+                    if (++s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h2) {
                       this._printHandler(e3, i4, s4), i4 = s4 - 1;
                       break;
                     }
-                    if (++s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h3) {
+                    if (++s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 126 && r2 < h2) {
                       this._printHandler(e3, i4, s4), i4 = s4 - 1;
                       break;
                     }
@@ -5013,7 +5013,7 @@ WARNING: This link could potentially be dangerous`)) {
                   this._dcsParser.hook(this._collect << 8 | r2, this._params);
                   break;
                 case 13:
-                  for (let s4 = i4 + 1; ; ++s4) if (s4 >= t3 || 24 === (r2 = e3[s4]) || 26 === r2 || 27 === r2 || r2 > 127 && r2 < h3) {
+                  for (let s4 = i4 + 1; ; ++s4) if (s4 >= t3 || 24 === (r2 = e3[s4]) || 26 === r2 || 27 === r2 || r2 > 127 && r2 < h2) {
                     this._dcsParser.put(e3, i4, s4), i4 = s4 - 1;
                     break;
                   }
@@ -5026,7 +5026,7 @@ WARNING: This link could potentially be dangerous`)) {
                   this._oscParser.start();
                   break;
                 case 5:
-                  for (let s4 = i4 + 1; ; s4++) if (s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 127 && r2 < h3) {
+                  for (let s4 = i4 + 1; ; s4++) if (s4 >= t3 || (r2 = e3[s4]) < 32 || r2 > 127 && r2 < h2) {
                     this._oscParser.put(e3, i4, s4), i4 = s4 - 1;
                     break;
                   }
@@ -5352,7 +5352,7 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.BufferService = t2.MINIMUM_ROWS = t2.MINIMUM_COLS = void 0;
-        const n = i2(8460), o = i2(844), a = i2(5295), h3 = i2(2585);
+        const n = i2(8460), o = i2(844), a = i2(5295), h2 = i2(2585);
         t2.MINIMUM_COLS = 2, t2.MINIMUM_ROWS = 1;
         let c = t2.BufferService = class extends o.Disposable {
           get buffer() {
@@ -5391,7 +5391,7 @@ WARNING: This link could potentially be dangerous`)) {
             s3.ydisp = Math.max(Math.min(s3.ydisp + e3, s3.ybase), 0), r2 !== s3.ydisp && (t3 || this._onScroll.fire(s3.ydisp));
           }
         };
-        t2.BufferService = c = s2([r(0, h3.IOptionsService)], c);
+        t2.BufferService = c = s2([r(0, h2.IOptionsService)], c);
       }, 7994: (e2, t2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CharsetService = void 0, t2.CharsetService = class {
           constructor() {
@@ -5419,7 +5419,7 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CoreMouseService = void 0;
-        const n = i2(2585), o = i2(8460), a = i2(844), h3 = { NONE: { events: 0, restrict: () => false }, X10: { events: 1, restrict: (e3) => 4 !== e3.button && 1 === e3.action && (e3.ctrl = false, e3.alt = false, e3.shift = false, true) }, VT200: { events: 19, restrict: (e3) => 32 !== e3.action }, DRAG: { events: 23, restrict: (e3) => 32 !== e3.action || 3 !== e3.button }, ANY: { events: 31, restrict: (e3) => true } };
+        const n = i2(2585), o = i2(8460), a = i2(844), h2 = { NONE: { events: 0, restrict: () => false }, X10: { events: 1, restrict: (e3) => 4 !== e3.button && 1 === e3.action && (e3.ctrl = false, e3.alt = false, e3.shift = false, true) }, VT200: { events: 19, restrict: (e3) => 32 !== e3.action }, DRAG: { events: 23, restrict: (e3) => 32 !== e3.action || 3 !== e3.button }, ANY: { events: 31, restrict: (e3) => true } };
         function c(e3, t3) {
           let i3 = (e3.ctrl ? 16 : 0) | (e3.shift ? 4 : 0) | (e3.alt ? 8 : 0);
           return 4 === e3.button ? (i3 |= 64, i3 |= e3.action) : (i3 |= 3 & e3.button, 4 & e3.button && (i3 |= 64), 8 & e3.button && (i3 |= 128), 32 === e3.action ? i3 |= 32 : 0 !== e3.action || t3 || (i3 |= 3)), i3;
@@ -5437,7 +5437,7 @@ WARNING: This link could potentially be dangerous`)) {
         let _ = t2.CoreMouseService = class extends a.Disposable {
           constructor(e3, t3) {
             super(), this._bufferService = e3, this._coreService = t3, this._protocols = {}, this._encodings = {}, this._activeProtocol = "", this._activeEncoding = "", this._lastEvent = null, this._onProtocolChange = this.register(new o.EventEmitter()), this.onProtocolChange = this._onProtocolChange.event;
-            for (const e4 of Object.keys(h3)) this.addProtocol(e4, h3[e4]);
+            for (const e4 of Object.keys(h2)) this.addProtocol(e4, h2[e4]);
             for (const e4 of Object.keys(d)) this.addEncoding(e4, d[e4]);
             this.reset();
           }
@@ -5504,7 +5504,7 @@ WARNING: This link could potentially be dangerous`)) {
           };
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.CoreService = void 0;
-        const n = i2(1439), o = i2(8460), a = i2(844), h3 = i2(2585), c = Object.freeze({ insertMode: false }), l = Object.freeze({ applicationCursorKeys: false, applicationKeypad: false, bracketedPasteMode: false, origin: false, reverseWraparound: false, sendFocus: false, wraparound: true });
+        const n = i2(1439), o = i2(8460), a = i2(844), h2 = i2(2585), c = Object.freeze({ insertMode: false }), l = Object.freeze({ applicationCursorKeys: false, applicationKeypad: false, bracketedPasteMode: false, origin: false, reverseWraparound: false, sendFocus: false, wraparound: true });
         let d = t2.CoreService = class extends a.Disposable {
           constructor(e3, t3, i3) {
             super(), this._bufferService = e3, this._logService = t3, this._optionsService = i3, this.isCursorInitialized = false, this.isCursorHidden = false, this._onData = this.register(new o.EventEmitter()), this.onData = this._onData.event, this._onUserInput = this.register(new o.EventEmitter()), this.onUserInput = this._onUserInput.event, this._onBinary = this.register(new o.EventEmitter()), this.onBinary = this._onBinary.event, this._onRequestScrollToBottom = this.register(new o.EventEmitter()), this.onRequestScrollToBottom = this._onRequestScrollToBottom.event, this.modes = (0, n.clone)(c), this.decPrivateModes = (0, n.clone)(l);
@@ -5521,11 +5521,11 @@ WARNING: This link could potentially be dangerous`)) {
             this._optionsService.rawOptions.disableStdin || (this._logService.debug(`sending binary "${e3}"`, (() => e3.split("").map(((e4) => e4.charCodeAt(0))))), this._onBinary.fire(e3));
           }
         };
-        t2.CoreService = d = s2([r(0, h3.IBufferService), r(1, h3.ILogService), r(2, h3.IOptionsService)], d);
+        t2.CoreService = d = s2([r(0, h2.IBufferService), r(1, h2.ILogService), r(2, h2.IOptionsService)], d);
       }, 9074: (e2, t2, i2) => {
         Object.defineProperty(t2, "__esModule", { value: true }), t2.DecorationService = void 0;
         const s2 = i2(8055), r = i2(8460), n = i2(844), o = i2(6106);
-        let a = 0, h3 = 0;
+        let a = 0, h2 = 0;
         class c extends n.Disposable {
           get decorations() {
             return this._decorations.values();
@@ -5554,7 +5554,7 @@ WARNING: This link could potentially be dangerous`)) {
           }
           forEachDecorationAtCell(e3, t3, i3, s3) {
             this._decorations.forEachByKey(t3, ((t4) => {
-              a = t4.options.x ?? 0, h3 = a + (t4.options.width ?? 1), e3 >= a && e3 < h3 && (!i3 || (t4.options.layer ?? "bottom") === i3) && s3(t4);
+              a = t4.options.x ?? 0, h2 = a + (t4.options.width ?? 1), e3 >= a && e3 < h2 && (!i3 || (t4.options.layer ?? "bottom") === i3) && s3(t4);
             }));
           }
         }
@@ -5633,12 +5633,12 @@ WARNING: This link could potentially be dangerous`)) {
         };
         Object.defineProperty(t2, "__esModule", { value: true }), t2.traceCall = t2.setTraceLogger = t2.LogService = void 0;
         const n = i2(844), o = i2(2585), a = { trace: o.LogLevelEnum.TRACE, debug: o.LogLevelEnum.DEBUG, info: o.LogLevelEnum.INFO, warn: o.LogLevelEnum.WARN, error: o.LogLevelEnum.ERROR, off: o.LogLevelEnum.OFF };
-        let h3, c = t2.LogService = class extends n.Disposable {
+        let h2, c = t2.LogService = class extends n.Disposable {
           get logLevel() {
             return this._logLevel;
           }
           constructor(e3) {
-            super(), this._optionsService = e3, this._logLevel = o.LogLevelEnum.OFF, this._updateLogLevel(), this.register(this._optionsService.onSpecificOptionChange("logLevel", (() => this._updateLogLevel()))), h3 = this;
+            super(), this._optionsService = e3, this._logLevel = o.LogLevelEnum.OFF, this._updateLogLevel(), this.register(this._optionsService.onSpecificOptionChange("logLevel", (() => this._updateLogLevel()))), h2 = this;
           }
           _updateLogLevel() {
             this._logLevel = a[this._optionsService.rawOptions.logLevel];
@@ -5666,15 +5666,15 @@ WARNING: This link could potentially be dangerous`)) {
           }
         };
         t2.LogService = c = s2([r(0, o.IOptionsService)], c), t2.setTraceLogger = function(e3) {
-          h3 = e3;
+          h2 = e3;
         }, t2.traceCall = function(e3, t3, i3) {
           if ("function" != typeof i3.value) throw new Error("not supported");
           const s3 = i3.value;
           i3.value = function(...e4) {
-            if (h3.logLevel !== o.LogLevelEnum.TRACE) return s3.apply(this, e4);
-            h3.trace(`GlyphRenderer#${s3.name}(${e4.map(((e5) => JSON.stringify(e5))).join(", ")})`);
+            if (h2.logLevel !== o.LogLevelEnum.TRACE) return s3.apply(this, e4);
+            h2.trace(`GlyphRenderer#${s3.name}(${e4.map(((e5) => JSON.stringify(e5))).join(", ")})`);
             const t4 = s3.apply(this, e4);
-            return h3.trace(`GlyphRenderer#${s3.name} return`, t4), t4;
+            return h2.trace(`GlyphRenderer#${s3.name} return`, t4), t4;
           };
         };
       }, 7302: (e2, t2, i2) => {
@@ -5881,8 +5881,8 @@ WARNING: This link could potentially be dangerous`)) {
                 56320 <= i4 && i4 <= 57343 ? o = 1024 * (o - 55296) + i4 - 56320 + 65536 : t3 += this.wcwidth(i4);
               }
               const a = this.charProperties(o, i3);
-              let h3 = n.extractWidth(a);
-              n.extractShouldJoin(a) && (h3 -= n.extractWidth(i3)), t3 += h3, i3 = a;
+              let h2 = n.extractWidth(a);
+              n.extractShouldJoin(a) && (h2 -= n.extractWidth(i3)), t3 += h2, i3 = a;
             }
             return t3;
           }
@@ -5902,7 +5902,7 @@ WARNING: This link could potentially be dangerous`)) {
       return (() => {
         var e2 = s;
         Object.defineProperty(e2, "__esModule", { value: true }), e2.Terminal = void 0;
-        const t2 = i(9042), r = i(3236), n = i(844), o = i(5741), a = i(8285), h3 = i(7975), c = i(7090), l = ["cols", "rows"];
+        const t2 = i(9042), r = i(3236), n = i(844), o = i(5741), a = i(8285), h2 = i(7975), c = i(7090), l = ["cols", "rows"];
         class d extends n.Disposable {
           constructor(e3) {
             super(), this._core = this.register(new r.Terminal(e3)), this._addonManager = this.register(new o.AddonManager()), this._publicOptions = { ...this._core.options };
@@ -5960,7 +5960,7 @@ WARNING: This link could potentially be dangerous`)) {
             return this._core.element;
           }
           get parser() {
-            return this._parser || (this._parser = new h3.ParserApi(this._core)), this._parser;
+            return this._parser || (this._parser = new h2.ParserApi(this._core)), this._parser;
           }
           get unicode() {
             return this._checkProposedApi(), new c.UnicodeApi(this._core);
@@ -6387,10 +6387,6 @@ async function fetchSnapshot(token2) {
   const resp = await af("Snapshot", { repo_id: "" }, token2);
   return resp.instances ?? [];
 }
-async function getTheme(token2) {
-  const resp = await af("GetTheme", {}, token2);
-  return resp.theme;
-}
 function probeToken(token2) {
   return fetchSnapshot(token2);
 }
@@ -6675,15 +6671,654 @@ function h(tag, props = {}, ...children) {
   return el2;
 }
 
+// src/terminal_ansi.ts
+var TERMINAL_ANSI = {
+  "light": {
+    "black": "#2E3440",
+    "red": "#944049",
+    "green": "#51693C",
+    "yellow": "#7C5A15",
+    "blue": "#426486",
+    "magenta": "#7F5478",
+    "cyan": "#2D6271",
+    "white": "#434C5E",
+    "brightBlack": "#000000",
+    "brightRed": "#76333A",
+    "brightGreen": "#415430",
+    "brightYellow": "#634811",
+    "brightBlue": "#35506B",
+    "brightMagenta": "#664360",
+    "brightCyan": "#244E5A",
+    "brightWhite": "#171A20"
+  },
+  "dark": {
+    "black": "#B4BCC8",
+    "red": "#D9B2B9",
+    "green": "#A3BE8C",
+    "yellow": "#EBCB8B",
+    "blue": "#81A1C1",
+    "magenta": "#B590AF",
+    "cyan": "#90C4D3",
+    "white": "#D8DEE9",
+    "brightBlack": "#959CA5",
+    "brightRed": "#E1C1C7",
+    "brightGreen": "#B5CBA3",
+    "brightYellow": "#EFD5A2",
+    "brightBlue": "#9AB4CD",
+    "brightMagenta": "#C4A6BF",
+    "brightCyan": "#A6D0DC",
+    "brightWhite": "#FFFFFF"
+  }
+};
+
+// src/theme.ts
+var THEME_CHOICES = ["light", "dark", "system"];
+var STORAGE_KEY = "af-theme";
+function connectionAttemptMayCommit(request, installedToken, candidate) {
+  return request.isCurrent() && installedToken === candidate;
+}
+function normalizeThemeChoice(value) {
+  return value === "light" || value === "dark" ? value : "system";
+}
+function readThemeChoice() {
+  try {
+    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return "system";
+  }
+}
+function persistThemeChoice(choice) {
+  try {
+    localStorage.setItem(STORAGE_KEY, choice);
+  } catch {
+  }
+}
+function currentMode() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") return attr;
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {
+    return "dark";
+  }
+}
+function surface(mode) {
+  const probe = document.createElement("span");
+  probe.dataset.afTheme = mode;
+  probe.hidden = true;
+  document.documentElement.append(probe);
+  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  probe.remove();
+  return color;
+}
+function themeColorMetaContents(choice) {
+  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
+}
+function refreshThemeMode() {
+  const mode = currentMode();
+  document.documentElement.dataset.afTheme = mode;
+  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
+  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
+  }
+}
+function stampTheme(choice) {
+  if (choice === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", choice);
+  refreshThemeMode();
+}
+function bootStampTheme() {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+function xtermTheme(mode) {
+  return TERMINAL_ANSI[mode];
+}
+function currentXtermTheme() {
+  return xtermTheme(currentMode());
+}
+
+// src/recovery.ts
+function recoveryScreen(state) {
+  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
+  action.addEventListener("click", state.run);
+  const screen = h(
+    "section",
+    { class: "af-recovery" },
+    h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
+    ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
+    action
+  );
+  scopeRecovery(screen);
+  if (state.failed) screen.setAttribute("role", "alert");
+  return screen;
+}
+function mutationNotice(condition, detail, action, failed = true) {
+  return scopeRecovery(h(
+    "div",
+    { class: "af-recovery af-recovery-notice", role: "alert" },
+    h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
+    h("p", { class: "af-recovery-detail" }, detail),
+    h("p", { class: "af-recovery-next" }, action)
+  ));
+}
+function scopeRecovery(element) {
+  element.setAttribute("data-af-theme", currentMode());
+  return element;
+}
+
+// src/nav.ts
+var VIEWS = ["sessions", "tasks", "config"];
+function cycleView(current, delta) {
+  const i = VIEWS.indexOf(current);
+  const n = VIEWS.length;
+  return VIEWS[(i + delta + n) % n];
+}
+function nextSelection(orderedIds, selectedId, delta) {
+  if (orderedIds.length === 0) {
+    return null;
+  }
+  const cur = selectedId ? orderedIds.indexOf(selectedId) : -1;
+  let next;
+  if (cur === -1) {
+    next = delta > 0 ? 0 : orderedIds.length - 1;
+  } else {
+    next = Math.min(Math.max(cur + delta, 0), orderedIds.length - 1);
+  }
+  return orderedIds[next] ?? null;
+}
+function decideKey(key, ctx, mods = {}) {
+  if (ctx.modalOpen) {
+    return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
+  }
+  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
+    if (ctx.view !== "sessions" || !ctx.selectedId) {
+      return { kind: "none" };
+    }
+    if (key === "j") {
+      return { kind: "cyclePane", delta: 1 };
+    }
+    if (key === "k") {
+      return { kind: "cyclePane", delta: -1 };
+    }
+    return { kind: "closePane" };
+  }
+  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
+    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
+  }
+  if (ctx.focus === "terminal") {
+    return { kind: "none" };
+  }
+  if (key === "[") {
+    return { kind: "switchView", view: cycleView(ctx.view, -1) };
+  }
+  if (key === "]") {
+    return { kind: "switchView", view: cycleView(ctx.view, 1) };
+  }
+  if (ctx.view !== "sessions") {
+    return { kind: "none" };
+  }
+  if (key === "Enter") {
+    return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
+  }
+  if (ctx.selectedId) {
+    if (key.length === 1 && key >= "1" && key <= "9") {
+      const index = key.charCodeAt(0) - "1".charCodeAt(0);
+      if (index < ctx.tabCount && index !== ctx.activeTab) {
+        return { kind: "switchTab", index };
+      }
+      return { kind: "none" };
+    }
+    if (key === "t") {
+      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
+    }
+    if (key === "w") {
+      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
+    }
+  }
+  let delta;
+  if (key === "ArrowDown" || key === "j") {
+    delta = 1;
+  } else if (key === "ArrowUp" || key === "k") {
+    delta = -1;
+  } else {
+    return { kind: "none" };
+  }
+  const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
+  return next ? { kind: "select", id: next } : { kind: "none" };
+}
+
+// node_modules/lucide/dist/esm/icons/archive-restore.mjs
+var ArchiveRestore = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
+  ["path", { d: "M20 8v11a2 2 0 0 1-2 2h-2" }],
+  ["path", { d: "m9 15 3-3 3 3" }],
+  ["path", { d: "M12 12v9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/archive.mjs
+var Archive = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
+  ["path", { d: "M10 12h4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/arrow-right.mjs
+var ArrowRight = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "m12 5 7 7-7 7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/bot.mjs
+var Bot = [
+  ["path", { d: "M12 8V4H8" }],
+  ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
+  ["path", { d: "M2 14h2" }],
+  ["path", { d: "M20 14h2" }],
+  ["path", { d: "M15 13v2" }],
+  ["path", { d: "M9 13v2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/check.mjs
+var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
+
+// node_modules/lucide/dist/esm/icons/chevron-down.mjs
+var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
+
+// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
+var CircleDashed = [
+  ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
+  ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
+  ["path", { d: "M17.609 3.721a10 10 0 0 1 2.69 2.7" }],
+  ["path", { d: "M2.182 13.9a10 10 0 0 1 0-3.8" }],
+  ["path", { d: "M20.279 17.609a10 10 0 0 1-2.7 2.69" }],
+  ["path", { d: "M21.818 10.1a10 10 0 0 1 0 3.8" }],
+  ["path", { d: "M3.721 6.391a10 10 0 0 1 2.7-2.69" }],
+  ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
+var CircleQuestionMark = [
+  ["circle", { cx: "12", cy: "12", r: "10" }],
+  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
+// node_modules/lucide/dist/esm/icons/circle.mjs
+var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
+
+// node_modules/lucide/dist/esm/icons/diamond.mjs
+var Diamond = [
+  [
+    "path",
+    {
+      d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/ellipsis.mjs
+var Ellipsis = [
+  ["circle", { cx: "12", cy: "12", r: "1" }],
+  ["circle", { cx: "19", cy: "12", r: "1" }],
+  ["circle", { cx: "5", cy: "12", r: "1" }]
+];
+
+// node_modules/lucide/dist/esm/icons/external-link.mjs
+var ExternalLink = [
+  ["path", { d: "M15 3h6v6" }],
+  ["path", { d: "M10 14 21 3" }],
+  ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
+var FolderGit2 = [
+  ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
+  [
+    "path",
+    {
+      d: "M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"
+    }
+  ],
+  ["circle", { cx: "13", cy: "12", r: "2" }],
+  ["circle", { cx: "20", cy: "19", r: "2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder.mjs
+var Folder = [
+  [
+    "path",
+    {
+      d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/funnel.mjs
+var Funnel = [
+  [
+    "path",
+    {
+      d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/git-branch.mjs
+var GitBranch = [
+  ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
+  ["circle", { cx: "18", cy: "6", r: "3" }],
+  ["circle", { cx: "6", cy: "18", r: "3" }]
+];
+
+// node_modules/lucide/dist/esm/icons/link.mjs
+var Link = [
+  ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
+  ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
+];
+
+// node_modules/lucide/dist/esm/icons/menu.mjs
+var Menu = [
+  ["path", { d: "M4 5h16" }],
+  ["path", { d: "M4 12h16" }],
+  ["path", { d: "M4 19h16" }]
+];
+
+// node_modules/lucide/dist/esm/icons/octagon-x.mjs
+var OctagonX = [
+  ["path", { d: "m15 9-6 6" }],
+  [
+    "path",
+    {
+      d: "M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"
+    }
+  ],
+  ["path", { d: "m9 9 6 6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
+var PanelsTopLeft = [
+  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
+  ["path", { d: "M3 9h18" }],
+  ["path", { d: "M9 21V9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/plus.mjs
+var Plus = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "M12 5v14" }]
+];
+
+// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
+var RefreshCw = [
+  ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
+  ["path", { d: "M21 3v5h-5" }],
+  ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
+  ["path", { d: "M8 16H3v5" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square-check-big.mjs
+var SquareCheckBig = [
+  ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
+  ["path", { d: "m9 11 3 3L22 4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square.mjs
+var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
+
+// node_modules/lucide/dist/esm/icons/terminal.mjs
+var Terminal = [
+  ["path", { d: "M12 19h8" }],
+  ["path", { d: "m4 17 6-6-6-6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
+var TriangleAlert = [
+  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
+  ["path", { d: "M12 9v4" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
+// node_modules/lucide/dist/esm/icons/x.mjs
+var X = [
+  ["path", { d: "M18 6 6 18" }],
+  ["path", { d: "m6 6 12 12" }]
+];
+
+// src/icon.ts
+var ICONS = {
+  archive: Archive,
+  "archive-restore": ArchiveRestore,
+  "arrow-right": ArrowRight,
+  bot: Bot,
+  check: Check,
+  "chevron-down": ChevronDown,
+  circle: Circle,
+  "circle-dashed": CircleDashed,
+  "circle-question": CircleQuestionMark,
+  diamond: Diamond,
+  ellipsis: Ellipsis,
+  "external-link": ExternalLink,
+  folder: Folder,
+  "folder-git": FolderGit2,
+  funnel: Funnel,
+  "git-branch": GitBranch,
+  link: Link,
+  menu: Menu,
+  "octagon-x": OctagonX,
+  panels: PanelsTopLeft,
+  plus: Plus,
+  reload: RefreshCw,
+  square: Square,
+  "square-check": SquareCheckBig,
+  terminal: Terminal,
+  "triangle-alert": TriangleAlert,
+  x: X
+};
+function icon(name, className = "") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", `af-icon${className ? ` ${className}` : ""}`);
+  svg.setAttribute("data-icon", name);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const [tag, attrs] of ICONS[name]) {
+    const child = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [attr, value] of Object.entries(attrs)) {
+      child.setAttribute(attr, String(value));
+    }
+    svg.append(child);
+  }
+  return svg;
+}
+
+// src/components.ts
+function actionsDisclosure(label = "Session actions") {
+  const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "\u2026"));
+  trigger.setAttribute("aria-label", label);
+  trigger.setAttribute("aria-expanded", "false");
+  const panel = h("div", { class: "af-term-menu", role: "group" });
+  panel.setAttribute("aria-label", label);
+  panel.hidden = true;
+  const el2 = h("div", { class: "af-term-more-wrap" }, trigger, panel);
+  const outside = (event) => {
+    if (!el2.contains(event.target)) close();
+  };
+  const close = (restoreFocus = false) => {
+    panel.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("mousedown", outside);
+    if (restoreFocus) trigger.focus();
+  };
+  const open = () => {
+    panel.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    document.addEventListener("mousedown", outside);
+  };
+  trigger.addEventListener("click", () => panel.hidden ? open() : close());
+  el2.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !panel.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+    }
+  });
+  return { el: el2, panel, trigger, open, close, dispose: close };
+}
+function terminalChrome(opts) {
+  const menu = actionsDisclosure();
+  const action = (label, className, run) => {
+    const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
+    button.addEventListener("click", () => {
+      menu.close();
+      run();
+    });
+    return button;
+  };
+  const title = h("span", { class: "af-term-title" }, opts.title);
+  const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
+  const tabs = h("div", { class: "af-tabbar", role: "tablist" });
+  tabs.setAttribute("aria-label", "Session tabs");
+  const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
+  pr.hidden = true;
+  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
+  keyboard.hidden = true;
+  const actions2 = h("div", { class: "af-term-actions" });
+  actions2.hidden = true;
+  const retry = action("Retry", "", opts.retry);
+  retry.title = "Resume this session from its usage-limit wall";
+  const handoff = action("Handoff", "", opts.handoff);
+  handoff.title = "Continue this session under a different agent";
+  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
+  copy.title = "Copy link";
+  copy.setAttribute("aria-label", "Copy link");
+  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
+  desktopCopy.append(icon("link"));
+  desktopCopy.title = "Copy link";
+  desktopCopy.setAttribute("aria-label", "Copy link");
+  const newTabSlot = h("div", { class: "af-term-new-slot" });
+  menu.panel.append(newTabSlot, copy, handoff, actions2);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
+  return { head, title, tabs, pr, keyboard, retry, handoff, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+}
+function paneChrome(onClose) {
+  const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
+  const label = h("span", { class: "af-pane-label" });
+  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
+  const close = h("button", { type: "button", class: "af-pane-close", title: "Close pane" }, icon("x"));
+  close.setAttribute("aria-label", "Close pane");
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClose();
+  });
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+}
+function terminalSurface(container, palette) {
+  const style = getComputedStyle(container);
+  const token2 = (name) => style.getPropertyValue(name).trim();
+  return {
+    ...palette,
+    background: token2("--af-surface"),
+    foreground: token2("--af-ink"),
+    cursor: token2("--af-ink"),
+    cursorAccent: token2("--af-surface"),
+    selectionBackground: token2("--af-surface-raised"),
+    selectionForeground: token2("--af-ink")
+  };
+}
+function viewNavigation(onSelect) {
+  const el2 = h("div", { class: "af-viewnav", role: "tablist" });
+  el2.setAttribute("aria-label", "Views");
+  const tabs = /* @__PURE__ */ new Map();
+  const labels = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
+  for (const view of VIEWS) {
+    const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
+    tab.dataset.view = view;
+    tab.addEventListener("click", () => onSelect(view));
+    tabs.set(view, tab);
+    el2.append(tab);
+  }
+  return { el: el2, tabs };
+}
+function modalChrome(opts) {
+  const body = h("div", { class: "af-modal-body" });
+  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
+  errorLine.hidden = true;
+  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
+  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
+  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
+  const card = h(
+    "div",
+    { class: "af-modal-card", role: "dialog" },
+    h("h2", { class: "af-modal-title" }, opts.title),
+    body,
+    errorLine,
+    footer
+  );
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-label", opts.title);
+  card.tabIndex = -1;
+  card.addEventListener("click", (e) => e.stopPropagation());
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  cancelBtn.addEventListener("click", () => opts.onCancel());
+  const handle = {
+    el: backdrop,
+    setBusy(busy) {
+      confirmBtn.disabled = busy;
+      cancelBtn.disabled = busy;
+      card.classList.toggle("af-modal-busy", busy);
+    },
+    setError(msg) {
+      if (msg) {
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
+        errorLine.hidden = false;
+      } else {
+        errorLine.textContent = "";
+        errorLine.hidden = true;
+      }
+    },
+    close() {
+      backdrop.remove();
+    }
+  };
+  return { handle, body, confirmBtn, cancelBtn, errorLine };
+}
+function field(label, control) {
+  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
+}
+function defaultsDisclosure() {
+  const summaryText = h("span", { class: "af-defaults-summary" });
+  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Edit defaults \xB7"), " ", summaryText);
+  const body = h("div", { class: "af-defaults-body" });
+  const el2 = h("details", { class: "af-defaults" }, summary, body);
+  const setSummary = (fragments) => {
+    summaryText.replaceChildren(...fragments.flatMap((fragment, index) => [h("span", { class: "af-defaults-fragment" }, `${fragment}${index < fragments.length - 1 ? " \xB7" : ""}`), " "]));
+  };
+  return { el: el2, body, setSummary };
+}
+
 // src/accounts.ts
 function emptyAccountsState() {
-  return { entries: [], agents: [], error: "", status: null };
+  return { entries: [], agents: [], error: "", status: null, loaded: false };
 }
 var ACCOUNT_INPUT_ATTR = "data-account-input";
 var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential. Signing in is a device code \xB7 the pane prints a URL, you finish it in your own browser.";
-function renderAccountsSection(state, actions2) {
+function renderAccountsSection(state, actions2, registration = { open: false, agent: "" }) {
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
+  }
   const head = h(
     "div",
     { class: "af-accounts-head" },
@@ -6710,13 +7345,43 @@ function renderAccountsSection(state, actions2) {
   const list = h("div", { class: "af-accounts-list" });
   for (const agent of state.agents) {
     const mine = state.entries.filter((e) => e.agent === agent);
-    list.append(h("div", { class: "af-accounts-agent" }, agent));
+    if (mine.length) list.append(h("div", { class: "af-accounts-agent" }, agent));
     for (const entry of mine) {
       list.append(renderAccountRow(entry, state.status, actions2));
     }
-    list.append(renderRegisterRow(agent, state.status, actions2));
   }
-  section.append(list);
+  const add = h("details", { class: "af-account-disclosure" });
+  add.open = registration.open;
+  add.addEventListener("toggle", () => {
+    registration.open = add.open;
+  });
+  const agentSelect = h("select", { class: "af-input" });
+  agentSelect.setAttribute("aria-label", "Account agent");
+  for (const agent of state.agents) agentSelect.append(h("option", { value: agent }, agent));
+  agentSelect.value = state.agents.includes(registration.agent) ? registration.agent : state.agents[0];
+  registration.agent = agentSelect.value;
+  const forms = state.agents.map((agent) => renderRegisterRow(agent, state.status, actions2));
+  const sync = () => {
+    registration.agent = agentSelect.value;
+    forms.forEach((form, i) => {
+      form.hidden = state.agents[i] !== registration.agent;
+    });
+  };
+  agentSelect.addEventListener("change", sync);
+  sync();
+  add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
+  section.append(list, add);
+  if (state.entries.length === 0 && !registration.open) {
+    add.hidden = true;
+    const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
+      empty.remove();
+      add.hidden = false;
+      add.open = true;
+      registration.open = true;
+      add.querySelector(".af-accounts-register:not([hidden]) input")?.focus();
+    } });
+    section.prepend(empty);
+  }
   return section;
 }
 function renderAccountRow(entry, status, actions2) {
@@ -6769,7 +7434,6 @@ function renderRegisterRow(agent, status, actions2) {
       return;
     }
     actions2.register(agent, name);
-    input.value = "";
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -6779,7 +7443,7 @@ function renderRegisterRow(agent, status, actions2) {
   });
   const button = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
   button.addEventListener("click", submit);
-  row.append(h("div", { class: "af-accounts-label" }, input), button);
+  row.append(h("div", { class: "af-accounts-label" }, field("Name", input)), button);
   appendStatus(row, status, agent, "");
   return row;
 }
@@ -6868,6 +7532,7 @@ var ConfigPane = class {
   }
   el;
   entries = [];
+  registration = { open: false, agent: "" };
   path = "";
   status = null;
   /** The Accounts section's data (#3385). It is rendered by this view but is not
@@ -6892,10 +7557,15 @@ var ConfigPane = class {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
+    if (registrationSucceeded) {
+      const submitted = this.accountInput(accounts.status.agent);
+      if (submitted) submitted.value = "";
+    }
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
-    this.entries = entries;
+    this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
@@ -6924,6 +7594,8 @@ var ConfigPane = class {
   rerenderKeepingUserState() {
     const active = document.activeElement;
     const accountDrafts = this.readAccountDrafts();
+    const accountAgentFocused = active?.getAttribute("aria-label") === "Account agent";
+    const accountSummaryFocused = active === this.el.querySelector(".af-account-disclosure summary");
     const focusedAccount = active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
     const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement ? { start: active.selectionStart, end: active.selectionEnd } : null;
     const wasEditing = this.editingInput !== null && active === this.editingInput;
@@ -6939,6 +7611,10 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (accountAgentFocused) {
+      this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
+    } else if (accountSummaryFocused) {
+      this.el.querySelector(".af-account-disclosure summary")?.focus({ preventScroll: true });
     } else if (focusedAccount !== null) {
       const field2 = this.accountInput(focusedAccount);
       field2?.focus({ preventScroll: true });
@@ -6984,7 +7660,7 @@ var ConfigPane = class {
       h("span", { class: "af-view-count" }, String(this.entries.length))
     );
     if (this.path !== "") {
-      head.append(h("span", { class: "af-config-path" }, this.path));
+      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} \xB7 ${this.path}`));
     }
     const assistantBtn = h(
       "button",
@@ -7000,7 +7676,7 @@ var ConfigPane = class {
         continue;
       }
       const folded = tier === TIER_ADVANCED && !this.showAdvanced;
-      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name));
+      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name.charAt(0).toUpperCase() + name.slice(1)));
       if (tier === TIER_ADVANCED) {
         const toggle = h(
           "button",
@@ -7032,7 +7708,7 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts)
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
     );
   }
   /** One key: its name, purpose, control, and — when it is the row just written
@@ -7097,6 +7773,7 @@ var ConfigPane = class {
     }
     input.setAttribute("aria-label", e.key);
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
     const commit = () => {
       if (!canCommit(input.value, e.value)) {
         return;
@@ -7105,6 +7782,7 @@ var ConfigPane = class {
     };
     const syncSave = () => {
       save.disabled = !canCommit(input.value, e.value);
+      dirty.hidden = save.disabled;
     };
     input.addEventListener("input", () => {
       this.editing = e.key;
@@ -7119,7 +7797,7 @@ var ConfigPane = class {
     });
     save.addEventListener("click", commit);
     syncSave();
-    return h("div", { class: "af-config-control" }, input, save);
+    return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 };
 
@@ -7734,468 +8412,6 @@ function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
 }
 
-// src/theme.ts
-var THEME_CHOICES = ["auto", "light", "dark"];
-var STORAGE_KEY = "af-theme";
-var HEX = /^#[0-9A-Fa-f]{6}$/;
-var BLACK = "#000000";
-var WHITE = "#FFFFFF";
-var NORD_THEME = {
-  name: "nord",
-  foreground: "#D8DEE9",
-  foreground_strong: "#ECEFF4",
-  foreground_muted: "#C3CBD6",
-  foreground_dim: "#A7B0BE",
-  background: "#2E3440",
-  background_subtle: "#3B4252",
-  background_panel: "#434C5E",
-  accent: "#88C0D0",
-  success: "#A3BE8C",
-  warning: "#EBCB8B",
-  error: "#CC8A91",
-  info: "#81A1C1",
-  purple: "#B590AF",
-  selection_background: "#4C566A",
-  selection_foreground: "#ECEFF4",
-  pane_border_default: "#4C566A",
-  pane_border_selected: "#88C0D0",
-  pane_border_interactive: "#A3BE8C",
-  pane_border_preview: "#B48EAD"
-};
-function rgb(hex2) {
-  if (!HEX.test(hex2)) return null;
-  return [
-    Number.parseInt(hex2.slice(1, 3), 16),
-    Number.parseInt(hex2.slice(3, 5), 16),
-    Number.parseInt(hex2.slice(5, 7), 16)
-  ];
-}
-function hex([r, g, b]) {
-  return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
-}
-function mix(a, b, amount) {
-  const aa = rgb(a);
-  const bb = rgb(b);
-  if (!aa || !bb) return NORD_THEME.foreground;
-  return hex(aa.map((v, i) => v + (bb[i] - v) * amount));
-}
-function rgbToHSL(color) {
-  const value = rgb(color) ?? rgb(NORD_THEME.accent);
-  const [r, g, b] = value.map((part) => part / 255);
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const lightness = (max + min) / 2;
-  if (max === min) return [0, 0, lightness];
-  const delta = max - min;
-  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
-  let hue = 0;
-  if (max === r) hue = (g - b) / delta + (g < b ? 6 : 0);
-  else if (max === g) hue = (b - r) / delta + 2;
-  else hue = (r - g) / delta + 4;
-  return [hue / 6, saturation, lightness];
-}
-function hslToHex(hue, saturation, lightness) {
-  if (saturation === 0) return hex([255 * lightness, 255 * lightness, 255 * lightness]);
-  const q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
-  const p = 2 * lightness - q;
-  const channel = (offset) => {
-    let value = hue + offset;
-    if (value < 0) value += 1;
-    if (value > 1) value -= 1;
-    if (value < 1 / 6) return p + (q - p) * 6 * value;
-    if (value < 1 / 2) return q;
-    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
-    return p;
-  };
-  return hex([255 * channel(1 / 3), 255 * channel(0), 255 * channel(-1 / 3)]);
-}
-function rgba(color, alpha) {
-  const value = rgb(color) ?? rgb(NORD_THEME.background);
-  return `rgba(${value[0]}, ${value[1]}, ${value[2]}, ${alpha})`;
-}
-function luminance(color) {
-  const value = rgb(color);
-  if (!value) return 0;
-  const linear = value.map((part) => {
-    const channel = part / 255;
-    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-}
-function contrastRatio(a, b) {
-  const first = luminance(a);
-  const second = luminance(b);
-  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
-}
-function passes(color, backgrounds, minimum) {
-  return HEX.test(color) && backgrounds.every((background) => contrastRatio(color, background) >= minimum);
-}
-function shiftToContrast(color, backgrounds, minimum, toward) {
-  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
-  for (let step = 1; step <= 100; step++) {
-    const candidate = mix(color, toward, step / 100);
-    if (passes(candidate, backgrounds, minimum)) return candidate;
-  }
-  return color.toUpperCase();
-}
-function adjustLightnessToContrast(color, backgrounds, minimum) {
-  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
-  const [hue, saturation, lightness] = rgbToHSL(color);
-  for (let step = 1; step <= 100; step++) {
-    const amount = step / 100;
-    const darker = hslToHex(hue, saturation, lightness * (1 - amount));
-    if (passes(darker, backgrounds, minimum)) return darker;
-    const lighter = hslToHex(hue, saturation, lightness + (1 - lightness) * amount);
-    if (passes(lighter, backgrounds, minimum)) return lighter;
-  }
-  return null;
-}
-function readable(candidate, backgrounds, minimum, fallback, toward) {
-  if (passes(candidate, backgrounds, minimum)) return candidate.toUpperCase();
-  const safeFallback = shiftToContrast(fallback, backgrounds, minimum, toward);
-  if (passes(safeFallback, backgrounds, minimum)) return safeFallback;
-  for (const endpoint of [BLACK, WHITE]) {
-    const shifted = shiftToContrast(fallback, backgrounds, minimum, endpoint);
-    if (passes(shifted, backgrounds, minimum)) return shifted;
-  }
-  const minimumContrast = (color) => Math.min(...backgrounds.map((background) => contrastRatio(color, background)));
-  return minimumContrast(BLACK) >= minimumContrast(WHITE) ? BLACK : WHITE;
-}
-var themeKeys = Object.keys(NORD_THEME).filter((key) => key !== "name");
-function normalizeTheme(value) {
-  const out = { ...NORD_THEME, name: typeof value?.name === "string" ? value.name : void 0 };
-  for (const key of themeKeys) {
-    const candidate = value?.[key];
-    out[key] = typeof candidate === "string" && HEX.test(candidate) ? candidate.toUpperCase() : NORD_THEME[key];
-  }
-  return out;
-}
-function hasConnectedToken(token2) {
-  return token2 !== null;
-}
-function connectionAttemptMayCommit(request, installedToken, candidate) {
-  return request.isCurrent() && installedToken === candidate;
-}
-function paletteFetchFailurePlan(status, hasLoadedPalette) {
-  const unsupported = status === 404 || status === 405 || status === 501;
-  const rejectedCredential = status === 401 || status === 403;
-  return {
-    reset: unsupported || !hasLoadedPalette,
-    retry: !unsupported && !rejectedCredential,
-    reauthenticate: rejectedCredential
-  };
-}
-function semantic(candidate, fallback, surfaces, minimum, toward) {
-  return readable(candidate, surfaces, minimum, fallback, toward);
-}
-function deriveTheme(input, mode) {
-  const source = normalizeTheme(input);
-  const dark = mode === "dark";
-  let canvas = dark ? source.background : source.foreground;
-  let surface = dark ? source.background_subtle : mix(source.foreground, source.foreground_strong, 0.55);
-  let raised = dark ? source.background_panel : source.foreground_strong;
-  let inset = dark ? mix(source.background, source.background_subtle, 0.22) : mix(source.foreground, source.background, 0.06);
-  let surfaces = [canvas, surface, inset, raised];
-  const resetSurfaceSystem = () => {
-    canvas = dark ? NORD_THEME.background : NORD_THEME.foreground;
-    surface = dark ? NORD_THEME.background_subtle : mix(NORD_THEME.foreground, NORD_THEME.foreground_strong, 0.55);
-    raised = dark ? NORD_THEME.background_panel : NORD_THEME.foreground_strong;
-    inset = dark ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22) : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
-    surfaces = [canvas, surface, inset, raised];
-  };
-  const sourceSurfaceText = dark ? source.foreground : source.background;
-  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
-  const hasSharedSurfaceText = [sourceSurfaceText, fallbackSurfaceText, BLACK, WHITE].some(
-    (candidate) => passes(candidate, surfaces, 4.5)
-  );
-  if (!hasSharedSurfaceText) {
-    resetSurfaceSystem();
-  }
-  const toward = dark ? source.foreground_strong : source.background;
-  const subtleAlpha = dark ? 0.12 : 0.09;
-  const tintAlpha = dark ? 0.2 : 0.16;
-  const provisionalText = readable(
-    dark ? source.foreground : source.background,
-    surfaces,
-    4.5,
-    fallbackSurfaceText,
-    toward
-  );
-  const lightSemantic = (candidate, fallback, backgrounds, minimum, neutral) => adjustLightnessToContrast(candidate, backgrounds, minimum) ?? adjustLightnessToContrast(fallback, backgrounds, minimum) ?? readable(fallback, backgrounds, minimum, neutral, neutral);
-  const provisionalSemantic = (candidate, fallback) => {
-    if (dark) return semantic(candidate, fallback, surfaces, 4.5, toward);
-    return lightSemantic(candidate, fallback, surfaces, 4.5, provisionalText);
-  };
-  const hasSharedFillText = (color, alphas) => {
-    const fills = surfaces.flatMap((background) => alphas.map((alpha) => mix(background, color, alpha)));
-    return passes(BLACK, fills, 4.5) || passes(WHITE, fills, 4.5);
-  };
-  const provisionalAccent = provisionalSemantic(source.accent, NORD_THEME.accent);
-  const provisionalDanger = provisionalSemantic(source.error, NORD_THEME.error);
-  if (!hasSharedFillText(provisionalAccent, [subtleAlpha, tintAlpha]) || !hasSharedFillText(provisionalDanger, [subtleAlpha])) {
-    resetSurfaceSystem();
-  }
-  const text = readable(
-    dark ? source.foreground : source.background,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground : NORD_THEME.background,
-    toward
-  );
-  const text2 = readable(
-    dark ? source.foreground_muted : source.background_subtle,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground_muted : NORD_THEME.background_subtle,
-    toward
-  );
-  const text3 = readable(
-    dark ? source.foreground_dim : source.background_panel,
-    surfaces,
-    4.5,
-    dark ? NORD_THEME.foreground_dim : NORD_THEME.background_panel,
-    toward
-  );
-  const modeSemantic = (candidate, fallback, minimum) => {
-    if (dark) return semantic(candidate, fallback, surfaces, minimum, toward);
-    return lightSemantic(candidate, fallback, surfaces, minimum, text);
-  };
-  const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
-  const danger = modeSemantic(source.error, NORD_THEME.error, 4.5);
-  const ready = modeSemantic(source.success, NORD_THEME.success, 3);
-  const statusNeedsYou = modeSemantic(source.success, NORD_THEME.success, 4.5);
-  const lost = modeSemantic(source.warning, NORD_THEME.warning, 3);
-  const limit = modeSemantic(source.error, NORD_THEME.error, 3);
-  const dead = semantic(text2, NORD_THEME.foreground_muted, surfaces, 3, toward);
-  const termColor = (candidate, fallback) => dark ? semantic(candidate, fallback, [canvas], 4.5, toward) : lightSemantic(candidate, fallback, [canvas], 4.5, text);
-  const termGreen = termColor(source.success, NORD_THEME.success);
-  const termAmber = termColor(source.warning, NORD_THEME.warning);
-  const termBlue = termColor(source.info, NORD_THEME.info);
-  const border = dark ? semantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, toward) : lightSemantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, text);
-  const borderSelected = modeSemantic(source.pane_border_selected, NORD_THEME.pane_border_selected, 3);
-  const borderInteractive = modeSemantic(source.pane_border_interactive, NORD_THEME.pane_border_interactive, 3);
-  const borderPreview = modeSemantic(source.pane_border_preview, NORD_THEME.pane_border_preview, 3);
-  const onAccentCandidates = [source.selection_foreground, source.background, text, BLACK, WHITE];
-  const onAccent = onAccentCandidates.find((candidate) => passes(candidate, [accent], 4.5)) ?? text;
-  const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
-  const hoverCandidate = mix(accent, hoverToward, 0.12);
-  const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
-  const semanticFillText = (candidate, fillSurfaces) => {
-    const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
-    return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
-  };
-  const accentFillSurfaces = surfaces.flatMap((background) => [
-    mix(background, accent, subtleAlpha),
-    mix(background, accent, tintAlpha)
-  ]);
-  const accentText = semanticFillText(accent, accentFillSurfaces);
-  const selectedText = semanticFillText(text, accentFillSurfaces);
-  const selectedTextMuted = semanticFillText(text2, accentFillSurfaces);
-  const selectedStatusNeedsYou = semanticFillText(statusNeedsYou, accentFillSurfaces);
-  const selectedStatusWorking = semanticFillText(text2, accentFillSurfaces);
-  const selectedStatusWaiting = semanticFillText(danger, accentFillSurfaces);
-  const selectedStatusBroken = semanticFillText(danger, accentFillSurfaces);
-  const selectedStatusInactive = semanticFillText(text2, accentFillSurfaces);
-  const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
-  const dangerText = semanticFillText(danger, dangerFillSurfaces);
-  const effectBase = dark ? canvas : text;
-  const selectionAlpha = dark ? 0.72 : 0.45;
-  const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
-  const selectionForeground = readable(
-    source.selection_foreground,
-    [selectionSurface],
-    4.5,
-    NORD_THEME.selection_foreground,
-    text
-  );
-  const tokens = {
-    "--af-bg-canvas": canvas,
-    "--af-bg-surface": surface,
-    "--af-bg-inset": inset,
-    "--af-bg-raised": raised,
-    "--af-bg-term": canvas,
-    "--af-border": border,
-    "--af-border-subtle": mix(surface, border, 0.35),
-    "--af-border-strong": border,
-    "--af-border-selected": borderSelected,
-    "--af-border-interactive": borderInteractive,
-    "--af-border-preview": borderPreview,
-    "--af-text": text,
-    "--af-text-2": text2,
-    "--af-text-3": text3,
-    "--af-accent": accent,
-    "--af-accent-text": accentText,
-    "--af-accent-hover": accentHover,
-    "--af-accent-subtle": rgba(accent, subtleAlpha),
-    "--af-accent-tint": rgba(accent, tintAlpha),
-    "--af-on-accent": onAccent,
-    "--af-danger": danger,
-    "--af-danger-text": dangerText,
-    "--af-danger-subtle": rgba(danger, subtleAlpha),
-    "--af-focus-ring": accent,
-    "--af-text-muted": text2,
-    "--af-status-needs-you": statusNeedsYou,
-    "--af-status-working": text2,
-    "--af-status-waiting": danger,
-    "--af-status-broken": danger,
-    "--af-status-inactive": text2,
-    "--af-selected-text": selectedText,
-    "--af-selected-text-muted": selectedTextMuted,
-    "--af-selected-status-needs-you": selectedStatusNeedsYou,
-    "--af-selected-status-working": selectedStatusWorking,
-    "--af-selected-status-waiting": selectedStatusWaiting,
-    "--af-selected-status-broken": selectedStatusBroken,
-    "--af-selected-status-inactive": selectedStatusInactive,
-    "--af-dot-ready": ready,
-    "--af-dot-lost": lost,
-    "--af-dot-dead": dead,
-    "--af-dot-archived": dead,
-    "--af-dot-limit": limit,
-    "--af-term-green": termGreen,
-    "--af-term-amber": termAmber,
-    "--af-term-blue": termBlue,
-    "--af-term-dim": text3,
-    "--af-shadow-1": `0 1px 2px ${rgba(effectBase, dark ? 0.4 : 0.08)}`,
-    "--af-shadow-2": `0 4px 10px ${rgba(effectBase, dark ? 0.45 : 0.12)}`,
-    "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
-    "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42)
-  };
-  const ansiDistinct = (color, avoid) => {
-    const normalized = color.toUpperCase();
-    const rejected = new Set(avoid.map((value) => value.toUpperCase()));
-    if (!rejected.has(normalized) && passes(normalized, [canvas], 4.5)) return normalized;
-    let best = normalized;
-    let bestDistance = -1;
-    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
-      for (let step = 1; step <= 255; step++) {
-        const candidate = mix(normalized, endpoint, step / 255);
-        if (rejected.has(candidate) || !passes(candidate, [canvas], 4.5)) continue;
-        const value = rgb(candidate);
-        const distance = Math.min(
-          ...avoid.map((occupied) => {
-            const other = rgb(occupied);
-            return value.reduce((sum, channel, index) => sum + (channel - other[index]) ** 2, 0);
-          })
-        );
-        if (distance > bestDistance) {
-          best = candidate;
-          bestDistance = distance;
-        }
-      }
-    }
-    return best;
-  };
-  const bright = (color) => ansiDistinct(color, [color]);
-  const ansiBlack = dark ? text3 : text;
-  const ansiWhite = ansiDistinct(dark ? text : text3, [ansiBlack]);
-  const brightBlack = ansiDistinct(ansiBlack, [ansiBlack, ansiWhite]);
-  const brightWhite = ansiDistinct(ansiWhite, [ansiWhite, ansiBlack, brightBlack]);
-  const xterm = {
-    background: tokens["--af-bg-term"],
-    foreground: text,
-    cursor: text,
-    cursorAccent: canvas,
-    selectionBackground: rgba(source.selection_background, selectionAlpha),
-    selectionForeground,
-    black: ansiBlack,
-    red: danger,
-    green: termGreen,
-    yellow: termAmber,
-    blue: termBlue,
-    magenta: termColor(source.purple, NORD_THEME.purple),
-    cyan: accent,
-    white: ansiWhite,
-    brightBlack,
-    brightRed: bright(danger),
-    brightGreen: bright(termGreen),
-    brightYellow: bright(termAmber),
-    brightBlue: bright(termBlue),
-    brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
-    brightCyan: bright(accent),
-    brightWhite
-  };
-  return { tokens, xterm };
-}
-var activeThemes = {
-  light: deriveTheme(NORD_THEME, "light"),
-  dark: deriveTheme(NORD_THEME, "dark")
-};
-function isChoice(value) {
-  return value === "auto" || value === "light" || value === "dark";
-}
-function readThemeChoice() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (isChoice(raw)) return raw;
-  } catch {
-  }
-  return "auto";
-}
-function persistThemeChoice(choice) {
-  try {
-    localStorage.setItem(STORAGE_KEY, choice);
-  } catch {
-  }
-}
-function prefersDark() {
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  } catch {
-    return false;
-  }
-}
-function currentMode() {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light" || attr === "dark") return attr;
-  return prefersDark() ? "dark" : "light";
-}
-function applyCurrentMode() {
-  const root2 = document.documentElement;
-  for (const [name, value] of Object.entries(activeThemes[currentMode()].tokens)) root2.style.setProperty(name, value);
-}
-function themeColorMetaContents(choice) {
-  const light = activeThemes.light.tokens["--af-bg-surface"];
-  const dark = activeThemes.dark.tokens["--af-bg-surface"];
-  if (choice === "auto") return { light, dark };
-  const forced = choice === "dark" ? dark : light;
-  return { light: forced, dark: forced };
-}
-function syncThemeColorMeta(choice) {
-  const colors = themeColorMetaContents(choice);
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
-  }
-}
-function refreshThemeMode() {
-  applyCurrentMode();
-  syncThemeColorMeta(document.documentElement.hasAttribute("data-theme") ? currentMode() : "auto");
-}
-function applyDaemonTheme(theme) {
-  activeThemes = { light: deriveTheme(theme, "light"), dark: deriveTheme(theme, "dark") };
-  refreshThemeMode();
-}
-function resetDaemonTheme() {
-  applyDaemonTheme(NORD_THEME);
-}
-function stampTheme(choice) {
-  const root2 = document.documentElement;
-  if (choice === "auto") root2.removeAttribute("data-theme");
-  else root2.setAttribute("data-theme", choice);
-  applyCurrentMode();
-  syncThemeColorMeta(choice);
-}
-function bootStampTheme() {
-  const choice = readThemeChoice();
-  stampTheme(choice);
-  return choice;
-}
-function xtermTheme(mode) {
-  return activeThemes[mode].xterm;
-}
-function currentXtermTheme() {
-  return xtermTheme(currentMode());
-}
-
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -8218,7 +8434,7 @@ var AttachTerminal = class {
       fontSize: 13,
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
-      theme: currentXtermTheme(),
+      theme: terminalSurface(container, currentXtermTheme()),
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5e3,
@@ -8931,7 +9147,7 @@ var AttachTerminal = class {
    *  from the new ITheme, so an open terminal switches light/dark without a
    *  reconnect or losing scrollback. */
   setTheme(theme) {
-    this.term.options.theme = theme;
+    this.term.options.theme = terminalSurface(this.container, theme);
   }
   // --- socket lifecycle ------------------------------------------------------
   connect() {
@@ -9605,9 +9821,6 @@ function openConfigAssistant(opts) {
 }
 
 // src/events.ts
-function eventRequestsPaletteRefresh(event) {
-  return event.type === "theme.changed";
-}
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
 function wsScheme2() {
@@ -9737,256 +9950,6 @@ function backendNotice(choices, selected) {
 function backendSelectable(choices, selected) {
   const choice = choices.find((c) => c.value === selected);
   return choice === void 0 || choice.status === "available";
-}
-
-// node_modules/lucide/dist/esm/icons/archive-restore.mjs
-var ArchiveRestore = [
-  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
-  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
-  ["path", { d: "M20 8v11a2 2 0 0 1-2 2h-2" }],
-  ["path", { d: "m9 15 3-3 3 3" }],
-  ["path", { d: "M12 12v9" }]
-];
-
-// node_modules/lucide/dist/esm/icons/archive.mjs
-var Archive = [
-  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
-  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
-  ["path", { d: "M10 12h4" }]
-];
-
-// node_modules/lucide/dist/esm/icons/arrow-right.mjs
-var ArrowRight = [
-  ["path", { d: "M5 12h14" }],
-  ["path", { d: "m12 5 7 7-7 7" }]
-];
-
-// node_modules/lucide/dist/esm/icons/bot.mjs
-var Bot = [
-  ["path", { d: "M12 8V4H8" }],
-  ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
-  ["path", { d: "M2 14h2" }],
-  ["path", { d: "M20 14h2" }],
-  ["path", { d: "M15 13v2" }],
-  ["path", { d: "M9 13v2" }]
-];
-
-// node_modules/lucide/dist/esm/icons/check.mjs
-var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
-
-// node_modules/lucide/dist/esm/icons/chevron-down.mjs
-var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
-
-// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
-var CircleDashed = [
-  ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
-  ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
-  ["path", { d: "M17.609 3.721a10 10 0 0 1 2.69 2.7" }],
-  ["path", { d: "M2.182 13.9a10 10 0 0 1 0-3.8" }],
-  ["path", { d: "M20.279 17.609a10 10 0 0 1-2.7 2.69" }],
-  ["path", { d: "M21.818 10.1a10 10 0 0 1 0 3.8" }],
-  ["path", { d: "M3.721 6.391a10 10 0 0 1 2.7-2.69" }],
-  ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
-];
-
-// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
-var CircleQuestionMark = [
-  ["circle", { cx: "12", cy: "12", r: "10" }],
-  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
-  ["path", { d: "M12 17h.01" }]
-];
-
-// node_modules/lucide/dist/esm/icons/circle.mjs
-var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
-
-// node_modules/lucide/dist/esm/icons/diamond.mjs
-var Diamond = [
-  [
-    "path",
-    {
-      d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/ellipsis.mjs
-var Ellipsis = [
-  ["circle", { cx: "12", cy: "12", r: "1" }],
-  ["circle", { cx: "19", cy: "12", r: "1" }],
-  ["circle", { cx: "5", cy: "12", r: "1" }]
-];
-
-// node_modules/lucide/dist/esm/icons/external-link.mjs
-var ExternalLink = [
-  ["path", { d: "M15 3h6v6" }],
-  ["path", { d: "M10 14 21 3" }],
-  ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
-var FolderGit2 = [
-  ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
-  [
-    "path",
-    {
-      d: "M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"
-    }
-  ],
-  ["circle", { cx: "13", cy: "12", r: "2" }],
-  ["circle", { cx: "20", cy: "19", r: "2" }]
-];
-
-// node_modules/lucide/dist/esm/icons/folder.mjs
-var Folder = [
-  [
-    "path",
-    {
-      d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/funnel.mjs
-var Funnel = [
-  [
-    "path",
-    {
-      d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/git-branch.mjs
-var GitBranch = [
-  ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
-  ["circle", { cx: "18", cy: "6", r: "3" }],
-  ["circle", { cx: "6", cy: "18", r: "3" }]
-];
-
-// node_modules/lucide/dist/esm/icons/link.mjs
-var Link = [
-  ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
-  ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
-];
-
-// node_modules/lucide/dist/esm/icons/menu.mjs
-var Menu = [
-  ["path", { d: "M4 5h16" }],
-  ["path", { d: "M4 12h16" }],
-  ["path", { d: "M4 19h16" }]
-];
-
-// node_modules/lucide/dist/esm/icons/octagon-x.mjs
-var OctagonX = [
-  ["path", { d: "m15 9-6 6" }],
-  [
-    "path",
-    {
-      d: "M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"
-    }
-  ],
-  ["path", { d: "m9 9 6 6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
-var PanelsTopLeft = [
-  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
-  ["path", { d: "M3 9h18" }],
-  ["path", { d: "M9 21V9" }]
-];
-
-// node_modules/lucide/dist/esm/icons/plus.mjs
-var Plus = [
-  ["path", { d: "M5 12h14" }],
-  ["path", { d: "M12 5v14" }]
-];
-
-// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
-var RefreshCw = [
-  ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
-  ["path", { d: "M21 3v5h-5" }],
-  ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
-  ["path", { d: "M8 16H3v5" }]
-];
-
-// node_modules/lucide/dist/esm/icons/square-check-big.mjs
-var SquareCheckBig = [
-  ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
-  ["path", { d: "m9 11 3 3L22 4" }]
-];
-
-// node_modules/lucide/dist/esm/icons/square.mjs
-var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
-
-// node_modules/lucide/dist/esm/icons/terminal.mjs
-var Terminal2 = [
-  ["path", { d: "M12 19h8" }],
-  ["path", { d: "m4 17 6-6-6-6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
-var TriangleAlert = [
-  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
-  ["path", { d: "M12 9v4" }],
-  ["path", { d: "M12 17h.01" }]
-];
-
-// node_modules/lucide/dist/esm/icons/x.mjs
-var X = [
-  ["path", { d: "M18 6 6 18" }],
-  ["path", { d: "m6 6 12 12" }]
-];
-
-// src/icon.ts
-var ICONS = {
-  archive: Archive,
-  "archive-restore": ArchiveRestore,
-  "arrow-right": ArrowRight,
-  bot: Bot,
-  check: Check,
-  "chevron-down": ChevronDown,
-  circle: Circle,
-  "circle-dashed": CircleDashed,
-  "circle-question": CircleQuestionMark,
-  diamond: Diamond,
-  ellipsis: Ellipsis,
-  "external-link": ExternalLink,
-  folder: Folder,
-  "folder-git": FolderGit2,
-  funnel: Funnel,
-  "git-branch": GitBranch,
-  link: Link,
-  menu: Menu,
-  "octagon-x": OctagonX,
-  panels: PanelsTopLeft,
-  plus: Plus,
-  reload: RefreshCw,
-  square: Square,
-  "square-check": SquareCheckBig,
-  terminal: Terminal2,
-  "triangle-alert": TriangleAlert,
-  x: X
-};
-function icon(name, className = "") {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", `af-icon${className ? ` ${className}` : ""}`);
-  svg.setAttribute("data-icon", name);
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "2");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("focusable", "false");
-  for (const [tag, attrs] of ICONS[name]) {
-    const child = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (const [attr, value] of Object.entries(attrs)) {
-      child.setAttribute(attr, String(value));
-    }
-    svg.append(child);
-  }
-  return svg;
 }
 
 // src/dirpicker.ts
@@ -10210,50 +10173,6 @@ function handoffAgentChoices(catalog, current) {
 }
 
 // src/modals.ts
-function modalChrome(opts) {
-  const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
-  errorLine.hidden = true;
-  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
-  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
-  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
-  const card = h(
-    "div",
-    { class: "af-modal-card", role: "dialog" },
-    h("h2", { class: "af-modal-title" }, opts.title),
-    body,
-    errorLine,
-    footer
-  );
-  card.setAttribute("aria-modal", "true");
-  card.setAttribute("aria-label", opts.title);
-  card.tabIndex = -1;
-  card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
-  cancelBtn.addEventListener("click", () => opts.onCancel());
-  const handle = {
-    el: backdrop,
-    setBusy(busy) {
-      confirmBtn.disabled = busy;
-      cancelBtn.disabled = busy;
-      card.classList.toggle("af-modal-busy", busy);
-    },
-    setError(msg) {
-      if (msg) {
-        errorLine.textContent = msg;
-        errorLine.hidden = false;
-      } else {
-        errorLine.textContent = "";
-        errorLine.hidden = true;
-      }
-    },
-    close() {
-      backdrop.remove();
-    }
-  };
-  return { handle, body, confirmBtn, cancelBtn, errorLine };
-}
 function asForm(card, onSubmit) {
   const form = h("form", { class: "af-modal-form" });
   while (card.firstChild) {
@@ -10296,12 +10215,12 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let programs = programChoices(null);
   const backendSelect = h("select", { class: "af-input" });
   backendSelect.setAttribute("aria-label", "Backend");
-  const backendHint = h("p", { class: "af-modal-hint" });
+  const backendHint = h("p", { class: "af-modal-hint af-backend-hint" });
   backendHint.setAttribute("role", "status");
   let choices = backendChoices(null);
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "Account");
-  const accountHint = h("p", { class: "af-modal-hint" });
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
   accountHint.setAttribute("role", "status");
   let accounts = null;
   let programCatalog = null;
@@ -10309,9 +10228,28 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let accountAgent = "";
   let accountPicked = false;
   let busy = false;
+  const defaults = defaultsDisclosure();
+  const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
+  const accountSlot = h("div", { class: "af-defaults-account-slot" });
   const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace("Ambient identity (the agent's own login)", "ambient");
+    const accountNeedsChoice = !!accountHint.textContent || accountPicked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent);
+    defaults.setSummary([
+      `Program: ${choiceLabel(programSelect)}`,
+      `Backend: ${choiceLabel(backendSelect)}`,
+      ...accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`]
+    ]);
+    const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
+    if (accountBlock.parentElement !== accountParent) {
+      const focused = document.activeElement;
+      const ownsFocus = !!focused && accountBlock.contains(focused);
+      accountParent.append(accountBlock);
+      if (ownsFocus) focused.focus();
+    }
+    accountSlot.hidden = !accountNeedsChoice;
+    if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
     confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value);
   };
   const chromeSetBusy = handle.setBusy.bind(handle);
@@ -10418,16 +10356,13 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
-  body.append(
-    field("Title", titleInput),
-    field("Project", projectSelect),
+  defaults.body.append(
     field("Program", programSelect),
     field("Backend", backendSelect),
     backendHint,
-    field("Account", accountSelect),
-    accountHint,
-    field("Prompt", promptArea)
+    accountBlock
   );
+  body.append(field("Title", titleInput), field("Project", projectSelect), field("Prompt", promptArea), accountSlot, defaults.el);
   renderPrograms();
   renderChoices();
   renderAccounts();
@@ -10521,7 +10456,7 @@ function confirmModal(opts) {
     kill: {
       title: `Kill ${opts.sessionTitle}?`,
       confirmLabel: "Kill",
-      confirmClass: "af-danger",
+      confirmClass: "af-primary",
       body: "This permanently destroys the session and prunes its branch. This can't be undone."
     },
     archive: {
@@ -10543,7 +10478,7 @@ function confirmModal(opts) {
     confirmClass: copy.confirmClass,
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, copy.body));
+  body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     handle.setError(null);
@@ -10556,7 +10491,7 @@ function confirmDeleteProjectModal(opts) {
   const { handle, body } = modalChrome({
     title: `Delete project ${opts.projectLabel}?`,
     confirmLabel: "Delete project",
-    confirmClass: "af-danger",
+    confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
   const message = opts.sessionCount === 0 ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched \u2014 you can add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`;
@@ -10632,14 +10567,17 @@ function addProjectModal(callbacks) {
   });
   return handle;
 }
-function field(label, control) {
-  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
-}
 function projectLabel(root2) {
   const parts = root2.replace(/\/+$/, "").split("/");
   const base = parts[parts.length - 1] || root2;
   const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
   return parent ? `${base}  (${parent}/${base})` : base;
+}
+function removeTaskModal(name, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "This deletes the task and stops future runs. Existing sessions are kept."));
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
 }
 
 // src/install.ts
@@ -10723,87 +10661,6 @@ var InstallAffordance = class {
   }
 };
 
-// src/nav.ts
-var VIEWS = ["sessions", "tasks", "config"];
-function cycleView(current, delta) {
-  const i = VIEWS.indexOf(current);
-  const n = VIEWS.length;
-  return VIEWS[(i + delta + n) % n];
-}
-function nextSelection(orderedIds, selectedId, delta) {
-  if (orderedIds.length === 0) {
-    return null;
-  }
-  const cur = selectedId ? orderedIds.indexOf(selectedId) : -1;
-  let next;
-  if (cur === -1) {
-    next = delta > 0 ? 0 : orderedIds.length - 1;
-  } else {
-    next = Math.min(Math.max(cur + delta, 0), orderedIds.length - 1);
-  }
-  return orderedIds[next] ?? null;
-}
-function decideKey(key, ctx, mods = {}) {
-  if (ctx.modalOpen) {
-    return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
-  }
-  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
-    if (ctx.view !== "sessions" || !ctx.selectedId) {
-      return { kind: "none" };
-    }
-    if (key === "j") {
-      return { kind: "cyclePane", delta: 1 };
-    }
-    if (key === "k") {
-      return { kind: "cyclePane", delta: -1 };
-    }
-    return { kind: "closePane" };
-  }
-  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
-    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
-  }
-  if (ctx.focus === "terminal") {
-    return { kind: "none" };
-  }
-  if (key === "[") {
-    return { kind: "switchView", view: cycleView(ctx.view, -1) };
-  }
-  if (key === "]") {
-    return { kind: "switchView", view: cycleView(ctx.view, 1) };
-  }
-  if (ctx.view !== "sessions") {
-    return { kind: "none" };
-  }
-  if (key === "Enter") {
-    return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
-  }
-  if (ctx.selectedId) {
-    if (key.length === 1 && key >= "1" && key <= "9") {
-      const index = key.charCodeAt(0) - "1".charCodeAt(0);
-      if (index < ctx.tabCount && index !== ctx.activeTab) {
-        return { kind: "switchTab", index };
-      }
-      return { kind: "none" };
-    }
-    if (key === "t") {
-      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
-    }
-    if (key === "w") {
-      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
-    }
-  }
-  let delta;
-  if (key === "ArrowDown" || key === "j") {
-    delta = 1;
-  } else if (key === "ArrowUp" || key === "k") {
-    delta = -1;
-  } else {
-    return { kind: "none" };
-  }
-  const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
-  return next ? { kind: "select", id: next } : { kind: "none" };
-}
-
 // src/types.ts
 var Liveness = {
   Unset: 0,
@@ -10847,6 +10704,26 @@ var Status = {
   Lost: 5,
   Archived: 6
 };
+
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
 
 // src/status.ts
 var OPERATOR_KIND_LABELS = {
@@ -10900,14 +10777,7 @@ function idleReasonLabel(reason) {
   return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
 }
 function formatPaneChurnAge(churn, now) {
-  const ageMs = Math.max(0, now.getTime() - churn.getTime());
-  const minute = 6e4;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (ageMs < minute) return "<1m";
-  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
-  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
-  return `${Math.floor(ageMs / day)}d`;
+  return formatDuration(now.getTime() - churn.getTime());
 }
 var READY_ICON = "circle";
 var DEAD_ICON = "circle";
@@ -12231,21 +12101,7 @@ var SplitView = class {
   createPane(leaf) {
     const container = el("div", "af-pane");
     container.setAttribute("data-leaf", leaf.id);
-    const head = el("div", "af-pane-head");
-    const glyph = el("span", "af-pane-glyph");
-    glyph.setAttribute("aria-hidden", "true");
-    const label = el("span", "af-pane-label");
-    const closeBtn = document.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.className = "af-pane-close";
-    closeBtn.title = "Close pane";
-    closeBtn.setAttribute("aria-label", "Close pane");
-    closeBtn.append(icon("x"));
-    closeBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.closePane(leaf.id);
-    });
-    head.append(glyph, label, closeBtn);
+    const { head, glyph, label } = paneChrome(() => this.closePane(leaf.id));
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");
     container.append(head, paneHost, overlay);
@@ -12971,20 +12827,20 @@ function parseCron(expr) {
     return { schedule: { type: "hourly", minute: hourlyMinute }, ok: true };
   }
   const m = singleInt(minute, 0, 59);
-  const h3 = singleInt(hour, 0, 23);
-  if (m !== null && h3 !== null) {
+  const h2 = singleInt(hour, 0, 23);
+  if (m !== null && h2 !== null) {
     if (dom === "*" && dow === "*") {
-      return { schedule: { type: "daily", hour: h3, minute: m }, ok: true };
+      return { schedule: { type: "daily", hour: h2, minute: m }, ok: true };
     }
     if (dom === "*") {
       const days = weekdayList(dow);
       if (days !== null) {
-        return { schedule: { type: "weekly", hour: h3, minute: m, weekdays: days }, ok: true };
+        return { schedule: { type: "weekly", hour: h2, minute: m, weekdays: days }, ok: true };
       }
     } else if (dow === "*") {
       const d = singleInt(dom, 1, 31);
       if (d !== null) {
-        return { schedule: { type: "monthly", hour: h3, minute: m, dayOfMonth: d }, ok: true };
+        return { schedule: { type: "monthly", hour: h2, minute: m, dayOfMonth: d }, ok: true };
       }
     }
   }
@@ -13013,16 +12869,16 @@ function normalizeWeekdays(days) {
 }
 function clockTime(hour, minute) {
   let suffix = "AM";
-  let h3 = hour;
-  if (h3 === 0) {
-    h3 = 12;
-  } else if (h3 === 12) {
+  let h2 = hour;
+  if (h2 === 0) {
+    h2 = 12;
+  } else if (h2 === 12) {
     suffix = "PM";
-  } else if (h3 > 12) {
-    h3 -= 12;
+  } else if (h2 > 12) {
+    h2 -= 12;
     suffix = "PM";
   }
-  return `${h3}:${pad2(minute)} ${suffix}`;
+  return `${h2}:${pad2(minute)} ${suffix}`;
 }
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -13169,9 +13025,9 @@ function taskHealthSummary(t) {
   }
   return t.unassessable ? "Health unknown" : "";
 }
-function taskArmingSummary(t) {
+function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   if (t.next_run_at) {
-    return `next run ${t.next_run_at}`;
+    return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   return "";
 }
@@ -13182,6 +13038,8 @@ var TasksPane = class {
     this.el.setAttribute("aria-label", "Tasks");
   }
   el;
+  menus = [];
+  lastError;
   lastTasks = null;
   lastProject = null;
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
@@ -13190,19 +13048,52 @@ var TasksPane = class {
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
-  update(tasks, selectedProject) {
-    if (this.lastTasks === tasks && this.lastProject === selectedProject) {
+  update(tasks, selectedProject, error) {
+    if (this.lastTasks === tasks && this.lastProject === selectedProject && this.lastError === error) {
       return;
     }
+    this.lastError = error;
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
     this.lastTasks = tasks;
     this.lastProject = selectedProject;
+    const openIds = new Set(this.menus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.closest("[data-task-id]")?.dataset.taskId));
+    const active = document.activeElement;
+    const focusedId = active?.closest("[data-task-id]")?.dataset.taskId;
+    const focusedName = active?.getAttribute("aria-label") || active?.textContent;
+    for (const menu of this.menus) menu.dispose();
+    this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
     rebuildKeepingScroll(this.el, previous, token2, () => this.render(scoped));
+    for (const menu of this.menus) {
+      if (openIds.has(menu.el.closest("[data-task-id]")?.dataset.taskId)) menu.open();
+    }
+    if (focusedId && focusedName) {
+      const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
+      const control = [...row?.querySelectorAll("button") ?? []].find((button) => (button.getAttribute("aria-label") || button.textContent) === focusedName);
+      control?.focus({ preventScroll: true });
+    }
   }
   render(tasks) {
+    if (this.lastError) {
+      this.el.replaceChildren(recoveryScreen({
+        condition: "Tasks unavailable",
+        detail: this.lastError,
+        failed: true,
+        action: "Retry",
+        run: () => this.actions.retry?.()
+      }));
+      return;
+    }
+    if (this.lastProject === null) {
+      this.el.replaceChildren(recoveryScreen({
+        condition: "No project registered",
+        action: "Add project",
+        run: () => this.actions.addProject?.()
+      }));
+      return;
+    }
     const addBtn = h(
       "button",
       { type: "button", class: "af-tasks-add", title: "Add task" },
@@ -13219,12 +13110,7 @@ var TasksPane = class {
     );
     if (tasks.length === 0) {
       this.el.replaceChildren(
-        head,
-        h(
-          "p",
-          { class: "af-tasks-empty" },
-          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule."
-        )
+        recoveryScreen({ condition: "No tasks", action: "Add task", run: () => this.actions.add() })
       );
       return;
     }
@@ -13252,13 +13138,14 @@ var TasksPane = class {
         " \xB7 "
       );
     }
-    const arming = taskArmingSummary(t);
-    if (arming !== "") {
-      metaParts.push(arming, " \xB7 ");
-    }
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
-    const main = h("div", { class: "af-task-main" }, name, trigger, meta);
+    const next = h("div", { class: "af-task-next" }, taskArmingSummary(t));
+    const detail = h("div", { class: "af-task-detail" }, next, trigger, meta);
+    const main = h("div", { class: "af-task-main" }, name, detail);
+    if (t.last_run_status?.startsWith("errored:")) {
+      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
+    }
     const toggleBtn = h(
       "button",
       { type: "button", class: "af-ghost af-task-action" },
@@ -13267,17 +13154,23 @@ var TasksPane = class {
     toggleBtn.addEventListener("click", () => this.actions.toggle(t));
     const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
     editBtn.addEventListener("click", () => this.actions.edit(t));
-    const actionEls = [toggleBtn, editBtn];
+    const menu = actionsDisclosure(`Actions for ${t.name}`);
+    this.menus.push(menu);
+    const actionEls = [toggleBtn];
     if (canTrigger(t)) {
       const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
       triggerBtn.addEventListener("click", () => this.actions.trigger(t));
       actionEls.push(triggerBtn);
     }
-    const removeBtn = h("button", { type: "button", class: "af-danger af-task-action" }, "Remove");
+    const removeBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Remove");
     removeBtn.addEventListener("click", () => this.actions.remove(t));
     actionEls.push(removeBtn);
-    const actions2 = h("div", { class: "af-task-actions" }, ...actionEls);
-    return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
+    menu.panel.append(...actionEls);
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    const actions2 = h("div", { class: "af-task-actions" }, editBtn, menu.el);
+    const row = h("li", { class: "af-task-row" }, enabledDot, main, actions2);
+    row.dataset.taskId = t.id;
+    return row;
   }
 };
 var WEEKDAY_DISPLAY = [
@@ -13518,12 +13411,12 @@ var SchedulePicker = class {
     }
   }
   hour24() {
-    const h3 = clampField(this.hourInput.value, 1, 12, 12);
+    const h2 = clampField(this.hourInput.value, 1, 12, 12);
     const pm = this.meridiemSelect.value === "PM";
     if (pm) {
-      return h3 === 12 ? 12 : h3 + 12;
+      return h2 === 12 ? 12 : h2 + 12;
     }
-    return h3 === 12 ? 0 : h3;
+    return h2 === 12 ? 0 : h2;
   }
   /** The cron expression the form submits — always live off the current state. */
   cron() {
@@ -13864,39 +13757,15 @@ function tabIdentity(tab) {
 function tabRealId(tab) {
   return tab.id && tab.id !== "" ? tab.id : "";
 }
-function viewLabel(view) {
-  switch (view) {
-    case "sessions":
-      return "Sessions";
-    case "tasks":
-      return "Tasks";
-    case "config":
-      return "Config";
-  }
-}
 function themeLabel(choice) {
   switch (choice) {
-    case "auto":
-      return "Auto";
+    case "system":
+      return "System";
     case "light":
       return "Light";
     case "dark":
       return "Dark";
   }
-}
-function h2(tag, props = {}, ...children) {
-  const el2 = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (key === "class") {
-      el2.className = value;
-    } else {
-      el2[key] = value;
-    }
-  }
-  for (const child of children) {
-    el2.append(child);
-  }
-  return el2;
 }
 function orderedSessions(sessions) {
   return [...sessions].sort(compareSessionsForRail);
@@ -13905,17 +13774,33 @@ function visibleRailSessions(state) {
   const scoped = scopeToProject(state.sessions, state.selectedProject);
   return filterSessions(orderedSessions(scoped), state.statusFilter);
 }
+var loginDrafts = /* @__PURE__ */ new WeakMap();
 function renderLogin(root2, state, actions2) {
+  const draft = state.loginError || state.connecting || state.loginCondition ? root2.querySelector("#af-token")?.value ?? loginDrafts.get(root2) ?? "" : "";
+  loginDrafts.set(root2, draft);
   root2.replaceChildren(loginView(state, actions2));
+  const input = root2.querySelector("#af-token");
+  if (input) input.value = draft;
 }
 function loginView(state, actions2) {
+  if (state.loginCondition === "unavailable") {
+    const screen = recoveryScreen({
+      condition: "Cannot reach the daemon",
+      failed: true,
+      detail: state.loginError ?? "Check the daemon and its listener address, then retry.",
+      action: state.connecting ? "Connecting\u2026" : "Retry",
+      run: () => actions2.retryConnection?.()
+    });
+    screen.classList.add("af-recovery-login");
+    return screen;
+  }
   if (state.connecting && !state.loginError) {
     return connectingView();
   }
   if (!state.authRequired) {
     return noAuthLoginView(state, actions2);
   }
-  const input = h2("input", {
+  const input = h("input", {
     type: "password",
     id: "af-token",
     placeholder: "Paste your daemon token",
@@ -13923,15 +13808,15 @@ function loginView(state, actions2) {
     disabled: state.connecting
   });
   input.setAttribute("aria-label", "Daemon bearer token");
-  const button = h2(
+  const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
   );
-  const form = h2(
+  const form = h(
     "form",
     { class: "af-login-form" },
-    h2("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
     input,
     button
   );
@@ -13943,51 +13828,46 @@ function loginView(state, actions2) {
     }
   });
   const children = [
-    h2("h1", { class: "af-title" }, "Agent Factory"),
-    h2(
+    h("h1", { class: state.loginCondition === "expired" ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.loginCondition === "expired" ? "Login expired" : "Sign in"),
+    h(
       "p",
       { class: "af-subtitle" },
       "Paste the daemon bearer token to connect. Get it from ",
-      h2("code", {}, "af token show"),
+      h("code", {}, "af token show"),
       " on the host."
     ),
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h2("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
     form
   ];
   if (state.loginError) {
-    children.push(h2("p", { class: "af-error", role: "alert" }, state.loginError));
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
-  return h2("main", { class: "af-login" }, h2("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 function connectingView() {
-  return h2(
+  return scopeRecovery(h(
     "main",
-    { class: "af-login" },
-    h2(
-      "div",
-      { class: "af-card" },
-      h2("h1", { class: "af-title" }, "Agent Factory"),
-      h2("p", { class: "af-subtitle" }, "Connecting\u2026")
-    )
-  );
+    { class: "af-login af-recovery af-recovery-login" },
+    h("h1", { class: "af-recovery-title" }, "Connecting\u2026")
+  ));
 }
 function noAuthLoginView(state, actions2) {
-  const button = h2(
+  const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
   );
-  const form = h2("form", { class: "af-login-form" }, button);
+  const form = h("form", { class: "af-login-form" }, button);
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     actions2.connect("");
   });
   const children = [
-    h2("h1", { class: "af-title" }, "Agent Factory"),
-    h2(
+    h("h1", { class: "af-title" }, "Agent Factory"),
+    h(
       "p",
       { class: "af-subtitle" },
       "This daemon does not require a token for your connection."
@@ -13995,9 +13875,9 @@ function noAuthLoginView(state, actions2) {
     form
   ];
   if (state.loginError) {
-    children.push(h2("p", { class: "af-error", role: "alert" }, state.loginError));
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
-  return h2("main", { class: "af-login" }, h2("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 var AppShell = class {
   constructor(actions2, termHost2, modalHost2, installEl) {
@@ -14005,34 +13885,25 @@ var AppShell = class {
     this.termHost = termHost2;
     this.modalHost = modalHost2;
     this.installEl = installEl;
-    const disconnect2 = h2("button", { type: "button", class: "af-ghost" }, "Disconnect");
+    const disconnect2 = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect2.setAttribute("title", "Disconnect and forget the saved token");
-    const themeToggle = h2("div", { class: "af-theme-toggle" });
+    const themeToggle = h("div", { class: "af-theme-toggle" });
     themeToggle.setAttribute("role", "group");
     themeToggle.setAttribute("aria-label", "Theme");
     for (const choice of THEME_CHOICES) {
-      const opt = h2("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
+      const opt = h("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
       opt.setAttribute("data-theme-opt", choice);
       opt.setAttribute("title", `${themeLabel(choice)} theme`);
       opt.addEventListener("click", () => this.actions.setTheme(choice));
       this.themeOpts.set(choice, opt);
       themeToggle.append(opt);
     }
-    const viewNav = h2("div", { class: "af-viewnav" });
-    viewNav.setAttribute("role", "tablist");
-    viewNav.setAttribute("aria-label", "Views");
-    for (const v of VIEWS) {
-      const tab = h2("button", { type: "button", class: "af-viewtab" }, viewLabel(v));
-      tab.setAttribute("role", "tab");
-      tab.setAttribute("data-view", v);
-      tab.addEventListener("click", () => this.actions.switchView(v));
-      this.viewTabs.set(v, tab);
-      viewNav.append(tab);
-    }
-    this.projectSwitchName = h2("span", { class: "af-project-switch-name" }, "\u2014");
+    const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
+    this.viewTabs = tabs;
+    this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
     const switchGlyph = icon("folder-git", "af-project-glyph");
     const switchCaret = icon("chevron-down", "af-project-caret");
-    this.projectSwitchBtn = h2(
+    this.projectSwitchBtn = h(
       "button",
       { type: "button", class: "af-project-switch" },
       switchGlyph,
@@ -14047,22 +13918,22 @@ var AppShell = class {
       setAppbarToolsOpen(false);
       this.toggleProjectMenu();
     });
-    this.projectMenu = h2("div", { class: "af-project-menu" });
+    this.projectMenu = h("div", { class: "af-project-menu" });
     this.projectMenu.setAttribute("role", "listbox");
     this.projectMenu.setAttribute("aria-label", "Switch project");
     this.projectMenu.hidden = true;
-    this.projectSwitchWrap = h2("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
     document.addEventListener("click", (e) => {
       if (this.projectMenuOpen && !this.projectSwitchWrap.contains(e.target)) {
         this.closeProjectMenu();
       }
     });
-    this.navToggle = h2("button", { type: "button", class: "af-nav-toggle" }, icon("menu"));
+    this.navToggle = h("button", { type: "button", class: "af-nav-toggle" }, icon("menu"));
     this.navToggle.setAttribute("aria-label", "Toggle sessions");
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
-    const appbarTools = h2(
+    const appbarTools = h(
       "div",
       { class: "af-appbar-tools", id: "af-appbar-tools" },
       ...this.installEl ? [this.installEl] : [],
@@ -14071,12 +13942,12 @@ var AppShell = class {
     );
     appbarTools.setAttribute("role", "group");
     appbarTools.setAttribute("aria-label", "App controls");
-    const appbarMore = h2("button", { type: "button", class: "af-appbar-more" }, icon("ellipsis"));
+    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, icon("ellipsis"));
     appbarMore.setAttribute("aria-label", "More app controls");
     appbarMore.setAttribute("title", "More app controls");
     appbarMore.setAttribute("aria-controls", "af-appbar-tools");
     appbarMore.setAttribute("aria-expanded", "false");
-    const appbarToolsWrap = h2("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
+    const appbarToolsWrap = h("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
     let appbarToolsOpen = false;
     function setAppbarToolsOpen(open) {
       if (appbarToolsOpen === open) {
@@ -14121,17 +13992,17 @@ var AppShell = class {
       setAppbarToolsOpen(false);
       this.actions.disconnect();
     });
-    const header = h2(
+    const header = h(
       "header",
       { class: "af-appbar" },
       this.navToggle,
-      h2("span", { class: "af-brand" }, "Agent Factory"),
+      h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
       appbarToolsWrap
     );
-    this.railCount = h2("span", { class: "af-rail-count" }, "0");
-    const newBtn = h2(
+    this.railCount = h("span", { class: "af-rail-count" }, "0");
+    const newBtn = h(
       "button",
       { type: "button", class: "af-rail-new", title: "New session" },
       icon("plus"),
@@ -14139,9 +14010,9 @@ var AppShell = class {
     );
     newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
     const filterGlyph = icon("funnel", "af-rail-filter-glyph");
-    this.filterDot = h2("span", { class: "af-rail-filter-dot" });
+    this.filterDot = h("span", { class: "af-rail-filter-dot" });
     this.filterDot.setAttribute("aria-hidden", "true");
-    this.filterBtn = h2("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);
+    this.filterBtn = h("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);
     this.filterBtn.setAttribute("aria-haspopup", "true");
     this.filterBtn.setAttribute("aria-expanded", "false");
     this.filterBtn.setAttribute("aria-label", "Filter sessions");
@@ -14150,33 +14021,35 @@ var AppShell = class {
       e.stopPropagation();
       this.toggleFilterMenu();
     });
-    this.filterMenu = h2("div", { class: "af-filter-menu" });
+    this.filterMenu = h("div", { class: "af-filter-menu" });
     this.filterMenu.setAttribute("role", "group");
     this.filterMenu.setAttribute("aria-label", "Filter sessions");
     this.filterMenu.hidden = true;
-    this.filterWrap = h2("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
     document.addEventListener("click", (e) => {
       if (this.filterMenuOpen && !this.filterWrap.contains(e.target)) {
         this.closeFilterMenu();
       }
     });
-    const railHead = h2(
+    const railHead = h(
       "div",
       { class: "af-rail-head" },
-      h2("span", { class: "af-rail-title" }, "Sessions"),
+      h("span", { class: "af-rail-title" }, "Sessions"),
       this.railCount,
-      h2("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
+      h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
     );
-    this.railList = h2("ul", { class: "af-rail-list" });
+    this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h2("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
-    this.main = h2("section", { class: "af-main" });
-    this.navScrim = h2("div", { class: "af-nav-scrim" });
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
+    this.main = h("section", { class: "af-main" });
+    this.navScrim = h("div", { class: "af-nav-scrim" });
     this.navScrim.setAttribute("aria-hidden", "true");
     this.navScrim.addEventListener("click", () => this.setNav(false));
-    this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main, this.navScrim);
+    this.sessionsBody = h("div", { class: "af-body" }, rail, this.main, this.navScrim);
     this.tasksPane = new TasksPane({
+      retry: () => this.actions.retryTasks?.(),
+      addProject: () => this.actions.addProject(),
       add: () => this.actions.addTask(),
       edit: (task) => this.actions.editTask(task),
       toggle: (task) => this.actions.toggleTask(task),
@@ -14191,10 +14064,13 @@ var AppShell = class {
         login: (agent, name) => this.actions.openAccountLogin(agent, name)
       }
     });
-    const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
-    this.toast = h2("div", { class: "af-toast" });
+    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
+    this.toast = h("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
-    this.el = h2("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
+    this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
+    header.dataset.afTheme = currentMode();
+    rail.dataset.afTheme = currentMode();
+    this.navScrim.dataset.afTheme = currentMode();
     this.idleAgeTimer = window.setInterval(() => refreshIdleReasonAges(this.railList), 15e3);
   }
   el;
@@ -14207,8 +14083,8 @@ var AppShell = class {
   // the three body surfaces they toggle between. The sessions body (rail+terminal)
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
-  viewTabs = /* @__PURE__ */ new Map();
-  // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
+  viewTabs;
+  // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
   themeOpts = /* @__PURE__ */ new Map();
   lastThemeChoice = null;
@@ -14221,6 +14097,7 @@ var AppShell = class {
   // presentation decision. The root class is media-query inert on desktop.
   lastCondensedSessionChrome = null;
   lastTasks = null;
+  lastTasksError;
   lastTasksProject = null;
   // The top-right project switcher (redesign PR2): a button showing the current
   // project + a dropdown menu listing every project with its per-project counts, the
@@ -14253,6 +14130,7 @@ var AppShell = class {
   lastRailToken = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
+  terminalChrome = null;
   // The full bounded archive-loss notice for the selected session. It stays
   // mounted above the terminal and is patched on every same-selection snapshot,
   // so automatic Lost recovery cannot turn it into a one-shot toast.
@@ -14329,6 +14207,7 @@ var AppShell = class {
   // selected (selectedId is null before AND after that first update, so the
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
+  lastEmptyKey = "";
   mainRendered = false;
   idleAgeTimer;
   // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
@@ -14345,6 +14224,7 @@ var AppShell = class {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    this.terminalChrome?.dispose();
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
@@ -14398,7 +14278,13 @@ var AppShell = class {
     }
     if (this.lastError !== state.tabError) {
       this.lastError = state.tabError;
-      this.toast.textContent = state.tabError ?? "";
+      this.toast.replaceChildren(...state.tabError ? [recoveryScreen({
+        condition: state.tabNotice ? "Notice" : "Operation failed",
+        detail: state.tabError,
+        failed: !state.tabNotice,
+        action: "Dismiss",
+        run: () => this.actions.dismissNotice?.()
+      })] : []);
       this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
     if (this.lastLive !== state.live) {
@@ -14425,10 +14311,11 @@ var AppShell = class {
         opt.setAttribute("aria-pressed", active ? "true" : "false");
       }
     }
-    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject) {
+    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject || this.lastTasksError !== state.tasksError) {
+      this.lastTasksError = state.tasksError;
       this.lastTasks = state.tasks;
       this.lastTasksProject = state.selectedProject;
-      this.tasksPane.update(state.tasks, state.selectedProject);
+      this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
     this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
     const sessionsChanged = this.lastSessions !== state.sessions;
@@ -14457,7 +14344,9 @@ var AppShell = class {
       this.lastRailToken = railToken;
       rebuildKeepingScroll(this.railList, previousRailToken, railToken, () => this.renderRail(state));
     }
-    if (selectionChanged || !this.mainRendered) {
+    const emptyKey = `${state.selectedProject}:${state.sessions.length}:${state.projectsError ?? ""}`;
+    if (selectionChanged || !this.mainRendered || !selectedSession(state) && emptyKey !== this.lastEmptyKey) {
+      this.lastEmptyKey = emptyKey;
       this.mainRendered = true;
       this.renderMain(state);
     } else {
@@ -14514,11 +14403,15 @@ var AppShell = class {
     this.lifecycleAction = null;
     this.railCount.textContent = String(visible.length);
     this.renderFilterMenu(state, scoped);
+    const openIds = new Set(this.railMenus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.dataset.sessionId));
+    const active = document.activeElement;
+    const focusedId = active?.closest("[data-session-id]")?.dataset.sessionId;
+    const focusedName = active?.getAttribute("aria-label");
+    for (const menu of this.railMenus) menu.dispose();
+    this.railMenus = [];
     const list = this.railList;
     if (!state.selectedProject) {
-      list.replaceChildren(
-        h2("li", { class: "af-rail-empty" }, "No projects yet \u2014 add one from the project switcher to get started.")
-      );
+      list.replaceChildren();
       return;
     }
     const rows = visible.map((s) => {
@@ -14530,38 +14423,52 @@ var AppShell = class {
         (target) => this.rowActions(target, selected)
       );
     });
-    if (visible.length > 1 && isRootSession(visible[0])) {
-      rows.splice(1, 0, h2("li", { class: "af-rail-sep", ariaHidden: "true" }));
-    }
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...notice ? [notice, ...rows] : rows);
+    for (const menu of this.railMenus) if (openIds.has(menu.el.dataset.sessionId)) menu.open();
+    if (focusedId && focusedName) {
+      const host = list.querySelector(`[data-session-id="${CSS.escape(focusedId)}"]`);
+      host?.querySelector(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+    }
   }
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
+  railMenus = [];
   rowActions(session, selected) {
-    return h2("div", { class: "af-row-actions" }, ...this.sessionActionButtons(session, "rail", selected));
+    const host = h("div", { class: "af-row-actions" });
+    const buttons = this.sessionActionButtons(session, "rail", selected);
+    if (!buttons.length) return host;
+    const menu = actionsDisclosure(`Actions for ${session.title}`);
+    menu.el.dataset.sessionId = session.id;
+    this.railMenus.push(menu);
+    menu.trigger.replaceChildren("\u2026");
+    menu.panel.append(...buttons);
+    menu.el.addEventListener("click", (event) => event.stopPropagation());
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    host.append(menu.el);
+    return host;
   }
   /** Builds both rail and fallback-header controls from the same daemon capabilities.
    *  Placement chooses only presentation and whether a mobile rail exit is needed;
    *  target narrowing, labels, and callbacks remain one path. */
-  sessionActionButtons(session, surface, selected = false) {
+  sessionActionButtons(session, surface2, selected = false) {
     const buttons = [];
     if (isActionableSession(session)) {
       const lifecycleSession = session;
-      const lifecycleClass = surface === "rail" ? "af-rail-action af-rail-lifecycle" : "af-ghost af-term-action af-term-lifecycle";
-      const lifecycleBtn = h2("button", { type: "button", class: lifecycleClass });
+      const lifecycleClass = surface2 === "rail" ? "af-rail-action af-rail-lifecycle" : "af-ghost af-term-action af-term-lifecycle";
+      const lifecycleBtn = h("button", { type: "button", class: lifecycleClass });
       lifecycleBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         const run = lifecycleBtn.dataset.action === "restore" ? () => this.actions.restore(lifecycleSession) : () => this.actions.archive(lifecycleSession);
-        if (surface === "rail") {
+        if (surface2 === "rail") {
           this.runRailExit(run);
         } else {
           run();
         }
       });
-      this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface);
-      if (surface === "rail" && selected) {
+      this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface2);
+      if (surface2 === "rail" && selected) {
         this.lifecycleBtn = lifecycleBtn;
         this.lifecycleAction = lifecycleSession.lifecycle_action;
       }
@@ -14569,18 +14476,18 @@ var AppShell = class {
     }
     if (isKillableSession(session)) {
       const killSession2 = session;
-      const killClass = surface === "rail" ? "af-rail-action af-rail-kill" : "af-ghost af-term-action af-term-kill";
-      const killBtn = h2(
+      const killClass = surface2 === "rail" ? "af-rail-action af-rail-kill" : "af-ghost af-term-action af-term-kill";
+      const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        ...surface === "rail" ? [icon("octagon-x")] : ["Kill"]
+        "Kill"
       );
       const killLabel = `Kill session \u201C${killSession2.title}\u201D`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
       killBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (surface === "rail") {
+        if (surface2 === "rail") {
           this.runRailExit(() => this.actions.kill(killSession2));
         } else {
           this.actions.kill(killSession2);
@@ -14592,12 +14499,12 @@ var AppShell = class {
   }
   /** Applies the daemon-projected verb, icon, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
-  patchLifecycleButton(btn, action, sessionTitle, surface = "rail") {
+  patchLifecycleButton(btn, action, sessionTitle, surface2 = "rail") {
     const verb = action === "restore" ? "Restore session" : "Archive session";
     const label = `${verb} \u201C${sessionTitle}\u201D`;
     btn.dataset.action = action;
-    if (surface === "rail") {
-      btn.replaceChildren(icon(action === "restore" ? "archive-restore" : "archive"));
+    if (surface2 === "rail") {
+      btn.textContent = verb.replace(" session", "");
     } else {
       btn.textContent = verb.replace(" session", "");
     }
@@ -14618,29 +14525,30 @@ var AppShell = class {
    *  - otherwise nothing: rows are showing.
    */
   railNotice(state, scoped, visible) {
+    if (scoped.length === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
-      const newBtn = h2(
+      const newBtn = h(
         "button",
         { type: "button", class: "af-rail-empty-new", title: "New session" },
         icon("plus"),
         "New"
       );
       newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
-      const empty = h2("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} \u2014 `, newBtn);
+      const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} \u2014 `, newBtn);
       const archived = scoped.filter(isArchived).length;
       if (archived > 0 && !state.statusFilter.archived) {
-        const show = h2("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
+        const show = h("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
         show.addEventListener("click", () => this.actions.setStatusFilter("archived", true));
         empty.append(` \xB7 ${archived} archived hidden `, show);
       }
       return empty;
     }
     if (visible.length === 0) {
-      const reset = h2("button", { type: "button", class: "af-rail-empty-new af-rail-reset-filter" }, "Reset filter");
+      const reset = h("button", { type: "button", class: "af-rail-empty-new af-rail-reset-filter" }, "Reset filter");
       reset.addEventListener("click", () => this.actions.resetStatusFilter());
-      return h2(
+      return h(
         "li",
         { class: "af-rail-empty-project" },
         `No sessions match the filter \u2014 ${hiddenCount(scoped, state.statusFilter)} hidden `,
@@ -14659,31 +14567,31 @@ var AppShell = class {
     const narrowed = !isDefaultFilter(state.statusFilter);
     this.filterDot.classList.toggle("af-rail-filter-dot-on", narrowed);
     this.filterBtn.classList.toggle("af-rail-filter-narrowed", narrowed);
-    const children = [h2("div", { class: "af-filter-menu-label" }, "Show sessions")];
+    const children = [h("div", { class: "af-filter-menu-label" }, "Show sessions")];
     for (const kind of FILTER_KINDS) {
       children.push(this.filterItem(kind, state.statusFilter[kind], counts[kind]));
     }
-    const reset = h2("button", { type: "button", class: "af-ghost af-filter-reset" }, "Reset to default");
+    const reset = h("button", { type: "button", class: "af-ghost af-filter-reset" }, "Reset to default");
     reset.disabled = !narrowed;
     reset.addEventListener("click", (e) => {
       e.stopPropagation();
       this.actions.resetStatusFilter();
     });
-    children.push(h2("div", { class: "af-filter-menu-foot" }, reset));
+    children.push(h("div", { class: "af-filter-menu-foot" }, reset));
     this.filterMenu.replaceChildren(...children);
   }
   /** One state's checkbox in the filter menu: a check when shown, the state's label
    *  (the row's own words — status.ts OPERATOR_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
   filterItem(kind, on, count) {
-    const check = h2("span", { class: "af-filter-check" }, ...on ? [icon("check")] : []);
+    const check = h("span", { class: "af-filter-check" }, ...on ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
-    const item = h2(
+    const item = h(
       "button",
       { type: "button", class: `af-filter-item${on ? " af-filter-item-on" : ""}` },
       check,
-      h2("span", { class: "af-filter-item-label" }, filterLabel(kind)),
-      h2("span", { class: "af-filter-item-count" }, String(count))
+      h("span", { class: "af-filter-item-label" }, filterLabel(kind)),
+      h("span", { class: "af-filter-item-count" }, String(count))
     );
     item.dataset.kind = kind;
     item.setAttribute("role", "checkbox");
@@ -14703,15 +14611,15 @@ var AppShell = class {
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     this.projectSwitchBtn.disabled = false;
-    const children = [h2("div", { class: "af-project-menu-label" }, "Switch project")];
+    const children = [h("div", { class: "af-project-menu-label" }, "Switch project")];
     if (summaries.length === 0) {
-      children.push(h2("div", { class: "af-project-menu-empty" }, "No projects yet \u2014 add one below."));
+      children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet \u2014 add one below."));
     }
     for (const p of summaries) {
       children.push(this.projectItem(p, p.root === current));
     }
     const footChildren = [];
-    const add = h2("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
     add.setAttribute("title", "Register a git checkout by path as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -14721,7 +14629,7 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
-      const del = h2("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
+      const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
       const isRegistered = state.registeredProjects.includes(currentSummary.root);
       if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
@@ -14742,7 +14650,7 @@ var AppShell = class {
       }
       footChildren.push(del);
     }
-    children.push(h2("div", { class: "af-project-menu-foot" }, ...footChildren));
+    children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
     this.projectMenu.replaceChildren(...children);
   }
   /** One project row in the switcher menu: a check on the current project, the name +
@@ -14750,16 +14658,16 @@ var AppShell = class {
    *  switches the active project and closes the menu. */
   projectItem(p, current) {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
-    const check = h2("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
+    const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
-    const label = h2(
+    const label = h(
       "span",
       { class: "af-project-item-label" },
-      h2("span", { class: "af-project-item-name" }, p.name),
-      h2("span", { class: "af-project-item-path" }, p.path)
+      h("span", { class: "af-project-item-name" }, p.name),
+      h("span", { class: "af-project-item-path" }, p.path)
     );
-    const meta = h2("span", { class: "af-project-item-meta" }, projectMeta(p));
-    const item = h2("button", { type: "button", class: cls }, check, label, meta);
+    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    const item = h("button", { type: "button", class: cls }, check, label, meta);
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
     item.addEventListener("click", (e) => {
@@ -14780,18 +14688,18 @@ var AppShell = class {
    *  are bound to THIS instance and torn down with it — see the isConnected check
    *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
   newTabControl(selected) {
-    const wrap = h2("div", { class: "af-tab-new-wrap" });
-    const trigger = h2(
+    const wrap = h("div", { class: "af-tab-new-wrap" });
+    const trigger = h(
       "button",
       { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
       icon("plus", "af-tab-new-plus"),
-      h2("span", {}, "New tab"),
+      h("span", {}, "New tab"),
       icon("chevron-down", "af-tab-new-caret")
     );
     trigger.setAttribute("aria-haspopup", "menu");
     trigger.setAttribute("aria-expanded", "false");
     trigger.setAttribute("aria-label", "New tab \xB7 Terminal or VS Code");
-    const menu = h2("div", { class: "af-tab-menu" });
+    const menu = h("div", { class: "af-tab-menu" });
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "Tab type");
     menu.hidden = true;
@@ -14801,8 +14709,9 @@ var AppShell = class {
       const menuBox = menu.getBoundingClientRect();
       const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
       const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const below = anchor.bottom + 6;
-      const above = anchor.top - menuBox.height - 6;
+      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
+      const below = anchor.bottom + gap;
+      const above = anchor.top - menuBox.height - gap;
       const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
@@ -14840,11 +14749,12 @@ var AppShell = class {
       document.addEventListener("keydown", onKeyDown, true);
     };
     const item = (label, kind) => {
-      const b = h2("button", { type: "button", class: "af-tab-menu-item" }, label);
+      const b = h("button", { type: "button", class: "af-tab-menu-item" }, label);
       b.setAttribute("role", "menuitem");
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         close();
+        this.terminalChrome?.menu.close();
         this.actions.newTab(kind);
       });
       return b;
@@ -14904,6 +14814,8 @@ var AppShell = class {
     this.projectSwitchBtn.setAttribute("aria-expanded", "false");
   }
   renderMain(state) {
+    this.terminalChrome?.dispose();
+    this.terminalChrome = null;
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
@@ -14914,60 +14826,65 @@ var AppShell = class {
       this.retryVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
+      delete this.main.dataset.afTheme;
       delete this.main.dataset.termStatus;
       this.main.replaceChildren(
-        h2("p", { class: "af-empty-title" }, "Select a session"),
-        h2("p", { class: "af-empty-hint" }, "Pick a session in the rail to attach its terminal.")
+        recoveryScreen(state.projectsError && state.selectedProject === null ? {
+          condition: "Projects unavailable",
+          detail: state.projectsError,
+          failed: true,
+          action: "Retry",
+          run: () => this.actions.retryConnection?.()
+        } : state.selectedProject === null ? {
+          condition: "No project registered",
+          action: "Add project",
+          run: () => this.actions.addProject()
+        } : scopeToProject(state.sessions, state.selectedProject).length === 0 ? {
+          condition: "No sessions",
+          action: "New session",
+          run: () => this.actions.newSession()
+        } : {
+          condition: "Select a session",
+          action: "Choose a session",
+          run: () => this.railList.querySelector(".af-row")?.focus()
+        })
       );
       return;
     }
-    this.headTitle = h2("span", { class: "af-term-title" }, selected.title);
-    const prBadge = h2("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-    prBadge.hidden = true;
-    this.prBadge = prBadge;
+    const chrome = terminalChrome({
+      title: selected.title,
+      copyLink: () => this.actions.copyLink(),
+      handoff: () => this.actions.handoff(),
+      retry: () => this.actions.retryLimit()
+    });
+    this.terminalChrome = chrome;
+    this.headTitle = chrome.title;
+    this.prBadge = chrome.pr;
     this.prBadgeSig = "";
-    const copyLink = h2(
-      "button",
-      { type: "button", class: "af-ghost af-term-action af-copy-link", title: "Copy link to this session" },
-      icon("link"),
-      h2("span", { class: "af-copy-link-label" }, "Copy link")
-    );
-    copyLink.setAttribute("aria-label", "Copy link");
-    copyLink.addEventListener("click", () => this.actions.copyLink());
-    const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle);
-    const retryBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
-    retryBtn.title = "Resume this session from its usage-limit wall";
-    retryBtn.addEventListener("click", () => this.actions.retryLimit());
-    this.retryBtn = retryBtn;
+    this.retryBtn = chrome.retry;
     this.retryVisible = isLimitReached(selected);
-    retryBtn.hidden = !this.retryVisible;
-    const handoffBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Handoff");
-    handoffBtn.title = "Continue this session under a different agent";
-    handoffBtn.addEventListener("click", () => this.actions.handoff());
-    this.handoffBtn = handoffBtn;
+    chrome.retry.hidden = !this.retryVisible;
+    this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
-    handoffBtn.hidden = !this.handoffVisible;
-    const headActions = h2("div", { class: "af-term-actions" });
-    headActions.hidden = true;
-    this.headActions = headActions;
+    chrome.handoff.hidden = !this.handoffVisible;
+    this.headActions = chrome.actions;
     this.headActionSig = "";
-    const tabBar = h2("div", { class: "af-tabbar" });
+    const tabBar = chrome.tabs;
     this.tabBar = tabBar;
-    tabBar.setAttribute("role", "tablist");
-    tabBar.setAttribute("aria-label", "Session tabs");
     this.attachTabDrag(tabBar);
-    this.tabInsert = h2("div", { class: "af-tab-insert" });
+    this.tabInsert = h("div", { class: "af-tab-insert" });
     this.tabInsert.hidden = true;
     this.tabInsert.setAttribute("aria-hidden", "true");
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
-    const head = h2("div", { class: "af-term-head" }, titleBox, prBadge, copyLink, tabBar, headActions, handoffBtn, retryBtn);
+    const head = chrome.head;
     const warningText = archiveWarningText(selected);
-    const archiveWarning = h2("div", { class: "af-archive-warning", role: "status" }, warningText);
+    const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
     this.main.className = "af-main af-main-term";
+    this.main.dataset.afTheme = currentMode();
     if (warningText === "") {
       this.main.replaceChildren(head, this.termHost);
     } else {
@@ -15015,11 +14932,11 @@ var AppShell = class {
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
-      children.push(this.newTabControl(selected));
+      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
     } else {
-      const reason = h2("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
+      const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
       reason.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
-      children.push(reason);
+      this.terminalChrome?.newTabSlot.replaceChildren(reason);
     }
     const scrollLeft = bar.scrollLeft;
     bar.replaceChildren(...children);
@@ -15348,6 +15265,7 @@ var AppShell = class {
       return;
     }
     this.headTitle.textContent = selected.title;
+    if (this.terminalChrome) this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
     const warningText = archiveWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
@@ -15478,11 +15396,11 @@ function tabCenters(bar) {
 }
 function tabButton(tab, index, active, shown, canRename, canClose, actions2, liveIdentity, selectedSessionId) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
-  const btn = h2("button", { type: "button", class: cls, draggable: true });
+  const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.dataset.tabIndex = String(index);
-  btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h2("span", { class: "af-tab-label" }, tabLabel(tab)));
+  btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions2.openTab(index));
   const renameable = canRename && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
@@ -15495,7 +15413,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, liv
     });
   }
   if (index > 0 && canClose) {
-    const close = h2("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
+    const close = h("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -15506,7 +15424,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, liv
   return btn;
 }
 function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
-  const input = h2("input", { type: "text", class: "af-tab-edit", value: tab.name });
+  const input = h("input", { type: "text", class: "af-tab-edit", value: tab.name });
   input.setAttribute("aria-label", `Rename tab ${tabLabel(tab)}`);
   let done = false;
   const finish = (commit) => {
@@ -15541,36 +15459,34 @@ function sessionRow(s, selected, openSession, buildActions) {
   const actionable = isActionableSession(s);
   const killable = isKillableSession(s);
   const managed = actionable || killable;
-  const title = h2("div", { class: "af-row-title" }, rowTitle(s));
+  const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
   const branchParts = [
-    h2("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-    " \xB7 "
+    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
   ];
-  if (idleDetail) {
-    const idle = h2("span", { class: "af-idle-reason" }, `${idleDetail} \xB7 `);
+  if (selected && idleDetail) {
+    const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
   }
-  branchParts.push(
-    h2(
-      "span",
-      { class: "af-row-branch-name" },
-      icon("git-branch", "af-branch-icon"),
-      s.branch || "\u2014"
-    )
-  );
-  const branch = h2("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h2("div", { class: "af-row-main" }, title, branch);
+  if (s.branch) {
+    branchParts.push(
+      " \xB7 ",
+      h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
+    );
+  }
+  const branch = h("div", { class: "af-row-branch" }, ...branchParts);
+  const main = h("div", { class: "af-row-main" }, title, branch);
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
-  const row = h2("li", { class: cls });
-  const statusSlot = h2("span", { class: "af-row-status" });
+  const row = h("li", { class: cls });
+  row.dataset.state = status.kind ?? "working";
+  const statusSlot = h("span", { class: "af-row-status" });
   statusSlot.setAttribute("aria-hidden", "true");
   if (status.kind && status.icon) {
-    const dot = h2("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
+    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
     statusSlot.append(dot);
   }
   row.append(statusSlot);
@@ -15606,7 +15522,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? `${detail} \xB7 ` : "";
+    idle.textContent = detail ? ` \xB7 ${detail}` : "";
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";
@@ -15657,10 +15573,6 @@ var store = new Store({
 var token = null;
 var stream = null;
 var connectionGate = createLatestRequestGate();
-var paletteRefreshGate = createLatestRequestGate();
-var PALETTE_RETRY_MS = 1e3;
-var paletteRetryTimer = null;
-var hasDaemonPalette = false;
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
@@ -15705,11 +15617,13 @@ function mount() {
   void bootstrap();
 }
 async function bootstrap() {
+  store.set({ connecting: true, loginCondition: void 0, loginError: null });
   let required = true;
   try {
     required = await probeAuthRequired();
   } catch {
-    required = true;
+    store.set({ connecting: false, loginCondition: "unavailable" });
+    return;
   }
   if (!required) {
     store.set({ authRequired: false });
@@ -15754,7 +15668,7 @@ function rerender() {
 }
 async function connect(candidate) {
   const attempt = connectionGate.begin();
-  store.set({ connecting: true, loginError: null });
+  store.set({ connecting: true, loginError: null, loginCondition: void 0 });
   let sessions;
   try {
     sessions = await probeToken(candidate);
@@ -15763,22 +15677,22 @@ async function connect(candidate) {
     if (shouldForgetToken(e)) {
       clearToken();
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e) });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
-  await refreshDaemonPalette(candidate);
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  let tasksError = "";
   let tasks = [];
   try {
     tasks = await listTasks(candidate);
-  } catch {
+  } catch (e) {
+    tasksError = errorText(e);
     tasks = [];
   }
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  const registeredProjects = await fetchRegisteredProjects(candidate);
+  const { projects: registeredProjects, error: projectsError } = await fetchRegisteredProjects(candidate);
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   resolvingRoute = true;
@@ -15796,6 +15710,8 @@ async function connect(candidate) {
     shownTabs: [0],
     tabError: null,
     tasks,
+    tasksError,
+    projectsError,
     registeredProjects
   });
   resolvingRoute = false;
@@ -15805,20 +15721,20 @@ async function connect(candidate) {
 }
 async function fetchRegisteredProjects(tok) {
   try {
-    return (await listProjects(tok)).map((p) => p.root);
-  } catch {
-    return [];
+    const projects = (await listProjects(tok)).map((p) => p.root);
+    return { projects, error: "" };
+  } catch (e) {
+    return { projects: [], error: errorText(e) };
   }
 }
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
+  store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   stopStream();
   closeModal();
   closeConfigAssistant();
   token = null;
   clearToken();
-  resetDaemonTheme();
-  hasDaemonPalette = false;
   store.set({
     phase: "login",
     view: "sessions",
@@ -16019,7 +15935,10 @@ function newSession() {
           }
         }).catch((e) => {
           requestResync();
-          surfaceTabError(e);
+          m.setBusy(false);
+          m.setError(errorText(e));
+          if (!modal && token === tok) openModal(m);
+          else surfaceTabError(e);
         });
       },
       onCancel: closeModal
@@ -16249,13 +16168,14 @@ function reorderSessionTab(from, to) {
 function surfaceTabError(e) {
   const msg = errorText(e);
   console.error("af-web: operation failed:", msg);
-  showTransientNotice(msg);
+  showTransientNotice(msg, false);
 }
-function showTransientNotice(msg) {
+function showTransientNotice(msg, notice = true) {
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
-  store.set({ tabError: msg });
+  store.set({ tabError: msg, tabNotice: notice });
+  if (!notice) return;
   tabErrorTimer = window.setTimeout(() => {
     tabErrorTimer = null;
     store.set({ tabError: null });
@@ -16295,7 +16215,7 @@ var accountsRefetcher = createFencedRefetcher({
   fetch: listAccounts,
   commit: (resp) => {
     store.set({
-      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "" }
+      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true }
     });
   },
   onError: (err) => {
@@ -16397,10 +16317,9 @@ var tasksRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       store.get().registeredProjects
     );
-    store.set({ tasks, selectedProject });
-  }
-  // No onError: a transport/auth failure leaves the last-known list up; a task.*
-  // event or the next mutation refetches. Nothing to surface here.
+    store.set({ tasks, selectedProject, tasksError: "" });
+  },
+  onError: (e) => store.set({ tasksError: errorText(e) })
 });
 function refreshTasks() {
   tasksRefetcher.refresh();
@@ -16426,10 +16345,9 @@ var projectsRefetcher = createFencedRefetcher({
       store.get().selectedProject,
       registeredProjects
     );
-    store.set({ registeredProjects, selectedProject });
-  }
-  // No onError: a transport/auth failure keeps the last-known registry up; the next
-  // projects.changed event or reconnect refetches. Never blank the union on a blip.
+    store.set({ registeredProjects, selectedProject, projectsError: "" });
+  },
+  onError: (e) => store.set({ projectsError: errorText(e) })
 });
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
@@ -16573,7 +16491,18 @@ function doRemoveTask(task) {
   if (tok === null) {
     return;
   }
-  void removeTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  openModal(removeTaskModal(task.name || task.id, () => {
+    if (!modal || token !== tok) return;
+    const handle = modal;
+    handle.setBusy(true);
+    void removeTask(task, tok).then(() => {
+      closeModal();
+      return refreshTasks();
+    }).catch((error) => {
+      handle.setBusy(false);
+      handle.setError(errorText(error));
+    });
+  }, closeModal));
 }
 function setTheme(choice) {
   if (store.get().themeChoice === choice) {
@@ -16592,7 +16521,7 @@ function watchSystemTheme() {
     return;
   }
   const onChange = () => {
-    if (store.get().themeChoice === "auto") {
+    if (store.get().themeChoice === "system") {
       refreshThemeMode();
       splitView.applyTheme();
     }
@@ -16627,6 +16556,11 @@ var actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  dismissNotice: clearTabError,
+  retryConnection: () => {
+    void bootstrap();
+  },
+  retryTasks: refreshTasks,
   notice: surfaceNotice,
   paneDropHintAt: (x, y) => splitView.showTabDropHintAt(x, y),
   clearPaneDropHint: () => splitView.clearTabDropHint(),
@@ -16683,56 +16617,16 @@ function startStream(tok) {
     onEvent,
     onResync: () => {
       requestResync();
-      void refreshDaemonPalette(tok);
     },
     onStatus: (s) => store.set({ live: s })
   });
   stream.start();
-}
-function clearPaletteRetry() {
-  if (paletteRetryTimer === null) return;
-  window.clearTimeout(paletteRetryTimer);
-  paletteRetryTimer = null;
-}
-async function refreshDaemonPalette(tok) {
-  clearPaletteRetry();
-  const request = paletteRefreshGate.begin();
-  let paletteChanged = false;
-  try {
-    const theme = await getTheme(tok);
-    if (token !== tok || !request.isCurrent()) return;
-    applyDaemonTheme(theme);
-    hasDaemonPalette = true;
-    paletteChanged = true;
-  } catch (error) {
-    if (token !== tok || !request.isCurrent()) return;
-    const status = error instanceof ApiError ? error.status : 0;
-    const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
-    if (plan.reauthenticate) {
-      disconnect(describeError(error), true);
-      return;
-    }
-    if (plan.reset) {
-      resetDaemonTheme();
-      hasDaemonPalette = false;
-      paletteChanged = true;
-    }
-    if (plan.retry) {
-      paletteRetryTimer = window.setTimeout(() => {
-        paletteRetryTimer = null;
-        if (token === tok) void refreshDaemonPalette(tok);
-      }, PALETTE_RETRY_MS);
-    }
-  }
-  if (paletteChanged) splitView.applyTheme();
 }
 function stopStream() {
   resyncRequestGeneration += 1;
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
-  paletteRefreshGate.invalidate();
-  clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -16752,8 +16646,8 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
-  if (eventRequestsPaletteRefresh(ev)) {
-    if (hasConnectedToken(token)) void refreshDaemonPalette(token);
+  if (ev.type === "theme.changed") {
+    requestResync();
     return;
   }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
@@ -16812,7 +16706,9 @@ function requestResync() {
       }
       applySessions(sessions);
       root?.setAttribute("data-af-resync-settled", "");
-    }).catch(() => {
+    }).catch((error) => {
+      if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
+      if (shouldForgetToken(error)) disconnect(describeError(error), true);
     });
   }, 150);
 }

@@ -59,5 +59,6 @@ export default defineConfig({
     launchOptions: { args: ["--no-sandbox", "--disable-dev-shm-usage"] },
   },
   outputDir: "./test-results",
+  snapshotPathTemplate: "{testDir}/goldens/{arg}{ext}",
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
 });

@@ -120,7 +120,7 @@ test("a healthy task carries no mark and no health text", () => {
 });
 
 test("next run comes from the live entry, and its absence is not an accusation", () => {
-  assert.equal(taskArmingSummary(task({ next_run_at: "2026-09-03T03:00:00Z", arming: "armed" })), "next run 2026-09-03T03:00:00Z");
+  assert.equal(taskArmingSummary(task({ next_run_at: "2026-09-03T03:00:00Z", arming: "armed" }), new Date("2026-09-03T02:30:00Z")), "Next run in 30m");
   // The not-armed fact lives in the HEALTH fragment, which leads the line and
   // carries the mark — not in the dim tail that ellipsizes first.
   assert.equal(taskArmingSummary(task({ arming: "not-armed" })), "");

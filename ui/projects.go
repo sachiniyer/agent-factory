@@ -149,6 +149,9 @@ func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 // Projects returns the current row list (test/inspection helper).
 func (p *ProjectsPane) Projects() []SidebarProject { return p.projects }
 
+// Degraded reports an unavailable registry, not an empty one.
+func (p *ProjectsPane) Degraded() bool { return p.degraded }
+
 // SetDegraded records whether the project registry read failed (#3298), so
 // the section says the list may be incomplete instead of presenting the
 // remaining discovery sources as the whole world. Reports whether the flag

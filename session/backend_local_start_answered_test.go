@@ -34,8 +34,6 @@ func (f answeredLaunchPtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan erro
 	return ptmx, done, nil
 }
 
-func (answeredLaunchPtyFactory) Close() {}
-
 // TestLocalBackendAnsweredStartFailurePreservesFreshWorktree is the user-visible
 // half of the pre-spawn-only cleanup invariant. A process that started and then
 // failed may have launched a pane which is still flushing even after the tmux
