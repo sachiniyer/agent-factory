@@ -192,9 +192,34 @@ func (p *hookProvisioner) manualReapCommand() string {
 	return shellsuggest.Command(p.hooks.DeleteCmd, "--name", p.slug)
 }
 
-// runHookScriptWithEnvironment runs one hook script under a timeout and returns
-// its combined output. It exists to answer a question the obvious CombinedOutput() gets wrong:
-// WHICH CHILDREN ARE OURS TO KILL?
+// hookScriptOutput is one hook script's captured output, kept per-stream because
+// the endpoint contract is a STDOUT contract (docs/remote-hooks.md). Combined is
+// only for diagnostics, where both streams are worth showing.
+type hookScriptOutput struct {
+	Stdout []byte
+	Stderr []byte
+}
+
+// Combined renders both streams for an error message. Interleaving is not
+// recoverable from two files and is not worth a pipe to regain: stderr carries
+// the script's narrative and stdout carries at most the endpoint line, so
+// concatenating them loses nothing a reader was relying on.
+func (o hookScriptOutput) Combined() []byte {
+	switch {
+	case len(o.Stderr) == 0:
+		return o.Stdout
+	case len(o.Stdout) == 0:
+		return o.Stderr
+	}
+	combined := make([]byte, 0, len(o.Stderr)+len(o.Stdout)+1)
+	combined = append(combined, bytes.TrimRight(o.Stderr, "\n")...)
+	combined = append(combined, '\n')
+	return append(combined, o.Stdout...)
+}
+
+// runHookScriptWithResolvedEnvironment runs one hook script under a timeout and
+// returns its combined output. It exists to answer a question the obvious
+// CombinedOutput() gets wrong: WHICH CHILDREN ARE OURS TO KILL?
 //
 // Answer: only the script itself. A launch_cmd is DOCUMENTED to leave a tunnel or
 // port-forward running — that background process is not a leak, it is the product,
@@ -228,40 +253,6 @@ func (p *hookProvisioner) manualReapCommand() string {
 // endpoint (#2637). Two regular files keep every property the comment above is
 // about — still no pipe, still nothing a surviving tunnel can hold open — while
 // letting launch read the stream the docs actually promise.
-func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) (hookScriptOutput, *exec.Cmd, error) {
-	agentName := sessionenv.AgentForCommand(program)
-	if agentName == "" && strings.TrimSpace(program) == "" {
-		agentName = tmux.ProgramClaude
-	}
-	authSelectors := sessionenv.ResolveAuthSelectors(os.Environ(), agentName, program)
-	return runHookScriptWithResolvedEnvironment(timeout, name, agentName, authSelectors, passthrough, args...)
-}
-
-// hookScriptOutput is one hook script's captured output, kept per-stream because
-// the endpoint contract is a STDOUT contract (docs/remote-hooks.md). Combined is
-// only for diagnostics, where both streams are worth showing.
-type hookScriptOutput struct {
-	Stdout []byte
-	Stderr []byte
-}
-
-// Combined renders both streams for an error message. Interleaving is not
-// recoverable from two files and is not worth a pipe to regain: stderr carries
-// the script's narrative and stdout carries at most the endpoint line, so
-// concatenating them loses nothing a reader was relying on.
-func (o hookScriptOutput) Combined() []byte {
-	switch {
-	case len(o.Stderr) == 0:
-		return o.Stdout
-	case len(o.Stdout) == 0:
-		return o.Stderr
-	}
-	combined := make([]byte, 0, len(o.Stderr)+len(o.Stdout)+1)
-	combined = append(combined, bytes.TrimRight(o.Stderr, "\n")...)
-	combined = append(combined, '\n')
-	return append(combined, o.Stdout...)
-}
-
 func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent string, authSelectors, passthrough []string, args ...string) (hookScriptOutput, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
