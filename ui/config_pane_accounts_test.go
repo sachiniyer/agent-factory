@@ -335,3 +335,39 @@ func TestConfigRowsStillEditWithAccountsPresent(t *testing.T) {
 		t.Fatalf("editing a config key produced an account request: %+v", req)
 	}
 }
+
+// Remote login has no terminal transport. Its refusal belongs to the account,
+// survives reopening, and never prevents registration on the same daemon.
+func TestAccountsRemoteLoginRefusalStaysInSection(t *testing.T) {
+	pane := accountsPane(t, []AccountRow{{Agent: "codex", Name: "work"}}, []string{"codex"})
+	const refusal = "Run af accounts login on the daemon host (http://buildbox:8443)."
+	pane.SetAccountLoginRefusal(refusal)
+	selectAccount(t, pane, "codex", "work")
+	for i := 0; i < 2; i++ {
+		pane.HandleKeyPress(accountKey("enter"))
+		if !pane.HasFocus() || pane.editing {
+			t.Fatal("refused login must retain the Accounts section")
+		}
+		if req := pane.TakeAccountRequest(); req.Kind != AccountRequestNone {
+			t.Fatalf("refused login requested %+v", req)
+		}
+		if view := pane.String(); !strings.Contains(view, refusal) || strings.Contains(view, "↵ log in") {
+			t.Fatalf("refusal must replace the login offer:\n%s", view)
+		}
+		pane.SetFocus(false)
+		pane.SetFocus(true)
+	}
+	selectAccount(t, pane, "codex", "")
+	pane.HandleKeyPress(accountKey("enter"))
+	pane.HandleKeyPress(accountKey("new-work"))
+	pane.HandleKeyPress(accountKey("enter"))
+	if req := pane.TakeAccountRequest(); req.Kind != AccountRequestRegister || req.Name != "new-work" {
+		t.Fatalf("remote registration request = %+v", req)
+	}
+	pane.SetAccountLoginRefusal("")
+	selectAccount(t, pane, "codex", "work")
+	pane.HandleKeyPress(accountKey("enter"))
+	if req := pane.TakeAccountRequest(); req.Kind != AccountRequestLogin {
+		t.Fatalf("clearing remote policy did not restore local login: %+v", req)
+	}
+}
