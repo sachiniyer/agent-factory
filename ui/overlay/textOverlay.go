@@ -75,10 +75,7 @@ func (t *TextOverlay) HandleKeyPress(msg tea.KeyMsg) (tea.Cmd, bool) {
 // Render renders the text overlay
 func (t *TextOverlay) Render() string {
 	// Create styles
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.CurrentTheme().Accent).
-		Padding(textOverlayVerticalPadding, textOverlayHorizontalPadding).
+	style := ui.DialogStyle().
 		Width(t.width)
 	// One predicate for "this overlay windows its content", so the ↑/↓ markers
 	// visibleContent paints and the Scrollable() the host gates its keys on can
@@ -88,7 +85,15 @@ func (t *TextOverlay) Render() string {
 	}
 
 	// Apply the border style and return
-	return style.Render(t.visibleContent())
+	content := t.visibleContent()
+	if t.scroll == 0 {
+		first, rest, more := strings.Cut(content, "\n")
+		content = ui.DialogTitleStyle().Render(first)
+		if more {
+			content += "\n" + rest
+		}
+	}
+	return ui.RenderDialog(style, content)
 }
 
 func (t *TextOverlay) SetWidth(width int) {

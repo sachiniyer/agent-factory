@@ -153,11 +153,12 @@ func branchLineIndent(t *testing.T, idx int) int {
 		Program: "test",
 	})
 	require.NoError(t, err)
+	inst.Branch = "feature"
 
 	r := NewInstanceRenderer()
 	r.SetWidth(60) // wide enough to render the full branch line
 
-	out := r.Render(inst, idx, false, false, false)
+	out := r.Render(inst, idx, false, false, true)
 	for _, line := range strings.Split(out, "\n") {
 		clean := ansiEscape.ReplaceAllString(line, "")
 		if pos := strings.Index(clean, branchIcon); pos >= 0 {
@@ -185,9 +186,9 @@ func TestInstanceRendererOmitsInstanceIndex(t *testing.T) {
 	for _, idx := range []int{1, 9, 10, 99, 100, 10000} {
 		out := r.Render(inst, idx, false, false, false)
 		lines := strings.Split(ansiEscape.ReplaceAllString(out, ""), "\n")
-		require.GreaterOrEqual(t, len(lines), 2)
-		assert.Contains(t, lines[1], "feature")
-		assert.NotRegexp(t, indexPrefix, lines[1],
+		require.Len(t, lines, 1)
+		assert.Contains(t, lines[0], "feature")
+		assert.NotRegexp(t, indexPrefix, lines[0],
 			"instance row rendered the display index at idx=%d", idx)
 	}
 }
@@ -217,8 +218,8 @@ func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance) (tit
 	r.SetWidth(effectiveWidth(sidebarW))
 	out := r.Render(inst, 1, false, false, false)
 	lines := strings.Split(out, "\n")
-	require.GreaterOrEqual(t, len(lines), 2, "renderer should emit at least a title row")
-	titleLine = lines[1]
+	require.GreaterOrEqual(t, len(lines), 1, "renderer should emit at least a title row")
+	titleLine = lines[0]
 	return titleLine, sidebarW
 }
 
@@ -307,7 +308,7 @@ func branchLineForTerminal(t *testing.T, terminalW int, inst *session.Instance) 
 	sidebarW = int(float32(terminalW) * 0.3)
 	r := NewInstanceRenderer()
 	r.SetWidth(effectiveWidth(sidebarW))
-	out := r.Render(inst, 1, false, false, false)
+	out := r.Render(inst, 1, false, false, true)
 	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(ansiEscape.ReplaceAllString(line, ""), branchIcon) {
 			return line, sidebarW
@@ -609,6 +610,7 @@ func TestInstanceRendererDeletingRetainsSelectionRoles(t *testing.T) {
 		Program: "test",
 	})
 	require.NoError(t, err)
+	inst.Branch = "feature"
 
 	// SGR foreground params of the generated dark muted role.
 	dimFG := termenv.RGBColor(theme.Colors()["ink-muted"].Dark).Sequence(false)
@@ -650,14 +652,14 @@ func TestInstanceRendererTreeArrow(t *testing.T) {
 	r := NewInstanceRenderer()
 	r.SetWidth(40)
 
-	collapsed := strings.Split(r.Render(inst, 1, false, false, false), "\n")[1]
+	collapsed := strings.Split(r.Render(inst, 1, false, false, false), "\n")[0]
 	assert.Contains(t, collapsed, collapsedArrow, "collapsed expandable row must show ▸")
 
 	expanded := strings.Split(r.Render(inst, 1, false, false, true), "\n")[1]
 	assert.Contains(t, expanded, expandedArrow, "expanded row must show ▾")
 
 	inst.SetStatusForTest(session.Loading)
-	transient := strings.Split(r.Render(inst, 1, false, false, false), "\n")[1]
+	transient := strings.Split(r.Render(inst, 1, false, false, false), "\n")[0]
 	assert.NotContains(t, transient, collapsedArrow, "transient rows are not expandable")
 	assert.NotContains(t, transient, expandedArrow, "transient rows are not expandable")
 	clean := ansiEscape.ReplaceAllString(transient, "")
@@ -666,18 +668,18 @@ func TestInstanceRendererTreeArrow(t *testing.T) {
 }
 
 // TestRenderTabRows pins the tab child row shape: ├/└ connectors, the 1-based
-// slot number matching the 1-9 jump keys, the tmux-style " *" marker on the
+// slot number matching the 1-9 jump keys, the tmux-style " · open" marker on the
 // active tab, and hard truncation at narrow widths.
 func TestRenderTabRows(t *testing.T) {
 	r := NewInstanceRenderer()
 	r.SetWidth(30)
 
 	mid := ansiEscape.ReplaceAllString(r.RenderTab("Agent", 1, false, false, true), "")
-	assert.Contains(t, mid, "├ 1 Agent *", "active non-last tab: ├ connector + slot number + * marker")
+	assert.Contains(t, mid, "├ 1 Agent · open", "active non-last tab: ├ connector + slot number + * marker")
 
 	last := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, false), "")
 	assert.Contains(t, last, "└ 2 Terminal", "last tab uses the └ connector")
-	assert.NotContains(t, last, "*", "inactive tabs carry no active marker")
+	assert.NotContains(t, last, "open", "inactive tabs carry no active marker")
 
 	// Rows must not exceed the container: effective width + the 2-cell padding
 	// every sidebar row shares.
@@ -693,17 +695,17 @@ func TestTabRowForegroundMatchesAgentTab(t *testing.T) {
 		"selected tab rows keep their highlight background")
 }
 
-// activeMarkerVisible reports whether a rendered tab row still carries its " *"
+// activeMarkerVisible reports whether a rendered tab row still carries its " · open"
 // active marker. lipgloss.Place pads the row out to the full width, so the
 // marker is the last NON-SPACE cell rather than the last cell.
 func activeMarkerVisible(row string) bool {
-	return strings.HasSuffix(strings.TrimRight(ansiEscape.ReplaceAllString(row, ""), " "), "*")
+	return strings.HasSuffix(strings.TrimRight(ansiEscape.ReplaceAllString(row, ""), " "), "open")
 }
 
 // TestRenderTab_ActiveMarkerSurvivesTruncation is the regression for #1983: a
 // truncated tab name ate the active-tab marker.
 //
-// The " *" marker is the ONLY active cue — tabRowActiveStyle is deliberately
+// The " · open" marker is the ONLY active cue — tabRowActiveStyle is deliberately
 // identical to tabRowStyle — but it was appended as the row's RIGHTMOST
 // characters and the row was then truncated right-to-left, so the marker was the
 // first thing dropped. An active tab whose name overflowed rendered with no
@@ -790,7 +792,7 @@ func TestIndicatorsSurviveTruncation(t *testing.T) {
 // encodings rather than what the user sees.
 func nameShown(row string) string {
 	clean := strings.TrimRight(ansiEscape.ReplaceAllString(row, ""), " ")
-	clean = strings.TrimSuffix(clean, " *")
+	clean = strings.TrimSuffix(clean, " · open")
 	_, name, _ := strings.Cut(clean, "2 ")
 	return name
 }
@@ -805,7 +807,7 @@ func TestRenderTab_InactiveRowsUnaffected(t *testing.T) {
 	label := WebTabGlyph + " a-very-long-web-tab-name-that-overflows"
 
 	inactive := r.RenderTab(label, 2, false, false, false)
-	assert.NotContains(t, ansiEscape.ReplaceAllString(inactive, ""), "*",
+	assert.NotContains(t, ansiEscape.ReplaceAllString(inactive, ""), "open",
 		"inactive tabs carry no active marker")
 
 	active := r.RenderTab(label, 2, false, false, true)
@@ -839,25 +841,25 @@ func TestFlatten(t *testing.T) {
 // mid-start) the placeholder is the single guaranteed slot, never a padded
 // two-slot bar that would advertise a phantom Terminal target.
 func TestTabLabelsMirrorRealTabs(t *testing.T) {
-	assert.Equal(t, []string{"◆ Agent"}, TabLabels(nil),
+	assert.Equal(t, []string{"Agent"}, TabLabels(nil),
 		"nil instance: single-slot placeholder, no phantom Terminal")
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "labeled", Path: t.TempDir(), Program: "test",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"◆ Agent"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent"}, TabLabels(inst),
 		"mid-start (no tabs yet): single-slot placeholder")
 
 	inst.AddTabForTest("agent", session.TabKindAgent)
-	assert.Equal(t, []string{"◆ Agent"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent"}, TabLabels(inst),
 		"fresh instance (#1100): exactly one real slot, no padding to two")
 
 	inst.AddTabForTest("shell", session.TabKindShell)
-	assert.Equal(t, []string{"◆ Agent", "› Terminal"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent", "› Terminal"}, TabLabels(inst),
 		"after t: the on-demand terminal is the second slot")
 
 	inst.AddTabForTest("btop", session.TabKindProcess)
-	assert.Equal(t, []string{"◆ Agent", "› Terminal", "› btop"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent", "› Terminal", "› btop"}, TabLabels(inst),
 		"process tabs extend the list under their own names")
 }

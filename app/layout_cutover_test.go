@@ -25,7 +25,7 @@ import (
 func newPopulatedLayoutHome(t *testing.T) *home {
 	h := newTestHome(t)
 	h.store.SetTasks([]task.Task{{ID: "layout-task", Name: "Layout task"}})
-	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: "/project"}})
+	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: "/project"}, {Name: "tools", Root: "/tools"}})
 	return h
 }
 
@@ -67,7 +67,7 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		view := h.View()
 		requireViewSized(t, view, tc.w, tc.h)
 		assert.Contains(t, view, "Agent Factory", "%dx%d: tree title", tc.w, tc.h)
-		assert.Contains(t, view, "alpha · ◆ Agent", "%dx%d: pane header carries title · tab", tc.w, tc.h)
+		assert.Contains(t, view, "alpha · Agent", "%dx%d: pane header carries title · tab", tc.w, tc.h)
 		// The header ellipsizes at the narrowest rails, so assert the stable
 		// prefix plus the manage affordance FIX 2 guarantees is never cut.
 		//
@@ -417,7 +417,7 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	// The workspace still renders the instance afterwards.
 	var view string
 	eh.query(func(h *home) { view = h.View() })
-	assert.Contains(t, view, "alpha · ◆ Agent")
+	assert.Contains(t, view, "alpha · Agent")
 }
 
 // TestLayoutCutover_DigitJumpGatedByFocusRegion pins the 1-9 gate (Greptile on

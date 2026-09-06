@@ -19,7 +19,7 @@ import (
 
 // programDefaultLabel is the selector option that resolves to an empty Program
 // string (the daemon then falls back to the user's configured default_program).
-const programDefaultLabel = "(use config default)"
+const programDefaultLabel = "Use config default"
 
 // watchRunNowRefusal explains why "run now" is unavailable on a watch task.
 // Both surfaces that accept r (the list and the editor) report it, so it lives
@@ -57,6 +57,7 @@ const (
 
 // TaskPane renders an inline task editor in the right pane.
 type TaskPane struct {
+	showActions bool
 	unavailable string
 	tasks       []task.Task
 	selectedIdx int
@@ -441,6 +442,9 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 		return false
 	}
 	switch msg.String() {
+	case "?":
+		s.showActions = !s.showActions
+		return true
 	case "esc":
 		s.hasFocus = false
 		return true
@@ -493,6 +497,25 @@ func (s *TaskPane) toggleSelectedTask() {
 	}
 	s.tasks[s.selectedIdx].Enabled = !s.tasks[s.selectedIdx].Enabled
 	s.markTaskDirty(s.tasks[s.selectedIdx].ID)
+}
+
+// SelectedTask returns the selected identity for target-specific confirmations.
+func (s *TaskPane) SelectedTask() (task.Task, bool) {
+	if !s.selectedTaskInRange() {
+		return task.Task{}, false
+	}
+	return s.tasks[s.selectedIdx], true
+}
+
+// DeleteTask removes the confirmed identity even if a refresh moved the cursor.
+func (s *TaskPane) DeleteTask(id string) {
+	for i := range s.tasks {
+		if s.tasks[i].ID == id {
+			s.selectedIdx = i
+			s.deleteSelectedTask()
+			return
+		}
+	}
 }
 
 func (s *TaskPane) deleteSelectedTask() {
@@ -595,7 +618,7 @@ func taskTriggerSummary(tsk task.Task) string {
 		return fmt.Sprintf("watch: %s [%s]", tsk.WatchCmd, watchTaskStatus(tsk))
 	}
 	if tsk.CronExpr == "" {
-		return "(no trigger)"
+		return "No trigger"
 	}
 	return tsk.CronExpr
 }
@@ -610,17 +633,17 @@ func taskDeliverySummary(tsk task.Task) string {
 
 func (s *TaskPane) renderListMode() string {
 	if s.unavailable != "" {
-		return RecoveryScreen(layout.Rect{W: s.width, H: s.height}, "Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
+		return DialogRecoveryScreen(layout.Rect{W: s.width, H: s.height}, "Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
 	}
 	if len(s.tasks) == 0 {
-		return RecoveryScreen(layout.Rect{W: s.width, H: s.height}, "No tasks", "", "Press n to create one.", false)
+		return DialogRecoveryScreen(layout.Rect{W: s.width, H: s.height}, "No tasks", "", "Press n to create one.", false)
 	}
 	t := CurrentTheme()
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	tStyle := DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	enabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	disabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	hintStyle := DialogHintStyle()
 	detailStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	erroredStyle := lipgloss.NewStyle().Foreground(t.Dead)
 
@@ -634,7 +657,11 @@ func (s *TaskPane) renderListMode() string {
 		detailWidth = 1
 	}
 
+	selectedStart, selectedEnd := 2, 2
 	for i, tsk := range s.tasks {
+		if i == s.selectedIdx {
+			selectedStart = strings.Count(b.String(), "\n")
+		}
 		status := "[✓]"
 		style := enabledStyle
 		if !tsk.Enabled {
@@ -642,22 +669,22 @@ func (s *TaskPane) renderListMode() string {
 			style = disabledStyle
 		}
 
-		// One line per task: status, name, trigger, delivery — ellipsized to
-		// the pane width so a long name/cron column marks its cut instead of
-		// being hard-clamped.
+		// Names and the next occurrence lead; mechanical details expand only
+		// beneath the selected task.
 		parts := []string{status}
 		if tsk.Name != "" {
 			parts = append(parts, tsk.Name)
 		}
-		label := strings.Join(parts, "  ")
-		metadata := "  " + taskTriggerSummary(tsk) + "  " + taskDeliverySummary(tsk)
-		header := label + metadata
+		if tsk.Enabled && tsk.NextRunAt != nil {
+			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
+		}
+		header := strings.Join(parts, "  ")
 
 		isSelected := i == s.selectedIdx
 		if isSelected && s.hasFocus {
 			b.WriteString(fitLine(SelectionMarker("▸ ")+selectedStyle.Render(header), s.width))
 		} else {
-			b.WriteString(fitLine(style.Render("  "+label)+detailStyle.Render(metadata), s.width))
+			b.WriteString(fitLine(style.Render("  "+header), s.width))
 		}
 		b.WriteString("\n")
 
@@ -674,6 +701,9 @@ func (s *TaskPane) renderListMode() string {
 
 		// The selected row expands with prompt + agent + last-run detail.
 		if isSelected {
+			for _, detail := range []string{taskTriggerSummary(tsk), taskDeliverySummary(tsk)} {
+				b.WriteString(detailStyle.Render(fitLine("      "+detail, s.width)) + "\n")
+			}
 			if snippet := promptSnippet(tsk.Prompt, detailWidth); snippet != "" {
 				b.WriteString(detailStyle.Render("      " + snippet))
 				b.WriteString("\n")
@@ -694,14 +724,16 @@ func (s *TaskPane) renderListMode() string {
 				if strings.HasPrefix(statusLabel, "errored:") {
 					statusLabel = "errored"
 				}
-				detail += " (" + statusLabel + ")"
+				detail += " · " + statusLabel
 			}
 			b.WriteString(detailStyle.Render(fitLine(detail, s.width)))
 			b.WriteString("\n")
 		}
+		b.WriteString("\n")
+		if isSelected {
+			selectedEnd = strings.Count(b.String(), "\n")
+		}
 	}
-
-	b.WriteString("\n")
 
 	// A refused action reports directly above the hint row, styled like the
 	// editor's inline field error so the two surfaces read the same. It is
@@ -731,12 +763,16 @@ func (s *TaskPane) renderListMode() string {
 
 	if s.hasFocus {
 		hint := "↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back"
-		short := "r run now · ↑/↓ · n new · enter · esc"
+		short := "r run now · x toggle · D delete · ? back · esc"
 		// A watch task can't be manually run (#1758): drop "r run now" so the
 		// hint never advertises an action that always fails.
 		if s.selectedTaskIsWatch() {
 			hint = "↑/↓ select · n new · enter edit · x toggle · D delete · esc back"
-			short = "↑/↓ · n new · enter · esc"
+			short = "x toggle · D delete · ? back · esc"
+		}
+		if !s.showActions {
+			hint = "enter edit · n new · ? actions · esc back"
+			short = "enter edit · ? actions · esc"
 		}
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
 			hint = short
@@ -746,7 +782,7 @@ func (s *TaskPane) renderListMode() string {
 		b.WriteString(hintStyle.Render(fitLine("enter to focus and edit tasks", s.width)))
 	}
 
-	return fitBlockToSize(b.String(), s.width, s.height, pinnedFooter)
+	return fitTaskList(b.String(), s.width, s.height, pinnedFooter, selectedStart, selectedEnd)
 }
 
 // promptSnippet collapses a prompt to a single line truncated to maxWidth,

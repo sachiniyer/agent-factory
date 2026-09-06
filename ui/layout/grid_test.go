@@ -465,11 +465,11 @@ func TestGridSolveAutomationsInRail(t *testing.T) {
 		w, h  int
 		panes int
 	}{
-		{"wide", layout.Grid{Panes: 1, Automations: 1, Projects: 1}, 160, 48, 1},
-		{"canonical-80x24", layout.Grid{Panes: 1, Automations: 1, Projects: 1}, 80, 24, 1},
-		{"compact", layout.Grid{Panes: 1, Automations: 1, Projects: 1}, 79, 22, 1},
-		{"two-pane", layout.Grid{Panes: 2, Automations: 1, Projects: 1}, 160, 48, 2},
-		{"three-pane", layout.Grid{Panes: 3, Automations: 1, Projects: 1}, 220, 48, 3},
+		{"wide", layout.Grid{Panes: 1, Automations: 1, Projects: 2}, 160, 48, 1},
+		{"canonical-80x24", layout.Grid{Panes: 1, Automations: 1, Projects: 2}, 80, 24, 1},
+		{"compact", layout.Grid{Panes: 1, Automations: 1, Projects: 2}, 79, 22, 1},
+		{"two-pane", layout.Grid{Panes: 2, Automations: 1, Projects: 2}, 160, 48, 2},
+		{"three-pane", layout.Grid{Panes: 3, Automations: 1, Projects: 2}, 220, 48, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := tc.grid.Solve(tc.w, tc.h)

@@ -49,15 +49,16 @@ func TestTaskHeaderMetadataRoles(t *testing.T) {
 				pane.SetSize(120, 20)
 				pane.SetTasks([]task.Task{tsk})
 				pane.SetFocus(focused)
-				meta := "  " + taskTriggerSummary(tsk) + "  " + taskDeliverySummary(tsk)
+				metadata := []string{taskTriggerSummary(tsk), taskDeliverySummary(tsk)}
 				if focused {
 					status := "[✓]"
 					if !enabled {
 						status = "[✗]"
 					}
-					require.Contains(t, pane.String(), lipgloss.NewStyle().Bold(true).Foreground(roles.Ink).Background(roles.SurfaceRaised).Render(status+"  Review"+meta))
-				} else {
-					require.Contains(t, pane.String(), lipgloss.NewStyle().Foreground(roles.InkMuted).Render(meta))
+					require.Contains(t, pane.String(), lipgloss.NewStyle().Bold(true).Foreground(roles.Ink).Background(roles.SurfaceRaised).Render(status+"  Review"))
+				}
+				for _, meta := range metadata {
+					require.Contains(t, pane.String(), lipgloss.NewStyle().Foreground(roles.InkMuted).Render("      "+meta))
 				}
 			}
 		}

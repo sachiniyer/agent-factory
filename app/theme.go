@@ -10,13 +10,10 @@ import (
 func applyTheme(cfg config.ThemeConfig) {
 	ui.ApplyTheme(cfg)
 	t := ui.CurrentTheme()
-	hooksOverlayStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Accent).
-		Padding(1, 2)
+	hooksOverlayStyle = ui.DialogStyle()
 	splitDividerStyle = lipgloss.NewStyle().
 		Foreground(t.Border)
-	titleStyle = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(t.Accent)
+	titleStyle = ui.DialogTitleStyle()
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 	keyStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 	descStyle = lipgloss.NewStyle().Foreground(t.Ink)

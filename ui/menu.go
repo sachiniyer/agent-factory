@@ -14,29 +14,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var keyStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+var keyStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
-var descStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+var descStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
 var sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
 
-var actionGroupStyle = lipgloss.NewStyle().Foreground(AccentColor)
+var actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
-// separator joins hints WITHIN a group; verticalSeparator divides the groups.
-//
-// " · " is the repo-wide separator for fragments on one line (CLAUDE.md copy
-// conventions); this row rendered " • " instead (#2399). Because this is the
-// SHARED menu renderer rather than one overlay, the drift showed up throughout
-// ordinary navigation, which is why it was worth a change to a load-bearing
-// string.
-//
-// It is width-neutral, and that is not incidental — the hint row is clamped and
-// shed by width (hintDropOrder), so a separator one cell wider would silently
-// drop a hint at some terminal size. U+00B7 and U+2022 are both East Asian
-// Ambiguous, which lipgloss.Width counts as one cell each, so the row measures
-// identically. TestMenuSeparatorIsWidthNeutral pins that rather than trusting it.
+// Hints and action groups use the same middle-dot separator. Its three-cell
+// width preserves the existing width-based shedding and pointer geometry.
 var separator = " · "
-var verticalSeparator = " │ "
+var verticalSeparator = separator
 
 var menuStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.Ink)
@@ -688,7 +677,7 @@ func (m *Menu) String() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, line)
 	}
 
-	// Render the full hint row; while it exceeds the bar width, drop options
+	// Keep context-specific hints within the bar width, dropping options
 	// in priority order and re-render. Whatever still doesn't fit after the
 	// drop list is exhausted is clamped by the status bar as before.
 	drop := make(map[keys.KeyName]bool)

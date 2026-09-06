@@ -2,47 +2,16 @@ package tree
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// Tab-kind glyphs (#1813). Where render.go's status glyphs say how a session is
-// doing, these say what a tab *is*, so a tab bar reads at a glance without
-// parsing names. Shell and Process deliberately share `›`: a process tab is a
-// terminal that happens to run one command, and the thing that distinguishes
-// them — the command name — is already the label text beside the glyph.
-//
-// This block is the canonical definition; the web client copies the values
-// verbatim, the mirror of the convention in web/src/status.ts (which copies
-// render.go's status glyphs). Keep the two in sync.
-//
-// AgentTabGlyph is intentionally the same `◆` as render.go's limitIcon, which
-// marks a session blocked at a usage-limit wall. The two never meet, and the
-// renderer — not this comment — is what keeps them apart, in two ways at once:
-//
-//   - Different COLUMNS. limitIcon is a status glyph, rendered into the row's
-//     right-hand column (render.go's `join`, placed after a Place(width-3)); a
-//     tab glyph prefixes a tab label at the far left. At any usable width they
-//     sit most of the row apart.
-//   - Different ROWS. A status glyph is on an *instance* row, a tab glyph on a
-//     *tab* child, and an instance's branch line plus a blank spacer separate
-//     the two even when the instance is expanded.
-//
-// So an expanded limit-blocked instance reads (width 80):
-//
-//	▸  [limit] resets 2:30pm alpha                                        ◆
-//	   ⎇-dev/alpha
-//
-//	  ├ 1 ◆ Agent
-//
-// Note what the left-hand `[limit] resets 2:30pm` is and isn't: it is a TEXT
-// title prefix (render.go's limitBadgePrefix), which exists so the limit state
-// survives low contrast and color-blindness — not a `◆ [limit] title` string.
-// Nothing renders the diamond adjacent to it. The rule to preserve if this
-// layout ever changes: right column = how a session is DOING, left glyph = what
-// a tab IS.
+// Tab-kind glyphs distinguish terminal and browser tabs. Agent is already a
+// meaningful label, so it has no decorative glyph; the diamond belongs only
+// to the limit-reached liveness state.
 const (
-	AgentTabGlyph   = "◆"
+	AgentTabGlyph   = ""
 	ShellTabGlyph   = "›"
 	ProcessTabGlyph = "›"
 	WebTabGlyph     = "◱"
@@ -78,13 +47,13 @@ func TabGlyph(kind session.TabKind) string {
 // terminal tabs exist on demand only (#1100) — so promising a second slot
 // before the real tab list exists would manufacture a phantom jump/attach
 // target in every consumer of TabLabels.
-var placeholderTabLabels = []string{AgentTabGlyph + " Agent"}
+var placeholderTabLabels = []string{"Agent"}
 
 // TabLabels returns the display labels for an instance's tab slots — the
 // single source of truth shared by the TabbedWindow's header, the sidebar
 // tree (#1024 PR 3), and the 1-9 jump keys, so slot numbering can never
 // disagree between them. Each label is a kind glyph plus text: agent tabs
-// render as "◆ Agent", shell tabs as "› Terminal"; any Process tab renders
+// render as "Agent", shell tabs as "› Terminal"; any Process tab renders
 // under its own name ("› btop"). See labelForTab.
 //
 // Once an instance's tabs have materialized the labels mirror the real tab
@@ -146,7 +115,7 @@ func TabLabelAt(instance *session.Instance, idx int) (string, bool) {
 // three call sites the chance to disagree, which is the thing TabLabels exists
 // to prevent. TabGlyph stays exported for anyone who needs the glyph alone.
 func labelForTab(tab *session.Tab) string {
-	return TabGlyph(tab.Kind) + " " + textForTab(tab)
+	return strings.TrimSpace(TabGlyph(tab.Kind) + " " + textForTab(tab))
 }
 
 // textForTab delegates to session.TabLabel, the single definition of what a user
