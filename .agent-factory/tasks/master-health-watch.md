@@ -8,6 +8,17 @@ nobody rebases it. #3554 sat blocked on five findings for that reason, and #3574
 was a duplicate of it opened by the next hourly run. Fixes are dispatched by the
 maintainer to lanes that stay alive until the merge.
 
+PROMPT DRIFT — before the checks below and before any no-findings early exit:
+From the master checkout at /home/siyer/Desktop/claude-squad, run:
+  go run ./scripts/prompt-drift 4ab7ba4f .agent-factory/tasks/master-health-watch.md
+This only reads the live task with `af tasks get 4ab7ba4f --json` and compares
+its prompt byte-for-byte with the versioned file, including whitespace. Silent
+success means no drift. Treat a FINDING line, or inability to run the helper,
+as a finding with the command output as evidence; use the existing dedupe and
+OUTPUT rules below (one line of new evidence on an existing issue when known).
+Never fix drift or run `af tasks update`. Captain applies reviewed prompt edits
+after merge. Continue the four existing checks even if this comparison fails.
+
 Check these four things, in order:
 
 1. MASTER CI. `gh run list --branch master --limit 15`. Any completed run with

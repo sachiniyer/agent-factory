@@ -476,6 +476,7 @@ var tasksRestartCmd = &cobra.Command{
 var (
 	taskUpdateNameFlag              string
 	taskUpdatePromptFlag            string
+	taskUpdatePromptFileFlag        string
 	taskUpdateCronFlag              string
 	taskUpdateWatchCmdFlag          string
 	taskUpdateTargetSessionFlag     string
@@ -511,6 +512,22 @@ var tasksUpdateCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
+		prompt := taskUpdatePromptFlag
+		fromFile := cmd.Flags().Changed("prompt-file")
+		if fromFile {
+			if cmd.Flags().Changed("prompt") || taskUpdatePromptFlag != "" {
+				return jsonError(errors.New("--prompt and --prompt-file are mutually exclusive"))
+			}
+			contents, err := os.ReadFile(taskUpdatePromptFileFlag)
+			if err != nil {
+				return jsonError(fmt.Errorf("read --prompt-file: %w", err))
+			}
+			prompt = string(contents)
+			if strings.TrimSpace(prompt) == "" {
+				return jsonError(errors.New("prompt must be non-empty"))
+			}
+		}
+
 		expect, err := enforceTaskScope("af tasks update", args[0])
 		if err != nil {
 			return jsonError(err)
@@ -535,17 +552,17 @@ var tasksUpdateCmd = &cobra.Command{
 		if taskUpdateNameFlag != "" {
 			patch.Name = strPtr(taskUpdateNameFlag)
 		}
-		if taskUpdatePromptFlag != "" {
+		if prompt != "" {
 			// Partial-update semantics keep `--prompt ""` as "leave
 			// unchanged", but whitespace-only values used to slip past
 			// the != "" check and be sent literally to tmux via
 			// send-keys (#568). Mirrors the trim-validation tasksAddCmd
 			// applies for #517.
-			if strings.TrimSpace(taskUpdatePromptFlag) == "" {
+			if strings.TrimSpace(prompt) == "" {
 				return jsonError(errors.New("prompt must be non-empty"))
 			}
-			s.Prompt = taskUpdatePromptFlag
-			patch.Prompt = strPtr(taskUpdatePromptFlag)
+			s.Prompt = prompt
+			patch.Prompt = strPtr(prompt)
 		}
 
 		if taskUpdateCronFlag != "" && taskUpdateWatchCmdFlag != "" {

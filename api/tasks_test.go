@@ -136,6 +136,9 @@ func resetUpdateFlags(t *testing.T) {
 	reset := func() {
 		taskUpdateNameFlag = ""
 		taskUpdatePromptFlag = ""
+		taskUpdatePromptFileFlag = ""
+		tasksUpdateCmd.Flags().Lookup("prompt-file").Changed = false
+		tasksUpdateCmd.Flags().Lookup("prompt").Changed = false
 		taskUpdateCronFlag = ""
 		taskUpdateWatchCmdFlag = ""
 		taskUpdateTargetSessionFlag = ""

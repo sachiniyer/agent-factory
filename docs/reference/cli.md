@@ -2736,6 +2736,7 @@ af tasks update <id> [flags]
 | `--program` | `string` | New program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; leave unset to keep the current one) |
 | `--project-path` | `string` | Move the task to this git repository (distinct from --repo, which scopes its current project) |
 | `--prompt` | `string` | New prompt |
+| `--prompt-file` | `string` | Read the new prompt verbatim from a local file (mutually exclusive with --prompt) |
 | `--target-session` | `string` | New target session; pass an empty value to revert to a new session per run |
 | `--watch-cmd` | `string` | New watch command (clears cron) |
 
