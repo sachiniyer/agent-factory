@@ -27,7 +27,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(mode == "dark")
 				h := newTestHome(t)
@@ -119,6 +119,32 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.showHelpScreen(helpTypeGeneral{}, nil)
 				case "confirmation":
 					h.confirmActionWithDetail("Kill Apply design roles? Its running process will stop.", "The worktree and conversation remain available.", nil)
+				case "search-overflow", "selection-overflow", "project-picker-overflow":
+					var items []string
+					var instances []*session.Instance
+					var projects []overlay.Project
+					for i := 0; i < 40; i++ {
+						name := fmt.Sprintf("Review item %02d", i)
+						items = append(items, name)
+						instances = append(instances, &session.Instance{Title: name})
+						projects = append(projects, overlay.Project{Name: name, Root: name})
+					}
+					switch scene {
+					case "search-overflow":
+						h.state = stateSearch
+						h.searchOverlay = overlay.NewSearchOverlay(instances)
+						h.searchOverlay.SetMaxSize(80, 20)
+						h.searchOverlay.SetSelectedIndex(20)
+					case "selection-overflow":
+						h.state = stateSelectProgram
+						h.selectionOverlay = overlay.NewSelectionOverlay("Select program", items)
+						h.selectionOverlay.SetMaxSize(80, 20)
+						h.selectionOverlay.SetSelectedIndex(20)
+					case "project-picker-overflow":
+						h.state = stateSwitchProject
+						h.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, projects[20].Root)
+						h.projectPickerOverlay.SetMaxSize(80, 20)
+					}
 				case "search":
 					h.state = stateSearch
 					results := []*session.Instance{inst}

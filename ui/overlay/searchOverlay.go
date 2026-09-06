@@ -291,7 +291,7 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	}
 
 	if plan.showAbove {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(
 			fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
 	}
 
@@ -342,7 +342,7 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 
 	if plan.showBelow {
 		remaining := len(s.results) - plan.endIdx
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(
 			fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
 	}
 

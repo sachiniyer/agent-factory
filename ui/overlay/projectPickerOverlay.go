@@ -256,13 +256,13 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 	start, end, showAbove, showBelow := budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
 	if showAbove {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
 		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
 	}
 	if showBelow {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
 	}
 
 	lines = append(lines, "")

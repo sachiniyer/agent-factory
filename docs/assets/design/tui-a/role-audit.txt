@@ -1,4 +1,4 @@
-P5 A whole-PR role audit (base 1bbc5ac6, weekday-state correction)
+P5 A whole-PR role audit (base 1bbc5ac6, weekday/overflow correction)
 
 Review scope: every changed path below, including prior-round changes; not only
 the latest inline locations. Production diffs reviewed against interface-design.md.
@@ -26,7 +26,7 @@ Contrast: generator validates all text roles on Surface and SurfaceRaised at
 4.5:1, border at 3:1; Surface on Accent and the blurred title Surface on InkMuted
 are explicitly checked at 4.5:1 in both themes. Examined every background setter,
 foreground assignment, reverse/faint modifier and generated style assignment in
-changed production files. A cell-level pass through all 90 current SVGs finds
+changed production files. A cell-level pass through all 96 current SVGs finds
 26 actual emitted foreground/background combinations, listed below: every one
 meets the token contract within the approved termenv channel tolerance.
 Dark Accent on SurfaceRaised emits 4.491:1; token contrast remains >=4.5:1. SGR token tolerance remains +/-1 channel.
@@ -66,31 +66,35 @@ Weekday-state correction: checked labels retain brackets while focused;
 unchecked labels remain plain. Focus no longer erases the stored value.
 TrueColor/ASCII and both palettes preserve the distinction at the same width.
 
+Overflow review: search, selection and project-picker overflow indicators use
+InkMuted in both directions. Regression tests cover compact and normal heights
+in both palettes; six additional driver stills verify the complete app frame.
+
 Emitted pairs across every gallery SVG:
-#2c6171 on #eceff3: 5.959:1 (18 stills)
-#2c6171 on #f8f9fc: 6.528:1 (37 stills)
+#2c6171 on #eceff3: 5.959:1 (21 stills)
+#2c6171 on #f8f9fc: 6.528:1 (40 stills)
 #2e3440 on #90c3d3: 6.502:1 (10 stills)
 #2e3440 on #b7c0ce: 6.807:1 (3 stills)
-#2e3440 on #eceff3: 10.829:1 (32 stills)
-#2e3440 on #f8f9fc: 11.863:1 (45 stills)
+#2e3440 on #eceff3: 10.829:1 (35 stills)
+#2e3440 on #f8f9fc: 11.863:1 (48 stills)
 #405430 on #eceff3: 7.200:1 (11 stills)
-#4c5669 on #f8f9fc: 7.018:1 (38 stills)
+#4c5669 on #f8f9fc: 7.018:1 (41 stills)
 #657083 on #f8f9fc: 4.751:1 (13 stills)
 #705014 on #f8f9fc: 7.008:1 (1 stills)
 #883b43 on #eceff3: 6.612:1 (1 stills)
 #883b43 on #f8f9fc: 7.244:1 (12 stills)
-#90c3d3 on #2e3440: 6.502:1 (37 stills)
-#90c3d3 on #434c5e: 4.491:1 (18 stills)
+#90c3d3 on #2e3440: 6.502:1 (40 stills)
+#90c3d3 on #434c5e: 4.491:1 (21 stills)
 #a1aaba on #2e3440: 5.337:1 (13 stills)
-#b7c0ce on #2e3440: 6.807:1 (38 stills)
+#b7c0ce on #2e3440: 6.807:1 (41 stills)
 #d5e2cc on #434c5e: 6.401:1 (11 stills)
 #d8dee9 on #2e3440: 9.245:1 (1 stills)
 #e3c8cd on #2e3440: 7.975:1 (12 stills)
 #e3c8cd on #434c5e: 5.509:1 (1 stills)
 #ebcb8b on #2e3440: 7.998:1 (1 stills)
-#eceff3 on #2e3440: 10.829:1 (44 stills)
-#eceff3 on #434c5e: 7.480:1 (32 stills)
-#eceff4 on #2e3440: 10.836:1 (16 stills)
+#eceff3 on #2e3440: 10.829:1 (47 stills)
+#eceff3 on #434c5e: 7.480:1 (35 stills)
+#eceff4 on #2e3440: 10.836:1 (17 stills)
 #f8f9fc on #2c6171: 6.528:1 (10 stills)
 #f8f9fc on #4c5669: 7.018:1 (3 stills)
 
@@ -135,6 +139,8 @@ app/testdata/design/project-picker-dark.svg
 app/testdata/design/project-picker-existing-dark.svg
 app/testdata/design/project-picker-existing-light.svg
 app/testdata/design/project-picker-light.svg
+app/testdata/design/project-picker-overflow-dark.svg
+app/testdata/design/project-picker-overflow-light.svg
 app/testdata/design/prompt-dark.svg
 app/testdata/design/prompt-light.svg
 app/testdata/design/rail-project-selection-dark.svg
@@ -143,8 +149,12 @@ app/testdata/design/rail-task-selection-dark.svg
 app/testdata/design/rail-task-selection-light.svg
 app/testdata/design/search-dark.svg
 app/testdata/design/search-light.svg
+app/testdata/design/search-overflow-dark.svg
+app/testdata/design/search-overflow-light.svg
 app/testdata/design/selection-dark.svg
 app/testdata/design/selection-light.svg
+app/testdata/design/selection-overflow-dark.svg
+app/testdata/design/selection-overflow-light.svg
 app/testdata/design/sessions-dark.svg
 app/testdata/design/sessions-light.svg
 app/testdata/design/task-create-dark.svg
@@ -278,6 +288,10 @@ docs/assets/design/tui-a/project-picker-existing-light.ansi
 docs/assets/design/tui-a/project-picker-existing-light.svg
 docs/assets/design/tui-a/project-picker-light.ansi
 docs/assets/design/tui-a/project-picker-light.svg
+docs/assets/design/tui-a/project-picker-overflow-dark.ansi
+docs/assets/design/tui-a/project-picker-overflow-dark.svg
+docs/assets/design/tui-a/project-picker-overflow-light.ansi
+docs/assets/design/tui-a/project-picker-overflow-light.svg
 docs/assets/design/tui-a/projects-unavailable-dark.ansi
 docs/assets/design/tui-a/projects-unavailable-dark.svg
 docs/assets/design/tui-a/projects-unavailable-light.ansi
@@ -299,10 +313,18 @@ docs/assets/design/tui-a/search-dark.ansi
 docs/assets/design/tui-a/search-dark.svg
 docs/assets/design/tui-a/search-light.ansi
 docs/assets/design/tui-a/search-light.svg
+docs/assets/design/tui-a/search-overflow-dark.ansi
+docs/assets/design/tui-a/search-overflow-dark.svg
+docs/assets/design/tui-a/search-overflow-light.ansi
+docs/assets/design/tui-a/search-overflow-light.svg
 docs/assets/design/tui-a/selection-dark.ansi
 docs/assets/design/tui-a/selection-dark.svg
 docs/assets/design/tui-a/selection-light.ansi
 docs/assets/design/tui-a/selection-light.svg
+docs/assets/design/tui-a/selection-overflow-dark.ansi
+docs/assets/design/tui-a/selection-overflow-dark.svg
+docs/assets/design/tui-a/selection-overflow-light.ansi
+docs/assets/design/tui-a/selection-overflow-light.svg
 docs/assets/design/tui-a/sessions-dark.ansi
 docs/assets/design/tui-a/sessions-dark.svg
 docs/assets/design/tui-a/sessions-light.ansi
@@ -391,6 +413,7 @@ ui/hooks_pane.go
 ui/menu.go
 ui/overlay/combined_fgbg_test.go
 ui/overlay/confirmationOverlay.go
+ui/overlay/overflow_roles_test.go
 ui/overlay/overlay.go
 ui/overlay/overlay_test.go
 ui/overlay/projectPickerOverlay.go

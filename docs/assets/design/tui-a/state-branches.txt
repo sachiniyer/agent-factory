@@ -843,10 +843,10 @@ ui/overlay/projectPickerOverlay.go:202 Render
   251 condition p.degraded
   254 condition avail < 1
   258 condition showAbove
-  259 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
+  259 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
   262 mapping lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
   264 condition showBelow
-  265 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
+  265 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
   270 condition layout.Cells(hint) > cw
   273 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
   275 return return finishRender(style, fit, textRect, lines)
@@ -911,7 +911,7 @@ ui/overlay/searchOverlay.go:264 renderFrame
   287 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  type to search…"), plan.contentWidth))
   289 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  No matches found"), plan.contentWidth))
   293 condition plan.showAbove
-  294 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render( 	fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
+  294 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render( 	fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
   304 mapping statusStyle := lipgloss.NewStyle().Foreground(t.Ink)
   305 mapping glyph := " "
   306 condition r.Instance.GetInFlightOp() == session.OpNone
@@ -938,7 +938,7 @@ ui/overlay/searchOverlay.go:264 renderFrame
   335 mapping line += selectedStyle.Render(" (" + branch + ")")
   339 mapping lines = append(lines, truncateOverlayLine("  "+statusStr+normalStyle.Render("  "+label), plan.contentWidth))
   343 condition plan.showBelow
-  345 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render( 	fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
+  345 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render( 	fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
   349 condition !plan.compact
   353 condition plan.compact || layout.Cells(hint) > plan.contentWidth
   356 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), plan.contentWidth))
@@ -963,12 +963,12 @@ ui/overlay/selectionOverlay.go:111 Render
   129 mapping lines := []string{truncateOverlayLine(titleStyle.Render(s.title), textRect.W)}
   130 condition !compact
   134 condition showAbove
-  135 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more above"), textRect.W))
+  135 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more above"), textRect.W))
   139 condition i == s.selectedIdx
   140 mapping lines = append(lines, truncateOverlayLine(ui.SelectionMarker("▸ ")+selectedStyle.Render(item), textRect.W))
   142 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  "+item), textRect.W))
   145 condition showBelow
-  146 mapping lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more below"), textRect.W))
+  146 mapping lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more below"), textRect.W))
   149 condition !compact
   161 condition compact
   165 condition layout.Cells(candidate) <= textRect.W

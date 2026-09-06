@@ -132,7 +132,7 @@ func (s *SelectionOverlay) Render() string {
 	}
 
 	if showAbove {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more above"), textRect.W))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more above"), textRect.W))
 	}
 	for i := start; i < end; i++ {
 		item := s.items[i]
@@ -143,7 +143,7 @@ func (s *SelectionOverlay) Render() string {
 		}
 	}
 	if showBelow {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more below"), textRect.W))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more below"), textRect.W))
 	}
 
 	if !compact {

@@ -75,10 +75,11 @@ K05 automations enabled/disabled -> [✓]/[✗]; health unknown -> [?]; attentio
 K06 creation defaults/options in Menu: checkmarks indicate a selected option;
     shortcut labels and separators are not liveness. B owns footer grouping,
     essential-action density, and action/metadata hierarchy.
-K07 scroll indicators -> arrows/ellipsis and hidden counts; textOverlay M;
-    search/selection/project pickers presently I. They are chrome, never rows.
+K07 scroll indicators -> arrows/ellipsis and hidden counts in M throughout
+    text/search/selection/project overlays. They are chrome, never rows.
     Search zones use render-plan coordinates; title/indicator collisions tested.
-    B applies one hint hierarchy across these indicators.
+    Overflow regressions cover both directions, all three pickers, compact and
+    normal geometry, and both palettes. Selectable labels retain I.
 
 SELECTION / FOCUS / BLUR / MODE
 -------------------------------

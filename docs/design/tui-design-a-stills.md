@@ -21,9 +21,9 @@ Shared daemon config retirement is tracked in
 
 ## Capture provenance
 
-These 90 stills are deterministic real app-model `Update`/`View` output,
+These 96 stills are deterministic real app-model `Update`/`View` output,
 converted from ANSI cells by P4's SVG writer. They are not live-daemon screen
-recordings. `TestDesignDriverScenes` adds thirty-two chrome scenes to P4's thirteen
+recordings. `TestDesignDriverScenes` adds thirty-five chrome scenes to P4's thirteen
 recovery scenes. Both run only in the isolated sandbox created by
 `make playtest-container-detached`; no host TUI, app tests or daemon tests run.
 The supplementary P4 live tmux scenario passed retained failed creation,
@@ -54,7 +54,7 @@ selections use Ink on SurfaceRaised. The blurred sidebar title uses Surface on
 InkMuted, with a 4.5:1 contrast gate in both palettes. Regression tests pin these
 role assignments. Only the affected accounts, config, zero-accounts, search,
 pane, keyboard and preview SVG/ANSI pairs were refreshed in the make-created
-playtest sandbox; all 90 driver goldens pass. The search fixture now includes
+playtest sandbox; all 96 driver goldens pass. The search fixture now includes
 lost, dead and archived results.
 
 The final whole-PR [role audit](../assets/design/tui-a/role-audit.txt) records
@@ -83,6 +83,10 @@ The focused weekday retains its checked value: checked days use `[M]`-style
 labels, unchecked days keep the plain letter. Both occupy three cells; focus
 keeps the same raised/underlined treatment. TrueColor and ASCII regressions
 cover the toggle in both palettes, with separate checked/unchecked stills.
+
+Search and both pickers use InkMuted for overflow indicators, while selectable
+labels retain Ink. Separate scrolled scenes show both directions; regression
+coverage includes compact/normal geometry and both themes.
 
 ## Performance and verification
 
@@ -152,3 +156,6 @@ stills were self-reviewed before requesting review.
 | config-edit | ![config-edit light](../assets/design/tui-a/config-edit-light.svg) | ![config-edit dark](../assets/design/tui-a/config-edit-dark.svg) |
 | account-register | ![account-register light](../assets/design/tui-a/account-register-light.svg) | ![account-register dark](../assets/design/tui-a/account-register-dark.svg) |
 | task-weekdays-unchecked | ![Unchecked weekday light](../assets/design/tui-a/task-weekdays-unchecked-light.svg) | ![Unchecked weekday dark](../assets/design/tui-a/task-weekdays-unchecked-dark.svg) |
+| search-overflow | ![search-overflow light](../assets/design/tui-a/search-overflow-light.svg) | ![search-overflow dark](../assets/design/tui-a/search-overflow-dark.svg) |
+| selection-overflow | ![selection-overflow light](../assets/design/tui-a/selection-overflow-light.svg) | ![selection-overflow dark](../assets/design/tui-a/selection-overflow-dark.svg) |
+| project-picker-overflow | ![project-picker-overflow light](../assets/design/tui-a/project-picker-overflow-light.svg) | ![project-picker-overflow dark](../assets/design/tui-a/project-picker-overflow-dark.svg) |
