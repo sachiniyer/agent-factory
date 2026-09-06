@@ -48,19 +48,16 @@ type ConfirmationOverlay struct {
 	ConfirmKey string
 	// Custom cancel key (defaults to 'n')
 	CancelKey string
-	// Custom styling options
-	borderColor lipgloss.TerminalColor
 }
 
 // NewConfirmationOverlay creates a new confirmation dialog overlay with the given message
 func NewConfirmationOverlay(message string) *ConfirmationOverlay {
 	return &ConfirmationOverlay{
-		Dismissed:   false,
-		message:     message,
-		width:       50, // Default width
-		ConfirmKey:  defaultConfirmKey,
-		CancelKey:   "n",
-		borderColor: ui.CurrentTheme().Dead,
+		Dismissed:  false,
+		message:    message,
+		width:      50, // Default width
+		ConfirmKey: defaultConfirmKey,
+		CancelKey:  "n",
 	}
 }
 
@@ -117,10 +114,7 @@ func (c *ConfirmationOverlay) enterConfirms() bool {
 // frameStyle is the overlay's border+padding style, shared by every path that
 // needs to know how much room the text actually gets.
 func (c *ConfirmationOverlay) frameStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(c.borderColor).
-		Padding(confirmationOverlayVerticalPadding, confirmationOverlayHorizontalPadding)
+	return ui.DialogStyle()
 }
 
 // textRect resolves the text area the message will actually be rendered into.
@@ -151,7 +145,7 @@ func (c *ConfirmationOverlay) Render() string {
 	}
 
 	// Apply the border style and return
-	return style.Render(content)
+	return ui.RenderDialog(style, content)
 }
 
 // SetWidth sets the width of the confirmation overlay
@@ -259,6 +253,9 @@ func (c *ConfirmationOverlay) fittedHint(width, height int) []string {
 
 func (c *ConfirmationOverlay) visibleContent(width, height int) string {
 	critical := wrapOverlayLines(c.message, width)
+	for i := range critical {
+		critical[i] = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Dead).Render(critical[i])
+	}
 	detail := c.detailLines(width)
 
 	if height <= 0 {
@@ -358,15 +355,17 @@ func refusalNotices(short int) []string {
 
 func (c *ConfirmationOverlay) instruction(compact bool) string {
 	bold := lipgloss.NewStyle().Bold(true).Render
+	t := ui.CurrentTheme()
+	primary := lipgloss.NewStyle().Bold(true).Foreground(t.Surface).Background(t.Accent).Render
 	if compact {
-		return bold(c.ConfirmKey) + " confirm · " +
+		return primary(c.ConfirmKey) + " confirm · " +
 			bold(c.CancelKey) + "/" + bold("esc") + " cancel"
 	}
-	confirmKeys := bold(c.ConfirmKey)
+	confirmKeys := primary(c.ConfirmKey)
 	if c.enterConfirms() {
 		// "/enter" mirrors the compact "n/esc" idiom and keeps the full hint on one
 		// line at the confirmation's fixed width, so its click zone survives (#2405).
-		confirmKeys += "/" + bold("enter")
+		confirmKeys += "/" + primary("enter")
 	}
 	return "Press " + confirmKeys + " to confirm, " +
 		bold(c.CancelKey) + " or " + bold("esc") + " to cancel"

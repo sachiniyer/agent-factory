@@ -34,15 +34,15 @@ type SidebarProject struct {
 }
 
 // projectsTitleStyle / projectsTitleDimStyle paint the section header — the
-// accent when the section holds focus, the muted foreground when it does not —
+// underline when the section holds focus, plain ink when it does not —
 // mirroring the Automations header so the two bottom sections read as peers.
 var projectsTitleStyle = lipgloss.NewStyle().
-	Bold(true).
-	Foreground(AccentColor)
+	Bold(true).Underline(true).
+	Foreground(activeTheme.Ink)
 
 var projectsTitleDimStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.InkMuted)
+	Foreground(activeTheme.Ink)
 
 var projectsHintStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.InkMuted)
@@ -348,7 +348,7 @@ func (p *ProjectsPane) String() string {
 		// remaining sources as a complete list (#3298). This row also stands
 		// in for the empty-state line: "No other projects yet" would be a
 		// claim the failed read cannot support.
-		lines = append(lines, projectsHintStyle.Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
+		lines = append(lines, projectsHintStyle.Foreground(activeTheme.Dead).Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
 	} else if len(p.projects) == 0 {
 		lines = append(lines, projectRowStyle.Render(fitLine("  No other projects yet", p.rect.W)))
 	}

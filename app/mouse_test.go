@@ -575,7 +575,7 @@ func TestMouse_ClickSectionBackgroundFocusesAutomations(t *testing.T) {
 // exactly like pressing Tab.
 func TestMouse_ClickStatusHintRunsAction(t *testing.T) {
 	h, _, _ := mouseTestHome(t)
-	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: "/project"}})
+	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: "/project"}, {Name: "other", Root: "/other"}})
 	h.relayout()
 	newFakeClock(h)
 	h.focusRegion(layout.RegionAutomations)

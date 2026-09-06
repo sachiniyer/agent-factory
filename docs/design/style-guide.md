@@ -404,3 +404,5 @@ The [TUI role gallery](tui-design-a-stills.md) applies the generated roles to
 96 app-model driver stills. Slice A replaces the configurable TUI palette and
 private ANSI colours; the common overlay recipe and density cuts follow in B,
 and the Light/Dark/System selector and migration in C.
+
+The [TUI overlay and density gallery](tui-design-b-stills.md) applies the shared dialog frame and TUI cut list.

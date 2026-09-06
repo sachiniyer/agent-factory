@@ -484,7 +484,7 @@ func (p *schedulePicker) render() string {
 	dimStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	previewStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
 
 	lines := []string{labelStyle.Render("Schedule:") + " " + p.renderTypeSelector(selectedStyle, dimSelectedStyle)}
 	lines = append(lines, p.renderContextLines()...)
@@ -492,7 +492,7 @@ func (p *schedulePicker) render() string {
 		lines = append(lines, preview)
 	}
 	if p.focused {
-		lines = append(lines, indentSub+dimStyle.Render(p.hint()))
+		lines = append(lines, indentSub+previewStyle.Render(p.hint()))
 	}
 
 	for i := range lines {

@@ -282,6 +282,7 @@ func TestTaskPaneWatchTaskListFooterOmitsRunNow(t *testing.T) {
 		Enabled:  true,
 	}})
 
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
 	lines := strings.Split(tp.String(), "\n")
 	footer := lines[len(lines)-1]
 	assert.NotContains(t, footer, "run now",
@@ -1133,11 +1134,11 @@ func TestTaskPaneListRendersWatchStatus(t *testing.T) {
 		wantDetail    string // short status on the selected row's detail line
 	}{
 		{"enabled fresh", true, "", "[watching]", ""},
-		{"enabled delivering", true, "sent", "[watching]", "(sent)"},
-		{"crash loop", true, "errored", "[errored]", "(errored)"},
-		{"crash loop with summary", true, "errored: exit status 1: WARN lock held", "[errored]", "(errored)"},
-		{"clean exit", true, "stopped", "[stopped]", "(stopped)"},
-		{"disabled", false, "sent", "[stopped]", "(sent)"},
+		{"enabled delivering", true, "sent", "[watching]", "· sent"},
+		{"crash loop", true, "errored", "[errored]", "· errored"},
+		{"crash loop with summary", true, "errored: exit status 1: WARN lock held", "[errored]", "· errored"},
+		{"clean exit", true, "stopped", "[stopped]", "· stopped"},
+		{"disabled", false, "sent", "[stopped]", "· sent"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1361,6 +1362,7 @@ func TestTaskPaneListCompactFooterShowsRunNow(t *testing.T) {
 		Enabled:  true,
 	}})
 
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
 	lines := strings.Split(tp.String(), "\n")
 	assert.Contains(t, lines[len(lines)-1], "r run now",
 		"compact task-list footer must keep the documented run-now affordance discoverable")

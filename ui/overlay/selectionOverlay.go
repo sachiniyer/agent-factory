@@ -84,10 +84,7 @@ func (s *SelectionOverlay) SetMaxSize(width, height int) {
 }
 
 func selectionOverlayStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.CurrentTheme().Accent).
-		Padding(1, 2)
+	return ui.DialogStyle()
 }
 
 func (s *SelectionOverlay) windowForTextHeight(textHeight int) (start, end int, showAbove, showBelow, compact bool) {
@@ -110,10 +107,11 @@ func (s *SelectionOverlay) windowForTextHeight(textHeight int) (start, end int, 
 // Render renders the selection overlay
 func (s *SelectionOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	titleStyle := ui.DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	hintStyle := ui.DialogHintStyle()
+	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 
 	style := selectionOverlayStyle()
 	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
@@ -132,7 +130,7 @@ func (s *SelectionOverlay) Render() string {
 	}
 
 	if showAbove {
-		lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more above"), textRect.W))
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render("  … more above"), textRect.W))
 	}
 	for i := start; i < end; i++ {
 		item := s.items[i]
@@ -143,7 +141,7 @@ func (s *SelectionOverlay) Render() string {
 		}
 	}
 	if showBelow {
-		lines = append(lines, truncateOverlayLine(hintStyle.Render("  … more below"), textRect.W))
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render("  … more below"), textRect.W))
 	}
 
 	if !compact {
@@ -173,5 +171,5 @@ func (s *SelectionOverlay) Render() string {
 	if fit.H > 0 && len(lines) >= textRect.H {
 		style = style.Height(fit.H)
 	}
-	return style.Render(strings.Join(lines, "\n"))
+	return ui.RenderDialog(style, strings.Join(lines, "\n"))
 }

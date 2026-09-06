@@ -18,7 +18,7 @@ import (
 
 var windowStyle = lipgloss.NewStyle().
 	BorderForeground(activeTheme.Border).
-	Border(lipgloss.RoundedBorder())
+	Border(lipgloss.NormalBorder())
 
 // blurredWindowStyle is the neutral pane frame for ordinary panes.
 var blurredWindowStyle = windowStyle.
@@ -33,7 +33,7 @@ var selectedWindowStyle = windowStyle.
 // interactive mode (#1089, RFC §2.3): an accent DOUBLE border still signals
 // "keystrokes go INTO this terminal" even when colors are unavailable.
 var interactiveWindowStyle = windowStyle.
-	Border(lipgloss.DoubleBorder()).
+	Border(lipgloss.NormalBorder()).
 	BorderForeground(activeTheme.Accent)
 
 // previewWindowStyle marks a transient #1321 preview binding without
@@ -225,7 +225,7 @@ func (w *TabbedWindow) ContentSeq() uint64 {
 }
 
 // SetPreview applies a transient render binding without mutating the committed
-// pane binding. original is rendered in the preview header so the reversible
+// pane binding. original is retained for the preview details so the reversible
 // state is visible to the user.
 func (w *TabbedWindow) SetPreview(instance *session.Instance, tab int, original string) uint64 {
 	if w.preview != nil &&
@@ -254,6 +254,15 @@ func (w *TabbedWindow) ClearPreview() uint64 {
 	// HostHistory for a capture-only pane). Until then there is no truthful owner.
 	w.SetScrollOwnerResolving()
 	return w.bumpContentSeq()
+}
+
+// PreviewOrigin is the retained pane identity, disclosed in help rather than
+// repeating it in the one-line preview header.
+func (w *TabbedWindow) PreviewOrigin() string {
+	if w.preview == nil {
+		return ""
+	}
+	return w.preview.original
 }
 
 // Previewing reports whether the window is currently rendering a transient
@@ -586,7 +595,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
-		text = fmt.Sprintf(" Preview %s · %s — original %s ", inst.Title, label, w.preview.original)
+		text = fmt.Sprintf(" %s · %s · Preview ", inst.Title, label)
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
@@ -595,6 +604,9 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		}
 	} else {
 		text = " No session selected "
+	}
+	if w.interactive {
+		text = strings.TrimSuffix(text, " ") + " · Keyboard "
 	}
 	if w.IsInScrollMode() {
 		// Scroll mode is pane chrome, not terminal history. Keeping this cue in

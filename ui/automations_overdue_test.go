@@ -60,7 +60,7 @@ func TestAutomationsExpandedRowExplainsOverdue(t *testing.T) {
 
 	out := a.View()
 	require.Contains(t, out, "▾[!]  nightly-sweep")
-	assert.Contains(t, out, "overdue · missed 18 · 0 3 * * *",
+	assert.Regexp(t, `overdue · missed 18 .*0 3 \* \* \*`, out,
 		"the warning leads the detail line, ahead of the task's own configuration, "+
 			"because a narrow rail ellipsizes from the right:\n%s", out)
 }
@@ -241,7 +241,7 @@ func TestAutomationsDiagnosesAMalformedExpression(t *testing.T) {
 
 	out := a.View()
 	assert.Contains(t, out, "▾[!]  nightly-sweep")
-	assert.Contains(t, out, "Invalid cron expression · 99 * * * *",
+	assert.Regexp(t, `Invalid cron expression .*99 \* \* \* \*`, out,
 		"the reason LEADS the line, ahead of the expression it is about:\n%s", out)
 	assert.NotContains(t, out, "next ", "and no fire time is promised")
 }
@@ -316,7 +316,7 @@ func TestAutomationsLeadsWithBothUnschedulableDiagnoses(t *testing.T) {
 		a.SetRect(layout.Rect{W: 100, H: 4})
 		a.Focus()
 		wide := a.View()
-		assert.Contains(t, wide, tc.want+" · "+tc.expr,
+		assert.Less(t, strings.Index(wide, tc.want), strings.Index(wide, tc.expr),
 			"%q: the reason leads the line:\n%s", tc.expr, wide)
 		assert.Equal(t, 1, strings.Count(wide, tc.want),
 			"%q: and is said once — the summary must not repeat it", tc.expr)

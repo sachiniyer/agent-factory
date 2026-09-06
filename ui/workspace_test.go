@@ -14,8 +14,8 @@ func TestEmptyWorkspacePreservesFrameAtTinySize(t *testing.T) {
 
 	requireExactRect(t, out, lay.Workspace, "empty workspace")
 	lines := strings.Split(stripANSI(out), "\n")
-	assert.True(t, strings.HasSuffix(lines[0], "╮"), "top right corner must stay visible")
-	assert.True(t, strings.HasSuffix(lines[len(lines)-1], "╯"), "bottom right corner must stay visible")
+	assert.True(t, strings.HasSuffix(lines[0], "┐"), "top right corner must stay visible")
+	assert.True(t, strings.HasSuffix(lines[len(lines)-1], "┘"), "bottom right corner must stay visible")
 }
 
 func TestFirstRunWorkspaceUnframedAtTinySize(t *testing.T) {
@@ -24,8 +24,8 @@ func TestFirstRunWorkspaceUnframedAtTinySize(t *testing.T) {
 
 	requireExactRect(t, out, lay.Workspace, "first-run workspace")
 	lines := strings.Split(stripANSI(out), "\n")
-	assert.NotContains(t, lines[0], "╮", "recovery screens have no card frame")
-	assert.NotContains(t, lines[len(lines)-1], "╯", "recovery screens have no card frame")
+	assert.NotContains(t, lines[0], "┐", "recovery screens have no card frame")
+	assert.NotContains(t, lines[len(lines)-1], "┘", "recovery screens have no card frame")
 }
 
 // TestNoActiveProjectWorkspaceDoesNotAdvertiseCreate is #2830. Launched outside
@@ -72,8 +72,8 @@ func TestNoActiveProjectWorkspaceUnframedAtTinySize(t *testing.T) {
 
 	requireExactRect(t, out, lay.Workspace, "no-active-project workspace")
 	lines := strings.Split(stripANSI(out), "\n")
-	assert.NotContains(t, lines[0], "╮", "recovery screens have no card frame")
-	assert.NotContains(t, lines[len(lines)-1], "╯", "recovery screens have no card frame")
+	assert.NotContains(t, lines[0], "┐", "recovery screens have no card frame")
+	assert.NotContains(t, lines[len(lines)-1], "┘", "recovery screens have no card frame")
 }
 
 // TestWorkspaceEmptyStatesUseSentenceCase is #3632. This one file renders three

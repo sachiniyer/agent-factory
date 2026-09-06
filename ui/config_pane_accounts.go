@@ -415,13 +415,13 @@ func accountRowPurpose(account AccountRow) string {
 
 // renderAccountsUnavailable renders the section's failure line in place of rows.
 func (c *ConfigPane) renderAccountsUnavailable() string {
-	return RecoveryContent("Cannot load accounts", "Accounts could not be read: "+c.accounts.unavailable, "Reopen settings to retry.", true, c.width)
+	return DialogRecoveryContent("Cannot load accounts", "Accounts could not be read: "+c.accounts.unavailable, "Reopen settings to retry.", true, c.width)
 }
 
 // renderBusyAccountRow keeps disabled labels readable and uses the shared dashed
 // outline. Fit each physical line separately so viewport height stays accurate.
 func (c *ConfigPane) renderBusyAccountRow(label, cursor string) string {
-	style := theme.Disabled()
+	style := theme.Disabled().Background(activeTheme.SurfaceRaised)
 	if c.width > 0 {
 		style = style.MaxWidth(max(1, c.width-2))
 	}

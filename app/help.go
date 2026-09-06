@@ -489,7 +489,7 @@ func (m *home) layoutTextOverlay() {
 }
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ui.CurrentTheme().Accent)
+	titleStyle  = ui.DialogTitleStyle()
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
 	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
 	descStyle   = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Ink)
@@ -535,7 +535,13 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 		m.textOverlayPendingSeenMask = flag
 
 		if responsive, ok := helpType.(responsiveHelpText); ok {
-			m.textOverlay = overlay.NewResponsiveTextOverlay(responsive.toContentWidth)
+			m.textOverlay = overlay.NewResponsiveTextOverlay(func(width int) string {
+				content := responsive.toContentWidth(width)
+				if window, _ := m.focusedContentPane(); window != nil && window.PreviewOrigin() != "" {
+					content = "Preview returns to " + window.PreviewOrigin() + "\n\n" + content
+				}
+				return content
+			})
 		} else {
 			m.textOverlay = overlay.NewTextOverlay(helpType.toContent())
 		}
