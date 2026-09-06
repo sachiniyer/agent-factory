@@ -1,4 +1,4 @@
-// Ratchet this family list as P2 migrates B (terminal/tabs), then C (all chrome).
+// Rail/header and terminal/tabs are migrated; widen to all chrome in P2 slice C.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";

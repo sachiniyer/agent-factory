@@ -133,6 +133,26 @@ interface Pass {
   seededRows: number;
 }
 
+function screenshotFor(page: Page, suffix: string): (name: string) => Promise<void> {
+  return async (name: string) => {
+    if (visual) {
+      // A completed transcript precedes the daemon's idle observation. Fast CI
+      // can reach a still while rows still say Working; wait for the same
+      // observable settled state on every visible rail, including after resize.
+      if (await page.locator(".af-rail-list").isVisible()) {
+        const states = page.locator(".af-rail-list .af-operator-state");
+        await expect(states).toHaveText(Array(await states.count()).fill("Needs you"));
+      }
+      await expect(page).toHaveScreenshot(`${name}${suffix}.png`, {
+        animations: "disabled", caret: "hide",
+        stylePath: "./selftest/visual.css",
+      });
+    } else {
+      await page.screenshot({ path: join(SHOT_DIR, `${name}${suffix}.png`) });
+    }
+  };
+}
+
 async function record(browser: Browser, pass: Pass): Promise<void> {
   const context = await browser.newContext({
     viewport: DEMO_VIEWPORT,
@@ -146,23 +166,7 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
   const video = page.video();
   // Freeze wall-clock age labels only; timers and performance.now still advance.
   if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
-  const shot = async (name: string) => {
-    if (visual) {
-      // A completed transcript precedes the daemon's idle observation. Fast CI
-      // can reach a still while rows still say Working; wait for the same
-      // observable settled state on every visible rail, including after resize.
-      if (await page.locator(".af-rail-list").isVisible()) {
-        const states = page.locator(".af-rail-list .af-operator-state");
-        await expect(states).toHaveText(Array(await states.count()).fill("Needs you"));
-      }
-      await expect(page).toHaveScreenshot(`${name}${pass.suffix}.png`, {
-        animations: "disabled", caret: "hide",
-        stylePath: "./selftest/visual.css",
-      });
-    } else {
-      await page.screenshot({ path: join(SHOT_DIR, `${name}${pass.suffix}.png`) });
-    }
-  };
+  const shot = screenshotFor(page, pass.suffix);
 
   try {
     // --- 1. the dashboard --------------------------------------------------
@@ -343,7 +347,8 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
 async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "suffix">, phone: boolean): Promise<void> {
   const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
   const page = await context.newPage();
-  const shot = (name: string) => page.screenshot({ path: join(SHOT_DIR, `${name}${pass.suffix}.png`) });
+  if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
+  const shot = screenshotFor(page, pass.suffix);
   try {
     await openAfterInitialResync(page, async () => { await page.goto("/"); });
     await row(page, SESSION_JSON).click();
@@ -420,6 +425,7 @@ async function recordSplits(browser: Browser): Promise<void> {
   for (const pass of [{ suffix: "", colorScheme: "light" }, { suffix: "-dark", colorScheme: "dark" }] as const) {
     const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
     const page = await context.newPage();
+    if (visual) await page.clock.setFixedTime(new Date("2000-01-01T00:00:00Z"));
     try {
       await openAfterInitialResync(page, async () => { await page.goto("/"); });
       await row(page, SESSION_JSON).click();
@@ -430,7 +436,7 @@ async function recordSplits(browser: Browser): Promise<void> {
       await page.locator('.af-tab[data-tab-index="0"]').dragTo(pane, { targetPosition: { x: 8, y: box.height / 2 } });
       await expect(page.locator(".af-pane")).toHaveCount(2);
       await page.locator(".af-pane-host .xterm").first().click();
-      await page.screenshot({ path: join(SHOT_DIR, `split-panes${pass.suffix}.png`) });
+      await screenshotFor(page, pass.suffix)("split-panes");
     } finally {
       await context.close();
     }

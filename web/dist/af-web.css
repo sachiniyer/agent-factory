@@ -1146,11 +1146,25 @@ button:disabled,
   font-size: var(--af-fs-md);
 }
 .af-main-term {
+  position: relative;
+  padding: calc(var(--af-space-1) / 2);
   min-height: 0;
   outline: calc(var(--af-space-1) / 4) solid var(--af-border);
   outline-offset: calc(var(--af-space-1) / -4);
   background: var(--af-surface);
   color: var(--af-ink);
+}
+.af-main-term::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+}
+.af-kb-terminal .af-main-term::after {
+  border-width: calc(var(--af-space-1) / 2);
+  border-color: var(--af-accent);
 }
 .af-term-head {
   display: flex;
@@ -2471,6 +2485,9 @@ button:disabled,
   .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-project-switch-wrap,
   .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-appbar-tools-wrap {
     display: none;
+  }
+  .af-app.af-view-sessions.af-session-selected .af-main-term {
+    padding-block: 0;
   }
   .af-app.af-view-sessions.af-session-selected .af-term-head {
     min-height: calc(max(var(--af-space-1), env(safe-area-inset-top)) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-1));

@@ -1423,11 +1423,27 @@ button:disabled,
 /* Terminal pane: one slim title + tabs + conditional-Retry header over the xterm
  * host, which fills the remaining height so the FitAddon has real dimensions. */
 .af-main-term {
+  position: relative;
+  padding: calc(var(--af-space-1) / 2);
   min-height: 0;
   outline: calc(var(--af-space-1) / 4) solid var(--af-border);
   outline-offset: calc(var(--af-space-1) / -4);
   background: var(--af-surface);
   color: var(--af-ink);
+}
+
+/* Paint the pane boundary above terminal children without intercepting input. */
+.af-main-term::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+}
+.af-kb-terminal .af-main-term::after {
+  border-width: calc(var(--af-space-1) / 2);
+  border-color: var(--af-accent);
 }
 
 .af-term-head {
@@ -3201,6 +3217,10 @@ button:disabled,
   .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-project-switch-wrap,
   .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-appbar-tools-wrap {
     display: none;
+  }
+
+  .af-app.af-view-sessions.af-session-selected .af-main-term {
+    padding-block: 0;
   }
 
   .af-app.af-view-sessions.af-session-selected .af-term-head {

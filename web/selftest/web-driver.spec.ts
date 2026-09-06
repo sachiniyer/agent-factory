@@ -9393,6 +9393,7 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
 
   // Escape closes the menu without creating anything (checked after, so a stray
   // tab from a mis-click can't be mistaken for the one above).
+  await openSessionActions(page);
   await newTab.click();
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
