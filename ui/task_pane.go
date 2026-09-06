@@ -36,7 +36,8 @@ var taskPlaceholderStyle = lipgloss.NewStyle().
 var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
-// (name, trigger, prompt) then Delivery (target session, path, program).
+// (name, trigger, prompt) then Delivery (target session, on-complete, path,
+// program).
 // The trigger is a two-step stop: a cron|watch type selector followed by the
 // matching value input — only the selected trigger's field is shown, which
 // makes the exactly-one-trigger contract (#782) structural instead of a
@@ -47,6 +48,7 @@ const (
 	taskFocusTriggerValue // cron expression or watch command, per the selector
 	taskFocusPrompt
 	taskFocusTarget
+	taskFocusOnComplete // spawned-session lifecycle: keep | archive | kill (#2595)
 	taskFocusPath
 	taskFocusProgram
 	taskFocusSave
@@ -81,8 +83,15 @@ type TaskPane struct {
 	// enum (#658); per-task paths-with-flags are out of scope.
 	editProgramOptions []string
 	editProgramIdx     int
-	editError          string // last validation error shown to the user
-	editErrorField     int    // focus stop the error is rendered under (-1 = none)
+	// Spawned-session lifecycle selector state (#2595). editOnCompleteOptions
+	// is task.OnCompleteValues() verbatim — the SERVED order, least destructive
+	// first — rather than a copy, so a verb added there reaches this picker with
+	// no change here (the #1970 rule: a surface must not carry its own copy of an
+	// enum the daemon owns).
+	editOnCompleteOptions []string
+	editOnCompleteIdx     int
+	editError             string // last validation error shown to the user
+	editErrorField        int    // focus stop the error is rendered under (-1 = none)
 	// listNotice is the list-mode counterpart of editError: edit mode hangs a
 	// validation message under the offending field, but list mode has no
 	// fields, so a refused action (r on a watch task) reported nothing and the
@@ -188,6 +197,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 		path.SetValue(tsk.ProjectPath)
 		s.editTriggerIsWatch = tsk.IsWatch()
 		s.setProgramFromValue(tsk.Program)
+		s.setOnCompleteFromValue(tsk.OnComplete)
 		// Re-open an existing time trigger on its matching preset when the cron
 		// maps cleanly; otherwise ParseCron falls back to Custom with the raw
 		// expression shown, so nothing is lost (#2057).
@@ -199,6 +209,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 		path.SetValue(defaultPath)
 		s.editTriggerIsWatch = false
 		s.setProgramFromValue("")
+		s.setOnCompleteFromValue("")
 	}
 
 	s.editName = name
@@ -267,6 +278,63 @@ func (s *TaskPane) programValue() string {
 	return s.editProgramOptions[s.editProgramIdx]
 }
 
+// setOnCompleteFromValue initializes the spawned-session lifecycle selector
+// from a stored OnComplete verb (#2595). The stored form is lowercase, and
+// EMPTY means keep — task.CanonicalOnComplete is the one function that says so,
+// and it is asked here rather than re-implemented, so a legacy row written
+// before the field existed seeds the same option as an explicit "keep".
+//
+// An unrecognized verb seeds keep. That is the safe direction and matches
+// setProgramFromValue: the alternative is an out-of-range index, which would
+// render nothing and save a value the user never saw. It cannot arise from the
+// daemon — task.ValidateTrigger rejects an unknown verb on the way in — so it
+// only covers a hand-edited tasks.json.
+func (s *TaskPane) setOnCompleteFromValue(value string) {
+	s.editOnCompleteOptions = task.OnCompleteValues()
+	canonical := task.CanonicalOnComplete(value)
+	for i, v := range s.editOnCompleteOptions {
+		if v == canonical {
+			s.editOnCompleteIdx = i
+			return
+		}
+	}
+	s.editOnCompleteIdx = 0
+}
+
+// onCompleteApplies reports whether the form's CURRENT target-session value
+// leaves room for a spawned-session lifecycle. It asks
+// task.CanonicalTargetSession — the same function task.onCompleteApplies,
+// ValidateTrigger and deliverTaskPrompt ask — because a form that answered
+// "does this task have a target session?" its own way would offer a verb the
+// daemon then refuses, which is the two-answers defect CanonicalTargetSession
+// exists to remove.
+func (s *TaskPane) onCompleteApplies() bool {
+	return task.CanonicalTargetSession(s.editTarget.Value()) == ""
+}
+
+// onCompleteValue returns the OnComplete verb to save for the current selector
+// state, in the STORED form: "" for keep, so an untouched task's record is
+// byte-identical to what it was before the field existed (task.canonicalizeOnComplete).
+//
+// A task with a target session saves "" whatever the selector shows. That is not
+// the selector being ignored — the selector is rendered inapplicable in that
+// state and refuses input — it is the save agreeing with what the daemon would
+// do anyway (task.clearInapplicableOnComplete), so the patch task.DiffTask emits
+// cannot carry a verb ValidateTrigger would reject.
+func (s *TaskPane) onCompleteValue() string {
+	if !s.onCompleteApplies() {
+		return ""
+	}
+	if s.editOnCompleteIdx <= 0 || s.editOnCompleteIdx >= len(s.editOnCompleteOptions) {
+		return ""
+	}
+	verb := s.editOnCompleteOptions[s.editOnCompleteIdx]
+	if verb == task.OnCompleteKeep {
+		return ""
+	}
+	return verb
+}
+
 // triggerValues resolves the two trigger buffers to the exactly-one contract:
 // only the selected trigger type's value is returned; the inactive buffer is
 // discarded regardless of content, so a save can never produce both.
@@ -282,14 +350,44 @@ func (s *TaskPane) HasPendingCreate() bool {
 	return s.pendingCreate
 }
 
+// TaskDraft is the create form's submitted content, handed to the app layer to
+// finish into a task.Task (it supplies the id, creation time, and the program
+// default the form leaves empty).
+//
+// A struct rather than the tuple this used to return. Eight same-typed strings
+// in a row is a transposition the compiler cannot see, and the form only grows:
+// the seventh (program) and eighth (on-complete) both arrived after the shape
+// was chosen, and a ninth would arrive the same way.
+type TaskDraft struct {
+	Name          string
+	Prompt        string
+	Cron          string
+	WatchCmd      string
+	TargetSession string
+	Path          string
+	// Program is the user-supplied agent override; empty means "use the
+	// caller's default".
+	Program string
+	// OnComplete is the spawned-session lifecycle verb in its STORED form
+	// (#2595): "" for keep, and "" as well when the draft names a target
+	// session, which cannot carry one. See TaskPane.onCompleteValue.
+	OnComplete string
+}
+
 // ConsumePendingCreate returns the submitted create data and clears the pending flag.
-// program is the user-supplied program override; empty means "use the caller's default".
-func (s *TaskPane) ConsumePendingCreate() (name, prompt, cron, watchCmd, targetSession, path, program string) {
+func (s *TaskPane) ConsumePendingCreate() TaskDraft {
 	s.pendingCreate = false
 	cronVal, watchVal := s.triggerValues()
-	return s.editName.Value(), s.editPrompt.Value(),
-		cronVal, watchVal,
-		s.editTarget.Value(), s.editPath.Value(), s.programValue()
+	return TaskDraft{
+		Name:          s.editName.Value(),
+		Prompt:        s.editPrompt.Value(),
+		Cron:          cronVal,
+		WatchCmd:      watchVal,
+		TargetSession: s.editTarget.Value(),
+		Path:          s.editPath.Value(),
+		Program:       s.programValue(),
+		OnComplete:    s.onCompleteValue(),
+	}
 }
 
 // HasPendingTrigger returns true if a task was triggered to run immediately.
