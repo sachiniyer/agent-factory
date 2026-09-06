@@ -636,3 +636,9 @@ teardown is `docker rm -f`. The driver reinforces this:
   touch a real `~/.agent-factory`.
 - Sessions run the cheap `bash` program (the sandbox's `config.toml`
   override), never a real agent or an unbounded generator.
+
+## Performance measurements
+
+`make perf-container` drives this library against the same 1,000-session fixture
+as the browser, recording three full-frame and key-to-render samples. See
+[perf-baselines.md](perf-baselines.md) for the measurement boundaries and budgets.

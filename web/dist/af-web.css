@@ -2810,6 +2810,125 @@ button:disabled,
   --af-type-title: 1.25rem;
 }
 
+/* src/recovery.css */
+.af-recovery {
+  background: var(--af-surface);
+  color: var(--af-ink);
+  padding: var(--af-space-4);
+  font-size: var(--af-type-body);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.af-recovery-title {
+  color: var(--af-ink);
+  font-size: var(--af-type-display);
+  font-weight: 600;
+  margin: 0;
+}
+.af-recovery-detail {
+  margin: var(--af-space-2) 0 0;
+  color: var(--af-ink);
+}
+.af-recovery-failed {
+  color: var(--af-dead);
+}
+.af-recovery-next {
+  margin: var(--af-space-4) 0 0;
+  color: var(--af-ink);
+}
+.af-recovery-action {
+  margin-top: var(--af-space-4);
+  padding: var(--af-space-2) var(--af-space-3);
+  min-height: 44px;
+  font-size: var(--af-type-body);
+  background: var(--af-surface);
+  color: var(--af-ink);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius-control);
+}
+.af-recovery-action:focus-visible {
+  outline: 2px solid var(--af-accent);
+  outline-offset: 2px;
+}
+.af-recovery-action:hover {
+  text-decoration: underline;
+}
+.af-recovery-notice {
+  padding: var(--af-space-2);
+}
+.af-recovery-login {
+  width: 100%;
+  min-height: 100dvh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--af-space-2);
+  text-align: center;
+}
+.af-recovery-login > * {
+  max-width: 32rem;
+}
+.af-recovery-login > p {
+  margin: 0;
+}
+.af-recovery-login .af-title {
+  font-size: var(--af-type-display);
+  margin: 0;
+}
+.af-recovery-login .af-login-form {
+  width: 100%;
+  text-align: left;
+}
+.af-recovery-login .af-login-form {
+  max-width: 32rem;
+}
+.af-recovery-login label,
+.af-recovery-login p {
+  color: var(--af-ink);
+  font-size: var(--af-type-body);
+}
+.af-recovery-login input {
+  color: var(--af-ink);
+  background: var(--af-surface-raised);
+  border-color: var(--af-border);
+}
+.af-recovery-login button {
+  color: var(--af-ink);
+  background: var(--af-surface);
+  border-color: var(--af-border);
+}
+.af-main-empty:has(> .af-recovery) {
+  padding: 0;
+  align-items: stretch;
+}
+.af-main-empty > .af-recovery {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.af-recovery-notice > strong {
+  display: block;
+  font-size: var(--af-type-display);
+  font-weight: 600;
+}
+.af-toast:has(.af-recovery) {
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+.af-toast:has(.af-recovery) {
+  transition: none;
+  transform: none;
+}
+.af-toast.af-toast-show:has(.af-recovery) {
+  pointer-events: auto;
+}
+
 /* node_modules/@xterm/xterm/css/xterm.css */
 .xterm {
   cursor: text;

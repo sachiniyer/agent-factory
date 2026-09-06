@@ -119,7 +119,8 @@ the real one:
 
 ## Not a gate
 
-CI never runs the recorder. It asserts nothing about correctness, and the
+CI runs the same beats in still-only mode for [visual regression](perf-baselines.md),
+without video or pacing. CI never runs the video recorder. It asserts nothing about correctness, and the
 `expect` calls in its spec are waits, not assertions — they are how the recorder
 knows a beat has landed before it takes the picture.
 

@@ -1,3 +1,4 @@
+import { recoveryScreen, scopeRecovery } from "./recovery.js";
 // The view layer of the web client (#1592 Phase 5). It renders two views into
 // #app: the paste-token login (design §1.2) and the authed app — a left rail of
 // live sessions (PR3) beside a main pane that now hosts the live attach terminal
@@ -123,6 +124,9 @@ export interface AppState {
   connecting: boolean;
   /** an actionable message shown under the login form after a failed probe. */
   loginError: string | null;
+  loginCondition?: "unavailable" | "expired";
+  tasksError?: string;
+  projectsError?: string;
   /** the live session projection (Snapshot + /v1/events), the rail's data. */
   sessions: SessionData[];
   /** the selected row's STABLE id (session.id), or null when nothing is selected.
@@ -154,6 +158,7 @@ export interface AppState {
    *  ops have no modal to surface an error in (unlike create/kill/archive), so the
    *  failure is shown here instead of being silently swallowed (#1592 Phase 5 PR7/PR8). */
   tabError: string | null;
+  tabNotice?: boolean;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
   /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
@@ -206,6 +211,9 @@ export interface Actions {
    *  attaches exactly like Enter on the selected row (#1693). */
   open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
+  dismissNotice?(): void;
+  retryConnection?(): void;
+  retryTasks?(): void;
   newSession(): void;
   copyLink(): void;
   /** Opens the kill-confirm modal for this stably-addressed rail row. */
@@ -585,11 +593,24 @@ function visibleRailSessions(state: AppState): SessionData[] {
 }
 
 /** Renders the paste-token login view, replacing the root's contents. */
+const loginDrafts = new WeakMap<HTMLElement, string>();
 export function renderLogin(root: HTMLElement, state: AppState, actions: Actions): void {
+  const draft = state.loginError || state.connecting || state.loginCondition
+    ? root.querySelector<HTMLInputElement>("#af-token")?.value ?? loginDrafts.get(root) ?? "" : "";
+  loginDrafts.set(root, draft);
   root.replaceChildren(loginView(state, actions));
+  const input = root.querySelector<HTMLInputElement>("#af-token");
+  if (input) input.value = draft;
 }
 
 function loginView(state: AppState, actions: Actions): HTMLElement {
+  if (state.loginCondition === "unavailable") {
+    const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
+      detail: state.loginError ?? "Check the daemon and its listener address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
+      run: () => actions.retryConnection?.(), });
+    screen.classList.add("af-recovery-login");
+    return screen;
+  }
   // While the initial auth probe (or a silent token resume) is in flight, show a
   // neutral placeholder rather than flashing a paste-token field a tokenless daemon
   // may not need (#1696). An error always wins over the placeholder so a failed
@@ -634,7 +655,7 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
   });
 
   const children: (Node | string)[] = [
-    h("h1", { class: "af-title" }, "Agent Factory"),
+    h("h1", { class: state.loginCondition === "expired" ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.loginCondition === "expired" ? "Login expired" : "Sign in"),
     h(
       "p",
       { class: "af-subtitle" },
@@ -652,23 +673,15 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
     children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
 
-  return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 
 /** The neutral "connecting" placeholder shown while the initial auth probe or a
  *  token resume is in flight (#1696), so no paste-token field flashes before we know
  *  whether this client even needs one. */
 function connectingView(): HTMLElement {
-  return h(
-    "main",
-    { class: "af-login" },
-    h(
-      "div",
-      { class: "af-card" },
-      h("h1", { class: "af-title" }, "Agent Factory"),
-      h("p", { class: "af-subtitle" }, "Connecting…"),
-    ),
-  );
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" },
+    h("h1", { class: "af-recovery-title" }, "Connecting…")));
 }
 
 /** The tokenless login view (#1696): the daemon exempts this client, so there is no
@@ -700,7 +713,7 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
     children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
 
-  return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 
 /**
@@ -736,6 +749,7 @@ export class AppShell {
   // presentation decision. The root class is media-query inert on desktop.
   private lastCondensedSessionChrome: boolean | null = null;
   private lastTasks: TaskData[] | null = null;
+  private lastTasksError: string | undefined;
   private lastTasksProject: string | null = null;
 
   // The top-right project switcher (redesign PR2): a button showing the current
@@ -848,6 +862,7 @@ export class AppShell {
   // selected (selectedId is null before AND after that first update, so the
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
+  private lastEmptyKey = "";
   private mainRendered = false;
   private readonly idleAgeTimer: number;
 
@@ -1085,6 +1100,8 @@ export class AppShell {
     // shows exactly one and hides the other by `state.view`. It owns its own subtree
     // (scoped to the selected project) so a task.* event patches only that pane.
     this.tasksPane = new TasksPane({
+      retry: () => this.actions.retryTasks?.(),
+      addProject: () => this.actions.addProject(),
       add: () => this.actions.addTask(),
       edit: (task: TaskData) => this.actions.editTask(task),
       toggle: (task: TaskData) => this.actions.toggleTask(task),
@@ -1184,7 +1201,10 @@ export class AppShell {
 
     if (this.lastError !== state.tabError) {
       this.lastError = state.tabError;
-      this.toast.textContent = state.tabError ?? "";
+      this.toast.replaceChildren(...(state.tabError ? [recoveryScreen({
+        condition: state.tabNotice ? "Notice" : "Operation failed", detail: state.tabError,
+        failed: !state.tabNotice, action: "Dismiss", run: () => this.actions.dismissNotice?.(),
+      })] : []));
       this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
 
@@ -1237,10 +1257,11 @@ export class AppShell {
     // The tasks pane mirrors the task projection, SCOPED to the selected project
     // (redesign PR2). It re-renders when either the task list or the project scope
     // changes, so switching projects re-scopes the tasks view too.
-    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject) {
+    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject || this.lastTasksError !== state.tasksError) {
+      this.lastTasksError = state.tasksError;
       this.lastTasks = state.tasks;
       this.lastTasksProject = state.selectedProject;
-      this.tasksPane.update(state.tasks, state.selectedProject);
+      this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
 
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
@@ -1310,7 +1331,9 @@ export class AppShell {
     // the very first update, which lays down the initial empty-state placeholder);
     // otherwise we just patch its header (title, actions, published status), leaving
     // the terminal host — and its focus and scrollback — in place.
-    if (selectionChanged || !this.mainRendered) {
+    const emptyKey = `${state.selectedProject}:${state.sessions.length}:${state.projectsError ?? ""}`;
+    if (selectionChanged || !this.mainRendered || (!selectedSession(state) && emptyKey !== this.lastEmptyKey)) {
+      this.lastEmptyKey = emptyKey;
       this.mainRendered = true;
       this.renderMain(state);
     } else {
@@ -1401,9 +1424,7 @@ export class AppShell {
     // from the switcher's "+ Add project", not the TUI — the union then surfaces it
     // and a session can be created into it here.
     if (!state.selectedProject) {
-      list.replaceChildren(
-        h("li", { class: "af-rail-empty" }, "No projects yet — add one from the project switcher to get started."),
-      );
+      list.replaceChildren();
       return;
     }
     const rows = visible.map((s) => {
@@ -1519,6 +1540,8 @@ export class AppShell {
    *  - otherwise nothing: rows are showing.
    */
   private railNotice(state: AppState, scoped: SessionData[], visible: SessionData[]): HTMLElement | null {
+    // The pane owns zero-data guidance; keep only the rail count for that state.
+    if (scoped.length === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -1876,8 +1899,16 @@ export class AppShell {
       // selftest wait on the PREVIOUS attach and call it the new one.
       delete this.main.dataset.termStatus;
       this.main.replaceChildren(
-        h("p", { class: "af-empty-title" }, "Select a session"),
-        h("p", { class: "af-empty-hint" }, "Pick a session in the rail to attach its terminal."),
+        recoveryScreen(state.projectsError && state.selectedProject === null ? {
+          condition: "Projects unavailable", detail: state.projectsError, failed: true,
+          action: "Retry", run: () => this.actions.retryConnection?.(),
+        } : state.selectedProject === null ? {
+          condition: "No project registered", action: "Add project", run: () => this.actions.addProject(),
+        } : scopeToProject(state.sessions, state.selectedProject).length === 0 ? {
+          condition: "No sessions", action: "New session", run: () => this.actions.newSession(),
+        } : {
+          condition: "Select a session", action: "Choose a session", run: () => this.railList.querySelector<HTMLElement>(".af-row")?.focus(),
+        }),
       );
       return;
     }

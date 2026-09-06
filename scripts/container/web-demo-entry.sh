@@ -6,19 +6,25 @@
 # while recording video and stills (web/selftest/web-demo.spec.ts), and convert
 # the recording into the media docs/ ships.
 #
-# It is the RECORDER, not a gate. Everything about the sandbox — the same image,
+# Default mode records the video; perf mode gates stills and measurements.
+# Everything about the sandbox — the same image,
 # the same daemon-on-a-throwaway-home shape, the same loopback tokenless browser
 # — is borrowed from web-selftest-entry.sh so the demo shows the product the
 # self-test asserts on. What it deliberately does NOT share is that script's
 # fixture zoo: the gate seeds probe-a, probe-noserver, a dead port and a
 # URL-less tab, all of which exist to make failures reachable and none of which
 # belong in the picture on the README. So this file seeds its own small,
-# plausible project instead, and CI never runs it.
+# plausible project instead. The perf mode reuses its stills as a CI gate (#3908).
 #
 # Everything here — the tmux server, the daemon, the AF home, the sessions, the
 # browser — lives and dies with the container. Teardown is `docker rm -f`, not a
 # checklist. Nothing touches the host tmux server or the real ~/.agent-factory.
 set -euo pipefail
+[ -f /.dockerenv ] || [ -f /run/.containerenv ] || { echo "container only" >&2; exit 1; }
+if [ -n "${CI:-}" ] && { [ "${AF_PERF_RECORD:-0}" = 1 ] || [ "${AF_UPDATE_GOLDENS:-0}" = 1 ]; }; then
+    echo "CI cannot update baselines or goldens" >&2
+    exit 1
+fi
 
 # --- writable working copy (the /src bind mount is read-only) ---------------
 # shellcheck source=scripts/container/copy-src.sh
@@ -31,6 +37,7 @@ cd /work
 # (the media is staged first), so a run that dies halfway leaves the committed
 # assets exactly as it found them rather than half-replaced.
 OUT=/work/demo-out
+if [ "${AF_PERF_MODE:-0}" = 1 ]; then OUT=/work/web/test-results; fi
 STAGE=/work/demo-stage
 SHOTS=$STAGE/stills
 VIDEO_DIR=$STAGE/video
@@ -91,6 +98,16 @@ mkdir -p "$HOME" "$HOME_DIR" /work/bin
 
 echo ">>> building af from /work ..."
 go build -buildvcs=false -o "$BIN" .
+
+if [ "${AF_PERF_MODE:-0}" = 1 ]; then
+    (
+        cd /work/web
+        export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+        npm ci --no-audit --no-fund
+        npx tsc -p tsconfig.selftest.json
+        node --test /work/scripts/perf/check.test.mjs
+    )
+fi
 
 # --- the mock project -------------------------------------------------------
 # A real git repo with a real program and a real test script, so every edit the
@@ -268,6 +285,10 @@ start_daemon
 
 cleanup() {
     rc=$?
+    if [ "${AF_PERF_MODE:-0}" = 1 ]; then
+        cp /work/daemon.log "$OUT/daemon.log" 2>/dev/null || true
+        tail -n 200 "$HOME_DIR/agent-factory.log" >"$OUT/agent-factory.log" 2>/dev/null || true
+    fi
     echo ">>> tearing down (rc=$rc) ..."
     for s in "$SESSION_JSON" "$SESSION_USAGE" "$SESSION_DOCS" "$SESSION_NEW"; do
         "$BIN" sessions kill "$s" >/dev/null 2>&1 || true
@@ -387,13 +408,13 @@ for w in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
 done
 # The repaint is a signal handler, so give it a moment to land before the browser
 # starts photographing panes.
-sleep 2
+if [ "${AF_PERF_MODE:-0}" != 1 ]; then sleep 2; fi
 
 # --- record -----------------------------------------------------------------
 echo ">>> installing web deps + recording the demo ..."
 cd /work/web
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-npm ci --no-audit --no-fund
+if [ "${AF_PERF_MODE:-0}" != 1 ]; then npm ci --no-audit --no-fund; fi
 # Whatever Playwright writes lands in the bind mount as root; a permissive umask
 # keeps it removable even when the trap above never runs (a SIGKILLed container
 # runs no trap at all).
@@ -408,6 +429,20 @@ export AF_DEMO_SESSION_DOCS="$SESSION_DOCS"
 export AF_DEMO_SESSION_NEW="$SESSION_NEW"
 export AF_DEMO_WIDTH="$VIEW_W"
 export AF_DEMO_HEIGHT="$VIEW_H"
+if [ "${AF_PERF_MODE:-0}" = 1 ]; then
+    npx playwright test --config=playwright.visual.config.ts
+    if [ "${AF_UPDATE_GOLDENS:-0}" = 1 ]; then cp -r /work/web/selftest/goldens "$OUT/goldens"; fi
+    kill "$DAEMON_PID"
+    wait "$DAEMON_PID" || true
+    node /work/scripts/perf/seed.mjs
+    start_daemon
+    wait_for_listener
+    export AF_BIN="$BIN" AF_MOCK_REPO="$MOCK"
+    npx playwright test --config=playwright.perf.config.ts
+    bash /work/scripts/perf/tui.sh
+    node /work/scripts/perf/report.mjs
+    exit 0
+fi
 npx playwright test --config=playwright.demo.config.ts
 
 # The spec saves the default-theme pass's recording under this exact name

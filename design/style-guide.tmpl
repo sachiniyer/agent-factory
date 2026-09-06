@@ -13,11 +13,10 @@ The specimens consume the generated CSS. TUI examples show the prescribed cell l
 and colours in HTML; they are not a running Bubble Tea app. Example controls are inert,
 except native disclosure menus. System selects one of these same two themes.
 
-The web stills show the real rail and header after P2 slice A; the remaining
-components are awaiting their slices. Web has six [recorder beats](../dev/demo-assets.md)
-in both themes, plus filter, project-menu and phone drawer/control captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
-screen/theme matrix. Missing captures are labelled. Empty/error examples are rules,
-not fabricated recordings. Click a still for the full screen.
+The stills are the current product, unchanged. Web has six [recorder beats](../dev/demo-assets.md)
+in both themes. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
+screen/theme matrix. Missing captures are labelled. Empty/error specimens illustrate the rules; the [P4 recovery matrix](recovery-stills.md)
+provides asserted recordings. Click a still for the full screen.
 
 {{range .Components}}{{$c := .}}
 <h3>{{.Name}}</h3>
@@ -25,7 +24,7 @@ not fabricated recordings. Click a still for the full screen.
 {{range $.Themes}}{{$mode := .}}
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="{{.}}"><h4>Web · {{themeLabel .}}</h4>{{$c.Web}}</section>
-<figure><a href="../../assets/web/{{$c.WebStill}}{{if eq . "dark"}}-dark{{end}}.png"><img loading="lazy" src="../../assets/web/{{$c.WebStill}}{{if eq . "dark"}}-dark{{end}}.png" alt="Current web {{$c.WebStill}} screen in {{.}} theme"></a><figcaption>{{if or (eq $c.Name "Rail") (eq $c.Name "Header")}}Rules applied · Real web screen{{else}}Current recorder still{{end}} · {{$c.WebStill}} · {{.}}{{if or (eq $c.Name "Empty states") (eq $c.Name "Errors and notices")}} · Context only; this state has no committed recording{{end}}</figcaption></figure>
+<figure><a href="../../assets/web/{{$c.WebStill}}{{if eq . "dark"}}-dark{{end}}.png"><img loading="lazy" src="../../assets/web/{{$c.WebStill}}{{if eq . "dark"}}-dark{{end}}.png" alt="Current web {{$c.WebStill}} screen in {{.}} theme"></a><figcaption>Current recorder still · {{$c.WebStill}} · {{.}}{{if or (eq $c.Name "Empty states") (eq $c.Name "Errors and notices")}} · Context only; see the P4 recovery matrix{{end}}</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="{{.}}"><h4>TUI · {{themeLabel .}}</h4><pre>{{tuiSample $c.TUI}}</pre></section>
@@ -72,3 +71,9 @@ matrix; P2/P5 own applying tokens and matching new stills; P6 refreshes the publ
 Run `make docs`, then `go run ./scripts/gen-design --check` and `mkdocs build --strict`.
 The docs drift gate checks the web CSS, Go theme, docs CSS copy and this page together.
 Edit the token source and specimen sources, never these generated outputs.
+
+## Recovery screens · P4
+
+The [recovery capture matrix](recovery-stills.md) shows the application’s empty,
+unavailable and failed-operation states in both themes. These captures come from
+asserted container selftest scenes; the surrounding chrome remains owned by P2.

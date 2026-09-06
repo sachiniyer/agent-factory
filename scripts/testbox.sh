@@ -11,6 +11,7 @@
 #   scripts/testbox.sh drive                   boot af via the driver + attach
 #   scripts/testbox.sh lifecycle [scenario]    clean-install / install->upgrade gate
 #   scripts/testbox.sh web-selftest            browser gate for the web client (#1592)
+#   scripts/testbox.sh perf                    web/TUI budgets + demo still pixel diffs (#3908)
 #   scripts/testbox.sh web-demo                record docs/assets/web/ (#3855) — NOT a gate
 #   scripts/testbox.sh build                   (re)build the image only
 #   scripts/testbox.sh clean                   reclaim this harness's disk (#2133)
@@ -664,7 +665,9 @@ lifecycle)
     finish_image_start
     exit "$rc"
     ;;
-web-selftest)
+web-selftest|perf)
+    # The perf variant shares this entire fence and artifact mount; its entry
+    # reuses demo stills before seeding 1000 storage rows for both clients.
     # Playwright web-driver-selftest (#1592 Phase 5 PR6): build the dedicated
     # Go+Node+Chromium image, then run the whole harness in ONE ephemeral
     # container — it builds af, boots a real daemon on a loopback TLS+token
@@ -704,6 +707,7 @@ web-selftest)
     # graceful path never happens — a SIGKILLed container skips every trap, and that
     # is precisely the case this mount exists to rescue.
     WEB_RESULTS="$REPO_ROOT/web/test-results/$RUN_TOKEN"
+    echo ">>> artifacts: $WEB_RESULTS"
     # Old runs are gitignored and only ever created by FAILURES, but they are traces
     # of ~1MB each, so age them out. Best-effort, and it can never touch a concurrent
     # run: that directory is minutes old, not days.
@@ -712,6 +716,8 @@ web-selftest)
     rm -rf "$WEB_RESULTS"
     mkdir -p "$WEB_RESULTS"
     rc=0
+    WEB_ENTRY=web-selftest-entry.sh
+    if [ "$cmd" = perf ]; then WEB_ENTRY=web-demo-entry.sh; fi
     WEB_SELFTEST_NAME="af-web-selftest-$RUN_TOKEN"
     watch_image_start "$WEB_SELFTEST_NAME"
     engine_run --rm --label "$LABEL" --init \
@@ -723,7 +729,9 @@ web-selftest)
         --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
         --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
         -e AF_PLAYWRIGHT_ARGS \
-        "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh || rc=$?
+        -e AF_PERF_MODE="$([ "$cmd" = perf ] && echo 1 || echo 0)" \
+        -e AF_PERF_RECORD -e AF_UPDATE_GOLDENS -e CI \
+        "$WEB_IMAGE" bash "/src/scripts/container/$WEB_ENTRY" || rc=$?
     finish_image_start
     exit "$rc"
     ;;
@@ -831,7 +839,7 @@ clean)
     "$ENGINE" system df
     ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | web-demo | build | clean)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | perf | web-demo | build | clean)" >&2
     exit 1
     ;;
 esac
