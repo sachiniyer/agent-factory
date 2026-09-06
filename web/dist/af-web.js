@@ -6344,15 +6344,21 @@ var MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 var ApiError = class extends Error {
   status;
   code;
-  constructor(status, message, code = "") {
+  /** A parsed daemon error envelope, rather than a missing/gateway response. */
+  daemonRejected;
+  constructor(status, message, code = "", daemonRejected = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.daemonRejected = daemonRejected;
   }
 };
 function isMutationCommittedError(e) {
-  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE;
+  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE && e.status !== 502 && e.status !== 504;
+}
+function isMutationOutcomeUncertain(e) {
+  return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 async function af(method, body, token2) {
   const headers = { "Content-Type": "application/json" };
@@ -6376,10 +6382,11 @@ async function af(method, body, token2) {
   }
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error));
+    const daemonRejected = env?.error != null && resp.status !== 502 && resp.status !== 504;
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), daemonRejected);
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error));
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), true);
   }
   return env?.data;
 }
@@ -12674,6 +12681,169 @@ var SplitView = class {
   }
 };
 
+// src/optimistic.ts
+var OptimisticSessions = class {
+  authoritative = [];
+  pending = /* @__PURE__ */ new Map();
+  epoch = 0;
+  sequence = 0;
+  revision = 0;
+  sessionEvents = /* @__PURE__ */ new Map();
+  reset(sessions = []) {
+    this.epoch++;
+    this.revision++;
+    this.pending.clear();
+    this.sessionEvents.clear();
+    this.authoritative = sessions;
+  }
+  /** Captured before fetching, so an older snapshot cannot undo an RPC or event. */
+  snapshotFence() {
+    return this.revision;
+  }
+  snapshot(sessions, fence) {
+    if (fence !== this.revision) return false;
+    this.authoritative = sessions;
+    this.revision++;
+    for (const [key, op] of this.pending) {
+      if (op.kind !== "create" && op.row.id) {
+        const target = sessions.find((row) => row.id === op.row.id);
+        if (op.kind === "kill" && !target || op.kind === "archive" && target?.liveness === Liveness.Archived) op.confirmed = true;
+      }
+      if (op.acknowledged) this.pending.delete(key);
+    }
+    return true;
+  }
+  /** A tab mutation requires a snapshot accepted after its RPC. Never return
+   * the old projection when events cross that request; retry a bounded number
+   * of times and cancel silently when this connection no longer owns the work. */
+  async refresh(fetch2) {
+    const epoch = this.epoch;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const fence = this.snapshotFence();
+      let sessions;
+      try {
+        sessions = await fetch2();
+      } catch (error) {
+        if (epoch !== this.epoch) return null;
+        throw error;
+      }
+      if (epoch !== this.epoch) return null;
+      if (this.snapshot(sessions, fence)) return this.project();
+    }
+    throw new Error("Could not refresh sessions after the operation because they kept changing. Check the session before trying again.");
+  }
+  beginCreate(input, now = (/* @__PURE__ */ new Date()).toISOString()) {
+    const ticket = this.ticket();
+    this.pending.set(ticket.sequence, {
+      ticket,
+      kind: "create",
+      acknowledged: false,
+      confirmed: false,
+      startedRevision: this.revision,
+      existingKeys: new Set(this.authoritative.map(sessionKey)),
+      row: {
+        id: `optimistic:${ticket.epoch}:${ticket.sequence}`,
+        title: input.title,
+        branch: "",
+        created_at: now,
+        worktree: { repo_path: input.repoPath },
+        in_flight_op: InFlightOp.Creating
+      }
+    });
+    return ticket;
+  }
+  begin(kind, row) {
+    if ([...this.pending.values()].some((op) => sessionKey(op.row) === sessionKey(row))) return null;
+    const ticket = this.ticket();
+    this.pending.set(ticket.sequence, { ticket, kind, row, acknowledged: false, confirmed: false, startedRevision: this.revision });
+    return ticket;
+  }
+  isCurrent(ticket) {
+    return ticket.epoch === this.epoch && this.pending.get(ticket.sequence)?.ticket === ticket;
+  }
+  succeed(ticket, created) {
+    if (!this.isCurrent(ticket)) return false;
+    this.revision++;
+    const op = this.pending.get(ticket.sequence);
+    if (created) {
+      const latest = this.sessionEvents.get(sessionKey(created));
+      if (!latest?.completed || latest.revision <= op.startedRevision) {
+        this.authoritative = upsertSession(this.authoritative, created);
+      }
+      this.pending.delete(ticket.sequence);
+    } else if (op.confirmed) {
+      this.pending.delete(ticket.sequence);
+    } else {
+      op.acknowledged = true;
+    }
+    return true;
+  }
+  fail(ticket) {
+    if (!this.isCurrent(ticket)) return false;
+    this.revision++;
+    this.pending.delete(ticket.sequence);
+    return true;
+  }
+  /** A missing reply is not proof that the mutation failed. Lifecycle events
+   * confirm by stable ID. Creates have no request ID on the events plane, so an
+   * uncertain reply must never infer ownership from a coincidentally equal title. */
+  reject(ticket, uncertain = false) {
+    if (!this.isCurrent(ticket)) return "stale";
+    const op = this.pending.get(ticket.sequence);
+    if (uncertain && !op.confirmed && op.kind !== "create") {
+      this.revision++;
+      op.acknowledged = true;
+      return "uncertain";
+    }
+    this.fail(ticket);
+    return op.confirmed ? "confirmed" : uncertain ? "uncertain" : "reverted";
+  }
+  event(event) {
+    const result = applyEvent(this.authoritative, event);
+    this.authoritative = result.sessions;
+    this.revision++;
+    if (event.data && (event.type === "session.created" || event.type === "session.updated" || event.type === "session.archived" || event.type === "session.restored" || event.type === "session.killed")) {
+      const completed = event.type === "session.killed" || event.data.liveness !== void 0 && event.data.in_flight_op !== InFlightOp.Creating;
+      this.sessionEvents.set(sessionKey(event.data), { revision: this.revision, completed });
+    }
+    for (const [key, op] of this.pending) {
+      if (!event.data || sessionKey(event.data) !== sessionKey(op.row)) continue;
+      const completed = op.kind === "kill" && event.type === "session.killed" || op.kind === "archive" && event.type === "session.archived" && event.data.liveness !== void 0;
+      if (completed) {
+        op.confirmed = true;
+        if (op.acknowledged) this.pending.delete(key);
+      }
+    }
+    return result.needsResync;
+  }
+  project() {
+    let rows = this.authoritative;
+    const creating = this.authoritative.filter((row) => row.in_flight_op === InFlightOp.Creating);
+    const displayed = /* @__PURE__ */ new Set();
+    for (const op of this.pending.values()) {
+      if (op.confirmed) continue;
+      if (op.kind === "create") {
+        const match = creating.find((row) => !displayed.has(sessionKey(row)) && !op.existingKeys?.has(sessionKey(row)) && row.title === op.row.title && row.worktree?.repo_path === op.row.worktree?.repo_path);
+        if (match) displayed.add(sessionKey(match));
+        else rows = [...rows, op.row];
+      } else {
+        rows = rows.map((row) => sessionKey(row) === sessionKey(op.row) ? {
+          ...row,
+          in_flight_op: op.kind === "archive" ? InFlightOp.Archiving : InFlightOp.Killing,
+          lifecycle_action: void 0,
+          can_kill: false,
+          can_handoff: false
+        } : row);
+      }
+    }
+    return rows;
+  }
+  ticket() {
+    this.revision++;
+    return { epoch: this.epoch, sequence: ++this.sequence };
+  }
+};
+
 // src/store.ts
 var Store = class {
   state;
@@ -14276,16 +14446,25 @@ var AppShell = class {
       this.el.classList.toggle("af-kb-terminal", kb === "terminal");
       this.el.classList.toggle("af-kb-rail", kb === "rail");
     }
-    if (this.lastError !== state.tabError) {
-      this.lastError = state.tabError;
-      this.toast.replaceChildren(...state.tabError ? [recoveryScreen({
-        condition: state.tabNotice ? "Notice" : "Operation failed",
-        detail: state.tabError,
-        failed: !state.tabNotice,
-        action: "Dismiss",
-        run: () => this.actions.dismissNotice?.()
-      })] : []);
-      this.toast.classList.toggle("af-toast-show", state.tabError !== null);
+    const errorSignature = JSON.stringify([state.mutationError, state.tabError, state.tabNotice]);
+    if (this.lastError !== errorSignature) {
+      this.lastError = errorSignature;
+      if (state.mutationError) {
+        const notice = mutationNotice("Operation failed", state.mutationError, "Review the details, then try again.");
+        const dismiss = h("button", { type: "button", class: "af-recovery-action" }, "Dismiss");
+        dismiss.addEventListener("click", () => this.actions.dismissNotice?.());
+        notice.append(dismiss);
+        this.toast.replaceChildren(notice);
+      } else {
+        this.toast.replaceChildren(...state.tabError ? [recoveryScreen({
+          condition: state.tabNotice ? "Notice" : "Operation failed",
+          detail: state.tabError,
+          failed: !state.tabNotice,
+          action: "Dismiss",
+          run: () => this.actions.dismissNotice?.()
+        })] : []);
+      }
+      this.toast.classList.toggle("af-toast-show", Boolean(state.mutationError) || state.tabError !== null);
     }
     if (this.lastLive !== state.live) {
       this.lastLive = state.live;
@@ -15572,6 +15751,7 @@ var store = new Store({
 });
 var token = null;
 var stream = null;
+var optimisticSessions = new OptimisticSessions();
 var connectionGate = createLatestRequestGate();
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
@@ -15695,6 +15875,7 @@ async function connect(candidate) {
   const { projects: registeredProjects, error: projectsError } = await fetchRegisteredProjects(candidate);
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
     phase: "app",
@@ -15709,6 +15890,7 @@ async function connect(candidate) {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
+    mutationError: void 0,
     tasks,
     tasksError,
     projectsError,
@@ -15730,6 +15912,7 @@ async function fetchRegisteredProjects(tok) {
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
+  optimisticSessions.reset();
   stopStream();
   closeModal();
   closeConfigAssistant();
@@ -15749,6 +15932,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
+    mutationError: void 0,
     tasks: [],
     registeredProjects: []
   });
@@ -15759,7 +15943,9 @@ function tabIdsOf(list, id) {
 }
 var resolvingRoute = false;
 var routeSelection = null;
+var navigationGeneration = 0;
 function resolveRoute() {
+  navigationGeneration++;
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -15783,6 +15969,7 @@ function resolveRoute() {
   }
 }
 function moveSelection(id) {
+  navigationGeneration++;
   clearTabError();
   store.set({
     selectedId: id,
@@ -15816,6 +16003,7 @@ function focusRail() {
   splitView.blur();
 }
 function switchView(view) {
+  navigationGeneration++;
   if (store.get().view === view) {
     return;
   }
@@ -15843,6 +16031,7 @@ function resetStatusFilter() {
   store.set({ statusFilter: next });
 }
 function switchProject(root2) {
+  navigationGeneration++;
   persistProjectChoice(root2);
   if (store.get().selectedProject === root2) {
     return;
@@ -15924,21 +16113,36 @@ function newSession() {
         m.setBusy(true);
         closeModal();
         const requestedAccount = values.account ?? "";
+        const navigationAtSubmit = navigationGeneration;
+        const mutation = optimisticSessions.beginCreate(values);
+        applySessions(optimisticSessions.project());
         void createSession(values, tok).then((created) => {
-          if (created.id) {
-            const sessions = upsertSession(store.get().sessions, created);
-            store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
+          if (!created || typeof created.title !== "string") throw new Error("The daemon response did not identify the created session.");
+          if (!optimisticSessions.succeed(mutation, created)) return;
+          requestResync();
+          const maySelect = navigationGeneration === navigationAtSubmit && store.get().view === "sessions";
+          applySessions(optimisticSessions.project());
+          if (created.id && maySelect && store.get().selectedProject === values.repoPath && store.get().sessions.some((session) => session.id === created.id)) {
+            store.set({ selectedId: created.id, activeTab: 0, tabError: null });
           }
           const skew = accountSkewMessage(requestedAccount, created);
           if (skew !== "") {
             surfaceTabError(new Error(skew));
           }
         }).catch((e) => {
+          const uncertain = isMutationOutcomeUncertain(e);
+          const outcome = optimisticSessions.reject(mutation, uncertain);
+          if (outcome === "stale") return;
+          applySessions(optimisticSessions.project());
           requestResync();
+          if (outcome !== "reverted") {
+            surfaceMutationError(new Error(`The create response could not confirm the outcome. Check sessions before creating again. ${errorText(e)}`));
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
           if (!modal && token === tok) openModal(m);
-          else surfaceTabError(e);
+          else surfaceMutationError(e);
         });
       },
       onCancel: closeModal
@@ -15957,9 +16161,36 @@ function openConfirm(action, session) {
           return;
         }
         const m = modal;
+        const mutation = action === "restore" ? null : optimisticSessions.begin(action, session);
+        if (action !== "restore" && !mutation) return;
         m.setBusy(true);
+        if (mutation) {
+          closeModal();
+          applySessions(optimisticSessions.project());
+        }
         const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.id, target.title, tok);
-        void run.then(closeModal).catch((e) => {
+        void run.then(() => {
+          if (mutation) {
+            if (!optimisticSessions.succeed(mutation)) return;
+            applySessions(optimisticSessions.project());
+            requestResync();
+          } else if (modal === m) closeModal();
+        }).catch((e) => {
+          if (mutation) {
+            const outcome = isMutationCommittedError(e) ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+            if (outcome === "stale") return;
+            applySessions(optimisticSessions.project());
+            requestResync();
+            if (outcome !== "reverted") {
+              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action} outcome could not be confirmed. Check the session before trying again. ${errorText(e)}`) : e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+            if (!modal) openModal(m);
+            else surfaceMutationError(e);
+            return;
+          }
           if (isMutationCommittedError(e)) {
             closeModal();
             requestResync();
@@ -16048,6 +16279,7 @@ function openTab(index) {
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
   void run().then((sessions) => {
+    if (sessions === null) return;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
@@ -16084,7 +16316,7 @@ function createSessionTab(kind = "shell") {
     selId,
     () => create(selId, sel.title, tok).then((name) => {
       createdName = name;
-      return fetchSnapshot(tok);
+      return fetchProjectedSnapshot(tok);
     }),
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
@@ -16114,7 +16346,7 @@ function closeSessionTab(index) {
   const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);
   guardedTabRebind(
     selId,
-    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)),
+    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)),
     // Resolve the kept tab's CURRENT ordinal in the post-close roster; -1 (a concurrent
     // close took it too) leaves the pane where syncSplit's identity remap already
     // settled it rather than guessing again.
@@ -16144,7 +16376,8 @@ function renameSessionTab(id, name, editedSessionId) {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
+    if (sessions === null) return;
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
   }).catch((e) => surfaceTabError(e));
 }
@@ -16161,9 +16394,14 @@ function reorderSessionTab(from, to) {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
+    if (sessions === null) return;
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
   }).catch((e) => surfaceTabError(e));
+}
+function surfaceMutationError(error) {
+  const previous = store.get().mutationError;
+  store.set({ mutationError: [previous, errorText(error)].filter(Boolean).join("\n\n") });
 }
 function surfaceTabError(e) {
   const msg = errorText(e);
@@ -16556,7 +16794,10 @@ var actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
-  dismissNotice: clearTabError,
+  dismissNotice: () => {
+    if (store.get().mutationError) store.set({ mutationError: void 0 });
+    else clearTabError();
+  },
   retryConnection: () => {
     void bootstrap();
   },
@@ -16658,8 +16899,8 @@ function onEvent(ev) {
     requestProjectsResync();
   }
   sessionEventGeneration += 1;
-  const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
-  applySessions(sessions);
+  const needsResync = optimisticSessions.event(ev);
+  applySessions(optimisticSessions.project());
   if (needsResync) {
     requestResync();
   }
@@ -16684,6 +16925,15 @@ function applySessions(sessions) {
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }
+async function fetchProjectedSnapshot(tok) {
+  if (token !== tok) return null;
+  try {
+    return await optimisticSessions.refresh(() => fetchSnapshot(tok));
+  } catch (error) {
+    requestResync();
+    throw error;
+  }
+}
 function requestResync() {
   if (resyncTimer !== null) {
     return;
@@ -16696,6 +16946,7 @@ function requestResync() {
       return;
     }
     const eventGeneration = sessionEventGeneration;
+    const mutationFence = optimisticSessions.snapshotFence();
     void fetchSnapshot(tok).then((sessions) => {
       if (requestGeneration !== resyncRequestGeneration || token !== tok) {
         return;
@@ -16704,7 +16955,11 @@ function requestResync() {
         requestResync();
         return;
       }
-      applySessions(sessions);
+      if (!optimisticSessions.snapshot(sessions, mutationFence)) {
+        requestResync();
+        return;
+      }
+      applySessions(optimisticSessions.project());
       root?.setAttribute("data-af-resync-settled", "");
     }).catch((error) => {
       if (requestGeneration !== resyncRequestGeneration || token !== tok) return;

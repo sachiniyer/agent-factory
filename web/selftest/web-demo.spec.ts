@@ -235,11 +235,13 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
       await modal.locator(".af-modal-foot button.af-ghost").click();
     }
     await expect(modal).toBeHidden();
-    await expect(row(page, SESSION_NEW)).toBeVisible({ timeout: 90_000 });
+    await expect(row(page, SESSION_NEW).first()).toBeVisible({ timeout: 90_000 });
     // Selecting it explicitly rather than relying on create's own selection:
     // the recording must be looking at the new session's pane whatever the
     // create path decides to focus.
-    await row(page, SESSION_NEW).click();
+    const createdRow = row(page, SESSION_NEW).and(page.locator(".af-row:not(.af-row-creating)"));
+    await expect(createdRow).toBeVisible({ timeout: 90_000 });
+    await createdRow.click();
     await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open", { timeout: 90_000 });
     await expect(page.locator(".af-term-host")).toContainText("demo-agent", { timeout: 90_000 });
     if (pass.createsSession) {
