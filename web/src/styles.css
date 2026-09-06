@@ -2459,6 +2459,10 @@ button:disabled,
   line-height: 1.5;
 }
 
+.af-on-complete-hint {
+  color: var(--af-ink-muted);
+}
+
 .af-modal-hint:empty {
   display: none;
 }
