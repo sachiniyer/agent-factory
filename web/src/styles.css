@@ -492,19 +492,15 @@ button:disabled,
 .af-appbar {
   display: flex;
   align-items: center;
-  gap: var(--af-sp-4);
-  /* The base padding is the desktop value; the max(…, env(safe-area-inset-*)) only
-   * grows it on a device with a display cutout (notch/rounded corner) once the viewport
-   * meta opts into viewport-fit=cover. env() resolves to 0 on every non-notched display,
-   * so the desktop bar is byte-for-byte unchanged. */
-  padding: max(var(--af-sp-3), env(safe-area-inset-top)) max(var(--af-sp-5), env(safe-area-inset-right))
-    var(--af-sp-3) max(var(--af-sp-5), env(safe-area-inset-left));
-  background: var(--af-bg-surface);
-  border-bottom: 1px solid var(--af-border);
-  /* Keep the bar to one row on a comfortable width, but never let it force the page
-   * wider than the viewport: on a narrow window it wraps to a second line instead of
-   * overflowing (the overflow-x guard on body would otherwise clip it). */
+  gap: var(--af-space-2);
+  padding: max(var(--af-space-3), env(safe-area-inset-top)) max(var(--af-space-3), env(safe-area-inset-right)) var(--af-space-3) max(var(--af-space-3), env(safe-area-inset-left));
+  background: var(--af-surface);
+  border-bottom: 0;
+
   flex-wrap: wrap;
+  color: var(--af-ink);
+  font-size: var(--af-type-body);
+  line-height: 1.5;
 }
 
 /* The narrow-viewport rail toggle (web mobile pass): a hamburger that slides the
@@ -515,27 +511,28 @@ button:disabled,
   display: none;
   align-items: center;
   justify-content: center;
-  min-width: 2.75rem;
-  min-height: 2.75rem;
-  padding: 0.3rem 0.55rem;
-  background: transparent;
-  color: var(--af-text);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-md);
+  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  padding: var(--af-space-1) var(--af-space-2);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-lg);
+  font-size: var(--af-type-heading);
   line-height: 1;
   cursor: pointer;
 }
 
 .af-nav-toggle:hover {
-  background: var(--af-bg-inset);
-  border-color: var(--af-border-strong);
+  background: var(--af-surface-raised);
+  border-color: var(--af-border);
 }
 
 .af-brand {
   font-weight: 600;
-  letter-spacing: var(--af-track);
+  letter-spacing: normal;
+  font-size: var(--af-type-body);
 }
 
 /* The project switcher takes the auto margin (redesign PR2), pushing it — and the
@@ -554,31 +551,33 @@ button:disabled,
 .af-project-switch {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.3rem 0.65rem;
-  background: var(--af-bg-inset);
-  color: var(--af-text);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-md);
+  gap: var(--af-space-2);
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-sm);
+  font-size: var(--af-type-heading);
   font-weight: 600;
   cursor: pointer;
 }
 
 .af-project-switch:hover:not(:disabled) {
-  border-color: var(--af-border-strong);
-  background: var(--af-bg-surface);
+  border-color: var(--af-border);
+
+  background: var(--af-surface-raised);
 }
 
 .af-project-switch:disabled {
   cursor: default;
-  color: var(--af-text-muted);
+
+  color: var(--af-ink);
 }
 
 .af-project-glyph {
   flex: 0 0 auto;
-  color: var(--af-accent);
+  color: var(--af-ink);
 }
 
 .af-project-switch-name {
@@ -590,75 +589,78 @@ button:disabled,
 
 .af-project-caret {
   flex: 0 0 auto;
-  color: var(--af-text-muted);
-  font-size: 0.6em;
+  color: var(--af-ink);
+  font-size: var(--af-type-body);
 }
 
 .af-project-menu {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + var(--af-space-1));
   right: 0;
-  min-width: 17rem;
-  max-width: 24rem;
-  background: var(--af-bg-raised);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-lg);
-  box-shadow: var(--af-shadow-overlay);
-  padding: 0.3rem;
+  min-width: calc(var(--af-space-3) * 17);
+  max-width: calc(var(--af-space-3) * 24);
+  background: var(--af-surface-raised);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-dialog);
+  box-shadow: none;
+  padding: var(--af-space-3);
   z-index: 30;
 }
 
 .af-project-menu-label {
-  padding: 0.35rem 0.6rem 0.25rem;
-  font-size: var(--af-fs-2xs);
-  color: var(--af-text-muted);
+  padding: var(--af-space-1) var(--af-space-2) var(--af-space-1);
+  font-size: var(--af-type-heading);
+  color: var(--af-ink);
   font-weight: 600;
 }
 
 .af-project-menu-empty {
-  padding: 0.35rem 0.6rem 0.5rem;
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
+  padding: var(--af-space-1) var(--af-space-2) var(--af-space-2);
+
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
 }
 
 .af-project-item {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: var(--af-space-2);
   width: 100%;
-  padding: 0.42rem 0.6rem;
-  background: transparent;
+  padding: var(--af-space-2) var(--af-space-2);
+
+  background: var(--af-surface-raised);
   border: none;
-  border-radius: var(--af-r-md);
-  color: var(--af-text);
+  border-radius: 0;
+  color: var(--af-ink);
   font: inherit;
-  font-size: var(--af-fs-sm);
+  font-size: var(--af-type-body);
   text-align: left;
   cursor: pointer;
 }
 
 .af-project-item:hover {
-  background: var(--af-bg-inset);
+  background: var(--af-surface-raised);
 }
 
 .af-project-item-current,
 .af-project-item-current:hover {
-  background: var(--af-accent-subtle);
+  background: var(--af-surface-raised);
 }
 
 .af-project-item-current .af-project-check,
 .af-project-item-current .af-project-item-name {
-  color: var(--af-accent-text);
+  color: var(--af-ink);
+  font-weight: 600;
 }
 
 .af-project-item-current .af-project-item-path,
 .af-project-item-current .af-project-item-meta {
-  color: var(--af-selected-text-muted);
+  color: var(--af-ink-muted);
 }
 
 .af-project-check {
   flex: 0 0 auto;
-  width: 0.8rem;
+  width: var(--af-space-3);
   color: var(--af-accent);
 }
 
@@ -676,31 +678,32 @@ button:disabled,
 }
 
 .af-project-item-path {
-  font-size: var(--af-fs-2xs);
-  color: var(--af-text-muted);
-  white-space: nowrap;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 .af-project-item-meta {
   margin-left: auto;
   flex: 0 0 auto;
-  color: var(--af-text-muted);
-  font-size: var(--af-fs-2xs);
+  color: var(--af-ink-muted);
+  font-size: var(--af-type-caption);
   white-space: nowrap;
 }
 
 /* The menu footer holds the always-present add-project action (#2456) and, for the
  * current project, the reversible delete-project action (#1735, moved here from the
- * removed Projects view); a hairline separates it from the switch list. */
+ * removed Projects view). Space separates it from the switch list. */
 .af-project-menu-foot {
-  margin-top: 0.25rem;
-  padding-top: 0.35rem;
-  border-top: 1px solid var(--af-border-subtle);
+  margin-top: var(--af-space-2);
+  padding-top: 0;
+  border-top: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: var(--af-sp-2);
+  gap: var(--af-space-2);
 }
 
 /* Both footer actions split the row evenly and read at one size: a lone add button
@@ -711,7 +714,8 @@ button:disabled,
 .af-project-delete {
   flex: 1 1 0;
   justify-content: center;
-  font-size: var(--af-fs-xs);
+
+  font-size: var(--af-type-body);
   white-space: nowrap;
 }
 
@@ -722,7 +726,8 @@ button:disabled,
 .af-appbar-tools {
   display: inline-flex;
   align-items: center;
-  gap: var(--af-sp-4);
+
+  gap: var(--af-space-2);
   flex: 0 0 auto;
 }
 
@@ -730,22 +735,22 @@ button:disabled,
   display: none;
   align-items: center;
   justify-content: center;
-  width: 2.75rem;
-  height: 2.75rem;
+  width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   padding: 0;
-  background: transparent;
-  color: var(--af-text);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-md);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-lg);
+  font-size: var(--af-type-heading);
   line-height: 1;
   cursor: pointer;
 }
 
 .af-appbar-more:hover {
-  background: var(--af-bg-inset);
-  border-color: var(--af-border-strong);
+  background: var(--af-surface-raised);
+  border-color: var(--af-border);
 }
 
 .af-ghost {
@@ -772,7 +777,7 @@ button:disabled,
 .af-install {
   display: inline-flex;
   align-items: center;
-  gap: 0.15rem;
+  gap: var(--af-space-1);
 }
 
 /* Beats the .af-install display above on specificity (class + attribute), so the
@@ -785,54 +790,55 @@ button:disabled,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 0.3rem;
-  background: transparent;
-  color: var(--af-text-muted);
+  padding: 0 var(--af-space-1);
+
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
   border: none;
-  border-radius: var(--af-r-sm);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-sm);
+  font-size: var(--af-type-body);
   line-height: 1;
   cursor: pointer;
 }
 
 .af-install__dismiss:hover {
-  color: var(--af-text);
+  color: var(--af-ink);
 }
 
-/* Theme toggle: a compact Auto/Light/Dark segmented control in the appbar. The
- * active option carries an accent-tinted chip; theme.ts persists the choice and
- * stamps data-theme on <html>. */
+/* Appearance mode stays on the existing route until slice C renames Auto. */
 .af-theme-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 0.1rem;
-  padding: 0.15rem;
-  background: var(--af-bg-inset);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-full);
+  gap: var(--af-space-1);
+  padding: 0;
+  background: var(--af-surface);
+  border: 0;
+  border-radius: 0;
 }
 
 .af-theme-opt {
-  padding: 0.2rem 0.55rem;
-  background: transparent;
-  color: var(--af-text-2);
+  padding: var(--af-space-2);
+  background: var(--af-surface);
+  color: var(--af-ink);
   border: none;
-  border-radius: var(--af-r-full);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-2xs);
+  font-size: var(--af-type-body);
   line-height: 1.4;
   cursor: pointer;
 }
 
 .af-theme-opt:hover {
-  color: var(--af-text);
+  color: var(--af-ink);
 }
 
 .af-theme-opt-active {
-  background: var(--af-accent-subtle);
-  color: var(--af-accent-text);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
   font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: var(--af-space-1);
 }
 
 /* Body: fixed-width rail + flexible main content. `position: relative` is the
@@ -853,21 +859,25 @@ button:disabled,
 }
 
 .af-rail {
-  width: 18rem;
-  flex: 0 0 18rem;
-  border-right: 1px solid var(--af-border);
-  background: var(--af-bg-surface);
+  width: calc(var(--af-space-3) * 20);
+  flex: 0 0 calc(var(--af-space-3) * 20);
+  border-right: 0;
+  background: var(--af-surface);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  color: var(--af-ink);
+  font-size: var(--af-type-body);
+  line-height: 1.5;
 }
 
 .af-rail-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0.6rem 0.9rem;
-  border-bottom: 1px solid var(--af-border);
+  justify-content: normal;
+  padding: var(--af-space-2);
+  border-bottom: 0;
+  gap: var(--af-space-2);
 }
 
 /* Keyboard-focus indicator (#1693): which pane owns the keyboard, mirroring the
@@ -875,29 +885,33 @@ button:disabled,
  * the xterm background) marks the pane that has the keyboard, so the nav-vs-terminal
  * mode is legible. The rail also brightens the selected row's edge in nav mode, to
  * show which row Enter will attach. */
-.af-kb-rail .af-rail,
+.af-kb-rail .af-rail {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+  outline-offset: calc(var(--af-space-1) / -2);
+}
+
 .af-kb-terminal .af-main-term {
   outline: 2px solid var(--af-accent);
   outline-offset: -2px;
 }
 
 .af-kb-rail .af-row-selected {
-  box-shadow: inset 0 0 0 1px var(--af-accent);
+  box-shadow: none;
 }
 
 .af-rail-title {
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
+  font-size: var(--af-type-heading);
+  color: var(--af-ink);
   font-weight: 600;
 }
 
 .af-rail-count {
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
-  background: var(--af-bg-inset);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-full);
-  padding: 0.05rem var(--af-sp-2);
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
+  background: var(--af-surface);
+  border: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 /* The rail head's right-hand controls: the status filter and + New, grouped so the
@@ -905,7 +919,8 @@ button:disabled,
 .af-rail-head-actions {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: var(--af-space-2);
+  margin-left: auto;
 }
 
 .af-rail-filter-wrap {
@@ -919,20 +934,21 @@ button:disabled,
 .af-rail-filter {
   display: inline-flex;
   align-items: center;
-  gap: 0.2rem;
-  padding: var(--af-sp-1) 0.45rem;
-  background: transparent;
-  color: var(--af-text-2);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-md);
+  gap: var(--af-space-1);
+  padding: var(--af-space-1) var(--af-space-2);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-2xs);
+
+  font-size: var(--af-type-body);
   cursor: pointer;
 }
 
 .af-rail-filter:hover {
-  color: var(--af-text);
-  border-color: var(--af-border-strong);
+  color: var(--af-ink);
+  border-color: var(--af-border);
 }
 
 /* Narrowed = the filter differs from the default. The DEFAULT (archived hidden) is
@@ -945,77 +961,78 @@ button:disabled,
 
 .af-rail-filter-glyph {
   display: block;
-  width: 0.875rem;
-  height: 0.875rem;
+  width: var(--af-space-3);
+  height: var(--af-space-3);
   flex: 0 0 auto;
 }
 
 /* A static 4px dot — the #1766 rule: state reads from a static glyph, never motion. */
 .af-rail-filter-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: var(--af-r-full);
-  background: transparent;
+  width: var(--af-space-1);
+  height: var(--af-space-1);
+  border-radius: var(--af-radius-control);
+  background: var(--af-surface);
 }
 
 .af-rail-filter-dot-on {
   background: var(--af-accent);
 }
 
-/* The filter menu. Mirrors .af-project-menu's chrome (raised surface, overlay shadow,
- * same radii/padding) so the two dropdowns read as one system. It hangs from its
+/* The filter menu shares the project menu's raised surface and border. It hangs from its
  * button's RIGHT edge and opens leftward, which is what keeps a 13rem menu inside an
  * 18rem rail — anchored left it would spill across the terminal pane. */
 .af-filter-menu {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + var(--af-space-1));
   right: 0;
-  min-width: 13rem;
-  background: var(--af-bg-raised);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-lg);
-  box-shadow: var(--af-shadow-overlay);
-  padding: 0.3rem;
+  min-width: calc(var(--af-space-3) * 13);
+  background: var(--af-surface-raised);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-dialog);
+  box-shadow: none;
+
+  padding: var(--af-space-2);
   z-index: 30;
 }
 
 .af-filter-menu-label {
-  padding: 0.35rem 0.6rem 0.25rem;
-  font-size: var(--af-fs-2xs);
-  color: var(--af-text-muted);
+  padding: var(--af-space-1) var(--af-space-2) var(--af-space-1);
+  font-size: var(--af-type-heading);
+  color: var(--af-ink);
   font-weight: 600;
 }
 
 .af-filter-item {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: var(--af-space-2);
   width: 100%;
-  padding: 0.35rem 0.6rem;
-  background: transparent;
+
+  padding: var(--af-space-2);
+
+  background: var(--af-surface-raised);
   border: none;
-  border-radius: var(--af-r-md);
-  color: var(--af-text-2);
+  border-radius: var(--af-radius-control);
+  color: var(--af-ink);
   font: inherit;
-  font-size: var(--af-fs-sm);
+  font-size: var(--af-type-body);
   text-align: left;
   cursor: pointer;
 }
 
 .af-filter-item:hover {
-  background: var(--af-bg-inset);
-  color: var(--af-text);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
 }
 
-/* A checked state is the row's normal weight; unchecked stays dimmer, so the shown
- * set is legible at a glance without reading every check. */
+/* Checkmarks distinguish the shown set without dimming action labels. */
 .af-filter-item-on {
-  color: var(--af-text);
+  color: var(--af-ink);
 }
 
 .af-filter-check {
   flex: 0 0 auto;
-  width: 0.8rem;
+  width: var(--af-space-3);
   color: var(--af-accent);
 }
 
@@ -1029,67 +1046,57 @@ button:disabled,
 
 .af-filter-item-count {
   flex: 0 0 auto;
-  font-size: var(--af-fs-2xs);
-  color: var(--af-text-muted);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .af-filter-menu-foot {
-  margin-top: 0.25rem;
-  padding-top: 0.35rem;
-  border-top: 1px solid var(--af-border-subtle);
+  margin-top: var(--af-space-2);
+  padding-top: 0;
+  border-top: 0;
   display: flex;
 }
 
 .af-filter-reset {
   width: 100%;
   justify-content: center;
-  font-size: var(--af-fs-xs);
+
+  font-size: var(--af-type-body);
 }
 
 .af-filter-reset:disabled {
-  color: var(--af-text-muted);
-  border-color: var(--af-border-subtle);
+  color: var(--af-ink);
+  border-color: var(--af-border);
   cursor: default;
 }
 
 .af-filter-reset:disabled:hover {
-  color: var(--af-text-muted);
-  border-color: var(--af-border-subtle);
+  color: var(--af-ink);
+  border-color: var(--af-border);
 }
 
 .af-rail-list {
   list-style: none;
   margin: 0;
-  padding: 0.35rem;
+  padding: 0;
   overflow-y: auto;
-  /* Keep a scroll that reaches this list's edge from chaining into the document
-   * (rubber-band / pull-to-refresh) on mobile. Inert on desktop (#2493). */
+
   overscroll-behavior: contain;
   flex: 1;
 }
 
-/* The hairline under the pinned root agent (#2513): a dim rule matching the rail's
- * own borders (--af-border) so root reads as its own zone, never a heavy divider.
- * Pure demarcation — aria-hidden, not a navigable row, and rendered only when a
- * non-root row follows root. Mirrors the TUI sidebar's subtle rule. */
-.af-rail-sep {
-  height: 0;
-  margin: var(--af-sp-1) var(--af-sp-2);
-  border-top: 1px solid var(--af-border);
-  list-style: none;
-}
 
 .af-rail-empty {
-  padding: var(--af-sp-4) var(--af-sp-3);
-  color: var(--af-text-2);
-  font-size: var(--af-fs-sm);
+  padding: var(--af-space-3) var(--af-space-2);
+  color: var(--af-ink);
+  font-size: var(--af-type-body);
   line-height: 1.5;
 }
 
 .af-rail-empty code {
   font-family: var(--af-font-mono);
-  color: var(--af-text);
+  color: var(--af-ink);
 }
 
 /* The per-project empty state (redesign PR2): a dim one-liner shown when the selected
@@ -1099,43 +1106,47 @@ button:disabled,
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.35rem;
-  padding: var(--af-sp-3) var(--af-sp-3);
-  color: var(--af-text-muted);
-  font-size: var(--af-fs-xs);
+  gap: var(--af-space-1);
+  padding: var(--af-space-2) var(--af-space-2);
+
+  color: var(--af-ink);
+
+  font-size: var(--af-type-body);
   line-height: 1.5;
 }
 
 .af-rail-empty-new {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.1rem 0.5rem;
-  background: var(--af-accent-subtle);
-  color: var(--af-accent-text);
+  gap: var(--af-space-1);
+  padding: calc(var(--af-space-1) * 0.4) var(--af-space-2);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
   border: none;
-  border-radius: var(--af-r-md);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-2xs);
+
+  font-size: var(--af-type-body);
   font-weight: 600;
   cursor: pointer;
 }
 
 .af-rail-empty-new:hover {
-  background: var(--af-accent-tint);
+  background: var(--af-surface-raised);
 }
 
 .af-row {
   display: flex;
   align-items: flex-start;
-  gap: var(--af-sp-2);
-  padding: var(--af-sp-2) 0.6rem;
-  border-radius: var(--af-r-md);
+  gap: var(--af-space-1);
+  padding: var(--af-space-2);
+  border-radius: 0;
   cursor: pointer;
+  position: relative;
 }
 
 .af-row:hover {
-  background: var(--af-bg-inset);
+  background: var(--af-surface);
 }
 
 /* A row that cannot attach is visible status only, though it may still contain an
@@ -1148,25 +1159,26 @@ button:disabled,
  * cursor is the web analogue of the TUI's inert Loading row; no local spinner or
  * optimistic state is involved. */
 .af-row-creating {
-  cursor: progress;
+  cursor: default;
 }
 
 .af-row-selected {
-  background: var(--af-accent-subtle);
-  color: var(--af-selected-text);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
 }
 
 .af-row-selected:hover {
-  background: var(--af-accent-tint);
+  background: var(--af-surface-raised);
 }
 
 .af-row-archived {
-  color: var(--af-text-muted);
+  color: var(--af-ink-muted);
 }
 
 .af-row-selected.af-row-archived,
 .af-row-selected .af-row-branch {
-  color: var(--af-selected-text-muted);
+  color: var(--af-ink-muted);
+  margin-top: 0;
 }
 
 .af-row-main {
@@ -1184,7 +1196,7 @@ button:disabled,
   align-items: center;
   align-self: center;
   flex: 0 0 auto;
-  gap: 0.15rem;
+  gap: var(--af-space-1);
   opacity: 0;
   pointer-events: none;
 }
@@ -1200,81 +1212,83 @@ button:disabled,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.6rem;
-  height: 1.6rem;
+  width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   padding: 0;
-  background: transparent;
-  color: var(--af-text-2);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-md);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-sm);
+  font-size: var(--af-type-body);
   line-height: 1;
   cursor: pointer;
 }
 
 .af-rail-action:hover {
-  color: var(--af-text);
-  border-color: var(--af-border-strong);
+  color: var(--af-ink);
+  border-color: var(--af-border);
 }
 
 .af-rail-kill {
-  color: var(--af-text-muted);
-  border-color: transparent;
+  color: var(--af-ink);
+  border-color: var(--af-surface);
 }
 
 .af-rail-kill:hover {
-  color: var(--af-danger);
-  border-color: var(--af-border-strong);
+  color: var(--af-ink);
+  border-color: var(--af-border);
 }
 
 .af-row-selected .af-rail-action {
-  color: var(--af-selected-text-muted);
+  color: var(--af-ink);
 }
 
 .af-row-selected .af-rail-action:hover {
-  color: var(--af-selected-text);
+  color: var(--af-ink);
 }
 
 .af-row-selected .af-rail-kill:hover {
-  color: var(--af-selected-status-broken);
+  color: var(--af-ink);
 }
 
 .af-row-title {
-  font-size: var(--af-fs-md);
-  font-weight: 600;
+  font-size: var(--af-type-body);
+  font-weight: 400;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--af-ink);
 }
 
 .af-row-branch {
-  margin-top: 0.15rem;
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-muted);
+  margin-top: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .af-operator-state {
-  font-weight: 600;
+  font-weight: 400;
+  font-size: var(--af-type-body);
 }
 
 .af-row-branch-name {
-  display: inline-flex;
-  align-items: baseline;
-  min-width: 0;
+  /* Inline text truncates within the branch; an atomic inline-flex box was
+   * replaced wholesale by the parent's ellipsis, leaving only the separator. */
+  display: inline;
   font-family: var(--af-font-mono);
 }
 
 .af-branch-icon {
   display: inline-block;
-  width: 0.85rem;
-  height: 0.85rem;
-  margin-right: 0.2rem;
-  vertical-align: -0.15rem;
-  opacity: 0.8;
+  width: var(--af-space-3);
+  height: var(--af-space-3);
+  margin-right: var(--af-space-1);
+  vertical-align: baseline;
+  opacity: 1;
 }
 
 /* A fixed status cell aligns every title even though Working intentionally has no
@@ -1283,16 +1297,16 @@ button:disabled,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 0.875rem;
-  min-height: 1.2rem;
-  flex: 0 0 0.875rem;
+  width: var(--af-type-body);
+  min-height: calc(var(--af-type-body) * 1.5);
+  flex: 0 0 var(--af-type-body);
 }
 
 /* Status icon: every shape is static (#1766). */
 .af-dot {
   flex: 0 0 auto;
   line-height: 1.4;
-  font-size: var(--af-fs-sm);
+  font-size: var(--af-type-body);
 }
 
 .af-dot-ready .af-icon,
@@ -1301,66 +1315,78 @@ button:disabled,
 }
 
 .af-dot-ready {
-  color: var(--af-dot-ready);
+  color: var(--af-ready);
 }
 
 .af-dot-lost {
-  color: var(--af-dot-lost);
+  color: var(--af-lost);
 }
 
 .af-dot-dead {
-  color: var(--af-dot-dead);
+  color: var(--af-dead);
 }
 
 .af-dot-archived {
-  color: var(--af-dot-archived);
+  color: var(--af-archived);
 }
 
 .af-dot-limit {
-  color: var(--af-dot-limit);
+  color: var(--af-limit-reached);
 }
 
-.af-row-operator-needs-you :is(.af-dot, .af-operator-state) {
-  color: var(--af-status-needs-you);
+/* Resolved state is independent of the selected surface. Failure detail remains
+ * readable even for a ready process whose prompt could not be delivered. */
+.af-row[data-state="ready"] .af-operator-state { color: var(--af-ready); }
+.af-row[data-state="working"] .af-operator-state { color: var(--af-running); }
+.af-row[data-state="lost"] .af-operator-state { color: var(--af-lost); }
+.af-row[data-state="dead"] .af-operator-state { color: var(--af-dead); }
+.af-row[data-state="archived"] .af-operator-state { color: var(--af-archived); }
+.af-row[data-state="limit"] .af-operator-state { color: var(--af-limit-reached); }
+.af-row-operator-broken .af-idle-reason { color: var(--af-dead); }
+.af-row-selected .af-row-title { font-weight: 600; }
+.af-row-selected::before {
+  content: "";
+  position: absolute;
+  inset: var(--af-space-2) auto var(--af-space-2) 0;
+  width: calc(var(--af-space-1) / 2);
+  background: var(--af-accent);
 }
 
-.af-row-operator-working .af-operator-state {
-  color: var(--af-status-working);
+/* Migrated chrome uses the fixed recipes even when a shared legacy class (ghost,
+ * icon, disabled or focus) is also present. Slice C migrates the remaining controls. */
+:is(.af-appbar, .af-rail) button {
+  min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  line-height: 1.5;
 }
-
-.af-row-operator-waiting-limit :is(.af-dot, .af-operator-state) {
-  color: var(--af-status-waiting);
+:is(.af-appbar, .af-rail) .af-ghost {
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-control);
+  font-size: var(--af-type-body);
 }
-
-.af-row-operator-broken :is(.af-dot, .af-operator-state) {
-  color: var(--af-status-broken);
+:is(.af-appbar, .af-rail) button:disabled {
+  opacity: 1;
+  color: var(--af-ink);
+  border-color: var(--af-border);
+  border-style: dashed;
 }
-
-.af-row-operator-archived :is(.af-dot, .af-operator-state) {
-  color: var(--af-status-inactive);
+:is(.af-appbar, .af-rail) button:focus-visible {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+  outline-offset: calc(var(--af-space-1) / 2);
 }
-
-/* Selected rows use the same static glyph + label vocabulary, with foregrounds
- * revalidated against both translucent accent fills. */
-.af-row-selected.af-row-operator-needs-you :is(.af-dot, .af-operator-state) {
-  color: var(--af-selected-status-needs-you);
+:is(.af-appbar, .af-rail) button:hover:not(:disabled) { text-decoration-line: underline; }
+:is(.af-appbar, .af-rail) .af-icon {
+  width: var(--af-type-body);
+  height: var(--af-type-body);
 }
-
-.af-row-selected.af-row-operator-working .af-operator-state {
-  color: var(--af-selected-status-working);
+:is(.af-appbar, .af-rail) *::-webkit-scrollbar-thumb {
+  background: var(--af-border);
+  border: 0;
+  border-radius: 0;
 }
-
-.af-row-selected.af-row-operator-waiting-limit :is(.af-dot, .af-operator-state) {
-  color: var(--af-selected-status-waiting);
-}
-
-.af-row-selected.af-row-operator-broken :is(.af-dot, .af-operator-state) {
-  color: var(--af-selected-status-broken);
-}
-
-.af-row-selected.af-row-operator-archived :is(.af-dot, .af-operator-state) {
-  color: var(--af-selected-status-inactive);
-}
+:is(.af-appbar, .af-rail) * { scrollbar-color: var(--af-border) var(--af-surface); }
 
 /* af-pulse is gone with its last consumer. It survived #1766's "no animated
  * indicators" rule as the connection live-pip's pulse; removing that pip (#2458)
@@ -2224,21 +2250,22 @@ button:disabled,
 .af-rail-new {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: var(--af-sp-1) 0.55rem;
-  background: transparent;
-  color: var(--af-accent);
-  border: 1px solid var(--af-accent);
-  border-radius: var(--af-r-md);
+  gap: var(--af-space-1);
+  padding: var(--af-space-2);
+  background: var(--af-accent);
+  color: var(--af-surface);
+  border: calc(var(--af-space-1) / 4) solid var(--af-accent);
+  border-radius: var(--af-radius-control);
   font: inherit;
-  font-size: var(--af-fs-2xs);
+  font-size: var(--af-type-body);
   font-weight: 600;
   cursor: pointer;
 }
 
 .af-rail-new:hover {
-  background: var(--af-accent-subtle);
-  color: var(--af-accent-text);
+  background: var(--af-accent);
+  color: var(--af-surface);
+  text-decoration: underline;
 }
 
 /* Destructive action button (kill/confirm-kill): outlined in the error color, and
@@ -2657,34 +2684,39 @@ button:disabled,
 .af-viewnav {
   display: inline-flex;
   align-items: stretch;
-  gap: 2px;
-  padding: 2px;
-  margin-left: var(--af-sp-2);
-  background: var(--af-bg-inset);
-  border: 1px solid var(--af-border-subtle);
-  border-radius: var(--af-r-md);
+  gap: var(--af-space-2);
+  padding: 0;
+  margin-left: var(--af-space-2);
+  background: var(--af-surface);
+  border: 0;
+  border-radius: 0;
 }
 
 .af-viewtab {
-  padding: 0.24rem 0.75rem;
-  background: transparent;
-  color: var(--af-text-2);
+  padding: var(--af-space-2);
+  background: var(--af-surface);
+  color: var(--af-ink);
   border: none;
-  border-radius: var(--af-r-sm);
+  border-radius: 0;
   font: inherit;
-  font-size: var(--af-fs-xs);
-  font-weight: 500;
+  font-size: var(--af-type-body);
+  font-weight: 400;
   cursor: pointer;
 }
 
 .af-viewtab:hover {
-  color: var(--af-text);
+  color: var(--af-ink);
 }
 
 .af-viewtab-active {
-  background: var(--af-bg-surface);
-  color: var(--af-text);
-  box-shadow: var(--af-shadow-1);
+  background: var(--af-surface);
+  color: var(--af-ink);
+  box-shadow: none;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--af-accent);
+  text-decoration-thickness: calc(var(--af-space-1) / 2);
+  text-underline-offset: var(--af-space-2);
 }
 
 /* The viewport holds the three view bodies; exactly one shows at a time (the others
@@ -2904,9 +2936,9 @@ button:disabled,
       "nav views views"
       "project project tools";
     align-items: center;
-    gap: var(--af-sp-2);
-    padding: max(var(--af-sp-2), env(safe-area-inset-top)) max(var(--af-sp-2), env(safe-area-inset-right))
-      var(--af-sp-2) max(var(--af-sp-2), env(safe-area-inset-left));
+    gap: var(--af-space-2);
+    padding: max(var(--af-space-2), env(safe-area-inset-top)) max(var(--af-space-2), env(safe-area-inset-right))
+      var(--af-space-2) max(var(--af-space-2), env(safe-area-inset-left));
   }
 
   /* The hamburger is meaningful only where there is a rail to reveal — the sessions
@@ -2933,25 +2965,19 @@ button:disabled,
     left: 0;
     bottom: 0;
     z-index: var(--af-z-drawer);
-    width: min(85vw, 20rem);
+    width: min(85vw, calc(var(--af-space-3) * 20));
     flex: none;
     transform: translateX(-100%);
-    /* The parked drawer is visibility:hidden so it takes no touches and drops out of the
-     * tab/a11y order; the 0.22s visibility delay lets it finish sliding OUT before it
-     * disappears (open flips it visible immediately, at 0s). */
+
     visibility: hidden;
-    transition:
-      transform 0.22s ease,
-      visibility 0s linear 0.22s;
+    transition: none;
   }
 
   .af-app.af-nav-open .af-rail {
     transform: translateX(0);
     visibility: visible;
-    box-shadow: var(--af-shadow-overlay);
-    transition:
-      transform 0.22s ease,
-      visibility 0s linear 0s;
+    box-shadow: none;
+    transition: none;
   }
 
   /* The scrim over the terminal while the drawer is open — dim + tap-to-close. */
@@ -2960,10 +2986,10 @@ button:disabled,
     position: absolute;
     inset: 0;
     z-index: calc(var(--af-z-drawer) - 1);
-    background: var(--af-backdrop);
+    background: var(--af-surface);
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.22s ease;
+    transition: none;
   }
 
   .af-app.af-nav-open .af-nav-scrim {
@@ -2990,7 +3016,7 @@ button:disabled,
   .af-project-switch {
     width: 100%;
     min-width: 0;
-    height: 2.75rem;
+    height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
   .af-project-switch-name {
@@ -3002,11 +3028,11 @@ button:disabled,
    * keeps a right-anchored menu inside both 320px and 375px viewports, whether the
    * drawer is open or closed. The appbar's stacking context keeps it above the drawer. */
   .af-project-menu {
-    right: calc(-2.75rem - var(--af-sp-2));
-    width: calc(100vw - var(--af-sp-2) - var(--af-sp-2));
+    right: calc(-1 * var(--af-space-4) - var(--af-space-3) - var(--af-space-1) - var(--af-space-2));
+    width: calc(100vw - var(--af-space-2) - var(--af-space-2));
     min-width: 0;
     max-width: none;
-    max-height: calc(100dvh - 7rem);
+    max-height: calc(100dvh - calc(var(--af-space-3) * 7));
     overflow-y: auto;
     z-index: var(--af-z-popover);
   }
@@ -3017,14 +3043,14 @@ button:disabled,
     margin-left: 0;
     padding: 0;
     border: 0;
-    box-shadow: inset 0 0 0 1px var(--af-border-subtle);
+    box-shadow: none;
   }
 
   .af-appbar .af-viewtab {
     flex: 1 1 0;
     min-width: 0;
-    min-height: 2.75rem;
-    padding-inline: var(--af-sp-2);
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+    padding-inline: var(--af-space-2);
   }
 
   /* Live/install/theme/disconnect are useful but secondary. One 44px trigger keeps
@@ -3043,20 +3069,20 @@ button:disabled,
   .af-appbar-tools {
     display: none;
     position: absolute;
-    top: calc(100% + 6px);
+    top: calc(100% + var(--af-space-1));
     right: 0;
     z-index: var(--af-z-popover);
-    width: min(17rem, calc(100vw - var(--af-sp-2) - var(--af-sp-2)));
-    max-height: calc(100dvh - 4rem);
+    width: min(calc(var(--af-space-3) * 17), calc(100vw - var(--af-space-2) - var(--af-space-2)));
+    max-height: calc(100dvh - calc(var(--af-space-3) * 4));
     overflow-y: auto;
     flex-direction: column;
     align-items: stretch;
-    gap: var(--af-sp-2);
-    padding: var(--af-sp-2);
-    background: var(--af-bg-raised);
-    border: 1px solid var(--af-border);
-    border-radius: var(--af-r-lg);
-    box-shadow: var(--af-shadow-overlay);
+    gap: var(--af-space-2);
+    padding: var(--af-space-2);
+    background: var(--af-surface-raised);
+    border: calc(var(--af-space-1) / 4) solid var(--af-border);
+    border-radius: var(--af-radius-dialog);
+    box-shadow: none;
   }
 
   .af-appbar-tools-open > .af-appbar-tools {
@@ -3069,12 +3095,12 @@ button:disabled,
 
   .af-appbar-tools .af-install__go {
     flex: 1 1 auto;
-    min-height: 2.75rem;
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
   .af-appbar-tools .af-install__dismiss {
-    min-width: 2.75rem;
-    min-height: 2.75rem;
+    min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
   .af-appbar-tools .af-theme-toggle {
@@ -3083,12 +3109,12 @@ button:disabled,
 
   .af-appbar-tools .af-theme-opt {
     flex: 1 1 0;
-    min-height: 2.5rem;
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
   .af-appbar-tools > .af-ghost {
     width: 100%;
-    min-height: 2.75rem;
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
   /* A selected session gets the phone's whole viewport except ONE control row.
@@ -3102,7 +3128,7 @@ button:disabled,
     inset: 0 0 auto;
     z-index: var(--af-z-appbar);
     display: block;
-    height: calc(max(var(--af-sp-1), env(safe-area-inset-top)) + 2.75rem + var(--af-sp-1));
+    height: calc(max(var(--af-space-1), env(safe-area-inset-top)) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-1));
     padding: 0;
     background: transparent;
     border: 0;
@@ -3111,11 +3137,11 @@ button:disabled,
 
   .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-nav-toggle {
     position: absolute;
-    top: max(var(--af-sp-1), env(safe-area-inset-top));
-    left: max(var(--af-sp-2), env(safe-area-inset-left));
+    top: max(var(--af-space-1), env(safe-area-inset-top));
+    left: max(var(--af-space-2), env(safe-area-inset-left));
     display: inline-flex;
-    width: 2.75rem;
-    height: 2.75rem;
+    width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+    height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     padding: 0;
     pointer-events: auto;
   }
@@ -3156,11 +3182,11 @@ button:disabled,
       "project project tools";
     height: auto;
     align-items: center;
-    gap: var(--af-sp-2);
-    padding: max(var(--af-sp-2), env(safe-area-inset-top)) max(var(--af-sp-2), env(safe-area-inset-right))
-      var(--af-sp-2) max(var(--af-sp-2), env(safe-area-inset-left));
-    background: var(--af-bg-surface);
-    border-bottom: 1px solid var(--af-border);
+    gap: var(--af-space-2);
+    padding: max(var(--af-space-2), env(safe-area-inset-top)) max(var(--af-space-2), env(safe-area-inset-right))
+      var(--af-space-2) max(var(--af-space-2), env(safe-area-inset-left));
+    background: var(--af-surface);
+    border-bottom: 0;
     pointer-events: auto;
   }
 
@@ -3180,7 +3206,7 @@ button:disabled,
 
   .af-app.af-view-sessions.af-session-selected.af-nav-open .af-rail {
     top: calc(
-      max(var(--af-sp-2), env(safe-area-inset-top)) + 2.75rem + var(--af-sp-2) + 2.75rem + var(--af-sp-2)
+      max(var(--af-space-2), env(safe-area-inset-top)) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-2) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-2)
     );
   }
 
@@ -3211,16 +3237,16 @@ button:disabled,
   .af-project-switch,
   .af-viewtab,
   .af-theme-opt {
-    min-height: 2.25rem;
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 
   .af-rail-action {
-    min-width: 2.25rem;
+    min-width: calc(var(--af-space-3) * 2.25);
   }
 
   .af-row {
-    padding-top: var(--af-sp-3);
-    padding-bottom: var(--af-sp-3);
+    padding-top: var(--af-space-2);
+    padding-bottom: var(--af-space-2);
   }
 
   /* Overlays go near-full-width so a modal (create session, confirms) is never clipped
