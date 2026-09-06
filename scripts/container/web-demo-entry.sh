@@ -569,4 +569,3 @@ chmod 0644 "$OUT"/*
 ls -l "$OUT"
 printf '>>> done · %ss mp4 (%s bytes) · %s stills\n' \
     "$mp4_seconds" "$mp4_bytes" "$(find "$SHOTS" -name '*.png' | wc -l)"
-
