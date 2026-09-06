@@ -857,7 +857,6 @@ Settable keys:
   default_program            agent enum (claude, codex, aider, gemini, amp, opencode, devin)
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
-  theme                      nord | zenburn | compact JSON object of #RRGGBB color slots
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
@@ -920,7 +919,7 @@ is rejected with the location it actually belongs to. Clear an override with
 Examples:
   af config set default_program codex
   af config set auto_update false
-  af config set theme zenburn
+  af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"

@@ -289,7 +289,7 @@ preference. Agent-owned ANSI output remains unchanged.
 Legacy global config migrates once on a normal config read, without a separate
 `af config migrate` command:
 
-| Legacy value | Saved replacement when no valid `appearance` exists |
+| Legacy value | Saved replacement |
 | --- | --- |
 | `appearance = "auto"` | `appearance = "system"` |
 | `theme = "light"` | `appearance = "light"` |
@@ -303,8 +303,9 @@ like their TOML equivalents, and objects map like custom tables. TOML inline
 tables (`theme = { accent = "#ffffff" }`) and dotted table keys
 (`theme.accent = "#ffffff"`) also follow the custom `[theme]` table mapping.
 
-An existing valid `appearance` (`light`, `dark`, or `system`) wins over every
-legacy theme value. Migration removes the legacy key/table, logs the old key
+An existing `appearance` wins over every legacy theme value; `auto` means
+`system`, even beside a legacy light/dark theme. Migration removes the legacy
+key/table, logs the old key
 and the new `appearance` value, and persists the result idempotently: subsequent
 reads do not repeat the rewrite or migration log. Legacy `appearance = "auto"`
 normalizes to `system`; new writes accept only `light`, `dark`, and `system`.

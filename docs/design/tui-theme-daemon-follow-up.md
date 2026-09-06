@@ -10,8 +10,7 @@ each client. Shared daemon palette configuration is retired.
 - Migrate legacy `theme = "light"` / `"dark"` to matching appearance. Legacy
   `auto`, `system`, `nord`, `zenburn` and custom `[theme]` tables become
   `system`.
-  An existing valid `appearance` always wins. Legacy appearance `auto`
-  normalizes
+  An existing `appearance` always wins. Legacy appearance `auto` normalizes
   to `system`; new writes accept only the three supported values. Legacy JSON
   `theme` strings/objects follow the same mapping, as do TOML inline tables and
   dotted table keys such as `theme.accent`.
