@@ -104,6 +104,7 @@ func armDeleteProjectDialogAt(t *testing.T, data []session.InstanceData, w, hgt 
 	// The section's rows come from the same discovery prod uses on launch, poll,
 	// and project switch. This is what makes the test cover the derivation.
 	h.refreshSidebarProjects()
+	h.relayout()
 	require.Len(t, h.projects.Projects(), 1, "the snapshot must yield exactly the test project")
 
 	h.focusRegion(layout.RegionProjects)

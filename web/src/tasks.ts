@@ -1,3 +1,4 @@
+import { recoveryScreen } from "./recovery.js";
 // The TASKS view of the web client (#1592 Phase 5 PR8): the browser analogue of the
 // TUI's automations / task pane (ui/task_pane.go, ui/automations.go). It lists the
 // scheduled tasks the daemon owns — name, cron/watch trigger, enabled, target
@@ -46,6 +47,8 @@ export interface AddTaskInput {
  *  handler has its stable id and current state; the toggle turns that into a
  *  field-level `{ enabled }` patch (UpdateTask), never a full-struct write (#1700). */
 export interface TaskActions {
+  retry?: () => void;
+  addProject?: () => void;
   /** Opens the add-task modal. */
   add(): void;
   /** Opens the edit modal seeded from this task; submits the changed fields via
@@ -241,6 +244,7 @@ export function taskArmingSummary(t: TaskData): string {
  */
 export class TasksPane {
   readonly el: HTMLElement;
+  private lastError: string | undefined;
   private lastTasks: TaskData[] | null = null;
   private lastProject: string | null = null;
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
@@ -255,10 +259,11 @@ export class TasksPane {
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
-  update(tasks: TaskData[], selectedProject: string | null): void {
-    if (this.lastTasks === tasks && this.lastProject === selectedProject) {
+  update(tasks: TaskData[], selectedProject: string | null, error?: string): void {
+    if (this.lastTasks === tasks && this.lastProject === selectedProject && this.lastError === error) {
       return;
     }
+    this.lastError = error;
     const token = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token;
@@ -269,6 +274,16 @@ export class TasksPane {
   }
 
   private render(tasks: TaskData[]): void {
+    if (this.lastError) {
+      this.el.replaceChildren(recoveryScreen({ condition: "Tasks unavailable", detail: this.lastError,
+        failed: true, action: "Retry", run: () => this.actions.retry?.() }));
+      return;
+    }
+    if (this.lastProject === null) {
+      this.el.replaceChildren(recoveryScreen({ condition: "No project registered",
+        action: "Add project", run: () => this.actions.addProject?.() }));
+      return;
+    }
     const addBtn = h(
       "button",
       { type: "button", class: "af-tasks-add", title: "Add task" },
@@ -285,12 +300,7 @@ export class TasksPane {
     );
     if (tasks.length === 0) {
       this.el.replaceChildren(
-        head,
-        h(
-          "p",
-          { class: "af-tasks-empty" },
-          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule.",
-        ),
+        recoveryScreen({ condition: "No tasks", action: "Add task", run: () => this.actions.add() }),
       );
       return;
     }

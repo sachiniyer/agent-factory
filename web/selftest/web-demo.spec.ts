@@ -436,6 +436,8 @@ async function recordSplits(browser: Browser): Promise<void> {
       await page.locator('.af-tab[data-tab-index="0"]').dragTo(pane, { targetPosition: { x: 8, y: box.height / 2 } });
       await expect(page.locator(".af-pane")).toHaveCount(2);
       await page.locator(".af-pane-host .xterm").first().click();
+      // Splitting resizes both PTYs; wait for that repaint before checking idle.
+      await settleTerminal(page);
       await screenshotFor(page, pass.suffix)("split-panes");
     } finally {
       await context.close();

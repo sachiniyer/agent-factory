@@ -427,8 +427,10 @@ func TestHookScriptRejectsAgentNameUsedAsDataAndGetsConfiguredEnvironment(t *tes
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv | cut -d= -f1\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	out, _, err := runHookScriptWithEnvironment(
-		hookDeleteTimeout, script, "./collect codex", []string{customName},
+	p := &hookProvisioner{program: "./collect codex"}
+	p.resolveAuthSelectors()
+	out, _, err := runHookScriptWithResolvedEnvironment(
+		hookDeleteTimeout, script, p.environmentAgent(), p.authSelectors, []string{customName},
 	)
 	if err != nil {
 		t.Fatal(err)

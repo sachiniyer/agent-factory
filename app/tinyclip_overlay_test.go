@@ -166,8 +166,8 @@ func TestTasksOverlayNarrowIsFullScreenWithoutRailBleed(t *testing.T) {
 			}
 
 			// …and it is still legible, not merely bounded.
-			assert.Contains(t, plain, "Tasks")
-			assert.Contains(t, plain, "r run now")
+			assert.Contains(t, plain, "No tasks")
+			assert.Contains(t, plain, "Press n to create one.")
 		})
 	}
 }
@@ -192,5 +192,5 @@ func TestTasksOverlayWideKeepsRailAndCenteredModal(t *testing.T) {
 	plain := xansi.Strip(view)
 	assert.Contains(t, plain, "Agent Factory", "the rail must still render beside a centered modal")
 	assert.Contains(t, plain, "rail-inst", "the rail's instance row must still render")
-	assert.Contains(t, plain, "Tasks")
+	assert.Contains(t, plain, "No tasks")
 }

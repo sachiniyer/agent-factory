@@ -34,7 +34,6 @@ func (p persistPtyFactory) Start(cmd *exec.Cmd) (*os.File, error) {
 	}
 	return f, err
 }
-func (p persistPtyFactory) Close() {}
 
 // nameKeyedExec is a tmux mock that tracks session existence per session name,
 // so an instance's agent and shell sessions are independent. Sessions named in

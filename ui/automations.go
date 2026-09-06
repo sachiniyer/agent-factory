@@ -610,10 +610,6 @@ func (a *AutomationsPane) String() string {
 		counts: fmt.Sprintf("(%d)", len(tasks)),
 	}, nameStyle)
 	lines := []string{title}
-	if len(tasks) == 0 {
-		lines = append(lines, automationsDisabledStyle.Render(
-			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", railHelpKey(keys.KeyTaskList)), a.rect.W)))
-	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace
 	// frame's bottom border never abuts the section's last row (#1560), the way

@@ -1,6 +1,7 @@
 // Shared presentation chrome. State, transport and operation policy stay with callers.
 // Native DOM nodes and listeners preserve the existing focus/ownership contracts.
 import { h } from "./dom.js";
+import { mutationNotice } from "./recovery.js";
 import { VIEWS, type View } from "./nav.js";
 import { icon } from "./icon.js";
 import type { ITheme } from "@xterm/xterm";
@@ -142,7 +143,7 @@ export function modalChrome(opts: {
   errorLine: HTMLElement;
 } {
   const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
+  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
   errorLine.hidden = true;
 
   const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
@@ -183,7 +184,7 @@ export function modalChrome(opts: {
     },
     setError(msg: string | null) {
       if (msg) {
-        errorLine.textContent = msg;
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
       } else {
         errorLine.textContent = "";
@@ -196,3 +197,4 @@ export function modalChrome(opts: {
   };
   return { handle, body, confirmBtn, cancelBtn, errorLine };
 }
+

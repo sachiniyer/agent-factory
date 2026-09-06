@@ -526,16 +526,12 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		default:
 			lines = append(lines, configHeadingStyle.Render(strings.ToUpper(row.heading)))
 			if row.heading == accountsHeading {
-				// What these rows are, said once under the heading — see
-				// accountsHeadingNote.
-				lines = append(lines, strings.Split(
-					strings.TrimSuffix(c.wrapIndented(accountsHeadingNote, configHintStyle), "\n"), "\n")...)
-				// The Accounts heading is also the only one that can be followed by a
-				// failure instead of rows: an empty section reads as "you have no
-				// accounts", which is a different thing from "af could not look".
 				if c.accounts.unavailable != "" {
-					lines = append(lines, strings.Split(
-						strings.TrimSuffix(c.renderAccountsUnavailable(), "\n"), "\n")...)
+					lines = append(lines, strings.Split(c.renderAccountsUnavailable(), "\n")...)
+				} else if c.accounts.empty {
+					lines = append(lines, strings.Split(RecoveryContent("No accounts", "", "Select a register row and press enter to add one.", false, c.width), "\n")...)
+				} else {
+					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(accountsHeadingNote, configHintStyle), "\n"), "\n")...)
 				}
 			}
 		}

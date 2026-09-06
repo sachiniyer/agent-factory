@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -55,6 +56,7 @@ const (
 
 // TaskPane renders an inline task editor in the right pane.
 type TaskPane struct {
+	unavailable string
 	tasks       []task.Task
 	selectedIdx int
 
@@ -510,6 +512,12 @@ func taskDeliverySummary(tsk task.Task) string {
 }
 
 func (s *TaskPane) renderListMode() string {
+	if s.unavailable != "" {
+		return RecoveryScreen(layout.Rect{W: s.width, H: s.height}, "Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
+	}
+	if len(s.tasks) == 0 {
+		return RecoveryScreen(layout.Rect{W: s.width, H: s.height}, "No tasks", "", "Press n to create one.", false)
+	}
 	t := CurrentTheme()
 	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
@@ -522,11 +530,6 @@ func (s *TaskPane) renderListMode() string {
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Tasks"))
 	b.WriteString("\n\n")
-
-	if len(s.tasks) == 0 {
-		b.WriteString(disabledStyle.Render("  No tasks. Press n to create one."))
-		b.WriteString("\n")
-	}
 
 	// Width available to the indented detail lines under the selected row.
 	detailWidth := s.width - 8

@@ -22,8 +22,6 @@ func (p *captureLaunchEnvPty) Start(command *exec.Cmd) (*os.File, error) {
 	return nil, errors.New("stop after capturing launch command")
 }
 
-func (*captureLaunchEnvPty) Close() {}
-
 func forceSessionEnvExecutable(t *testing.T, path string) {
 	t.Helper()
 	previous := sessionEnvExecutable
