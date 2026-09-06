@@ -3491,6 +3491,118 @@ test("the degraded pass with a head-bound approval still merges itself", async (
   assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
 });
 
+// #3951 live reproductions; #3948's summary edit time was captured from GitHub
+// after the issue was filed (the issue gives no timestamp for that summary).
+const CODEX_TRANSIENT_FAILURE = 'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error';
+for (const [pr, head, committed, limit, later, body] of [
+  [3937, "9528ae06", "12:22:12", "12:22:34", "12:30:46", CODEX_TRANSIENT_FAILURE],
+  [3948, "a40e7aac", "12:38:27", "12:38:32", "12:48:27", "<!-- codex-pull-request-review-summary -->\n## Codex Review Summary"],
+  [3949, "8f4eab35", "12:37:11", "12:37:49", "12:45:33", "<!-- codex-pull-request-review-summary -->\n## Codex Review Summary …"],
+]) {
+  test(`#3951: PR #${pr} non-review artifact permits head-current degradation`, async () => {
+    const at = (time) => `2026-09-06T${time}Z`;
+    const options = {
+      headSha: head.padEnd(40, "0"), headCommittedDate: at(committed),
+      issueComments: [
+        codexRateLimit(at(limit), "Codex usage limits have been reached for code reviews. Please check with the admins of this repo to increase the limits by adding credits."),
+        codexRateLimit(at(later), body),
+      ],
+    };
+    const blocked = await evaluateGate(options);
+    assert.match(blocked.reasons.join("\n"), /awaiting maintainer review/);
+    assert.doesNotMatch(blocked.reasons.join("\n"), /no parseable verdict/);
+    const approved = await evaluateGate({ ...options, issueComments: [
+      ...options.issueComments,
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", at("12:50:00")),
+    ] });
+    assert.equal(approved.shouldMerge, true, approved.reasons.join("; "));
+    if (pr !== 3937) {
+      const withoutLimit = await evaluateGate({ ...options, issueComments: [options.issueComments[1]] });
+      assert.doesNotMatch(withoutLimit.reasons.join("\n"), /awaiting maintainer review|no parseable verdict/);
+    }
+    // A summary must not refresh stale evidence; a failure is itself evidence.
+    const stale = await evaluateGate({ ...options, headCommittedDate: at("12:50:01") });
+    assert.doesNotMatch(stale.reasons.join("\n"), /awaiting maintainer review/);
+  });
+}
+
+test("a transient Codex failure alone arms degradation only after the head", async () => {
+  for (const timestamp of ["2026-07-09T00:59:59Z", "2026-07-09T01:00:00Z", "2026-07-09T01:00:01Z"]) {
+    const result = await evaluateGate({ issueComments: [codexRateLimit(timestamp, CODEX_TRANSIENT_FAILURE)] });
+    assert.equal(/awaiting maintainer review/.test(result.reasons.join("\n")), timestamp.endsWith("01Z"));
+  }
+  const quoted = codexVerdict(HEAD_SHA);
+  quoted.body += `\n${CODEX_TRANSIENT_FAILURE}`;
+  assert.equal(autoGate.codexEvidence.isCodexUsageLimitArtifact(quoted), false);
+  assert.equal(autoGate.codexEvidence.isCodexUsageLimitArtifact({ body: `${CODEX_TRANSIENT_FAILURE} P2`, in_reply_to_id: 1 }), false);
+});
+
+test("transient failure notices do not diagnose a usage limit", async () => {
+  for (const author of ["sachiniyer", "detail-app"]) {
+    for (const approved of [false, true]) {
+      const result = await evaluateGate({ author, issueComments: [
+        codexRateLimit("2026-07-09T01:20:00Z", CODEX_TRANSIENT_FAILURE),
+        ...(approved ? [prComment("sachiniyer", "## Review — approve", "2026-07-09T01:30:00Z")] : []),
+      ] });
+      assert.equal(result.degradedForUnavailableReviewer, true);
+      assert.doesNotMatch(JSON.stringify(result), /usage.limit|out of quota/i);
+      assert.match(result.notes.join("\n"), /transient failure/);
+      const github = fakeGateGithub({ author, checkRuns: happyCheckRuns() });
+      await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result, manual: false });
+      assert.doesNotMatch(JSON.stringify(github.createdChecks), /usage.limit|out of quota/i);
+    }
+  }
+});
+
+test("completed summary rows for older heads supersede outages by row time", async () => {
+  for (const [rowTime, status, expected] of [
+    ["2026-07-09T01:25:00Z", "✅ **Completed**", false],
+    ["2026-07-09T01:15:00Z", "✅ **Completed**", true],
+    ["2026-07-09T01:25:00Z", "🔄 **Running**", true],
+    [null, "✅ **Completed**", true],
+  ]) {
+    const result = await evaluateGate({ issueComments: [
+      codexRateLimit("2026-07-09T01:20:00Z"),
+      codexSummaryTable(OTHER_SHA, { rowTime, status, commentTime: "2026-07-09T01:30:00Z" }),
+    ] });
+    assert.equal(result.degradedForUnavailableReviewer, expected, `${rowTime} ${status}`);
+  }
+});
+
+test("automatic summary verdict closes a transient failure outage at the row time", () => {
+  const { aggregate, render } = require("./codex-outage.js");
+  const at = (minute) => `2026-09-06T13:${minute}:00Z`;
+  const failure = codexRateLimit(at("10"), CODEX_TRANSIENT_FAILURE);
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: at("20"), commentTime: at("40"),
+  });
+  summary.html_url = "https://github.com/sachiniyer/agent-factory/pull/3953#issuecomment-summary";
+  const collect = (artifact) => aggregate([{
+    number: 3953, head: { sha: HEAD_SHA }, merged_at: at("25"),
+    artifacts: [failure, artifact],
+  }], at("30"));
+  const episodes = collect(summary);
+  assert.equal(episodes.length, 1);
+  assert.equal(episodes[0].end, new Date(at("20")).toISOString());
+  assert.equal(episodes[0].recovery, summary.html_url);
+  assert.deepEqual(episodes[0].merged, []);
+  assert.match(render(episodes, at("30")), /availability — recovered/);
+
+  // An edit after the outage must not refresh a stale row. Recovery can be for
+  // any head, but needs a completed, timestamped row that is not in the future.
+  for (const options of [
+    { status: "🔄 **Running**" },
+    { rowTime: null },
+    { rowTime: at("05") },
+    { rowTime: at("35") },
+  ]) {
+    const invalid = codexSummaryTable(HEAD_SHA, {
+      rowTime: at("20"), commentTime: at("40"), ...options,
+    });
+    assert.equal(collect(invalid).at(-1).end, null, JSON.stringify(options));
+  }
+});
+
 test("degraded evaluation writes outage duration to the Actions job summary", async () => {
   const core = fakeCore();
   let summary = "";

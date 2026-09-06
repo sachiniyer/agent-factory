@@ -11,6 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
@@ -24,7 +26,7 @@ func TestRecoveryDriverScenes(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile); lipgloss.SetHasDarkBackground(dark) })
 	for _, theme := range []string{"light", "dark"} {
-		for _, scene := range []string{"zero-sessions", "no-project", "zero-tasks", "zero-accounts", "tasks-unavailable", "projects-unavailable", "no-daemon", "create-failed", "archive-failed", "kill-failed", "task-save-failed", "task-edit-save-failed", "too-small"} {
+		for _, scene := range []string{"zero-sessions", "no-project", "zero-tasks", "zero-accounts", "remote-accounts", "tasks-unavailable", "projects-unavailable", "no-daemon", "create-failed", "archive-failed", "kill-failed", "task-save-failed", "task-edit-save-failed", "too-small"} {
 			t.Run(scene+"-"+theme, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(theme == "dark")
 				h := newTestHome(t)
@@ -47,6 +49,23 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					h.configPane.SetAccounts(nil, []string{"claude", "codex"}, nil)
 					h.configPane.SetFocus(true)
 					want = "No accounts"
+				case "remote-accounts":
+					t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
+					h.state = stateConfigEditor
+					h.configPane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "codex", Tier: 1}},
+						"http://buildbox:8443 · /srv/af/config.toml")
+					t.Cleanup(SetAccountSeamsForTest(func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
+						return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "codex", Name: "remote-work"}}, Agents: []string{"codex"}}, nil
+					}, registerAccount, startAccountLogin))
+					load := h.loadAccountsIntoPane()
+					h.configPane.SetFocus(true)
+					require.NotNil(t, load)
+					_, _ = h.Update(load())
+					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyDown})
+					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnter})
+					require.True(t, h.configPane.HasFocus(), "refused login keeps Accounts visible")
+					require.Contains(t, ansi.Strip(h.configPane.String()), "http://buildbox:8443")
+					want = "cannot do that against a remote daemon"
 				case "tasks-unavailable":
 					h.state = stateTasks
 					h.automations.TaskPane().SetFocus(true)

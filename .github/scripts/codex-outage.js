@@ -7,6 +7,7 @@ const MARKER = '<!-- codex-reviewer-outage:v1 ';
 // rolling 24h window cannot forget an outage and completed history stays fixed.
 const SCAN_SINCE = '2026-09-05T00:00:00.000Z';
 const time = (value) => Date.parse(value || '');
+const causeLabel = kind => ({ failure: 'transient failure', 'usage-limit': 'usage limit' })[kind] || 'unknown cause';
 const hours = (start, end) => (Math.max(0, time(end) - time(start)) / 3600000).toFixed(1);
 
 function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
@@ -18,10 +19,21 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       if (artifact.user?.login !== evidence.CODEX_REVIEWER) continue;
       const body = artifact.body || '';
       const verdict = evidence.parseReviewedCommit(body);
-      const limit = evidence.isCodexUsageLimitArtifact(artifact);
-      const at = (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at;
-      if ((!verdict && !limit) || !Number.isFinite(time(at)) || time(at) > time(now) || time(at) < time(since)) continue;
-      events.push({ time: at, verdict, url: artifact.html_url, body });
+      const unavailable = evidence.classifyCodexUnavailableArtifact(artifact);
+      // Every completed row is a recovery, including superseded commits.
+      // Head matching remains necessary only for the merge accounting below.
+      const responses = evidence.completedCodexSummaryRows(artifact).map(row => ({
+        time: new Date(row.time).toISOString(), verdict: true,
+      }));
+      if (verdict || unavailable) responses.push({
+        time: (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at,
+        verdict, kind: unavailable?.kind,
+      });
+      for (const response of responses) {
+        const at = time(response.time);
+        if (!Number.isFinite(at) || at > time(now) || at < time(since)) continue;
+        events.push({ ...response, url: artifact.html_url, body });
+      }
     }
   }
   // Verdict wins a timestamp tie. A real verdict is recovery even if it reports
@@ -38,10 +50,11 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       }
     } else {
       if (!active) {
-        active = { start: event.time, end: null, latest: null, merged: [] };
+        active = { start: event.time, end: null, latest: null, merged: [], causes: [] };
         episodes.push(active);
       }
-      active.latest = { time: event.time, url: event.url, body: event.body };
+      if (!active.causes.includes(event.kind)) active.causes.push(event.kind);
+      active.latest = { time: event.time, url: event.url, body: event.body, kind: event.kind };
     }
   }
   for (const episode of episodes) {
@@ -68,10 +81,11 @@ function render(episodes, now) {
     : 'Codex reviewer availability — recovered';
   const lines = [`## ${heading}`, '', 'Owned by Master Health Watch. Policy and evidence: #3932.',
     `Last sweep: ${now}. History scanned since ${SCAN_SINCE}.`,
-    'Degraded merges are reconstructed from pre-merge limit notices and absence of a verdict covering the merged head (the #3932 method).', ''];
+    'Degraded merges are reconstructed from pre-merge reviewer-unavailable notices and absence of a verdict covering the merged head (the #3932 method).', ''];
   for (const episode of [...episodes].reverse()) {
     lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
-      `Latest limit notice: [${episode.latest.time}](${episode.latest.url})`,
+      `Observed causes: ${(episode.causes || []).map(causeLabel).join(', ') || 'not recorded'}.`,
+      `Latest reviewer-unavailable notice: [${episode.latest.time}](${episode.latest.url})`,
       `> ${episode.latest.body.replace(/\n/g, '\n> ')}`,
       `Degraded merges: ${episode.merged.length}${episode.merged.length ? ` (${episode.merged.map(n => `#${n}`).join(', ')})` : ''}.`,
       episode.end ? `Recovered: ${episode.end} — [first real verdict](${episode.recovery}). Final degraded-merge count: ${episode.merged.length}.` : 'Status: unavailable.', '');
@@ -91,9 +105,11 @@ function readRecord(comment) {
   } catch { return null; }
 }
 
-async function gateNotice({ github, context, since, now = new Date().toISOString() }) {
+async function gateNotice({ github, context, since, kind = "usage-limit", now = new Date().toISOString() }) {
   let suffix = ' (repository record not yet updated; duration observed on this PR)';
   let start = since;
+  let description = kind === 'failure' ? 'unavailable after a transient failure' : 'usage-limited';
+  let observedCauses = '';
   try {
     const comments = await github.paginate(github.rest.issues.listComments, {
       ...context.repo, issue_number: POLICY_ISSUE, per_page: 100,
@@ -102,12 +118,17 @@ async function gateNotice({ github, context, since, now = new Date().toISOString
     const active = record?.state.episodes.at(-1);
     if (active && !active.end && time(active.start) <= time(since)) {
       start = active.start;
+      const causes = active.causes || [];
+      if (causes.length !== 1 || causes[0] !== kind) {
+        description = 'unavailable';
+        observedCauses = ` (${causes.map(causeLabel).join(', then ') || 'causes not recorded'})`;
+      }
       suffix = ` (Master Health Watch as of ${record.state.observedAt}; ${record.comment.html_url})`;
     }
   } catch {
     suffix = ' (repository record unavailable; duration observed on this PR)';
   }
-  return `Codex usage-limited since ${start}, ${hours(start, now)}h ago${suffix}`;
+  return `Codex ${description} since ${start}, ${hours(start, now)}h ago${observedCauses}${suffix}`;
 }
 
 // api paginates GET collections; failures abort before any record write. The
