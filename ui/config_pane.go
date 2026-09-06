@@ -183,6 +183,7 @@ func (c *ConfigPane) IsEditing() bool { return c.editing || c.accounts.registeri
 func (c *ConfigPane) SetFocus(focus bool) {
 	c.hasFocus = focus
 	if !focus {
+		c.accounts.busy = false
 		c.cancelEdit()
 		c.cancelRegister()
 		c.accounts.status = ""
@@ -208,6 +209,7 @@ func (c *ConfigPane) TakeAssistantRequest() bool {
 // rebuildRows flattens the manifest into the visible list, honoring the
 // advanced toggle, and keeps the cursor on something selectable.
 func (c *ConfigPane) rebuildRows() {
+	selectedAccount := c.selectedAccount()
 	c.rows = nil
 	for _, tier := range config.ManifestTiers {
 		if tier == config.TierAdvanced && !c.showAdvanced {
@@ -232,6 +234,20 @@ func (c *ConfigPane) rebuildRows() {
 	// Accounts last: the config keys are what this overlay is for, and a
 	// credential section above them would push them off the first screen.
 	c.appendAccountRows()
+	if selectedAccount != nil {
+		found := false
+		for i, row := range c.rows {
+			account := row.account
+			if account != nil && account.Agent == selectedAccount.Agent && account.Name == selectedAccount.Name && account.Register == selectedAccount.Register {
+				c.selectedIdx = i
+				found = true
+				break
+			}
+		}
+		if !found && c.accounts.registering {
+			c.cancelRegister() // the editor's row disappeared; never retain an invisible field
+		}
+	}
 	c.clampSelection()
 }
 
@@ -734,6 +750,9 @@ func (c *ConfigPane) renderHints() string {
 		verb := "↵ log in"
 		if account.Register {
 			verb = "↵ register"
+			if c.accounts.busy {
+				verb = "registration pending"
+			}
 		} else if c.accounts.loginRefusal != "" {
 			verb = "login unavailable"
 		}

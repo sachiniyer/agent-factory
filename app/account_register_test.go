@@ -199,7 +199,7 @@ func TestAccountRegisterRemoteIgnoresCompletionAfterReopen(t *testing.T) {
 	require.Equal(t, stateConfigEditor, h.state)
 }
 
-func TestAccountRegisterRemoteIgnoresSupersededCompletion(t *testing.T) {
+func TestAccountRegisterRemoteRejectsOverlappingRequest(t *testing.T) {
 	h := remoteAccountRegisterHome(t)
 	t.Cleanup(SetAccountSeamsForTest(
 		func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
@@ -212,10 +212,8 @@ func TestAccountRegisterRemoteIgnoresSupersededCompletion(t *testing.T) {
 	first := h.handleAccountRegister("codex", "first")
 	second := h.handleAccountRegister("codex", "second")
 	require.NotNil(t, first)
-	require.NotNil(t, second)
-	h.Update(second())
-	newer := h.configPane.String()
-	require.Contains(t, newer, `Registered codex account "second"`)
+	require.Nil(t, second, "one remote mutation may run at a time")
+	require.Contains(t, h.configPane.String(), `Registering codex account "first"…`)
 	h.Update(first())
-	require.Equal(t, newer, h.configPane.String(), "out-of-order completion must not overwrite the latest result")
+	require.Contains(t, h.configPane.String(), `Registered codex account "first"`)
 }

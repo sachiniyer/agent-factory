@@ -7,6 +7,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 // The Accounts section of the config overlay (#3385) — the owner's ask, in his
@@ -80,6 +82,7 @@ type accountsSection struct {
 	rows    []AccountRow
 	loaded  bool
 	loading bool
+	busy    bool
 	empty   bool
 	// unavailable is why the accounts could not be read, rendered in place of the
 	// rows. A section that silently shows nothing is indistinguishable from "you
@@ -187,6 +190,18 @@ func (c *ConfigPane) SetAccountStatus(text string, isError bool) {
 	c.accounts.statusIsError = isError
 }
 
+// AccountsBusy reports whether a remote registration and its refresh are pending.
+func (c *ConfigPane) AccountsBusy() bool { return c.accounts.busy }
+
+// SetAccountsBusy prevents a second registration editor or submission while the
+// first mutation runs. The completion handler or closing the pane releases it.
+func (c *ConfigPane) SetAccountsBusy(busy bool) {
+	c.accounts.busy = busy
+	if busy {
+		c.cancelRegister()
+	}
+}
+
 // SetAccountLoginRefusal explains why login is unavailable on the attached host.
 // Registration stays available; the selected account shows this in place.
 func (c *ConfigPane) SetAccountLoginRefusal(reason string) {
@@ -225,6 +240,9 @@ func (c *ConfigPane) handleAccountKey(msg tea.KeyMsg) bool {
 	switch msg.String() {
 	case "enter":
 		if account.Register {
+			if c.accounts.busy {
+				return true
+			}
 			c.beginRegister(account.Agent)
 			return true
 		}
@@ -319,6 +337,9 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 
 	if account.Register {
 		label := "+ register a " + account.Agent + " account"
+		if c.accounts.busy {
+			return c.renderBusyAccountRow(label, cursor)
+		}
 		if selected {
 			b.WriteString(configSelectedStyle.Render(label))
 		} else {
@@ -391,4 +412,22 @@ func accountRowPurpose(account AccountRow) string {
 // renderAccountsUnavailable renders the section's failure line in place of rows.
 func (c *ConfigPane) renderAccountsUnavailable() string {
 	return RecoveryContent("Cannot load accounts", "Accounts could not be read: "+c.accounts.unavailable, "Reopen settings to retry.", true, c.width)
+}
+
+// renderBusyAccountRow keeps disabled labels readable and uses the shared dashed
+// outline. Fit each physical line separately so viewport height stays accurate.
+func (c *ConfigPane) renderBusyAccountRow(label, cursor string) string {
+	style := theme.Disabled()
+	if c.width > 0 {
+		style = style.MaxWidth(max(1, c.width-2))
+	}
+	var out strings.Builder
+	for i, line := range strings.Split(style.Render(label), "\n") {
+		prefix := "  "
+		if i == 1 {
+			prefix = cursor
+		}
+		out.WriteString(c.fitPaneLine(prefix+line) + "\n")
+	}
+	return out.String()
 }

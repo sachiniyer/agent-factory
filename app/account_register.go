@@ -18,6 +18,10 @@ type accountRegisteredMsg struct {
 }
 
 func (m *home) remoteAccountRegisterCmd(agent, name string) tea.Cmd {
+	if m.configPane.AccountsBusy() {
+		return nil
+	}
+	m.configPane.SetAccountsBusy(true)
 	m.accountGeneration++
 	generation := m.accountGeneration
 	register, list := registerAccount, listAccountsForPane
@@ -33,11 +37,12 @@ func (m *home) remoteAccountRegisterCmd(agent, name string) tea.Cmd {
 }
 
 func (m *home) handleAccountRegistered(msg accountRegisteredMsg) {
-	// Closing/reopening or starting another registration makes this answer stale.
+	// Closing/reopening makes this answer stale.
 	// A late completion must neither reopen Accounts nor overwrite newer feedback.
 	if msg.generation != m.accountGeneration || m.state != stateConfigEditor || !m.configPane.HasFocus() {
 		return
 	}
+	m.configPane.SetAccountsBusy(false)
 	if msg.err != nil {
 		m.configPane.SetAccountStatus(msg.err.Error(), true)
 		return
