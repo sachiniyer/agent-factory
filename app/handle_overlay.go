@@ -384,7 +384,7 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 // opening an editor onto a broken or absent config and letting the user "fix"
 // one key would write the rest of that state back.
 func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
-	m.accountRegisterGeneration++ // discard a registration result from an earlier opening
+	m.accountGeneration++ // discard account results from an earlier opening
 	entries, location, err := ui.ReadConfigForEditor()
 	if err != nil {
 		return m, m.handleError(err)
@@ -393,11 +393,11 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	// The Accounts section (#3385), read on every open for the same reason the
 	// config is: an account registered from the CLI, or logged in from the web,
 	// since this TUI started must show as it is now rather than as af remembers.
-	m.loadAccountsIntoPane()
+	accountsCmd := m.loadAccountsIntoPane()
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor
-	return m, nil
+	return m, accountsCmd
 }
 
 // handleStateConfigEditor routes key events to the config editor overlay. Esc

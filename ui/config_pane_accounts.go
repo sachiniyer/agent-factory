@@ -77,9 +77,10 @@ type AccountRequest struct {
 // accountsSection is the pane's account state: the rows the daemon reported, the
 // register field, and the pending request.
 type accountsSection struct {
-	rows   []AccountRow
-	loaded bool
-	empty  bool
+	rows    []AccountRow
+	loaded  bool
+	loading bool
+	empty   bool
 	// unavailable is why the accounts could not be read, rendered in place of the
 	// rows. A section that silently shows nothing is indistinguishable from "you
 	// have no accounts", and those need different actions from the operator.
@@ -128,6 +129,7 @@ const accountsHeadingNote = "agent identities, not config keys · af runs the ag
 // register affordance still has to be offered. An error replaces the rows rather
 // than emptying them silently.
 func (c *ConfigPane) SetAccounts(accounts []AccountRow, agents []string, err error) {
+	c.accounts.loading = false
 	c.accounts.rows = nil
 	c.accounts.unavailable = ""
 	c.accounts.loaded = true
@@ -156,10 +158,16 @@ func (c *ConfigPane) SetAccounts(accounts []AccountRow, agents []string, err err
 	c.rebuildRows()
 }
 
-// AccountsLoaded reports whether SetAccounts has run. The host uses it to decide
-// whether to render the section at all — an overlay opened before the daemon
-// answered shows the config rows it already has rather than an empty Accounts
-// heading that looks like "you have none".
+// SetAccountsLoading clears an earlier opening's rows while the remote read runs.
+func (c *ConfigPane) SetAccountsLoading() {
+	c.SetAccounts(nil, nil, nil)
+	c.accounts.loading = true
+	c.accounts.empty = false
+	c.SetAccountStatus("", false)
+}
+
+// AccountsLoaded reports whether the section has been initialized, either with
+// a completed read or the loading state. Before initialization it stays hidden.
 func (c *ConfigPane) AccountsLoaded() bool { return c.accounts.loaded }
 
 // TakeAccountRequest reports what the user asked for since the last call,

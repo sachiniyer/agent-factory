@@ -57,8 +57,10 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					t.Cleanup(SetAccountSeamsForTest(func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
 						return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "codex", Name: "remote-work"}}, Agents: []string{"codex"}}, nil
 					}, registerAccount, startAccountLogin))
-					h.loadAccountsIntoPane()
+					load := h.loadAccountsIntoPane()
 					h.configPane.SetFocus(true)
+					require.NotNil(t, load)
+					_, _ = h.Update(load())
 					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyDown})
 					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnter})
 					require.True(t, h.configPane.HasFocus(), "refused login keeps Accounts visible")

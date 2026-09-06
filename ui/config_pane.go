@@ -528,7 +528,9 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		default:
 			lines = append(lines, configHeadingStyle.Render(row.heading))
 			if row.heading == accountsHeading {
-				if c.accounts.unavailable != "" {
+				if c.accounts.loading {
+					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("Loading accounts…", configHintStyle), "\n"), "\n")...)
+				} else if c.accounts.unavailable != "" {
 					lines = append(lines, strings.Split(c.renderAccountsUnavailable(), "\n")...)
 				} else if c.accounts.empty {
 					lines = append(lines, strings.Split(RecoveryContent("No accounts", "", "Select a register row and press enter to add one.", false, c.width), "\n")...)

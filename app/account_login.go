@@ -61,11 +61,16 @@ func SetAccountSeamsForTest(
 // A failure becomes the section's own message rather than blocking the overlay:
 // the config editor is still useful when the accounts cannot be read, and an
 // operator who came to change a key should not be turned away because a daemon
-// call failed.
-func (m *home) loadAccountsIntoPane() {
+// call failed. Remote reads return a command so a stalled daemon cannot freeze
+// the UI; only the local control-socket read stays inline.
+func (m *home) loadAccountsIntoPane() tea.Cmd {
 	m.configPane.SetAccountLoginRefusal(remoteAccountLoginRefusal())
+	if apiclient.IsRemoteTarget() {
+		return m.remoteAccountsLoadCmd()
+	}
 	resp, err := listAccountsForPane(daemon.ListAccountsRequest{})
 	m.applyAccountsToPane(resp, err)
+	return nil
 }
 
 // applyAccountsToPane applies a completed read on the UI loop.
