@@ -589,14 +589,18 @@ func (p *schedulePicker) renderWeekdayRow() string {
 	active := p.focused && p.activeCell() == cellWeekdays
 	var b strings.Builder
 	for i, letter := range weekdayLetters {
+		label := " " + letter + " "
 		style := lipgloss.NewStyle().Foreground(t.Ink)
 		if p.weekdays[i] {
+			// Checked state is text, independent of focus styling and colour.
+			// Brackets retain the existing three-cell width.
+			label = "[" + letter + "]"
 			style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
 		}
 		if active && i == p.weekdayCursor {
 			style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
 		}
-		b.WriteString(style.Render(" " + letter + " "))
+		b.WriteString(style.Render(label))
 	}
 	return b.String()
 }

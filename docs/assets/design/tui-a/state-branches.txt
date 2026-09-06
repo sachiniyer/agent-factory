@@ -1144,24 +1144,24 @@ ui/schedule_picker.go:578 renderTimeLine
   583 return return plain.Render("At") + p.chip(cellHour, p.hourStr) + plain.Render(":") + 	p.chip(cellMinute, p.minuteStr) + p.chip(cellMeridiem, meridiem)
 
 ui/schedule_picker.go:587 renderWeekdayRow
-  592 mapping style := lipgloss.NewStyle().Foreground(t.Ink)
-  593 condition p.weekdays[i]
-  594 mapping style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
-  596 condition active && i == p.weekdayCursor
-  597 mapping style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
+  593 mapping style := lipgloss.NewStyle().Foreground(t.Ink)
+  594 condition p.weekdays[i]
+  598 mapping style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
+  600 condition active && i == p.weekdayCursor
+  601 mapping style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
 
-ui/schedule_picker.go:606 chip
-  608 condition strings.TrimSpace(text) == ""
-  611 mapping style := lipgloss.NewStyle().Foreground(t.Ink)
-  612 condition p.focused && p.activeCell() == cell
-  613 mapping style = lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
-  615 return return style.Render(" " + text + " ")
+ui/schedule_picker.go:610 chip
+  612 condition strings.TrimSpace(text) == ""
+  615 mapping style := lipgloss.NewStyle().Foreground(t.Ink)
+  616 condition p.focused && p.activeCell() == cell
+  617 mapping style = lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+  619 return return style.Render(" " + text + " ")
 
-ui/schedule_picker.go:620 hint
-  622 case cellRaw
-  624 case cellWeekdays
-  626 case cellType
-  626 case cellMeridiem
+ui/schedule_picker.go:624 hint
+  626 case cellRaw
+  628 case cellWeekdays
+  630 case cellType
+  630 case cellMeridiem
 
 ui/selection_marker.go:7 SelectionMarker
   9 return return lipgloss.NewStyle().Bold(true).Foreground(t.Accent).Background(t.SurfaceRaised).Render(marker)

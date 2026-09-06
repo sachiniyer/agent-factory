@@ -21,9 +21,9 @@ Shared daemon config retirement is tracked in
 
 ## Capture provenance
 
-These 88 stills are deterministic real app-model `Update`/`View` output,
+These 90 stills are deterministic real app-model `Update`/`View` output,
 converted from ANSI cells by P4's SVG writer. They are not live-daemon screen
-recordings. `TestDesignDriverScenes` adds thirty-one chrome scenes to P4's thirteen
+recordings. `TestDesignDriverScenes` adds thirty-two chrome scenes to P4's thirteen
 recovery scenes. Both run only in the isolated sandbox created by
 `make playtest-container-detached`; no host TUI, app tests or daemon tests run.
 The supplementary P4 live tmux scenario passed retained failed creation,
@@ -54,7 +54,7 @@ selections use Ink on SurfaceRaised. The blurred sidebar title uses Surface on
 InkMuted, with a 4.5:1 contrast gate in both palettes. Regression tests pin these
 role assignments. Only the affected accounts, config, zero-accounts, search,
 pane, keyboard and preview SVG/ANSI pairs were refreshed in the make-created
-playtest sandbox; all 88 driver goldens pass. The search fixture now includes
+playtest sandbox; all 90 driver goldens pass. The search fixture now includes
 lost, dead and archived results.
 
 The final whole-PR [role audit](../assets/design/tui-a/role-audit.txt) records
@@ -79,12 +79,17 @@ project markers that reused Ready’s glyph, and failure notice colours.
 New both-theme scenes cover these transitions. Remaining B recipes are listed
 explicitly in the enumeration rather than counted as completed A work.
 
+The focused weekday retains its checked value: checked days use `[M]`-style
+labels, unchecked days keep the plain letter. Both occupy three cells; focus
+keeps the same raised/underlined treatment. TrueColor and ASCII regressions
+cover the toggle in both palettes, with separate checked/unchecked stills.
+
 ## Performance and verification
 
 One `make perf-container` pass at 1,000 sessions verified the Codex corrections
-on top of the gate update at `7d5e68e0`. Full frame
-averaged **76.038 ms** (range 49.871–92.322); key-to-render averaged **75.848 ms**
-(67.319–82.517).
+on top of the gate update at `5c2637fa`. Full frame
+averaged **62.555 ms** (range 48.318–69.715); key-to-render averaged **65.651 ms**
+(59.161–77.491).
 Every sample meets P5's stricter 480 / 351 ms limits. The harness still reports
 P1's original looser CI ceilings; these are not the thresholds used to accept P5.
 [Raw samples](../assets/design/tui-a/perf/tui-runs.json) and the
@@ -146,3 +151,4 @@ stills were self-reviewed before requesting review.
 | project-picker-existing | ![project-picker-existing light](../assets/design/tui-a/project-picker-existing-light.svg) | ![project-picker-existing dark](../assets/design/tui-a/project-picker-existing-dark.svg) |
 | config-edit | ![config-edit light](../assets/design/tui-a/config-edit-light.svg) | ![config-edit dark](../assets/design/tui-a/config-edit-dark.svg) |
 | account-register | ![account-register light](../assets/design/tui-a/account-register-light.svg) | ![account-register dark](../assets/design/tui-a/account-register-dark.svg) |
+| task-weekdays-unchecked | ![Unchecked weekday light](../assets/design/tui-a/task-weekdays-unchecked-light.svg) | ![Unchecked weekday dark](../assets/design/tui-a/task-weekdays-unchecked-dark.svg) |

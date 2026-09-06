@@ -120,8 +120,10 @@ F10 Task form create/edit: field labels I; focused trigger/program selector I/R
     with A/R arrows; unfocused selected values currently M. Schedule type has
     the same pair. B shared control recipe must keep all field labels readable,
     and moves the existing Accent title / M group headings to I.
-F11 Schedule checked weekdays -> I/R bold; focused day -> same plus underline;
-    unchecked days I. Numeric/hour/minute/meridiem/day cells -> I, focused I/R
+F11 Schedule checked weekdays -> bracketed letter (e.g. [M]), I/R bold;
+    unchecked -> plain letter, I. Focused day -> I/R bold plus underline,
+    retaining brackets only if checked. Both labels stay three cells wide;
+    the focused checked/unchecked value remains distinct without colour. Numeric/hour/minute/meridiem/day cells -> I, focused I/R
     bold+underline. Empty cell -> dash, not liveness. Preview/next occurrence I,
     raw cron M. All preset arms and Custom text input are in state-branches.txt.
 F12 Task textinput/textarea and PromptOverlay: typed text inherits I; placeholder

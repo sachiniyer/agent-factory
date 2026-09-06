@@ -27,7 +27,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(mode == "dark")
 				h := newTestHome(t)
@@ -96,17 +96,20 @@ func TestDesignDriverScenes(t *testing.T) {
 					for n := 0; n < count; n++ {
 						pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 					}
-				case "task-create", "task-schedule", "task-weekdays":
+				case "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked":
 					h.state = stateTasks
 					h.automations.TaskPane().EnterCreateMode(h.repoRoot)
 					if scene != "task-create" {
 						pane := h.automations.TaskPane()
 						pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 						pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
-						if scene == "task-weekdays" {
+						if scene == "task-weekdays" || scene == "task-weekdays-unchecked" {
 							pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
 							for n := 0; n < 4; n++ {
 								pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
+							}
+							if scene == "task-weekdays-unchecked" {
+								pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeySpace})
 							}
 						} else {
 							pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})

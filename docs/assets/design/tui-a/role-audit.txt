@@ -1,4 +1,4 @@
-P5 A whole-PR role audit (base 03de5767, fifth-round correction)
+P5 A whole-PR role audit (base 1bbc5ac6, weekday-state correction)
 
 Review scope: every changed path below, including prior-round changes; not only
 the latest inline locations. Production diffs reviewed against interface-design.md.
@@ -26,7 +26,7 @@ Contrast: generator validates all text roles on Surface and SurfaceRaised at
 4.5:1, border at 3:1; Surface on Accent and the blurred title Surface on InkMuted
 are explicitly checked at 4.5:1 in both themes. Examined every background setter,
 foreground assignment, reverse/faint modifier and generated style assignment in
-changed production files. A cell-level pass through all 88 current SVGs finds
+changed production files. A cell-level pass through all 90 current SVGs finds
 26 actual emitted foreground/background combinations, listed below: every one
 meets the token contract within the approved termenv channel tolerance.
 Dark Accent on SurfaceRaised emits 4.491:1; token contrast remains >=4.5:1. SGR token tolerance remains +/-1 channel.
@@ -62,31 +62,35 @@ style, producing the validated Surface/Accent pair. Every emitted selected
 value/state cell was checked, not only its foreground. B/C requirements remain
 explicit in the enumeration; unfinished recipes are not counted as A passes.
 
+Weekday-state correction: checked labels retain brackets while focused;
+unchecked labels remain plain. Focus no longer erases the stored value.
+TrueColor/ASCII and both palettes preserve the distinction at the same width.
+
 Emitted pairs across every gallery SVG:
 #2c6171 on #eceff3: 5.959:1 (18 stills)
-#2c6171 on #f8f9fc: 6.528:1 (36 stills)
+#2c6171 on #f8f9fc: 6.528:1 (37 stills)
 #2e3440 on #90c3d3: 6.502:1 (10 stills)
 #2e3440 on #b7c0ce: 6.807:1 (3 stills)
-#2e3440 on #eceff3: 10.829:1 (31 stills)
-#2e3440 on #f8f9fc: 11.863:1 (44 stills)
+#2e3440 on #eceff3: 10.829:1 (32 stills)
+#2e3440 on #f8f9fc: 11.863:1 (45 stills)
 #405430 on #eceff3: 7.200:1 (11 stills)
-#4c5669 on #f8f9fc: 7.018:1 (37 stills)
+#4c5669 on #f8f9fc: 7.018:1 (38 stills)
 #657083 on #f8f9fc: 4.751:1 (13 stills)
 #705014 on #f8f9fc: 7.008:1 (1 stills)
 #883b43 on #eceff3: 6.612:1 (1 stills)
 #883b43 on #f8f9fc: 7.244:1 (12 stills)
-#90c3d3 on #2e3440: 6.502:1 (36 stills)
+#90c3d3 on #2e3440: 6.502:1 (37 stills)
 #90c3d3 on #434c5e: 4.491:1 (18 stills)
 #a1aaba on #2e3440: 5.337:1 (13 stills)
-#b7c0ce on #2e3440: 6.807:1 (37 stills)
+#b7c0ce on #2e3440: 6.807:1 (38 stills)
 #d5e2cc on #434c5e: 6.401:1 (11 stills)
 #d8dee9 on #2e3440: 9.245:1 (1 stills)
 #e3c8cd on #2e3440: 7.975:1 (12 stills)
 #e3c8cd on #434c5e: 5.509:1 (1 stills)
 #ebcb8b on #2e3440: 7.998:1 (1 stills)
-#eceff3 on #2e3440: 10.829:1 (43 stills)
-#eceff3 on #434c5e: 7.480:1 (31 stills)
-#eceff4 on #2e3440: 10.836:1 (15 stills)
+#eceff3 on #2e3440: 10.829:1 (44 stills)
+#eceff3 on #434c5e: 7.480:1 (32 stills)
+#eceff4 on #2e3440: 10.836:1 (16 stills)
 #f8f9fc on #2c6171: 6.528:1 (10 stills)
 #f8f9fc on #4c5669: 7.018:1 (3 stills)
 
@@ -155,6 +159,8 @@ app/testdata/design/task-trigger-dark.svg
 app/testdata/design/task-trigger-light.svg
 app/testdata/design/task-weekdays-dark.svg
 app/testdata/design/task-weekdays-light.svg
+app/testdata/design/task-weekdays-unchecked-dark.svg
+app/testdata/design/task-weekdays-unchecked-light.svg
 app/testdata/design/tasks-dark.svg
 app/testdata/design/tasks-light.svg
 app/testdata/recovery/no-project-dark.svg
@@ -336,6 +342,10 @@ docs/assets/design/tui-a/task-weekdays-dark.ansi
 docs/assets/design/tui-a/task-weekdays-dark.svg
 docs/assets/design/tui-a/task-weekdays-light.ansi
 docs/assets/design/tui-a/task-weekdays-light.svg
+docs/assets/design/tui-a/task-weekdays-unchecked-dark.ansi
+docs/assets/design/tui-a/task-weekdays-unchecked-dark.svg
+docs/assets/design/tui-a/task-weekdays-unchecked-light.ansi
+docs/assets/design/tui-a/task-weekdays-unchecked-light.svg
 docs/assets/design/tui-a/tasks-dark.ansi
 docs/assets/design/tui-a/tasks-dark.svg
 docs/assets/design/tui-a/tasks-light.ansi
@@ -396,6 +406,7 @@ ui/projects.go
 ui/projects_test.go
 ui/recovery.go
 ui/schedule_picker.go
+ui/schedule_weekday_state_test.go
 ui/selection_marker.go
 ui/selection_marker_test.go
 ui/sidebar_deferral_test.go
