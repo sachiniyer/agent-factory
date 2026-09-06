@@ -1,4 +1,4 @@
-import { mutationNotice, recoveryScreen, scopeRecovery } from "./recovery.js";
+import { renderMutationOutcome, recoveryScreen, scopeRecovery, type MutationOutcomeNotice } from "./recovery.js";
 // The view layer of the web client (#1592 Phase 5). It renders two views into
 // #app: the paste-token login (design §1.2) and the authed app — a left rail of
 // live sessions (PR3) beside a main pane that now hosts the live attach terminal
@@ -161,8 +161,8 @@ export interface AppState {
    *  failure is shown here instead of being silently swallowed (#1592 Phase 5 PR7/PR8). */
   tabError: string | null;
   tabNotice?: boolean;
-  /** A failed optimistic mutation remains explained until explicitly dismissed. */
-  mutationError?: string;
+  /** An optimistic mutation outcome remains explained until explicitly dismissed. */
+  mutationError?: MutationOutcomeNotice;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
   /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
@@ -1212,7 +1212,7 @@ export class AppShell {
     if (this.lastError !== errorSignature) {
       this.lastError = errorSignature;
       if (state.mutationError) {
-        const notice = mutationNotice("Operation failed", state.mutationError, "Review the details, then try again.");
+        const notice = renderMutationOutcome(state.mutationError);
         const dismiss = h("button", { type: "button", class: "af-recovery-action" }, "Dismiss");
         dismiss.addEventListener("click", () => this.actions.dismissNotice?.());
         notice.append(dismiss);

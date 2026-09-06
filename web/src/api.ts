@@ -112,6 +112,7 @@ export function shouldForgetToken(e: unknown): boolean {
  * object. Mirrors apiclient/client.go, which reads env.Error.Message.
  */
 interface EnvelopeError {
+  daemon_rejected?: boolean;
   message: string;
   code?: string;
 }
@@ -191,6 +192,11 @@ function envelopeErrorCode(err: unknown): string {
   return typeof code === "string" ? code : "";
 }
 
+function isDaemonRejection(err: EnvelopeError | null | undefined, status: number): boolean {
+  return err?.daemon_rejected === true && status !== 502 && status !== 504 &&
+    envelopeErrorCode(err) !== MUTATION_COMMITTED_ERROR_CODE;
+}
+
 export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 
 /**
@@ -200,7 +206,7 @@ export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  /** A parsed daemon error envelope, rather than a missing/gateway response. */
+  /** A positively marked daemon refusal, excluding committed outcomes. */
   readonly daemonRejected: boolean;
   constructor(status: number, message: string, code = "", daemonRejected = false) {
     super(message);
@@ -259,14 +265,13 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
 
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    // The RPC handler does not emit gateway statuses. A proxy can return the
-    // same JSON error shape after the upstream committed, so shape alone is
-    // insufficient evidence that retrying the mutation is safe.
-    const daemonRejected = env?.error != null && resp.status !== 502 && resp.status !== 504;
+    // A proxy can return its own JSON error after forwarding the mutation.
+    // Require the daemon's explicit refusal marker, not merely an error shape.
+    const daemonRejected = isDaemonRejection(env?.error, resp.status);
     throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), daemonRejected);
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), true);
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), isDaemonRejection(env.error, resp.status));
   }
   return env?.data as T;
 }

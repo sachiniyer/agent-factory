@@ -23,7 +23,7 @@ export function recoveryScreen(state: Recovery): HTMLElement {
   return screen;
 }
 
-/** An inline failure has one recovery instruction; the existing submit owns retry. */
+/** An inline outcome notice has one instruction; only definitive failures invite retry. */
 export function mutationNotice(condition: string, detail: string, action: string, failed = true): HTMLElement {
   return scopeRecovery(h("div", { class: "af-recovery af-recovery-notice", role: "alert" },
     h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
@@ -35,4 +35,28 @@ export function mutationNotice(condition: string, detail: string, action: string
 export function scopeRecovery<T extends HTMLElement>(element: T): T {
   element.setAttribute("data-af-theme", currentMode());
   return element;
+}
+
+export interface MutationOutcomeNotice {
+  kind: "uncertain" | "confirmed" | "failed";
+  detail: string;
+}
+
+export function renderMutationOutcome(notice: MutationOutcomeNotice): HTMLElement {
+  if (notice.kind === "uncertain") {
+    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before taking further action.", false);
+  }
+  if (notice.kind === "confirmed") {
+    return mutationNotice("Operation completed", notice.detail, "Review the details before taking further action.", false);
+  }
+  return mutationNotice("Operation failed", notice.detail, "Review the details, then try again.");
+}
+
+/** Keep overlapping outcomes readable without turning an unknown outcome into a retry invitation. */
+export function appendMutationOutcome(previous: MutationOutcomeNotice | undefined, next: MutationOutcomeNotice): MutationOutcomeNotice {
+  return {
+    kind: previous?.kind === "uncertain" || next.kind === "uncertain" ? "uncertain"
+      : previous?.kind === "confirmed" || next.kind === "confirmed" ? "confirmed" : "failed",
+    detail: [previous?.detail, next.detail].filter(Boolean).join("\n\n"),
+  };
 }

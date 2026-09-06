@@ -428,6 +428,13 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 // writeHTTPEnvelope is the single write path for both success and failure so the
 // Content-Type, status, and byte-identical envelope shape stay uniform.
 func writeHTTPEnvelope(w http.ResponseWriter, r *http.Request, status int, env apiproto.Envelope) {
+	if env.Error != nil {
+		// Keep provenance separate from the machine-readable outcome code.
+		// Copy the error so serializing it does not mutate the caller's envelope.
+		err := *env.Error
+		err.DaemonRejected = err.Code != apiproto.ErrorCodeMutationCommitted
+		env.Error = &err
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := apiproto.WriteEnvelope(w, env); err != nil && !httpResponseWriteAbandoned(r, err) {

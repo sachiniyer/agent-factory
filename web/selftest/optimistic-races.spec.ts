@@ -179,7 +179,11 @@ for (const status of [502, 504]) {
     f.event("session.created", created);
     await expect(f.row(title).filter({ has: page.locator(".af-row-actions button") })).toHaveCount(1);
     pending.release();
-    await expect(page.locator(".af-toast .af-recovery-notice")).toContainText("Check sessions before creating again");
+    const notice = page.locator(".af-toast .af-recovery-notice");
+    await expect(notice).toContainText("Outcome not confirmed");
+    await expect(notice).toContainText("Check the session before taking further action.");
+    await expect(notice).not.toContainText("Operation failed");
+    await expect(notice).not.toContainText("then try again");
     await expect(page.locator(".af-toast .af-recovery-notice")).toContainText("Upstream response unavailable");
     await expect(page.locator(".af-modal-card")).toHaveCount(0);
     await expect(f.row(title)).toHaveCount(1);
@@ -214,7 +218,10 @@ for (const operation of ["archive", "kill"] as const) {
     pending.release();
     const notice = page.locator(".af-toast .af-recovery-notice");
     await expect(notice).toContainText(`The ${operation} outcome could not be confirmed`);
-    await expect(notice).toContainText("Check the session before trying again");
+    await expect(notice).toContainText("Outcome not confirmed");
+    await expect(notice).toContainText("Check the session before taking further action.");
+    await expect(notice).not.toContainText("Operation failed");
+    await expect(notice).not.toContainText("then try again");
     await expect(page.locator(".af-modal-card")).toHaveCount(0);
     await expect(row).toContainText(`[deleting] ${f.a.title}`);
     await snapshotRequested.promise;
