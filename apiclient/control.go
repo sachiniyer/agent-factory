@@ -288,10 +288,24 @@ func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsRespon
 	return resp, nil
 }
 
+// There is deliberately no AccountLogin wrapper here (#3949), for the same
+// reason as ListProjects below: the daemon exposes the route and the web calls
+// it over HTTP directly, but it has no Go consumer. The config pane's Accounts
+// section reaches daemon.AccountLogin through the gob control client on the local
+// socket, and that is the honest shape rather than an oversight — its response
+// names a tmux session on the DAEMON'S host, so a client on another machine could
+// read the outcome but could never attach to the pane. That is why both the pane
+// and `af accounts login` refuse a remote daemon outright instead of pretending
+// otherwise. ListAccounts above stays because the create flow's account picker
+// has to ask the daemon the session will actually be created on
+// (app/account_picker.go), as does the config pane's Accounts section (#3950).
+//
+// RegisterAccount was removed alongside AccountLogin in #3949 when neither had
+// a Go consumer. Unlike login, registration needs no terminal on the daemon
+// host: #3950 deliberately restores it for the config pane's remote target.
+
 // RegisterAccount creates an account's credential directory on the daemon host
-// without logging in. The config pane calls this for remote targets (#3950);
-// unlike AccountLogin, registration needs no terminal on the daemon host.
-// This is the deliberate caller that was missing when #3949 removed the wrapper.
+// without logging in, for the config pane's Accounts section.
 func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {
 	var resp daemon.RegisterAccountResponse
 	if err := c.call("RegisterAccount", daemon.RegisterAccountRequest{Agent: agent, Name: name}, &resp); err != nil {
@@ -299,10 +313,6 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 	}
 	return resp, nil
 }
-
-// There is deliberately no AccountLogin wrapper (#3949). Both the TUI Accounts
-// section and CLI refuse remote login: its tmux terminal lives on the daemon's
-// host. Local login uses the gob control client; the web calls HTTP directly.
 
 // There is deliberately no ListProjects here. The web reads the registry over HTTP
 // (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),

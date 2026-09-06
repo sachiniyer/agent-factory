@@ -481,10 +481,10 @@ func (p *schedulePicker) selectedWeekdays() []time.Weekday {
 func (p *schedulePicker) render() string {
 	t := CurrentTheme()
 	labelStyle := lipgloss.NewStyle().Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	previewStyle := lipgloss.NewStyle().Foreground(t.Foreground)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	dimStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	previewStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 
 	lines := []string{labelStyle.Render("Schedule:") + " " + p.renderTypeSelector(selectedStyle, dimSelectedStyle)}
 	lines = append(lines, p.renderContextLines()...)
@@ -542,7 +542,7 @@ func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
 func (p *schedulePicker) renderTypeSelector(selected, dim lipgloss.Style) string {
 	label := scheduleTypes[p.typ].label
 	if p.focused && p.activeCell() == cellType {
-		return selected.Render("◂ " + label + " ▸")
+		return SelectionMarker("◂ ") + selected.Render(label) + SelectionMarker(" ▸")
 	}
 	return dim.Render(label)
 }
@@ -550,7 +550,7 @@ func (p *schedulePicker) renderTypeSelector(selected, dim lipgloss.Style) string
 // renderContextLines renders the inputs specific to the selected type.
 func (p *schedulePicker) renderContextLines() []string {
 	t := CurrentTheme()
-	plain := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	plain := lipgloss.NewStyle().Foreground(t.Ink)
 	switch p.kind() {
 	case schedule.EveryNMinutes:
 		return []string{indentSub + plain.Render("Every") + p.chip(cellInterval, p.interval) + plain.Render("minutes")}
@@ -589,14 +589,18 @@ func (p *schedulePicker) renderWeekdayRow() string {
 	active := p.focused && p.activeCell() == cellWeekdays
 	var b strings.Builder
 	for i, letter := range weekdayLetters {
-		style := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+		label := " " + letter + " "
+		style := lipgloss.NewStyle().Foreground(t.Ink)
 		if p.weekdays[i] {
-			style = lipgloss.NewStyle().Foreground(t.Warning).Bold(true)
+			// Checked state is text, independent of focus styling and colour.
+			// Brackets retain the existing three-cell width.
+			label = "[" + letter + "]"
+			style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
 		}
 		if active && i == p.weekdayCursor {
-			style = style.Reverse(true)
+			style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
 		}
-		b.WriteString(style.Render(" " + letter + " "))
+		b.WriteString(style.Render(label))
 	}
 	return b.String()
 }
@@ -608,9 +612,9 @@ func (p *schedulePicker) chip(cell scheduleCell, text string) string {
 	if strings.TrimSpace(text) == "" {
 		text = " "
 	}
-	style := lipgloss.NewStyle().Foreground(t.Foreground)
+	style := lipgloss.NewStyle().Foreground(t.Ink)
 	if p.focused && p.activeCell() == cell {
-		style = lipgloss.NewStyle().Bold(true).Background(t.Accent).Foreground(t.Background)
+		style = lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	}
 	return style.Render(" " + text + " ")
 }

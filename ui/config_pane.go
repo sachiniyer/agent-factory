@@ -116,15 +116,16 @@ func (r configRow) isSelectable() bool {
 
 var (
 	configTitleStyle    = lipgloss.NewStyle().Bold(true)
-	configHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
-	configKeyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	configValueStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
-	configPurposeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	configSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	configErrorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	configOKStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	configNoticeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	configHintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	configHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Ink)
+	configKeyStyle      = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configValueStyle    = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configLocationStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+	configPurposeStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configSelectedStyle = lipgloss.NewStyle().Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
+	configErrorStyle    = lipgloss.NewStyle().Foreground(activeTheme.Dead)
+	configOKStyle       = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configNoticeStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configHintStyle     = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 )
 
 // NewConfigPane builds the pane wired to the real write path.
@@ -221,7 +222,8 @@ func (c *ConfigPane) rebuildRows() {
 		if len(inTier) == 0 {
 			continue
 		}
-		c.rows = append(c.rows, configRow{heading: config.TierName(tier)})
+		heading := config.TierName(tier)
+		c.rows = append(c.rows, configRow{heading: strings.ToUpper(heading[:1]) + heading[1:]})
 		for i := range inTier {
 			entry := inTier[i]
 			c.rows = append(c.rows, configRow{entry: &entry})
@@ -500,7 +502,7 @@ func (c *ConfigPane) renderHeader() string {
 	var b strings.Builder
 	b.WriteString(configTitleStyle.Render("Config"))
 	if c.location != "" {
-		b.WriteString(configPurposeStyle.Render("  " + c.location))
+		b.WriteString(configLocationStyle.Render("  " + c.location))
 	}
 	// The location is the one part of this line the pane does not control the
 	// length of, so it is clipped rather than allowed to wrap (#3430): a wrapped
@@ -524,7 +526,7 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		default:
-			lines = append(lines, configHeadingStyle.Render(strings.ToUpper(row.heading)))
+			lines = append(lines, configHeadingStyle.Render(row.heading))
 			if row.heading == accountsHeading {
 				if c.accounts.unavailable != "" {
 					lines = append(lines, strings.Split(c.renderAccountsUnavailable(), "\n")...)
@@ -603,7 +605,7 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 
 	cursor := "  "
 	if selected {
-		cursor = configSelectedStyle.Render("› ")
+		cursor = SelectionMarker("› ")
 	}
 	b.WriteString(cursor)
 
@@ -620,12 +622,16 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 		key = configSelectedStyle.Render(keyText)
 	}
 	b.WriteString(key)
-	b.WriteString("  ")
+	valueStyle := configValueStyle
+	if selected {
+		valueStyle = configSelectedStyle
+	}
+	b.WriteString(valueStyle.Render("  "))
 
 	if selected && c.editing {
-		b.WriteString(c.input.View())
+		b.WriteString(renderConfigInput(&c.input))
 	} else {
-		b.WriteString(configValueStyle.Render(c.displayValue(e)))
+		b.WriteString(valueStyle.Render(c.displayValue(e)))
 	}
 	// Clip, do not wrap (#3430). displayValue and sizeEditField already budget
 	// this row, but neither can shrink the KEY: at a narrow pane the key alone

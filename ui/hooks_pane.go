@@ -159,11 +159,11 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 func (h *HooksPane) String() string {
 	t := CurrentTheme()
 	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	editStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
-	descStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim).Italic(true)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	editStyle := selectedStyle
+	descStyle := lipgloss.NewStyle().Foreground(t.InkMuted).Italic(true)
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Post-worktree hooks"))
@@ -183,9 +183,9 @@ func (h *HooksPane) String() string {
 	for i, cmd := range h.commands {
 		isSelected := i == h.selectedIdx
 		if h.editing && isSelected {
-			b.WriteString(editStyle.Render("▸ "+h.editBuffer) + InputCaret())
-		} else if isSelected && h.hasFocus {
-			b.WriteString(selectedStyle.Render("▸ " + cmd))
+			b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
+		} else if isSelected && h.hasFocus && !h.adding {
+			b.WriteString(SelectionMarker("▸ ") + selectedStyle.Render(cmd))
 		} else {
 			b.WriteString(normalStyle.Render("  " + cmd))
 		}
@@ -193,7 +193,7 @@ func (h *HooksPane) String() string {
 	}
 
 	if h.adding {
-		b.WriteString(editStyle.Render("▸ "+h.editBuffer) + InputCaret())
+		b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
 		b.WriteString("\n")
 	}
 

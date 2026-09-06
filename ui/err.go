@@ -31,7 +31,7 @@ type ErrBox struct {
 	retainedIsFailure bool
 }
 
-var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Error)
+var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
 
 func NewErrBox() *ErrBox {
 	return &ErrBox{}
@@ -101,7 +101,11 @@ func (e *ErrBox) String() string {
 	if e.err != nil {
 		err = e.statusLine()
 	}
-	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, theme.Styles()["body"].Render(err))
+	style := theme.Styles().Body
+	if e.retainedIsFailure {
+		style = theme.Styles().Error
+	}
+	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, style.Render(err))
 }
 
 func (e *ErrBox) statusLine() string {

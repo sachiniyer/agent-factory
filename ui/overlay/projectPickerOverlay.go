@@ -201,14 +201,14 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 // Render renders the project picker overlay.
 func (p *ProjectPickerOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
-	countStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	addStyle := lipgloss.NewStyle().Foreground(t.Success)
-	errStyle := lipgloss.NewStyle().Foreground(t.Error)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	countStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	addStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	errStyle := lipgloss.NewStyle().Foreground(t.Dead)
 
 	style := searchOverlayStyle()
 	fit := fitOverlayContent(p.width, 0, p.maxWidth, p.maxHeight, style)
@@ -224,7 +224,7 @@ func (p *ProjectPickerOverlay) Render() string {
 	var lines []string
 	lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch project"), cw))
 	lines = append(lines, "")
-	warnStyle := lipgloss.NewStyle().Foreground(t.Warning)
+	warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
 	if p.degraded && !p.adding {
 		// A failed registry read may hide every registered sessionless
 		// project — say so rather than render the remainder as complete
@@ -256,13 +256,13 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 	start, end, showAbove, showBelow := budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
 	if showAbove {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
 		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
 	}
 	if showBelow {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
 	}
 
 	lines = append(lines, "")
@@ -282,14 +282,14 @@ func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, coun
 	if i == len(p.all) {
 		text := "+ Add project…"
 		if selected {
-			return "  " + selectedStyle.Render("▸ "+text)
+			return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(text)
 		}
 		return "    " + addStyle.Render(text)
 	}
 	proj := p.all[i]
 	count := countStyle.Render(fmt.Sprintf(" (%d)", proj.SessionCount))
 	if selected {
-		return "  " + selectedStyle.Render("▸ "+proj.Name) + count
+		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount))
 	}
 	return "    " + normalStyle.Render(proj.Name) + count
 }
