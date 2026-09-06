@@ -182,6 +182,7 @@ nav:
           - TUI recovery states: design/tui-recovery-stills.md
           - TUI design roles: design/tui-design-a-stills.md
           - TUI overlays and density: design/tui-design-b-stills.md
+          - TUI appearance: design/tui-design-c-stills.md
           - TUI daemon theme boundary: design/tui-theme-daemon-follow-up.md
           - TUI rewrite: design/tui-rewrite.md
           - Agent handoff: design/agent-handoff.md

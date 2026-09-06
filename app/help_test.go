@@ -317,6 +317,10 @@ func TestGeneralHelpSeparatesPreviewAndAttachedScrolling(t *testing.T) {
 }
 
 func TestGeneralHelpOverlayFitsAndMarksScrollAt80x24(t *testing.T) {
+	// Use a release title to distinguish the overlay from the unversioned rail.
+	originalVersion := Version
+	Version = "test"
+	t.Cleanup(func() { Version = originalVersion })
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)
 
@@ -390,6 +394,10 @@ func TestGeneralHelpOverlayShiftArrowsScrollAt80x24(t *testing.T) {
 }
 
 func TestGeneralHelpOverlayPagesAndJumpsAt80x24(t *testing.T) {
+	// Use a release title to distinguish the overlay from the unversioned rail.
+	originalVersion := Version
+	Version = "test"
+	t.Cleanup(func() { Version = originalVersion })
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)
 	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)

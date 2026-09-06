@@ -1,0 +1,37 @@
+P5 C verification against stacked B ce0fbb961721f734d162f019653216fb8dac0497
+
+PASS gofmt -l . (empty)
+PASS go build ./...
+PASS go vet ./...
+PASS golangci-lint run --timeout=3m --fast
+PASS scripts/lint-file-length.sh (1813 Go files; zero grandfathered)
+PASS go test ./config ./ui ./ui/theme ./internal/designtokens
+PASS go test ./ui/overlay ./ui/tree ./ui/theme ./internal/designtokens
+  Includes literal guard, all-role SGR tolerance, state/selection/metadata tests.
+PASS Config edit round-trip for Light/Dark/System and legacy auto replacement
+PASS go run ./scripts/gen-design --check
+PASS container app driver: Test(Recovery|DesignDriverScenes|HelpTitleWithAndWithoutVersion)
+  116 app goldens; four new appearance frames and four changed help frames.
+  Source ANSI beside SVG for every gallery frame. Other 108 unchanged from B.
+PASS role audit: every SVG cell pair uses generated roles within +/-1 channel.
+  Full source constructor scan and AST state enumeration attached separately.
+PASS AF_UPDATE_GOLDENS=1 make perf-container (refresh affected shared Config views)
+  3 browser demo tests + 3-sample web and TUI perf pass. No budget changes.
+  Only 14 Config/account web PNGs retained; unrelated timing shifts discarded.
+
+Safety: host build/vet/lint and non-app/non-daemon unit tests only. App driver
+runs inside af-p5-3916-b, created by make playtest-container-detached; perf uses
+make perf-container. No host TUI, daemon/app tests, install/reset, shared tmux
+teardown, other AF homes, daemon/theme.go edit or daemon ApplyTheme edit.
+
+Self-review: all C code/tests/docs and affected stills inspected against the
+interface design doc; state-mappings.txt enumerates inherited semantic axes
+and C appearance resolution, migration, selection and help title behavior.
+
+PASS strict MkDocs (PYTHONPATH=/tmp/p5-docs-tools python3 -m mkdocs build --strict)
+PASS final make perf-container WITHOUT update mode: web/test-results/1558072-348e3c
+  Three browser demo tests pass against committed goldens, web perf passes.
+  TUI frame mean/max 79.734/88.021 ms; key-to-render 63.709/68.426 ms.
+  All three raw samples explicitly checked <=480/351 ms. Budgets unchanged.
+  Final raw metrics are in perf/. Earlier refresh run also passed; the initial
+  comparison failed only on the new shared-manifest Config row before refresh.

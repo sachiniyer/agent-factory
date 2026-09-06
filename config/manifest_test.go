@@ -372,7 +372,7 @@ func TestManifestIsTierOrdered(t *testing.T) {
 func TestManifestTierAssignments(t *testing.T) {
 	wantCore := []string{
 		"default_program", "network.listen_addr", "network.require_token",
-		"network.require_loopback_token", "update_channel", "auto_update",
+		"network.require_loopback_token", "update_channel", "auto_update", "appearance",
 	}
 	wantCommon := []string{"theme", "vscode_server_binary"}
 

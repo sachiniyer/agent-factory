@@ -66,6 +66,9 @@ func TestConfigPaneRendersEveryManifestKey(t *testing.T) {
 	view := c.String()
 
 	for _, e := range config.Manifest() {
+		if e.Key == "theme" { // Retired palette; separately tested as hidden.
+			continue
+		}
 		if !strings.Contains(view, e.Key) {
 			t.Errorf("config key %q is in the manifest but the TUI editor does not render it — "+
 				"a user cannot see or set a key that exists", e.Key)
@@ -163,7 +166,6 @@ func TestConfigPaneEditWritesThroughTheRealPathAndEchoes(t *testing.T) {
 // open a field, save, survive a real load, and refresh to the saved value.
 func TestConfigPaneFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want := config.DefaultConfig()
-	want.Theme.Accent = "#112233"
 	if want.ProgramOverrides == nil {
 		want.ProgramOverrides = map[string]string{}
 	}
@@ -175,7 +177,6 @@ func TestConfigPaneFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want.Keys = map[string]any{"quit": "Q"}
 
 	for _, key := range []string{
-		"theme",
 		"program_overrides",
 		"session_env_passthrough",
 		"limit_patterns",
@@ -764,6 +765,9 @@ func TestConfigPaneUnsizedRendersEverything(t *testing.T) {
 
 	view := c.String() // must not panic
 	for _, e := range config.Manifest() {
+		if e.Key == "theme" { // Retired palette; separately tested as hidden.
+			continue
+		}
 		if !strings.Contains(view, e.Key) {
 			t.Errorf("unsized, the pane must render everything; %q is missing", e.Key)
 		}

@@ -206,6 +206,13 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 
+	{
+		Key: "appearance", Type: "string", Default: "system",
+		Purpose: "TUI appearance · Light, Dark or System (terminal background); applies on next TUI launch.",
+		Tier:    TierCore, Settable: true, Enum: []string{"light", "dark", "system"},
+		Sources: sourceGlobalOnly, Precedence: precedenceGlobal, Merge: MergeReplace, Formats: formatTOMLOnly,
+	},
+
 	// ---- Tier 2 ----
 	{
 		Key:  "theme",

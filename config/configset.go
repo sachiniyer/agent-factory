@@ -84,6 +84,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
+	"appearance":  {kind: cfgString, validate: func(_, value string) error { return ValidateAppearance(value) }},
 	"auto_update": {kind: cfgBool},
 	// The staged-artifact escape hatch (#3864). A plain bool: it only widens what
 	// an upgrade may set aside when it cannot read the owning home, and there is

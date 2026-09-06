@@ -293,10 +293,10 @@ type Config struct {
 	// aside without this. Turn it on for a box where an upgrade keeps refusing on
 	// a staged artifact you have looked at and know is dead.
 	UpgradeClearUnverifiableArtifacts bool `json:"upgrade_clear_unverifiable_artifacts" toml:"upgrade_clear_unverifiable_artifacts"`
-	// Theme is the global-only TOML palette (#1389): either a named preset or a
-	// custom [theme] table, shared by the TUI and web. It is intentionally
-	// TOML-only because legacy config.json is frozen and a cloned repo must never
-	// be able to recolor a user's interfaces.
+	// Appearance is global-only; a cloned repository cannot choose TUI colours.
+	Appearance string `json:"-" toml:"appearance"`
+	// Theme is retained solely for the legacy daemon operation until #3936.
+	// Renderers ignore its presets and table; legacy JSON remains frozen.
 	Theme ThemeConfig `json:"-" toml:"theme"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
@@ -639,6 +639,7 @@ func DefaultConfig() *Config {
 		LogMaxBackups:          log.DefaultMaxBackups,
 		UpdateChannel:          UpdateChannelStable,
 		SSHHostKeyVerification: SSHHostKeyStrict,
+		Appearance:             "system",
 		Theme:                  DefaultThemeConfig(),
 		WorktreeRoot:           WorktreeRootSibling,
 		BranchPrefix: func() string {

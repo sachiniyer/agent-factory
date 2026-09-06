@@ -312,7 +312,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 		lineControls += descStyle.Render(" · " + aliases + " jump")
 	}
 	header := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
+		titleStyle.Render(helpProductTitle()),
 		"",
 		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
 		"",
