@@ -31,7 +31,7 @@ after the tour. [Remote daemon access](remote-http-auth.md) is the full setup gu
 The app bar's **Sessions**, **Tasks**, and **Config** buttons switch views.
 The **project switcher** scopes Sessions and Tasks to one repository and remembers
 that choice across reloads. Its menu shows session and working counts per project.
-**Auto · Light · Dark** chooses the browser theme; Auto follows your system.
+**Light · Dark · System** chooses the browser theme; System follows your operating system.
 **Disconnect** forgets the browser's saved daemon token and returns to the login
 screen. **Install app**, when offered by the browser, opens its installation
 prompt; its **×** dismisses the offer. See [Install it as an app](#install-it-as-an-app).
@@ -363,7 +363,7 @@ address does not. Use a TLS-terminating proxy for remote installation; see
 #### What gets installed
 
 The app uses the same daemon and page, with its own icon and standalone window.
-Browser chrome follows **Auto · Light · Dark**. The service worker caches the
+Browser chrome follows **Light · Dark · System**. The service worker caches the
 static shell, using the network first, so an unreachable daemon can show the
 app's connection-error screen. It does not cache API requests, event streams,
 terminal streams, or previews. Installing is optional.
