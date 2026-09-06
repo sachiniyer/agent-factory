@@ -394,6 +394,7 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	// config is: an account registered from the CLI, or logged in from the web,
 	// since this TUI started must show as it is now rather than as af remembers.
 	accountsCmd := m.loadAccountsIntoPane()
+	m.showAccountRegisterPending()
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor

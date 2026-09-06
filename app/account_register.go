@@ -18,14 +18,14 @@ type accountRegisteredMsg struct {
 }
 
 func (m *home) remoteAccountRegisterCmd(agent, name string) tea.Cmd {
-	if m.configPane.AccountsBusy() {
+	if m.accountRegisterInFlight != nil {
 		return nil
 	}
-	m.configPane.SetAccountsBusy(true)
+	m.accountRegisterInFlight = &daemon.RegisterAccountRequest{Agent: agent, Name: name}
+	m.showAccountRegisterPending()
 	m.accountGeneration++
 	generation := m.accountGeneration
 	register, list := registerAccount, listAccountsForPane
-	m.configPane.SetAccountStatus(fmt.Sprintf("Registering %s account %q…", agent, name), false)
 	return func() tea.Msg {
 		response, err := register(daemon.RegisterAccountRequest{Agent: agent, Name: name})
 		result := accountRegisteredMsg{generation: generation, response: response, err: err}
@@ -36,17 +36,50 @@ func (m *home) remoteAccountRegisterCmd(agent, name string) tea.Cmd {
 	}
 }
 
-func (m *home) handleAccountRegistered(msg accountRegisteredMsg) {
-	// Closing/reopening makes this answer stale.
-	// A late completion must neither reopen Accounts nor overwrite newer feedback.
-	if msg.generation != m.accountGeneration || m.state != stateConfigEditor || !m.configPane.HasFocus() {
-		return
+// showAccountRegisterPending restores the view of a mutation that may have
+// started in an earlier opening. The home model, not pane focus, owns its life.
+func (m *home) showAccountRegisterPending() {
+	m.configPane.SetAccountsBusy(m.accountRegisterInFlight != nil)
+	if m.accountRegisterInFlight != nil {
+		m.configPane.SetAccountStatus(accountRegisterPendingStatus(*m.accountRegisterInFlight), false)
+	}
+}
+
+func accountRegisterPendingStatus(req daemon.RegisterAccountRequest) string {
+	return fmt.Sprintf("Registering %s account %q…", req.Agent, req.Name)
+}
+
+func (m *home) handleAccountRegistered(msg accountRegisteredMsg) tea.Cmd {
+	pending := m.accountRegisterInFlight
+	m.accountRegisterInFlight = nil
+	if m.state != stateConfigEditor || !m.configPane.HasFocus() {
+		return nil
 	}
 	m.configPane.SetAccountsBusy(false)
+	if msg.generation != m.accountGeneration {
+		// Preserve newer feedback, but retire our own pending notice. A failed
+		// mutation still needs its error shown when no newer account status exists.
+		status := m.configPane.AccountStatus()
+		ownsStatus := status == "" || (pending != nil && status == accountRegisterPendingStatus(*pending))
+		if msg.err != nil {
+			if ownsStatus {
+				m.configPane.SetAccountStatus(msg.err.Error(), true)
+			}
+			return nil
+		}
+		if ownsStatus {
+			m.configPane.SetAccountStatus("", false)
+		}
+		// The old command's snapshot may predate this opening. Fetch again, and
+		// invalidate even this opening's initial read if it is still in flight.
+		m.accountGeneration++
+		return m.remoteAccountsLoadCmd()
+	}
 	if msg.err != nil {
 		m.configPane.SetAccountStatus(msg.err.Error(), true)
-		return
+		return nil
 	}
 	m.applyAccountsToPane(msg.accounts, msg.listErr)
 	m.setAccountRegisteredStatus(msg.response)
+	return nil
 }

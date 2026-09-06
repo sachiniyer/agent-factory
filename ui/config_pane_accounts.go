@@ -190,6 +190,10 @@ func (c *ConfigPane) SetAccountStatus(text string, isError bool) {
 	c.accounts.statusIsError = isError
 }
 
+// AccountStatus returns the current feedback so a late result can preserve a
+// newer status rather than replace it with an earlier operation's outcome.
+func (c *ConfigPane) AccountStatus() string { return c.accounts.status }
+
 // AccountsBusy reports whether a remote registration and its refresh are pending.
 func (c *ConfigPane) AccountsBusy() bool { return c.accounts.busy }
 

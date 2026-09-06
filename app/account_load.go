@@ -15,7 +15,6 @@ type accountsLoadedMsg struct {
 func (m *home) remoteAccountsLoadCmd() tea.Cmd {
 	generation := m.accountGeneration
 	list := listAccountsForPane
-	m.configPane.SetAccountsLoading()
 	return func() tea.Msg {
 		response, err := list(daemon.ListAccountsRequest{})
 		return accountsLoadedMsg{generation: generation, response: response, err: err}

@@ -66,6 +66,7 @@ func SetAccountSeamsForTest(
 func (m *home) loadAccountsIntoPane() tea.Cmd {
 	m.configPane.SetAccountLoginRefusal(remoteAccountLoginRefusal())
 	if apiclient.IsRemoteTarget() {
+		m.configPane.SetAccountsLoading()
 		return m.remoteAccountsLoadCmd()
 	}
 	resp, err := listAccountsForPane(daemon.ListAccountsRequest{})

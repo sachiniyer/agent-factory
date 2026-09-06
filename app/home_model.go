@@ -326,6 +326,8 @@ type home struct {
 	configPane *ui.ConfigPane
 	// Identifies the current opening and its latest remote accounts operation.
 	accountGeneration uint64
+	// A remote mutation outlives the overlay and is released only on completion.
+	accountRegisterInFlight *daemon.RegisterAccountRequest
 	// menu displays the key hints inside the status bar (shared handle for
 	// SetState/keydown callers)
 	menu *ui.Menu

@@ -254,8 +254,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleAccountsLoaded(msg)
 		return m, nil
 	case accountRegisteredMsg:
-		m.handleAccountRegistered(msg)
-		return m, nil
+		return m, m.handleAccountRegistered(msg)
 	case accountLoginStartedMsg:
 		return m.handleAccountLoginStarted(msg)
 	case accountLoginDoneMsg:
