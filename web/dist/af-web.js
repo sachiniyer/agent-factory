@@ -8517,6 +8517,7 @@ var AttachTerminal = class {
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
     container.addEventListener("copy", this.onCopy);
+    this.fitVisibleHost();
     this.scheduleVisibleFit();
   }
   term;
@@ -9196,7 +9197,7 @@ var AttachTerminal = class {
       return;
     }
     this.initialConnectStarted = true;
-    this.connect();
+    queueMicrotask(() => this.connect());
   }
   onMessage(data) {
     if (typeof data === "string") {
@@ -14438,6 +14439,8 @@ var AppShell = class {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
+    this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
   }
@@ -14477,7 +14480,7 @@ var AppShell = class {
     this.setNav(!this.navOpen);
   }
   /** Applies the latest state, touching only what changed. */
-  update(state) {
+  update(state, prioritizeTerminal = false) {
     this.syncDocumentTitle(state);
     const condensedSessionChrome = usesCondensedSessionChrome(state);
     if (this.lastCondensedSessionChrome !== condensedSessionChrome) {
@@ -14560,13 +14563,23 @@ var AppShell = class {
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
     if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
-      const railToken = listToken([
-        state.selectedProject,
-        Object.entries(state.statusFilter).filter(([, on]) => on).map(([kind]) => kind).sort().join(",")
-      ]);
-      const previousRailToken = this.lastRailToken;
-      this.lastRailToken = railToken;
-      rebuildKeepingScroll(this.railList, previousRailToken, railToken, () => this.renderRail(state));
+      if (!this.railPainted && prioritizeTerminal) {
+        this.pendingInitialRail = state;
+        if (this.initialRailFrame === null) {
+          this.initialRailFrame = window.requestAnimationFrame(() => {
+            this.initialRailFrame = null;
+            this.railPainted = true;
+            if (this.pendingInitialRail) this.updateRail(this.pendingInitialRail);
+            this.pendingInitialRail = null;
+          });
+        }
+      } else {
+        if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
+        this.initialRailFrame = null;
+        this.pendingInitialRail = null;
+        this.railPainted = true;
+        this.updateRail(state);
+      }
     }
     const emptyKey = `${state.selectedProject}:${state.sessions.length}:${state.projectsError ?? ""}`;
     if (selectionChanged || !this.mainRendered || !selectedSession(state) && emptyKey !== this.lastEmptyKey) {
@@ -14580,6 +14593,18 @@ var AppShell = class {
       }
     }
     this.syncTabIdentityCaches(state);
+  }
+  railPainted = false;
+  initialRailFrame = null;
+  pendingInitialRail = null;
+  updateRail(state) {
+    const railToken = listToken([
+      state.selectedProject,
+      Object.entries(state.statusFilter).filter(([, on]) => on).map(([kind]) => kind).sort().join(",")
+    ]);
+    const previous = this.lastRailToken;
+    this.lastRailToken = railToken;
+    rebuildKeepingScroll(this.railList, previous, railToken, () => this.renderRail(state));
   }
   /** Refreshes the ordered tab identity + REAL-id caches the delegated dragstart
    *  stamps into a payload. Cheap (two maps over ≤9 tabs) and pure bookkeeping — it
@@ -15922,7 +15947,7 @@ function rerender() {
     replaceRoute(state.selectedId ? { session: state.selectedId } : null);
   }
   routeSelection = state.selectedId;
-  shell.update(state);
+  shell.update(state, parseRoute(location.hash) !== null);
   syncSplit(state);
 }
 async function connect(candidate) {
@@ -15942,16 +15967,12 @@ async function connect(candidate) {
   if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
-  let tasksError = "";
-  let tasks = [];
-  try {
-    tasks = await listTasks(candidate);
-  } catch (e) {
-    tasksError = errorText(e);
-    tasks = [];
-  }
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  const { projects: registeredProjects, error: projectsError } = await fetchRegisteredProjects(candidate);
+  const [taskResult, projectResult] = await Promise.all([
+    listTasks(candidate).then((tasks2) => ({ tasks: tasks2, error: "" })).catch((error) => ({ tasks: [], error: errorText(error) })),
+    fetchRegisteredProjects(candidate)
+  ]);
+  const { tasks, error: tasksError } = taskResult;
+  const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   optimisticSessions.reset(sessions);
