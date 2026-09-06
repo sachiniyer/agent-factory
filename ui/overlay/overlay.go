@@ -5,7 +5,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 
 	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -13,11 +15,15 @@ import (
 
 // Most of this code is modified from https://github.com/charmbracelet/lipgloss/pull/102
 
-// Faded gray tones used by the overlay fade effect.
-const (
-	fadedFg = "38;5;240" // Medium gray foreground
-	fadedBg = "48;5;236" // Dark gray background
-)
+// Backdrop colours use existing roles, resolved once per overlay frame.
+func backdropColors() (string, string) {
+	c := theme.Roles()
+	profile := lipgloss.ColorProfile()
+	if profile == termenv.Ascii {
+		return "39", "49"
+	}
+	return profile.FromColor(c.InkMuted).Sequence(false), profile.FromColor(c.Surface).Sequence(true)
+}
 
 // sgrRegex matches any SGR (Select Graphic Rendition) sequence so the fade
 // pass can parse its parameters as a whole. A single pass over the full
@@ -53,6 +59,11 @@ func extendedColorLen(tokens []string, i int) int {
 // so a region that returns to the terminal default stays default instead of
 // gaining a spurious gray (#728).
 func fadeSGR(match string) string {
+	fg, bg := backdropColors()
+	return fadeSGRColors(match, fg, bg)
+}
+
+func fadeSGRColors(match, fadedFg, fadedBg string) string {
 	params := strings.TrimSuffix(strings.TrimPrefix(match, "\x1b["), "m")
 	if params == "" || params == "0" {
 		return match
@@ -314,13 +325,14 @@ func PlaceOverlay(
 
 	// Apply a fade effect to the background by directly modifying each line
 	fadedBgLines := make([]string, len(bgLines))
+	fgColor, bgColor := backdropColors()
 
 	for i, line := range bgLines {
 		// Fade every SGR sequence on the line in a single pass. Parsing each
 		// sequence whole lets combined FG+BG codes keep both colors (#701) while
 		// still graying standalone FG-only, BG-only, and 16-color/attribute
 		// sequences.
-		fadedBgLines[i] = sgrRegex.ReplaceAllStringFunc(line, fadeSGR)
+		fadedBgLines[i] = sgrRegex.ReplaceAllStringFunc(line, func(s string) string { return fadeSGRColors(s, fgColor, bgColor) })
 	}
 
 	// Replace the original background with the faded version

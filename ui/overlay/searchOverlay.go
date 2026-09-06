@@ -255,18 +255,19 @@ func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
 
 // Render renders the search overlay.
 func (s *SearchOverlay) Render() string {
+	frame, _, _ := s.renderFrame()
+	return frame
+}
+
+// renderFrame returns the exact first result row along with the same plan that
+// painted it; pointer zones never infer row identity from user-controlled text.
+func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
-	statusRunning := lipgloss.NewStyle().Foreground(t.Success)
-	statusReady := lipgloss.NewStyle().Foreground(t.Warning)
-	statusLoading := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
-	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
-	statusLimit := lipgloss.NewStyle().Foreground(t.Error)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 
 	style := searchOverlayStyle()
 	plan := s.renderPlan(style)
@@ -290,61 +291,58 @@ func (s *SearchOverlay) Render() string {
 	}
 
 	if plan.showAbove {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(
 			fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
 	}
 
+	firstResultLine := len(lines)
 	for i := plan.startIdx; i < plan.endIdx; i++ {
 		r := s.results[i]
 
-		// Status indicator. Two axes (#1195): a create in flight reads as loading;
-		// otherwise a total switch over the liveness — every value explicit (incl.
-		// LimitReached, #1146, which gets its own red diamond so it never reads as a
-		// live dot), no silent default. Running/Ready get the filled dot; every
-		// other liveness gets the hollow ○.
-		var statusStr string
-		switch {
-		case r.Instance.GetInFlightOp() == session.OpCreating:
-			statusStr = statusLoading.Render("○")
-		case r.Instance.GetInFlightOp() != session.OpNone:
-			// A kill/archive teardown in flight — going away.
-			statusStr = normalStyle.Render("○")
-		default:
+		// Working, in-flight and unset states reserve a blank status cell.
+		// Otherwise use the fixed liveness glyph, independent of colour.
+		statusStyle := lipgloss.NewStyle().Foreground(t.Ink)
+		glyph := " "
+		if r.Instance.GetInFlightOp() == session.OpNone {
 			switch r.Instance.GetLiveness() {
-			case session.LiveRunning:
-				statusStr = statusRunning.Render("●")
+			case session.LiveRunning, session.LivenessUnset:
 			case session.LiveReady:
-				statusStr = statusReady.Render("●")
+				glyph, statusStyle = "●", statusStyle.Foreground(t.Ready)
 			case session.LiveLimitReached:
-				// A usage-limit-blocked session (#1146) gets a distinct red diamond
-				// so "blocked on limit" never reads as a live/gone dot.
-				statusStr = statusLimit.Render("◆")
-			case session.LiveLost, session.LiveDead, session.LiveArchived,
-				session.LivenessUnset:
-				statusStr = normalStyle.Render("○")
+				glyph, statusStyle = "◆", statusStyle.Foreground(t.LimitReached)
+			case session.LiveLost:
+				glyph, statusStyle = "◌", statusStyle.Foreground(t.Lost)
+			case session.LiveDead:
+				glyph, statusStyle = "○", statusStyle.Foreground(t.Dead)
+			case session.LiveArchived:
+				glyph, statusStyle = "▧", statusStyle.Foreground(t.Archived)
 			}
 		}
+		if i == s.selectedIdx {
+			statusStyle = statusStyle.Background(t.SurfaceRaised)
+		}
+		statusStr := statusStyle.Render(glyph + " ")
 
 		label := r.Instance.Title
 		branch := r.Instance.GetBranch()
 		if branch != "" {
-			label += normalStyle.Render(" (" + branch + ")")
+			label += hintStyle.Render(" (" + branch + ")")
 		}
 
 		if i == s.selectedIdx {
-			line := "  " + statusStr + " " + selectedStyle.Render("▸ "+r.Instance.Title)
+			line := "  " + statusStr + ui.SelectionMarker("▸ ") + selectedStyle.Render(r.Instance.Title)
 			if branch != "" {
-				line += normalStyle.Render(" (" + branch + ")")
+				line += selectedStyle.Render(" (" + branch + ")")
 			}
 			lines = append(lines, truncateOverlayLine(line, plan.contentWidth))
 		} else {
-			lines = append(lines, truncateOverlayLine("  "+statusStr+" "+normalStyle.Render("  "+label), plan.contentWidth))
+			lines = append(lines, truncateOverlayLine("  "+statusStr+normalStyle.Render("  "+label), plan.contentWidth))
 		}
 	}
 
 	if plan.showBelow {
 		remaining := len(s.results) - plan.endIdx
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+		lines = append(lines, truncateOverlayLine(hintStyle.Render(
 			fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
 	}
 
@@ -361,5 +359,5 @@ func (s *SearchOverlay) Render() string {
 	if plan.styleHeight > 0 && len(lines) >= plan.contentHeight {
 		style = style.Height(plan.styleHeight)
 	}
-	return style.Render(strings.Join(lines, "\n"))
+	return style.Render(strings.Join(lines, "\n")), style.GetBorderTopSize() + style.GetPaddingTop() + firstResultLine, plan
 }

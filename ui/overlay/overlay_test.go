@@ -116,10 +116,10 @@ func TestPlaceOverlayEqualHeight(t *testing.T) {
 func TestPlaceOverlayBasicBackgroundFade(t *testing.T) {
 	result := PlaceOverlay(0, 0, "XX", "\x1b[41mred-bg\x1b[0m", false)
 
-	if strings.Contains(result, "\x1b[38;5;240m") {
+	if strings.Contains(result, "\x1b["+testBackdropFG()+"m") {
 		t.Fatalf("basic background code was faded as foreground: %q", result)
 	}
-	if !strings.Contains(result, "\x1b[48;5;236m") {
+	if !strings.Contains(result, "\x1b["+testBackdropBG()+"m") {
 		t.Fatalf("expected faded background code, got: %q", result)
 	}
 }
@@ -127,7 +127,7 @@ func TestPlaceOverlayBasicBackgroundFade(t *testing.T) {
 func TestPlaceOverlayReverseVideoFadesAsBackground(t *testing.T) {
 	result := PlaceOverlay(0, 0, "XX", "\x1b[7mreverse\x1b[0m", false)
 
-	if !strings.Contains(result, "\x1b[48;5;236m") {
+	if !strings.Contains(result, "\x1b["+testBackdropBG()+"m") {
 		t.Fatalf("expected reverse-video styling to preserve background semantics, got: %q", result)
 	}
 }
@@ -138,7 +138,7 @@ func TestPlaceOverlayReverseVideoFadesAsBackground(t *testing.T) {
 func TestPlaceOverlaySingleParamForegroundFade(t *testing.T) {
 	result := PlaceOverlay(0, 0, "XX", "\x1b[37mhello\x1b[0m", false)
 
-	if !strings.Contains(result, "\x1b[38;5;240m") {
+	if !strings.Contains(result, "\x1b["+testBackdropFG()+"m") {
 		t.Fatalf("expected single-param fg code to be faded, got: %q", result)
 	}
 	if strings.Contains(result, "\x1b[37m") {
@@ -159,7 +159,7 @@ func TestPlaceOverlayMultiParamForegroundFade(t *testing.T) {
 	if strings.Contains(result, "\x1b[1;37m") {
 		t.Fatalf("multi-param SGR \\x1b[1;37m leaked through fade: %q", result)
 	}
-	if !strings.Contains(result, "\x1b[38;5;240m") {
+	if !strings.Contains(result, "\x1b["+testBackdropFG()+"m") {
 		t.Fatalf("expected multi-param fg code to be faded, got: %q", result)
 	}
 	if !strings.Contains(result, "\x1b[0m") {
@@ -176,7 +176,7 @@ func TestPlaceOverlayMultiParamBackgroundFade(t *testing.T) {
 	if strings.Contains(result, "\x1b[1;41m") {
 		t.Fatalf("multi-param SGR \\x1b[1;41m leaked through fade: %q", result)
 	}
-	if !strings.Contains(result, "\x1b[48;5;236m") {
+	if !strings.Contains(result, "\x1b["+testBackdropBG()+"m") {
 		t.Fatalf("expected multi-param bg code to be faded to bg gray, got: %q", result)
 	}
 }
@@ -189,7 +189,7 @@ func TestPlaceOverlayExtendedBackgroundFade(t *testing.T) {
 	input := "\x1b[48;5;196mred-bg\x1b[0m"
 	result := PlaceOverlay(0, 0, "XX", input, false)
 
-	if strings.Contains(result, "\x1b[38;5;240m") && strings.Contains(input, "\x1b[48;5;") {
+	if strings.Contains(result, "\x1b["+testBackdropFG()+"m") && strings.Contains(input, "\x1b[48;5;") {
 		t.Fatalf("BUG CONFIRMED: extended background was faded as foreground.\nInput had 48;5 (bg), output has 38;5 (fg)")
 	}
 }
@@ -201,7 +201,7 @@ func TestPlaceOverlayTrueColorBackgroundFade(t *testing.T) {
 	input := "\x1b[48;2;255;0;0mtrue-color-red-bg\x1b[0m"
 	result := PlaceOverlay(0, 0, "XX", input, false)
 
-	if strings.Contains(result, "\x1b[38;5;240m") && strings.Contains(input, "\x1b[48;2;") {
+	if strings.Contains(result, "\x1b["+testBackdropFG()+"m") && strings.Contains(input, "\x1b[48;2;") {
 		t.Fatalf("BUG CONFIRMED: true-color background was faded as foreground")
 	}
 }

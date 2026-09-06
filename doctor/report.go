@@ -108,14 +108,13 @@ func renderStatus(s CheckStatus, color bool) string {
 		return text
 	}
 	theme := ui.CurrentTheme()
-	var c lipgloss.Color
+	var c lipgloss.TerminalColor
 	switch s {
-	case StatusPass, StatusFixed:
-		c = theme.Success
-	case StatusWarn:
-		c = theme.Warning
+	case StatusPass, StatusFixed, StatusWarn:
+		// Generic diagnostics are not session liveness.
+		c = theme.Ink
 	case StatusFail:
-		c = theme.Error
+		c = theme.Dead
 	default:
 		return text
 	}

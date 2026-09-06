@@ -6,45 +6,40 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 func TestTabbedWindowFrameStyleUsesPaneBorderThemeSlots(t *testing.T) {
 	defaultTheme := config.DefaultThemeConfig()
 	t.Cleanup(func() { ApplyTheme(defaultTheme) })
 
-	custom := defaultTheme
-	custom.PaneBorderDefault = "#111111"
-	custom.PaneBorderSelected = "#222222"
-	custom.PaneBorderInteractive = "#333333"
-	custom.PaneBorderPreview = "#444444"
-	custom.Warning = "#555555"
-	ApplyTheme(custom)
+	c := theme.Colors()
 
-	assertFrameColor := func(name string, w *TabbedWindow, want string) {
+	assertFrameColor := func(name string, w *TabbedWindow, want lipgloss.TerminalColor) {
 		t.Helper()
 		got := w.frameStyle().GetBorderBottomForeground()
-		if got != lipgloss.TerminalColor(lipgloss.Color(want)) {
-			t.Fatalf("%s border = %v, want %s", name, got, want)
+		if got != want {
+			t.Fatalf("%s border = %v, want %v", name, got, want)
 		}
 	}
 
 	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
-	assertFrameColor("default", w, "#111111")
+	assertFrameColor("default", w, c["border"])
 
 	w.SetSidebarSelected(true)
-	assertFrameColor("selected but not focused", w, "#222222")
+	assertFrameColor("selected but not focused", w, c["accent"])
 
 	w.Focus()
-	assertFrameColor("focused nav", w, "#111111")
+	assertFrameColor("focused nav", w, c["border"])
 
 	w.SetInteractive(true)
-	assertFrameColor("interactive", w, "#333333")
+	assertFrameColor("interactive", w, c["accent"])
 
 	w.SetInteractive(false)
 	w.SetPreview(nil, 0, "original")
-	assertFrameColor("preview", w, "#444444")
+	assertFrameColor("preview", w, c["border"])
 
 	w.ClearPreview()
 	w.SetDropTarget(true)
-	assertFrameColor("drop target", w, "#555555")
+	assertFrameColor("drop target", w, c["accent"])
 }

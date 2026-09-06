@@ -235,6 +235,8 @@ hints before the exit route. Connecting… is static body text, not a spinner.
 
 ## Fixed colour and liveness contract
 
+TUI colours follow tokens within termenv's rounding (at most one step per RGB channel); the web is exact.
+
 There are **12 colour roles per theme**: surface, surface-raised, ink, ink-muted,
 border, accent, running, ready, lost, dead, archived and limit-reached. Accent
 also provides focus; dead also provides failed-operation/confirmation text.

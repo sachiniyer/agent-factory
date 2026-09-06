@@ -17,52 +17,51 @@ import (
 )
 
 var windowStyle = lipgloss.NewStyle().
-	BorderForeground(activeTheme.PaneBorderDefault).
+	BorderForeground(activeTheme.Border).
 	Border(lipgloss.RoundedBorder())
 
 // blurredWindowStyle is the neutral pane frame for ordinary panes.
 var blurredWindowStyle = windowStyle.
-	BorderForeground(activeTheme.PaneBorderDefault)
+	BorderForeground(activeTheme.Border)
 
 // selectedWindowStyle marks the pane that matches the current sidebar
 // highlight, while the focus ring is elsewhere.
 var selectedWindowStyle = windowStyle.
-	BorderForeground(activeTheme.PaneBorderSelected)
+	BorderForeground(activeTheme.Accent)
 
 // interactiveWindowStyle marks the pane that owns the keyboard in
-// interactive mode (#1089, RFC §2.3): a green DOUBLE border still signals
+// interactive mode (#1089, RFC §2.3): an accent DOUBLE border still signals
 // "keystrokes go INTO this terminal" even when colors are unavailable.
 var interactiveWindowStyle = windowStyle.
 	Border(lipgloss.DoubleBorder()).
-	BorderForeground(activeTheme.PaneBorderInteractive)
+	BorderForeground(activeTheme.Accent)
 
 // previewWindowStyle marks a transient #1321 preview binding without
 // mutating the pane's committed store binding.
 var previewWindowStyle = windowStyle.
-	BorderForeground(activeTheme.PaneBorderPreview)
+	BorderForeground(activeTheme.Border)
 
 // dropTargetWindowStyle marks the pane currently under an active tab drag.
 var dropTargetWindowStyle = windowStyle.
-	BorderForeground(activeTheme.Warning)
+	BorderForeground(activeTheme.Accent)
 
 var paneHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.Foreground)
+	Foreground(activeTheme.Ink)
 
 var paneHeaderFocusedStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(activeTheme.SelectionBackground).
-	Foreground(activeTheme.SelectionForeground)
+	Background(activeTheme.SurfaceRaised).
+	Foreground(activeTheme.Ink)
 
 var paneHeaderDimStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
-// paneHeaderInteractiveStyle matches the interactive frame: green header bar
-// on the pane whose terminal owns the keyboard.
+// paneHeaderInteractiveStyle uses raised selection with readable body ink.
 var paneHeaderInteractiveStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(activeTheme.Success).
-	Foreground(activeTheme.Background)
+	Background(activeTheme.SurfaceRaised).
+	Foreground(activeTheme.Ink)
 
 // paneHeaderRows is the height of the `title · tab` header line rendered
 // inside the pane frame. With the tab bar gone (#1024 PR 4) the header is
