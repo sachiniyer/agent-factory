@@ -213,8 +213,25 @@ func assertCreateLeavesADeletedHomeDeleted(t *testing.T, worktreeRoot string) {
 	defer conn.Close()
 
 	deletedAt := time.Now()
-	if err := os.RemoveAll(h.home); err != nil {
-		t.Fatalf("remove the daemon's home: %v", err)
+	// A concurrent write by the daemon or stand-in during deletion is expected
+	// traffic, not a product bug: on macOS it can make RemoveAll report
+	// "directory not empty" (#3957). Retry only the deletion harness step.
+	const deleteAttempts = 20
+	for attempt := 1; attempt <= deleteAttempts; attempt++ {
+		if err := os.RemoveAll(h.home); err != nil {
+			if attempt == deleteAttempts {
+				entries, readErr := os.ReadDir(h.home)
+				var remaining []string
+				for _, entry := range entries {
+					remaining = append(remaining, entry.Name())
+				}
+				t.Fatalf("remove the daemon's home %s after %d attempts: %v; remaining entries: %v (listing error: %v)",
+					h.home, deleteAttempts, err, remaining, readErr)
+			}
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	createErr := postOverConn(conn, "/v1/CreateSession", map[string]string{
