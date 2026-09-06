@@ -1116,6 +1116,11 @@ button:disabled,
   max-width: min(18rem, 34vw);
   overflow: hidden;
 }
+.af-copy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
 .af-term-action {
   flex: 0 0 auto;
   padding: 0.3rem 0.6rem;
@@ -2381,6 +2386,9 @@ button:disabled,
   }
   .af-tab {
     min-height: 2.5rem;
+  }
+  .af-copy-link-label {
+    display: none;
   }
   .af-term-action {
     min-height: 2.5rem;
