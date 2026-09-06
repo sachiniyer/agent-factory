@@ -77,21 +77,26 @@ they never establish that a frame completed.
 
 ## Recorded baseline and budgets
 
-Measured 2026-09-05 on Linux amd64, Node/Chromium from the pinned
-Playwright 1.56.1 Noble image, Go 1.25.0, 4GiB container memory limit. The warm
-end-to-end run took about three minutes, including the existing PR-badge sweep.
+The original P1 recording was measured on 2026-09-05; its bundle, layout-shift
+and TUI entries remain unchanged. The three web latency baselines were tightened
+on 2026-09-06 for #3914 using the six after samples detailed below. Measurements
+use Linux amd64, Node/Chromium from the pinned Playwright 1.56.1 Noble image,
+Go 1.25.0 and a 4GiB container memory limit. The original warm end-to-end run took
+about three minutes, including the existing PR-badge sweep.
+
 The committed `scripts/perf/baselines.json` is the budget source. The table below
-reports the arithmetic mean, range and population standard deviation across three
-runs. Each CI run uploads the individual samples, summary JSON/table, and any
+reports arithmetic mean, range and population standard deviation: six samples
+for first terminal, echo and initial rail; the original three for every other
+metric. Each CI run uploads individual samples, summary JSON/table and any
 Playwright traces/diff images under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 878059.000 | 878059.000–878059.000 | 0.000 | 921961.950 |
 | gzip_bytes | 196682.000 | 196682.000–196682.000 | 0.000 | 206516.100 |
-| first_terminal_ms | 6974.800 | 5912.400–7654.300 | 760.926 | 13949.600 |
-| echo_ms | 388.000 | 380.700–400.400 | 8.814 | 776.000 |
-| rail_ms | 932.967 | 894.600–968.400 | 30.200 | 1865.933 |
+| first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
+| echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
+| rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
 | load_shift | 0.000 | 0.000–0.000 | 0.000 | 0.010 |
 | snapshot_shift | 0.000 | 0.000–0.000 | 0.000 | 0.010 |
 | frame_ms | 480.005 | 375.747–679.179 | 140.888 | 960.011 |
@@ -102,8 +107,9 @@ Budget = baseline mean + margin. For deterministic bundle bytes the margin is
 payload increase. Timing margin is 100% of the baseline, with a 50ms absolute
 floor, to tolerate shared-runner scheduling and sub-frame observation noise.
 Layout-shift margin is an absolute 0.01 (multiplying a zero baseline would allow
-no noise). These are deliberately initial regression budgets, not latency SLOs;
-P3 should tighten them after the implementation improves. CI compares the
+no noise). These are regression budgets, not latency SLOs. P3 tightened only the first-terminal,
+echo and initial-rail baselines while preserving this margin policy; bundle, layout
+shift and TUI entries remain unchanged. CI compares the
 three-run mean and fails on missing, negative or non-finite samples, missing
 budgets, or a mean above its budget. It never learns a new baseline in CI.
 
@@ -113,16 +119,56 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
 
+### P3 recording provenance (#3914)
+
+Four complete `make perf-container` runs were executed serially in B1/A1/B2/A2
+order on 2026-09-06, with three fresh browser contexts in each block. B is the
+rail-diff parent `d2b2e91e01757663c7d896c92538c78ae40cf259`; A is the attach
+implementation `e8464e816faf50aafe4535b0adacca6d699d84d5`. Later rebasing may
+change commit IDs; the measured production bundle SHA-256 values are:
+
+- B: `c59d1d0052cf3041da9792b2852f733948dc71946a279785ecfcb009f8591962`.
+- A: `cb414f01af64609c3be7d765d33d32a304d37cd842d1ed9e8c01dbce5d05550b`.
+
+Both measurement worktrees used the same instrumentation: the independent #3941
+chrome capture-state wait on both sides, plus the terminal-surface probe added
+to the before harness as well. These were test-only differences; neither
+production bundle was changed. All four runs passed the existing budgets and
+unchanged visual goldens. Artifacts retain raw `metrics.json` and `web-runs.json`.
+
+| Block | Artifact run directory | first_terminal_ms mean (min–max) | echo_ms mean (min–max) | rail_ms mean (min–max) |
+| --- | --- | ---: | ---: | ---: |
+| B1 | `363772-bbcae3` | 3049.167 (2925.600–3189.100) | 364.267 (319.400–404.400) | 754.733 (737.200–779.300) |
+| A1 | `1574812-f1ea23` | 2899.733 (2757.600–3033.000) | 291.367 (273.300–308.000) | 726.367 (718.800–731.900) |
+| B2 | `2794144-efef7c` | 2989.800 (2890.100–3110.900) | 261.533 (229.100–285.800) | 730.300 (718.700–741.300) |
+| A2 | `4018718-1ef677` | 2841.100 (2675.500–2926.100) | 323.733 (314.400–338.100) | 726.400 (711.500–749.500) |
+| Before pooled, n=6 | — | 3019.483 (2890.100–3189.100) | 312.900 (229.100–404.400) | 742.517 (718.700–779.300) |
+| After pooled, n=6 | — | 2870.417 (2675.500–3033.000) | 307.550 (273.300–338.100) | 726.383 (711.500–749.500) |
+
+The committed three latency entries pool the six individual A samples, not the
+rounded block means. Their margins remain 100% of the new baseline (50ms floor),
+and every other baseline entry is unchanged. Both after blocks count equally;
+the slower echo block is retained. Overlapping before/after echo ranges do not
+establish a causal echo improvement from early attach. These are observed
+regression thresholds, not a claim that all P3 timing targets were achieved.
+
+The P1 first-terminal scenario still opens the rail and clicks a session.
+Direct-route ordering is verified separately by the attach browser test;
+`terminal_surface_ms` and `snapshot_rail_ms` remain supplemental observations
+and do not replace the three existing budgeted latency metrics.
+
 ## Demo stills and intentional redesigns
 
 `playwright.visual.config.ts` drives the **same forty-two demo stills** as the
 recorder: the ten workflow scenes plus rail disclosures, phone layouts,
 terminal actions, tab types, keyboard ownership, split panes, form disclosures,
 confirmations, account registration and controlled recovery fixtures, all in light
-and dark (84 goldens). It omits video, conversion and video pacing. It waits for final
-stand-in output, a stable terminal and the visible rail's settled `Needs you`
-states before shooting; completed terminal output alone precedes the daemon's
-idle observation on fast runners. Goldens are committed under
+and dark (84 goldens). It omits video, conversion and video pacing. It waits for
+final stand-in output, a stable terminal and all retained seeded rows to report
+`Needs you`, even when the rail is hidden. Chrome and split captures require
+exactly four seeded rows; login/unavailable scenes have no application rail.
+Completed terminal output alone precedes the daemon's idle observation on fast
+runners, so #3941 checks these states before each application chrome capture. Goldens are committed under
 `web/selftest/goldens`; missing goldens fail normally. Playwright pixel-diffs each
 stabilized image, permits **zero differing pixels** above its 0.2 per-pixel color
 distance threshold, and uploads actual/expected/diff images on failure.
