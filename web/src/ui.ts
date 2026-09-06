@@ -1,4 +1,4 @@
-import { recoveryScreen, scopeRecovery } from "./recovery.js";
+import { mutationNotice, recoveryScreen, scopeRecovery } from "./recovery.js";
 // The view layer of the web client (#1592 Phase 5). It renders two views into
 // #app: the paste-token login (design §1.2) and the authed app — a left rail of
 // live sessions (PR3) beside a main pane that now hosts the live attach terminal
@@ -159,6 +159,8 @@ export interface AppState {
    *  failure is shown here instead of being silently swallowed (#1592 Phase 5 PR7/PR8). */
   tabError: string | null;
   tabNotice?: boolean;
+  /** A failed optimistic mutation remains explained until explicitly dismissed. */
+  mutationError?: string;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
   /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
@@ -1201,13 +1203,22 @@ export class AppShell {
       this.el.classList.toggle("af-kb-rail", kb === "rail");
     }
 
-    if (this.lastError !== state.tabError) {
-      this.lastError = state.tabError;
-      this.toast.replaceChildren(...(state.tabError ? [recoveryScreen({
-        condition: state.tabNotice ? "Notice" : "Operation failed", detail: state.tabError,
-        failed: !state.tabNotice, action: "Dismiss", run: () => this.actions.dismissNotice?.(),
-      })] : []));
-      this.toast.classList.toggle("af-toast-show", state.tabError !== null);
+    const errorSignature = JSON.stringify([state.mutationError, state.tabError, state.tabNotice]);
+    if (this.lastError !== errorSignature) {
+      this.lastError = errorSignature;
+      if (state.mutationError) {
+        const notice = mutationNotice("Operation failed", state.mutationError, "Review the details, then try again.");
+        const dismiss = h("button", { type: "button", class: "af-recovery-action" }, "Dismiss");
+        dismiss.addEventListener("click", () => this.actions.dismissNotice?.());
+        notice.append(dismiss);
+        this.toast.replaceChildren(notice);
+      } else {
+        this.toast.replaceChildren(...(state.tabError ? [recoveryScreen({
+          condition: state.tabNotice ? "Notice" : "Operation failed", detail: state.tabError,
+          failed: !state.tabNotice, action: "Dismiss", run: () => this.actions.dismissNotice?.(),
+        })] : []));
+      }
+      this.toast.classList.toggle("af-toast-show", Boolean(state.mutationError) || state.tabError !== null);
     }
 
     // The event-stream state is tracked and published, but no longer DRAWN: the
