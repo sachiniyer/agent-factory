@@ -36,7 +36,9 @@ playtest_is_expired() {
     local inspected="$1" now="$2" name label started mode command lifetime epoch header
     header="${inspected%%$'\n'*}"
     IFS='|' read -r name label started mode command <<<"$header"
-    [[ "$name" == /af-playtest-* && "$label" == testbox ]] || return 1
+    # Docker prefixes inspected names with /; Podman does not.
+    name="${name#/}"
+    [[ "$name" == af-playtest-* && "$label" == testbox ]] || return 1
     # Interactive sandboxes have no deadline. Legacy launches lacked a mode
     # label, so identify only their exact detached entrypoint command.
     case "$mode" in

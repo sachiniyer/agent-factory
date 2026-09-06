@@ -82,6 +82,11 @@ func TestPlaytestExpiryPredicate(t *testing.T) {
 		{"legacy unknown command", legacy + `["sleep","infinity"]`, 43200, false},
 		{"legacy missing command", legacy, 43200, false},
 		{"interactive overrides command", strings.Replace(legacy, "||", "|interactive|", 1) + `["bash","/src/scripts/container/playtest-entry.sh","hold"]`, 43200, false},
+		{"podman detached", strings.TrimPrefix(base, "/"), 21600, true},
+		{"podman legacy detached", strings.TrimPrefix(legacy, "/") + `["bash","/src/scripts/container/playtest-entry.sh","hold"]`, 21600, true},
+		{"podman young", strings.TrimPrefix(base, "/"), 21599, false},
+		{"podman unlabelled", strings.Replace(strings.TrimPrefix(base, "/"), "|testbox|", "||", 1), 43200, false},
+		{"podman substring name", "other-" + strings.TrimPrefix(base, "/"), 43200, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,6 +132,9 @@ func TestPlaytestReaperUsesInspectedScopeAndAge(t *testing.T) {
 		"legacy_interactive": "/af-playtest-legacy-interactive|testbox|" + old + `||["bash","/src/scripts/container/playtest-entry.sh"]`,
 		"unknown":            "/af-playtest-unknown|testbox|" + old + `||["sleep","infinity"]`,
 		"legacy":             "/af-playtest-legacy|testbox|" + old + `||["bash","/src/scripts/container/playtest-entry.sh","hold"]`,
+		"podman_old":         "af-playtest-podman-old|testbox|" + old + "|detached|[]",
+		"podman_legacy":      "af-playtest-podman-legacy|testbox|" + old + `||["bash","/src/scripts/container/playtest-entry.sh","hold"]`,
+		"podman_unlabelled":  "af-playtest-podman-unlabelled||" + old + "|detached|[]",
 	} {
 		if err := os.WriteFile(filepath.Join(fixtures, id), []byte(inspected), 0o600); err != nil {
 			t.Fatal(err)
@@ -138,7 +146,7 @@ docker() {
     case "$1" in
         ps)
             [[ "$*" == 'ps -aq --filter label=af.harness=testbox --filter name=af-playtest-' ]] || return 90
-            printf '%s\n' old young unlabelled other extended interactive legacy_interactive unknown legacy vanished
+            printf '%s\n' old young unlabelled other extended interactive legacy_interactive unknown legacy podman_old podman_legacy podman_unlabelled vanished
             ;;
         inspect)
             [[ "$3" == *'.State.StartedAt'* && "$3" == *'.Config.Labels'* && "$3" == *'af.playtest.mode'* && "$3" == *'json .Config.Cmd'* ]] || return 91
@@ -155,7 +163,7 @@ cat "$fixtures/removals"`, fixtures)
 		t.Fatalf("reaper: %v: %s", err, out)
 	}
 	data, err := os.ReadFile(filepath.Join(fixtures, "removals"))
-	if err != nil || string(data) != "rm -f old\nrm -f legacy\n" {
+	if err != nil || string(data) != "rm -f old\nrm -f legacy\nrm -f podman_old\nrm -f podman_legacy\n" {
 		t.Fatalf("removals=%q err=%v, want only expired detached sandboxes", data, err)
 	}
 }
