@@ -328,7 +328,8 @@ func TestTaskPaneCreateSavesGeneratedCron(t *testing.T) {
 	tp.HandleKeyPress(keyType(tea.KeyEnter))
 
 	require.True(t, tp.HasPendingCreate(), "a valid schedule must submit")
-	_, _, cron, watch, _, _, _ := tp.ConsumePendingCreate()
+	draft := tp.ConsumePendingCreate()
+	cron, watch := draft.Cron, draft.WatchCmd
 	assert.Equal(t, "0 9 * * *", cron, "the default daily schedule's cron is saved")
 	assert.Equal(t, "", watch)
 }
