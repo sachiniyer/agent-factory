@@ -70,6 +70,7 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
         if (p.railStart && document.querySelectorAll(".af-rail-list .af-row").length === 1000) {
           record("rail_ms", p.railStart);
         }
+        if (document.querySelector(".af-term-host .xterm")) record("terminal_surface_ms", 0);
         const text = document.querySelector(".af-term-host .xterm-rows")?.textContent ?? "";
         if (text.trim() !== "") record("first_terminal_ms", 0);
         if (p.echoStart && text.includes(p.echo)) record("echo_ms", p.echoStart);

@@ -1140,6 +1140,8 @@ export class AppShell {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose(): void {
     window.clearInterval(this.idleAgeTimer);
+    if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
+    this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
   }
@@ -1187,7 +1189,7 @@ export class AppShell {
   }
 
   /** Applies the latest state, touching only what changed. */
-  update(state: AppState): void {
+  update(state: AppState, prioritizeTerminal = false): void {
     this.syncDocumentTitle(state);
     const condensedSessionChrome = usesCondensedSessionChrome(state);
     if (this.lastCondensedSessionChrome !== condensedSessionChrome) {
@@ -1326,21 +1328,25 @@ export class AppShell {
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
     if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
-      // The rail rebuilds on session STATUS CHURN, not only on something the user did,
-      // so a reader scrolled down it was being returned to the top by other people's
-      // sessions (#2933). Keep the place while it is the same list; a project or filter
-      // change is a different list and correctly starts at the top.
-      const railToken = listToken([
-        state.selectedProject,
-        Object.entries(state.statusFilter)
-          .filter(([, on]) => on)
-          .map(([kind]) => kind)
-          .sort()
-          .join(","),
-      ]);
-      const previousRailToken = this.lastRailToken;
-      this.lastRailToken = railToken;
-      rebuildKeepingScroll(this.railList, previousRailToken, railToken, () => this.renderRail(state));
+      // Mount/bind a routed terminal before spending the first frame on the rail.
+      // Further updates coalesce into that first paint; later gestures stay immediate.
+      if (!this.railPainted && prioritizeTerminal) {
+        this.pendingInitialRail = state;
+        if (this.initialRailFrame === null) {
+          this.initialRailFrame = window.requestAnimationFrame(() => {
+            this.initialRailFrame = null;
+            this.railPainted = true;
+            if (this.pendingInitialRail) this.updateRail(this.pendingInitialRail);
+            this.pendingInitialRail = null;
+          });
+        }
+      } else {
+        if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
+        this.initialRailFrame = null;
+        this.pendingInitialRail = null;
+        this.railPainted = true;
+        this.updateRail(state);
+      }
     }
 
     // The main pane's STRUCTURE only changes when the selected session changes (or on
@@ -1378,6 +1384,20 @@ export class AppShell {
     // the cache by reintroducing exactly the #1737 rebuild — so the cache is synced
     // independently of the render instead.
     this.syncTabIdentityCaches(state);
+  }
+
+  private railPainted = false;
+  private initialRailFrame: number | null = null;
+  private pendingInitialRail: AppState | null = null;
+
+  private updateRail(state: AppState): void {
+    const railToken = listToken([
+      state.selectedProject,
+      Object.entries(state.statusFilter).filter(([, on]) => on).map(([kind]) => kind).sort().join(","),
+    ]);
+    const previous = this.lastRailToken;
+    this.lastRailToken = railToken;
+    rebuildKeepingScroll(this.railList, previous, railToken, () => this.renderRail(state));
   }
 
   /** Refreshes the ordered tab identity + REAL-id caches the delegated dragstart

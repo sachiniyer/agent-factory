@@ -354,7 +354,7 @@ function rerender(): void {
     replaceRoute(state.selectedId ? { session: state.selectedId } : null);
   }
   routeSelection = state.selectedId;
-  shell.update(state);
+  shell.update(state, parseRoute(location.hash) !== null);
   syncSplit(state);
 }
 
@@ -392,20 +392,13 @@ async function connect(candidate: string): Promise<void> {
   // not as a temporary session-backed fallback that would then stick (reconcile keeps
   // a valid current selection). A transport failure degrades to no tasks (the events
   // plane / a view switch refetches); the scope then falls back until they load.
-  let tasksError = "";
-  let tasks: TaskData[] = [];
-  try {
-    tasks = await listTasks(candidate);
-  } catch (e) {
-    tasksError = errorText(e);
-    tasks = [];
-  }
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  // Fetch the registered projects too (the #2456 union): the reconcile must see a
-  // registered-but-sessionless project as a real, restorable selection, or a persisted
-  // choice on an empty registered repo would fall back on connect. Degrades to none on
-  // a transport failure — the projects.changed resync refetches it.
-  const { projects: registeredProjects, error: projectsError } = await fetchRegisteredProjects(candidate);
+  const [taskResult, projectResult] = await Promise.all([
+    listTasks(candidate).then(tasks => ({ tasks, error: "" }))
+      .catch(error => ({ tasks: [] as TaskData[], error: errorText(error) })),
+    fetchRegisteredProjects(candidate),
+  ]);
+  const { tasks, error: tasksError } = taskResult;
+  const { projects: registeredProjects, error: projectsError } = projectResult;
   // Fence the final app commit against a disconnect during tasks/projects loading.
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real

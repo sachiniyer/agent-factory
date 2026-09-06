@@ -63,6 +63,12 @@ Snapshot and DOM; decorated display titles cannot produce an empty cohort. The
 four live rows may receive real status updates. The DOM audit runs only during this
 resync, so it adds no observation overhead to the initial rail or echo measurements.
 
+`terminal_surface_ms` additionally records navigation origin → mounted xterm and
+two animation frames, without requiring PTY output. The original first-terminal
+metric still requires a painted PTY glyph. The separate attach browser tests hold
+PTY output until after focus/input assertions and verify that a direct session
+route starts its stream before initial construction of a 1,000-row rail.
+
 TUI frame time is a user-observable full-frame turnaround, **not isolated Go View
 CPU time**. The two TUI cases exercise opening and dismissing a full overlay over
 the populated session model. The 5ms driver poll interval bounds observation
