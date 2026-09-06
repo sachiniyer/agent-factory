@@ -36,6 +36,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // quotedArrayRe matches a bracketed run of quoted strings — the shape any
@@ -128,8 +129,12 @@ func stripComments(src string) string {
 // threshold here rather than leaving it implicit matters, because it is exactly the
 // line between "this check under-covers" and "this check false-fires".
 func hardcodedAgentEnums(src string) []string {
+	return hardcodedEnums(src, tmux.SupportedPrograms)
+}
+
+func hardcodedEnums(src string, values []string) []string {
 	canonical := map[string]bool{}
-	for _, p := range tmux.SupportedPrograms {
+	for _, p := range values {
 		canonical[p] = true
 	}
 
@@ -253,5 +258,29 @@ func TestStripCommentsDoesNotTruncateAtAURL(t *testing.T) {
 
 	if got := hardcodedAgentEnums(src); len(got) == 0 {
 		t.Errorf("a copy after a URL string was not seen — stripComments truncated the line at the URL's //\nsource: %s", src)
+	}
+}
+
+// Completion choices must be served, and both create and edit must send the value.
+func TestWebOnCompleteEnum(t *testing.T) {
+	if loadInventory(t).byID()["task.on-complete"].Web.Status != "yes" {
+		t.Fatal("task.on-complete must credit the web picker")
+	}
+	if !deriveWebRPCs(t)["ListOnComplete"] {
+		t.Error("the web must fetch ListOnComplete from the daemon")
+	}
+	for _, typ := range []string{"TaskData", "TaskUpdate"} {
+		if !webNestedValueReach(t, typ).Fields["on_complete"] {
+			t.Errorf("%s must send on_complete by value", typ)
+		}
+	}
+	for _, path := range webSourceFiles(t) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, hit := range hardcodedEnums(string(b), task.OnCompleteValues()) {
+			t.Errorf("%s copies lifecycle choices [%s]; render ListOnComplete instead", relSite(t, path), hit)
+		}
 	}
 }

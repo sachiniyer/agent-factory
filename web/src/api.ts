@@ -28,6 +28,7 @@
 import type { BackendCatalog } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
+  OnCompleteOption,
   AccountLoginResponse,
   AccountsResponse,
   ConfigResponse,
@@ -969,6 +970,12 @@ export async function probeWebTab(path: string, token: string, timeoutMs: number
 // (requireTaskID) — refusing BEFORE the request rather than letting an empty id fall
 // through to the daemon's first-match, the task analogue of the #1678 id-scoping
 // class the session write-path fixed.
+
+/** Fetches the daemon's lifecycle choices in presentation order. */
+export async function listOnComplete(token: string): Promise<OnCompleteOption[]> {
+  const resp = await af<{ values: OnCompleteOption[] }>("ListOnComplete", {}, token);
+  return resp.values;
+}
 
 /** Fetches every task across all repos (mirrors `af tasks list`). Returns [] for an
  *  empty daemon (never null); throws ApiError on transport/auth failure so callers

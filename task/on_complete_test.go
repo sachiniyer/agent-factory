@@ -288,3 +288,9 @@ func TestUpdateTaskExplicitVerbWithATargetSessionStillErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target_session")
 }
+
+func TestOnCompleteHint(t *testing.T) {
+	assert.Equal(t, "leaves the run's session in place", OnCompleteHint(OnCompleteKeep))
+	assert.Equal(t, "archives the run's session — restorable", OnCompleteHint(OnCompleteArchive))
+	assert.Equal(t, "deletes the run's session and its branch — permanent", OnCompleteHint(OnCompleteKill))
+}
