@@ -1012,9 +1012,7 @@ button:disabled,
   font-size: var(--af-type-body);
 }
 .af-row-branch-name {
-  display: inline-flex;
-  align-items: baseline;
-  min-width: 0;
+  display: inline;
   font-family: var(--af-font-mono);
 }
 .af-branch-icon {
@@ -1167,6 +1165,11 @@ button:disabled,
   min-width: 7.5rem;
   max-width: min(18rem, 34vw);
   overflow: hidden;
+}
+.af-copy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 .af-term-action {
   flex: 0 0 auto;
@@ -2439,6 +2442,9 @@ button:disabled,
   }
   .af-tab {
     min-height: 2.5rem;
+  }
+  .af-copy-link-label {
+    display: none;
   }
   .af-term-action {
     min-height: 2.5rem;

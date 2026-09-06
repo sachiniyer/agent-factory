@@ -6119,6 +6119,156 @@ WARNING: This link could potentially be dangerous`)) {
   }
 });
 
+// src/route.ts
+function parseRoute(hash) {
+  const match = /^#\/session\/([^/]+)$/.exec(hash);
+  if (!match) return null;
+  try {
+    const session = decodeURIComponent(match[1]);
+    return session.trim() && !/[\x00-\x1f\x7f]/.test(session) ? { session } : null;
+  } catch {
+    return null;
+  }
+}
+function serializeRoute(route) {
+  return route?.session ? `#/session/${encodeURIComponent(route.session)}` : "";
+}
+var ROUTE_KEY = "af-session-route";
+function stashRoute(hash, storage) {
+  try {
+    const route = parseRoute(hash);
+    if (route) storage.setItem(ROUTE_KEY, serializeRoute(route));
+    else storage.removeItem(ROUTE_KEY);
+  } catch {
+  }
+}
+function restoreRoute(hash, storage) {
+  try {
+    const saved = storage.getItem(ROUTE_KEY);
+    storage.removeItem(ROUTE_KEY);
+    return hash || serializeRoute(parseRoute(saved ?? ""));
+  } catch {
+    return hash;
+  }
+}
+function replaceRoute(route) {
+  const hash = serializeRoute(route);
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+}
+function sessionURL(id) {
+  return new URL("/" + serializeRoute({ session: id }), location.origin).href;
+}
+function restoreLoginRoute() {
+  try {
+    const hash = restoreRoute(location.hash, sessionStorage);
+    if (hash !== location.hash) history.replaceState(null, "", location.pathname + location.search + hash);
+  } catch {
+  }
+}
+function stashLoginRoute() {
+  try {
+    stashRoute(location.hash, sessionStorage);
+  } catch {
+  }
+}
+function clearLoginRoute() {
+  try {
+    sessionStorage.removeItem(ROUTE_KEY);
+  } catch {
+  }
+}
+
+// src/clipboard.ts
+function chordIsLetter(ev, letter, code) {
+  const typed = ev.key.toLowerCase();
+  if (typed.length === 1 && typed >= "a" && typed <= "z") {
+    return typed === letter;
+  }
+  return ev.code === code;
+}
+var ETX = "";
+var LF = "\n";
+function handleClipboardKeydown(ev, deps) {
+  if (ev.type !== "keydown") {
+    return true;
+  }
+  if (deps.composerNewline && ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    deps.sendUserInput(LF);
+    return false;
+  }
+  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && chordIsLetter(ev, "c", "KeyC")) {
+    if (!deps.hasSelection()) {
+      return true;
+    }
+    ev.preventDefault();
+    deps.copy(deps.getSelection());
+    return false;
+  }
+  if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
+    return true;
+  }
+  if (chordIsLetter(ev, "v", "KeyV")) {
+    return false;
+  }
+  if (chordIsLetter(ev, "c", "KeyC")) {
+    if (ev.shiftKey) {
+      return true;
+    }
+    if (deps.hasSelection()) {
+      ev.preventDefault();
+      deps.copy(deps.getSelection());
+      deps.clearSelection();
+      return false;
+    }
+    ev.preventDefault();
+    deps.sendInput(ETX);
+    return false;
+  }
+  return true;
+}
+function handleTerminalCopy(ev, deps) {
+  if (!deps.hasSelection()) {
+    return false;
+  }
+  const text = deps.getSelection();
+  if (text === "") {
+    return false;
+  }
+  ev.preventDefault();
+  if (ev.clipboardData) {
+    ev.clipboardData.setData("text/plain", text);
+    return true;
+  }
+  deps.copy(text);
+  return true;
+}
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+  }
+  const previous = document.activeElement;
+  const input = document.createElement("textarea");
+  try {
+    input.className = "af-clipboard-fallback";
+    input.value = text;
+    input.readOnly = true;
+    document.body.append(input);
+    input.select();
+    input.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    input.remove();
+    if (previous instanceof HTMLElement) previous.focus();
+  }
+}
+
 // src/api.ts
 var TOKEN_KEY = "af.token";
 function loadToken() {
@@ -7141,72 +7291,6 @@ function accountLoginStreamEndpoint(agent, name) {
 // src/terminal.ts
 var import_addon_fit = __toESM(require_addon_fit(), 1);
 var import_xterm = __toESM(require_xterm(), 1);
-
-// src/clipboard.ts
-function chordIsLetter(ev, letter, code) {
-  const typed = ev.key.toLowerCase();
-  if (typed.length === 1 && typed >= "a" && typed <= "z") {
-    return typed === letter;
-  }
-  return ev.code === code;
-}
-var ETX = "";
-var LF = "\n";
-function handleClipboardKeydown(ev, deps) {
-  if (ev.type !== "keydown") {
-    return true;
-  }
-  if (deps.composerNewline && ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-    ev.preventDefault();
-    deps.sendUserInput(LF);
-    return false;
-  }
-  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && chordIsLetter(ev, "c", "KeyC")) {
-    if (!deps.hasSelection()) {
-      return true;
-    }
-    ev.preventDefault();
-    deps.copy(deps.getSelection());
-    return false;
-  }
-  if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
-    return true;
-  }
-  if (chordIsLetter(ev, "v", "KeyV")) {
-    return false;
-  }
-  if (chordIsLetter(ev, "c", "KeyC")) {
-    if (ev.shiftKey) {
-      return true;
-    }
-    if (deps.hasSelection()) {
-      ev.preventDefault();
-      deps.copy(deps.getSelection());
-      deps.clearSelection();
-      return false;
-    }
-    ev.preventDefault();
-    deps.sendInput(ETX);
-    return false;
-  }
-  return true;
-}
-function handleTerminalCopy(ev, deps) {
-  if (!deps.hasSelection()) {
-    return false;
-  }
-  const text = deps.getSelection();
-  if (text === "") {
-    return false;
-  }
-  ev.preventDefault();
-  if (ev.clipboardData) {
-    ev.clipboardData.setData("text/plain", text);
-    return true;
-  }
-  deps.copy(text);
-  return true;
-}
 
 // src/frame.ts
 var RESIZE_PAYLOAD_LEN = 4;
@@ -9258,37 +9342,9 @@ var AttachTerminal = class {
     if (text === "") {
       return;
     }
-    const clip = navigator.clipboard;
-    if (clip && typeof clip.writeText === "function") {
-      clip.writeText(text).catch(() => {
-        if (!this.execCommandCopy(text)) {
-          this.flashCopyHint();
-        }
-      });
-      return;
-    }
-    if (!this.execCommandCopy(text)) {
-      this.flashCopyHint();
-    }
-  }
-  /** Legacy clipboard write via a throwaway off-screen textarea. Returns whether the
-   *  copy reported success. Requires a user gesture, which the key handler provides. */
-  execCommandCopy(text) {
-    try {
-      const ta = document.createElement("textarea");
-      ta.className = "af-clipboard-fallback";
-      ta.value = text;
-      ta.setAttribute("readonly", "");
-      document.body.appendChild(ta);
-      ta.select();
-      ta.setSelectionRange(0, text.length);
-      const ok = document.execCommand("copy");
-      ta.remove();
-      this.term.focus();
-      return ok;
-    } catch {
-      return false;
-    }
+    void copyText(text).then((ok) => {
+      if (!ok) this.flashCopyHint();
+    });
   }
   /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never
    *  silently dropped. An app-level "clipboard unavailable" condition (not
@@ -9810,6 +9866,12 @@ var GitBranch = [
   ["circle", { cx: "6", cy: "18", r: "3" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/link.mjs
+var Link = [
+  ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
+  ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
+];
+
 // node_modules/lucide/dist/esm/icons/menu.mjs
 var Menu = [
   ["path", { d: "M4 5h16" }],
@@ -9896,6 +9958,7 @@ var ICONS = {
   "folder-git": FolderGit2,
   funnel: Funnel,
   "git-branch": GitBranch,
+  link: Link,
   menu: Menu,
   "octagon-x": OctagonX,
   panels: PanelsTopLeft,
@@ -14849,6 +14912,14 @@ var AppShell = class {
     prBadge.hidden = true;
     this.prBadge = prBadge;
     this.prBadgeSig = "";
+    const copyLink = h(
+      "button",
+      { type: "button", class: "af-ghost af-term-action af-copy-link", title: "Copy link to this session" },
+      icon("link"),
+      h("span", { class: "af-copy-link-label" }, "Copy link")
+    );
+    copyLink.setAttribute("aria-label", "Copy link");
+    copyLink.addEventListener("click", () => this.actions.copyLink());
     const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
     const retryBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
     retryBtn.title = "Resume this session from its usage-limit wall";
@@ -14877,7 +14948,7 @@ var AppShell = class {
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
-    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, copyLink, tabBar, headActions, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -15459,25 +15530,22 @@ function sessionRow(s, selected, openSession, buildActions) {
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
   const branchParts = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-    " \xB7 "
+    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
   ];
   if (selected && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, `${idleDetail} \xB7 `);
+    const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
   }
-  branchParts.push(
-    h(
-      "span",
-      { class: "af-row-branch-name" },
-      icon("git-branch", "af-branch-icon"),
-      s.branch || "\u2014"
-    )
-  );
+  if (s.branch) {
+    branchParts.push(
+      " \xB7 ",
+      h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
+    );
+  }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
@@ -15522,7 +15590,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? `${detail} \xB7 ` : "";
+    idle.textContent = detail ? ` \xB7 ${detail}` : "";
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";
@@ -15612,6 +15680,8 @@ function mount() {
   if (!root) {
     throw new Error("af-web: #app root element missing from index.html");
   }
+  restoreLoginRoute();
+  window.addEventListener("hashchange", resolveRoute);
   store.subscribe(rerender);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
@@ -15644,6 +15714,7 @@ function rerender() {
   }
   const state = store.get();
   if (state.phase === "login") {
+    stashLoginRoute();
     if (shell) {
       shell.dispose();
       shell = null;
@@ -15658,6 +15729,10 @@ function rerender() {
     shell = new AppShell(actions, termHost, modalHost, installAffordance.el);
     root.replaceChildren(shell.el);
   }
+  if (!resolvingRoute && state.selectedId !== routeSelection) {
+    replaceRoute(state.selectedId ? { session: state.selectedId } : null);
+  }
+  routeSelection = state.selectedId;
   shell.update(state);
   syncSplit(state);
 }
@@ -15690,6 +15765,7 @@ async function connect(candidate) {
   const registeredProjects = await fetchRegisteredProjects(candidate);
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  resolvingRoute = true;
   store.set({
     phase: "app",
     view: "sessions",
@@ -15706,6 +15782,9 @@ async function connect(candidate) {
     tasks,
     registeredProjects
   });
+  resolvingRoute = false;
+  resolveRoute();
+  clearLoginRoute();
   startStream(candidate);
 }
 async function fetchRegisteredProjects(tok) {
@@ -15745,6 +15824,31 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
 function tabIdsOf(list, id) {
   const s = id ? list.find((x) => x.id === id) : null;
   return s ? sessionTabs(s).map(tabIdentity) : [];
+}
+var resolvingRoute = false;
+var routeSelection = null;
+function resolveRoute() {
+  if (store.get().phase !== "app") {
+    stashLoginRoute();
+    return;
+  }
+  const route = parseRoute(location.hash);
+  resolvingRoute = true;
+  try {
+    const session = route && store.get().sessions.find((s) => s.id === route.session);
+    if (session?.id) {
+      if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
+      setStatusFilter(operatorKind(session), true);
+      openFromRail(session.id);
+    } else {
+      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      if (route) showTransientNotice("No session with that id in this daemon");
+    }
+  } finally {
+    resolvingRoute = false;
+    const id = store.get().selectedId;
+    replaceRoute(id ? { session: id } : null);
+  }
 }
 function moveSelection(id) {
   clearTabError();
@@ -16487,6 +16591,13 @@ var actions = {
   connect,
   disconnect,
   open: openFromRail,
+  copyLink: () => {
+    const id = store.get().selectedId;
+    if (!id) return;
+    void copyText(sessionURL(id)).then(
+      (ok) => showTransientNotice(ok ? "Link copied" : "Copy failed \xB7 copy the address bar link")
+    );
+  },
   newSession,
   kill: (session) => openConfirm("kill", session),
   archive: (session) => openConfirm("archive", session),
@@ -16810,6 +16921,7 @@ lucide/dist/esm/icons/folder-git-2.mjs:
 lucide/dist/esm/icons/folder.mjs:
 lucide/dist/esm/icons/funnel.mjs:
 lucide/dist/esm/icons/git-branch.mjs:
+lucide/dist/esm/icons/link.mjs:
 lucide/dist/esm/icons/menu.mjs:
 lucide/dist/esm/icons/octagon-x.mjs:
 lucide/dist/esm/icons/panels-top-left.mjs:

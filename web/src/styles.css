@@ -1276,9 +1276,9 @@ button:disabled,
 }
 
 .af-row-branch-name {
-  display: inline-flex;
-  align-items: baseline;
-  min-width: 0;
+  /* Inline text truncates within the branch; an atomic inline-flex box was
+   * replaced wholesale by the parent's ellipsis, leaving only the separator. */
+  display: inline;
   font-family: var(--af-font-mono);
 }
 
@@ -1444,6 +1444,12 @@ button:disabled,
   min-width: 7.5rem;
   max-width: min(18rem, 34vw);
   overflow: hidden;
+}
+
+.af-copy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
 .af-term-action {
@@ -3208,6 +3214,10 @@ button:disabled,
    * terminal path depends on a precise tap or a hover that touch never delivers. */
   .af-tab {
     min-height: 2.5rem;
+  }
+
+  .af-copy-link-label {
+    display: none;
   }
 
   .af-term-action {

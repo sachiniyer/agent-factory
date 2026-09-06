@@ -12,6 +12,8 @@
 
 import "./styles.css";
 import "./tokens.css";
+import { parseRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
+import { copyText } from "./clipboard.js";
 import {
   addTask,
   ApiError,
@@ -84,7 +86,7 @@ import {
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, type OperatorKind } from "./status.js";
+import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -276,6 +278,8 @@ function mount(): void {
   if (!root) {
     throw new Error("af-web: #app root element missing from index.html");
   }
+  restoreLoginRoute();
+  window.addEventListener("hashchange", resolveRoute);
   store.subscribe(rerender);
   rerender();
 
@@ -335,6 +339,7 @@ function rerender(): void {
   }
   const state = store.get();
   if (state.phase === "login") {
+    stashLoginRoute();
     if (shell) {
       shell.dispose();
       shell = null; // dropped from the tree by renderLogin below
@@ -349,6 +354,11 @@ function rerender(): void {
     shell = new AppShell(actions, termHost, modalHost, installAffordance.el);
     root.replaceChildren(shell.el);
   }
+  // Unrelated event paints must not overwrite a hashchange queued by the browser.
+  if (!resolvingRoute && state.selectedId !== routeSelection) {
+    replaceRoute(state.selectedId ? { session: state.selectedId } : null);
+  }
+  routeSelection = state.selectedId;
   shell.update(state);
   syncSplit(state);
 }
@@ -415,6 +425,7 @@ async function connect(candidate: string): Promise<void> {
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  resolvingRoute = true;
   store.set({
     phase: "app",
     view: "sessions",
@@ -431,6 +442,9 @@ async function connect(candidate: string): Promise<void> {
     tasks,
     registeredProjects,
   });
+  resolvingRoute = false;
+  resolveRoute();
+  clearLoginRoute();
   startStream(candidate);
 }
 
@@ -487,6 +501,33 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
 function tabIdsOf(list: SessionData[], id: string | null): string[] {
   const s = id ? list.find((x) => x.id === id) : null;
   return s ? sessionTabs(s).map(tabIdentity) : [];
+}
+
+// Resolve only against an authenticated snapshot, never a partially loaded rail.
+let resolvingRoute = false;
+let routeSelection: string | null = null;
+function resolveRoute(): void {
+  if (store.get().phase !== "app") {
+    stashLoginRoute();
+    return;
+  }
+  const route = parseRoute(location.hash);
+  resolvingRoute = true;
+  try {
+    const session = route && store.get().sessions.find((s) => s.id === route.session);
+    if (session?.id) {
+      if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
+      setStatusFilter(operatorKind(session), true);
+      openFromRail(session.id);
+    } else {
+      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      if (route) showTransientNotice("No session with that id in this daemon");
+    }
+  } finally {
+    resolvingRoute = false;
+    const id = store.get().selectedId;
+    replaceRoute(id ? { session: id } : null);
+  }
 }
 
 /** Moves the rail selection to a session by its stable id and puts the keyboard in
@@ -1861,6 +1902,13 @@ const actions = {
   connect,
   disconnect,
   open: openFromRail,
+  copyLink: () => {
+    const id = store.get().selectedId;
+    if (!id) return;
+    void copyText(sessionURL(id)).then((ok) =>
+      showTransientNotice(ok ? "Link copied" : "Copy failed · copy the address bar link"),
+    );
+  },
   newSession,
   kill: (session: KillableSession) => openConfirm("kill", session),
   archive: (session: ActionableSession) => openConfirm("archive", session),

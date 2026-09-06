@@ -302,3 +302,29 @@ export function handleTerminalCopy(ev: TerminalCopyEvent, deps: TerminalCopyDeps
   deps.copy(text);
   return true;
 }
+
+/** Shared clipboard write for UI controls, with the terminal's legacy fallback. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* Try the gesture-based fallback. */ }
+  const previous = document.activeElement;
+  const input = document.createElement("textarea");
+  try {
+    input.className = "af-clipboard-fallback";
+    input.value = text;
+    input.readOnly = true;
+    document.body.append(input);
+    input.select();
+    input.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    input.remove();
+    if (previous instanceof HTMLElement) previous.focus();
+  }
+}

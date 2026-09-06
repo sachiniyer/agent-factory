@@ -1442,6 +1442,7 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
     list.push(
       synth("probe-working", 1), // Running → working → no dot
       synth("probe-needs-you", 2, "settled-after-pane-change"),
+      { ...synth("probe-no-branch", 2, "settled-after-pane-change"), branch: "" },
       synth("probe-broken-prompt", 2, "prompt-not-delivered"),
       synth("probe-lost", 3, "process-exited"),
       synth("probe-dead", 4, "process-exited"),
@@ -1470,6 +1471,9 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
   await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
+  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("Needs you · synth-probe-needs-you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("Needs you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch-name")).toHaveCount(0);
   await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
   // Positive non-delivery is Broken even though the underlying process is Ready.
@@ -5625,7 +5629,9 @@ test("filter (feat): the choice persists across a reload", REAL_FIXTURE, async (
   await page.locator(".af-rail-title").click();
 
   // ...and so does the default, once restored: the persistence is a round trip, not a
-  // one-way write that can only ever add rows.
+  // one-way write that can only ever add rows. Select a live row first: reloading
+  // an archived session's deep link deliberately reveals Archived (#3909).
+  await row(page, SESSION_A).click();
   await resetFilter(page);
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
@@ -8343,7 +8349,9 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               };
               const titleEl = document.querySelector<HTMLElement>(".af-term-title")!;
               const bar = document.querySelector<HTMLElement>(".af-tabbar")!;
-              const retryEl = document.querySelector<HTMLElement>(".af-term-action:not([hidden])");
+              // Copy link is also a header action (#3909); measure Retry itself.
+              const retrySelector = ".af-term-action[title='Resume this session from its usage-limit wall']:not([hidden])";
+              const retryEl = document.querySelector<HTMLElement>(retrySelector);
               const titleStyle = getComputedStyle(titleEl);
               const barStyle = getComputedStyle(bar);
               return {
@@ -8352,7 +8360,7 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
                 title: rect(".af-term-title"),
                 bar: rect(".af-tabbar"),
                 nav: rect(".af-nav-toggle"),
-                retry: retryEl ? rect(".af-term-action:not([hidden])") : null,
+                retry: retryEl ? rect(retrySelector) : null,
                 host: rect(".af-term-host"),
                 titleClientWidth: titleEl.clientWidth,
                 titleScrollWidth: titleEl.scrollWidth,
