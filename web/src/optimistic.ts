@@ -3,7 +3,7 @@
 // state, not restore a saved row over events received while the RPC was pending.
 import type { CreateSessionInput } from "./api.js";
 import { applyEvent, sessionKey, upsertSession } from "./sessions.js";
-import { InFlightOp, type SessionData, type WireEvent } from "./types.js";
+import { InFlightOp, Liveness, type SessionData, type WireEvent } from "./types.js";
 
 export interface MutationTicket {
   readonly epoch: number;
@@ -43,9 +43,37 @@ export class OptimisticSessions {
     this.authoritative = sessions;
     this.revision++;
     for (const [key, op] of this.pending) {
+      // A fresh full snapshot can confirm lifecycle completion even if its event
+      // was missed. Keep the ticket until the HTTP outcome arrives so a lost
+      // reply cannot reopen a confirmation for this already-completed action.
+      if (op.kind !== "create" && op.row.id) {
+        const target = sessions.find(row => row.id === op.row.id);
+        if ((op.kind === "kill" && !target) ||
+          (op.kind === "archive" && target?.liveness === Liveness.Archived)) op.confirmed = true;
+      }
       if (op.acknowledged) this.pending.delete(key);
     }
     return true;
+  }
+
+  /** A tab mutation requires a snapshot accepted after its RPC. Never return
+   * the old projection when events cross that request; retry a bounded number
+   * of times and cancel silently when this connection no longer owns the work. */
+  async refresh(fetch: () => Promise<SessionData[]>): Promise<SessionData[] | null> {
+    const epoch = this.epoch;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const fence = this.snapshotFence();
+      let sessions: SessionData[];
+      try {
+        sessions = await fetch();
+      } catch (error) {
+        if (epoch !== this.epoch) return null;
+        throw error;
+      }
+      if (epoch !== this.epoch) return null;
+      if (this.snapshot(sessions, fence)) return this.project();
+    }
+    throw new Error("Could not refresh sessions after the operation because they kept changing. Check the session before trying again.");
   }
 
   beginCreate(input: CreateSessionInput, now = new Date().toISOString()): MutationTicket {
@@ -101,6 +129,16 @@ export class OptimisticSessions {
     this.revision++;
     this.pending.delete(ticket.sequence);
     return true;
+  }
+
+  /** A missing reply is not proof that the mutation failed. Lifecycle events
+   * confirm by stable ID. Creates have no request ID on the events plane, so an
+   * uncertain reply must never infer ownership from a coincidentally equal title. */
+  reject(ticket: MutationTicket, uncertain = false): "stale" | "confirmed" | "uncertain" | "reverted" {
+    if (!this.isCurrent(ticket)) return "stale";
+    const confirmed = this.pending.get(ticket.sequence)!.confirmed;
+    this.fail(ticket);
+    return confirmed ? "confirmed" : uncertain ? "uncertain" : "reverted";
   }
 
   event(event: WireEvent): boolean {

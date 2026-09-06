@@ -6344,11 +6344,14 @@ var MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 var ApiError = class extends Error {
   status;
   code;
-  constructor(status, message, code = "") {
+  /** A parsed daemon error envelope, rather than a missing/gateway response. */
+  daemonRejected;
+  constructor(status, message, code = "", daemonRejected = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.daemonRejected = daemonRejected;
   }
 };
 function isMutationCommittedError(e) {
@@ -6376,10 +6379,10 @@ async function af(method, body, token2) {
   }
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error));
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), env?.error != null);
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error));
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), true);
   }
   return env?.data;
 }
@@ -12698,9 +12701,32 @@ var OptimisticSessions = class {
     this.authoritative = sessions;
     this.revision++;
     for (const [key, op] of this.pending) {
+      if (op.kind !== "create" && op.row.id) {
+        const target = sessions.find((row) => row.id === op.row.id);
+        if (op.kind === "kill" && !target || op.kind === "archive" && target?.liveness === Liveness.Archived) op.confirmed = true;
+      }
       if (op.acknowledged) this.pending.delete(key);
     }
     return true;
+  }
+  /** A tab mutation requires a snapshot accepted after its RPC. Never return
+   * the old projection when events cross that request; retry a bounded number
+   * of times and cancel silently when this connection no longer owns the work. */
+  async refresh(fetch2) {
+    const epoch = this.epoch;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const fence = this.snapshotFence();
+      let sessions;
+      try {
+        sessions = await fetch2();
+      } catch (error) {
+        if (epoch !== this.epoch) return null;
+        throw error;
+      }
+      if (epoch !== this.epoch) return null;
+      if (this.snapshot(sessions, fence)) return this.project();
+    }
+    throw new Error("Could not refresh sessions after the operation because they kept changing. Check the session before trying again.");
   }
   beginCreate(input, now = (/* @__PURE__ */ new Date()).toISOString()) {
     const ticket = this.ticket();
@@ -12753,6 +12779,15 @@ var OptimisticSessions = class {
     this.revision++;
     this.pending.delete(ticket.sequence);
     return true;
+  }
+  /** A missing reply is not proof that the mutation failed. Lifecycle events
+   * confirm by stable ID. Creates have no request ID on the events plane, so an
+   * uncertain reply must never infer ownership from a coincidentally equal title. */
+  reject(ticket, uncertain = false) {
+    if (!this.isCurrent(ticket)) return "stale";
+    const confirmed = this.pending.get(ticket.sequence).confirmed;
+    this.fail(ticket);
+    return confirmed ? "confirmed" : uncertain ? "uncertain" : "reverted";
   }
   event(event) {
     const result = applyEvent(this.authoritative, event);
@@ -15899,7 +15934,9 @@ function tabIdsOf(list, id) {
 }
 var resolvingRoute = false;
 var routeSelection = null;
+var navigationGeneration = 0;
 function resolveRoute() {
+  navigationGeneration++;
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -15923,6 +15960,7 @@ function resolveRoute() {
   }
 }
 function moveSelection(id) {
+  navigationGeneration++;
   clearTabError();
   store.set({
     selectedId: id,
@@ -15956,6 +15994,7 @@ function focusRail() {
   splitView.blur();
 }
 function switchView(view) {
+  navigationGeneration++;
   if (store.get().view === view) {
     return;
   }
@@ -15983,6 +16022,7 @@ function resetStatusFilter() {
   store.set({ statusFilter: next });
 }
 function switchProject(root2) {
+  navigationGeneration++;
   persistProjectChoice(root2);
   if (store.get().selectedProject === root2) {
     return;
@@ -16064,14 +16104,14 @@ function newSession() {
         m.setBusy(true);
         closeModal();
         const requestedAccount = values.account ?? "";
-        const selectionAtSubmit = store.get();
+        const navigationAtSubmit = navigationGeneration;
         const mutation = optimisticSessions.beginCreate(values);
         applySessions(optimisticSessions.project());
         void createSession(values, tok).then((created) => {
+          if (!created || typeof created.title !== "string") throw new Error("The daemon response did not identify the created session.");
           if (!optimisticSessions.succeed(mutation, created)) return;
           requestResync();
-          const current = store.get();
-          const maySelect = current.selectedId === selectionAtSubmit.selectedId && current.selectedProject === selectionAtSubmit.selectedProject && current.view === selectionAtSubmit.view && current.view === "sessions";
+          const maySelect = navigationGeneration === navigationAtSubmit && store.get().view === "sessions";
           applySessions(optimisticSessions.project());
           if (created.id && maySelect && store.get().selectedProject === values.repoPath && store.get().sessions.some((session) => session.id === created.id)) {
             store.set({ selectedId: created.id, activeTab: 0, tabError: null });
@@ -16081,9 +16121,15 @@ function newSession() {
             surfaceTabError(new Error(skew));
           }
         }).catch((e) => {
-          if (!optimisticSessions.fail(mutation)) return;
+          const uncertain = isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
+          const outcome = optimisticSessions.reject(mutation, uncertain);
+          if (outcome === "stale") return;
           applySessions(optimisticSessions.project());
           requestResync();
+          if (outcome !== "reverted") {
+            surfaceMutationError(new Error(`The create response could not confirm the outcome. Check sessions before creating again. ${errorText(e)}`));
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
           if (!modal && token === tok) openModal(m);
@@ -16122,14 +16168,17 @@ function openConfirm(action, session) {
           } else if (modal === m) closeModal();
         }).catch((e) => {
           if (mutation) {
-            if (!optimisticSessions.isCurrent(mutation)) return;
-            if (isMutationCommittedError(e)) optimisticSessions.succeed(mutation);
-            else optimisticSessions.fail(mutation);
+            const outcome = isMutationCommittedError(e) ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation);
+            if (outcome === "stale") return;
             applySessions(optimisticSessions.project());
             requestResync();
+            if (outcome !== "reverted") {
+              surfaceMutationError(e);
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!isMutationCommittedError(e) && !modal) openModal(m);
+            if (!modal) openModal(m);
             else surfaceMutationError(e);
             return;
           }
@@ -16221,6 +16270,7 @@ function openTab(index) {
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
   void run().then((sessions) => {
+    if (sessions === null) return;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
@@ -16318,6 +16368,7 @@ function renameSessionTab(id, name, editedSessionId) {
   clearTabError();
   const selId = sel.id ?? "";
   void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
+    if (sessions === null) return;
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
   }).catch((e) => surfaceTabError(e));
 }
@@ -16335,6 +16386,7 @@ function reorderSessionTab(from, to) {
   clearTabError();
   const selId = sel.id ?? "";
   void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
+    if (sessions === null) return;
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
   }).catch((e) => surfaceTabError(e));
 }
@@ -16865,10 +16917,13 @@ function applySessions(sessions) {
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 async function fetchProjectedSnapshot(tok) {
-  const fence = optimisticSessions.snapshotFence();
-  const sessions = await fetchSnapshot(tok);
-  if (!optimisticSessions.snapshot(sessions, fence)) requestResync();
-  return optimisticSessions.project();
+  if (token !== tok) return null;
+  try {
+    return await optimisticSessions.refresh(() => fetchSnapshot(tok));
+  } catch (error) {
+    requestResync();
+    throw error;
+  }
 }
 function requestResync() {
   if (resyncTimer !== null) {

@@ -1078,3 +1078,19 @@ test("fetchPreviewOrigin: every failure degrades to '' rather than throwing", as
   };
   assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
 });
+
+test("create refusal provenance distinguishes daemon rejection from lost or gateway replies", async () => {
+  for (const status of [400, 503]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({ data: null, error: { message: "refused" } }) });
+    await assert.rejects(createSession(createInput(), "tok"), error =>
+      error instanceof ApiError && error.daemonRejected && error.message === "refused");
+  }
+  for (const status of [502, 504]) {
+    stubFetchResponse({ ok: false, status, json: async () => { throw new SyntaxError("truncated gateway response"); } });
+    await assert.rejects(createSession(createInput(), "tok"), error =>
+      error instanceof ApiError && !error.daemonRejected);
+  }
+  (globalThis as { fetch: unknown }).fetch = async () => { throw new TypeError("response lost"); };
+  await assert.rejects(createSession(createInput(), "tok"), error =>
+    error instanceof ApiError && !error.daemonRejected);
+});

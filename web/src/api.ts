@@ -200,11 +200,14 @@ export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, message: string, code = "") {
+  /** A parsed daemon error envelope, rather than a missing/gateway response. */
+  readonly daemonRejected: boolean;
+  constructor(status: number, message: string, code = "", daemonRejected = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.daemonRejected = daemonRejected;
   }
 }
 
@@ -250,10 +253,10 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
 
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error));
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), env?.error != null);
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error));
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), true);
   }
   return env?.data as T;
 }

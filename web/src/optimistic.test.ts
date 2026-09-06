@@ -222,3 +222,122 @@ test("create response replaces the earlier provisional Creating projection", () 
   model.succeed(ticket, created);
   assert.deepEqual(model.project(), [first, second, created]);
 });
+
+for (const kind of ["archive", "kill"] as const) {
+  test(`${kind} confirmed before a lost HTTP reply does not offer rollback`, () => {
+    const model = state();
+    const ticket = model.begin(kind, first)!;
+    const data = kind === "archive" ? { ...first, liveness: Liveness.Archived } : first;
+    model.event({ type: kind === "archive" ? "session.archived" : "session.killed", data });
+    assert.equal(model.reject(ticket), "confirmed");
+    assert.deepEqual(model.project(), kind === "archive" ? [data, second] : [second]);
+    assert.equal(model.reject(ticket), "stale");
+  });
+}
+
+test("lost create replies preserve completed rows without guessing same-title ownership", () => {
+  const model = state();
+  const a = model.beginCreate(input);
+  const b = model.beginCreate(input);
+  const completed = { ...first, id: "other-or-either-request", title: input.title };
+  model.event({ type: "session.created", data: completed });
+  assert.equal(model.reject(a, true), "uncertain");
+  assert.equal(model.isCurrent(b), true);
+  assert.equal(model.project().find(row => row.id === completed.id), completed);
+  assert.equal(model.reject(b, true), "uncertain");
+  assert.deepEqual(model.project(), [first, second, completed]);
+});
+
+test("a daemon create refusal may revert but a missing reply cannot imply retry", () => {
+  const model = state();
+  assert.equal(model.reject(model.beginCreate(input)), "reverted");
+  assert.equal(model.reject(model.beginCreate(input), true), "uncertain");
+  assert.deepEqual(model.project(), [first, second]);
+});
+
+test("post-mutation snapshot waits for an accepted retry after an unrelated event", async () => {
+  const model = state();
+  const updated = { ...first, branch: "post-tab-mutation" };
+  let calls = 0;
+  const rows = await model.refresh(async () => {
+    if (++calls === 1) model.event({ type: "session.updated", data: { ...second, branch: "event" } });
+    return [updated, second];
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(rows, [updated, second]);
+});
+
+test("post-mutation snapshot retries optimistic lifecycle changes without dropping their feedback", async () => {
+  const model = state();
+  let calls = 0;
+  const rows = await model.refresh(async () => {
+    if (++calls === 1) model.begin("archive", second);
+    return [{ ...first, branch: "post-tab-mutation" }, second];
+  });
+  assert.equal(calls, 2);
+  assert.equal(rows?.[0].branch, "post-tab-mutation");
+  assert.equal(rows?.[1].in_flight_op, InFlightOp.Archiving);
+});
+
+test("continuous snapshot churn fails actionably after three requests instead of returning old rows", async () => {
+  const model = state();
+  let calls = 0;
+  await assert.rejects(model.refresh(async () => {
+    calls++;
+    model.event({ type: "session.updated", data: second });
+    return [first, second];
+  }), /Could not refresh sessions after the operation/);
+  assert.equal(calls, 3);
+});
+
+test("disconnect cancels pending post-mutation snapshots and errors without a stale rebind", async () => {
+  for (const fails of [false, true]) {
+    const model = state();
+    const result = await model.refresh(async () => {
+      model.reset([second]);
+      if (fails) throw new Error("old connection failed");
+      return [first, second];
+    });
+    assert.equal(result, null);
+    assert.deepEqual(model.project(), [second]);
+  }
+});
+
+for (const kind of ["archive", "kill"] as const) {
+  test(`${kind} completed snapshot before a lost HTTP reply suppresses rollback`, () => {
+    const model = state();
+    const ticket = model.begin(kind, first)!;
+    const completed = kind === "kill" ? [second] : [{ ...first, liveness: Liveness.Archived }, second];
+    assert.equal(model.snapshot(completed, model.snapshotFence()), true);
+    assert.equal(model.isCurrent(ticket), true);
+    assert.deepEqual(model.project(), completed);
+    assert.equal(model.reject(ticket), "confirmed");
+    assert.deepEqual(model.project(), completed);
+  });
+
+  test(`${kind} stale snapshot cannot confirm completion`, () => {
+    const model = state();
+    const stale = model.snapshotFence();
+    const ticket = model.begin(kind, first)!;
+    const completed = kind === "kill" ? [second] : [{ ...first, liveness: Liveness.Archived }, second];
+    assert.equal(model.snapshot(completed, stale), false);
+    assert.equal(model.reject(ticket), "reverted");
+    assert.deepEqual(model.project(), [first, second]);
+  });
+}
+
+test("snapshot lifecycle confirmation uses stable IDs despite matching titles", () => {
+  const model = state();
+  const ticket = model.begin("archive", first)!;
+  model.snapshot([first, { ...second, title: first.title, liveness: Liveness.Archived }], model.snapshotFence());
+  assert.equal(model.reject(ticket), "reverted");
+});
+
+test("a completed same-title snapshot never claims ownership of a pending create", () => {
+  const model = state();
+  const ticket = model.beginCreate(input);
+  const completed = { ...first, id: "other-client", title: input.title };
+  model.snapshot([first, second, completed], model.snapshotFence());
+  assert.equal(model.reject(ticket, true), "uncertain");
+  assert.deepEqual(model.project(), [first, second, completed]);
+});
