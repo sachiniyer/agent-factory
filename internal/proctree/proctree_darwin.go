@@ -198,7 +198,7 @@ func readUID(pid int) (int, bool) {
 func readEnviron(pid int) ([]string, error) {
 	_, env, err := procArgs(pid)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEnvUnreadable, err)
+		return nil, fmt.Errorf("%w: %w", ErrEnvUnreadable, err)
 	}
 	return env, nil
 }
@@ -215,6 +215,9 @@ func readArgv(pid int) ([]string, error) {
 	return argv, nil
 }
 
+// procArgsSysctl is injectable so Darwin tests also cover the public readers.
+var procArgsSysctl = unix.SysctlRaw
+
 // procArgs reads and parses KERN_PROCARGS2 for pid.
 //
 // The kernel withholds this from us for reasons of its own — a foreign uid and
@@ -225,11 +228,7 @@ func readArgv(pid int) ([]string, error) {
 // and that a refusal it declines to report at all is caught by Environ's
 // classification instead.
 func procArgs(pid int) (argv []string, env []string, err error) {
-	buf, err := unix.SysctlRaw("kern.procargs2", pid)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading argv for pid %d (kern.procargs2): %w", pid, err)
-	}
-	return parseProcArgs2(buf)
+	return readProcArgs2(pid, procArgsSysctl, readProc)
 }
 
 // cString converts a NUL-padded fixed-size kernel char array to a string.
