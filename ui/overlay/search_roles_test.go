@@ -52,7 +52,11 @@ func TestSearchLivenessRoles(t *testing.T) {
 							require.NotContains(t, plain, "▧")
 							require.NotContains(t, plain, "◆")
 						} else {
-							require.Contains(t, row, lipgloss.NewStyle().Foreground(state.Color).Render(glyph))
+							statusStyle := lipgloss.NewStyle().Foreground(state.Color)
+							if selected == 0 {
+								statusStyle = statusStyle.Background(ui.CurrentTheme().SurfaceRaised)
+							}
+							require.Contains(t, row, statusStyle.Render(glyph+" "))
 						}
 						require.Contains(t, plain, "Result")
 					}

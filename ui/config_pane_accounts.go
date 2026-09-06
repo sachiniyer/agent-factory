@@ -307,8 +307,8 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 			b.WriteString(accountRegisterStyle.Render(label))
 		}
 		if selected && c.accounts.registering && c.accounts.registerFor == account.Agent {
-			b.WriteString("  ")
-			b.WriteString(c.accounts.input.View())
+			b.WriteString(configSelectedStyle.Render("  "))
+			b.WriteString(renderConfigInput(&c.accounts.input))
 		}
 		return c.fitPaneLine(b.String()) + "\n"
 	}
@@ -319,12 +319,15 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 	} else {
 		b.WriteString(accountAgentNameStyle.Render(label))
 	}
-	b.WriteString("  ")
+	stateStyle := accountStateOffStyle
+	stateText := "not logged in"
 	if account.LoggedIn {
-		b.WriteString(accountStateOKStyle.Render("logged in"))
-	} else {
-		b.WriteString(accountStateOffStyle.Render("not logged in"))
+		stateStyle, stateText = accountStateOKStyle, "logged in"
 	}
+	if selected {
+		stateStyle = configSelectedStyle
+	}
+	b.WriteString(stateStyle.Render("  " + stateText))
 	line := c.fitPaneLine(b.String()) + "\n"
 
 	if !selected {

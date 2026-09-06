@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,7 +27,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				lipgloss.SetHasDarkBackground(mode == "dark")
 				h := newTestHome(t)
@@ -54,22 +55,38 @@ func TestDesignDriverScenes(t *testing.T) {
 					if scene == "preview" {
 						window.SetPreview(inst, 0, "Origin session")
 					}
-				case "config":
+				case "config", "config-edit":
 					h.state = stateConfigEditor
 					h.configPane.SetEntries([]config.ConfigEntry{{Key: "default_program", Type: "string", Value: "claude", Purpose: "Agent for new sessions", Tier: 1, TierName: "Essentials", Settable: true, Enum: []string{"claude", "codex"}}}, "Local daemon · /home/operator/.agent-factory/config.toml")
 					h.configPane.SetFocus(true)
+					if scene == "config-edit" {
+						h.configPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+					}
+				case "account-register":
+					h.state = stateConfigEditor
+					h.configPane.SetAccounts(nil, []string{"claude"}, nil)
+					h.configPane.SetFocus(true)
+					h.configPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+					h.configPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("work")})
 				case "accounts":
 					h.state = stateConfigEditor
 					h.configPane.SetAccounts([]ui.AccountRow{{Agent: "claude", Name: "work", LoggedIn: true}, {Agent: "codex", Name: "personal"}}, []string{"claude", "codex"}, nil)
 					h.configPane.SetFocus(true)
-				case "hooks":
+				case "hooks", "hooks-edit", "hooks-add":
 					h.state = stateHooks
 					h.hooksPane.SetCommands([]string{"make test", "make lint"})
 					h.hooksPane.SetFocus(true)
+					if scene == "hooks-edit" {
+						h.hooksPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+					}
+					if scene == "hooks-add" {
+						h.hooksPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+						h.hooksPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("make vet")})
+					}
 
 				case "tasks":
 					h.state = stateTasks
-					h.automations.TaskPane().SetTasks([]task.Task{{ID: "design", Name: "Daily design review", Enabled: true}})
+					h.automations.TaskPane().SetTasks([]task.Task{{ID: "design", Name: "Daily design review", Enabled: true}, {ID: "nightly", Name: "Nightly checks", Enabled: true, CronExpr: "0 2 * * *"}})
 					h.automations.TaskPane().SetFocus(true)
 				case "task-trigger", "task-program", "task-schedule-type":
 					h.state = stateTasks
@@ -109,9 +126,27 @@ func TestDesignDriverScenes(t *testing.T) {
 					}
 					h.searchOverlay = overlay.NewSearchOverlay(results)
 					h.searchOverlay.SetMaxSize(100, 30)
-				case "project-picker":
+				case "notice", "failure-notice":
+					if scene == "failure-notice" {
+						h.errBox.SetError(fmt.Errorf("Cannot save configuration: the file is read-only"))
+					} else {
+						h.errBox.SetNotice(fmt.Errorf("Configuration saved; restart the session to apply it"))
+					}
+				case "rail-task-selection", "rail-project-selection":
+					h.store.SetTasks([]task.Task{{ID: "design", Name: "Daily review", Enabled: true, CronExpr: "0 9 * * *"}})
+					h.projects.SetProjects([]ui.SidebarProject{{Name: "Agent Factory", Root: h.repoRoot, Active: true}, {Name: "Second project", Root: "/second"}})
+					h.relayout()
+					if scene == "rail-task-selection" {
+						h.automations.Focus()
+					} else {
+						h.projects.Focus()
+					}
+				case "project-picker", "project-picker-existing":
 					h.state = stateSwitchProject
 					h.projectPickerOverlay = overlay.NewProjectPickerOverlay(nil, h.repoRoot)
+					if scene == "project-picker-existing" {
+						h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{{Name: "Agent Factory", Root: h.repoRoot, SessionCount: 4}}, h.repoRoot)
+					}
 					h.projectPickerOverlay.SetMaxSize(100, 30)
 				case "selection":
 					h.state = stateSelectProgram

@@ -622,12 +622,16 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 		key = configSelectedStyle.Render(keyText)
 	}
 	b.WriteString(key)
-	b.WriteString("  ")
+	valueStyle := configValueStyle
+	if selected {
+		valueStyle = configSelectedStyle
+	}
+	b.WriteString(valueStyle.Render("  "))
 
 	if selected && c.editing {
-		b.WriteString(c.input.View())
+		b.WriteString(renderConfigInput(&c.input))
 	} else {
-		b.WriteString(configValueStyle.Render(c.displayValue(e)))
+		b.WriteString(valueStyle.Render(c.displayValue(e)))
 	}
 	// Clip, do not wrap (#3430). displayValue and sizeEditField already budget
 	// this row, but neither can shrink the KEY: at a narrow pane the key alone

@@ -268,13 +268,6 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
-	statusReady := lipgloss.NewStyle().Foreground(t.Ready)
-	statusLost := lipgloss.NewStyle().Foreground(t.Lost)
-	statusDead := lipgloss.NewStyle().Foreground(t.Dead)
-	statusArchived := lipgloss.NewStyle().Foreground(t.Archived)
-	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
-	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
-	statusLimit := lipgloss.NewStyle().Foreground(t.LimitReached)
 
 	style := searchOverlayStyle()
 	plan := s.renderPlan(style)
@@ -308,45 +301,42 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 
 		// Working, in-flight and unset states reserve a blank status cell.
 		// Otherwise use the fixed liveness glyph, independent of colour.
-		var statusStr string
-		switch {
-		case r.Instance.GetInFlightOp() != session.OpNone:
-			statusStr = " "
-		default:
+		statusStyle := lipgloss.NewStyle().Foreground(t.Ink)
+		glyph := " "
+		if r.Instance.GetInFlightOp() == session.OpNone {
 			switch r.Instance.GetLiveness() {
-			case session.LiveRunning:
-				statusStr = " "
+			case session.LiveRunning, session.LivenessUnset:
 			case session.LiveReady:
-				statusStr = statusReady.Render("●")
+				glyph, statusStyle = "●", statusStyle.Foreground(t.Ready)
 			case session.LiveLimitReached:
-				// A usage-limit-blocked session (#1146) gets a distinct red diamond
-				// so "blocked on limit" never reads as a live/gone dot.
-				statusStr = statusLimit.Render("◆")
+				glyph, statusStyle = "◆", statusStyle.Foreground(t.LimitReached)
 			case session.LiveLost:
-				statusStr = statusLost.Render("◌")
+				glyph, statusStyle = "◌", statusStyle.Foreground(t.Lost)
 			case session.LiveDead:
-				statusStr = statusDead.Render("○")
+				glyph, statusStyle = "○", statusStyle.Foreground(t.Dead)
 			case session.LiveArchived:
-				statusStr = statusArchived.Render("▧")
-			case session.LivenessUnset:
-				statusStr = " "
+				glyph, statusStyle = "▧", statusStyle.Foreground(t.Archived)
 			}
 		}
+		if i == s.selectedIdx {
+			statusStyle = statusStyle.Background(t.SurfaceRaised)
+		}
+		statusStr := statusStyle.Render(glyph + " ")
 
 		label := r.Instance.Title
 		branch := r.Instance.GetBranch()
 		if branch != "" {
-			label += normalStyle.Render(" (" + branch + ")")
+			label += hintStyle.Render(" (" + branch + ")")
 		}
 
 		if i == s.selectedIdx {
-			line := "  " + statusStr + " " + ui.SelectionMarker("▸ ") + selectedStyle.Render(r.Instance.Title)
+			line := "  " + statusStr + ui.SelectionMarker("▸ ") + selectedStyle.Render(r.Instance.Title)
 			if branch != "" {
-				line += normalStyle.Render(" (" + branch + ")")
+				line += selectedStyle.Render(" (" + branch + ")")
 			}
 			lines = append(lines, truncateOverlayLine(line, plan.contentWidth))
 		} else {
-			lines = append(lines, truncateOverlayLine("  "+statusStr+" "+normalStyle.Render("  "+label), plan.contentWidth))
+			lines = append(lines, truncateOverlayLine("  "+statusStr+normalStyle.Render("  "+label), plan.contentWidth))
 		}
 	}
 

@@ -162,7 +162,7 @@ func (h *HooksPane) String() string {
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	hintStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
-	editStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	editStyle := selectedStyle
 	descStyle := lipgloss.NewStyle().Foreground(t.InkMuted).Italic(true)
 
 	var b strings.Builder
@@ -184,7 +184,7 @@ func (h *HooksPane) String() string {
 		isSelected := i == h.selectedIdx
 		if h.editing && isSelected {
 			b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
-		} else if isSelected && h.hasFocus {
+		} else if isSelected && h.hasFocus && !h.adding {
 			b.WriteString(SelectionMarker("▸ ") + selectedStyle.Render(cmd))
 		} else {
 			b.WriteString(normalStyle.Render("  " + cmd))

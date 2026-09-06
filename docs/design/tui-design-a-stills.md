@@ -21,9 +21,9 @@ Shared daemon config retirement is tracked in
 
 ## Capture provenance
 
-These 70 stills are deterministic real app-model `Update`/`View` output,
+These 88 stills are deterministic real app-model `Update`/`View` output,
 converted from ANSI cells by P4's SVG writer. They are not live-daemon screen
-recordings. `TestDesignDriverScenes` adds twenty-two chrome scenes to P4's thirteen
+recordings. `TestDesignDriverScenes` adds thirty-one chrome scenes to P4's thirteen
 recovery scenes. Both run only in the isolated sandbox created by
 `make playtest-container-detached`; no host TUI, app tests or daemon tests run.
 The supplementary P4 live tmux scenario passed retained failed creation,
@@ -54,7 +54,7 @@ selections use Ink on SurfaceRaised. The blurred sidebar title uses Surface on
 InkMuted, with a 4.5:1 contrast gate in both palettes. Regression tests pin these
 role assignments. Only the affected accounts, config, zero-accounts, search,
 pane, keyboard and preview SVG/ANSI pairs were refreshed in the make-created
-playtest sandbox; all 70 driver goldens pass. The search fixture now includes
+playtest sandbox; all 88 driver goldens pass. The search fixture now includes
 lost, dead and archived results.
 
 The final whole-PR [role audit](../assets/design/tui-a/role-audit.txt) records
@@ -69,12 +69,22 @@ new trigger, program and schedule-type scenes expose focused field markers.
 Search hit regions now use render-plan positions, with a regression test for
 session titles identical to scroll indicators.
 
+The fifth-round [state mapping enumeration](../assets/design/tui-a/state-mappings.txt)
+checks liveness, in-flight operations, operator kind, selection/focus/blur,
+edit/add modes, warnings and diagnostics. Its [source branch inventory](../assets/design/tui-a/state-branches.txt)
+includes compact fallbacks. Hook edit/add fields now use the raised surface;
+search selection includes state cells; unselected task metadata is muted. The
+audit also fixes Config/account and rail selection gaps, selected project counts,
+project markers that reused Ready’s glyph, and failure notice colours.
+New both-theme scenes cover these transitions. Remaining B recipes are listed
+explicitly in the enumeration rather than counted as completed A work.
+
 ## Performance and verification
 
 One `make perf-container` pass at 1,000 sessions verified the Codex corrections
-on top of the gate update at `0e1476fb`. Full frame
-averaged **60.369 ms** (range 44.905–69.887); key-to-render averaged **58.556 ms**
-(55.737–61.159).
+on top of the gate update at `7d5e68e0`. Full frame
+averaged **76.038 ms** (range 49.871–92.322); key-to-render averaged **75.848 ms**
+(67.319–82.517).
 Every sample meets P5's stricter 480 / 351 ms limits. The harness still reports
 P1's original looser CI ceilings; these are not the thresholds used to accept P5.
 [Raw samples](../assets/design/tui-a/perf/tui-runs.json) and the
@@ -127,3 +137,12 @@ stills were self-reviewed before requesting review.
 | task-trigger | ![task-trigger light](../assets/design/tui-a/task-trigger-light.svg) | ![task-trigger dark](../assets/design/tui-a/task-trigger-dark.svg) |
 | task-program | ![task-program light](../assets/design/tui-a/task-program-light.svg) | ![task-program dark](../assets/design/tui-a/task-program-dark.svg) |
 | task-schedule-type | ![task-schedule-type light](../assets/design/tui-a/task-schedule-type-light.svg) | ![task-schedule-type dark](../assets/design/tui-a/task-schedule-type-dark.svg) |
+| hooks-edit | ![hooks-edit light](../assets/design/tui-a/hooks-edit-light.svg) | ![hooks-edit dark](../assets/design/tui-a/hooks-edit-dark.svg) |
+| hooks-add | ![hooks-add light](../assets/design/tui-a/hooks-add-light.svg) | ![hooks-add dark](../assets/design/tui-a/hooks-add-dark.svg) |
+| rail-task-selection | ![rail-task-selection light](../assets/design/tui-a/rail-task-selection-light.svg) | ![rail-task-selection dark](../assets/design/tui-a/rail-task-selection-dark.svg) |
+| rail-project-selection | ![rail-project-selection light](../assets/design/tui-a/rail-project-selection-light.svg) | ![rail-project-selection dark](../assets/design/tui-a/rail-project-selection-dark.svg) |
+| notice | ![notice light](../assets/design/tui-a/notice-light.svg) | ![notice dark](../assets/design/tui-a/notice-dark.svg) |
+| failure-notice | ![failure-notice light](../assets/design/tui-a/failure-notice-light.svg) | ![failure-notice dark](../assets/design/tui-a/failure-notice-dark.svg) |
+| project-picker-existing | ![project-picker-existing light](../assets/design/tui-a/project-picker-existing-light.svg) | ![project-picker-existing dark](../assets/design/tui-a/project-picker-existing-dark.svg) |
+| config-edit | ![config-edit light](../assets/design/tui-a/config-edit-light.svg) | ![config-edit dark](../assets/design/tui-a/config-edit-dark.svg) |
+| account-register | ![account-register light](../assets/design/tui-a/account-register-light.svg) | ![account-register dark](../assets/design/tui-a/account-register-dark.svg) |

@@ -359,21 +359,22 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	marker := " "
 	nameStyle := automationItemTitleStyle
 	if expanded {
-		marker = "▾"
-		nameStyle = nameStyle.Bold(true)
+		marker = SelectionMarker("▾")
+		nameStyle = nameStyle.Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
+		glyphStyle = glyphStyle.Background(activeTheme.SurfaceRaised)
+		if !needsAttention(tsk) {
+			glyphStyle = glyphStyle.Foreground(activeTheme.Ink)
+		}
 	}
 	name := tsk.Name
 	if name == "" {
 		name = "(unnamed)"
 	}
-	w := a.rect.W
-	if w <= itemPrefixWidth {
-		// Too narrow to split the styled segments cleanly: fall back to one
-		// fitted plain line so the row never overflows the rail.
-		return automationItemTitleStyle.Render(fitLine(marker+glyph+"  "+name, w))
+	gap := "  "
+	if expanded {
+		gap = nameStyle.Render(gap)
 	}
-	return marker + glyphStyle.Render(glyph) + "  " +
-		nameStyle.Render(fitLine(name, w-itemPrefixWidth))
+	return fitLine(marker+glyphStyle.Render(glyph)+gap+nameStyle.Render(name), a.rect.W)
 }
 
 // rowDetail is the text an expanded row reveals: the trigger (cron expression

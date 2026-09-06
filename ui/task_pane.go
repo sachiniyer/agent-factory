@@ -551,14 +551,15 @@ func (s *TaskPane) renderListMode() string {
 		if tsk.Name != "" {
 			parts = append(parts, tsk.Name)
 		}
-		parts = append(parts, taskTriggerSummary(tsk), taskDeliverySummary(tsk))
-		header := strings.Join(parts, "  ")
+		label := strings.Join(parts, "  ")
+		metadata := "  " + taskTriggerSummary(tsk) + "  " + taskDeliverySummary(tsk)
+		header := label + metadata
 
 		isSelected := i == s.selectedIdx
 		if isSelected && s.hasFocus {
 			b.WriteString(fitLine(SelectionMarker("▸ ")+selectedStyle.Render(header), s.width))
 		} else {
-			b.WriteString(style.Render(fitLine("  "+header, s.width)))
+			b.WriteString(fitLine(style.Render("  "+label)+detailStyle.Render(metadata), s.width))
 		}
 		b.WriteString("\n")
 

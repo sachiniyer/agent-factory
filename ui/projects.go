@@ -269,13 +269,13 @@ func (p *ProjectsPane) titleLine(header railHeader, nameStyle lipgloss.Style) st
 	)
 }
 
-// projectRow renders one project row: "● name (N)" for the active project (the
-// "●" marker in the accent color), "  name (N)" for the rest. The focused
+// projectRow renders one project row: "▹ name (N)" for the active project (the
+// "▹" marker in the accent color), "  name (N)" for the rest. The focused
 // cursor row paints on the selection background so the current pick stands out.
 func (p *ProjectsPane) projectRow(proj SidebarProject, selected bool) string {
 	marker := "  "
 	if proj.Active {
-		marker = projectRowActiveStyle.Render("●") + " "
+		marker = projectRowActiveStyle.Render("▹") + " "
 	}
 	name := proj.Name
 	if name == "" {
@@ -285,10 +285,14 @@ func (p *ProjectsPane) projectRow(proj SidebarProject, selected bool) string {
 	// The marker occupies 2 cells; fit the label into the rest of the row.
 	label = fitLine(label, p.rect.W-2)
 	if selected {
-		return marker + projectRowSelectedStyle.Render(label)
+		cursor := "▸ "
+		if proj.Active {
+			cursor = "▹ "
+		}
+		return SelectionMarker(cursor) + projectRowSelectedStyle.Render(label)
 	}
 	if proj.Active {
-		return marker + projectRowActiveStyle.Render(label)
+		return marker + projectRowStyle.Bold(true).Render(label)
 	}
 	return marker + projectRowStyle.Render(label)
 }

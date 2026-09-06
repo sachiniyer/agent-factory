@@ -401,6 +401,6 @@ captures in both themes, supplemented by an isolated real tmux onboarding run.
 ## TUI roles · P5 slice A
 
 The [TUI role gallery](tui-design-a-stills.md) applies the generated roles to
-70 app-model driver stills. Slice A replaces the configurable TUI palette and
+88 app-model driver stills. Slice A replaces the configurable TUI palette and
 private ANSI colours; the common overlay recipe and density cuts follow in B,
 and the Light/Dark/System selector and migration in C.
