@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
+import { appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
 import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -242,7 +242,7 @@ export interface Actions {
    *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
   switchTab(index: number): void;
   /** Re-measures every live terminal after shell chrome changes usable geometry.
-   *  The app shell owns drawer/view/condensed-header state, while SplitView owns
+   *  The app shell owns drawer/view state, while SplitView owns
    *  xterm; this explicit boundary keeps those two owners synchronized without a
    *  resize-event shim or a polling timer. */
   layoutChanged(): void;
@@ -742,16 +742,13 @@ export class AppShell {
   private readonly viewTabs: Map<View, HTMLElement>;
   // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
+  private readonly appControls: ReturnType<typeof appbarControls>;
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
   private lastThemeChoice: ThemeChoice | null = null;
   private readonly sessionsBody: HTMLElement;
   private readonly tasksPane: TasksPane;
   private readonly configPane: ConfigPane;
   private lastView: View | null = null;
-  // Whether the selected sessions surface is using the phone's condensed shell.
-  // Kept separately from lastView/lastSelectedId because either can flip this one
-  // presentation decision. The root class is media-query inert on desktop.
-  private lastCondensedSessionChrome: boolean | null = null;
   private lastTasks: TaskData[] | null = null;
   private lastTasksError: string | undefined;
   private lastTasksProject: string | null = null;
@@ -938,7 +935,7 @@ export class AppShell {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      setAppbarToolsOpen(false);
+      this.appControls.close();
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -964,70 +961,12 @@ export class AppShell {
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
-    // Secondary appbar chrome stays inline on desktop, but a phone cannot give all
-    // four controls scarce primary-row width without clipping the project context
-    // (#2227). Group them behind one More trigger at the narrow breakpoint instead
-    // of deleting functionality or shrinking touch targets. The listeners exist only
-    // while the popover is open, so logout/login cannot accumulate document handlers.
-    const appbarTools = h(
-      "div",
-      { class: "af-appbar-tools", id: "af-appbar-tools" },
-      ...(this.installEl ? [this.installEl] : []),
-      themeToggle,
-      disconnect,
-    );
-    appbarTools.setAttribute("role", "group");
-    appbarTools.setAttribute("aria-label", "App controls");
-    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, icon("ellipsis"));
-    appbarMore.setAttribute("aria-label", "More app controls");
-    appbarMore.setAttribute("title", "More app controls");
-    appbarMore.setAttribute("aria-controls", "af-appbar-tools");
-    appbarMore.setAttribute("aria-expanded", "false");
-    const appbarToolsWrap = h("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
-    let appbarToolsOpen = false;
-    function setAppbarToolsOpen(open: boolean): void {
-      if (appbarToolsOpen === open) {
-        return;
-      }
-      appbarToolsOpen = open;
-      appbarToolsWrap.classList.toggle("af-appbar-tools-open", open);
-      appbarMore.setAttribute("aria-expanded", open ? "true" : "false");
-      if (open) {
-        document.addEventListener("mousedown", onAppbarToolsMouseDown);
-        document.addEventListener("keydown", onAppbarToolsKeyDown, true);
-        window.addEventListener("resize", onAppbarToolsResize);
-      } else {
-        document.removeEventListener("mousedown", onAppbarToolsMouseDown);
-        document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
-        window.removeEventListener("resize", onAppbarToolsResize);
-      }
-    }
-    const onAppbarToolsMouseDown = (e: MouseEvent): void => {
-      if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target as Node)) {
-        setAppbarToolsOpen(false);
-      }
-    };
-    const onAppbarToolsKeyDown = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") {
-        return;
-      }
-      e.stopPropagation();
-      setAppbarToolsOpen(false);
-      appbarMore.focus();
-    };
-    const onAppbarToolsResize = (): void => setAppbarToolsOpen(false);
-    appbarMore.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const opening = !appbarToolsOpen;
-      if (opening) {
-        this.closeProjectMenu();
-      }
-      setAppbarToolsOpen(opening);
-    });
-    // Disconnect replaces the shell synchronously. Close first so the temporary
-    // document/window listeners cannot outlive the DOM subtree they describe.
+    this.appControls = appbarControls([
+      ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
+    ]);
+    this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect.addEventListener("click", () => {
-      setAppbarToolsOpen(false);
+      this.appControls.close();
       this.actions.disconnect();
     });
 
@@ -1038,7 +977,7 @@ export class AppShell {
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
-      appbarToolsWrap,
+      this.appControls.el,
     );
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
@@ -1143,6 +1082,7 @@ export class AppShell {
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
+    this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
   }
 
@@ -1191,12 +1131,6 @@ export class AppShell {
   /** Applies the latest state, touching only what changed. */
   update(state: AppState, prioritizeTerminal = false): void {
     this.syncDocumentTitle(state);
-    const condensedSessionChrome = usesCondensedSessionChrome(state);
-    if (this.lastCondensedSessionChrome !== condensedSessionChrome) {
-      this.lastCondensedSessionChrome = condensedSessionChrome;
-      this.el.classList.toggle("af-session-selected", condensedSessionChrome);
-      this.actions.layoutChanged();
-    }
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -2551,6 +2485,7 @@ export class AppShell {
       return;
     }
     this.headTitle.textContent = selected.title;
+    this.headTitle.title = selected.title;
     if (this.terminalChrome) this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
     const warningText = archiveWarningText(selected);
     if (this.archiveWarning) {
@@ -2688,21 +2623,6 @@ export function documentTitle(state: AppState): string {
 /** The currently selected session row, or null. */
 function selectedSession(state: AppState): SessionData | null {
   return state.selectedId ? (state.sessions.find((s) => s.id === state.selectedId) ?? null) : null;
-}
-
-/** Whether mobile CSS should collapse the persistent appbar/title chrome into the
- *  selected session's hamburger + tab row. A stale selected id is deliberately false:
- *  renderMain shows the empty state in that case, so hiding its app navigation would
- *  strand the user on a blank shell. Desktop consumes the same class but ignores it
- *  outside the narrow media query. */
-export function usesCondensedSessionChrome(
-  state: Pick<AppState, "view" | "selectedId" | "sessions">,
-): boolean {
-  return (
-    state.view === "sessions" &&
-    !!state.selectedId &&
-    state.sessions.some((session) => session.id === state.selectedId)
-  );
 }
 
 /** A signature of everything the tab BAR draws for the selected session: which session

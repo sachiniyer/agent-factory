@@ -8146,7 +8146,7 @@ test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the 
   await page.setViewportSize({ width: 1280, height: 720 });
 });
 
-test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tabs", REAL_FIXTURE, async ({ browser }, testInfo) => {
+test("#2224/#3967: desktop keeps title + tabs; phone gives title and tabs separate rows", REAL_FIXTURE, async ({ browser }, testInfo) => {
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!mockRepo, "AF_MOCK_REPO is set only by web-selftest-entry.sh");
 
@@ -8219,14 +8219,14 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
             const tabbar = head.locator(":scope > .af-tabbar");
             const retry = head.getByRole("button", { name: "Retry", exact: true });
             const navToggle = p.locator(".af-nav-toggle");
-            await expect(tabbar, "the strip belongs to the title row, not a second row").toHaveCount(1);
+            await expect(tabbar, "the strip belongs to the pane header").toHaveCount(1);
             await expect(titleNode).toHaveText(title);
             if (width <= 768) {
-              await expect(titleBox, "mobile spends no row or width on a repeated session title").toBeHidden();
+              await expect(titleBox, "mobile keeps the session title on its own row").toBeVisible();
               await expect(navToggle, "the static hamburger remains the first mobile control").toBeVisible();
-              await expect(p.locator(".af-viewnav"), "top-level navigation moves into the open drawer").toBeHidden();
-              await expect(p.locator(".af-project-switch"), "project chrome moves into the open drawer").toBeHidden();
-              await expect(p.locator(".af-appbar-more"), "app chrome moves into the open drawer").toBeHidden();
+              await expect(p.locator(".af-viewnav"), "navigation remains available on a phone").toBeVisible();
+              await expect(p.locator(".af-project-switch"), "navigation remains available on a phone").toBeVisible();
+              await expect(p.locator(".af-appbar-more"), "navigation remains available on a phone").toBeVisible();
             } else {
               await expect(titleBox, "desktop keeps its identifying pane title").toBeVisible();
               await expect(navToggle).toBeHidden();
@@ -8280,14 +8280,16 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
             });
             expect(layout.barParent).toContain("af-term-head");
             expect(layout.hostPrevious).toContain("af-term-head");
-            expect(layout.head.height, "one row reclaims the old stacked chrome height").toBeLessThan(64);
+            expect(layout.head.height, "phone separates title and tabs; desktop keeps one row").toBeLessThan(width <= 768 ? 170 : 64);
             expect(layout.bar.top).toBeGreaterThanOrEqual(layout.head.top);
             expect(layout.bar.bottom).toBeLessThanOrEqual(layout.head.bottom);
             expect(layout.host.top).toBeGreaterThanOrEqual(layout.head.bottom - 1);
             if (width <= 768) {
-              expect(Math.abs(layout.nav.centerY - layout.bar.centerY), "hamburger and tabs share the sole mobile row").toBeLessThanOrEqual(1);
-              expect(layout.titleBox.width, "the repeated mobile title consumes no horizontal space").toBe(0);
-              expect(layout.host.top, "only the slim hamburger/tab row precedes mobile content").toBeLessThan(64);
+              expect(layout.bar.top, "tabs have their own scrolling row").toBeGreaterThanOrEqual(layout.titleBox.bottom);
+              expect(layout.titleClientWidth, "the session title remains readable").toBeGreaterThan(80);
+              expect(layout.titleScrollWidth).toBeGreaterThan(layout.titleClientWidth);
+              expect(layout.titleTextOverflow).toBe("ellipsis");
+              expect(layout.host.top, "navigation and pane controls leave room for output").toBeLessThan(300);
             } else {
               expect(Math.abs(layout.titleBox.centerY - layout.bar.centerY), "desktop title and tabs share a baseline row").toBeLessThanOrEqual(1);
               expect(layout.titleBox.width, "the desktop title keeps a useful allocation").toBeGreaterThanOrEqual(120);
@@ -8304,7 +8306,7 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
             expect(layout.barPosition, "#1813 marker keeps the tab bar as its containing block").toBe("relative");
             expect(await horizontalOverflow(p), "the combined row never widens the page").toBeLessThanOrEqual(1);
             if (layout.retry) {
-              expect(Math.abs(layout.retry.centerY - layout.bar.centerY), "Retry stays aligned with the tab strip").toBeLessThanOrEqual(1);
+              if (width > 768) expect(Math.abs(layout.retry.centerY - layout.bar.centerY), "desktop Retry stays aligned with the tab strip").toBeLessThanOrEqual(1);
               expect(layout.retry.width, "Retry is fixed-size rather than squeezed").toBeGreaterThan(40);
               expect(layout.retry.right).toBeLessThanOrEqual(layout.head.right);
             }
@@ -8351,6 +8353,10 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               expect(Math.abs(after.menu.x - before.menu.x - (after.trigger.x - before.trigger.x))).toBeLessThan(1);
               await p.keyboard.press("Escape");
               await expect(menu).toBeHidden();
+              // Escape closes the nested kind picker first; close Actions as well
+              // before clicking the tab row underneath its phone popover.
+              await p.keyboard.press("Escape");
+              await expect(sessionMenu).toBeHidden();
 
               // Activating a tab rebuilds every button. The stable strip must retain
               // its viewport across that rebuild instead of snapping back to Agent —
@@ -10647,10 +10653,10 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
   }, title);
 }
 
-test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer stays an overlay", REAL_FIXTURE, async ({
+test("#3967 mobile: navigation and pane rows remain visible and the drawer stays an overlay", REAL_FIXTURE, async ({
   browser,
 }) => {
-  for (const width of [320, 375]) {
+  for (const width of [360, 390, 430]) {
     await test.step(`${width}px`, async () => {
       const height = 812;
       const { ctx, p } = await openAt(browser, width, height);
@@ -10666,12 +10672,11 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
         await expect(app).toHaveClass(/af-nav-open/);
         await row(p, SESSION_ORDER).click();
         await expect(app).not.toHaveClass(/af-nav-open/);
-        await expect(app, "a real selected session enables the condensed mobile shell").toHaveClass(/af-session-selected/);
         await expect(p.locator(".af-main.af-main-term")).toBeVisible();
-        await expect(p.locator(".af-term-head-main"), "the title is not a redundant mobile row").toBeHidden();
-        await expect(viewNav, "top-level navigation reserves no closed-state row").toBeHidden();
-        await expect(project, "project chrome reserves no closed-state row").toBeHidden();
-        await expect(more, "secondary app chrome reserves no closed-state row").toBeHidden();
+        await expect(p.locator(".af-term-head-main"), "the title identifies the focused session").toBeVisible();
+        await expect(viewNav, "navigation remains visible with a focused session").toBeVisible();
+        await expect(project, "navigation remains visible with a focused session").toBeVisible();
+        await expect(more, "navigation remains visible with a focused session").toBeVisible();
 
         const geometry = () =>
           p.evaluate(() => {
@@ -10696,14 +10701,12 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
             };
           });
         const closed = await geometry();
-        expect(Math.abs(closed.toggle.centerY - closed.tabs.centerY), "hamburger and tabs share one row").toBeLessThanOrEqual(1);
-        expect(closed.head.height, "the mobile control row stays slim").toBeLessThan(64);
-        expect(closed.host.y - closed.app.y, "session content begins immediately after that one row").toBeLessThan(64);
-        expect(closed.host.bottom, "the pane reaches the mobile viewport bottom").toBeCloseTo(closed.app.bottom, 0);
+        expect(closed.tabs.y, "pane tabs follow the app navigation").toBeGreaterThan(closed.toggle.bottom);
+        expect(closed.head.height, "the title and tabs each have one row").toBeLessThan(120);
+        expect(closed.host.y - closed.app.y, "navigation and pane controls leave room for output").toBeLessThan(240);
+        expect(closed.host.bottom, "the terminal fills the pane inside its existing 2px inset").toBeCloseTo(closed.app.bottom - 2, 0);
 
-        // The hamburger reveals navigation as an overlay. The app/project controls
-        // become reachable only inside that transient state, while the pane keeps the
-        // exact same usable rectangle underneath it.
+        // The drawer overlays the pane without changing its usable rectangle.
         await toggle.click();
         await expect(app).toHaveClass(/af-nav-open/);
         await expect(rail).toBeVisible();
@@ -10713,16 +10716,13 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
         const opened = await geometry();
         expect(opened.host, "opening the overlay must not resize or displace the pane").toEqual(closed.host);
 
-        // A drawer-only view control is genuinely operable, and leaving Sessions
-        // dismisses the drawer. Returning keeps the selected terminal and restores
-        // the condensed row rather than stacking the old appbar back above it.
+        // View switching dismisses the drawer and preserves session selection.
         await viewNav.getByRole("tab", { name: "Tasks", exact: true }).click();
         await expect(app).not.toHaveClass(/af-nav-open/);
         await expect(p.locator(".af-tasks")).toBeVisible();
         await p.getByRole("tab", { name: "Sessions", exact: true }).click();
         await expect(p.locator(".af-main.af-main-term")).toBeVisible();
-        await expect(app).toHaveClass(/af-session-selected/);
-        await expect(viewNav).toBeHidden();
+        await expect(viewNav).toBeVisible();
 
         // Outside tap is the other drawer exit. Aim at the scrim's exposed right
         // edge because the left portion is intentionally covered by the rail.
@@ -10748,7 +10748,7 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
         await expect
           .poll(rows, { message: "a taller mobile viewport refits the active terminal without manual recovery" })
           .toBeGreaterThan(beforeResizeRows);
-        expect(await horizontalOverflow(p), "the condensed shell never widens the phone").toBeLessThanOrEqual(1);
+        expect(await horizontalOverflow(p), "the phone shell never widens the page").toBeLessThanOrEqual(1);
       } finally {
         await ctx.close();
       }

@@ -6,8 +6,9 @@ import { VIEWS, type View } from "./nav.js";
 import { icon } from "./icon.js";
 import type { ITheme } from "@xterm/xterm";
 
-/** A disclosure owns only visibility and focus; callers own the operations. */
-export function actionsDisclosure(label = "Session actions") {
+/** A disclosure owns only visibility and focus; callers own the operations.
+ * Responsive callers may keep the panel inline by returning false from enabled. */
+export function actionsDisclosure(label = "Session actions", enabled = () => true) {
   const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "…"));
   trigger.setAttribute("aria-label", label);
   trigger.setAttribute("aria-expanded", "false");
@@ -19,25 +20,51 @@ export function actionsDisclosure(label = "Session actions") {
     if (!el.contains(event.target as Node)) close();
   };
   const close = (restoreFocus = false) => {
-    panel.hidden = true;
+    panel.hidden = enabled();
     trigger.setAttribute("aria-expanded", "false");
     document.removeEventListener("mousedown", outside);
     if (restoreFocus) trigger.focus();
   };
   const open = () => {
+    if (!enabled()) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     document.addEventListener("mousedown", outside);
   };
   trigger.addEventListener("click", () => panel.hidden ? open() : close());
   el.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !panel.hidden) {
+    if (event.key === "Escape" && enabled() && !panel.hidden) {
       event.preventDefault();
       event.stopPropagation();
       close(true);
     }
   });
   return { el, panel, trigger, open, close, dispose: close };
+}
+
+/** The app's secondary controls use the same disclosure and Escape/focus model.
+ * Desktop displays the same nodes inline; resizing closes any phone disclosure. */
+export function appbarControls(controls: HTMLElement[], phone = window.matchMedia("(max-width: 768px)")) {
+  const menu = actionsDisclosure("More app controls", () => phone.matches);
+  menu.el.className = "af-appbar-tools-wrap";
+  menu.trigger.className = "af-appbar-more";
+  menu.trigger.replaceChildren(icon("ellipsis"));
+  menu.trigger.title = "More app controls";
+  menu.trigger.setAttribute("aria-controls", "af-appbar-tools");
+  menu.panel.className = "af-appbar-tools";
+  menu.panel.id = "af-appbar-tools";
+  menu.panel.setAttribute("aria-label", "App controls");
+  menu.panel.append(...controls);
+  const sync = () => {
+    const hadFocus = menu.panel.contains(document.activeElement);
+    menu.close();
+    menu.trigger.hidden = !phone.matches;
+    menu.panel.hidden = phone.matches;
+    if (phone.matches && hadFocus) menu.trigger.focus();
+  };
+  phone.addEventListener("change", sync);
+  sync();
+  return { ...menu, dispose: () => { phone.removeEventListener("change", sync); menu.dispose(); } };
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
@@ -48,7 +75,7 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
     button.addEventListener("click", () => { menu.close(); run(); });
     return button;
   };
-  const title = h("span", { class: "af-term-title" }, opts.title);
+  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");

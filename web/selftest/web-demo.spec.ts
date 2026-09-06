@@ -380,6 +380,51 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
   await expect(page.locator(".af-term-keyboard")).toBeHidden();
 }
 
+/** Phone geometry and keyboard access supplement the pixel oracle. */
+async function assertPhoneHeader(page: Page): Promise<void> {
+  const header = page.locator(".af-appbar");
+  await expect(header.locator(".af-viewnav")).toBeVisible();
+  await expect(header.locator(".af-project-switch")).toBeVisible();
+  await expect(header.locator(".af-brand")).toBeHidden();
+  await expect(header.locator(".af-theme-toggle")).toBeHidden();
+  await expect(header.getByRole("button", { name: "Disconnect", exact: true })).toBeHidden();
+  const more = page.getByRole("button", { name: "More app controls", exact: true });
+  await more.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".af-appbar-tools")).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(more).toBeFocused();
+  await expect(page.locator(".af-appbar-tools")).toBeHidden();
+  const title = page.locator(".af-term-title");
+  await expect(title).toBeVisible();
+  await expect(page.locator(".af-term-keyboard")).toHaveJSProperty("tagName", "SPAN");
+  await expect(page.locator(".af-term-head > .af-term-more-wrap .af-term-more-label")).toBeVisible();
+  const geometry = await page.evaluate(() => {
+    const title = document.querySelector<HTMLElement>(".af-term-title")!;
+    const original = title.textContent;
+    title.textContent = "A long focused session title that must truncate with … on a phone";
+    const truncates = title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === "ellipsis";
+    title.textContent = original;
+    const head = document.querySelector<HTMLElement>(".af-term-head")!;
+    const tabs = document.querySelector<HTMLElement>(".af-tabbar")!;
+    const targets = [...document.querySelectorAll<HTMLElement>(".af-appbar button, .af-term-head button, .af-term-head > a")]
+      .filter(el => el.getBoundingClientRect().height > 0);
+    return {
+      truncates,
+      separate: head.getBoundingClientRect().top >= document.querySelector(".af-appbar")!.getBoundingClientRect().bottom,
+      tabsBelow: tabs.getBoundingClientRect().top >= title.getBoundingClientRect().bottom,
+      scrolls: getComputedStyle(tabs).overflowX === "auto" && getComputedStyle(tabs).flexWrap === "nowrap",
+      targets: targets.every(el => el.getBoundingClientRect().height >= 44),
+      fits: document.documentElement.scrollWidth === window.innerWidth,
+    };
+  });
+  expect(geometry).toEqual({ truncates: true, separate: true, tabsBelow: true, scrolls: true, targets: true, fits: true });
+  // Return ownership to the terminal before the still, just as session selection does.
+  await page.locator(".af-pane-host .xterm").first().click();
+}
+
 /** Chrome evidence: disclosures, keyboard ownership and phone layouts are real screens. */
 async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "suffix">, phone: boolean): Promise<void> {
   const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
@@ -403,6 +448,14 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
       await page.getByRole("button", { name: "Switch project", exact: true }).click();
       await recordLogin(page, shot);
       return;
+    }
+    // Issue #3967 evidence: the same real focused session at three phone widths.
+    for (const width of [360, 390, 430]) {
+      await page.setViewportSize({ width, height: 812 });
+      await settleTerminal(page);
+      await assertPhoneHeader(page);
+      await page.screenshot({ path: visual ? test.info().outputPath(`after-phone-session-${width}${pass.suffix}.png`) : join(SHOT_DIR, `phone-session-${width}${pass.suffix}.png`),
+        animations: "disabled", caret: "hide", style: visualStyle });
     }
     await page.setViewportSize({ width: 375, height: 812 });
     await settleTerminal(page);

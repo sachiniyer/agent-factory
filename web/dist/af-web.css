@@ -2221,7 +2221,7 @@ button:disabled,
     border-radius: var(--af-radius-dialog);
     box-shadow: none;
   }
-  .af-appbar-tools-open > .af-appbar-tools {
+  .af-appbar-tools:not([hidden]) {
     display: flex;
   }
   .af-appbar-tools .af-install {
@@ -2246,74 +2246,59 @@ button:disabled,
     width: 100%;
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
-  .af-app.af-view-sessions.af-session-selected > .af-appbar {
-    position: absolute;
-    inset: 0 0 auto;
-    z-index: var(--af-z-appbar);
-    display: block;
-    height: calc(max(var(--af-space-1), env(safe-area-inset-top)) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-1));
-    padding: 0;
-    background: transparent;
-    border: 0;
-    pointer-events: none;
+  .af-term-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: var(--af-space-2);
   }
-  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-nav-toggle {
-    position: absolute;
-    top: max(var(--af-space-1), env(safe-area-inset-top));
-    left: max(var(--af-space-2), env(safe-area-inset-left));
-    display: inline-flex;
-    width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-    height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-    padding: 0;
-    pointer-events: auto;
+  .af-term-head-main {
+    grid-row: 1;
+    grid-column: 1;
+    max-width: none;
+    align-items: center;
   }
-  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-viewnav,
-  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-project-switch-wrap,
-  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-appbar-tools-wrap {
+  .af-term-title-separator {
     display: none;
   }
-  .af-app.af-view-sessions.af-session-selected .af-main-term {
-    padding-block: 0;
+  .af-term-keyboard {
+    grid-row: 1;
+    grid-column: 2;
+    white-space: nowrap;
   }
-  .af-app.af-view-sessions.af-session-selected .af-term-head {
-    min-height: calc(max(var(--af-space-1), env(safe-area-inset-top)) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-1));
-    gap: var(--af-space-1);
-    padding: max(var(--af-space-1), env(safe-area-inset-top)) max(var(--af-space-2), env(safe-area-inset-right)) var(--af-space-1) calc(max(var(--af-space-2), env(safe-area-inset-left)) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-2));
+  .af-term-head > .af-term-more-wrap {
+    grid-row: 1;
+    grid-column: 3;
   }
-  .af-app.af-view-sessions.af-session-selected .af-term-head-main {
+  .af-term-head > .af-term-more-wrap .af-term-more-label {
+    display: inline;
+  }
+  .af-term-head > .af-term-more-wrap .af-term-more-compact {
     display: none;
   }
-  .af-app.af-view-sessions.af-session-selected .af-tabbar {
+  .af-term-head > .af-term-more-wrap > .af-term-menu {
+    max-height: calc(100dvh - var(--af-space-4) * 8);
+    overflow-y: auto;
+  }
+  .af-tabbar {
+    grid-row: 2;
+    grid-column: 1 / -1;
     min-width: 0;
+    flex-wrap: nowrap;
   }
-  .af-app.af-view-sessions.af-session-selected .af-tab {
+  .af-term-head:has(> .af-pr-badge:not([hidden])) .af-tabbar {
+    grid-column: 1;
+  }
+  .af-term-head > .af-pr-badge {
+    grid-row: 2;
+    grid-column: 2 / -1;
+  }
+  .af-term-head > .af-pr-badge:not([hidden]) {
+    display: flex;
+    align-items: center;
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
-  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas: "nav views views" "project project tools";
-    height: auto;
-    align-items: center;
-    gap: var(--af-space-2);
-    padding: max(var(--af-space-2), env(safe-area-inset-top)) max(var(--af-space-2), env(safe-area-inset-right)) var(--af-space-2) max(var(--af-space-2), env(safe-area-inset-left));
-    background: var(--af-surface);
-    border-bottom: 0;
-    pointer-events: auto;
-  }
-  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-nav-toggle {
-    position: static;
-    width: auto;
-  }
-  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-viewnav {
-    display: inline-flex;
-  }
-  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-project-switch-wrap,
-  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-appbar-tools-wrap {
-    display: block;
-  }
-  .af-app.af-view-sessions.af-session-selected.af-nav-open .af-rail {
-    top: calc(max(var(--af-space-2), env(safe-area-inset-top)) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-2) + calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)) + var(--af-space-2));
+  .af-term-head > .af-term-action:not(.af-copy-link-desktop) {
+    grid-column: 1 / -1;
   }
   .af-tab {
     min-height: calc(var(--af-space-3) * 2.5);
@@ -2984,6 +2969,19 @@ textarea[class] {
 .af-config-dirty {
   color: var(--af-ink);
   font-size: var(--af-type-body);
+}
+.af-appbar-more[hidden] {
+  display: none;
+}
+@media (max-width: 768px) {
+  .af-appbar-tools[hidden] {
+    display: none;
+  }
+  .af-term-head .af-tab,
+  .af-term-head .af-term-action,
+  .af-term-head .af-tab-new {
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  }
 }
 
 /* src/tokens.css */
