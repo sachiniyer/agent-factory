@@ -92,7 +92,7 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.state = stateTasks
 					pane := h.automations.TaskPane()
 					pane.EnterCreateMode(h.repoRoot)
-					count := map[string]int{"task-trigger": 1, "task-program": 6, "task-schedule-type": 2}[scene]
+					count := map[string]int{"task-trigger": 1, "task-program": 7, "task-schedule-type": 2}[scene]
 					for n := 0; n < count; n++ {
 						pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 					}
