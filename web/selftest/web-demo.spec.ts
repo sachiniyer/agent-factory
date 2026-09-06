@@ -657,4 +657,6 @@ test("task completion catalog failure is visible and preserves the seed", async 
   });
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => saved).toBe("archive");
+  // Saving refreshes tasks; finish intercepted refreshes before closing the page.
+  await page.unrouteAll({ behavior: "wait" });
 });

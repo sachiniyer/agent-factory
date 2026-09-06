@@ -13,6 +13,7 @@
 import "./styles.css";
 import "./tokens.css";
 import "./recovery.css";
+import { appendMutationOutcome, type MutationOutcomeNotice } from "./recovery.js";
 import { parseRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
 import { copyText } from "./clipboard.js";
 import {
@@ -89,7 +90,7 @@ import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
-import { OptimisticSessions } from "./optimistic.js";
+import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import {
@@ -492,9 +493,9 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
 let routeSelection: string | null = null;
-let navigationGeneration = 0;
+const createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute(): void {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -526,7 +527,7 @@ function resolveRoute(): void {
  *  follows the layout the split view will actually show (settledTab) — a session shown
  *  before keeps its retained pane, and only one never shown starts on its agent tab. */
 function moveSelection(id: string): void {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   clearTabError();
   store.set({
     selectedId: id,
@@ -599,7 +600,7 @@ function focusRail(): void {
  *  view switch composes with the #1694 focus model instead of fighting it. Switching
  *  INTO the tasks view refreshes the task list so it is current on arrival. */
 function switchView(view: View): void {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   if (store.get().view === view) {
     return;
   }
@@ -651,7 +652,7 @@ function resetStatusFilter(): void {
  *  reconciliation can choose this valid fallback while storage names a project that
  *  just disappeared (#2276). */
 function switchProject(root: string): void {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   persistProjectChoice(root);
   if (store.get().selectedProject === root) {
     return;
@@ -772,7 +773,7 @@ function newSession(): void {
         m.setBusy(true);
         closeModal();
         const requestedAccount = values.account ?? "";
-        const navigationAtSubmit = navigationGeneration;
+        const navigationAtSubmit = createSelectionIntent.submit();
         const mutation = optimisticSessions.beginCreate(values);
         applySessions(optimisticSessions.project());
         void createSession(values, tok)
@@ -780,8 +781,8 @@ function newSession(): void {
             if (!created || typeof created.title !== "string") throw new Error("The daemon response did not identify the created session.");
             if (!optimisticSessions.succeed(mutation, created)) return;
             requestResync();
-            // Preserve navigation made while the daemon was creating the session.
-            const maySelect = navigationGeneration === navigationAtSubmit && store.get().view === "sessions";
+            // Preserve later create submissions and navigation while the RPC was pending.
+            const maySelect = createSelectionIntent.isCurrent(navigationAtSubmit) && store.get().view === "sessions";
             applySessions(optimisticSessions.project());
             if (created.id && maySelect && store.get().selectedProject === values.repoPath &&
                 store.get().sessions.some(session => session.id === created.id)) {
@@ -813,7 +814,9 @@ function newSession(): void {
             // phantom creating row, and surface the daemon's unmodified error text.
             requestResync();
             if (outcome !== "reverted") {
-              surfaceMutationError(new Error(`The create response could not confirm the outcome. Check sessions before creating again. ${errorText(e)}`));
+              surfaceMutationError(outcome === "uncertain"
+                ? new Error(`The create response could not confirm the outcome. ${errorText(e)}`)
+                : e, outcome);
               return;
             }
             m.setBusy(false);
@@ -872,8 +875,8 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
             requestResync();
             if (outcome !== "reverted") {
               surfaceMutationError(outcome === "uncertain"
-                ? new Error(`The ${action} outcome could not be confirmed. Check the session before trying again. ${errorText(e)}`)
-                : e);
+                ? new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`)
+                : e, outcome);
               return;
             }
             m.setBusy(false);
@@ -883,9 +886,15 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
             return;
           }
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             requestResync();
-            surfaceTabError(e);
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          if (isMutationOutcomeUncertain(e)) {
+            if (modal === m) closeModal();
+            requestResync();
+            surfaceMutationError(new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
             return;
           }
           m.setBusy(false);
@@ -1320,10 +1329,9 @@ function reorderSessionTab(from: number, to: number): void {
     .catch((e) => surfaceTabError(e));
 }
 
-/** Keep every overlapping mutation failure readable until explicitly dismissed. */
-function surfaceMutationError(error: unknown): void {
-  const previous = store.get().mutationError;
-  store.set({ mutationError: [previous, errorText(error)].filter(Boolean).join("\n\n") });
+/** Keep every overlapping mutation outcome readable until explicitly dismissed. */
+function surfaceMutationError(error: unknown, kind: MutationOutcomeNotice["kind"] = "failed"): void {
+  store.set({ mutationError: appendMutationOutcome(store.get().mutationError, { kind, detail: errorText(error) }) });
 }
 
 /** Surfaces a failed asynchronous operation as a transient toast. Tab mutations

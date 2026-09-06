@@ -76,8 +76,8 @@ anything. Do not proxy this socket to a network interface.
 ## Response envelope
 
 Every response — success or failure, on every endpoint — is the same
-`{data, error}` JSON envelope the CLI's `--json` flag emits, so the two surfaces
-are byte-for-byte identical.
+`{data, error}` JSON envelope shape the CLI's `--json` flag emits. HTTP
+errors additionally carry the daemon outcome markers described below.
 
 A **success** carries the payload under `data` with `error: null`:
 
@@ -93,13 +93,35 @@ A **failure** sets `data: null` and populates `error.message`:
 ```json
 {
   "data": null,
-  "error": { "message": "agent-factory daemon is starting (restoring sessions); retry shortly" }
+  "error": {
+    "message": "agent-factory daemon is starting (restoring sessions); retry shortly",
+    "daemon_rejected": true
+  }
 }
 ```
 
 Both members always serialize (no `omitempty`), so a consumer can branch on
 `error === null` without a presence check. Every response sets
 `Content-Type: application/json`.
+
+Ordinary errors emitted by the daemon's HTTP handler include
+`error.daemon_rejected: true`, an optional boolean identifying a daemon
+rejection. Only the boolean `true` counts; strings and other truthy values do not. A JSON `error` body or a `500`/`503` status alone does not establish
+that provenance: a reverse proxy may return its own error after forwarding a
+mutation that the daemon accepted. Clients must treat an unmarked `5xx`, a lost
+reply, or an unfamiliar error envelope as an uncertain outcome, check the
+session's state, and avoid automatically retrying the mutation. The web client
+also treats `502` and `504` as uncertain even if a marker is present, since the
+daemon does not emit those gateway statuses. The marker is a
+protocol convention, not authentication against a proxy that deliberately copies
+it.
+
+`error.code: "mutation_committed"` is the existing, separate outcome marker for a
+mutation that reached durable storage before a follow-up failed. It takes
+precedence over `daemon_rejected` if both occur: surface the detail without
+retrying the completed mutation. The daemon omits `daemon_rejected` from these
+committed-outcome envelopes. CLI `--json` ordinary errors retain their existing
+shape without the HTTP provenance marker.
 
 ## Status codes
 
@@ -130,7 +152,7 @@ all-repo `Snapshot`. Failing loudly is the safer answer:
 ```console
 $ curl --unix-socket ~/.agent-factory/daemon-http.sock \
     -X POST http://af/v1/Snapshot -d '{"repo_idd":"typo"}'
-{"data":null,"error":{"message":"malformed JSON request body: json: unknown field \"repo_idd\""}}
+{"data":null,"error":{"message":"malformed JSON request body: json: unknown field \"repo_idd\"","daemon_rejected":true}}
 ```
 
 **Requests carrying the `X-AF-Client-Version` header** — which the `af` TUI and CLI

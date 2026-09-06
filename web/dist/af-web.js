@@ -6119,6 +6119,175 @@ WARNING: This link could potentially be dangerous`)) {
   }
 });
 
+// src/dom.ts
+function h(tag, props = {}, ...children) {
+  const el2 = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") {
+      el2.className = value;
+    } else {
+      el2[key] = value;
+    }
+  }
+  for (const child of children) {
+    el2.append(child);
+  }
+  return el2;
+}
+
+// src/terminal_ansi.ts
+var TERMINAL_ANSI = {
+  "light": {
+    "black": "#2E3440",
+    "red": "#944049",
+    "green": "#51693C",
+    "yellow": "#7C5A15",
+    "blue": "#426486",
+    "magenta": "#7F5478",
+    "cyan": "#2D6271",
+    "white": "#434C5E",
+    "brightBlack": "#000000",
+    "brightRed": "#76333A",
+    "brightGreen": "#415430",
+    "brightYellow": "#634811",
+    "brightBlue": "#35506B",
+    "brightMagenta": "#664360",
+    "brightCyan": "#244E5A",
+    "brightWhite": "#171A20"
+  },
+  "dark": {
+    "black": "#B4BCC8",
+    "red": "#D9B2B9",
+    "green": "#A3BE8C",
+    "yellow": "#EBCB8B",
+    "blue": "#81A1C1",
+    "magenta": "#B590AF",
+    "cyan": "#90C4D3",
+    "white": "#D8DEE9",
+    "brightBlack": "#959CA5",
+    "brightRed": "#E1C1C7",
+    "brightGreen": "#B5CBA3",
+    "brightYellow": "#EFD5A2",
+    "brightBlue": "#9AB4CD",
+    "brightMagenta": "#C4A6BF",
+    "brightCyan": "#A6D0DC",
+    "brightWhite": "#FFFFFF"
+  }
+};
+
+// src/theme.ts
+var THEME_CHOICES = ["light", "dark", "system"];
+var STORAGE_KEY = "af-theme";
+function connectionAttemptMayCommit(request, installedToken, candidate) {
+  return request.isCurrent() && installedToken === candidate;
+}
+function normalizeThemeChoice(value) {
+  return value === "light" || value === "dark" ? value : "system";
+}
+function readThemeChoice() {
+  try {
+    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return "system";
+  }
+}
+function persistThemeChoice(choice) {
+  try {
+    localStorage.setItem(STORAGE_KEY, choice);
+  } catch {
+  }
+}
+function currentMode() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") return attr;
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {
+    return "dark";
+  }
+}
+function surface(mode) {
+  const probe = document.createElement("span");
+  probe.dataset.afTheme = mode;
+  probe.hidden = true;
+  document.documentElement.append(probe);
+  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  probe.remove();
+  return color;
+}
+function themeColorMetaContents(choice) {
+  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
+}
+function refreshThemeMode() {
+  const mode = currentMode();
+  document.documentElement.dataset.afTheme = mode;
+  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
+  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
+  }
+}
+function stampTheme(choice) {
+  if (choice === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", choice);
+  refreshThemeMode();
+}
+function bootStampTheme() {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+function xtermTheme(mode) {
+  return TERMINAL_ANSI[mode];
+}
+function currentXtermTheme() {
+  return xtermTheme(currentMode());
+}
+
+// src/recovery.ts
+function recoveryScreen(state) {
+  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
+  action.addEventListener("click", state.run);
+  const screen = h(
+    "section",
+    { class: "af-recovery" },
+    h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
+    ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
+    action
+  );
+  scopeRecovery(screen);
+  if (state.failed) screen.setAttribute("role", "alert");
+  return screen;
+}
+function mutationNotice(condition, detail, action, failed = true) {
+  return scopeRecovery(h(
+    "div",
+    { class: "af-recovery af-recovery-notice", role: "alert" },
+    h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
+    h("p", { class: "af-recovery-detail" }, detail),
+    h("p", { class: "af-recovery-next" }, action)
+  ));
+}
+function scopeRecovery(element) {
+  element.setAttribute("data-af-theme", currentMode());
+  return element;
+}
+function renderMutationOutcome(notice) {
+  if (notice.kind === "uncertain") {
+    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before taking further action.", false);
+  }
+  if (notice.kind === "confirmed") {
+    return mutationNotice("Operation completed", notice.detail, "Review the details before taking further action.", false);
+  }
+  return mutationNotice("Operation failed", notice.detail, "Review the details, then try again.");
+}
+function appendMutationOutcome(previous, next) {
+  return {
+    kind: previous?.kind === "uncertain" || next.kind === "uncertain" ? "uncertain" : previous?.kind === "confirmed" || next.kind === "confirmed" ? "confirmed" : "failed",
+    detail: [previous?.detail, next.detail].filter(Boolean).join("\n\n")
+  };
+}
+
 // src/route.ts
 function parseRoute(hash) {
   const match = /^#\/session\/([^/]+)$/.exec(hash);
@@ -6340,11 +6509,14 @@ function envelopeErrorCode(err) {
   const code = err.code;
   return typeof code === "string" ? code : "";
 }
+function isDaemonRejection(err, status) {
+  return err?.daemon_rejected === true && status !== 502 && status !== 504 && envelopeErrorCode(err) !== MUTATION_COMMITTED_ERROR_CODE;
+}
 var MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 var ApiError = class extends Error {
   status;
   code;
-  /** A parsed daemon error envelope, rather than a missing/gateway response. */
+  /** A positively marked daemon refusal, excluding committed outcomes. */
   daemonRejected;
   constructor(status, message, code = "", daemonRejected = false) {
     super(message);
@@ -6382,11 +6554,11 @@ async function af(method, body, token2) {
   }
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    const daemonRejected = env?.error != null && resp.status !== 502 && resp.status !== 504;
+    const daemonRejected = isDaemonRejection(env?.error, resp.status);
     throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), daemonRejected);
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), true);
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), isDaemonRejection(env.error, resp.status));
   }
   return env?.data;
 }
@@ -6664,160 +6836,6 @@ async function registerAccount(agent, name, token2) {
 }
 async function startAccountLogin(agent, name, token2) {
   return af("AccountLogin", { agent, name }, token2);
-}
-
-// src/dom.ts
-function h(tag, props = {}, ...children) {
-  const el2 = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (key === "class") {
-      el2.className = value;
-    } else {
-      el2[key] = value;
-    }
-  }
-  for (const child of children) {
-    el2.append(child);
-  }
-  return el2;
-}
-
-// src/terminal_ansi.ts
-var TERMINAL_ANSI = {
-  "light": {
-    "black": "#2E3440",
-    "red": "#944049",
-    "green": "#51693C",
-    "yellow": "#7C5A15",
-    "blue": "#426486",
-    "magenta": "#7F5478",
-    "cyan": "#2D6271",
-    "white": "#434C5E",
-    "brightBlack": "#000000",
-    "brightRed": "#76333A",
-    "brightGreen": "#415430",
-    "brightYellow": "#634811",
-    "brightBlue": "#35506B",
-    "brightMagenta": "#664360",
-    "brightCyan": "#244E5A",
-    "brightWhite": "#171A20"
-  },
-  "dark": {
-    "black": "#B4BCC8",
-    "red": "#D9B2B9",
-    "green": "#A3BE8C",
-    "yellow": "#EBCB8B",
-    "blue": "#81A1C1",
-    "magenta": "#B590AF",
-    "cyan": "#90C4D3",
-    "white": "#D8DEE9",
-    "brightBlack": "#959CA5",
-    "brightRed": "#E1C1C7",
-    "brightGreen": "#B5CBA3",
-    "brightYellow": "#EFD5A2",
-    "brightBlue": "#9AB4CD",
-    "brightMagenta": "#C4A6BF",
-    "brightCyan": "#A6D0DC",
-    "brightWhite": "#FFFFFF"
-  }
-};
-
-// src/theme.ts
-var THEME_CHOICES = ["light", "dark", "system"];
-var STORAGE_KEY = "af-theme";
-function connectionAttemptMayCommit(request, installedToken, candidate) {
-  return request.isCurrent() && installedToken === candidate;
-}
-function normalizeThemeChoice(value) {
-  return value === "light" || value === "dark" ? value : "system";
-}
-function readThemeChoice() {
-  try {
-    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
-  } catch {
-    return "system";
-  }
-}
-function persistThemeChoice(choice) {
-  try {
-    localStorage.setItem(STORAGE_KEY, choice);
-  } catch {
-  }
-}
-function currentMode() {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light" || attr === "dark") return attr;
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  } catch {
-    return "dark";
-  }
-}
-function surface(mode) {
-  const probe = document.createElement("span");
-  probe.dataset.afTheme = mode;
-  probe.hidden = true;
-  document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
-  probe.remove();
-  return color;
-}
-function themeColorMetaContents(choice) {
-  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
-}
-function refreshThemeMode() {
-  const mode = currentMode();
-  document.documentElement.dataset.afTheme = mode;
-  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
-  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
-  }
-}
-function stampTheme(choice) {
-  if (choice === "system") document.documentElement.removeAttribute("data-theme");
-  else document.documentElement.setAttribute("data-theme", choice);
-  refreshThemeMode();
-}
-function bootStampTheme() {
-  const choice = readThemeChoice();
-  stampTheme(choice);
-  return choice;
-}
-function xtermTheme(mode) {
-  return TERMINAL_ANSI[mode];
-}
-function currentXtermTheme() {
-  return xtermTheme(currentMode());
-}
-
-// src/recovery.ts
-function recoveryScreen(state) {
-  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
-  action.addEventListener("click", state.run);
-  const screen = h(
-    "section",
-    { class: "af-recovery" },
-    h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
-    ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
-    action
-  );
-  scopeRecovery(screen);
-  if (state.failed) screen.setAttribute("role", "alert");
-  return screen;
-}
-function mutationNotice(condition, detail, action, failed = true) {
-  return scopeRecovery(h(
-    "div",
-    { class: "af-recovery af-recovery-notice", role: "alert" },
-    h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
-    h("p", { class: "af-recovery-detail" }, detail),
-    h("p", { class: "af-recovery-next" }, action)
-  ));
-}
-function scopeRecovery(element) {
-  element.setAttribute("data-af-theme", currentMode());
-  return element;
 }
 
 // src/nav.ts
@@ -12848,6 +12866,18 @@ var OptimisticSessions = class {
     return { epoch: this.epoch, sequence: ++this.sequence };
   }
 };
+var CreateSelectionIntent = class {
+  generation = 0;
+  navigate() {
+    this.generation++;
+  }
+  submit() {
+    return ++this.generation;
+  }
+  isCurrent(intent) {
+    return intent === this.generation;
+  }
+};
 
 // src/store.ts
 var Store = class {
@@ -14550,7 +14580,7 @@ var AppShell = class {
     if (this.lastError !== errorSignature) {
       this.lastError = errorSignature;
       if (state.mutationError) {
-        const notice = mutationNotice("Operation failed", state.mutationError, "Review the details, then try again.");
+        const notice = renderMutationOutcome(state.mutationError);
         const dismiss = h("button", { type: "button", class: "af-recovery-action" }, "Dismiss");
         dismiss.addEventListener("click", () => this.actions.dismissNotice?.());
         notice.append(dismiss);
@@ -16095,9 +16125,9 @@ function tabIdsOf(list, id) {
 }
 var resolvingRoute = false;
 var routeSelection = null;
-var navigationGeneration = 0;
+var createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute() {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -16121,7 +16151,7 @@ function resolveRoute() {
   }
 }
 function moveSelection(id) {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   clearTabError();
   store.set({
     selectedId: id,
@@ -16155,7 +16185,7 @@ function focusRail() {
   splitView.blur();
 }
 function switchView(view) {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   if (store.get().view === view) {
     return;
   }
@@ -16183,7 +16213,7 @@ function resetStatusFilter() {
   store.set({ statusFilter: next });
 }
 function switchProject(root2) {
-  navigationGeneration++;
+  createSelectionIntent.navigate();
   persistProjectChoice(root2);
   if (store.get().selectedProject === root2) {
     return;
@@ -16265,14 +16295,14 @@ function newSession() {
         m.setBusy(true);
         closeModal();
         const requestedAccount = values.account ?? "";
-        const navigationAtSubmit = navigationGeneration;
+        const navigationAtSubmit = createSelectionIntent.submit();
         const mutation = optimisticSessions.beginCreate(values);
         applySessions(optimisticSessions.project());
         void createSession(values, tok).then((created) => {
           if (!created || typeof created.title !== "string") throw new Error("The daemon response did not identify the created session.");
           if (!optimisticSessions.succeed(mutation, created)) return;
           requestResync();
-          const maySelect = navigationGeneration === navigationAtSubmit && store.get().view === "sessions";
+          const maySelect = createSelectionIntent.isCurrent(navigationAtSubmit) && store.get().view === "sessions";
           applySessions(optimisticSessions.project());
           if (created.id && maySelect && store.get().selectedProject === values.repoPath && store.get().sessions.some((session) => session.id === created.id)) {
             store.set({ selectedId: created.id, activeTab: 0, tabError: null });
@@ -16288,7 +16318,7 @@ function newSession() {
           applySessions(optimisticSessions.project());
           requestResync();
           if (outcome !== "reverted") {
-            surfaceMutationError(new Error(`The create response could not confirm the outcome. Check sessions before creating again. ${errorText(e)}`));
+            surfaceMutationError(outcome === "uncertain" ? new Error(`The create response could not confirm the outcome. ${errorText(e)}`) : e, outcome);
             return;
           }
           m.setBusy(false);
@@ -16334,7 +16364,7 @@ function openConfirm(action, session) {
             applySessions(optimisticSessions.project());
             requestResync();
             if (outcome !== "reverted") {
-              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action} outcome could not be confirmed. Check the session before trying again. ${errorText(e)}`) : e);
+              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
               return;
             }
             m.setBusy(false);
@@ -16344,9 +16374,15 @@ function openConfirm(action, session) {
             return;
           }
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             requestResync();
-            surfaceTabError(e);
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          if (isMutationOutcomeUncertain(e)) {
+            if (modal === m) closeModal();
+            requestResync();
+            surfaceMutationError(new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
             return;
           }
           m.setBusy(false);
@@ -16551,9 +16587,8 @@ function reorderSessionTab(from, to) {
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
   }).catch((e) => surfaceTabError(e));
 }
-function surfaceMutationError(error) {
-  const previous = store.get().mutationError;
-  store.set({ mutationError: [previous, errorText(error)].filter(Boolean).join("\n\n") });
+function surfaceMutationError(error, kind = "failed") {
+  store.set({ mutationError: appendMutationOutcome(store.get().mutationError, { kind, detail: errorText(error) }) });
 }
 function surfaceTabError(e) {
   const msg = errorText(e);
