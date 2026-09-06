@@ -377,8 +377,6 @@ func (f *observingCreatePtyFactory) Start(command *exec.Cmd) (*os.File, error) {
 	return f.base.Start(command)
 }
 
-func (f *observingCreatePtyFactory) Close() { f.base.Close() }
-
 func TestPreparedCreateLaunchSnapshotsBeforeAgentProcessStart(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoRoot := initInPlaceRepo(t, "ordered-create")
