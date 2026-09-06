@@ -270,6 +270,28 @@ docker exec "$AF_PLAYTEST_NAME" tmux capture-pane -p -t drive
 docker rm -f "$AF_PLAYTEST_NAME"   # teardown: one command reaps everything
 ```
 
+Detached sandboxes have a six-hour maximum lifetime, including setup time.
+Set `AF_PLAYTEST_MAX_LIFETIME` to a positive integer number of seconds before
+starting one to change it (for example, `AF_PLAYTEST_MAX_LIFETIME=10800 make
+playtest-container-detached` for three hours). The container's own deadline
+terminates setup/hold, with a five-second forced-exit grace period, so `--rm`
+collects it even when the driving agent dies. Tear down promptly when finished;
+the deadline is a backstop, not a reason to leave a finished sandbox running.
+Interactive shells still rely on exiting the shell.
+
+Detached starts and driver reuse also sweep containers matching both
+`af.harness=testbox` and the `af-playtest-` name prefix. New launches also carry
+`af.playtest.mode=detached` or `interactive`; interactive shells are excluded.
+For legacy containers without a mode label, only the exact entrypoint command
+`bash /src/scripts/container/playtest-entry.sh hold` identifies a detached run.
+Only detached containers whose `StartedAt` has reached their configured lifetime
+are reaped; older containers without that setting use six hours. The sweep rechecks the label and prefix,
+skips unknown timestamps or invalid lifetimes, and removes by container ID.
+Name collisions never trigger removal, and a later caller's lifetime override
+does not shorten an existing run. Custom names outside `af-playtest-` retain
+the self-imposed deadline but are outside the sweep. `af doctor` lists expired
+sandboxes using the same scope and age policy, without removing them.
+
 Set `AF_PLAYTEST_AGENT=codex` (and optionally
 `AF_PLAYTEST_CODEX_RELEASE`) before the detached target to use the same real-agent
 path there.
