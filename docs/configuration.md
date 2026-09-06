@@ -266,8 +266,6 @@ that lets the repo-selected image receive it. New and respawned panes use the
 current list. A pane that was already running before an upgrade keeps the
 environment it started with until that process is restarted.
 
-<a id="theme-colors-theme"></a>
-
 ### Appearance and legacy theme migration
 
 Appearance has exactly **Light**, **Dark** and **System**, using two fixed product
@@ -277,7 +275,7 @@ the same choice. Changes apply on the next TUI launch. This preference belongs
 to the machine where the TUI runs; a remote Config editor still edits its named
 remote target. It is global-only and is not accepted from a repository's config.
 Read it with `af config get appearance`; `af config list` includes it as well.
-The default is `system`. See the [global example](../examples/config.toml).
+The default is `system`. See the [global example](https://github.com/sachiniyer/agent-factory/blob/master/examples/config.toml).
 
 System detects the terminal background through OSC 11, with `COLORFGBG` as the
 terminal library's fallback and **dark** when no background is available.
