@@ -16,7 +16,7 @@ import (
 func sandboxFixture(started time.Time) playtestContainer {
 	var c playtestContainer
 	c.ID, c.Name = "abc123", "/af-playtest-20990101-future-name"
-	c.Config.Labels = map[string]string{"af.harness": "testbox"}
+	c.Config.Labels = map[string]string{"af.harness": "testbox", "af.playtest.mode": "detached"}
 	c.State.StartedAt = started.Format(time.RFC3339Nano)
 	return c
 }
@@ -35,6 +35,17 @@ func TestPlaytestSandboxAgePredicate(t *testing.T) {
 		{"unlabelled", func(c *playtestContainer) { c.Config.Labels = nil }, false, false},
 		{"other harness", func(c *playtestContainer) { c.Config.Labels["af.harness"] = "other" }, false, false},
 		{"other name", func(c *playtestContainer) { c.Name = "/unrelated-af-playtest-old" }, false, false},
+		{"interactive", func(c *playtestContainer) { c.Config.Labels["af.playtest.mode"] = "interactive" }, false, false},
+		{"unknown mode", func(c *playtestContainer) { c.Config.Labels["af.playtest.mode"] = "unknown" }, false, false},
+		{"legacy detached", func(c *playtestContainer) {
+			delete(c.Config.Labels, "af.playtest.mode")
+			c.Config.Cmd = []string{"bash", "/src/scripts/container/playtest-entry.sh", "hold"}
+		}, true, false},
+		{"legacy interactive", func(c *playtestContainer) {
+			delete(c.Config.Labels, "af.playtest.mode")
+			c.Config.Cmd = []string{"bash", "/src/scripts/container/playtest-entry.sh"}
+		}, false, false},
+		{"legacy unknown command", func(c *playtestContainer) { delete(c.Config.Labels, "af.playtest.mode") }, false, false},
 		{"invalid timestamp", func(c *playtestContainer) { c.State.StartedAt = "bad" }, false, true},
 		{"never started", func(c *playtestContainer) { c.State.StartedAt = time.Time{}.Format(time.RFC3339Nano) }, false, true},
 		{"longer lifetime", func(c *playtestContainer) { c.Config.Env = []string{"AF_PLAYTEST_MAX_LIFETIME=86400"} }, false, false},

@@ -482,6 +482,7 @@ start_playtest_detached() {
     engine_run -d \
         "${RUN_FLAGS[@]}" \
         --name "$PLAYTEST_NAME" \
+        --label af.playtest.mode=detached \
         -e "AF_PLAYTEST_MAX_LIFETIME=$lifetime" \
         -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
         -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
@@ -560,6 +561,7 @@ playtest)
         engine_run -it \
             "${RUN_FLAGS[@]}" \
             --name "$PLAYTEST_NAME" \
+            --label af.playtest.mode=interactive \
             -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
             -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
             -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,7 @@ type playtestContainer struct {
 	Config struct {
 		Labels map[string]string
 		Env    []string
+		Cmd    []string
 	}
 }
 
@@ -44,6 +46,17 @@ type playtestContainer struct {
 // StartedAt, rather than Created or a date embedded in the name, determines age.
 func (c playtestContainer) stranded(now time.Time) (time.Duration, time.Duration, error) {
 	if c.Config.Labels["af.harness"] != "testbox" || !strings.HasPrefix(strings.TrimPrefix(c.Name, "/"), "af-playtest-") {
+		return 0, 0, nil
+	}
+	// Interactive shells have no detached deadline. Legacy sandboxes lack the
+	// mode label, so recognize only the exact hold invocation used by testbox.
+	switch c.Config.Labels["af.playtest.mode"] {
+	case "detached":
+	case "":
+		if !slices.Equal(c.Config.Cmd, []string{"bash", "/src/scripts/container/playtest-entry.sh", "hold"}) {
+			return 0, 0, nil
+		}
+	default:
 		return 0, 0, nil
 	}
 	started, err := time.Parse(time.RFC3339Nano, c.State.StartedAt)

@@ -33,10 +33,17 @@ playtest_started_epoch() {
 # Unknown timestamps/policy fail closed. Use the container's lifetime, not a
 # later caller's override, so a deliberately longer run survives later starts.
 playtest_is_expired() {
-    local inspected="$1" now="$2" name label started lifetime epoch header
+    local inspected="$1" now="$2" name label started mode command lifetime epoch header
     header="${inspected%%$'\n'*}"
-    IFS='|' read -r name label started <<<"$header"
+    IFS='|' read -r name label started mode command <<<"$header"
     [[ "$name" == /af-playtest-* && "$label" == testbox ]] || return 1
+    # Interactive sandboxes have no deadline. Legacy launches lacked a mode
+    # label, so identify only their exact detached entrypoint command.
+    case "$mode" in
+    detached) ;;
+    '') [[ "$command" == '["bash","/src/scripts/container/playtest-entry.sh","hold"]' ]] || return 1 ;;
+    *) return 1 ;;
+    esac
     lifetime="$(printf '%s\n' "$inspected" | sed -n 's/^AF_PLAYTEST_MAX_LIFETIME=//p' | tail -n 1)"
     lifetime="$(playtest_lifetime "$lifetime")" || return 1
     epoch="$(playtest_started_epoch "$started")" || return 1
@@ -48,7 +55,7 @@ reap_playtest_sandboxes() {
     ids="$("$ENGINE" ps -aq --filter label=af.harness=testbox --filter name=af-playtest- 2>/dev/null)" || return 0
     now="$(date -u +%s)"
     for id in $ids; do
-        inspected="$("$ENGINE" inspect -f '{{.Name}}|{{index .Config.Labels "af.harness"}}|{{.State.StartedAt}}{{println}}{{range .Config.Env}}{{println .}}{{end}}' "$id" 2>/dev/null)" || continue
+        inspected="$("$ENGINE" inspect -f '{{.Name}}|{{index .Config.Labels "af.harness"}}|{{.State.StartedAt}}|{{index .Config.Labels "af.playtest.mode"}}|{{json .Config.Cmd}}{{println}}{{range .Config.Env}}{{println .}}{{end}}' "$id" 2>/dev/null)" || continue
         if playtest_is_expired "$inspected" "$now"; then
             echo "testbox: reaping expired sandbox ${inspected%%$'\n'*}" >&2
             "$ENGINE" rm -f "$id" >/dev/null 2>&1 || true

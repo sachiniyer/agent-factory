@@ -52,7 +52,8 @@ func TestPlaytestLifetimeValidation(t *testing.T) {
 
 func TestPlaytestExpiryPredicate(t *testing.T) {
 	started := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
-	base := "/af-playtest-run|testbox|" + started.Format(time.RFC3339Nano)
+	base := "/af-playtest-run|testbox|" + started.Format(time.RFC3339Nano) + "|detached|[]"
+	legacy := "/af-playtest-run|testbox|" + started.Format(time.RFC3339Nano) + "||"
 	cases := []struct {
 		name, inspected string
 		age             int64
@@ -62,18 +63,25 @@ func TestPlaytestExpiryPredicate(t *testing.T) {
 		{"at deadline", base, 21600, true},
 		{"after deadline", base, 21601, true},
 		{"future start", base, -1, false},
-		{"missing start", "/af-playtest-run|testbox|", 21600, false},
-		{"invalid start", "/af-playtest-run|testbox|not-a-date", 21600, false},
-		{"never started", "/af-playtest-run|testbox|0001-01-01T00:00:00Z", 21600, false},
-		{"unlabelled", "/af-playtest-run||2026-09-06T00:00:00Z", 21600, false},
-		{"wrong label", "/af-playtest-run|other|2026-09-06T00:00:00Z", 21600, false},
-		{"wrong name", "/af-testbox-run|testbox|2026-09-06T00:00:00Z", 21600, false},
-		{"substring name", "/other-af-playtest-run|testbox|2026-09-06T00:00:00Z", 21600, false},
+		{"missing start", "/af-playtest-run|testbox||detached|[]", 21600, false},
+		{"invalid start", "/af-playtest-run|testbox|not-a-date|detached|[]", 21600, false},
+		{"never started", "/af-playtest-run|testbox|0001-01-01T00:00:00Z|detached|[]", 21600, false},
+		{"unlabelled", "/af-playtest-run||2026-09-06T00:00:00Z|detached|[]", 21600, false},
+		{"wrong label", "/af-playtest-run|other|2026-09-06T00:00:00Z|detached|[]", 21600, false},
+		{"wrong name", "/af-testbox-run|testbox|2026-09-06T00:00:00Z|detached|[]", 21600, false},
+		{"substring name", "/other-af-playtest-run|testbox|2026-09-06T00:00:00Z|detached|[]", 21600, false},
 		{"long override", base + "\nAF_PLAYTEST_MAX_LIFETIME=43200", 21601, false},
 		{"override boundary", base + "\nAF_PLAYTEST_MAX_LIFETIME=43200", 43200, true},
 		{"short override", base + "\nAF_PLAYTEST_MAX_LIFETIME=1", 1, true},
 		{"invalid override", base + "\nAF_PLAYTEST_MAX_LIFETIME=garbage", 43200, false},
 		{"unrelated environment", base + "\nOTHER=AF_PLAYTEST_MAX_LIFETIME=1", 1, false},
+		{"interactive label", strings.Replace(base, "|detached|", "|interactive|", 1), 43200, false},
+		{"unknown mode", strings.Replace(base, "|detached|", "|unknown|", 1), 43200, false},
+		{"legacy detached", legacy + `["bash","/src/scripts/container/playtest-entry.sh","hold"]`, 21600, true},
+		{"legacy interactive", legacy + `["bash","/src/scripts/container/playtest-entry.sh"]`, 43200, false},
+		{"legacy unknown command", legacy + `["sleep","infinity"]`, 43200, false},
+		{"legacy missing command", legacy, 43200, false},
+		{"interactive overrides command", strings.Replace(legacy, "||", "|interactive|", 1) + `["bash","/src/scripts/container/playtest-entry.sh","hold"]`, 43200, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,7 +104,7 @@ func TestPlaytestUnknownStartedAtFailsClosed(t *testing.T) {
 	for _, started := range []string{"", "yesterday", "2026-09-06"} {
 		out, err := runPlaytestPolicy(t, `
 if playtest_is_expired "$1" "$2"; then echo expired; else echo retained; fi`,
-			"/af-playtest-run|testbox|"+started,
+			"/af-playtest-run|testbox|"+started+"|detached|[]",
 			strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10))
 		if err != nil || strings.TrimSpace(out) != "retained" {
 			t.Errorf("StartedAt=%q: want retained, got %q, err=%v", started, out, err)
@@ -110,11 +118,15 @@ func TestPlaytestReaperUsesInspectedScopeAndAge(t *testing.T) {
 	old := now.Add(-7 * time.Hour).Format(time.RFC3339Nano)
 	young := now.Add(-time.Minute).Format(time.RFC3339Nano)
 	for id, inspected := range map[string]string{
-		"old":        "/af-playtest-old|testbox|" + old,
-		"young":      "/af-playtest-young|testbox|" + young,
-		"unlabelled": "/af-playtest-unlabelled||" + old,
-		"other":      "/af-testbox-other|testbox|" + old,
-		"extended":   "/af-playtest-long|testbox|" + old + "\nAF_PLAYTEST_MAX_LIFETIME=43200",
+		"old":                "/af-playtest-old|testbox|" + old + "|detached|[]",
+		"young":              "/af-playtest-young|testbox|" + young + "|detached|[]",
+		"unlabelled":         "/af-playtest-unlabelled||" + old + "|detached|[]",
+		"other":              "/af-testbox-other|testbox|" + old + "|detached|[]",
+		"extended":           "/af-playtest-long|testbox|" + old + "|detached|[]\nAF_PLAYTEST_MAX_LIFETIME=43200",
+		"interactive":        "/af-playtest-interactive|testbox|" + old + "|interactive|[]",
+		"legacy_interactive": "/af-playtest-legacy-interactive|testbox|" + old + `||["bash","/src/scripts/container/playtest-entry.sh"]`,
+		"unknown":            "/af-playtest-unknown|testbox|" + old + `||["sleep","infinity"]`,
+		"legacy":             "/af-playtest-legacy|testbox|" + old + `||["bash","/src/scripts/container/playtest-entry.sh","hold"]`,
 	} {
 		if err := os.WriteFile(filepath.Join(fixtures, id), []byte(inspected), 0o600); err != nil {
 			t.Fatal(err)
@@ -126,10 +138,10 @@ docker() {
     case "$1" in
         ps)
             [[ "$*" == 'ps -aq --filter label=af.harness=testbox --filter name=af-playtest-' ]] || return 90
-            printf '%s\n' old young unlabelled other extended vanished
+            printf '%s\n' old young unlabelled other extended interactive legacy_interactive unknown legacy vanished
             ;;
         inspect)
-            [[ "$3" == *'.State.StartedAt'* && "$3" == *'.Config.Labels'* ]] || return 91
+            [[ "$3" == *'.State.StartedAt'* && "$3" == *'.Config.Labels'* && "$3" == *'af.playtest.mode'* && "$3" == *'json .Config.Cmd'* ]] || return 91
             cat "$fixtures/$4"
             ;;
         rm) printf '%s\n' "$*" >> "$fixtures/removals" ;;
@@ -143,8 +155,8 @@ cat "$fixtures/removals"`, fixtures)
 		t.Fatalf("reaper: %v: %s", err, out)
 	}
 	data, err := os.ReadFile(filepath.Join(fixtures, "removals"))
-	if err != nil || string(data) != "rm -f old\n" {
-		t.Fatalf("removals=%q err=%v, want only the expired labelled sandbox", data, err)
+	if err != nil || string(data) != "rm -f old\nrm -f legacy\n" {
+		t.Fatalf("removals=%q err=%v, want only expired detached sandboxes", data, err)
 	}
 }
 
