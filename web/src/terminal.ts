@@ -39,7 +39,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { handleClipboardKeydown, handleTerminalCopy } from "./clipboard.js";
+import { copyText, handleClipboardKeydown, handleTerminalCopy } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
 import { MidLineHold, type HoldAction } from "./delivery_hold.js";
 import { PendingInput } from "./pending_input.js";
@@ -1601,41 +1601,9 @@ export class AttachTerminal {
     if (text === "") {
       return; // nothing selected — an explicit copy of nothing is a no-op
     }
-    const clip = navigator.clipboard;
-    if (clip && typeof clip.writeText === "function") {
-      // The .catch fallback runs after the async rejection, i.e. outside the key
-      // gesture, so execCommand may itself fail there; the hint is the backstop.
-      clip.writeText(text).catch(() => {
-        if (!this.execCommandCopy(text)) {
-          this.flashCopyHint();
-        }
-      });
-      return;
-    }
-    if (!this.execCommandCopy(text)) {
-      this.flashCopyHint();
-    }
-  }
-
-  /** Legacy clipboard write via a throwaway off-screen textarea. Returns whether the
-   *  copy reported success. Requires a user gesture, which the key handler provides. */
-  private execCommandCopy(text: string): boolean {
-    try {
-      const ta = document.createElement("textarea");
-      ta.className = "af-clipboard-fallback";
-      ta.value = text;
-      // Off-screen but still selectable; readonly stops a mobile keyboard popping up.
-      ta.setAttribute("readonly", "");
-      document.body.appendChild(ta);
-      ta.select();
-      ta.setSelectionRange(0, text.length);
-      const ok = document.execCommand("copy");
-      ta.remove();
-      this.term.focus(); // the temp textarea stole focus; hand it back to the terminal
-      return ok;
-    } catch {
-      return false;
-    }
+    void copyText(text).then((ok) => {
+      if (!ok) this.flashCopyHint();
+    });
   }
 
   /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never
