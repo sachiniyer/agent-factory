@@ -1,5 +1,9 @@
 # TUI design system: slice C
 
+The gallery files were regenerated from master after P2/P5 for
+[#3917](https://github.com/sachiniyer/agent-factory/issues/3917). The slice history
+below records the original implementation; the images now show the final design.
+
 The TUI now offers **Light**, **Dark** and **System**, with the same saved
 `light`, `dark` and `system` values as the browser. The global `appearance`
 setting applies on the next TUI launch. System detects the terminal background

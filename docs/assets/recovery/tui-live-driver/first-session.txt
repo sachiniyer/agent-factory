@@ -1,36 +1,36 @@
-                              ╔════════════════════════════════════════════════════════════════════════════════════════╗
- Agent Factory                ║ retained-draft · ◆ Agent                                                               ║
- ▼ Sessions (1)               ║                                                                                        ║
-                              ║===============================================================                         ║
-  ▾  retained-draft           ║Play-test stand-in                                                                      ║
-     ⎇-dev/retained-draft     ║This pane is bash, not an agent.                                                        ║
-                              ║Evidence from this pane does not cover agent UI behavior such as                        ║
-    └ 1 ◆ Agent *             ║the composer, modal state, paste handling, status footer, or turns.                     ║
-                              ║Use AF_PLAYTEST_AGENT=codex for a real-agent play-test.                                 ║
-                              ║===============================================================                         ║
-                              ║                                                                                        ║
-                              ║[Play-test stand-in: bash] ~/sandbox/mock-repo-retained-draft $                         ║
-                              ║[Play-test stand-in: bash] ~/sandbox/mock-repo-retained-draft $ : "AF62963963"; echo FIR║
-                              ║ST_SESSION_REACHED                                                                      ║
-                              ║FIRST_SESSION_REACHED                                                                   ║
-                              ║[Play-test stand-in: bash] ~/sandbox/mock-repo-retained-draft $                         ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-                              ║                                                                                        ║
-──────────────────────────────║                                                                                        ║
- Projects (1) · ↵ switch      ║                                                                                        ║
-● mock-repo (1)               ║                                                                                        ║
-                              ║                                                                                        ║
-                              ╚════════════════════════════════════════════════════════════════════════════════════════╝
+                              ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ Agent Factory                │ retained-draft · Agent · Keyboard                                                      │
+ ▼ Sessions (1)               │                                                                                        │
+                              │===============================================================                         │
+  ▾  retained-draft        ●  │Play-test stand-in                                                                      │
+     ⎇-dev/retained-draft     │This pane is bash, not an agent.                                                        │
+                              │Evidence from this pane does not cover agent UI behavior such as                        │
+    └ 1 Agent · open          │the composer, modal state, paste handling, status footer, or turns.                     │
+                              │Use AF_PLAYTEST_AGENT=codex for a real-agent play-test.                                 │
+                              │===============================================================                         │
+                              │                                                                                        │
+                              │[Play-test stand-in: bash] ~/sandbox/mock-repo-retained-draft $                         │
+                              │[Play-test stand-in: bash] ~/sandbox/mock-repo-retained-draft $ : "AF5D4E5B32"; echo FIR│
+                              │ST_SESSION_REACHED                                                                      │
+                              │FIRST_SESSION_REACHED                                                                   │
+                              │[Play-test stand-in: bash] ~/sandbox/mock-repo-retained-draft $                         │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              │                                                                                        │
+                              └────────────────────────────────────────────────────────────────────────────────────────┘
                                                     ctrl+] nav mode
 
