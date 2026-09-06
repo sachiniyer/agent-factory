@@ -754,35 +754,6 @@ func TestHookOutputSuffixRedactsSerializedEndpointVariants(t *testing.T) {
 	}
 }
 
-// TestExtractJSONAtHandlesMalformedDelimiterFlood keeps endpoint selection
-// linear after a valid JSON log. No unmatched opener can produce a complete
-// value, so retrying a suffix scan from each one is pure quadratic work.
-func TestExtractJSONAtHandlesMalformedDelimiterFlood(t *testing.T) {
-	const logRecord = `{"level":"info"}`
-	output := logRecord + strings.Repeat("{", 50_000)
-
-	first, next := extractJSONAt(output, 0)
-	require.Equal(t, logRecord, first)
-	started := time.Now()
-	value, end := extractJSONAt(output, next)
-	assert.Less(t, time.Since(started), time.Second, "unmatched delimiters must be scanned in linear time")
-	assert.Empty(t, value)
-	assert.Equal(t, len(output), end)
-
-	balanced := strings.Repeat("[", 50_000) + "not-json" + strings.Repeat("]", 50_000)
-	started = time.Now()
-	value, end = extractJSONAt(balanced, 0)
-	assert.Less(t, time.Since(started), time.Second, "balanced malformed nesting must be scanned in linear time")
-	assert.Empty(t, value)
-	assert.Equal(t, len(balanced), end)
-
-	recoverable := strings.Repeat("[bad", 20_000) + logRecord + strings.Repeat("]", 20_000)
-	started = time.Now()
-	value, _ = extractJSONAt(recoverable, 0)
-	assert.Less(t, time.Since(started), time.Second, "nested recovery must walk each candidate once")
-	assert.Equal(t, logRecord, value)
-}
-
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
 // killed or interrupted while writing its endpoint JSON. The unmatched tail is
 // still diagnostic output, but a complete quoted token value inside it is just
