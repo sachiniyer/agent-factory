@@ -7,6 +7,7 @@ const MARKER = '<!-- codex-reviewer-outage:v1 ';
 // rolling 24h window cannot forget an outage and completed history stays fixed.
 const SCAN_SINCE = '2026-09-05T00:00:00.000Z';
 const time = (value) => Date.parse(value || '');
+const causeLabel = kind => ({ failure: 'transient failure', 'usage-limit': 'usage limit' })[kind] || 'unknown cause';
 const hours = (start, end) => (Math.max(0, time(end) - time(start)) / 3600000).toFixed(1);
 
 function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
@@ -17,16 +18,22 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
     for (const artifact of pull.artifacts) {
       if (artifact.user?.login !== evidence.CODEX_REVIEWER) continue;
       const body = artifact.body || '';
-      const headVerdict = evidence.parseVerdictArtifact(artifact, pull.head.sha);
-      const verdict = evidence.parseReviewedCommit(body) || headVerdict;
+      const verdict = evidence.parseReviewedCommit(body);
       const unavailable = evidence.classifyCodexUnavailableArtifact(artifact);
-      // Automatic reviews may recover only through a completed summary row.
-      // Its own time records recovery; later edits to the table do not.
-      const at = headVerdict?.kind === 'summary-row'
-        ? new Date(headVerdict.time).toISOString()
-        : (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at;
-      if ((!verdict && !unavailable) || !Number.isFinite(time(at)) || time(at) > time(now) || time(at) < time(since)) continue;
-      events.push({ time: at, verdict, url: artifact.html_url, body, kind: unavailable?.kind });
+      // Every completed row is a recovery, including superseded commits.
+      // Head matching remains necessary only for the merge accounting below.
+      const responses = evidence.completedCodexSummaryRows(artifact).map(row => ({
+        time: new Date(row.time).toISOString(), verdict: true,
+      }));
+      if (verdict || unavailable) responses.push({
+        time: (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at,
+        verdict, kind: unavailable?.kind,
+      });
+      for (const response of responses) {
+        const at = time(response.time);
+        if (!Number.isFinite(at) || at > time(now) || at < time(since)) continue;
+        events.push({ ...response, url: artifact.html_url, body });
+      }
     }
   }
   // Verdict wins a timestamp tie. A real verdict is recovery even if it reports
@@ -77,7 +84,7 @@ function render(episodes, now) {
     'Degraded merges are reconstructed from pre-merge reviewer-unavailable notices and absence of a verdict covering the merged head (the #3932 method).', ''];
   for (const episode of [...episodes].reverse()) {
     lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
-      `Observed causes: ${(episode.causes || []).map(kind => kind === 'failure' ? 'transient failure' : 'usage limit').join(', ') || 'not recorded'}.`,
+      `Observed causes: ${(episode.causes || []).map(causeLabel).join(', ') || 'not recorded'}.`,
       `Latest reviewer-unavailable notice: [${episode.latest.time}](${episode.latest.url})`,
       `> ${episode.latest.body.replace(/\n/g, '\n> ')}`,
       `Degraded merges: ${episode.merged.length}${episode.merged.length ? ` (${episode.merged.map(n => `#${n}`).join(', ')})` : ''}.`,
@@ -101,6 +108,8 @@ function readRecord(comment) {
 async function gateNotice({ github, context, since, kind = "usage-limit", now = new Date().toISOString() }) {
   let suffix = ' (repository record not yet updated; duration observed on this PR)';
   let start = since;
+  let description = kind === 'failure' ? 'unavailable after a transient failure' : 'usage-limited';
+  let observedCauses = '';
   try {
     const comments = await github.paginate(github.rest.issues.listComments, {
       ...context.repo, issue_number: POLICY_ISSUE, per_page: 100,
@@ -109,12 +118,17 @@ async function gateNotice({ github, context, since, kind = "usage-limit", now = 
     const active = record?.state.episodes.at(-1);
     if (active && !active.end && time(active.start) <= time(since)) {
       start = active.start;
+      const causes = active.causes || [];
+      if (causes.length !== 1 || causes[0] !== kind) {
+        description = 'unavailable';
+        observedCauses = ` (${causes.map(causeLabel).join(', then ') || 'causes not recorded'})`;
+      }
       suffix = ` (Master Health Watch as of ${record.state.observedAt}; ${record.comment.html_url})`;
     }
   } catch {
     suffix = ' (repository record unavailable; duration observed on this PR)';
   }
-  return `Codex ${kind === "failure" ? "unavailable after a transient failure" : "usage-limited"} since ${start}, ${hours(start, now)}h ago${suffix}`;
+  return `Codex ${description} since ${start}, ${hours(start, now)}h ago${observedCauses}${suffix}`;
 }
 
 // api paginates GET collections; failures abort before any record write. The

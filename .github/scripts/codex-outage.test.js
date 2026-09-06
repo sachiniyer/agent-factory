@@ -144,3 +144,63 @@ test('outage history records failure and quota causes without a false diagnosis'
   assert.equal(mixed[0].latest.kind, 'usage-limit');
   assert.match(render(mixed, t(5)), /transient failure, usage limit/);
 });
+
+function summaryRow(hour, { status = 'Completed', commit = 'bbbbbbb' } = {}) {
+  const timestamp = hour == null ? '' : `<relative-time datetime="${t(hour)}"></relative-time>`;
+  return `| Code Review | ${status} ${timestamp} | \`${commit}\` | New commits |`;
+}
+function summaryArtifact(rows, extra = {}) {
+  return comment(9, `<!-- codex-pull-request-review-summary -->\n## Codex Review Summary\n${rows.join('\n')}`, extra);
+}
+test('older-head completed summary rows recover outages at every row time', () => {
+  const failure = comment(2, 'Codex Review: Something went wrong. Unknown error');
+  const collect = artifacts => aggregate([{ number: 3953, head: { sha: head }, artifacts }], t(8));
+  const summary = summaryArtifact([summaryRow(4)]);
+  const episodes = collect([failure, summary]);
+  assert.equal(episodes[0].end, t(4));
+  assert.equal(episodes[0].recovery, summary.html_url);
+  // Every row is an event: neither the first row nor the current head is special.
+  const multiple = collect([failure, comment(5, limits[0]), summaryArtifact([summaryRow(7), summaryRow(4)])]);
+  assert.deepEqual(multiple.map(e => [e.start, e.end]), [[t(2), t(4)], [t(5), t(7)]]);
+  for (const invalid of [
+    summaryArtifact([summaryRow(4, { status: 'Running' })]),
+    summaryArtifact([summaryRow(null)]),
+    summaryArtifact([summaryRow(4, { commit: '' })]),
+    summaryArtifact([summaryRow(4)], { user: { login: 'someone' } }),
+    comment(9, `Quoted summary:\n${summary.body}`),
+  ]) assert.equal(collect([failure, invalid])[0].end, null);
+});
+
+test('record-backed notices use the episode causes for the entire adopted span', async () => {
+  for (const [causes, kind, expected] of [
+    [['failure', 'usage-limit'], 'usage-limit', 'unavailable since'],
+    [['usage-limit', 'failure'], 'failure', 'unavailable since'],
+    [['failure'], 'usage-limit', 'unavailable since'],
+    [['usage-limit'], 'failure', 'unavailable since'],
+    [['failure'], 'failure', 'unavailable after a transient failure since'],
+    [['usage-limit'], 'usage-limit', 'usage-limited since'],
+    [undefined, 'usage-limit', 'unavailable since'],
+  ]) {
+    const episodes = [{ start: t(2), end: null, causes, merged: [], latest: { time: t(3), body: '', url: 'notice' } }];
+    const github = { rest: { issues: { listComments() {} } }, paginate: async () => [
+      { user: { login: 'sachiniyer' }, body: render(episodes, t(4)), html_url: 'record' },
+    ] };
+    const notice = await gateNotice({ github, context: { repo: {} }, since: t(3), now: t(4), kind });
+    assert.ok(notice.startsWith(`Codex ${expected} ${t(2)}, 2.0h ago`), notice);
+    if (expected === 'unavailable since' && causes) {
+      const labels = causes.map(c => c === 'failure' ? 'transient failure' : 'usage limit').join(', then ');
+      assert.ok(notice.includes(`(${labels})`), notice);
+    }
+  }
+});
+
+test('missing and unreadable records retain local cause and local duration', async () => {
+  for (const kind of ['failure', 'usage-limit']) {
+    for (const paginate of [async () => [], async () => { throw Error('offline'); }]) {
+      const github = { rest: { issues: { listComments() {} } }, paginate };
+      const notice = await gateNotice({ github, context: { repo: {} }, since: t(3), now: t(4), kind });
+      const label = kind === 'failure' ? 'unavailable after a transient failure' : 'usage-limited';
+      assert.ok(notice.startsWith(`Codex ${label} since ${t(3)}, 1.0h ago`), notice);
+    }
+  }
+});

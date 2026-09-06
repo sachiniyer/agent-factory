@@ -170,7 +170,12 @@ same strictly-after-`headCurrentSince` timing rule and maintainer-review
 requirement as usage-limit answers. The shared outage-record predicate counts
 this failure too and records `failure` separately from `usage-limit`, so gate
 notices and the health record name the observed cause. An episode can include
-both causes. A real review quoting the message remains a review.
+both causes. When a notice adopts the repository episode's earlier start, it
+uses specific wording only if that episode has the same single cause as the
+local answer. Mixed or differing causes use “Codex unavailable since” and list
+the recorded causes in onset order. Without a usable record, the local answer
+supplies both the start and the cause. A real review quoting the message remains
+a review.
 
 `<!-- codex-pull-request-review-summary -->` identifies the maintained
 “Codex Review Summary” activity comment. Its edit time is excluded from
@@ -179,7 +184,10 @@ unavailable answer. Parseable Completed rows participate using their own times,
 even for an older commit, because they prove Codex answered again. Running rows
 and rows without a commit or timestamp remain excluded. A completed row older
 than the unavailable answer does not supersede it. Verdict parsing for the
-current head continues to use the row's own time.
+current head continues to use the row's own time. The repository outage record
+likewise treats every authenticated Completed row as recovery at its own time,
+regardless of the commit; only merge accounting requires a verdict for the
+merged head.
 
 Usage-limit evidence includes Codex inline review replies (`in_reply_to_id` set),
 including replies carried by an empty `COMMENTED` review (#3900). The reply's

@@ -4312,8 +4312,7 @@ async function evaluateCodex({
     // Ignore table edits and incomplete rows; only the row's own time counts.
     .flatMap((artifact) => {
       if (!String(artifact.body || "").trimStart().startsWith(CODEX_SUMMARY_MARKER)) return [artifact];
-      return parseSummaryRows(artifact.body)
-        .filter((row) => row.completed && row.commit != null && row.time != null)
+      return completedCodexSummaryRows(artifact)
         .map((row) => ({
           body: "", created_at: new Date(row.time).toISOString(),
         }));
@@ -4697,6 +4696,14 @@ function parseSummaryRows(body) {
   return rows;
 }
 
+// Availability recovery is head-independent. Both the gate and health record
+// use authenticated maintained rows, never the summary comment's edit time.
+function completedCodexSummaryRows(artifact) {
+  const body = String(artifact.body || "");
+  if (!body.trimStart().startsWith(CODEX_SUMMARY_MARKER)) return [];
+  return parseSummaryRows(body).filter(row => row.completed && row.commit != null && row.time != null);
+}
+
 // A Codex artifact's verdict for this head, or null. Prose first: it is the
 // explicit form and carries the artifact's own timestamp, exactly as before.
 //
@@ -4983,7 +4990,7 @@ function formatError(error) {
 
 module.exports = {
   codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact, classifyCodexUnavailableArtifact,
-    parseReviewedCommit, parseVerdictArtifact },
+    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,

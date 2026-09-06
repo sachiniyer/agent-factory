@@ -3588,10 +3588,9 @@ test("automatic summary verdict closes a transient failure outage at the row tim
   assert.deepEqual(episodes[0].merged, []);
   assert.match(render(episodes, at("30")), /availability — recovered/);
 
-  // An edit after the outage must not refresh a stale row. Only a completed,
-  // timestamped row for this head can recover; a future row is not evidence yet.
+  // An edit after the outage must not refresh a stale row. Recovery can be for
+  // any head, but needs a completed, timestamped row that is not in the future.
   for (const options of [
-    { commitCell: `\`${OTHER_SHA.slice(0, 7)}\`` },
     { status: "🔄 **Running**" },
     { rowTime: null },
     { rowTime: at("05") },
