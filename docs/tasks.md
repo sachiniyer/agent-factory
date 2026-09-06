@@ -216,6 +216,15 @@ af tasks add --name "Docs drift audit" --prompt "Audit the docs" \
 | `archive` | The session is archived — inert and restorable, and it keeps its full worktree |
 | `kill` | The session is permanently deleted, reclaiming its worktree and pruning the branch it owned |
 
+In the TUI Tasks pane the same three verbs are the **On done** row of the task form,
+between Target and Path. It shows what an existing task already declares, so a task set
+to `kill` is legible before you edit it rather than only from `af tasks get`. On a task
+with a `target_session` the row states why there is nothing to choose instead of
+offering a picker: that pair is refused (see [Task fields](#task-fields)), so a form that let
+you assemble it would turn a save into an error about a combination it offered. The web
+task modal does not have this field yet
+([#3959](https://github.com/sachiniyer/agent-factory/issues/3959)).
+
 **Choosing between `archive` and `kill` is the real decision, and af does not make it
 for you.** Archiving is restorable, but an archived worktree is retained whole —
 gitignored build output included — until someone prunes it by hand, so a daily task set

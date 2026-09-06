@@ -433,7 +433,7 @@ func TestTaskPaneCreateModeSelectorDefaultsToConfigDefault(t *testing.T) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "submit should mark a pending create")
-	_, _, _, _, _, _, program := tp.ConsumePendingCreate()
+	program := tp.ConsumePendingCreate().Program
 	assert.Equal(t, "", program, "default selector option must persist an empty Program")
 }
 
@@ -454,7 +454,7 @@ func TestTaskPaneCreateModeSelectorPicksCanonicalAgent(t *testing.T) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "submit should mark a pending create")
-	_, _, _, _, _, _, program := tp.ConsumePendingCreate()
+	program := tp.ConsumePendingCreate().Program
 	assert.Equal(t, "claude", program, "selector must persist the canonical agent name")
 }
 
@@ -884,7 +884,8 @@ func TestTaskPaneCreateModeInactiveTriggerNotSaved(t *testing.T) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "a valid watch task must submit")
-	_, _, cron, watchCmd, _, _, _ := tp.ConsumePendingCreate()
+	draft := tp.ConsumePendingCreate()
+	cron, watchCmd := draft.Cron, draft.WatchCmd
 	assert.Equal(t, "", cron, "the inactive cron buffer must not be saved")
 	assert.Equal(t, "tail -F log", watchCmd)
 }
@@ -953,7 +954,8 @@ func TestTaskPaneCreateModeWatchTask(t *testing.T) {
 
 	assert.True(t, tp.HasPendingCreate(), "a watch task with an empty prompt is valid")
 	assert.Equal(t, "", tp.editError)
-	_, prompt, cron, watchCmd, targetSession, _, _ := tp.ConsumePendingCreate()
+	draft := tp.ConsumePendingCreate()
+	prompt, cron, watchCmd, targetSession := draft.Prompt, draft.Cron, draft.WatchCmd, draft.TargetSession
 	assert.Equal(t, "", prompt)
 	assert.Equal(t, "", cron)
 	assert.Equal(t, "gh-issue-watch.sh", watchCmd)
@@ -1428,10 +1430,17 @@ func TestTaskPaneEditFormClampsToHeightWithFocusInView(t *testing.T) {
 
 // TestTaskPaneEditFormUnclampedWhenItFits: at normal sizes the form renders
 // unchanged — no window, no more-markers.
+//
+// 25, measured, not guessed: the On-done row (#2595) added a line to the form,
+// which moved the unclamped floor for this pane from 23 to 25. The two-row jump
+// is the prompt textarea, sized at height/4, crossing its own step at the same
+// time. A pane 25 tall is the task pane's share of a ~42-row terminal, and every
+// height below it still renders — clamped and scrolled, which is what #1098
+// built the window for.
 func TestTaskPaneEditFormUnclampedWhenItFits(t *testing.T) {
 	repo := newGitRepo(t)
 	tp := NewTaskPane()
-	tp.SetSize(80, 24)
+	tp.SetSize(80, 25)
 	tp.EnterCreateMode(repo)
 
 	out := tp.String()

@@ -6,9 +6,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // validateForm enforces the shared create/edit form contract, mirroring
@@ -136,6 +138,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.tasks[s.selectedIdx].CronExpr = cron
 			s.tasks[s.selectedIdx].WatchCmd = watch
 			s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
+			s.tasks[s.selectedIdx].OnComplete = s.onCompleteValue()
 			s.tasks[s.selectedIdx].ProjectPath = absPath
 			s.tasks[s.selectedIdx].Program = s.programValue()
 			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
@@ -158,6 +161,8 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.editPrompt, _ = s.editPrompt.Update(msg)
 		case taskFocusTarget:
 			s.editTarget, _ = s.editTarget.Update(msg)
+		case taskFocusOnComplete:
+			s.handleOnCompleteKey(msg)
 		case taskFocusPath:
 			s.editPath, _ = s.editPath.Update(msg)
 		case taskFocusProgram:
@@ -194,6 +199,33 @@ func (s *TaskPane) handleProgramKey(msg tea.KeyMsg) {
 	case "down", "j", "right", "l":
 		if s.editProgramIdx < len(s.editProgramOptions)-1 {
 			s.editProgramIdx++
+		}
+	}
+}
+
+// handleOnCompleteKey steps the spawned-session lifecycle selector, mirroring
+// handleProgramKey: left/h and right/l move the choice (up/down too) and every
+// other key is ignored, so the field behaves like a list rather than a text
+// input.
+//
+// It refuses to move while a target session is set. The verb governs a session
+// the task CREATES, and a target-session task delivers into one the user named
+// for reuse, so there is nothing for it to govern (task.onCompleteApplies) — and
+// a stored pair the daemon would reject (task.ValidateTrigger) must not be
+// reachable from the form at all. The row says so in place of the options, so a
+// dead key is explained rather than merely dead.
+func (s *TaskPane) handleOnCompleteKey(msg tea.KeyMsg) {
+	if !s.onCompleteApplies() || len(s.editOnCompleteOptions) == 0 {
+		return
+	}
+	switch msg.String() {
+	case "up", "k", "left", "h":
+		if s.editOnCompleteIdx > 0 {
+			s.editOnCompleteIdx--
+		}
+	case "down", "j", "right", "l":
+		if s.editOnCompleteIdx < len(s.editOnCompleteOptions)-1 {
+			s.editOnCompleteIdx++
 		}
 	}
 }
@@ -353,6 +385,11 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(s.editTarget.View())
 	b.WriteString("\n")
 	markEnd(taskFocusTarget)
+	markStart(taskFocusOnComplete)
+	b.WriteString(label("On done:"))
+	b.WriteString(s.renderOnCompleteSelector())
+	b.WriteString("\n")
+	markEnd(taskFocusOnComplete)
 	markStart(taskFocusPath)
 	b.WriteString(label("Path:"))
 	b.WriteString(s.editPath.View())
@@ -511,6 +548,69 @@ func (s *TaskPane) renderTriggerSelector() string {
 		out += hintStyle.Render("   ←/→ switch")
 	}
 	return out
+}
+
+// renderOnCompleteSelector renders the spawned-session lifecycle choice on one
+// line, in the same shape as the Program selector: the current value, with ←/→
+// stepping when focused.
+//
+// When the form names a target session the row renders the reason instead of the
+// options. Showing "keep" there would be the worse lie of the two available:
+// it reads as a policy this task carries, when in fact the task has no session
+// of its own to apply one to.
+func (s *TaskPane) renderOnCompleteSelector() string {
+	t := CurrentTheme()
+	hintStyle := DialogHintStyle()
+	if !s.onCompleteApplies() {
+		return hintStyle.Render(s.wrapOnCompleteText("n/a — a target session is not this task's to reap"))
+	}
+
+	focused := s.focusIndex == taskFocusOnComplete
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
+
+	value := task.OnCompleteKeep
+	if s.editOnCompleteIdx >= 0 && s.editOnCompleteIdx < len(s.editOnCompleteOptions) {
+		value = s.editOnCompleteOptions[s.editOnCompleteIdx]
+	}
+	if focused {
+		picker := SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸")
+		hint := "←/→ " + onCompleteHint(value)
+		if s.width > 0 && 9+lipgloss.Width(picker)+3+lipgloss.Width(hint) > s.width {
+			return picker + "\n         " + hintStyle.Render(s.wrapOnCompleteText(hint))
+		}
+		return picker + hintStyle.Render("   "+hint)
+	}
+	return dimSelectedStyle.Render(value)
+}
+
+// Keep consequences readable in the actual modal content width, which is
+// narrower than the terminal. Continuations align with the value after the
+// nine-cell label; the form's focus range includes these lines so scrolling
+// keeps the whole explanation visible when this field is selected.
+func (s *TaskPane) wrapOnCompleteText(text string) string {
+	if s.width <= 0 {
+		return text
+	}
+	width := max(1, s.width-9)
+	return strings.ReplaceAll(xansi.Wrap(text, width, ""), "\n", "\n         ")
+}
+
+// onCompleteHint says what the SELECTED verb does to the session a run created,
+// beside the picker that sets it. The words are the consequence, not the verb
+// again: "kill" beside a bare "change" reads as reversible, and it is the one
+// option here whose effect cannot be undone — it deletes the session's worktree
+// and prunes the branch it owned (#2595). "permanently" carries that, rather
+// than capitals, which this repo reserves for env vars and literal flag names.
+func onCompleteHint(value string) string {
+	switch value {
+	case task.OnCompleteArchive:
+		return "archives the run's session — restorable"
+	case task.OnCompleteKill:
+		return "deletes the run's session and its branch — permanent"
+	default:
+		return "leaves the run's session in place"
+	}
 }
 
 // renderProgramSelector renders the agent selector as a single line showing
