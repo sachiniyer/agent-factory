@@ -73,6 +73,18 @@ const SELFTEST_PATHS = [
   ".github/scripts/web-selftest-scope.js",
 ];
 
+// The narrower client-performance scope requested in #3908 review. web/**
+// includes the Playwright configs, committed bundle, and per-theme goldens.
+// Docs-only and CI-gate-only edits do not pay for a second container job.
+const PERF_PATHS = ["web/**", "app/**", "ui/**", "scripts/perf/**", "scripts/container/**"];
+
+function scopePerf(changedPaths) {
+  const matched = changedPaths.filter((path) =>
+    PERF_PATHS.some((pattern) => matchesPattern(pattern, path)),
+  );
+  return { run: matched.length > 0, matched };
+}
+
 // A deliberately tiny subset of GitHub's `paths:` globbing, matching what the
 // trigger filter does for the three shapes actually used:
 //
@@ -112,23 +124,27 @@ function scopeWebSelftest(changedPaths) {
 // CLI: `node web-selftest-scope.js <file-of-changed-paths>` prints `run=true` or
 // `run=false` on stdout for `>> "$GITHUB_OUTPUT"`, and the reasoning on stderr so
 // the job log says why it did what it did. A missing/unreadable file is not an
-// empty diff — it is a broken diff, so it prints run=true.
+// empty diff — it is a broken diff, so it prints run=true. A third argument
+// `perf` uses PERF_PATHS and prints perf_run=… into the same scope job.
 if (require.main === module) {
   const fs = require("node:fs");
   const file = process.argv[2];
+  const perf = process.argv[3] === "perf";
+  const output = perf ? "perf_run" : "run";
+  const label = perf ? "perf-scope" : "web-selftest-scope";
   let changed;
   try {
     changed = fs.readFileSync(file, "utf8").split("\n");
   } catch (error) {
-    process.stderr.write(`web-selftest-scope: cannot read ${file} (${error.message}) — running the suite\n`);
-    process.stdout.write("run=true\n");
+    process.stderr.write(`${label}: cannot read ${file} (${error.message}) — running the suite\n`);
+    process.stdout.write(`${output}=true\n`);
     process.exit(0);
   }
   const paths = changed.map((line) => line.trim()).filter((line) => line.length > 0);
-  const { run, matched } = scopeWebSelftest(paths);
+  const { run, matched } = (perf ? scopePerf : scopeWebSelftest)(paths);
   if (run) {
     process.stderr.write(
-      `web-selftest-scope: ${matched.length} of ${paths.length} changed path(s) are in scope, e.g.\n` +
+      `${label}: ${matched.length} of ${paths.length} changed path(s) are in scope, e.g.\n` +
         matched
           .slice(0, 10)
           .map((path) => `  ${path}\n`)
@@ -136,10 +152,10 @@ if (require.main === module) {
     );
   } else {
     process.stderr.write(
-      `web-selftest-scope: none of ${paths.length} changed path(s) can reach the web selftest — skipping it.\n`,
+      `${label}: none of ${paths.length} changed path(s) are in scope — skipping.\n`,
     );
   }
-  process.stdout.write(`run=${run}\n`);
+  process.stdout.write(`${output}=${run}\n`);
 }
 
-module.exports = { SELFTEST_PATHS, scopeWebSelftest, matchesPattern };
+module.exports = { SELFTEST_PATHS, PERF_PATHS, scopeWebSelftest, scopePerf, matchesPattern };
