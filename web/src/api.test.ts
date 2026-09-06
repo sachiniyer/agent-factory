@@ -18,6 +18,7 @@ import {
   fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
+  isMutationOutcomeUncertain,
   killSession,
   listBackends,
   listDirectory,
@@ -1077,4 +1078,53 @@ test("fetchPreviewOrigin: every failure degrades to '' rather than throwing", as
     throw new TypeError("network down");
   };
   assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
+});
+
+test("create refusal provenance distinguishes daemon rejection from lost or gateway replies", async () => {
+  for (const status of [400, 503]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({ data: null, error: { message: "refused" } }) });
+    await assert.rejects(createSession(createInput(), "tok"), error =>
+      error instanceof ApiError && error.daemonRejected && error.message === "refused");
+  }
+  for (const status of [502, 504]) {
+    stubFetchResponse({ ok: false, status, json: async () => { throw new SyntaxError("truncated gateway response"); } });
+    await assert.rejects(createSession(createInput(), "tok"), error =>
+      error instanceof ApiError && !error.daemonRejected);
+  }
+  (globalThis as { fetch: unknown }).fetch = async () => { throw new TypeError("response lost"); };
+  await assert.rejects(createSession(createInput(), "tok"), error =>
+    error instanceof ApiError && !error.daemonRejected);
+});
+
+
+test("JSON gateway error envelopes cannot establish rejection or committed mutation outcomes", async () => {
+  for (const status of [502, 504]) {
+    for (const code of [undefined, "mutation_committed"]) {
+      stubFetchResponse({ ok: false, status, json: async () => ({
+        data: null, error: { message: "Upstream response unavailable", code },
+      }) });
+      await assert.rejects(archiveSession("stable-id", "session", "tok"), error => {
+        assert.ok(error instanceof ApiError);
+        assert.equal(error.daemonRejected, false);
+        assert.equal(error.message, "Upstream response unavailable");
+        assert.equal(isMutationOutcomeUncertain(error), true);
+        assert.equal(isMutationCommittedError(error), false);
+        return true;
+      });
+    }
+  }
+});
+
+test("structured daemon lifecycle refusals remain definitive and retryable", async () => {
+  for (const status of [400, 503]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({
+      data: null, error: { message: "The daemon refused the operation" },
+    }) });
+    await assert.rejects(killSession("stable-id", "session", "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, true);
+      assert.equal(isMutationOutcomeUncertain(error), false);
+      return true;
+    });
+  }
 });

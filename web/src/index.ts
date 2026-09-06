@@ -32,6 +32,7 @@ import {
   killSession,
   getConfig,
   isMutationCommittedError,
+  isMutationOutcomeUncertain,
   handoffSession,
   listBackends,
   listDirectory,
@@ -76,19 +77,18 @@ import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
 import {
-  applyEvent,
   clampActiveTab,
   pickSelection,
   rebindTargetAfterAwait,
   tabRebindRefusalNotice,
   type TabRebindVerb,
   tabToKeepOnClose,
-  upsertSession,
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
+import { OptimisticSessions } from "./optimistic.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import {
@@ -180,6 +180,7 @@ const store = new Store<AppState>({
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let stream: EventStream | null = null;
+const optimisticSessions = new OptimisticSessions();
 const connectionGate = createLatestRequestGate();
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
@@ -410,6 +411,7 @@ async function connect(candidate: string): Promise<void> {
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
     phase: "app",
@@ -424,6 +426,7 @@ async function connect(candidate: string): Promise<void> {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
+    mutationError: undefined,
     tasks,
     tasksError,
     projectsError,
@@ -456,6 +459,7 @@ async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
+  optimisticSessions.reset();
   stopStream();
   closeModal();
   closeConfigAssistant();
@@ -475,6 +479,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
+    mutationError: undefined,
     tasks: [],
     registeredProjects: [],
   });
@@ -493,7 +498,9 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
 let routeSelection: string | null = null;
+let navigationGeneration = 0;
 function resolveRoute(): void {
+  navigationGeneration++;
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -525,6 +532,7 @@ function resolveRoute(): void {
  *  follows the layout the split view will actually show (settledTab) — a session shown
  *  before keeps its retained pane, and only one never shown starts on its agent tab. */
 function moveSelection(id: string): void {
+  navigationGeneration++;
   clearTabError();
   store.set({
     selectedId: id,
@@ -597,6 +605,7 @@ function focusRail(): void {
  *  view switch composes with the #1694 focus model instead of fighting it. Switching
  *  INTO the tasks view refreshes the task list so it is current on arrival. */
 function switchView(view: View): void {
+  navigationGeneration++;
   if (store.get().view === view) {
     return;
   }
@@ -648,6 +657,7 @@ function resetStatusFilter(): void {
  *  reconciliation can choose this valid fallback while storage names a project that
  *  just disappeared (#2276). */
 function switchProject(root: string): void {
+  navigationGeneration++;
   persistProjectChoice(root);
   if (store.get().selectedProject === root) {
     return;
@@ -763,27 +773,25 @@ function newSession(): void {
         const m = modal;
         clearTabError();
         // Latch the detached form against a duplicate submit, then release the UI
-        // immediately. The row that follows is NOT synthesized here: it comes from
-        // the daemon's session.updated OpCreating projection.
+        // immediately. Project Creating before sending the RPC; only the daemon
+        // response may replace this local identity with an attachable session.
         m.setBusy(true);
         closeModal();
         const requestedAccount = values.account ?? "";
+        const navigationAtSubmit = navigationGeneration;
+        const mutation = optimisticSessions.beginCreate(values);
+        applySessions(optimisticSessions.project());
         void createSession(values, tok)
           .then((created) => {
-            // Upsert the created row AND select it in one update, so it opens
-            // attached immediately. Upserting here (not just setting selectedId)
-            // matters: the async created event may not have landed yet, and
-            // selecting an id whose row isn't in the list would leave the pane
-            // stuck empty (the shell only re-renders the main pane on a selection
-            // change). CreateSession returns the full projection, so the row is
-            // complete; the later created event just upserts the same id again.
-            if (created.id) {
-              const sessions = upsertSession(store.get().sessions, created);
-              // Reset to the agent tab: selecting a DIFFERENT session must show its
-              // tab 0 (a new session has only the agent tab), or a stale activeTab
-              // would stream ?tab=<n> for a tab this session doesn't have. This is
-              // the same invariant moveSelection enforces for the keyboard path.
-              store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
+            if (!created || typeof created.title !== "string") throw new Error("The daemon response did not identify the created session.");
+            if (!optimisticSessions.succeed(mutation, created)) return;
+            requestResync();
+            // Preserve navigation made while the daemon was creating the session.
+            const maySelect = navigationGeneration === navigationAtSubmit && store.get().view === "sessions";
+            applySessions(optimisticSessions.project());
+            if (created.id && maySelect && store.get().selectedProject === values.repoPath &&
+                store.get().sessions.some(session => session.id === created.id)) {
+              store.set({ selectedId: created.id, activeTab: 0, tabError: null });
             }
             // Version skew on the account field (#3844): a daemon predating account
             // support drops it silently, and the row just selected is about to be
@@ -802,14 +810,22 @@ function newSession(): void {
             }
           })
           .catch((e) => {
+            const uncertain = isMutationOutcomeUncertain(e);
+            const outcome = optimisticSessions.reject(mutation, uncertain);
+            if (outcome === "stale") return;
+            applySessions(optimisticSessions.project());
             // The daemon publishes session.killed for the provisional id. Resync as a
             // direct fallback so even a missed delete event cannot strand a
             // phantom creating row, and surface the daemon's unmodified error text.
             requestResync();
+            if (outcome !== "reverted") {
+              surfaceMutationError(new Error(`The create response could not confirm the outcome. Check sessions before creating again. ${errorText(e)}`));
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
             if (!modal && token === tok) openModal(m);
-            else surfaceTabError(e);
+            else surfaceMutationError(e);
           });
       },
       onCancel: closeModal,
@@ -833,14 +849,45 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
           return;
         }
         const m = modal;
+        const mutation = action === "restore" ? null : optimisticSessions.begin(action, session);
+        if (action !== "restore" && !mutation) return;
         m.setBusy(true);
+        if (mutation) {
+          closeModal();
+          applySessions(optimisticSessions.project());
+        }
         const run =
           action === "kill"
             ? killSession(target.id, target.title, tok)
             : action === "archive"
               ? archiveSession(target.id, target.title, tok)
               : restoreSession(target.id, target.title, tok);
-        void run.then(closeModal).catch((e) => {
+        void run.then(() => {
+          if (mutation) {
+            if (!optimisticSessions.succeed(mutation)) return;
+            applySessions(optimisticSessions.project());
+            requestResync();
+          } else if (modal === m) closeModal();
+        }).catch((e) => {
+          if (mutation) {
+            const outcome = isMutationCommittedError(e)
+              ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
+              : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+            if (outcome === "stale") return;
+            applySessions(optimisticSessions.project());
+            requestResync();
+            if (outcome !== "reverted") {
+              surfaceMutationError(outcome === "uncertain"
+                ? new Error(`The ${action} outcome could not be confirmed. Check the session before trying again. ${errorText(e)}`)
+                : e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+            if (!modal) openModal(m);
+            else surfaceMutationError(e);
+            return;
+          }
           if (isMutationCommittedError(e)) {
             closeModal();
             requestResync();
@@ -988,7 +1035,7 @@ function openTab(index: number): void {
  *  surface on the pane header's status line. */
 function guardedTabRebind(
   selId: string,
-  run: () => Promise<SessionData[]>,
+  run: () => Promise<SessionData[] | null>,
   resolve: (sessions: SessionData[]) => number,
   verb: TabRebindVerb,
 ): void {
@@ -996,6 +1043,7 @@ function guardedTabRebind(
   const gen = splitView.layoutGeneration();
   void run()
     .then((sessions) => {
+      if (sessions === null) return;
       const targetIdx = resolve(sessions);
       // Read the generation BEFORE committing the roster. The guard asks whether the
       // USER formed a newer intent during the await, and this commit's own rerender is
@@ -1074,7 +1122,7 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
     () =>
       create(selId, sel.title, tok).then((name) => {
         createdName = name;
-        return fetchSnapshot(tok);
+        return fetchProjectedSnapshot(tok);
       }),
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
@@ -1139,7 +1187,7 @@ function closeSessionTab(index: number): void {
   // A close only re-points the focused pane; it does not attach (verb "close").
   guardedTabRebind(
     selId,
-    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)),
+    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)),
     // Resolve the kept tab's CURRENT ordinal in the post-close roster; -1 (a concurrent
     // close took it too) leaves the pane where syncSplit's identity remap already
     // settled it rather than guessing again.
@@ -1228,8 +1276,9 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
   // a pre-#1738 record. An empty id sends no tab_id and the daemon resolves by name,
   // which is the documented fallback for a roster that has no ids to key on (#1929).
   void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok)
-    .then(() => fetchSnapshot(tok))
+    .then(() => fetchProjectedSnapshot(tok))
     .then((sessions) => {
+      if (sessions === null) return;
       store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
     })
     .catch((e) => surfaceTabError(e));
@@ -1269,11 +1318,18 @@ function reorderSessionTab(from: number, to: number): void {
   // than by a name/ordinal read from a roster that may already have shifted is the
   // whole point (#1929). See renameSessionTab for why tabRealId and not tabIdentity.
   void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok)
-    .then(() => fetchSnapshot(tok))
+    .then(() => fetchProjectedSnapshot(tok))
     .then((sessions) => {
+      if (sessions === null) return;
       store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
     })
     .catch((e) => surfaceTabError(e));
+}
+
+/** Keep every overlapping mutation failure readable until explicitly dismissed. */
+function surfaceMutationError(error: unknown): void {
+  const previous = store.get().mutationError;
+  store.set({ mutationError: [previous, errorText(error)].filter(Boolean).join("\n\n") });
 }
 
 /** Surfaces a failed asynchronous operation as a transient toast. Tab mutations
@@ -1915,7 +1971,10 @@ const actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
-  dismissNotice: clearTabError,
+  dismissNotice: () => {
+    if (store.get().mutationError) store.set({ mutationError: undefined });
+    else clearTabError();
+  },
   retryConnection: () => { void bootstrap(); },
   retryTasks: refreshTasks,
   notice: surfaceNotice,
@@ -2089,8 +2148,8 @@ function onEvent(ev: WireEvent): void {
     requestProjectsResync();
   }
   sessionEventGeneration += 1;
-  const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
-  applySessions(sessions);
+  const needsResync = optimisticSessions.event(ev);
+  applySessions(optimisticSessions.project());
   if (needsResync) {
     requestResync();
   }
@@ -2134,6 +2193,20 @@ function applySessions(sessions: SessionData[]): void {
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 
+/** Tab mutations also fetch full snapshots. Fold those through the same ledger
+ * so their next event cannot restore the pre-tab roster or erase local feedback. */
+async function fetchProjectedSnapshot(tok: string): Promise<SessionData[] | null> {
+  if (token !== tok) return null;
+  try {
+    return await optimisticSessions.refresh(() => fetchSnapshot(tok));
+  } catch (error) {
+    // The gesture cannot safely rebind without its post-mutation roster. Keep
+    // ordinary background reconciliation alive after its bounded retries fail.
+    requestResync();
+    throw error;
+  }
+}
+
 /** Re-fetches the authoritative Snapshot (debounced) and replaces the rail — the
  *  resync path for reconnects and partial archived/restored events. Failures are
  *  swallowed: the stream keeps running and a later event/reconnect retries. */
@@ -2153,6 +2226,7 @@ function requestResync(): void {
       return;
     }
     const eventGeneration = sessionEventGeneration;
+    const mutationFence = optimisticSessions.snapshotFence();
     void fetchSnapshot(tok)
       .then((sessions) => {
         // A stop/reconnect or a newer resync owns the result now.
@@ -2167,7 +2241,11 @@ function requestResync(): void {
           requestResync();
           return;
         }
-        applySessions(sessions);
+        if (!optimisticSessions.snapshot(sessions, mutationFence)) {
+          requestResync();
+          return;
+        }
+        applySessions(optimisticSessions.project());
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
         // only after the winning response reaches the store, giving black-box clients

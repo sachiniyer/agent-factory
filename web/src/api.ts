@@ -200,16 +200,25 @@ export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, message: string, code = "") {
+  /** A parsed daemon error envelope, rather than a missing/gateway response. */
+  readonly daemonRejected: boolean;
+  constructor(status: number, message: string, code = "", daemonRejected = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.daemonRejected = daemonRejected;
   }
 }
 
 export function isMutationCommittedError(e: unknown): e is ApiError {
-  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE;
+  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE &&
+    e.status !== 502 && e.status !== 504;
+}
+
+/** Only a definitive daemon refusal permits an immediate mutation retry. */
+export function isMutationOutcomeUncertain(e: unknown): boolean {
+  return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 
 /**
@@ -250,10 +259,14 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
 
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error));
+    // The RPC handler does not emit gateway statuses. A proxy can return the
+    // same JSON error shape after the upstream committed, so shape alone is
+    // insufficient evidence that retrying the mutation is safe.
+    const daemonRejected = env?.error != null && resp.status !== 502 && resp.status !== 504;
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), daemonRejected);
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error));
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), true);
   }
   return env?.data as T;
 }
