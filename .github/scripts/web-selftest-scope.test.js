@@ -270,3 +270,66 @@ test("web-selftest.yml is callable AND runs on master", () => {
   // once through pr.yml — and the standalone one would gate nothing.
   assert.doesNotMatch(yaml, /^ {2}pull_request:$/m, "the PR run goes through pr.yml now, not a pull_request trigger");
 });
+
+const { PERF_PATHS, scopePerf } = require("./web-selftest-scope.js");
+
+test("performance path list is pinned to the reviewed client and harness scope", () => {
+  assert.deepEqual(PERF_PATHS, ["web/**", "app/**", "ui/**", "scripts/perf/**", "scripts/container/**"]);
+  for (const changed of [
+    "web/src/ui.ts", "web/dist/af-web.js", "web/playwright.demo.config.ts",
+    "web/playwright.perf.config.ts", "web/playwright.visual.config.ts",
+    "web/selftest/goldens/dashboard-dark.png", "app/app.go", "ui/sidebar.go",
+    "scripts/perf/baselines.json", "scripts/container/web-demo-entry.sh",
+  ]) {
+    assert.equal(scopePerf([changed]).run, true, changed);
+  }
+  assert.deepEqual(scopePerf(["docs/dev/perf-baselines.md", "app/app.go"]), { run: true, matched: ["app/app.go"] });
+});
+
+test("docs-only, gate-only, empty, and similarly prefixed paths skip performance", () => {
+  for (const changed of [
+    "docs/dev/perf-baselines.md", "mkdocs.yml", "README.md", ".github/workflows/pr.yml",
+    ".github/scripts/web-selftest-scope.js", "webhooks/test.go", "apps/other.go", "scripts/performance/other.js",
+  ]) {
+    assert.deepEqual(scopePerf([changed]), { run: false, matched: [] }, changed);
+  }
+  assert.equal(scopePerf([]).run, false);
+  // Rename detection is disabled by the shared scope job, so the deleted
+  // source still triggers even when the destination moves out of scope.
+  assert.equal(scopePerf(["docs/old-harness.md", "scripts/perf/report.mjs"]).run, true);
+});
+
+test("shared scope exposes both decisions and performance skips only on a known out-of-scope diff", () => {
+  const yaml = readWorkflow("pr.yml");
+  assert.deepEqual(jobNeeds(yaml, "perf"), ["web-selftest-scope"]);
+  const perf = yaml.slice(yaml.indexOf("\n  perf:\n"), yaml.indexOf("\n  test-macos:\n"));
+  assert.match(perf, /^ {4}if: needs\.web-selftest-scope\.outputs\.perf_run == 'true'$/m);
+  assert.match(yaml, /perf_run: \$\{\{ steps\.scope\.outputs\.perf_run \}\}/);
+  assert.match(yaml, /node \.github\/scripts\/web-selftest-scope\.js changed-paths\.txt perf >> "\$GITHUB_OUTPUT"/);
+  assert.match(yaml, /git diff --no-renames --name-only/);
+  assert.equal((yaml.match(/echo "perf_run=true" >> "\$GITHUB_OUTPUT"/g) ?? []).length, 2,
+    "unknown events and missing base parents both run performance");
+});
+
+test("performance scope CLI fails open for an unreadable diff and emits its own output key", () => {
+  const { execFileSync } = require("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = require("node:fs");
+  const { tmpdir } = require("node:os");
+  const dir = mkdtempSync(path.join(tmpdir(), "af-perf-scope-"));
+  const file = path.join(dir, "changed.txt");
+  const run = () => execFileSync(process.execPath, [path.join(__dirname, "web-selftest-scope.js"), file, "perf"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    assert.equal(run(), "perf_run=true\n");
+    writeFileSync(file, "docs/dev/index.md\n");
+    assert.equal(run(), "perf_run=false\n");
+    writeFileSync(file, "web/selftest/goldens/dashboard.png\n");
+    assert.equal(run(), "perf_run=true\n");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("performance preflight does not duplicate the Web job's application checks", () => {
+  const entry = fs.readFileSync(path.join(__dirname, "..", "..", "scripts/container/web-demo-entry.sh"), "utf8");
+  assert.doesNotMatch(entry, /npm (test|run typecheck)/);
+  assert.match(entry, /npx tsc -p tsconfig\.selftest\.json/);
+  assert.match(entry, /node --test \/work\/scripts\/perf\/check\.test\.mjs/);
+});

@@ -17,7 +17,8 @@ at the repository root. Read it first.
    then [File-length lint](file-length-lint.md) for the structural gate.
 3. Choose your surface · [Surface parity](surface-parity.md), then
    [Web client selftest](web-selftest.md) or [Manual TUI testing](tui-manual-testing.md).
-   Use [Demo assets](demo-assets.md) when refreshing documentation media.
+   Read [Performance baselines](perf-baselines.md) for the measured web/TUI budgets
+   and visual regression gate. Use [Demo assets](demo-assets.md) when refreshing documentation media.
 4. Follow the change into production · [Release process](release-process.md),
    [Release testing plan](release-testing-plan.md), then
    [Lifecycle testing](lifecycle-testing.md) for install and upgrade changes.
@@ -46,6 +47,7 @@ the docs build — on every push.
 | [Demo assets](demo-assets.md) | Regenerating the web demo and theme-specific stills. |
 | [Lifecycle testing](lifecycle-testing.md) | Clean install and install → upgrade on a real machine: the bugs that need two versions to exist. |
 | [Web client selftest](web-selftest.md) | The Playwright acceptance proof for the embedded web client. |
+| [Performance baselines](perf-baselines.md) | The 1,000-session fixture, web/TUI CI budgets, and reviewed demo goldens. |
 | [Manual TUI testing](tui-manual-testing.md) | `scripts/tui-driver.sh`, the self-synchronizing driver for play-testing the live TUI. |
 | [Surface parity](surface-parity.md) | The drift check that keeps the TUI, web, and CLI the same product. |
 | [File-length lint](file-length-lint.md) | The structural-health guard that bounds Go file length. |
