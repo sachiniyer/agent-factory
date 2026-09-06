@@ -8246,6 +8246,490 @@ function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
 }
 
+// src/nav.ts
+var VIEWS = ["sessions", "tasks", "config"];
+function cycleView(current, delta) {
+  const i = VIEWS.indexOf(current);
+  const n = VIEWS.length;
+  return VIEWS[(i + delta + n) % n];
+}
+function nextSelection(orderedIds, selectedId, delta) {
+  if (orderedIds.length === 0) {
+    return null;
+  }
+  const cur = selectedId ? orderedIds.indexOf(selectedId) : -1;
+  let next;
+  if (cur === -1) {
+    next = delta > 0 ? 0 : orderedIds.length - 1;
+  } else {
+    next = Math.min(Math.max(cur + delta, 0), orderedIds.length - 1);
+  }
+  return orderedIds[next] ?? null;
+}
+function decideKey(key, ctx, mods = {}) {
+  if (ctx.modalOpen) {
+    return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
+  }
+  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
+    if (ctx.view !== "sessions" || !ctx.selectedId) {
+      return { kind: "none" };
+    }
+    if (key === "j") {
+      return { kind: "cyclePane", delta: 1 };
+    }
+    if (key === "k") {
+      return { kind: "cyclePane", delta: -1 };
+    }
+    return { kind: "closePane" };
+  }
+  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
+    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
+  }
+  if (ctx.focus === "terminal") {
+    return { kind: "none" };
+  }
+  if (key === "[") {
+    return { kind: "switchView", view: cycleView(ctx.view, -1) };
+  }
+  if (key === "]") {
+    return { kind: "switchView", view: cycleView(ctx.view, 1) };
+  }
+  if (ctx.view !== "sessions") {
+    return { kind: "none" };
+  }
+  if (key === "Enter") {
+    return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
+  }
+  if (ctx.selectedId) {
+    if (key.length === 1 && key >= "1" && key <= "9") {
+      const index = key.charCodeAt(0) - "1".charCodeAt(0);
+      if (index < ctx.tabCount && index !== ctx.activeTab) {
+        return { kind: "switchTab", index };
+      }
+      return { kind: "none" };
+    }
+    if (key === "t") {
+      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
+    }
+    if (key === "w") {
+      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
+    }
+  }
+  let delta;
+  if (key === "ArrowDown" || key === "j") {
+    delta = 1;
+  } else if (key === "ArrowUp" || key === "k") {
+    delta = -1;
+  } else {
+    return { kind: "none" };
+  }
+  const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
+  return next ? { kind: "select", id: next } : { kind: "none" };
+}
+
+// node_modules/lucide/dist/esm/icons/archive-restore.mjs
+var ArchiveRestore = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
+  ["path", { d: "M20 8v11a2 2 0 0 1-2 2h-2" }],
+  ["path", { d: "m9 15 3-3 3 3" }],
+  ["path", { d: "M12 12v9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/archive.mjs
+var Archive = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
+  ["path", { d: "M10 12h4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/arrow-right.mjs
+var ArrowRight = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "m12 5 7 7-7 7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/bot.mjs
+var Bot = [
+  ["path", { d: "M12 8V4H8" }],
+  ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
+  ["path", { d: "M2 14h2" }],
+  ["path", { d: "M20 14h2" }],
+  ["path", { d: "M15 13v2" }],
+  ["path", { d: "M9 13v2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/check.mjs
+var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
+
+// node_modules/lucide/dist/esm/icons/chevron-down.mjs
+var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
+
+// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
+var CircleDashed = [
+  ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
+  ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
+  ["path", { d: "M17.609 3.721a10 10 0 0 1 2.69 2.7" }],
+  ["path", { d: "M2.182 13.9a10 10 0 0 1 0-3.8" }],
+  ["path", { d: "M20.279 17.609a10 10 0 0 1-2.7 2.69" }],
+  ["path", { d: "M21.818 10.1a10 10 0 0 1 0 3.8" }],
+  ["path", { d: "M3.721 6.391a10 10 0 0 1 2.7-2.69" }],
+  ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
+var CircleQuestionMark = [
+  ["circle", { cx: "12", cy: "12", r: "10" }],
+  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
+// node_modules/lucide/dist/esm/icons/circle.mjs
+var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
+
+// node_modules/lucide/dist/esm/icons/diamond.mjs
+var Diamond = [
+  [
+    "path",
+    {
+      d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/ellipsis.mjs
+var Ellipsis = [
+  ["circle", { cx: "12", cy: "12", r: "1" }],
+  ["circle", { cx: "19", cy: "12", r: "1" }],
+  ["circle", { cx: "5", cy: "12", r: "1" }]
+];
+
+// node_modules/lucide/dist/esm/icons/external-link.mjs
+var ExternalLink = [
+  ["path", { d: "M15 3h6v6" }],
+  ["path", { d: "M10 14 21 3" }],
+  ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
+var FolderGit2 = [
+  ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
+  [
+    "path",
+    {
+      d: "M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"
+    }
+  ],
+  ["circle", { cx: "13", cy: "12", r: "2" }],
+  ["circle", { cx: "20", cy: "19", r: "2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder.mjs
+var Folder = [
+  [
+    "path",
+    {
+      d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/funnel.mjs
+var Funnel = [
+  [
+    "path",
+    {
+      d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/git-branch.mjs
+var GitBranch = [
+  ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
+  ["circle", { cx: "18", cy: "6", r: "3" }],
+  ["circle", { cx: "6", cy: "18", r: "3" }]
+];
+
+// node_modules/lucide/dist/esm/icons/link.mjs
+var Link = [
+  ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
+  ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
+];
+
+// node_modules/lucide/dist/esm/icons/menu.mjs
+var Menu = [
+  ["path", { d: "M4 5h16" }],
+  ["path", { d: "M4 12h16" }],
+  ["path", { d: "M4 19h16" }]
+];
+
+// node_modules/lucide/dist/esm/icons/octagon-x.mjs
+var OctagonX = [
+  ["path", { d: "m15 9-6 6" }],
+  [
+    "path",
+    {
+      d: "M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"
+    }
+  ],
+  ["path", { d: "m9 9 6 6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
+var PanelsTopLeft = [
+  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
+  ["path", { d: "M3 9h18" }],
+  ["path", { d: "M9 21V9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/plus.mjs
+var Plus = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "M12 5v14" }]
+];
+
+// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
+var RefreshCw = [
+  ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
+  ["path", { d: "M21 3v5h-5" }],
+  ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
+  ["path", { d: "M8 16H3v5" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square-check-big.mjs
+var SquareCheckBig = [
+  ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
+  ["path", { d: "m9 11 3 3L22 4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square.mjs
+var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
+
+// node_modules/lucide/dist/esm/icons/terminal.mjs
+var Terminal = [
+  ["path", { d: "M12 19h8" }],
+  ["path", { d: "m4 17 6-6-6-6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
+var TriangleAlert = [
+  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
+  ["path", { d: "M12 9v4" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
+// node_modules/lucide/dist/esm/icons/x.mjs
+var X = [
+  ["path", { d: "M18 6 6 18" }],
+  ["path", { d: "m6 6 12 12" }]
+];
+
+// src/icon.ts
+var ICONS = {
+  archive: Archive,
+  "archive-restore": ArchiveRestore,
+  "arrow-right": ArrowRight,
+  bot: Bot,
+  check: Check,
+  "chevron-down": ChevronDown,
+  circle: Circle,
+  "circle-dashed": CircleDashed,
+  "circle-question": CircleQuestionMark,
+  diamond: Diamond,
+  ellipsis: Ellipsis,
+  "external-link": ExternalLink,
+  folder: Folder,
+  "folder-git": FolderGit2,
+  funnel: Funnel,
+  "git-branch": GitBranch,
+  link: Link,
+  menu: Menu,
+  "octagon-x": OctagonX,
+  panels: PanelsTopLeft,
+  plus: Plus,
+  reload: RefreshCw,
+  square: Square,
+  "square-check": SquareCheckBig,
+  terminal: Terminal,
+  "triangle-alert": TriangleAlert,
+  x: X
+};
+function icon(name, className = "") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", `af-icon${className ? ` ${className}` : ""}`);
+  svg.setAttribute("data-icon", name);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const [tag, attrs] of ICONS[name]) {
+    const child = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [attr, value] of Object.entries(attrs)) {
+      child.setAttribute(attr, String(value));
+    }
+    svg.append(child);
+  }
+  return svg;
+}
+
+// src/components.ts
+function actionsDisclosure() {
+  const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "\u2026"));
+  trigger.setAttribute("aria-label", "Session actions");
+  trigger.setAttribute("aria-expanded", "false");
+  const panel = h("div", { class: "af-term-menu", role: "group" });
+  panel.setAttribute("aria-label", "Session actions");
+  panel.hidden = true;
+  const el2 = h("div", { class: "af-term-more-wrap" }, trigger, panel);
+  const outside = (event) => {
+    if (!el2.contains(event.target)) close();
+  };
+  const close = (restoreFocus = false) => {
+    panel.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("mousedown", outside);
+    if (restoreFocus) trigger.focus();
+  };
+  trigger.addEventListener("click", () => {
+    if (!panel.hidden) return close();
+    panel.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    document.addEventListener("mousedown", outside);
+  });
+  el2.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !panel.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+    }
+  });
+  return { el: el2, panel, trigger, close, dispose: close };
+}
+function terminalChrome(opts) {
+  const menu = actionsDisclosure();
+  const action = (label, className, run) => {
+    const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
+    button.addEventListener("click", () => {
+      menu.close();
+      run();
+    });
+    return button;
+  };
+  const title = h("span", { class: "af-term-title" }, opts.title);
+  const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
+  const tabs = h("div", { class: "af-tabbar", role: "tablist" });
+  tabs.setAttribute("aria-label", "Session tabs");
+  const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
+  pr.hidden = true;
+  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
+  keyboard.hidden = true;
+  const actions2 = h("div", { class: "af-term-actions" });
+  actions2.hidden = true;
+  const retry = action("Retry", "", opts.retry);
+  retry.title = "Resume this session from its usage-limit wall";
+  const handoff = action("Handoff", "", opts.handoff);
+  handoff.title = "Continue this session under a different agent";
+  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
+  copy.title = "Copy link";
+  copy.setAttribute("aria-label", "Copy link");
+  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
+  desktopCopy.append(icon("link"));
+  desktopCopy.title = "Copy link";
+  desktopCopy.setAttribute("aria-label", "Copy link");
+  const newTabSlot = h("div", { class: "af-term-new-slot" });
+  menu.panel.append(newTabSlot, copy, handoff);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, actions2, menu.el);
+  return { head, title, tabs, pr, keyboard, retry, handoff, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+}
+function paneChrome(onClose) {
+  const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
+  const label = h("span", { class: "af-pane-label" });
+  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
+  const close = h("button", { type: "button", class: "af-pane-close", title: "Close pane" }, icon("x"));
+  close.setAttribute("aria-label", "Close pane");
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClose();
+  });
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+}
+function terminalSurface(container, palette) {
+  if (!container.closest(".af-main-term[data-af-theme]")) return palette;
+  const style = getComputedStyle(container);
+  const token2 = (name) => style.getPropertyValue(name).trim();
+  return {
+    ...palette,
+    background: token2("--af-surface"),
+    foreground: token2("--af-ink"),
+    cursor: token2("--af-ink"),
+    cursorAccent: token2("--af-surface"),
+    selectionBackground: token2("--af-surface-raised")
+  };
+}
+function viewNavigation(onSelect) {
+  const el2 = h("div", { class: "af-viewnav", role: "tablist" });
+  el2.setAttribute("aria-label", "Views");
+  const tabs = /* @__PURE__ */ new Map();
+  const labels = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
+  for (const view of VIEWS) {
+    const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
+    tab.dataset.view = view;
+    tab.addEventListener("click", () => onSelect(view));
+    tabs.set(view, tab);
+    el2.append(tab);
+  }
+  return { el: el2, tabs };
+}
+function modalChrome(opts) {
+  const body = h("div", { class: "af-modal-body" });
+  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
+  errorLine.hidden = true;
+  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
+  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
+  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
+  const card = h(
+    "div",
+    { class: "af-modal-card", role: "dialog" },
+    h("h2", { class: "af-modal-title" }, opts.title),
+    body,
+    errorLine,
+    footer
+  );
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-label", opts.title);
+  card.tabIndex = -1;
+  card.addEventListener("click", (e) => e.stopPropagation());
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  cancelBtn.addEventListener("click", () => opts.onCancel());
+  const handle = {
+    el: backdrop,
+    setBusy(busy) {
+      confirmBtn.disabled = busy;
+      cancelBtn.disabled = busy;
+      card.classList.toggle("af-modal-busy", busy);
+    },
+    setError(msg) {
+      if (msg) {
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
+        errorLine.hidden = false;
+      } else {
+        errorLine.textContent = "";
+        errorLine.hidden = true;
+      }
+    },
+    close() {
+      backdrop.remove();
+    }
+  };
+  return { handle, body, confirmBtn, cancelBtn, errorLine };
+}
+
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -8268,7 +8752,7 @@ var AttachTerminal = class {
       fontSize: 13,
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
-      theme: currentXtermTheme(),
+      theme: terminalSurface(container, currentXtermTheme()),
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5e3,
@@ -8981,7 +9465,7 @@ var AttachTerminal = class {
    *  from the new ITheme, so an open terminal switches light/dark without a
    *  reconnect or losing scrollback. */
   setTheme(theme) {
-    this.term.options.theme = theme;
+    this.term.options.theme = terminalSurface(this.container, theme);
   }
   // --- socket lifecycle ------------------------------------------------------
   connect() {
@@ -9789,256 +10273,6 @@ function backendSelectable(choices, selected) {
   return choice === void 0 || choice.status === "available";
 }
 
-// node_modules/lucide/dist/esm/icons/archive-restore.mjs
-var ArchiveRestore = [
-  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
-  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
-  ["path", { d: "M20 8v11a2 2 0 0 1-2 2h-2" }],
-  ["path", { d: "m9 15 3-3 3 3" }],
-  ["path", { d: "M12 12v9" }]
-];
-
-// node_modules/lucide/dist/esm/icons/archive.mjs
-var Archive = [
-  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
-  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
-  ["path", { d: "M10 12h4" }]
-];
-
-// node_modules/lucide/dist/esm/icons/arrow-right.mjs
-var ArrowRight = [
-  ["path", { d: "M5 12h14" }],
-  ["path", { d: "m12 5 7 7-7 7" }]
-];
-
-// node_modules/lucide/dist/esm/icons/bot.mjs
-var Bot = [
-  ["path", { d: "M12 8V4H8" }],
-  ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
-  ["path", { d: "M2 14h2" }],
-  ["path", { d: "M20 14h2" }],
-  ["path", { d: "M15 13v2" }],
-  ["path", { d: "M9 13v2" }]
-];
-
-// node_modules/lucide/dist/esm/icons/check.mjs
-var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
-
-// node_modules/lucide/dist/esm/icons/chevron-down.mjs
-var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
-
-// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
-var CircleDashed = [
-  ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
-  ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
-  ["path", { d: "M17.609 3.721a10 10 0 0 1 2.69 2.7" }],
-  ["path", { d: "M2.182 13.9a10 10 0 0 1 0-3.8" }],
-  ["path", { d: "M20.279 17.609a10 10 0 0 1-2.7 2.69" }],
-  ["path", { d: "M21.818 10.1a10 10 0 0 1 0 3.8" }],
-  ["path", { d: "M3.721 6.391a10 10 0 0 1 2.7-2.69" }],
-  ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
-];
-
-// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
-var CircleQuestionMark = [
-  ["circle", { cx: "12", cy: "12", r: "10" }],
-  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
-  ["path", { d: "M12 17h.01" }]
-];
-
-// node_modules/lucide/dist/esm/icons/circle.mjs
-var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
-
-// node_modules/lucide/dist/esm/icons/diamond.mjs
-var Diamond = [
-  [
-    "path",
-    {
-      d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/ellipsis.mjs
-var Ellipsis = [
-  ["circle", { cx: "12", cy: "12", r: "1" }],
-  ["circle", { cx: "19", cy: "12", r: "1" }],
-  ["circle", { cx: "5", cy: "12", r: "1" }]
-];
-
-// node_modules/lucide/dist/esm/icons/external-link.mjs
-var ExternalLink = [
-  ["path", { d: "M15 3h6v6" }],
-  ["path", { d: "M10 14 21 3" }],
-  ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
-var FolderGit2 = [
-  ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
-  [
-    "path",
-    {
-      d: "M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"
-    }
-  ],
-  ["circle", { cx: "13", cy: "12", r: "2" }],
-  ["circle", { cx: "20", cy: "19", r: "2" }]
-];
-
-// node_modules/lucide/dist/esm/icons/folder.mjs
-var Folder = [
-  [
-    "path",
-    {
-      d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/funnel.mjs
-var Funnel = [
-  [
-    "path",
-    {
-      d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"
-    }
-  ]
-];
-
-// node_modules/lucide/dist/esm/icons/git-branch.mjs
-var GitBranch = [
-  ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
-  ["circle", { cx: "18", cy: "6", r: "3" }],
-  ["circle", { cx: "6", cy: "18", r: "3" }]
-];
-
-// node_modules/lucide/dist/esm/icons/link.mjs
-var Link = [
-  ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
-  ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
-];
-
-// node_modules/lucide/dist/esm/icons/menu.mjs
-var Menu = [
-  ["path", { d: "M4 5h16" }],
-  ["path", { d: "M4 12h16" }],
-  ["path", { d: "M4 19h16" }]
-];
-
-// node_modules/lucide/dist/esm/icons/octagon-x.mjs
-var OctagonX = [
-  ["path", { d: "m15 9-6 6" }],
-  [
-    "path",
-    {
-      d: "M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"
-    }
-  ],
-  ["path", { d: "m9 9 6 6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
-var PanelsTopLeft = [
-  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
-  ["path", { d: "M3 9h18" }],
-  ["path", { d: "M9 21V9" }]
-];
-
-// node_modules/lucide/dist/esm/icons/plus.mjs
-var Plus = [
-  ["path", { d: "M5 12h14" }],
-  ["path", { d: "M12 5v14" }]
-];
-
-// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
-var RefreshCw = [
-  ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
-  ["path", { d: "M21 3v5h-5" }],
-  ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
-  ["path", { d: "M8 16H3v5" }]
-];
-
-// node_modules/lucide/dist/esm/icons/square-check-big.mjs
-var SquareCheckBig = [
-  ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
-  ["path", { d: "m9 11 3 3L22 4" }]
-];
-
-// node_modules/lucide/dist/esm/icons/square.mjs
-var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
-
-// node_modules/lucide/dist/esm/icons/terminal.mjs
-var Terminal2 = [
-  ["path", { d: "M12 19h8" }],
-  ["path", { d: "m4 17 6-6-6-6" }]
-];
-
-// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
-var TriangleAlert = [
-  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
-  ["path", { d: "M12 9v4" }],
-  ["path", { d: "M12 17h.01" }]
-];
-
-// node_modules/lucide/dist/esm/icons/x.mjs
-var X = [
-  ["path", { d: "M18 6 6 18" }],
-  ["path", { d: "m6 6 12 12" }]
-];
-
-// src/icon.ts
-var ICONS = {
-  archive: Archive,
-  "archive-restore": ArchiveRestore,
-  "arrow-right": ArrowRight,
-  bot: Bot,
-  check: Check,
-  "chevron-down": ChevronDown,
-  circle: Circle,
-  "circle-dashed": CircleDashed,
-  "circle-question": CircleQuestionMark,
-  diamond: Diamond,
-  ellipsis: Ellipsis,
-  "external-link": ExternalLink,
-  folder: Folder,
-  "folder-git": FolderGit2,
-  funnel: Funnel,
-  "git-branch": GitBranch,
-  link: Link,
-  menu: Menu,
-  "octagon-x": OctagonX,
-  panels: PanelsTopLeft,
-  plus: Plus,
-  reload: RefreshCw,
-  square: Square,
-  "square-check": SquareCheckBig,
-  terminal: Terminal2,
-  "triangle-alert": TriangleAlert,
-  x: X
-};
-function icon(name, className = "") {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", `af-icon${className ? ` ${className}` : ""}`);
-  svg.setAttribute("data-icon", name);
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "2");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("focusable", "false");
-  for (const [tag, attrs] of ICONS[name]) {
-    const child = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (const [attr, value] of Object.entries(attrs)) {
-      child.setAttribute(attr, String(value));
-    }
-    svg.append(child);
-  }
-  return svg;
-}
-
 // src/dirpicker.ts
 var INITIAL_PICKER_STATE = { listing: null, error: null, loading: false };
 function pickerLoading(prev) {
@@ -10257,147 +10491,6 @@ function handoffAgentChoices(catalog, current) {
     choices.push({ value: opt.name, label: opt.name });
   }
   return choices;
-}
-
-// src/nav.ts
-var VIEWS = ["sessions", "tasks", "config"];
-function cycleView(current, delta) {
-  const i = VIEWS.indexOf(current);
-  const n = VIEWS.length;
-  return VIEWS[(i + delta + n) % n];
-}
-function nextSelection(orderedIds, selectedId, delta) {
-  if (orderedIds.length === 0) {
-    return null;
-  }
-  const cur = selectedId ? orderedIds.indexOf(selectedId) : -1;
-  let next;
-  if (cur === -1) {
-    next = delta > 0 ? 0 : orderedIds.length - 1;
-  } else {
-    next = Math.min(Math.max(cur + delta, 0), orderedIds.length - 1);
-  }
-  return orderedIds[next] ?? null;
-}
-function decideKey(key, ctx, mods = {}) {
-  if (ctx.modalOpen) {
-    return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
-  }
-  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
-    if (ctx.view !== "sessions" || !ctx.selectedId) {
-      return { kind: "none" };
-    }
-    if (key === "j") {
-      return { kind: "cyclePane", delta: 1 };
-    }
-    if (key === "k") {
-      return { kind: "cyclePane", delta: -1 };
-    }
-    return { kind: "closePane" };
-  }
-  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
-    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
-  }
-  if (ctx.focus === "terminal") {
-    return { kind: "none" };
-  }
-  if (key === "[") {
-    return { kind: "switchView", view: cycleView(ctx.view, -1) };
-  }
-  if (key === "]") {
-    return { kind: "switchView", view: cycleView(ctx.view, 1) };
-  }
-  if (ctx.view !== "sessions") {
-    return { kind: "none" };
-  }
-  if (key === "Enter") {
-    return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
-  }
-  if (ctx.selectedId) {
-    if (key.length === 1 && key >= "1" && key <= "9") {
-      const index = key.charCodeAt(0) - "1".charCodeAt(0);
-      if (index < ctx.tabCount && index !== ctx.activeTab) {
-        return { kind: "switchTab", index };
-      }
-      return { kind: "none" };
-    }
-    if (key === "t") {
-      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
-    }
-    if (key === "w") {
-      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
-    }
-  }
-  let delta;
-  if (key === "ArrowDown" || key === "j") {
-    delta = 1;
-  } else if (key === "ArrowUp" || key === "k") {
-    delta = -1;
-  } else {
-    return { kind: "none" };
-  }
-  const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
-  return next ? { kind: "select", id: next } : { kind: "none" };
-}
-
-// src/components.ts
-function viewNavigation(onSelect) {
-  const el2 = h("div", { class: "af-viewnav", role: "tablist" });
-  el2.setAttribute("aria-label", "Views");
-  const tabs = /* @__PURE__ */ new Map();
-  const labels = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
-  for (const view of VIEWS) {
-    const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
-    tab.dataset.view = view;
-    tab.addEventListener("click", () => onSelect(view));
-    tabs.set(view, tab);
-    el2.append(tab);
-  }
-  return { el: el2, tabs };
-}
-function modalChrome(opts) {
-  const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("div", { class: "af-modal-error", role: "alert" });
-  errorLine.hidden = true;
-  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
-  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
-  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
-  const card = h(
-    "div",
-    { class: "af-modal-card", role: "dialog" },
-    h("h2", { class: "af-modal-title" }, opts.title),
-    body,
-    errorLine,
-    footer
-  );
-  card.setAttribute("aria-modal", "true");
-  card.setAttribute("aria-label", opts.title);
-  card.tabIndex = -1;
-  card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
-  cancelBtn.addEventListener("click", () => opts.onCancel());
-  const handle = {
-    el: backdrop,
-    setBusy(busy) {
-      confirmBtn.disabled = busy;
-      cancelBtn.disabled = busy;
-      card.classList.toggle("af-modal-busy", busy);
-    },
-    setError(msg) {
-      if (msg) {
-        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
-        errorLine.hidden = false;
-      } else {
-        errorLine.textContent = "";
-        errorLine.hidden = true;
-      }
-    },
-    close() {
-      backdrop.remove();
-    }
-  };
-  return { handle, body, confirmBtn, cancelBtn, errorLine };
 }
 
 // src/modals.ts
@@ -12297,21 +12390,7 @@ var SplitView = class {
   createPane(leaf) {
     const container = el("div", "af-pane");
     container.setAttribute("data-leaf", leaf.id);
-    const head = el("div", "af-pane-head");
-    const glyph = el("span", "af-pane-glyph");
-    glyph.setAttribute("aria-hidden", "true");
-    const label = el("span", "af-pane-label");
-    const closeBtn = document.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.className = "af-pane-close";
-    closeBtn.title = "Close pane";
-    closeBtn.setAttribute("aria-label", "Close pane");
-    closeBtn.append(icon("x"));
-    closeBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.closePane(leaf.id);
-    });
-    head.append(glyph, label, closeBtn);
+    const { head, glyph, label } = paneChrome(() => this.closePane(leaf.id));
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");
     container.append(head, paneHost, overlay);
@@ -14318,6 +14397,7 @@ var AppShell = class {
   lastRailToken = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
+  terminalChrome = null;
   // The full bounded archive-loss notice for the selected session. It stays
   // mounted above the terminal and is patched on every same-selection snapshot,
   // so automatic Lost recovery cannot turn it into a one-shot toast.
@@ -14411,6 +14491,7 @@ var AppShell = class {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    this.terminalChrome?.dispose();
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
@@ -14872,8 +14953,9 @@ var AppShell = class {
       const menuBox = menu.getBoundingClientRect();
       const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
       const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const below = anchor.bottom + 6;
-      const above = anchor.top - menuBox.height - 6;
+      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
+      const below = anchor.bottom + gap;
+      const above = anchor.top - menuBox.height - gap;
       const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
@@ -14916,6 +14998,7 @@ var AppShell = class {
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         close();
+        this.terminalChrome?.menu.close();
         this.actions.newTab(kind);
       });
       return b;
@@ -14975,6 +15058,8 @@ var AppShell = class {
     this.projectSwitchBtn.setAttribute("aria-expanded", "false");
   }
   renderMain(state) {
+    this.terminalChrome?.dispose();
+    this.terminalChrome = null;
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
@@ -14985,6 +15070,7 @@ var AppShell = class {
       this.retryVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
+      delete this.main.dataset.afTheme;
       delete this.main.dataset.termStatus;
       this.main.replaceChildren(
         recoveryScreen(state.projectsError && state.selectedProject === null ? {
@@ -15009,40 +15095,26 @@ var AppShell = class {
       );
       return;
     }
-    this.headTitle = h("span", { class: "af-term-title" }, selected.title);
-    const prBadge = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-    prBadge.hidden = true;
-    this.prBadge = prBadge;
+    const chrome = terminalChrome({
+      title: selected.title,
+      copyLink: () => this.actions.copyLink(),
+      handoff: () => this.actions.handoff(),
+      retry: () => this.actions.retryLimit()
+    });
+    this.terminalChrome = chrome;
+    this.headTitle = chrome.title;
+    this.prBadge = chrome.pr;
     this.prBadgeSig = "";
-    const copyLink = h(
-      "button",
-      { type: "button", class: "af-ghost af-term-action af-copy-link", title: "Copy link to this session" },
-      icon("link"),
-      h("span", { class: "af-copy-link-label" }, "Copy link")
-    );
-    copyLink.setAttribute("aria-label", "Copy link");
-    copyLink.addEventListener("click", () => this.actions.copyLink());
-    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
-    const retryBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
-    retryBtn.title = "Resume this session from its usage-limit wall";
-    retryBtn.addEventListener("click", () => this.actions.retryLimit());
-    this.retryBtn = retryBtn;
+    this.retryBtn = chrome.retry;
     this.retryVisible = isLimitReached(selected);
-    retryBtn.hidden = !this.retryVisible;
-    const handoffBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Handoff");
-    handoffBtn.title = "Continue this session under a different agent";
-    handoffBtn.addEventListener("click", () => this.actions.handoff());
-    this.handoffBtn = handoffBtn;
+    chrome.retry.hidden = !this.retryVisible;
+    this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
-    handoffBtn.hidden = !this.handoffVisible;
-    const headActions = h("div", { class: "af-term-actions" });
-    headActions.hidden = true;
-    this.headActions = headActions;
+    chrome.handoff.hidden = !this.handoffVisible;
+    this.headActions = chrome.actions;
     this.headActionSig = "";
-    const tabBar = h("div", { class: "af-tabbar" });
+    const tabBar = chrome.tabs;
     this.tabBar = tabBar;
-    tabBar.setAttribute("role", "tablist");
-    tabBar.setAttribute("aria-label", "Session tabs");
     this.attachTabDrag(tabBar);
     this.tabInsert = h("div", { class: "af-tab-insert" });
     this.tabInsert.hidden = true;
@@ -15050,12 +15122,13 @@ var AppShell = class {
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
-    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, copyLink, tabBar, headActions, handoffBtn, retryBtn);
+    const head = chrome.head;
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
     this.main.className = "af-main af-main-term";
+    this.main.dataset.afTheme = currentMode();
     if (warningText === "") {
       this.main.replaceChildren(head, this.termHost);
     } else {
@@ -15103,11 +15176,11 @@ var AppShell = class {
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
-      children.push(this.newTabControl(selected));
+      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
     } else {
       const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
       reason.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
-      children.push(reason);
+      this.terminalChrome?.newTabSlot.replaceChildren(reason);
     }
     const scrollLeft = bar.scrollLeft;
     bar.replaceChildren(...children);
@@ -15436,6 +15509,7 @@ var AppShell = class {
       return;
     }
     this.headTitle.textContent = selected.title;
+    if (this.terminalChrome) this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
     const warningText = archiveWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {

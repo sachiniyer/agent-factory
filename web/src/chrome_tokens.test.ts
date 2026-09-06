@@ -1,9 +1,9 @@
-// Ratchet this family list as P2 migrates B (terminal/tabs), then C (all chrome).
+// Rail/header and terminal/tabs are migrated; widen to all chrome in P2 slice C.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const migrated = /\.af-(?:appbar[\w-]*|brand|nav-toggle|nav-scrim|project[\w-]*|viewnav|viewtab[\w-]*|theme[\w-]*|install[\w_-]*|rail[\w-]*|filter[\w-]*|row[\w-]*|operator-state|idle-reason|branch-icon|dot[\w-]*)(?![\w-])/;
+const migrated = /\.af-(?:appbar[\w-]*|brand|nav-toggle|nav-scrim|project[\w-]*|viewnav|viewtab[\w-]*|theme[\w-]*|install[\w_-]*|rail[\w-]*|filter[\w-]*|row[\w-]*|operator-state|idle-reason|branch-icon|dot[\w-]*|main-term|term[\w-]*|tab[\w-]*|pr-badge|copy-link[\w-]*|split[\w-]*|pane[\w-]*|divider[\w-]*|drop[\w-]*|archive-warning)(?![\w-])/;
 const tokens = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
 const tokenNames = new Set([...tokens.matchAll(/(--af-[\w-]+):/g)].map((m) => m[1]));
 // Fonts and stacking levels are fixed structural rules, outside the 23-token budget.
@@ -36,7 +36,7 @@ function violations(css: string): string[] {
   return errors;
 }
 
-test("rail and header resolve colors and metrics through generated design tokens", () => {
+test("rail, header, terminal and tabs resolve colors and metrics through generated design tokens", () => {
   assert.deepEqual(violations(readFileSync(new URL("./styles.css", import.meta.url), "utf8")), []);
 });
 

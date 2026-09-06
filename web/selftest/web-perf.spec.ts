@@ -85,7 +85,8 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
     await page.locator(".af-rail-list .af-row", { hasText: "add-json-export" }).click();
     await page.waitForFunction(() => "first_terminal_ms" in window.perfProbe.values);
     await page.locator("#app[data-af-resync-settled]").waitFor();
-    await expect(page.locator(".af-term-host")).toContainText("review it like any branch");
+    // xterm row boundaries can consume the space when this phrase wraps.
+    await expect(page.locator(".af-term-host")).toContainText(/review it\s*like any branch/);
     const loadShift = await page.evaluate(() => window.perfProbe.shifts);
     // Reconnect the actual event stream: the client fetches and applies a real
     // daemon Snapshot. No browser-side fixture substitutes for the API response.

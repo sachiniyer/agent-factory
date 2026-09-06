@@ -103,9 +103,9 @@ test("the no-JavaScript CSS floor matches the derived Nord tokens exactly", () =
 test("pane states consume their corresponding semantic border tokens", () => {
   const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
-  assert.match(css, /\.af-pane-focused\s*\{[^}]*outline:\s*2px solid var\(--af-border-selected\)/s);
-  assert.match(css, /\.af-dragging-tab \.af-pane\s*\{[^}]*outline:\s*1px dashed var\(--af-border-interactive\)/s);
-  assert.match(css, /\.af-drop-overlay\s*\{[^}]*border:\s*1px solid var\(--af-border-preview\)/s);
+  assert.match(css, /\.af-pane-focused\s*\{[^}]*outline:[^;]*solid var\(--af-accent\)/s);
+  assert.match(css, /\.af-dragging-tab \.af-pane\s*\{[^}]*outline:[^;]*dashed var\(--af-accent\)/s);
+  assert.match(css, /\.af-drop-overlay\s*\{[^}]*border:[^;]*solid var\(--af-border\)/s);
 });
 
 test("tinted semantic states consume their contrast-safe text tokens", () => {
@@ -116,7 +116,7 @@ test("tinted semantic states consume their contrast-safe text tokens", () => {
   ]) {
     assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-accent-text\\)`, "s"));
   }
-  for (const selector of [".af-tab-close:hover", ".af-pane-close:hover", ".af-danger:hover"]) {
+  for (const selector of [".af-danger:hover"]) {
     assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-danger-text\\)`, "s"));
   }
   assert.match(css, /\.af-config-notice\s*\{[^}]*color:\s*var\(--af-accent-text\)/s);

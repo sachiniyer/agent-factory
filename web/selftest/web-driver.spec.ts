@@ -510,6 +510,12 @@ async function resetToAgentTab(page: Page): Promise<void> {
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 }
 
+/** Secondary session operations live in the same keyboard/pointer disclosure. */
+async function openSessionActions(page: Page): Promise<void> {
+  const trigger = page.getByRole("button", { name: "Session actions", exact: true });
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+}
+
 /** Creates the menu's Terminal choice. The labelled New tab control deliberately
  *  makes every mouse-created kind explicit; the `t` keyboard shortcut remains the
  *  one-keystroke shell path. */
@@ -521,8 +527,9 @@ async function createTerminalTab(page: Page): Promise<void> {
   const boundBefore = await pane.getAttribute("data-tab-id");
   const tabsBefore = await tabbar.locator(".af-tab").count();
 
-  await tabbar.locator(".af-tab-new").click();
-  const menu = tabbar.locator(".af-tab-menu");
+  await openSessionActions(page);
+  await tabbar.locator("..").locator(".af-tab-new").click();
+  const menu = tabbar.locator("..").locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
   await expect(menu).toBeHidden();
@@ -1760,9 +1767,9 @@ test("#2458: no live indicator by the project selector, no live/branch meta by t
   await expect(page.locator(".af-term-head")).not.toContainText("Live");
 
   // The branch went with it: "Live · master" was one unit, and the head now carries
-  // the session title alone.
+  // the session title and its separator before the tab labels.
   const head = await page.locator(".af-term-head-main").textContent();
-  expect(head?.trim()).toBe(SESSION_A);
+  expect(head?.trim()).toBe(`${SESSION_A} ·`);
 });
 
 // The phone path is checked separately because the indicator was not merely
@@ -4174,8 +4181,8 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   await expect(shelvedTab.locator(".af-tab-close")).toHaveCount(0);
   // Creation does not vanish: the bar names the restore step instead of looking
   // indistinguishable from a product with no tab-create feature (#2077).
-  await expect(tabbar.locator(".af-tab-new")).toHaveCount(0);
-  await expect(tabbar.locator(".af-tab-new-unavailable")).toHaveText("Restore this session to create tabs");
+  await expect(tabbar.locator("..").locator(".af-tab-new")).toHaveCount(0);
+  await expect(tabbar.locator("..").locator(".af-tab-new-unavailable")).toHaveText("Restore this session to create tabs");
 
   await shelvedTab.click();
 
@@ -8214,9 +8221,11 @@ test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the 
       message: "the real four-tab roster must overflow the narrow tab bar",
     })
     .toBe(true);
-  const trigger = tabbar.locator(".af-tab-new");
+  await tabbar.evaluate((bar) => { bar.scrollLeft = bar.scrollWidth; });
+  await openSessionActions(page);
+  const trigger = tabbar.locator("..").locator(".af-tab-new");
   await trigger.click();
-  const menu = tabbar.locator(".af-tab-menu");
+  const menu = tabbar.locator("..").locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   const before = await settledHitTestableTabMenu(page, menu, trigger);
 
@@ -8403,15 +8412,36 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               expect(layout.retry.right).toBeLessThanOrEqual(layout.head.right);
             }
 
+            const sessionMenu = head.locator(".af-term-menu");
+            await expect(sessionMenu).toBeHidden();
+            const sessionActions = head.getByRole("button", { name: "Session actions", exact: true });
+            await sessionActions.focus();
+            await p.keyboard.press("Enter");
+            await expect(sessionMenu).toBeVisible();
+            const copyLink = head.getByRole("button", { name: "Copy link", exact: true });
+            await expect(copyLink).toHaveCount(1);
+            await expect(copyLink).toHaveAttribute("title", "Copy link");
+            if (width <= 768) {
+              await expect(sessionMenu.getByRole("button", { name: "Copy link", exact: true })).toBeVisible();
+            } else {
+              await expect(head.locator(".af-copy-link-desktop")).toBeVisible();
+              await expect(copyLink).toHaveText("");
+            }
+            await p.keyboard.press("Escape");
+            await expect(sessionMenu).toBeHidden();
+            await expect(sessionActions).toBeFocused();
+
             if (roster === "one") {
               expect(layout.barScrollWidth, "one tab fits without a vestigial second row").toBeLessThanOrEqual(
                 layout.barClientWidth + 1,
               );
             } else {
               expect(layout.barScrollWidth, "the long roster genuinely overflows").toBeGreaterThan(layout.barClientWidth);
-              const trigger = tabbar.locator(".af-tab-new");
+              await tabbar.evaluate((bar) => { bar.scrollLeft = bar.scrollWidth; });
+              await openSessionActions(p);
+              const trigger = tabbar.locator("..").locator(".af-tab-new");
               await trigger.click();
-              const menu = tabbar.locator(".af-tab-menu");
+              const menu = tabbar.locator("..").locator(".af-tab-menu");
               await expect(menu).toBeVisible();
               const before = await settledHitTestableTabMenu(p, menu, trigger);
               const scroll = await tabbar.evaluate((bar) => {
@@ -9300,6 +9330,7 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
   const tabbar = page.locator(".af-tabbar");
   // The choice is named on the tab bar itself. The pre-#2077 split control exposed
   // only `+` and an unlabeled caret, so a user had to know the hidden menu existed.
+  await openSessionActions(page);
   const newTab = page.locator(".af-tab-new");
   await expect(newTab).toHaveCount(1);
   await expect(newTab).toContainText("New tab");
@@ -9367,6 +9398,7 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
 
   // Escape closes the menu without creating anything (checked after, so a stray
   // tab from a mis-click can't be mistaken for the one above).
+  await openSessionActions(page);
   await newTab.click();
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");

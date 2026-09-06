@@ -13,9 +13,9 @@ The specimens consume the generated CSS. TUI examples show the prescribed cell l
 and colours in HTML; they are not a running Bubble Tea app. Example controls are inert,
 except native disclosure menus. System selects one of these same two themes.
 
-The web stills show the real rail and header after P2 slice A; the remaining
+The web stills show the real rail, header, terminal and tabs after P2 slices A/B; the remaining
 components are awaiting their slices. Web has six [recorder beats](../dev/demo-assets.md)
-in both themes, plus filter, project-menu and phone drawer/control captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
+in both themes, plus filter, project-menu, terminal-action, keyboard, split and phone captures. TUI has a recorder poster and older Sessions/Tasks SVGs, not a complete
 screen/theme matrix. Missing captures are labelled. Empty/error specimens illustrate the rules; the [P4 recovery matrix](recovery-stills.md)
 provides asserted recordings. Click a still for the full screen.
 
@@ -80,7 +80,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-focus"><strong>tidy-tests · Agent · Keyboard</strong><pre>$ ./test.sh
 2 tests passed</pre><span>ctrl+] · Return to sessions</span></div></section>
-<figure><a href="../../assets/web/agent-tab.png"><img loading="lazy" src="../../assets/web/agent-tab.png" alt="Current web agent-tab screen in light theme"></a><figcaption>Current recorder still · agent-tab · light</figcaption></figure>
+<figure><a href="../../assets/web/agent-tab.png"><img loading="lazy" src="../../assets/web/agent-tab.png" alt="Current web agent-tab screen in light theme"></a><figcaption>Rules applied · Real web screen · agent-tab · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>┌ tidy-tests · Agent · Keyboard ┐
@@ -93,7 +93,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-focus"><strong>tidy-tests · Agent · Keyboard</strong><pre>$ ./test.sh
 2 tests passed</pre><span>ctrl+] · Return to sessions</span></div></section>
-<figure><a href="../../assets/web/agent-tab-dark.png"><img loading="lazy" src="../../assets/web/agent-tab-dark.png" alt="Current web agent-tab screen in dark theme"></a><figcaption>Current recorder still · agent-tab · dark</figcaption></figure>
+<figure><a href="../../assets/web/agent-tab-dark.png"><img loading="lazy" src="../../assets/web/agent-tab-dark.png" alt="Current web agent-tab screen in dark theme"></a><figcaption>Rules applied · Real web screen · agent-tab · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>┌ tidy-tests · Agent · Keyboard ┐
@@ -109,7 +109,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong><span style="color:var(--af-accent)">PR #128 · Open</span></div><pre>$ git diff --stat
 2 files changed</pre></section>
-<figure><a href="../../assets/web/review.png"><img loading="lazy" src="../../assets/web/review.png" alt="Current web review screen in light theme"></a><figcaption>Current recorder still · review · light</figcaption></figure>
+<figure><a href="../../assets/web/review.png"><img loading="lazy" src="../../assets/web/review.png" alt="Current web review screen in light theme"></a><figcaption>Rules applied · Real web screen · review · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>  1 · Agent
@@ -121,7 +121,7 @@ Keyboard: navigation</pre></section>
 <div class="sg-pair">
 <section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong><span style="color:var(--af-accent)">PR #128 · Open</span></div><pre>$ git diff --stat
 2 files changed</pre></section>
-<figure><a href="../../assets/web/review-dark.png"><img loading="lazy" src="../../assets/web/review-dark.png" alt="Current web review screen in dark theme"></a><figcaption>Current recorder still · review · dark</figcaption></figure>
+<figure><a href="../../assets/web/review-dark.png"><img loading="lazy" src="../../assets/web/review-dark.png" alt="Current web review screen in dark theme"></a><figcaption>Rules applied · Real web screen · review · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>  1 · Agent
