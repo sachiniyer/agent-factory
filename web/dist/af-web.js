@@ -13838,6 +13838,50 @@ function pressDistance(fromX, fromY, toX, toY) {
   return Math.hypot(toX - fromX, toY - fromY);
 }
 
+// src/keyed-rows.ts
+var KeyedRows = class {
+  rows = /* @__PURE__ */ new Map();
+  reconcile(values, key, signature, render, dispose) {
+    const keep = /* @__PURE__ */ new Set();
+    const nodes = values.map((value) => {
+      const id = key(value);
+      keep.add(id);
+      const sig = signature(value);
+      const previous = this.rows.get(id);
+      if (previous?.signature === sig) return previous.node;
+      const node = render(value, previous?.node);
+      this.rows.set(id, { signature: sig, node });
+      return node;
+    });
+    for (const id of this.rows.keys()) {
+      if (!keep.has(id)) {
+        dispose(id);
+        this.rows.delete(id);
+      }
+    }
+    return nodes;
+  }
+};
+function orderChildren(parent, children) {
+  const wanted = new Set(children);
+  let cursor = parent.firstElementChild;
+  while (cursor) {
+    const next = cursor.nextElementSibling;
+    if (!wanted.has(cursor)) cursor.remove();
+    cursor = next;
+  }
+  cursor = parent.firstElementChild;
+  for (const child of children) {
+    if (child === cursor) cursor = cursor.nextElementSibling;
+    else parent.insertBefore(child, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextElementSibling;
+    cursor.remove();
+    cursor = next;
+  }
+}
+
 // src/ui.ts
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
@@ -14395,6 +14439,7 @@ var AppShell = class {
   dispose() {
     window.clearInterval(this.idleAgeTimer);
     this.terminalChrome?.dispose();
+    for (const menu of this.railMenus.values()) menu.dispose();
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
@@ -14578,49 +14623,79 @@ var AppShell = class {
   renderRail(state) {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = visibleRailSessions(state);
-    this.lifecycleBtn = null;
-    this.lifecycleAction = null;
-    this.railCount.textContent = String(visible.length);
-    this.renderFilterMenu(state, scoped);
-    const openIds = new Set(this.railMenus.filter((menu) => !menu.panel.hidden).map((menu) => menu.el.dataset.sessionId));
-    const active = document.activeElement;
-    const focusedId = active?.closest("[data-session-id]")?.dataset.sessionId;
-    const focusedName = active?.getAttribute("aria-label");
-    for (const menu of this.railMenus) menu.dispose();
-    this.railMenus = [];
-    const list = this.railList;
-    if (!state.selectedProject) {
-      list.replaceChildren();
-      return;
+    const count = String(visible.length);
+    if (this.railCount.textContent !== count) this.railCount.textContent = count;
+    const filterSignature = JSON.stringify([kindCounts(scoped), state.statusFilter]);
+    if (filterSignature !== this.lastFilterSignature) {
+      this.lastFilterSignature = filterSignature;
+      this.renderFilterMenu(state, scoped);
     }
-    const rows = visible.map((s) => {
-      const selected = s.id === state.selectedId;
-      return sessionRow(
-        s,
-        selected,
-        (id) => this.runRailExit(() => this.actions.open(id)),
-        (target) => this.rowActions(target, selected)
-      );
-    });
-    const notice = this.railNotice(state, scoped, visible);
-    list.replaceChildren(...notice ? [notice, ...rows] : rows);
-    for (const menu of this.railMenus) if (openIds.has(menu.el.dataset.sessionId)) menu.open();
-    if (focusedId && focusedName) {
-      const host = list.querySelector(`[data-session-id="${CSS.escape(focusedId)}"]`);
-      host?.querySelector(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+    const activeBefore = document.activeElement;
+    let restoreChangedFocus;
+    const rows = this.railRows.reconcile(
+      state.selectedProject ? visible : [],
+      sessionKey,
+      (s) => JSON.stringify([s, s.id === state.selectedId]),
+      (s, previous) => {
+        const key = sessionKey(s);
+        const oldMenu = this.railMenus.get(key);
+        const wasOpen = oldMenu && !oldMenu.panel.hidden;
+        const active = document.activeElement;
+        const focusedName = previous?.contains(active) ? active?.getAttribute("aria-label") : null;
+        oldMenu?.dispose();
+        this.railMenus.delete(key);
+        const row = sessionRow(
+          s,
+          s.id === state.selectedId,
+          (id) => this.runRailExit(() => this.actions.open(id)),
+          (target) => this.rowActions(target, s.id === state.selectedId),
+          previous
+        );
+        if (wasOpen) this.railMenus.get(key)?.open();
+        if (focusedName) restoreChangedFocus = () => row.querySelector(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+        return row;
+      },
+      (key) => {
+        this.railMenus.get(key)?.dispose();
+        this.railMenus.delete(key);
+      }
+    );
+    const noticeSignature = JSON.stringify([
+      state.selectedProject,
+      scoped.length,
+      scoped.some((s) => !isArchived(s)),
+      scoped.filter(isArchived).length,
+      visible.length,
+      state.statusFilter
+    ]);
+    if (noticeSignature !== this.lastRailNoticeSignature) {
+      this.lastRailNoticeSignature = noticeSignature;
+      this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
+    orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    restoreChangedFocus?.();
+    if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
+      activeBefore.focus({ preventScroll: true });
+    }
+    const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : void 0;
+    this.lifecycleBtn = selectedMenu?.panel.querySelector(".af-rail-lifecycle") ?? null;
+    this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
   }
+  railRows = new KeyedRows();
+  lastFilterSignature = "";
+  lastRailNoticeSignature = "";
+  cachedRailNotice = null;
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
-  railMenus = [];
+  railMenus = /* @__PURE__ */ new Map();
   rowActions(session, selected) {
     const host = h("div", { class: "af-row-actions" });
     const buttons = this.sessionActionButtons(session, "rail", selected);
     if (!buttons.length) return host;
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
-    this.railMenus.push(menu);
+    this.railMenus.set(sessionKey(session), menu);
     menu.trigger.replaceChildren("\u2026");
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
@@ -15631,7 +15706,7 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
   input.focus();
   input.select();
 }
-function sessionRow(s, selected, openSession, buildActions) {
+function sessionRow(s, selected, openSession, buildActions, previous) {
   const status = rowStatus(s);
   const operator = operatorKind(s);
   const creating = isCreating(s);
@@ -15660,7 +15735,11 @@ function sessionRow(s, selected, openSession, buildActions) {
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
-  const row = h("li", { class: cls });
+  const row = previous ?? h("li", { class: cls });
+  row.className = cls;
+  row.replaceChildren();
+  row.onclick = null;
+  row.removeAttribute("aria-disabled");
   row.dataset.state = status.kind ?? "working";
   const statusSlot = h("span", { class: "af-row-status" });
   statusSlot.setAttribute("aria-hidden", "true");
@@ -15688,7 +15767,7 @@ function sessionRow(s, selected, openSession, buildActions) {
   if (!actionable && !managed) {
     row.setAttribute("aria-disabled", "true");
   } else if (actionable) {
-    row.addEventListener("click", () => openSession(s.id));
+    row.onclick = () => openSession(s.id);
   }
   return row;
 }

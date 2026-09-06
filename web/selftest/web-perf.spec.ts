@@ -8,6 +8,7 @@ declare global {
       values: Record<string, number>; shifts: number; snapshots: number;
       railStart: number; echoStart: number; echo: string;
       sockets: WebSocket[];
+      snapshotRows: Element[]; rowWrites: number; stopRowAudit: () => void;
     };
   }
 }
@@ -23,6 +24,7 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
       const p = window.perfProbe = {
         values: {} as Record<string, number>, shifts: 0, snapshots: 0,
         railStart: 0, echoStart: 0, echo: "", sockets: [] as WebSocket[],
+        snapshotRows: [] as Element[], rowWrites: 0, stopRowAudit: () => {},
       };
       // Two animation frames bracket a rendering opportunity after the observable
       // DOM write. All timestamps use the browser's monotonic clock, not RPC time.
@@ -93,6 +95,24 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
     const snapshots = await page.evaluate(() => {
       const p = window.perfProbe;
       p.shifts = 0;
+      p.snapshotRows = [...document.querySelectorAll(".af-rail-list .af-row")];
+      p.rowWrites = 0;
+      const audit = new MutationObserver(records => {
+        for (const mutation of records) {
+          const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
+          const row = target?.closest(".af-row");
+          if (row?.querySelector(".af-row-title")?.textContent?.startsWith("perf-")) p.rowWrites++;
+        }
+      });
+      audit.observe(document.querySelector(".af-rail-list")!, { subtree: true, childList: true, characterData: true, attributes: true });
+      p.stopRowAudit = () => audit.disconnect();
+      const settled = new MutationObserver(() => {
+        if (!document.querySelector("#app[data-af-resync-settled]")) return;
+        const start = p.railStart;
+        requestAnimationFrame(() => requestAnimationFrame(() => { p.values.snapshot_rail_ms = performance.now() - start; }));
+        settled.disconnect();
+      });
+      settled.observe(document.querySelector("#app")!, { attributes: true, attributeFilter: ["data-af-resync-settled"] });
       document.querySelector("#app")!.removeAttribute("data-af-resync-settled");
       p.sockets.find(s => s.url.includes("/v1/events") && s.readyState === WebSocket.OPEN)!.close();
       return p.snapshots;
@@ -107,7 +127,16 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
     await page.waitForFunction(n => window.perfProbe.snapshots > n, snapshots);
     await page.locator("#app[data-af-resync-settled]").waitFor();
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await page.waitForFunction(() => Number.isFinite(window.perfProbe.values.snapshot_rail_ms));
     const updateShift = await page.evaluate(() => window.perfProbe.shifts);
+    const rowAudit = await page.evaluate(() => {
+      const p = window.perfProbe;
+      const current = [...document.querySelectorAll(".af-rail-list .af-row")];
+      p.stopRowAudit();
+      return { sameNodes: current.length === p.snapshotRows.length && current.every((row, i) => row === p.snapshotRows[i]), writes: p.rowWrites };
+    });
+    expect(rowAudit.sameNodes, "accepted 1000-session snapshots retain every row node").toBe(true);
+    expect(rowAudit.writes, "unchanged seeded rows receive no DOM writes").toBe(0);
     // One real typed byte; a fresh character each run avoids matching scrollback.
     const key = ["~", "^", "%"][run];
     await expect(page.locator(".af-term-host .xterm-rows")).not.toContainText(key);
@@ -120,6 +149,7 @@ test("three container measurements at 1000 sessions", async ({ browser }) => {
     }), { loadShift, updateShift }));
     await context.close();
   }
+  console.log("Accepted snapshot rail samples (ms):", runs.map(run => run.snapshot_rail_ms));
   const sessions = execFileSync("tmux", ["list-sessions", "-F", "#{session_name}"], { encoding: "utf8" }).trim().split("\n");
   expect(sessions.length, "storage seeding must not spawn 1000 agents").toBeLessThanOrEqual(10);
   writeFileSync("test-results/web-runs.json", JSON.stringify(runs, null, 2));
