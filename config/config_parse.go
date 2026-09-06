@@ -279,6 +279,7 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	config.LimitAccountCandidates = normalizedCandidates
 
 	sanitizeLimitPatterns(config)
+	config.Appearance = NormalizeAppearance(config.Appearance)
 	sanitizeThemeColors(config, prettyConfigPath)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)

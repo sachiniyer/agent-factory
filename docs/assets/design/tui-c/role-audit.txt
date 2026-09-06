@@ -1,0 +1,333 @@
+P5 C whole-diff role audit against stacked B head ce0fbb961721f734d162f019653216fb8dac0497
+
+All changed production files and every ui/app Lip Gloss construction were
+reviewed against the component rules and fixed glyph contract. The companion
+state-mappings.txt enumerates semantic axes; state-branches.txt records the AST
+branches and assignments. No local colour literals, token edits, dependency
+patch, daemon theme changes, or agent terminal recolouring.
+
+All actual SVG cell pairs match generated roles within the approved one-channel
+termenv tolerance. Token contrast checks remain exact. Dark Accent on Raised
+emits 4.491:1 after truncation; the token pair meets 4.5:1.
+
+Emitted pairs across every gallery SVG:
+#2c6171 on #eceff3: 5.959:1 (25 stills)
+#2c6171 on #f8f9fc: 6.528:1 (2 stills)
+#2e3440 on #90c3d3: 6.502:1 (2 stills)
+#2e3440 on #eceff3: 10.829:1 (51 stills)
+#2e3440 on #f8f9fc: 11.863:1 (26 stills)
+#405430 on #eceff3: 7.200:1 (15 stills)
+#405430 on #f8f9fc: 7.888:1 (1 stills)
+#4c5669 on #eceff3: 6.406:1 (19 stills)
+#4c5669 on #f8f9fc: 7.018:1 (45 stills)
+#657083 on #f8f9fc: 4.751:1 (51 stills)
+#705014 on #eceff3: 6.396:1 (1 stills)
+#705014 on #f8f9fc: 7.008:1 (1 stills)
+#883b43 on #eceff3: 6.612:1 (5 stills)
+#883b43 on #f8f9fc: 7.244:1 (11 stills)
+#90c3d3 on #2e3440: 6.502:1 (2 stills)
+#90c3d3 on #434c5e: 4.491:1 (25 stills)
+#a1aaba on #2e3440: 5.337:1 (51 stills)
+#b7c0ce on #2e3440: 6.807:1 (45 stills)
+#b7c0ce on #434c5e: 4.702:1 (18 stills)
+#d5e2cc on #2e3440: 9.266:1 (1 stills)
+#d5e2cc on #434c5e: 6.401:1 (15 stills)
+#d8dee9 on #434c5e: 6.386:1 (1 stills)
+#e3c8cd on #2e3440: 7.975:1 (11 stills)
+#e3c8cd on #434c5e: 5.509:1 (5 stills)
+#ebcb8b on #2e3440: 7.998:1 (1 stills)
+#ebcb8b on #434c5e: 5.525:1 (1 stills)
+#eceff3 on #2e3440: 10.829:1 (26 stills)
+#eceff3 on #434c5e: 7.480:1 (51 stills)
+#eceff4 on #434c5e: 7.485:1 (10 stills)
+#f8f9fc on #2c6171: 6.528:1 (2 stills)
+
+Reviewed C-only path inventory:
+app/design_stills_test.go
+app/help.go
+app/help_title.go
+app/help_title_test.go
+app/home_model.go
+app/recovery_test.go
+app/testdata/design/appearance-dark.svg
+app/testdata/design/appearance-light.svg
+app/testdata/design/appearance-system-dark.svg
+app/testdata/design/appearance-system-light.svg
+app/testdata/design/help-dark.svg
+app/testdata/design/help-light.svg
+app/testdata/design/preview-help-dark.svg
+app/testdata/design/preview-help-light.svg
+config/appearance.go
+config/appearance_test.go
+config/config_parse.go
+config/config_types.go
+config/configset.go
+config/effect.go
+config/manifest.go
+config/manifest_test.go
+design/style-guide.tmpl
+docs/assets/design/tui-c/account-picker-dark.ansi
+docs/assets/design/tui-c/account-picker-dark.svg
+docs/assets/design/tui-c/account-picker-light.ansi
+docs/assets/design/tui-c/account-picker-light.svg
+docs/assets/design/tui-c/account-register-dark.ansi
+docs/assets/design/tui-c/account-register-dark.svg
+docs/assets/design/tui-c/account-register-light.ansi
+docs/assets/design/tui-c/account-register-light.svg
+docs/assets/design/tui-c/accounts-dark.ansi
+docs/assets/design/tui-c/accounts-dark.svg
+docs/assets/design/tui-c/accounts-light.ansi
+docs/assets/design/tui-c/accounts-light.svg
+docs/assets/design/tui-c/alarm-dark.ansi
+docs/assets/design/tui-c/alarm-dark.svg
+docs/assets/design/tui-c/alarm-light.ansi
+docs/assets/design/tui-c/alarm-light.svg
+docs/assets/design/tui-c/appearance-dark.ansi
+docs/assets/design/tui-c/appearance-dark.svg
+docs/assets/design/tui-c/appearance-light.ansi
+docs/assets/design/tui-c/appearance-light.svg
+docs/assets/design/tui-c/appearance-system-dark.ansi
+docs/assets/design/tui-c/appearance-system-dark.svg
+docs/assets/design/tui-c/appearance-system-light.ansi
+docs/assets/design/tui-c/appearance-system-light.svg
+docs/assets/design/tui-c/archive-failed-dark.ansi
+docs/assets/design/tui-c/archive-failed-dark.svg
+docs/assets/design/tui-c/archive-failed-light.ansi
+docs/assets/design/tui-c/archive-failed-light.svg
+docs/assets/design/tui-c/archive-warning-dark.ansi
+docs/assets/design/tui-c/archive-warning-dark.svg
+docs/assets/design/tui-c/archive-warning-light.ansi
+docs/assets/design/tui-c/archive-warning-light.svg
+docs/assets/design/tui-c/config-dark.ansi
+docs/assets/design/tui-c/config-dark.svg
+docs/assets/design/tui-c/config-edit-dark.ansi
+docs/assets/design/tui-c/config-edit-dark.svg
+docs/assets/design/tui-c/config-edit-light.ansi
+docs/assets/design/tui-c/config-edit-light.svg
+docs/assets/design/tui-c/config-light.ansi
+docs/assets/design/tui-c/config-light.svg
+docs/assets/design/tui-c/confirmation-dark.ansi
+docs/assets/design/tui-c/confirmation-dark.svg
+docs/assets/design/tui-c/confirmation-light.ansi
+docs/assets/design/tui-c/confirmation-light.svg
+docs/assets/design/tui-c/create-failed-dark.ansi
+docs/assets/design/tui-c/create-failed-dark.svg
+docs/assets/design/tui-c/create-failed-light.ansi
+docs/assets/design/tui-c/create-failed-light.svg
+docs/assets/design/tui-c/failure-notice-dark.ansi
+docs/assets/design/tui-c/failure-notice-dark.svg
+docs/assets/design/tui-c/failure-notice-light.ansi
+docs/assets/design/tui-c/failure-notice-light.svg
+docs/assets/design/tui-c/help-dark.ansi
+docs/assets/design/tui-c/help-dark.svg
+docs/assets/design/tui-c/help-light.ansi
+docs/assets/design/tui-c/help-light.svg
+docs/assets/design/tui-c/hooks-add-dark.ansi
+docs/assets/design/tui-c/hooks-add-dark.svg
+docs/assets/design/tui-c/hooks-add-light.ansi
+docs/assets/design/tui-c/hooks-add-light.svg
+docs/assets/design/tui-c/hooks-dark.ansi
+docs/assets/design/tui-c/hooks-dark.svg
+docs/assets/design/tui-c/hooks-edit-dark.ansi
+docs/assets/design/tui-c/hooks-edit-dark.svg
+docs/assets/design/tui-c/hooks-edit-light.ansi
+docs/assets/design/tui-c/hooks-edit-light.svg
+docs/assets/design/tui-c/hooks-light.ansi
+docs/assets/design/tui-c/hooks-light.svg
+docs/assets/design/tui-c/keyboard-dark.ansi
+docs/assets/design/tui-c/keyboard-dark.svg
+docs/assets/design/tui-c/keyboard-light.ansi
+docs/assets/design/tui-c/keyboard-light.svg
+docs/assets/design/tui-c/kill-failed-dark.ansi
+docs/assets/design/tui-c/kill-failed-dark.svg
+docs/assets/design/tui-c/kill-failed-light.ansi
+docs/assets/design/tui-c/kill-failed-light.svg
+docs/assets/design/tui-c/multiple-projects-dark.ansi
+docs/assets/design/tui-c/multiple-projects-dark.svg
+docs/assets/design/tui-c/multiple-projects-light.ansi
+docs/assets/design/tui-c/multiple-projects-light.svg
+docs/assets/design/tui-c/no-daemon-dark.ansi
+docs/assets/design/tui-c/no-daemon-dark.svg
+docs/assets/design/tui-c/no-daemon-light.ansi
+docs/assets/design/tui-c/no-daemon-light.svg
+docs/assets/design/tui-c/no-project-dark.ansi
+docs/assets/design/tui-c/no-project-dark.svg
+docs/assets/design/tui-c/no-project-light.ansi
+docs/assets/design/tui-c/no-project-light.svg
+docs/assets/design/tui-c/notice-dark.ansi
+docs/assets/design/tui-c/notice-dark.svg
+docs/assets/design/tui-c/notice-light.ansi
+docs/assets/design/tui-c/notice-light.svg
+docs/assets/design/tui-c/pane-dark.ansi
+docs/assets/design/tui-c/pane-dark.svg
+docs/assets/design/tui-c/pane-light.ansi
+docs/assets/design/tui-c/pane-light.svg
+docs/assets/design/tui-c/perf/metrics.json
+docs/assets/design/tui-c/perf/metrics.txt
+docs/assets/design/tui-c/perf/tui-runs.json
+docs/assets/design/tui-c/perf/web-runs.json
+docs/assets/design/tui-c/preview-dark.ansi
+docs/assets/design/tui-c/preview-dark.svg
+docs/assets/design/tui-c/preview-help-dark.ansi
+docs/assets/design/tui-c/preview-help-dark.svg
+docs/assets/design/tui-c/preview-help-light.ansi
+docs/assets/design/tui-c/preview-help-light.svg
+docs/assets/design/tui-c/preview-light.ansi
+docs/assets/design/tui-c/preview-light.svg
+docs/assets/design/tui-c/project-picker-dark.ansi
+docs/assets/design/tui-c/project-picker-dark.svg
+docs/assets/design/tui-c/project-picker-existing-dark.ansi
+docs/assets/design/tui-c/project-picker-existing-dark.svg
+docs/assets/design/tui-c/project-picker-existing-light.ansi
+docs/assets/design/tui-c/project-picker-existing-light.svg
+docs/assets/design/tui-c/project-picker-light.ansi
+docs/assets/design/tui-c/project-picker-light.svg
+docs/assets/design/tui-c/project-picker-overflow-dark.ansi
+docs/assets/design/tui-c/project-picker-overflow-dark.svg
+docs/assets/design/tui-c/project-picker-overflow-light.ansi
+docs/assets/design/tui-c/project-picker-overflow-light.svg
+docs/assets/design/tui-c/projects-degraded-dark.ansi
+docs/assets/design/tui-c/projects-degraded-dark.svg
+docs/assets/design/tui-c/projects-degraded-light.ansi
+docs/assets/design/tui-c/projects-degraded-light.svg
+docs/assets/design/tui-c/projects-unavailable-dark.ansi
+docs/assets/design/tui-c/projects-unavailable-dark.svg
+docs/assets/design/tui-c/projects-unavailable-light.ansi
+docs/assets/design/tui-c/projects-unavailable-light.svg
+docs/assets/design/tui-c/prompt-dark.ansi
+docs/assets/design/tui-c/prompt-dark.svg
+docs/assets/design/tui-c/prompt-light.ansi
+docs/assets/design/tui-c/prompt-light.svg
+docs/assets/design/tui-c/rail-project-selection-dark.ansi
+docs/assets/design/tui-c/rail-project-selection-dark.svg
+docs/assets/design/tui-c/rail-project-selection-light.ansi
+docs/assets/design/tui-c/rail-project-selection-light.svg
+docs/assets/design/tui-c/rail-task-selection-dark.ansi
+docs/assets/design/tui-c/rail-task-selection-dark.svg
+docs/assets/design/tui-c/rail-task-selection-light.ansi
+docs/assets/design/tui-c/rail-task-selection-light.svg
+docs/assets/design/tui-c/role-audit.txt
+docs/assets/design/tui-c/search-dark.ansi
+docs/assets/design/tui-c/search-dark.svg
+docs/assets/design/tui-c/search-light.ansi
+docs/assets/design/tui-c/search-light.svg
+docs/assets/design/tui-c/search-overflow-dark.ansi
+docs/assets/design/tui-c/search-overflow-dark.svg
+docs/assets/design/tui-c/search-overflow-light.ansi
+docs/assets/design/tui-c/search-overflow-light.svg
+docs/assets/design/tui-c/selection-dark.ansi
+docs/assets/design/tui-c/selection-dark.svg
+docs/assets/design/tui-c/selection-light.ansi
+docs/assets/design/tui-c/selection-light.svg
+docs/assets/design/tui-c/selection-overflow-dark.ansi
+docs/assets/design/tui-c/selection-overflow-dark.svg
+docs/assets/design/tui-c/selection-overflow-light.ansi
+docs/assets/design/tui-c/selection-overflow-light.svg
+docs/assets/design/tui-c/sessions-dark.ansi
+docs/assets/design/tui-c/sessions-dark.svg
+docs/assets/design/tui-c/sessions-dense-dark.ansi
+docs/assets/design/tui-c/sessions-dense-dark.svg
+docs/assets/design/tui-c/sessions-dense-light.ansi
+docs/assets/design/tui-c/sessions-dense-light.svg
+docs/assets/design/tui-c/sessions-light.ansi
+docs/assets/design/tui-c/sessions-light.svg
+docs/assets/design/tui-c/single-project-dark.ansi
+docs/assets/design/tui-c/single-project-dark.svg
+docs/assets/design/tui-c/single-project-light.ansi
+docs/assets/design/tui-c/single-project-light.svg
+docs/assets/design/tui-c/state-branches.txt
+docs/assets/design/tui-c/state-mappings.txt
+docs/assets/design/tui-c/style-constructions.txt
+docs/assets/design/tui-c/task-actions-dark.ansi
+docs/assets/design/tui-c/task-actions-dark.svg
+docs/assets/design/tui-c/task-actions-light.ansi
+docs/assets/design/tui-c/task-actions-light.svg
+docs/assets/design/tui-c/task-create-dark.ansi
+docs/assets/design/tui-c/task-create-dark.svg
+docs/assets/design/tui-c/task-create-light.ansi
+docs/assets/design/tui-c/task-create-light.svg
+docs/assets/design/tui-c/task-delete-dark.ansi
+docs/assets/design/tui-c/task-delete-dark.svg
+docs/assets/design/tui-c/task-delete-light.ansi
+docs/assets/design/tui-c/task-delete-light.svg
+docs/assets/design/tui-c/task-edit-save-failed-dark.ansi
+docs/assets/design/tui-c/task-edit-save-failed-dark.svg
+docs/assets/design/tui-c/task-edit-save-failed-light.ansi
+docs/assets/design/tui-c/task-edit-save-failed-light.svg
+docs/assets/design/tui-c/task-program-dark.ansi
+docs/assets/design/tui-c/task-program-dark.svg
+docs/assets/design/tui-c/task-program-light.ansi
+docs/assets/design/tui-c/task-program-light.svg
+docs/assets/design/tui-c/task-save-failed-dark.ansi
+docs/assets/design/tui-c/task-save-failed-dark.svg
+docs/assets/design/tui-c/task-save-failed-light.ansi
+docs/assets/design/tui-c/task-save-failed-light.svg
+docs/assets/design/tui-c/task-schedule-dark.ansi
+docs/assets/design/tui-c/task-schedule-dark.svg
+docs/assets/design/tui-c/task-schedule-light.ansi
+docs/assets/design/tui-c/task-schedule-light.svg
+docs/assets/design/tui-c/task-schedule-type-dark.ansi
+docs/assets/design/tui-c/task-schedule-type-dark.svg
+docs/assets/design/tui-c/task-schedule-type-light.ansi
+docs/assets/design/tui-c/task-schedule-type-light.svg
+docs/assets/design/tui-c/task-trigger-dark.ansi
+docs/assets/design/tui-c/task-trigger-dark.svg
+docs/assets/design/tui-c/task-trigger-light.ansi
+docs/assets/design/tui-c/task-trigger-light.svg
+docs/assets/design/tui-c/task-weekdays-dark.ansi
+docs/assets/design/tui-c/task-weekdays-dark.svg
+docs/assets/design/tui-c/task-weekdays-light.ansi
+docs/assets/design/tui-c/task-weekdays-light.svg
+docs/assets/design/tui-c/task-weekdays-unchecked-dark.ansi
+docs/assets/design/tui-c/task-weekdays-unchecked-dark.svg
+docs/assets/design/tui-c/task-weekdays-unchecked-light.ansi
+docs/assets/design/tui-c/task-weekdays-unchecked-light.svg
+docs/assets/design/tui-c/tasks-dark.ansi
+docs/assets/design/tui-c/tasks-dark.svg
+docs/assets/design/tui-c/tasks-light.ansi
+docs/assets/design/tui-c/tasks-light.svg
+docs/assets/design/tui-c/tasks-unavailable-dark.ansi
+docs/assets/design/tui-c/tasks-unavailable-dark.svg
+docs/assets/design/tui-c/tasks-unavailable-light.ansi
+docs/assets/design/tui-c/tasks-unavailable-light.svg
+docs/assets/design/tui-c/too-small-dark.ansi
+docs/assets/design/tui-c/too-small-dark.svg
+docs/assets/design/tui-c/too-small-light.ansi
+docs/assets/design/tui-c/too-small-light.svg
+docs/assets/design/tui-c/verification.txt
+docs/assets/design/tui-c/zero-accounts-dark.ansi
+docs/assets/design/tui-c/zero-accounts-dark.svg
+docs/assets/design/tui-c/zero-accounts-light.ansi
+docs/assets/design/tui-c/zero-accounts-light.svg
+docs/assets/design/tui-c/zero-sessions-dark.ansi
+docs/assets/design/tui-c/zero-sessions-dark.svg
+docs/assets/design/tui-c/zero-sessions-light.ansi
+docs/assets/design/tui-c/zero-sessions-light.svg
+docs/assets/design/tui-c/zero-tasks-dark.ansi
+docs/assets/design/tui-c/zero-tasks-dark.svg
+docs/assets/design/tui-c/zero-tasks-light.ansi
+docs/assets/design/tui-c/zero-tasks-light.svg
+docs/configuration.md
+docs/design/style-guide.md
+docs/design/tui-design-c-stills.md
+mkdocs.yml
+ui/appearance.go
+ui/appearance_test.go
+ui/config_pane.go
+ui/config_pane_test.go
+ui/config_pane_width.go
+ui/theme.go
+web/selftest/goldens/account-error-dark.png
+web/selftest/goldens/account-error.png
+web/selftest/goldens/add-account-dark.png
+web/selftest/goldens/add-account.png
+web/selftest/goldens/assistant-error-dark.png
+web/selftest/goldens/assistant-error.png
+web/selftest/goldens/config-accounts-dark.png
+web/selftest/goldens/config-accounts.png
+web/selftest/goldens/config-dirty-dark.png
+web/selftest/goldens/config-dirty.png
+web/selftest/goldens/phone-add-account-dark.png
+web/selftest/goldens/phone-add-account.png
+web/selftest/goldens/phone-config-dark.png
+web/selftest/goldens/phone-config.png
