@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -104,7 +105,7 @@ You can still do it by hand, and af runs exactly these:
 Those variables do not all have the same shape, and mixing them up is the easy
 mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.
 GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it, so the account
-directory af prints holds the credential at <dir>/.gemini/gemini-credentials.json.
+` + accountsGeminiCredentialHelp() + `
 Point the variable at the printed directory, never at a .gemini path inside it.
 
 Select an account for a session with:
@@ -133,6 +134,16 @@ when none is usable. Docker account-scoped creates remain supported, but
 automatic Docker replacement is disabled until af can durably identify and reap a
 crash-surviving container and freeze its complete provision plan. An explicit
 --account is a permanent pin and is never overridden.` + accountsRegistrationOnlyHelp(),
+}
+
+// accountsGeminiCredentialHelp uses the login artifact list so the help follows
+// filename differences across Gemini CLI versions.
+func accountsGeminiCredentialHelp() string {
+	artifacts := agentaccount.AccountCredentialArtifacts("gemini")
+	for i, artifact := range artifacts {
+		artifacts[i] = "<dir>/" + filepath.ToSlash(artifact)
+	}
+	return wrapHelpParagraph("directory af prints holds the credential at "+strings.Join(artifacts, " or ")+".", helpWrapColumns)
 }
 
 // accountsRegistrationOnlyHelp appends the registration-only agents to the group
