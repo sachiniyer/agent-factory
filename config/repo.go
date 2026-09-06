@@ -656,6 +656,11 @@ func ResolveProjectPath(projectPath string) ResolvedProject {
 		return ResolvedProject{ID: repo.ID, Root: repo.Root}
 	}
 	cleaned := filepath.Clean(projectPath)
+	// Walk the physical ancestry of an available alias, not the repository
+	// that happens to contain the symlink to a non-Git destination.
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		cleaned = resolved
+	}
 	// Only walk an ABSOLUTE path. A relative one has no meaning independent of
 	// the current directory, so climbing it reaches "." and resolves to whatever
 	// repository the caller happens to be standing in — adopting a record into
@@ -673,9 +678,6 @@ func ResolveProjectPath(projectPath string) ResolvedProject {
 				break // reached the filesystem root
 			}
 		}
-	}
-	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
-		cleaned = resolved
 	}
 	return ResolvedProject{ID: RepoIDFromRoot(cleaned)}
 }

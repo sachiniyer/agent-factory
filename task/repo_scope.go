@@ -45,6 +45,9 @@ type repoResolution struct {
 
 // newRepoScope uses Git identity or the symlink-resolved display fallback,
 // retaining the raw target hash when filesystem resolution fails.
+//
+// repoRoot is normally a main-worktree root, but a bare repository has no main
+// worktree and RepoContext.Root remains the requesting checkout (#3358).
 func newRepoScope(repoRoot string) *repoScope {
 	return newRepoScopeWithID(repoRoot, config.RepoIDForPath(repoRoot))
 }

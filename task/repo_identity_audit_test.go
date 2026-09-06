@@ -23,6 +23,8 @@ func TestProjectPathIdentityAudit(t *testing.T) {
 	repoAlias, plainAlias := filepath.Join(base, "repo-alias"), filepath.Join(base, "plain-alias")
 	require.NoError(t, os.Symlink(repo, repoAlias))
 	require.NoError(t, os.Symlink(plain, plainAlias))
+	nestedAlias := filepath.Join(repo, "outside")
+	require.NoError(t, os.Symlink(plain, nestedAlias))
 	missing := filepath.Join(base, "missing")
 	broken := filepath.Join(base, "broken")
 	require.NoError(t, os.Symlink(missing, broken))
@@ -36,6 +38,7 @@ func TestProjectPathIdentityAudit(t *testing.T) {
 		{"git-symlink", repoAlias, repo, repo, true},
 		{"non-git", plain, plain, "", false},
 		{"non-git-symlink", plainAlias, plain, "", false},
+		{"non-git-symlink-inside-git", nestedAlias, plain, "", false},
 		{"missing", missing, missing, "", false},
 		{"broken-symlink", broken, broken, "", false},
 		{"missing-git-child", filepath.Join(repo, "gone"), repo, repo, false},
@@ -46,7 +49,7 @@ func TestProjectPathIdentityAudit(t *testing.T) {
 			t.Run(shape.name+"/"+spelling.name, func(t *testing.T) {
 				path := shape.path + spelling.suffix
 				targetID, displayID, writerID := h(path), h(filepath.Clean(path)), ""
-				if shape.name == "non-git" || shape.name == "non-git-symlink" {
+				if shape.name == "non-git" || shape.name == "non-git-symlink" || shape.name == "non-git-symlink-inside-git" {
 					targetID, displayID = h(plain), h(plain)
 				}
 				if shape.projectRoot != "" {

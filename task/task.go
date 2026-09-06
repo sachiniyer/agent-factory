@@ -627,6 +627,9 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 
 // repoIDForPath returns only a Git-proven repository ID, leaving non-Git and
 // unavailable paths unbound with an empty ID instead of a display fallback hash.
+//
+// An ID that no repo actually has is worse than no ID at all, because a caller
+// cannot tell the two apart.
 func repoIDForPath(projectPath string) string {
 	if strings.TrimSpace(projectPath) == "" {
 		return ""
