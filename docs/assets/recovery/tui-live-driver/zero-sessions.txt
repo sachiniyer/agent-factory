@@ -1,0 +1,36 @@
+
+ Agent Factory
+ ▼ Sessions (0)
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                   No sessions yet
+
+                                                                Press n to create one.
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────
+ Projects (1) · ↵ switch
+● mock-repo (0)
+
+
+                                   n new · N new remote │ / search │ ? help · q quit
+

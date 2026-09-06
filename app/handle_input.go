@@ -167,7 +167,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// m.pendingPrompt from inside the closure would race the next create's
 		// reset. TrimSpace so a field holding only whitespace is "no prompt"
 		// rather than a stray newline delivered to the agent.
-		prompt := strings.TrimSpace(m.pendingPrompt)
+		rawPrompt := m.pendingPrompt
+		prompt := strings.TrimSpace(rawPrompt)
 		m.pendingPrompt = ""
 		// Same reasoning for the backend picked in the ctrl+r field (#1933): read it
 		// on the loop, clear it with the rest of the naming state.
@@ -218,6 +219,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
+				draft: &req, rawPrompt: rawPrompt,
 				instance: instance,
 				started:  started,
 				err:      err,
@@ -327,6 +329,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // startNewInstance creates a new instance and enters stateNew for naming.
 // If remote is true, the instance is forced to use the remote hook backend.
 func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
+	if m.restoreFailedCreate() {
+		return m, m.selectionChanged()
+	}
 	// A session lives in a project, and registry mode has none until the user
 	// selects one (#2477) — so refuse here rather than opening a form that cannot
 	// be submitted (#2764).
