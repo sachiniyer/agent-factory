@@ -261,18 +261,6 @@ func installVerifiedProbe(t *testing.T, manager *Manager, derivedID string, repo
 	manager.mu.Unlock()
 }
 
-func onlyRegisteredProject(t *testing.T) config.Project {
-	t.Helper()
-	projects, err := config.ListProjects()
-	if err != nil {
-		t.Fatalf("ListProjects: %v", err)
-	}
-	if len(projects) != 1 {
-		t.Fatalf("expected exactly one registered project, got %d", len(projects))
-	}
-	return projects[0]
-}
-
 // TestRealToRealReattributionCarriesItsState pins review id 3916912953 (P1).
 //
 // The identity a project is FILED under is not always provisional. A
