@@ -34,7 +34,7 @@ export default defineConfig({
   // nothing about correctness (#3855). Reached only through
   // playwright.demo.config.ts, so `npx playwright test` — which is exactly how
   // web-selftest-entry.sh invokes CI's Web selftest — never picks it up.
-  testIgnore: /web-demo\.spec\.ts$/,
+  testIgnore: /web-(demo|perf)\.spec\.ts$/,
   // One daemon, one browser: the flows mutate shared session state (create / kill /
   // archive), so they must run serially against a single worker.
   fullyParallel: false,

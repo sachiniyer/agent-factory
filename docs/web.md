@@ -79,6 +79,16 @@ it; tapping the backdrop dismisses it. With a session selected, project and view
 controls move into the drawer. **More** holds the install, theme, and Disconnect
 controls on narrow screens.
 
+**Share a link to a session.** Click **Copy link** beside the selected session's
+header title to copy its link, or copy the address bar: it follows your selection.
+Links use the stable session ID (`/#/session/<id>`) and open on this daemon,
+switching projects and revealing Archived when needed. Login preserves the target;
+a missing session shows a notice and returns to the dashboard.
+
+| Control | Action |
+| --- | --- |
+| Copy link | Copy the selected session's URL to the clipboard |
+
 ### Create a session
 
 Click **+ New** in the rail. If there are no projects, add one through the project
