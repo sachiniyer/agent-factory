@@ -170,7 +170,9 @@ commenting "@codex review". Unknown error` is `failure` (#3951). The production
 response “To use Codex here, [create an environment for this
 repo](https://chatgpt.com/codex/cloud/settings/environments).” exposed why
 enumerating vendor stems is not sufficient (#3985). Classification is now
-structural: after preserving a review body (`CODEX_REVIEW_RE` plus
+structural: a top-level pull-review comment is a finding surface and never
+availability evidence (`pull_request_review_id` set with no `in_reply_to_id`,
+#3989). After also preserving a review body (`CODEX_REVIEW_RE` plus
 `REVIEWED_COMMIT_RE`), a finding-shaped inline reply, and a parseable summary or
 verdict, every other non-empty Codex-authored artifact is reviewer-unavailable
 with kind `unrecognised`. Its first body line is retained as the cause so the
@@ -327,13 +329,15 @@ history does not disappear after 24h or require rescanning all past PRs. An
 episode starts at the first observed known limit or transient failure, not the
 preceding verdict. An unrecognised response extends an episode already open but
 does not open one by itself. The sweep reads **both** `/pulls/N/comments` and
-`/issues/N/comments` unfiltered, plus review bodies. It reconstructs degraded
-merges using #3932's method: a reviewer-unavailable response whose artifact
-timestamp falls inside the episode and before merge, plus no real verdict
-covering the actual merged head before merge. This is historical coverage
-accounting, not a second implementation of the merge gate; the count is
-labelled with its method in the record. An unrecognised artifact before the
-episode is not evidence. Late
+`/issues/N/comments` unfiltered, plus review bodies. The shared classifier
+structurally removes top-level pull-review comments from that feed before body
+classification; those artifacts are finding surfaces, while replies retain the
+finding-shaped body guard. It reconstructs degraded merges using #3932's method:
+a reviewer-unavailable response whose artifact timestamp falls inside the
+episode and before merge, plus no real verdict covering the actual merged head
+before merge. This is historical coverage accounting, not a second
+implementation of the merge gate; the count is labelled with its method in the
+record. An unrecognised artifact before the episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
 `auto-gate.js` supplies structural classification, quotation/finding exclusions,
 and verdict parsing. Finding predicates and the hand gate's jq are unchanged.

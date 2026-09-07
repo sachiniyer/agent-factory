@@ -3586,6 +3586,31 @@ test("unavailable classification preserves review, finding, and verdict guards",
   assert.equal(__test.parseReviewedCommit(quotingReview.body), HEAD_SHA.slice(0, 10));
 });
 
+test("#3989: evaluateCodex keeps a top-level inline finding in the finding list only", async () => {
+  const finding = {
+    ...codexFinding({
+      id: 3947119505,
+      line: 4662,
+      body: "**P2 Badge** Keep incomplete summary rows out of outage evidence",
+    }),
+    pull_request_review_id: 5128730196,
+    commit_id: HEAD_SHA,
+  };
+  const result = await __test.evaluateCodex({
+    github: fakeGateGithub({ issueComments: [], reviewComments: [finding] }),
+    context: fakeContext(),
+    number: 1465,
+    sha: HEAD_SHA,
+    lastCommitDate: "2026-07-09T01:00:00Z",
+    prCreatedAt: "2026-07-09T00:00:00Z",
+  });
+
+  assert.equal(result.reviewerUnavailable, false);
+  assert.equal(result.reviewerUnavailableKind, null);
+  assert.equal(result.findingBlockers.length, 1);
+  assert.match(result.findingBlockers[0].reason, /1 unresolved live Codex inline finding/);
+});
+
 for (const [pr, head, committed, limit, later, body] of [
   [3937, "9528ae06", "12:22:12", "12:22:34", "12:30:46", CODEX_TRANSIENT_FAILURE],
   [3948, "a40e7aac", "12:38:27", "12:38:32", "12:48:27", "<!-- codex-pull-request-review-summary -->\n## Codex Review Summary"],
