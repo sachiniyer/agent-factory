@@ -160,11 +160,11 @@ sandbox delta for scaling, and quote a single RSS reading for neither.
 - **every descendant that is not rerouted into another scope**, not just its
   direct children — a process spawned with a plain `exec` inherits the daemon's
   cgroup, and so does everything *it* forks, all the way down, until something
-  explicitly moves a process out. That is usually where the memory is: the
-  post-worktree hook is one `sh -c` child (`session/git/hooks.go`), while the
-  compiler, package manager and `node` processes that dominate its footprint are
-  its grandchildren. Anything in that tree that outlives a stop under
-  `KillMode=process` is still counted;
+  explicitly moves a process out. When a tree does land here, that is usually
+  where the memory is: it is the compiler, package manager and `node` processes
+  several levels down, not the `sh -c` child itself, that dominate a footprint.
+  Anything in that tree that outlives a stop under `KillMode=process` is still
+  counted;
 - **file-backed memory charged to this cgroup** — page cache is charged to
   whichever cgroup first instantiates a page, so this covers what these
   processes brought in, not everything they read: pages another cgroup had
@@ -172,13 +172,28 @@ sandbox delta for scaling, and quote a single RSS reading for neither.
   here after that child has exited;
 - kernel slab.
 
-Not everything the daemon starts lands there. af deliberately puts two classes
-of child in their own transient systemd scopes — tmux servers
-(`session/tmux/server_scope_linux.go`) and long-lived watchers and editors
-(`newDaemonChildCommand`, `daemon/child_scope_linux.go`) — and those scopes are
-siblings of the daemon unit, not children of it. Agent processes are descendants
-of a tmux server, so once that server is a scoped one they sit outside the
-unit's figure, which is why the sizing section below counts them separately.
+Not everything the daemon starts lands there. af deliberately puts three classes
+of child in their own transient systemd scopes, all of them siblings of the
+daemon unit rather than children of it:
+
+- tmux servers (`session/tmux/server_scope_linux.go`);
+- long-lived watchers and editors, in a scope *bound* to the daemon unit so
+  systemd stops them with it (`systemdunit.NewBoundChildCommand`,
+  `internal/systemdunit/childscope_linux.go`);
+- operator-authored hooks — `post_worktree_commands` (`session/git/hooks.go`)
+  and `on_archive_command` (`daemon/archive_hook.go`) — in an *unbound* scope
+  with no dependency edge at all, so a long build survives a daemon restart or
+  auto-upgrade (`systemdunit.NewUnboundScopeCommand`, #3650).
+
+Agent processes are descendants of a tmux server, so once that server is a
+scoped one they sit outside the unit's figure, which is why the sizing section
+below counts them separately.
+
+**Being the process systemd started is the whole gate.** All three routes check
+`systemdunit.RunningDaemonProcess()` first, so they apply to the daemon running
+as `agent-factory-daemon.service` on Linux. A TUI or CLI that creates a worktree
+itself spawns exactly what it always spawned — which is not in the daemon's
+cgroup either, because it is not the daemon.
 
 **One case where they do not: a legacy tmux server after an upgrade.**
 `ensureDedicatedServer` deliberately leaves a foreign or legacy server alone
@@ -302,14 +317,16 @@ the daemon's own memory.
 
 ### The measured driver: `post_worktree_commands`
 
-**`post_worktree_commands` for a locally created worktree run inside the
+**`post_worktree_commands` for a locally created worktree used to run inside the
 daemon's cgroup** — the behaviour before
-[#3650](https://github.com/sachiniyer/agent-factory/issues/3650), which is in
-flight, rather than a permanent property. When the daemon creates a worktree on
-its own box it runs your repo's post-worktree hook as a `sh -c` child with no
-scope of its own, so that whole process tree — the shell, and the compiler and
-package manager beneath it — is accounted to the daemon unit: its anon memory
-*and* whatever file-backed pages it is first to touch. On the measured box, one
+[#3650](https://github.com/sachiniyer/agent-factory/issues/3650), which is
+fixed, not a permanent property. The measurement below was taken on that older
+behaviour; read it for the mechanism, and see [After #3650](#after-3650) for
+what a current daemon does instead. When the daemon created a worktree on its
+own box it ran your repo's post-worktree hook as a `sh -c` child with no scope
+of its own, so that whole process tree — the shell, and the compiler and
+package manager beneath it — was accounted to the daemon unit: its anon memory
+*and* whatever file-backed pages it was first to touch. On the measured box, one
 repo's hook runs `make dev_install`, building a ~2 GB `node_modules` per
 worktree. Across those 13 warmed-up unit lifetimes:
 
@@ -326,8 +343,8 @@ lifetime with 42 sessions on hook-less repos peaked at 7.8 GB; one with 48
 sessions on the hook-carrying repo peaked at 38.3 GB.
 
 That is a description of one box over 13 lifetimes, not a formula for yours. The
-transferable part is the mechanism: a heavy post-worktree hook lands on the
-daemon unit.
+transferable part is the mechanism: a heavy post-worktree hook lands wherever
+its cgroup puts it, and before #3650 that was the daemon unit.
 
 **And only for a worktree the daemon creates on its own box.** The other four
 backends provision through an `af agent-server`: `docker`, `ssh`, `sandbox` and
@@ -336,25 +353,45 @@ backends provision through an `af agent-server`: `docker`, `ssh`, `sandbox` and
 backend which creates the worktree and runs the post-worktree commands. Where the
 server runs on another machine, its hook processes are its descendants there and
 never reach your daemon's unit — so on a remote fleet, look for the build on the
-machine hosting the workspace.
+machine hosting the workspace. This qualification outlives #3650: an
+agent-server on another box is not the daemon, so the scope below never applies
+to it.
 
 **Qualify that by where the agent-server runs, not by the backend's name.** A
 `hook` backend only has to hand back an agent-server endpoint; its `launch_cmd`
 may perfectly well start that server **on the daemon host**, which
-`session/runtime.go` calls out explicitly, and af moves nothing out of the
-cgroup it lands in. Such a tree is a descendant of the daemon unit after all, and
-its post-worktree builds do count toward the unit's peak. So if a peak is
-unexplained, check where that session's agent-server actually runs and read its
-`/proc/<pid>/cgroup` — do not rule a session out merely because its backend is
-not `local`.
+`session/runtime.go` calls out explicitly. `launch_cmd` itself is spawned with a
+plain `exec` (`session/backend_hook_backend.go`), so af moves nothing out of the
+cgroup it lands in: such a tree is a descendant of the daemon unit after all,
+and it counts toward the unit's peak. What its *hooks* do is a separate
+question — `RunningDaemonProcess()` reads `/proc/self/cgroup`, so a server
+sitting inside the unit's cgroup takes the same scoped path the daemon does. So
+if a peak is unexplained, check where that session's agent-server actually runs
+and read its `/proc/<pid>/cgroup` — do not rule a session out merely because its
+backend is not `local`.
 
-#3650 moves those spawns into their own transient scope — a sibling under
-`app.slice` rather than a child of the daemon unit, so the build is off the
-daemon's books and still survives a daemon restart. The watcher and the VS Code
-start gate already route through a scope (#2299); the post-worktree hook and the
-archive hook do not yet. Read `/proc/<hook pid>/cgroup` while a hook runs rather
-than inferring which side of #3650 your build is on. Until it lands, size the
-**box** for what your local hooks build — not the daemon.
+#### After #3650
+
+#3650 landed, and moved those spawns into their own transient scope — a sibling
+under `app.slice` rather than a child of the daemon unit — so the build is off
+the daemon's books and, because that scope carries no dependency edge to the
+unit, it also survives a daemon restart or auto-upgrade instead of being killed
+mid-build. It covers **both** operator hooks: `post_worktree_commands`
+(`session/git/hooks.go`) and `on_archive_command` (`daemon/archive_hook.go`).
+The watcher and the VS Code start gate had already routed through a scope
+(#2299), in the bound shape.
+
+So on a current daemon the correlation above should not reproduce, and the unit's
+`MemoryPeak` is a daemon number again — which is what makes a `MemoryMax=` or
+`CPUQuota=` on the unit size the daemon rather than the operator's build. Two
+things still put a hook back in the old place, and both are worth checking before
+concluding otherwise: a hook run by a **TUI or CLI** that creates the worktree
+itself was never scoped (it is not the daemon, so it is not in the daemon's
+cgroup either), and a **non-Linux** host has no systemd and no cgroup accounting
+at all. Read `/proc/<hook pid>/cgroup` while a hook runs rather than inferring
+which side of #3650 a given build is on. Either way, size the **box** for what
+your local hooks build — that memory did not disappear, it moved to a scope of
+its own.
 
 ### High child-process churn, which is not a measured driver
 
@@ -405,10 +442,11 @@ only the hook correlation above connects anything to the peak.
   daemon's footprint and outside this page; no figure for it was measured here.
   It is outside the *unit's* figure too — but only once a scoped tmux server has
   replaced any legacy one left in the service cgroup by a pre-upgrade daemon.
-- **Plus whatever `post_worktree_commands` builds**, per worktree — charged to
-  the daemon's cgroup until #3650 moves it out, and only for a worktree the
-  daemon creates on this box. An off-box backend builds it on the machine
-  hosting the workspace instead, and you size that machine for it.
+- **Plus whatever `post_worktree_commands` builds**, per worktree — since #3650
+  charged to its own sibling scope rather than the daemon's cgroup, so it is
+  outside the unit's figure but still on this box's RAM. Only for a worktree the
+  daemon creates here: an off-box backend builds it on the machine hosting the
+  workspace instead, and you size that machine for it.
 - **Plus everything else a session can start.** A session may hold any number of
   extra process-bearing tabs — shell, process, editor — and there is no cap on
   how many (#3021). Watch tasks run their command, editors and watchers run
@@ -423,7 +461,8 @@ cgroup figure is file-backed and how much of *that* is reclaimable page cache
 rather than tmpfs, dirty or writeback pages, and read `memory.events` and
 `memory.pressure` to find out whether any of it is actually costing anything. On
 the box above, that sequence turned a gigabyte-scale "daemon leak" into a 92.6 MB
-process and a hook building `node_modules` in the wrong cgroup.
+process and a hook building `node_modules` in the wrong cgroup — the diagnosis
+#3650 then acted on.
 
 ## Profiling the daemon
 
