@@ -21,15 +21,15 @@ export const TERMINAL_ANSI: Record<"light" | "dark", ITheme> = {
     "brightWhite": "#171A20"
   },
   "dark": {
-    "black": "#B4BCC8",
+    "black": "#9D9D9D",
     "red": "#D9B2B9",
     "green": "#A3BE8C",
     "yellow": "#EBCB8B",
     "blue": "#81A1C1",
     "magenta": "#B590AF",
     "cyan": "#90C4D3",
-    "white": "#D8DEE9",
-    "brightBlack": "#959CA5",
+    "white": "#CCCCCC",
+    "brightBlack": "#B0B0B0",
     "brightRed": "#E1C1C7",
     "brightGreen": "#B5CBA3",
     "brightYellow": "#EFD5A2",

@@ -21,7 +21,15 @@ set -euo pipefail
 COLS="${DEMO_COLS:-168}"
 ROWS="${DEMO_ROWS:-32}"
 AGG_FONT_SIZE="${DEMO_FONT_SIZE:-14}"
-AGG_THEME="${DEMO_THEME:-2e3440,eceff4,2e3440,e4c8cd,d5e2cc,ebcb8b,90c4d3,dbb9d5,90c4d3,eceff4}"
+# Read the fixed roles rather than retaining a second recorder palette.
+AGG_THEME="${DEMO_THEME:-$(python3 - "$(dirname "${BASH_SOURCE[0]}")/../../design/tokens.json" <<'PYTOKENS'
+import json, sys
+with open(sys.argv[1]) as source:
+    colors = json.load(source)["colors"]
+roles = ["surface", "ink", "surface", "dead", "ready", "lost", "accent", "limit-reached", "accent", "ink"]
+print(",".join(colors[role]["dark"].removeprefix("#") for role in roles))
+PYTOKENS
+)}"
 AGG_FPS="${DEMO_FPS:-12}"
 AGG_IDLE="${DEMO_IDLE:-3.0}"
 AGG_SPEED="${DEMO_SPEED:-1.8}"
