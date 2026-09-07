@@ -409,10 +409,70 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   }
   await expect(menu.getByRole("button", { name: "Disconnect", exact: true })).toBeVisible();
   const controls = menu.locator("button:visible:not(:disabled), a:visible[href]");
-  for (let index = 0; index < await controls.count(); index++) {
+  const states = page.locator(".af-rail-list .af-operator-state");
+  const seededRows = await states.count();
+  const settledSummary = `${seededRows} session${seededRows === 1 ? "" : "s"}`;
+  // PTY input in the preceding phone pass briefly marks its session Working.
+  // That update rebuilds the inlined project rows, so require the recorder's
+  // final seeded projection to remain unchanged before walking the panel.
+  let settledSamples = 0;
+  await expect.poll(async () => {
+    const [operatorStates, summary] = await Promise.all([
+      states.allTextContents(),
+      menu.locator(".af-project-item-current .af-project-item-meta").textContent(),
+    ]);
+    const settled = operatorStates.length === seededRows &&
+      operatorStates.every((state) => state === "Needs you") && summary?.trim() === settledSummary;
+    settledSamples = settled ? settledSamples + 1 : 0;
+    return settledSamples;
+  }, {
+    intervals: [250],
+    timeout: 30_000,
+    message: "the seeded project summary must stay settled before the phone keyboard audit",
+  }).toBeGreaterThanOrEqual(5);
+
+  type ControlRole = Parameters<Locator["getByRole"]>[0];
+  const controlOrder = (await controls.evaluateAll((elements) => elements.map((element) => ({
+    role: element.getAttribute("role") ?? (element.matches("a[href]") ? "link" : "button"),
+    name: element.getAttribute("aria-label")?.trim() ||
+      (element as HTMLElement).innerText.replace(/\s+/g, " ").trim(),
+  })))) as Array<{ role: ControlRole; name: string }>;
+  expect(controlOrder.every(({ name }) => name !== ""), "every phone control has an accessible name").toBe(true);
+
+  let injectedRebuild = false;
+  for (const [position, control] of controlOrder.entries()) {
     await page.keyboard.press("Tab");
-    await expect(controls.nth(index)).toBeFocused();
+    await expect(
+      menu.getByRole(control.role, { name: control.name, exact: true }),
+      `Tab ${position + 1} focuses ${control.role} “${control.name}”`,
+    ).toBeFocused();
+    if (control.role === "button" && control.name === "+ Add project") {
+      // Force #4007 instead of waiting for daemon timing. A refreshed project
+      // row inserted before the focused footer shifts every subsequent live
+      // index, while the snapshotted named order still identifies Delete.
+      await menu.evaluate((panel) => {
+        const projectMenu = panel.querySelector<HTMLElement>(".af-project-menu")!;
+        const current = projectMenu.querySelector<HTMLElement>(".af-project-item-current")!;
+        const inserted = current.cloneNode(true) as HTMLElement;
+        inserted.dataset.afFocusRebuildInjection = "";
+        inserted.classList.remove("af-project-item-current");
+        inserted.setAttribute("aria-selected", "false");
+        inserted.querySelector<HTMLElement>(".af-project-item-name")!.textContent = "refreshed-project";
+        inserted.querySelector<HTMLElement>(".af-project-item-path")!.textContent = "/work/refreshed-project";
+        inserted.querySelector<HTMLElement>(".af-project-item-meta")!.textContent = "0 sessions";
+        const focused = document.activeElement as HTMLElement;
+        projectMenu.replaceChildren(
+          ...Array.from(projectMenu.childNodes).flatMap((node) => node === current ? [inserted, node] : [node]),
+        );
+        focused.focus({ preventScroll: true });
+      });
+      injectedRebuild = true;
+    }
   }
+  expect(injectedRebuild, "the phone focus audit forces a project-row rebuild").toBe(true);
+  await menu.locator("[data-af-focus-rebuild-injection]").evaluateAll((elements) => {
+    for (const element of elements) element.remove();
+  });
   await page.keyboard.press("Escape");
   await expect(more).toBeFocused();
   await expect(menu).toBeHidden();
