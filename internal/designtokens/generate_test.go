@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,7 +27,9 @@ func TestCommittedArtifacts(t *testing.T) {
 			t.Fatalf("nondeterministic %s", p)
 		}
 	}
-	if !bytes.Equal(out["web/src/tokens.css"], out["docs/stylesheets/tokens.css"]) {
+	docsCSS := strings.ReplaceAll(string(out["docs/stylesheets/tokens.css"]), `, [data-md-color-scheme="default"]`, "")
+	docsCSS = strings.ReplaceAll(docsCSS, `, [data-md-color-scheme="slate"]`, "")
+	if string(out["web/src/tokens.css"]) != docsCSS {
 		t.Fatal("docs CSS differs")
 	}
 }

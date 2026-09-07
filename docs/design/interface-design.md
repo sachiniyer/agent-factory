@@ -7,9 +7,9 @@ The web remains vanilla TypeScript with no new runtime dependencies.
 The only user-facing theme choice will be **Light / Dark / System**: two fixed
 product palettes, with System selecting between them. No per-token overrides,
 custom palettes or colour configuration keys. This document
-sets the contract for P2 and P5; this slice changes no live screen, user palette,
-terminal output, shortcut or session behaviour. The [style guide](style-guide.md)
-is the only consumer of the new CSS. The new Go theme is not installed in `ui`.
+sets the contract for P2 and P5. The generated tokens now supply the live web,
+TUI, browser chrome and docs palettes. The [style guide](style-guide.md) displays
+both twins together.
 
 ## Evidence and reading order today
 
@@ -59,6 +59,26 @@ The [recorder documentation](../dev/demo-assets.md) identifies real UI and seede
 agent stand-ins. The [style guide](style-guide.md) pairs specimens with those
 stills and marks missing capture coverage. The TUI Sessions/Tasks SVGs are
 supplementary evidence of an older palette, not recoloured recorder outputs.
+
+## Browser and installed-app chrome
+
+[The design generator](https://github.com/sachiniyer/agent-factory/tree/master/internal/designtokens)
+stamps the light and dark `theme-color` metas in
+[the HTML shell](https://github.com/sachiniyer/agent-factory/blob/master/web/src/index.html)
+from the corresponding `surface` tokens. The
+[manifest](https://github.com/sachiniyer/agent-factory/blob/master/web/src/manifest.webmanifest)
+can carry only one `theme_color`: it uses the **light surface**, matching the
+light meta and prefers-color-scheme defaults. Its `background_color` is the light
+surface too. Dark browser chrome comes from the dark meta; at runtime `theme.ts`
+rewrites both metas to follow an explicit Light/Dark choice. The installed-app
+splash retains the manifest's light convention.
+
+`go run ./scripts/gen-design --check` checks both source files for drift.
+`TestDesignWebChromeServedBytes` independently reads the committed `web/dist`
+HTML and manifest before any JavaScript can rewrite them. The browser selftest
+separately proves the post-boot theme rewrite. Docs chrome consumes the generated
+palette through Material's scheme selector; embedded tab notices use the generated
+Go dark surface, ink and accent roles.
 
 ## Principles
 
@@ -404,12 +424,13 @@ roles/steps. Treat changing that budget as a design decision, not a customizatio
 feature. No config, API or end-user editor exposes token values.
 
 `go run ./scripts/gen-design` produces `web/src/tokens.css`, `ui/theme/theme.go`,
-the identical docs CSS copy and `docs/design/style-guide.md`. CSS has exactly
-23 custom properties per theme, scoped to `[data-af-theme="light"]` and
-`[data-af-theme="dark"]`. System selects one of those scopes. Go supplies the
-same adaptive light/dark roles and prescribed lipgloss component styles. The
-maps are internal implementation values, not user override facilities. The live
-`ui.Theme` and browser theme code remain untouched in this foundation slice.
+`docs/stylesheets/tokens.css` and `docs/design/style-guide.md`; it also stamps
+this page's contrast report, the HTML shell metas and the manifest colors. CSS has
+exactly 23 custom properties per theme, scoped to `[data-af-theme="light"]` and
+`[data-af-theme="dark"]`. The docs CSS adds Material's default/slate scheme
+selectors to the same declarations. System selects one of the two palettes. Go
+supplies the same adaptive light/dark roles and prescribed lipgloss component
+styles. The maps are internal implementation values, not user override facilities.
 
 `make docs` calls the same `scripts/gen-docs.sh` entry point as reference/plugin
 generation. `go run ./scripts/gen-design --check` compares outputs without writing.
