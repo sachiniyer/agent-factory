@@ -604,7 +604,7 @@ export function deletionConfirmationBody(opts: DeletionWorkspace): string {
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; immediateRestore?: boolean; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -632,14 +632,23 @@ export function confirmModal(
     },
   }[opts.action];
 
-  const { handle, body } = modalChrome({
-    title: copy.title,
-    confirmLabel: copy.confirmLabel,
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.immediateRestore ? `Restore ${opts.sessionTitle}` : copy.title,
+    confirmLabel: opts.immediateRestore ? "Retry restore" : copy.confirmLabel,
     confirmClass: copy.confirmClass,
     onCancel: opts.onCancel,
   });
 
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
+  if (opts.immediateRestore) {
+    // Mount directly in progress state; the action is already authorized by the
+    // Restore gesture. A refused attempt keeps the existing inline retry surface.
+    const setBusy = handle.setBusy;
+    handle.setBusy = (busy) => {
+      setBusy(busy);
+      confirmBtn.textContent = busy ? "Restoring…" : "Retry restore";
+    };
+  }
 
   let acknowledgment: HTMLInputElement | undefined;
   if (opts.action === "kill" && opts.isRoot) {

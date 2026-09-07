@@ -114,6 +114,7 @@ import {
   renderLogin,
   sessionTabs,
   canManageTabs,
+  restoreRequiresConfirmation,
   isOffBoxWorkspace,
   canMutateTabRoster,
   canCreateTabKind,
@@ -910,6 +911,7 @@ function openConfirm(
   invoker: ModalInvoker = captureModalInvoker(),
 ): void {
   const target = { id: session.id, title: session.title };
+  const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest: SessionData | undefined): boolean => {
     // Consent may get stronger while this dialog is open, never weaker. Keeping
@@ -928,89 +930,96 @@ function openConfirm(
     stopModalProjectionWatch = store.subscribe(refresh);
     refresh();
   };
+  const onConfirm = () => {
+    const tok = token;
+    // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+    if (tok === null || !modal) {
+      return;
+    }
+    const latest = store.get().sessions.find(s => s.id === target.id);
+    if (action === "kill" && !latest) {
+      modal.setError("This session is no longer available to delete.");
+      return;
+    }
+    // A queued submit can still come from a replaced generic form. Re-read
+    // the projection at the point of mutation even though the watch refreshes
+    // the visible dialog as soon as the root identity changes.
+    if (refreshRootConsent(latest)) return;
+    const m = modal;
+    const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
+    if (action !== "restore" && !mutation) return;
+    m.setBusy(true);
+    if (mutation) {
+      closeModal();
+      applySessions(optimisticSessions.project());
+    }
+    const run =
+      action === "kill"
+        ? killSession(target.id, target.title, tok)
+        : action === "archive"
+          ? archiveSession(target.id, target.title, tok)
+          : restoreSession(target.id, target.title, tok);
+    void run.then(() => {
+      if (mutation) {
+        if (!optimisticSessions.succeed(mutation)) return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+      } else {
+        if (modal === m) closeModal();
+        if (immediateRestore) requestResync();
+      }
+    }).catch((e) => {
+      if (mutation) {
+        const outcome = isMutationCommittedError(e)
+          ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
+          : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+        if (outcome === "stale") return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+        if (outcome !== "reverted") {
+          surfaceMutationError(outcome === "uncertain"
+            ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
+            : e, outcome);
+          return;
+        }
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (!modal) mountConfirmation(m);
+        else surfaceMutationError(e);
+        return;
+      }
+      if (isMutationCommittedError(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(e, "confirmed");
+        return;
+      }
+      if (isMutationOutcomeUncertain(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+        return;
+      }
+      m.setBusy(false);
+      m.setError(errorText(e));
+      if (immediateRestore && modal !== m) surfaceMutationError(e);
+    });
+  };
   mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
+      immediateRestore,
       isRoot: hasRootAcknowledgment,
       archived: isArchived(session),
       offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
       branchCreatedByUs: session.worktree?.branch_created_by_us === true,
-      onConfirm: () => {
-        const tok = token;
-        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-        if (tok === null || !modal) {
-          return;
-        }
-        const latest = store.get().sessions.find(s => s.id === target.id);
-        if (action === "kill" && !latest) {
-          modal.setError("This session is no longer available to delete.");
-          return;
-        }
-        // A queued submit can still come from a replaced generic form. Re-read
-        // the projection at the point of mutation even though the watch refreshes
-        // the visible dialog as soon as the root identity changes.
-        if (refreshRootConsent(latest)) return;
-        const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
-        if (action !== "restore" && !mutation) return;
-        m.setBusy(true);
-        if (mutation) {
-          closeModal();
-          applySessions(optimisticSessions.project());
-        }
-        const run =
-          action === "kill"
-            ? killSession(target.id, target.title, tok)
-            : action === "archive"
-              ? archiveSession(target.id, target.title, tok)
-              : restoreSession(target.id, target.title, tok);
-        void run.then(() => {
-          if (mutation) {
-            if (!optimisticSessions.succeed(mutation)) return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-          } else if (modal === m) closeModal();
-        }).catch((e) => {
-          if (mutation) {
-            const outcome = isMutationCommittedError(e)
-              ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
-              : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
-            if (outcome === "stale") return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-            if (outcome !== "reverted") {
-              surfaceMutationError(outcome === "uncertain"
-                ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
-                : e, outcome);
-              return;
-            }
-            m.setBusy(false);
-            m.setError(errorText(e));
-            if (!modal) mountConfirmation(m);
-            else surfaceMutationError(e);
-            return;
-          }
-          if (isMutationCommittedError(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(e, "confirmed");
-            return;
-          }
-          if (isMutationOutcomeUncertain(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
-            return;
-          }
-          m.setBusy(false);
-          m.setError(errorText(e));
-        });
-      },
+      onConfirm,
       onCancel: closeModal,
     }),
   );
+  if (immediateRestore) onConfirm();
 }
 
 /** Opens the delete-project confirm for a project row (#1735). On confirm it

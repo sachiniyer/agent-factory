@@ -392,6 +392,12 @@ export interface Actions {
   setTheme(choice: ThemeChoice): void;
 }
 
+/** Only known local restores can skip consent. Empty is the legacy local encoding
+ *  (session.InstanceData.UsesLocalTmux); unknown future backends keep consent. */
+export function restoreRequiresConfirmation(session: SessionData): boolean {
+  return session.backend_type !== undefined && session.backend_type !== "" && session.backend_type !== "local";
+}
+
 /** The backend types whose workspace lives off-box (session/archive_sandbox.go
  *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
  *  them can service tab management: every Add*Tab path needs a daemon-side git
