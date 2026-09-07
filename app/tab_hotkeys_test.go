@@ -448,6 +448,57 @@ func TestHandleTabJump(t *testing.T) {
 		"an out-of-range number must be a no-op")
 }
 
+func TestJumpTabPromptAcceptsDisplayLabelsAndCanonicalNames(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "jump-labels")
+	inst.AddTabForTest("vscode", session.TabKindVSCode)
+	inst.AddTabForTest("web", session.TabKindWeb)
+	inst.AddTabForTest("My editor", session.TabKindVSCode)
+	selectInstance(h, inst)
+
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{query: "VS Code", want: 1},
+		{query: "vs code", want: 1},
+		{query: "vscode", want: 1},
+		{query: "Web", want: 2},
+		{query: "web", want: 2},
+		{query: "My editor", want: 3},
+	} {
+		t.Run(test.query, func(t *testing.T) {
+			h.store.SetActiveTab(0)
+			h.sidebar.SyncCursorToActiveTab()
+
+			_, _ = h.showJumpTabPrompt()
+			require.NotNil(t, h.promptOverlay)
+			_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(test.query)})
+			_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyEnter})
+
+			require.Equal(t, test.want, h.store.ActiveTab())
+		})
+	}
+}
+
+func TestJumpTabPromptMissListsLabelsAndCanonicalNames(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "jump-miss")
+	inst.AddTabForTest("vscode", session.TabKindVSCode)
+	inst.AddTabForTest("web", session.TabKindWeb)
+	selectInstance(h, inst)
+
+	_, _ = h.showJumpTabPrompt()
+	require.NotNil(t, h.promptOverlay)
+	_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("missing")})
+	_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyEnter})
+
+	h.errBox.SetSize(200, 1)
+	notice := h.errBox.String()
+	require.Contains(t, notice, "VS Code (vscode)")
+	require.Contains(t, notice, "Web (web)")
+}
+
 // TestNumberKeyRoutesToTabJump proves the digit dispatch in handleKeyPress routes
 // to the jump handler when viewing an instance.
 func TestNumberKeyRoutesToTabJump(t *testing.T) {

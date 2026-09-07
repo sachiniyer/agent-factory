@@ -206,11 +206,13 @@ type Tab struct {
 	// (`--name`, via TabMatches), alongside the stable ID above.
 	//
 	// It is NOT the display label. What the UI renders is TabLabel, a
-	// presentation-only string that is never resolved against — the two
-	// deliberately differ for agent/shell tabs (named `agent`/`shell`, shown as
-	// "Agent"/"Terminal"). This field's doc once claimed to be "the display
-	// label"; that confusion was #1986, and the split into Name (the one handle)
-	// and TabLabel (the one display string) is its resolution.
+	// presentation-only string that name-based CLI and wire operations never
+	// resolve against — the two deliberately differ for agent/shell tabs (named
+	// `agent`/`shell`, shown as "Agent"/"Terminal"). The TUI jump prompt also
+	// accepts that visible label as a local convenience, without changing this
+	// canonical handle. This field's doc once claimed to be "the display label";
+	// that confusion was #1986, and the split into Name (the one handle) and
+	// TabLabel (the one display string) is its resolution.
 	Name string
 	// Kind selects the tab's process behavior.
 	Kind TabKind
@@ -382,17 +384,18 @@ func tabKindForData(k TabKind) TabKind {
 }
 
 // TabLabel returns the presentation-only string a user SEES for a tab — its
-// display label. It is NEVER an identifier: no surface resolves a tab by it
-// (TabMatches keys on Name alone), which is exactly what frees it to be a
-// prettier, non-unique string than the canonical Name. Agent and shell tabs
+// display label. It is NEVER a persisted or wire identifier: TabMatches and the
+// name-based CLI verbs key on Name alone, which is exactly what frees the label
+// to be a prettier, non-unique string than the canonical Name. The TUI's
+// jump-to-tab prompt accepts the visible label as a UI-local alias. Agent and shell tabs
 // render fixed labels ("Agent", "Terminal") that are deliberately not their
 // names (`agent`/`shell`). Web and VS Code tabs likewise use their proper display
 // labels when Name is empty or still carries the kind-string default written by
 // creation; an explicit custom name wins.
 //
-// This is the #1986 split: Name is the one handle a user types, the label is the
-// one string a user reads, and they are allowed to differ because the label
-// carries no identity. It lives beside the Tab type — not in the TUI — so the
+// This is the #1986 split: Name is the canonical handle, the label is the one
+// string a user reads, and they are allowed to differ because the label carries
+// no persisted identity. It lives beside the Tab type — not in the TUI — so the
 // definition of "what a user reads" sits next to Name, the definition of "what a
 // user types": whenever the two differ, TabIdentifiers surfaces the label in a
 // "no tab named …" error, so a user who read "Terminal" off the bar is told the
@@ -427,12 +430,12 @@ func TabLabel(t *Tab) string {
 }
 
 // TabMatches reports whether token identifies this tab. It keys on the canonical
-// Name ONLY: the display label (TabLabel) is presentation and is never an
-// identifier (#1986). A person who typed a label they read off the screen is not
-// matched here — accepting it would make two strings address one tab, the
-// ambiguity #1929/#1904 removed from the tab surface. The label is not a dead
-// end either: TabIdentifiers names it in the resulting "no tab named …" error,
-// so the user learns the real name to type (the discoverability half of #1984).
+// Name ONLY: the display label (TabLabel) is presentation and is never a CLI or
+// wire identifier (#1986). The TUI jump prompt deliberately offers the one
+// UI-local exception, resolving the visible label without changing TabMatches or
+// the public name contract. For name-based callers, TabIdentifiers includes a
+// differing label in the resulting "no tab named …" error so the user learns the
+// real name to type (the discoverability half of #1984).
 func TabMatches(t *Tab, token string) bool {
 	if t == nil || token == "" {
 		return false
@@ -515,11 +518,11 @@ func (i *Instance) tabIndexByIDLocked(id string) (int, bool) {
 
 // TabIdentifiers renders a tab as the strings that help a user address it in an
 // error: its canonical Name, plus the label the UI shows when that differs.
-// Because the label is presentation-only and never accepted (TabMatches keys on
-// Name), naming it here is what lets a user who read "Terminal" off the bar find
-// the `shell` they must type — the discoverability the #1986 split relies on in
-// place of the label alias. Used to make "no tab named X" list the valid options
-// instead of asserting an absence the user can see is false.
+// Because name-based CLI and wire callers accept only Name (TabMatches keys on
+// it), naming the label here lets a user who read "Terminal" off the bar find the
+// `shell` those callers require. The TUI jump prompt separately accepts the label
+// as a local alias. Used to make "no tab named X" list the valid options instead
+// of asserting an absence the user can see is false.
 func TabIdentifiers(t *Tab) string {
 	if t == nil {
 		return ""
