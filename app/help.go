@@ -373,7 +373,9 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 		}},
 		{title: "Tabs:", rows: []helpRow{
 			{helpKey(keys.KeyJumpTab), "Select one of the first nine tabs by number (s opens it, enter attaches)"},
-			{helpKey(keys.KeyJumpTabPrompt), "Jump to ANY tab by number or name — there is no tab limit (#3021)"},
+			// The unbounded jump-to-tab prompt comes from #3021; keep the issue
+			// reference in source rather than exposing it in the help overlay.
+			{helpKey(keys.KeyJumpTabPrompt), "Jump to ANY tab by number or name — there is no tab limit"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
 			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
 			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll the current tab preview (navigation mode only)"},
