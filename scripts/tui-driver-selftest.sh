@@ -840,10 +840,16 @@ step "af_select handles a target with an open pane (#1996)"  _expect_af_select_o
 # compact run action is discoverable.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_task_overlay_marker_context() {
-    local pane list_modal compact_list_modal scrolled_edit
+    local pane foreign_modal list_modal compact_list_modal nested_edit scrolled_edit
     pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
     if printf '%s\n' "$pane" | _af_tasks_overlay_visible; then
         _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
+        return 1
+    fi
+
+    foreign_modal=$'        ╭────────────────────╮\n        │  Agent prompt      │\n        │  esc back          │\n        ╰────────────────────╯'
+    if printf '%s\n' "$foreign_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a foreign rounded dialog with an Esc footer satisfied the task-overlay marker'
         return 1
     fi
 
@@ -856,6 +862,12 @@ _expect_task_overlay_marker_context() {
     compact_list_modal=$'╭──────────────────────────────────────╮\n│                                      │\n│  enter edit · ? actions · esc        │\n│                                      │\n╰──────────────────────────────────────╯'
     if ! printf '%s\n' "$compact_list_modal" | _af_tasks_overlay_visible; then
         _af_fail 'the rounded task dialog and its compact list footer did not satisfy the marker'
+        return 1
+    fi
+
+    nested_edit=$'╭────────────────────────────────────────────╮\n│  Edit task 1234                            │\n│  Prompt: ╭────────╮                       │\n│          │ inner  │                       │\n│          ╰────────╯                       │\n│  x toggle · D del · esc · q quit          │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$nested_edit" | _af_tasks_overlay_visible; then
+        _af_fail 'a task prompt containing a rounded box displaced the outer frame marker'
         return 1
     fi
 

@@ -926,14 +926,13 @@ _af_tab_count() {
 # supported 80x10 floor.
 : "${_AF_TASKS_LIST_TITLE:=│[[:space:]]+Tasks[[:space:]]+│}"
 
-# _AF_TASKS_FOOTER anchors on the `esc` affordance and the remainder of its
-# footer cell before the closing border. Every task-manager hint variant
-# contains it: full or compact list/edit actions, recovery, and create. Width
-# fitting may leave a label (`back`, `cancel`, `list`) or a clipped Unicode tail
-# such as `· …` after Esc, so accept the rest of this single footer line through
-# its closing border. Matching this stable affordance lets wording/order evolve
-# without marker drift, while the enclosing rounded frame rejects pane text.
-: "${_AF_TASKS_FOOTER:=esc.*│}"
+# _AF_TASKS_FOOTER is the task-manager-specific footer predicate, not merely an
+# Esc affordance. Its fragments mirror listModeHint (ui/task_pane_recovery.go),
+# renderListMode (ui/task_pane.go), and renderEditMode (ui/task_pane_edit.go):
+# every list/edit/recovery/create hint has one of these verbs before Esc. Keep
+# this union paired with those source functions when their hints change; the
+# rounded-frame scan then cannot mistake another agent dialog for Tasks.
+: "${_AF_TASKS_FOOTER:=(n new|[?] actions|[?] back|x toggle|D (delete|del)|tab fields|enter edit).*esc.*│}"
 
 # _AF_TASKS_FRAME_TOP/BOTTOM are the rounded borders shared by every task
 # dialog mode. A workspace pane uses square corners, and its OWN │ borders can
@@ -948,18 +947,28 @@ _af_tab_count() {
 : "${_AF_TASKS_FRAME_BOTTOM:=╰(─)+╯}"
 
 # _af_tasks_dialog_has <content-regex> reads a captured screen on stdin and
-# succeeds only when the marker is enclosed by a complete rounded dialog.
+# succeeds only when the marker is enclosed by one complete rounded dialog. The
+# first matching top edge establishes the outer frame; rounded boxes in task
+# prompt text are ignored, and the last matching rounded bottom in the capture
+# closes that outer frame.
 _af_tasks_dialog_has() {
     local content_re="$1"
-    awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" -v content_re="$content_re" '
-        $0 ~ top_re { inside = 1; matched = 0; next }
-        inside && $0 ~ content_re { matched = 1 }
-        inside && $0 ~ bottom_re {
-            if (matched) { found = 1 }
-            inside = 0
-            matched = 0
+    awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" \
+        -v content_re="$content_re" '
+        $0 ~ top_re {
+            if (!inside) {
+                inside = 1
+                matched = 0
+                last_footer = 0
+                last_bottom = 0
+            }
+            next
         }
-        END { exit found ? 0 : 1 }
+        inside {
+            if ($0 ~ content_re) { matched = 1; last_footer = NR }
+            if ($0 ~ bottom_re) { last_bottom = NR }
+        }
+        END { exit (inside && last_bottom > last_footer && matched) ? 0 : 1 }
     '
 }
 
