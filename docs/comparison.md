@@ -23,7 +23,7 @@ team board, a hosted cloud agent, or a manual shell setup.
 ![Web client showing a branch’s git diff in a process tab beside its PR link, dark theme](assets/web/comparison-review-dark.png#only-dark)
 <figcaption>Agent Factory’s web client keeps sessions visible while you review a
 branch with ordinary git commands. The diff shown here is terminal output in a
-process tab; the PR badge opens the external review.</figcaption>
+process tab.</figcaption>
 </figure>
 
 ## The big picture

@@ -16,7 +16,7 @@ type Instance struct {
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
 	// started, liveness/inFlightOp, Tabs (and the agent tab's tmux session),
-	// gitWorktree, prInfo, diffStats.
+	// gitWorktree, diffStats.
 	mu               sync.RWMutex
 	agentObservation *agentObservationRuntime
 	// agentObservationGeneration is atomic because daemon-owned side effects
@@ -242,18 +242,6 @@ type Instance struct {
 	// uncertainty into permission to delete its workspace (#2207, #3340).
 	// Persisted so a daemon restart cannot re-arm the destructive path.
 	startupStateUnknown bool
-
-	// prInfo stores the associated GitHub PR info
-	prInfo *git.PRInfo
-	// prInfoLastFetched is the wall-clock time of the most recent PR info
-	// fetch. Not persisted — restored instances start with a zero value so
-	// the first lazy fetch on selection always runs. Used to debounce
-	// repeated fetches when the user cycles the sidebar.
-	prInfoLastFetched time.Time
-	// prInfoGeneration counts PR-info writes and freshness bumps, so a slow
-	// producer can detect that a newer one landed while it was fetching and
-	// discard its stale result (#3287 review). In-memory only, like the clock.
-	prInfoGeneration uint64
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend

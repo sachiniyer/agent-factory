@@ -376,14 +376,6 @@ var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 	})
 }
 
-// refreshPRInfoThroughDaemon pokes daemon-owned PR discovery for the selected
-// session. The TUI sends identity only and learns the result from Snapshot.
-var refreshPRInfoThroughDaemon = func(request daemon.RefreshPRInfoRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.RefreshPRInfo(request)
-	})
-}
-
 // snapshotThroughDaemon fetches the daemon's authoritative session list for a
 // repo (#960 PR 3). It is the TUI's read path under the single-writer model: the
 // sidebar mirrors this projection instead of re-reading instances.json.
@@ -593,12 +585,6 @@ func SetTabCloserForTest(f func(daemon.CloseTabRequest) error) func() {
 	prev := closeTabThroughDaemon
 	closeTabThroughDaemon = f
 	return func() { closeTabThroughDaemon = prev }
-}
-
-func SetPRInfoRefresherForTest(f func(daemon.RefreshPRInfoRequest) error) func() {
-	prev := refreshPRInfoThroughDaemon
-	refreshPRInfoThroughDaemon = f
-	return func() { refreshPRInfoThroughDaemon = prev }
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {

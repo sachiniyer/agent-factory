@@ -213,25 +213,6 @@ func TestHandleKill_UsesCanonicalWorktreeBranch(t *testing.T) {
 	assert.Equal(t, unmergedKillConfirmKey, hm.confirmationOverlay.ConfirmKey)
 }
 
-// A merged PR is only evidence for the branch it was fetched from. Legacy
-// records can retain PR state for Instance.Branch while cleanup deletes the
-// GitWorktree branch; that stale state must not suppress a real loss warning.
-func TestHandleKill_StalePRBranchCannotSuppressCanonicalLoss(t *testing.T) {
-	repoDir, baseSHA := initBaseRepo(t)
-	wt := addWorktree(t, repoDir, baseSHA, "dev/canonical-pr")
-	commitInWorktree(t, wt)
-
-	inst := startedWorktreeInstance(t, "stale-pr", repoDir, wt, "dev/canonical-pr", baseSHA)
-	inst.Branch = "dev/legacy"
-	inst.SetPRInfo(&git.PRInfo{Number: 7, State: "MERGED", Branch: "dev/legacy"})
-	_, hm := armKill(t, inst)
-
-	rendered := flatten(hm.confirmationOverlay.Render())
-	assert.Contains(t, rendered, `Branch "dev/canonical-pr" has 1 commit`)
-	assert.Contains(t, rendered, "permanently deletes it")
-	assert.Equal(t, unmergedKillConfirmKey, hm.confirmationOverlay.ConfirmKey)
-}
-
 // Cleanup is a no-op for --here/legacy external worktrees. Their dirty files,
 // private refs, branches, and detached commits all remain after killing the
 // runtime, so destructive-worktree copy and escalation would be false.
@@ -322,23 +303,6 @@ func TestHandleKill_PushedCommits_NotSevere(t *testing.T) {
 		"a pushed branch must keep the ordinary 'y' confirm")
 }
 
-// TestHandleKill_MergedPR_NotSevere: a merged PR means the work landed in base's
-// history, so even unpushed branch commits are not a real loss and must not fire
-// the loud guard.
-func TestHandleKill_MergedPR_NotSevere(t *testing.T) {
-	repoDir, baseSHA := initBaseRepo(t)
-	wt := addWorktree(t, repoDir, baseSHA, "dev/merged")
-	commitInWorktree(t, wt) // unpushed locally, but the PR is merged
-
-	inst := startedWorktreeInstance(t, "merged", repoDir, wt, "dev/merged", baseSHA)
-	inst.SetPRInfo(&git.PRInfo{Number: 7, State: "MERGED", Branch: "dev/merged"})
-	_, hm := armKill(t, inst)
-
-	rendered := flatten(hm.confirmationOverlay.Render())
-	assert.NotContains(t, rendered, "permanently deletes", "merged work is not a loss")
-	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey)
-}
-
 // TestHandleKill_BaseUndeterminable_FailsClosed: when we cannot determine the
 // base (no recorded base, no origin), we cannot prove the branch is free of
 // local-only commits — so we WARN rather than show the bare prompt (mirroring
@@ -366,7 +330,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		repoDir, baseSHA := initBaseRepo(t)
 		wt := addWorktree(t, repoDir, baseSHA, "dev/a")
 		commitInWorktree(t, wt)
-		line, severe := unmergedCommitWarning(wt, "dev/a", baseSHA, "", true)
+		line, severe := unmergedCommitWarning(wt, "dev/a", baseSHA, true)
 		assert.True(t, severe)
 		assert.Contains(t, line, "1 commit")
 		assert.Contains(t, line, "cannot be undone")
@@ -375,7 +339,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 	t.Run("no commits beyond base is safe", func(t *testing.T) {
 		repoDir, baseSHA := initBaseRepo(t)
 		wt := addWorktree(t, repoDir, baseSHA, "dev/b")
-		line, severe := unmergedCommitWarning(wt, "dev/b", baseSHA, "", true)
+		line, severe := unmergedCommitWarning(wt, "dev/b", baseSHA, true)
 		assert.False(t, severe)
 		assert.Empty(t, line)
 	})
@@ -388,16 +352,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		killGit(t, repoDir, "init", "-q", "--bare", bare)
 		killGit(t, repoDir, "remote", "add", "origin", bare)
 		killGit(t, wt, "push", "-q", "origin", "dev/c")
-		line, severe := unmergedCommitWarning(wt, "dev/c", baseSHA, "", true)
-		assert.False(t, severe)
-		assert.Empty(t, line)
-	})
-
-	t.Run("merged PR is safe despite local-only commit", func(t *testing.T) {
-		repoDir, baseSHA := initBaseRepo(t)
-		wt := addWorktree(t, repoDir, baseSHA, "dev/d")
-		commitInWorktree(t, wt)
-		line, severe := unmergedCommitWarning(wt, "dev/d", baseSHA, "MERGED", true)
+		line, severe := unmergedCommitWarning(wt, "dev/c", baseSHA, true)
 		assert.False(t, severe)
 		assert.Empty(t, line)
 	})
@@ -409,7 +364,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(wt, "second.txt"), []byte("more\n"), 0o644))
 		killGit(t, wt, "add", "-A")
 		killGit(t, wt, "commit", "-q", "-m", "agent: more work")
-		line, severe := unmergedCommitWarning(wt, "dev/e", baseSHA, "", true)
+		line, severe := unmergedCommitWarning(wt, "dev/e", baseSHA, true)
 		assert.True(t, severe)
 		assert.Contains(t, line, "2 commits")
 		assert.Contains(t, line, "deletes them")
@@ -419,7 +374,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		repoDir, baseSHA := initBaseRepo(t)
 		wt := addWorktree(t, repoDir, baseSHA, "dev/f")
 		commitInWorktree(t, wt)
-		line, severe := unmergedCommitWarning(wt, "dev/f", "", "", true) // no recorded base, no origin
+		line, severe := unmergedCommitWarning(wt, "dev/f", "", true) // no recorded base, no origin
 		assert.False(t, severe, "unverifiable must not claim a proven loss")
 		assert.Contains(t, line, "Could not verify")
 	})
@@ -427,7 +382,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 	t.Run("missing session branch fails closed", func(t *testing.T) {
 		repoDir, baseSHA := initBaseRepo(t)
 		wt := addWorktree(t, repoDir, baseSHA, "dev/actual")
-		line, severe := unmergedCommitWarning(wt, "dev/missing", baseSHA, "", true)
+		line, severe := unmergedCommitWarning(wt, "dev/missing", baseSHA, true)
 		assert.False(t, severe, "unverifiable must not claim a proven loss")
 		assert.Contains(t, line, `session branch "dev/missing"`)
 		assert.Contains(t, line, "Could not verify")
@@ -436,20 +391,20 @@ func TestUnmergedCommitWarning(t *testing.T) {
 	t.Run("empty session branch fails closed", func(t *testing.T) {
 		repoDir, baseSHA := initBaseRepo(t)
 		wt := addWorktree(t, repoDir, baseSHA, "dev/actual")
-		line, severe := unmergedCommitWarning(wt, "", baseSHA, "", true)
+		line, severe := unmergedCommitWarning(wt, "", baseSHA, true)
 		assert.False(t, severe, "unverifiable must not claim a proven loss")
 		assert.Contains(t, line, "Could not verify whether the session branch")
 	})
 
 	t.Run("empty worktree path fails closed", func(t *testing.T) {
-		line, severe := unmergedCommitWarning("", "dev/missing", "deadbeef", "", true)
+		line, severe := unmergedCommitWarning("", "dev/missing", "deadbeef", true)
 		assert.False(t, severe)
 		assert.Contains(t, line, "Could not verify")
 	})
 
 	t.Run("git error fails closed", func(t *testing.T) {
 		// A non-repo directory makes the base rev-parse fail.
-		line, severe := unmergedCommitWarning(t.TempDir(), "dev/missing", "deadbeef", "", true)
+		line, severe := unmergedCommitWarning(t.TempDir(), "dev/missing", "deadbeef", true)
 		assert.False(t, severe)
 		assert.Contains(t, line, "Could not verify")
 	})
@@ -459,7 +414,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		wt := addWorktree(t, repoDir, baseSHA, "dev/detached-direct")
 		killGit(t, wt, "checkout", "-q", "--detach", baseSHA)
 		commitInWorktree(t, wt)
-		line, severe := unmergedCommitWarning(wt, "dev/detached-direct", baseSHA, "", true)
+		line, severe := unmergedCommitWarning(wt, "dev/detached-direct", baseSHA, true)
 		assert.True(t, severe)
 		assert.Contains(t, line, "Detached HEAD")
 		assert.Contains(t, line, "permanently orphans")
@@ -469,7 +424,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		repoDir, baseSHA := initBaseRepo(t)
 		wt := addWorktree(t, repoDir, baseSHA, "dev/detached-referenced")
 		killGit(t, wt, "checkout", "-q", "--detach", baseSHA)
-		line, severe := unmergedCommitWarning(wt, "dev/detached-referenced", baseSHA, "", true)
+		line, severe := unmergedCommitWarning(wt, "dev/detached-referenced", baseSHA, true)
 		assert.False(t, severe)
 		assert.Empty(t, line, "a detached HEAD still contained by the session branch survives worktree removal")
 	})
@@ -478,7 +433,7 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		repoDir, baseSHA := initBaseRepo(t)
 		wt := addWorktree(t, repoDir, baseSHA, "dev/user-owned")
 		commitInWorktree(t, wt)
-		line, severe := unmergedCommitWarning(wt, "dev/user-owned", baseSHA, "", false)
+		line, severe := unmergedCommitWarning(wt, "dev/user-owned", baseSHA, false)
 		assert.False(t, severe)
 		assert.Empty(t, line, "cleanup preserves a branch AF did not create")
 	})

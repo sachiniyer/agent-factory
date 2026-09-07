@@ -238,7 +238,6 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"ReapConfigAgent":  blockedDuringProbation,
 	"RegisterProject":  blockedDuringProbation,
 	"ReloadTasks":      blockedDuringProbation,
-	"RefreshPRInfo":    blockedDuringProbation,
 	"RemoveTask":       blockedDuringProbation,
 	"RestartTask":      blockedDuringProbation,
 	"RenameTab":        blockedDuringProbation,
@@ -250,7 +249,6 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"SendPrompt":       blockedDuringProbation,
 	"SetConfigValue":   blockedDuringProbation,
 	"UnsetConfigValue": blockedDuringProbation,
-	"SetPRInfo":        blockedDuringProbation,
 	"SpawnConfigAgent": blockedDuringProbation,
 	// AccountLogin registers a credential directory in the daemon host's
 	// agent-factory home and starts a process on it (#3384). Both halves are

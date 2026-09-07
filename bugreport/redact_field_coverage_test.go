@@ -107,9 +107,6 @@ var verbatimInstanceFields = map[string]string{
 	"ModelChange.Before": "model identifier reported by the agent, not user text",
 	"ModelChange.After":  "model identifier reported by the agent, not user text",
 
-	"PRInfo.Branch": "same branch-name policy as Branch above",
-	"PRInfo.State":  "bounded PR state enum",
-
 	"AgentConversation.Agent":       "agent enum name; the resumable ID beside it is cleared",
 	"AgentConversation.CaptureKind": "bounded capture-kind enum",
 

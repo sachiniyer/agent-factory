@@ -35,7 +35,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "help-actions", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				h, inst := newDesignDriverSceneHome(t, mode, nil)
 				switch scene {
@@ -164,8 +164,13 @@ func TestDesignDriverScenes(t *testing.T) {
 							pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
 						}
 					}
-				case "help":
+				case "help", "help-actions":
 					h.showHelpScreen(helpTypeGeneral{}, nil)
+					if scene == "help-actions" {
+						for n := 0; n < 26; n++ {
+							h.textOverlay.ScrollDown()
+						}
+					}
 				case "confirmation":
 					h.confirmActionWithDetail("Kill Apply design roles? Its running process will stop.", "The worktree and conversation remain available.", nil)
 				case "search-overflow", "selection-overflow", "project-picker-overflow":

@@ -364,8 +364,8 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 			// persistInstanceData takes on its own.
 			//
 			// This is the one site that calls persistInstanceData bare while holding
-			// m.mu; the other callers reach it with m.mu NOT held (CreateTab and
-			// SetPRInfo under the repo start lock, CloseTab under only its per-session
+			// m.mu; the other callers reach it with m.mu NOT held (CreateTab under
+			// the repo start lock, CloseTab under only its per-session
 			// op lock), so do not read them as precedent for the call shape here. What
 			// makes it safe is a property of the primitive rather than of any wrapper:
 			// persistInstanceData never re-enters m.mu, which is exactly where the old

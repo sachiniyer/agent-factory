@@ -82,7 +82,7 @@ and TUI entries remain unchanged. The three web latency baselines were tightened
 on 2026-09-06 for #3914 using the six after samples detailed below. Measurements
 use Linux amd64, Node/Chromium from the pinned Playwright 1.56.1 Noble image,
 Go 1.25.0 and a 4GiB container memory limit. The original warm end-to-end run took
-about three minutes, including the existing PR-badge sweep.
+about three minutes.
 
 The committed `scripts/perf/baselines.json` is the budget source. The table below
 reports arithmetic mean, range and population standard deviation: six samples

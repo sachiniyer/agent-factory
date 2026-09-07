@@ -898,42 +898,6 @@
       "notes": "The CLI and public POST /v1/Snapshot API are query surfaces, so they expose composable daemon-side bounds before transfer. The TUI and web use Snapshot as their authoritative navigation rail and must reconcile every session; filtering that rail would make an omitted row indistinguishable from deletion and strand it from interactive management. A separate client-side search/view control could hide rows without narrowing the authoritative snapshot, but that is a different UI feature rather than parity for this bounded scripting query. #3631 closed the round-trip hole this flag left open: the vocabulary it accepts is now derived from the same table that names each row's `liveness_name`, so a client can list, read a row's own word, and filter on it without hardcoding enum integers no document defined."
     },
     {
-      "id": "session.pr.open",
-      "title": "Open / copy a session's PR URL",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:169-170 (p, y)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/status.ts prBadgeContent + web/src/ui.ts patchMainHead (PR badge link, #3285)"
-      },
-      "cli": {
-        "status": "partial",
-        "pointer": "session/storage.go:190 (pr_info in the sessions JSON)"
-      },
-      "verdict": "deliberate",
-      "notes": "Discovery is daemon-side since #3232, so every surface receives pr_info. The web renders it as a badge that is a plain link (#3285): opening is the browser's own gesture and copy comes free with a link. The CLI deliberately gets no open verb — it is a scripting surface, and `af sessions list --json` already exposes pr_info.url to one jq."
-    },
-    {
-      "id": "session.pr.set",
-      "title": "Refresh a session's GitHub PR info",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/sync.go refreshPRInfoCmd (identity-only selection/tick poke, not a user verb)"
-      },
-      "web": {
-        "status": "no",
-        "pointer": "no RefreshPRInfo call in web/src"
-      },
-      "cli": {
-        "status": "no",
-        "pointer": "no PR verb in the cobra tree (derived)"
-      },
-      "verdict": "deliberate",
-      "notes": "The daemon is the sole PR-info producer (#3232/#3296): it sweeps every local session, while RefreshPRInfo lets the TUI accelerate its selected session using identity only. Every surface reads the same projected pr_info; web and CLI need no refresh verb. SetPRInfo remains served only for wire compatibility with older clients."
-    },
-    {
       "id": "session.preview",
       "title": "Read a session's terminal content without attaching",
       "tui": {
@@ -1647,7 +1611,6 @@
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
-      "POST /v1/RefreshPRInfo": "session.pr.set",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",
@@ -1657,7 +1620,6 @@
       "POST /v1/SendPrompt": "session.send-prompt",
       "POST /v1/ResumeFromLimit": "session.limit-retry",
       "POST /v1/SetConfigValue": "config.write",
-      "POST /v1/SetPRInfo": "session.pr.set",
       "POST /v1/Snapshot": "session.list",
       "POST /v1/SuggestSessionName": "-",
       "POST /v1/TriggerTask": "task.trigger",
@@ -1671,7 +1633,6 @@
       "collapse": "tui.navigation",
       "config_agent": "config-agent",
       "config_editor": "config.write",
-      "copy_pr": "session.pr.open",
       "down": "tui.navigation",
       "error_details": "tui.navigation",
       "expand": "tui.navigation",
@@ -1704,7 +1665,6 @@
       "new_tab": "session.tab.create",
       "next_section": "tui.navigation",
       "open_pane": "tui.panes",
-      "open_pr": "session.pr.open",
       "pane_next": "tui.panes",
       "pane_prev": "tui.panes",
       "prev_section": "tui.navigation",

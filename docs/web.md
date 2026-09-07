@@ -48,8 +48,7 @@ worktrees, branches, and uncommitted changes stay where they are. It removes the
 project registration while preserving the real repository.
 
 The **rail** lists the selected project's sessions. Click a row to select it and
-attach its terminal. The main pane shows that session's title and tabs; a linked
-pull request badge appears when the daemon has one for its branch. The rail count
+attach its terminal. The main pane shows that session's title and tabs. The rail count
 is the number of rows currently shown. The root agent is pinned first, then live
 sessions oldest first, then archived sessions newest first.
 
@@ -178,16 +177,15 @@ whose button you clicked, even when a different session is selected.
 ### Review the work in another tab
 
 <figure markdown>
-![The diff tab beside Agent showing a branch diff and a linked pull request badge](assets/web/review.png#only-light)
-![The diff tab beside Agent showing a branch diff and a linked pull request badge](assets/web/review-dark.png#only-dark)
+![The diff tab beside Agent showing a branch diff](assets/web/review.png#only-light)
+![The diff tab beside Agent showing a branch diff](assets/web/review-dark.png#only-dark)
 <figcaption>Switch tabs to review the work while keeping the agent’s terminal available.</figcaption>
 </figure>
 
 Click an existing process tab, such as **diff** in the still, to attach it. To
 inspect changes yourself, choose **Actions → + New tab → Terminal** and run `git diff` in
 the shell. The still's diff is terminal output, not a separate diff-view control.
-Tabs run in the session's worktree. Click **Agent** to return to the agent, or the
-**PR** badge to open its pull request.
+Tabs run in the session's worktree. Click **Agent** to return to the agent.
 
 **Actions → + New tab** also offers **VS Code**, which opens an editor for the worktree;
 see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a

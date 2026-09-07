@@ -103,8 +103,6 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-  pr.hidden = true;
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
   keyboard.hidden = true;
   const actions = h("div", { class: "af-term-actions" });
@@ -124,8 +122,8 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const closePane = action("Close pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, pr, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  return { head, title, tabs, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */

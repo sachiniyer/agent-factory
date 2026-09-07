@@ -11,20 +11,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 // ----------------------------------------------------------------------------
 // teatest harness for end-to-end UI tests of the async creation flow (#310)
-// and daemon-owned PR refresh pokes (#311/#3296).
+// and session lifecycle transitions.
 //
-// The harness swaps two seams:
+// The harness swaps the backend seam:
 //   session.SetBackendFactoryForTest — so NewInstance returns a FakeBackend
 //     whose Start blocks until the test signals completion
-//   app.SetPRInfoRefresherForTest — so refreshPRInfoCmd never dials a daemon
 //
-// Both seams are restored via t.Cleanup, so each test is isolated.
+// The seam is restored via t.Cleanup, so each test is isolated.
 // ----------------------------------------------------------------------------
 
 type e2eHarness struct {
@@ -34,8 +32,6 @@ type e2eHarness struct {
 
 	bmu      sync.Mutex
 	backends []*session.FakeBackend
-	fmu      sync.Mutex
-	prPokes  []daemon.RefreshPRInfoRequest
 }
 
 // e2eAsyncTimeout is the ceiling every E2E poll-until-condition waits before
@@ -83,13 +79,6 @@ func newE2EHarness(t *testing.T) *e2eHarness {
 	})
 	t.Cleanup(restoreBackend)
 	installDirectSessionStarter(t)
-
-	t.Cleanup(SetPRInfoRefresherForTest(func(req daemon.RefreshPRInfoRequest) error {
-		eh.fmu.Lock()
-		eh.prPokes = append(eh.prPokes, req)
-		eh.fmu.Unlock()
-		return nil
-	}))
 
 	return eh
 }
@@ -185,22 +174,6 @@ func (eh *e2eHarness) waitForStart(fb *session.FakeBackend, d time.Duration) {
 	case <-time.After(d):
 		eh.t.Fatalf("FakeBackend.Start was not invoked within %s", d)
 	}
-}
-
-func (eh *e2eHarness) prPokeCount() int {
-	eh.fmu.Lock()
-	defer eh.fmu.Unlock()
-	return len(eh.prPokes)
-}
-
-func (eh *e2eHarness) prPokeTitles() []string {
-	eh.fmu.Lock()
-	defer eh.fmu.Unlock()
-	titles := make([]string, 0, len(eh.prPokes))
-	for _, req := range eh.prPokes {
-		titles = append(titles, req.Title)
-	}
-	return titles
 }
 
 // waitUntil polls fn every 10ms until it returns true or d elapses, then
@@ -478,90 +451,4 @@ func TestE2E_310_Failure_DoesNotTouchOtherInstance(t *testing.T) {
 		"user's selection must remain on 'other'")
 	assert.Equal(t, stateDefault, eh.homeState(),
 		"failure should not put the app into a modal state")
-}
-
-// ----------------------------------------------------------------------------
-// #311/#3296 — PR refresh pokes should be async and lazy.
-//
-// Scenario 3: selecting an instance with stale PR info triggers exactly one
-// daemon poke. A second selection-change within the freshness window
-// must be debounced (no second call).
-// ----------------------------------------------------------------------------
-
-func TestE2E_311_LazyDebounce_OnSelectionChange(t *testing.T) {
-	eh := newE2EHarness(t)
-	a := eh.addStartedInstance("egg")
-	b := eh.addStartedInstance("fig")
-	eh.home.sidebar.SetSelectedInstance(0) // start on A
-	eh.start()
-
-	// Wait for the initial selection-triggered poke. Freshness age is
-	// sentinel-infinite on process start, so the first selection dispatches.
-	eh.waitUntil(e2eAsyncTimeout, "first PR refresh (for 'egg') dispatches", func() bool {
-		return eh.prPokeCount() >= 1
-	})
-	require.Equal(t, []string{"egg"}, eh.prPokeTitles(),
-		"the first poke must carry the selected session identity")
-
-	// Navigate down to B — through A's two expanded tab rows first (#1024
-	// PR 3: the selected instance auto-expands and j walks into its children;
-	// tab rows keep the selection on A, so they must not dispatch a fetch) —
-	// which triggers a second selectionChanged and poke on landing.
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	eh.waitUntil(e2eAsyncTimeout, "second PR refresh (for 'fig') dispatches", func() bool {
-		return eh.prPokeCount() >= 2
-	})
-	assert.Equal(t, []string{"egg", "fig"}, eh.prPokeTitles())
-
-	// Navigate back to A — freshness window is 60s, so no new fetch should
-	// fire. Give the event loop a chance to do the wrong thing if it's going to.
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyUp})
-	time.Sleep(300 * time.Millisecond)
-	assert.Equal(t, 2, eh.prPokeCount(),
-		"debounce must suppress another poke for an instance whose PR info is still fresh")
-
-	assert.NotNil(t, eh.findInstance("egg"))
-	assert.NotNil(t, eh.findInstance("fig"))
-	_ = a
-	_ = b
-}
-
-// ----------------------------------------------------------------------------
-// Scenario 4: the PR info tick refreshes the selected instance ONLY,
-// not every instance in the sidebar (the pre-#311 behavior).
-// ----------------------------------------------------------------------------
-
-func TestE2E_311_TickRefresh_OnlySelectedInstance(t *testing.T) {
-	eh := newE2EHarness(t)
-	eh.addStartedInstance("egg")
-	b := eh.addStartedInstance("fig")
-	eh.home.sidebar.SetSelectedInstance(1) // select B
-	eh.start()
-
-	// Let the initial selection-triggered poke complete.
-	eh.waitUntil(e2eAsyncTimeout, "initial PR refresh for selected instance", func() bool {
-		return eh.prPokeCount() >= 1
-	})
-	initial := eh.prPokeCount()
-	require.Equal(t, []string{"fig"}, eh.prPokeTitles(),
-		"initial poke must be for the selected instance only")
-
-	// Send the PR info tick message synthetically — the real ticker waits
-	// 60s, too long for a unit test. The handler forces a fetch for the
-	// selected instance regardless of the TUI's transport throttle.
-	eh.tm.Send(tickUpdatePRInfoMessage{})
-	eh.waitUntil(e2eAsyncTimeout, "tick triggers another PR refresh", func() bool {
-		return eh.prPokeCount() > initial
-	})
-
-	// Every poke should have targeted B — the tick must not
-	// iterate over every instance the way the pre-#311 code did.
-	titles := eh.prPokeTitles()
-	for _, title := range titles {
-		assert.Equal(t, "fig", title,
-			"every poke must target the selected instance; got %v", titles)
-	}
-	_ = b
 }

@@ -367,10 +367,6 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyHooks), "Open the worktree hooks editor"},
 			{helpKey(keys.KeyConfigEditor), "Open the global config editor"},
 		}},
-		{title: "GitHub PR:", rows: []helpRow{
-			{helpKey(keys.KeyOpenPR), "Open PR in browser"},
-			{helpKey(keys.KeyCopyPR), "Copy PR URL to clipboard"},
-		}},
 		{title: "Tabs:", rows: []helpRow{
 			{helpKey(keys.KeyJumpTab), "Select one of the first nine tabs by number (s opens it, enter attaches)"},
 			// The unbounded jump-to-tab prompt comes from #3021; keep the issue

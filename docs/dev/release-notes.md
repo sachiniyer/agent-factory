@@ -283,7 +283,6 @@ keymap, add:
 archive = "A"
 tasks = "S"
 split_pane = "alt+s"
-copy_pr = "P"
 hooks = "H"
 scroll_up = "shift+up"
 scroll_down = "shift+down"

@@ -99,7 +99,7 @@ the terminal streaming over the PTY WebSocket, the scheduled tasks, the config
 manifest, the accounts registry, and every file edit and diff you see. The web
 client in the video is the client this repository builds.
 
-**Stand-in.** Three things, each because a reproducible recording cannot have
+**Stand-in.** Two things, each because a reproducible recording cannot have
 the real one:
 
 - **The agent** (`scripts/container/web-demo-agent.sh`). It names itself in its
@@ -109,11 +109,6 @@ the real one:
   work in the session's own worktree: it edits the files, runs the project's
   `./test.sh`, and leaves the changes behind, which is why the diff in the
   recording is a diff it actually made.
-- **`gh`**. The daemon discovers a session's pull request by running `gh pr
-  list` (`session/git/github.go`); the sandbox has no GitHub remote. A stand-in
-  answers for exactly one branch, so one session carries a PR badge — which is
-  also the honest picture. Its URL points at an organization that does not
-  exist; nothing in the recording links to somebody's real pull request.
 - **The clock**, in one direction only. The scheduled tasks are seeded with a
   next occurrence half a day out, computed rather than fixed, so no task fires
   during the recording. Absolute times the Tasks view renders therefore differ
