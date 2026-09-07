@@ -36,6 +36,7 @@ import { expect, type Browser, type Locator, type Page, test } from "@playwright
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { openAfterInitialResync } from "./initial-resync.js";
+import { assertPhoneKeybar, phoneInputStream } from "./phone-keybar.js";
 import { DEMO_VIEWPORT } from "./demo-viewport.js";
 
 const visual = process.env.AF_PERF_MODE === "1";
@@ -375,7 +376,15 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
   await actions.click();
   await page.locator(".af-pane-host .xterm").first().click();
   await expect(page.locator(".af-term-keyboard")).toBeVisible();
+  if (!prefix) await expect(page.locator(".af-terminal-keybar")).toHaveCount(0);
   await shot(`${prefix}terminal-keyboard`);
+  if (prefix === "phone-") {
+    const ctrl = page.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Ctrl", exact: true });
+    await ctrl.dblclick({ delay: 80 });
+    await expect(ctrl).toHaveAttribute("data-state", "locked");
+    await shot("phone-terminal-modifier-locked");
+    await ctrl.click();
+  }
   await page.keyboard.press("Control+]");
   await expect(page.locator(".af-term-keyboard")).toBeHidden();
 }
@@ -429,6 +438,7 @@ async function assertPhoneHeader(page: Page): Promise<void> {
 async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "suffix">, phone: boolean): Promise<void> {
   const context = await browser.newContext({ viewport: DEMO_VIEWPORT, colorScheme: pass.colorScheme });
   const page = await context.newPage();
+  const inputStream = phoneInputStream(page);
   await prepareVisual(page);
   const shot = screenshotFor(page, pass.suffix, 4);
   try {
@@ -454,6 +464,8 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
       await page.setViewportSize({ width, height: 812 });
       await settleTerminal(page);
       await assertPhoneHeader(page);
+      await assertPhoneKeybar(page, inputStream);
+      await settleTerminal(page);
       await page.screenshot({ path: visual ? test.info().outputPath(`after-phone-session-${width}${pass.suffix}.png`) : join(SHOT_DIR, `phone-session-${width}${pass.suffix}.png`),
         animations: "disabled", caret: "hide", style: visualStyle });
     }

@@ -71,7 +71,12 @@ record() {
 redraw() {
     printf '\033[2J\033[H%s' "$buffer"
 }
-trap redraw WINCH
+# Phone keybar tests send real interrupts through the PTY. Keep this scripted
+# recorder fixture alive and repaint the transcript after the tty echoes ^C.
+trap redraw WINCH INT
+# Keep control-key echo out of scrollback. The perf echo probe uses a literal ^
+# as a fresh printable character after the phone scenes send real Ctrl+C.
+stty -echoctl
 
 say() {
     emit "$*"

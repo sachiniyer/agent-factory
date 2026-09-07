@@ -421,7 +421,7 @@ Wrong verb → `405`:
 ```bash
 curl -i --unix-socket ~/.agent-factory/daemon-http.sock http://localhost/v1/ListTasks
 # HTTP/1.1 405 Method Not Allowed
-# {"data":null,"error":{"message":"method GET not allowed; use POST"}}
+# {"data":null,"error":{"message":"method GET not allowed; use POST","daemon_rejected":true}}
 ```
 
 Oversize body → `413` (rejected, never processed):
@@ -431,7 +431,7 @@ head -c 20000000 /dev/zero | tr '\0' 'a' \
   | curl -i --unix-socket ~/.agent-factory/daemon-http.sock \
       http://localhost/v1/AddTask --data-binary @-
 # HTTP/1.1 413 Request Entity Too Large
-# {"data":null,"error":{"message":"request body exceeds 16777216-byte limit: …"}}
+# {"data":null,"error":{"message":"request body exceeds 16777216-byte limit: …","daemon_rejected":true}}
 ```
 
 ## Relationship to the CLI

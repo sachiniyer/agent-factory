@@ -3490,3 +3490,45 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 }
+
+/* Phone terminal keys (#3977): five controls, then four arrows. At 360px the
+ * first row has 62.4px targets, with token insets/gaps; no horizontal scrolling. */
+.af-terminal-keybar { display: none; }
+@media (max-width: 768px) {
+  .af-terminal-keybar {
+    display: grid;
+    position: fixed;
+    inset-inline: 0;
+    z-index: var(--af-z-appbar);
+    gap: var(--af-space-1);
+    padding: var(--af-space-2);
+    padding-bottom: max(var(--af-space-2), env(safe-area-inset-bottom));
+    padding-left: max(var(--af-space-2), env(safe-area-inset-left));
+    padding-right: max(var(--af-space-2), env(safe-area-inset-right));
+    background: var(--af-surface-raised);
+    color: var(--af-ink);
+  }
+  .af-keybar-row { display: flex; gap: var(--af-space-2); }
+  .af-keybar-row button {
+    position: relative;
+    flex: 1;
+    min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+    padding: var(--af-space-1);
+    border: calc(var(--af-space-1) / 4) solid var(--af-border);
+    border-radius: var(--af-radius-control);
+    background: var(--af-surface);
+    color: var(--af-ink);
+    font-size: var(--af-type-body);
+    touch-action: manipulation;
+  }
+  .af-keybar-row button[aria-pressed="true"] {
+    background: var(--af-surface-raised);
+    font-weight: 600;
+    border-inline-start: var(--af-space-1) solid var(--af-accent);
+  }
+  .af-keybar-row button[data-state="locked"] {
+    outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+    outline-offset: calc(0 - var(--af-space-1) / 2);
+  }
+}
