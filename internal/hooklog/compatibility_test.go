@@ -69,6 +69,21 @@ func TestOpenLockUnavailableStillCapturesOutput(t *testing.T) {
 				"post-worktree-v1-kept.log": true,
 				filepath.Base(file.Name()):  true,
 			})
+			// Even when a later launcher can lock this storage, the fallback
+			// must not be mistaken for a participant in the lock protocol.
+			old := time.Now().Add(-30 * 24 * time.Hour)
+			if err := os.Chtimes(file.Name(), old, old); err != nil {
+				t.Fatal(err)
+			}
+			next, err := Open(OnArchive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = next.Close() })
+			assertLogNames(t, dir, map[string]bool{
+				filepath.Base(file.Name()): true,
+				filepath.Base(next.Name()): true,
+			})
 		})
 	}
 }

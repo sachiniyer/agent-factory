@@ -29,7 +29,7 @@ func TestOpenPreservesQuietActiveLogs(t *testing.T) {
 		want[filepath.Base(file.Name())] = true
 	}
 	for i := 0; i < 20; i++ {
-		name := fmt.Sprintf("post-worktree-kept-%02d.log", i)
+		name := fmt.Sprintf("post-worktree-v1-kept-%02d.log", i)
 		seedLog(t, dir, name, time.Now().Add(-24*time.Hour))
 		want[name] = true
 	}

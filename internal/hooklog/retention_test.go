@@ -25,34 +25,34 @@ func TestOpenPrunesKeptLogs(t *testing.T) {
 	want := map[string]bool{filepath.Base(inFlight.Name()): true}
 	for _, kind := range []Kind{PostWorktree, OnArchive} {
 		for i := 0; i < 25; i++ {
-			name := fmt.Sprintf("%s-kept-%02d.log", kind, i)
+			name := fmt.Sprintf("%s-v1-kept-%02d.log", kind, i)
 			seedLog(t, dir, name, now.Add(-time.Duration(i+1)*time.Hour))
 			if i < 20 {
 				want[name] = true
 			}
 		}
 		for i := 0; i < 2; i++ {
-			seedLog(t, dir, fmt.Sprintf("%s-expired-%d.log", kind, i), now.Add(-15*24*time.Hour))
+			seedLog(t, dir, fmt.Sprintf("%s-v1-expired-%d.log", kind, i), now.Add(-15*24*time.Hour))
 		}
 		// Recent logs are neither pruned nor charged against the kept quota.
 		for i := 0; i < 22; i++ {
-			name := fmt.Sprintf("%s-new-%02d.log", kind, i)
+			name := fmt.Sprintf("%s-v1-new-%02d.log", kind, i)
 			seedLog(t, dir, name, now.Add(time.Hour))
 			want[name] = true
 		}
 	}
-	for _, name := range []string{"unrelated.log", "post-worktree-note.txt"} {
+	for _, name := range []string{"unrelated.log", "post-worktree-v1-note.txt"} {
 		seedLog(t, dir, name, now.Add(-30*24*time.Hour))
 		want[name] = true
 	}
-	if err := os.Mkdir(filepath.Join(dir, "post-worktree-directory.log"), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, "post-worktree-v1-directory.log"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	want["post-worktree-directory.log"] = true
-	if err := os.Symlink(filepath.Join(dir, "unrelated.log"), filepath.Join(dir, "on-archive-link.log")); err != nil {
+	want["post-worktree-v1-directory.log"] = true
+	if err := os.Symlink(filepath.Join(dir, "unrelated.log"), filepath.Join(dir, "on-archive-v1-link.log")); err != nil {
 		t.Fatal(err)
 	}
-	want["on-archive-link.log"] = true
+	want["on-archive-v1-link.log"] = true
 
 	var output logtest.Buffer
 	previous := aflog.InfoLog.Writer()
@@ -84,7 +84,7 @@ func TestOpenBelowRetentionLimitUntouched(t *testing.T) {
 	want := map[string]bool{filepath.Base(first.Name()): true}
 	for _, kind := range []Kind{PostWorktree, OnArchive} {
 		for i := 0; i < 19; i++ {
-			name := fmt.Sprintf("%s-%d.log", kind, i)
+			name := fmt.Sprintf("%s-v1-%d.log", kind, i)
 			seedLog(t, dir, name, time.Now().Add(-24*time.Hour))
 			want[name] = true
 		}
@@ -102,31 +102,31 @@ func TestPruneAgeBoundariesAndOpenedFile(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	for name, age := range map[string]time.Duration{
-		"post-worktree-expired.log":  14*24*time.Hour + time.Second,
-		"post-worktree-boundary.log": 14 * 24 * time.Hour,
-		"on-archive-expired.log":     15 * 24 * time.Hour,
-		"on-archive-opened.log":      30 * 24 * time.Hour,
+		"post-worktree-v1-expired.log":  14*24*time.Hour + time.Second,
+		"post-worktree-v1-boundary.log": 14 * 24 * time.Hour,
+		"on-archive-v1-expired.log":     15 * 24 * time.Hour,
+		"on-archive-v1-opened.log":      30 * 24 * time.Hour,
 	} {
 		seedLog(t, dir, name, now.Add(-age))
 	}
 	// Even with old metadata, the explicitly opened file is never eligible.
-	count, err := prune(dir, filepath.Join(dir, "on-archive-opened.log"), now)
+	count, err := prune(dir, filepath.Join(dir, "on-archive-v1-opened.log"), now)
 	if err != nil || count != 2 {
 		t.Fatalf("prune = %d, %v; want 2, nil", count, err)
 	}
 	assertLogNames(t, dir, map[string]bool{
-		"post-worktree-boundary.log": true,
-		"on-archive-opened.log":      true,
+		"post-worktree-v1-boundary.log": true,
+		"on-archive-v1-opened.log":      true,
 	})
 }
 
 func TestPruneGraceBoundaryAndTies(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-	want := map[string]bool{"post-worktree-recent.log": true}
-	seedLog(t, dir, "post-worktree-recent.log", now.Add(-4*time.Second))
+	want := map[string]bool{"post-worktree-v1-recent.log": true}
+	seedLog(t, dir, "post-worktree-v1-recent.log", now.Add(-4*time.Second))
 	for i := 0; i < 22; i++ {
-		name := fmt.Sprintf("post-worktree-%02d.log", i)
+		name := fmt.Sprintf("post-worktree-v1-%02d.log", i)
 		seedLog(t, dir, name, now.Add(-5*time.Second))
 		if i < 20 {
 			want[name] = true

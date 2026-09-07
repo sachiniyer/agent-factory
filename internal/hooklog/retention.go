@@ -10,9 +10,12 @@ import (
 )
 
 const (
-	keptLogLimit = 20
-	keptLogAge   = 14 * 24 * time.Hour
-	logGraceAge  = 5 * time.Second
+	// Unmarked logs may still be held by pre-upgrade hooks that never took
+	// locks. Only this versioned namespace promises the locking protocol.
+	lockedLogMarker = "-v1-"
+	keptLogLimit    = 20
+	keptLogAge      = 14 * 24 * time.Hour
+	logGraceAge     = 5 * time.Second
 )
 
 // prune is best-effort housekeeping, never a prerequisite for starting a hook.
@@ -76,7 +79,7 @@ func prune(dir, opened string, now time.Time) (int, error) {
 
 func logKind(name string) Kind {
 	for _, kind := range []Kind{PostWorktree, OnArchive} {
-		prefix := string(kind) + "-"
+		prefix := string(kind) + lockedLogMarker
 		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".log") && len(name) > len(prefix)+len(".log") {
 			return kind
 		}

@@ -50,7 +50,7 @@ func open(kind Kind, flock func(int, int) error) (*os.File, error) {
 	if err := config.MkdirAllUnderAFHome(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create hook log directory %s: %w", dir, err)
 	}
-	file, err := os.CreateTemp(dir, string(kind)+"-*.log")
+	file, err := os.CreateTemp(dir, string(kind)+lockedLogMarker+"*.log")
 	if err != nil {
 		return nil, fmt.Errorf("create %s hook log in %s: %w", kind, dir, err)
 	}
@@ -60,7 +60,15 @@ func open(kind Kind, flock func(int, int) error) (*os.File, error) {
 	if err := flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
 		_ = os.Remove(file.Name())
-		return nil, fmt.Errorf("lock active hook log %s: %w", file.Name(), err)
+		// Retention must not make a previously working hook fail on a
+		// filesystem without flock. An unmarked fallback is never pruned,
+		// including if a later launcher can acquire locks on this storage.
+		fallback, createErr := os.CreateTemp(dir, string(kind)+"-*.log")
+		if createErr != nil {
+			return nil, fmt.Errorf("create unlocked %s hook log in %s: %w", kind, dir, createErr)
+		}
+		log.WarningLog.Printf("hook log retention disabled for %s: cannot lock output: %v", fallback.Name(), err)
+		return fallback, nil
 	}
 	pruned, pruneErr := prune(dir, file.Name(), time.Now())
 	if pruned > 0 {
