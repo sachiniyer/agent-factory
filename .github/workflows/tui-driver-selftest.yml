@@ -1,0 +1,63 @@
+name: TUI driver selftest
+
+# The deterministic TUI acceptance scenario (#1161): a real af TUI and daemon,
+# two stand-in sessions, pane interaction, attach/detach, and assertions, all in
+# the ephemeral testbox container. Before #4000 no workflow ran it, so #3995 sat
+# red on master for two days — the same failure mode #2576 exposed and #2762
+# fixed for the web selftest.
+
+on:
+  # Step 1 of #4000 is a signal on master, not a PR gate. A matching commit has
+  # already merged; this run names the commit that made the acceptance scenario
+  # red instead of leaving the next TUI PR to inherit the failure.
+  push:
+    branches: [master]
+    paths:
+      - 'app/**'
+      - 'ui/**'
+      - 'keys/**'
+      - 'session/tmux/**'
+      - 'scripts/tui-driver*'
+      - 'scripts/testbox.sh'
+      - 'scripts/container/**'
+      - '.github/workflows/tui-driver-selftest.yml'
+
+  # Manual timing and recovery runs always execute, regardless of changed paths.
+  workflow_dispatch:
+
+# Read-only: the runner checks out source and runs the same container harness as
+# developers. The daemon and tmux server exist only inside the ephemeral testbox.
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: TUI driver selftest
+    runs-on: ubuntu-latest
+    # A cold image build must fit, but a wedged TUI must not consume the runner's
+    # six-hour default. The step wall leaves three minutes to upload its transcript.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      # This is exactly what `make tui-driver-selftest` invokes. Keep the harness
+      # definition in scripts/testbox.sh instead of duplicating it in CI.
+      - name: Run the TUI driver selftest
+        timeout-minutes: 12
+        env:
+          TUI_SELFTEST_TRANSCRIPT: ${{ runner.temp }}/tui-driver-selftest.log
+        run: |
+          set -o pipefail
+          scripts/testbox.sh selftest 2>&1 | tee "$TUI_SELFTEST_TRANSCRIPT"
+
+      # The streamed console transcript includes the failed step and the driver's
+      # final tmux capture. Best-effort upload must not change the harness verdict.
+      - name: Upload the TUI driver transcript
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-driver-selftest-transcript
+          path: ${{ runner.temp }}/tui-driver-selftest.log
+          if-no-files-found: error
+          retention-days: 14
