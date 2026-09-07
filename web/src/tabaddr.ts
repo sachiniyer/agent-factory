@@ -12,7 +12,7 @@ import { TabKind } from "./types.js";
  *  code-server on an ephemeral port, so the proxy path is the only address that
  *  exists for it. See SplitView.iframeSpecAt. */
 export type IframeSpec =
-  | { kind: typeof TabKind.Web; target: string }
+  | { kind: typeof TabKind.Web; target: string; web_proxied?: boolean }
   | { kind: typeof TabKind.VSCode; target: "" };
 
 /** Whether an iframe pane is served through the daemon proxy (rather than framing
@@ -27,7 +27,7 @@ export function iframeIsProxied(spec: IframeSpec): boolean {
   if (spec.kind === TabKind.VSCode) {
     return true;
   }
-  return spec.target !== "" && isLoopbackWebUrl(spec.target);
+  return spec.web_proxied ?? (spec.target !== "" && isLoopbackWebUrl(spec.target));
 }
 
 /** The stable identity of what an iframe pane is showing, used to decide whether a
@@ -45,15 +45,34 @@ export function iframeIdentity(spec: IframeSpec): string {
  *  (session/weburl.go). A URL that does not parse is treated as non-loopback. */
 export function isLoopbackWebUrl(raw: string): boolean {
   try {
-    let host = new URL(raw).hostname.toLowerCase();
-    host = host.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
-    // A single trailing dot is the DNS root label. Strip exactly one to mirror
-    // session.IsLoopbackWebTarget; a doubled dot remains malformed/fail-closed.
-    host = host.replace(/\.$/, "");
-    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+    // Preserve the host spelling: WHATWG URL canonicalizes 127.1, octal,
+    // and integer IPv4 shorthands that Go's net.ParseIP deliberately rejects.
+    new URL(raw); // validate the URL before extracting its authority
+    const authority = raw.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i)?.[1];
+    if (authority === undefined) return false;
+    const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+    const host = hostPort.startsWith("[")
+      ? hostPort.slice(1, hostPort.indexOf("]"))
+      : hostPort.split(":")[0];
+    return isLoopbackHost(host);
   } catch {
     return false;
   }
+}
+
+/** Compatibility predicate for old daemon records and the browser's own host. */
+function isLoopbackHost(raw: string): boolean {
+  const host = raw.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.includes(":")) {
+    try {
+      const ip = new URL(`http://[${host}]/`).hostname;
+      return ip === "[::1]" || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(ip);
+    } catch { return false; }
+  }
+  const parts = host.split(".");
+  return parts.length === 4 && parts[0] === "127" &&
+    parts.every((part) => /^(0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
 }
 
 /** The path component of a web-tab target, as the proxy URL must mirror it. Returns
@@ -276,8 +295,7 @@ export function canUsePreviewOrigin(loc: { protocol: string; hostname: string })
   if (loc.protocol !== "http:") {
     return false; // an https:// page cannot frame a plain-http per-tab origin
   }
-  const host = loc.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-  return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+  return isLoopbackHost(loc.hostname);
 }
 
 /** The iframe src for a web tab on its OWN preview origin (#1856 step 3b).

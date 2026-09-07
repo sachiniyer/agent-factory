@@ -230,6 +230,12 @@ func writeAPIReference(path string) error {
 		"takes precedence over that boolean and means the mutation must not be retried. " +
 		"See the [response envelope contract](../http-api.md#response-envelope) for details.\n\n")
 
+	b.WriteString("Session snapshot `tabs[]` records include `web_proxied` for web tabs: " +
+		"`true` means use the daemon proxy, `false` means iframe the target directly. " +
+		"It is derived by `session.IsLoopbackWebTarget`, the same predicate the proxy checks; " +
+		"clients should use this decision rather than classify the URL themselves. " +
+		"Non-web tabs omit it, and clients of older daemons may fall back when it is absent.\n\n")
+
 	b.WriteString("## Endpoints\n\n")
 	b.WriteString("Request fields are the JSON keys of each route's request body; " +
 		"a `—` means the route takes no body (or an empty `{}`).\n\n")

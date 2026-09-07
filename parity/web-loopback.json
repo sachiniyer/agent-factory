@@ -1,0 +1,118 @@
+[
+  {
+    "host": "localhost",
+    "proxied": true
+  },
+  {
+    "host": "localhost.",
+    "proxied": true
+  },
+  {
+    "host": "app.localhost",
+    "proxied": true
+  },
+  {
+    "host": "deep.app.localhost.",
+    "proxied": true
+  },
+  {
+    "host": "APP.LOCALHOST",
+    "proxied": true
+  },
+  {
+    "host": "127.0.0.1",
+    "proxied": true
+  },
+  {
+    "host": "127.255.255.255",
+    "proxied": true
+  },
+  {
+    "host": "127.0.0.1.",
+    "proxied": true
+  },
+  {
+    "host": "[::1]",
+    "proxied": true
+  },
+  {
+    "host": "[0:0:0:0:0:0:0:1]",
+    "proxied": true
+  },
+  {
+    "host": "[::ffff:7f00:1]",
+    "proxied": true
+  },
+  {
+    "host": "[::ffff:127.0.0.1]",
+    "proxied": true
+  },
+  {
+    "host": "[::ffff:7fff:ffff]",
+    "proxied": true
+  },
+  {
+    "host": "example.com",
+    "proxied": false
+  },
+  {
+    "host": "127.example.com",
+    "proxied": false
+  },
+  {
+    "host": "localhost.example",
+    "proxied": false
+  },
+  {
+    "host": "localhost..",
+    "proxied": false
+  },
+  {
+    "host": "app.localhost..",
+    "proxied": false
+  },
+  {
+    "host": "128.0.0.1",
+    "proxied": false
+  },
+  {
+    "host": "0.0.0.0",
+    "proxied": false
+  },
+  {
+    "host": "[::]",
+    "proxied": false
+  },
+  {
+    "host": "[::ffff:8000:1]",
+    "proxied": false
+  },
+  {
+    "host": "[::127.0.0.1]",
+    "proxied": false
+  },
+  {
+    "host": "127.1",
+    "proxied": false
+  },
+  {
+    "host": "2130706433",
+    "proxied": false
+  },
+  {
+    "host": "0177.0.0.1",
+    "proxied": false
+  },
+  {
+    "host": "0x7f000001",
+    "proxied": false
+  },
+  {
+    "host": "127.00.0.1",
+    "proxied": false
+  },
+  {
+    "host": "127.0.0.256",
+    "proxied": false
+  }
+]
