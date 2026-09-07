@@ -180,9 +180,10 @@ daemon unit rather than children of it:
 - long-lived watchers and editors, in a scope *bound* to the daemon unit so
   systemd stops them with it (`systemdunit.NewBoundChildCommand`,
   `internal/systemdunit/childscope_linux.go`);
-- operator-authored hooks — `post_worktree_commands` (`session/git/hooks.go`)
-  and `on_archive_command` (`daemon/archive_hook.go`) — in an *unbound* scope
-  with no dependency edge at all, so the scope survives a daemon restart or
+- hooks with separate trust boundaries — repository-controlled
+  `post_worktree_commands` (`session/git/hooks.go`) and operator-controlled
+  `on_archive_command` (`daemon/archive_hook.go`) — in an *unbound* scope with
+  no dependency edge at all, so the scope survives a daemon restart or
   auto-upgrade (`systemdunit.NewUnboundScopeCommand`, #3650); see the hook-output
   caveat below.
 
@@ -385,15 +386,17 @@ survives with it. Both hook runners, however, give the child pipes whose readers
 live in the daemon — a `bytes.Buffer` in `session/git/hooks.go` and an
 `archiveHookOutputTail` in `daemon/archive_hook.go`. A hook that writes after the
 daemon exits can therefore die on `SIGPIPE`/`EPIPE`; [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
-tracks moving both runners to a per-run log file. It covers **both** operator
-hooks: `post_worktree_commands` (`session/git/hooks.go`) and
-`on_archive_command` (`daemon/archive_hook.go`). The watcher and the VS Code
-start gate had already routed through a scope (#2299), in the bound shape.
+tracks moving both runners to a per-run log file. It covers **both** hooks:
+repository-controlled `post_worktree_commands` (`session/git/hooks.go`) and
+operator-controlled `on_archive_command` (`daemon/archive_hook.go`). The watcher
+and the VS Code start gate had already routed through a scope (#2299), in the
+bound shape.
 
-So on a current daemon the two operator hooks should not reproduce the
-correlation above: their builds no longer contribute to the unit's `MemoryPeak`.
-That does not make `MemoryPeak` a daemon-process number. Only those two operator
-hooks moved out; every other unscoped descendant still charges the unit,
+So on a current daemon the repository-controlled `post_worktree_commands` and
+operator-controlled `on_archive_command` should not reproduce the correlation
+above: their builds no longer contribute to the unit's `MemoryPeak`. That does
+not make `MemoryPeak` a daemon-process number. Only those two hooks moved out;
+every other unscoped descendant still charges the unit,
 including a hook backend's plain-`exec` `launch_cmd` on the daemon host.
 `MemoryPeak`, `MemoryMax=`, and `CPUQuota=` therefore still cover more than the
 daemon process. Two things still put a hook back in the old place, and both are
@@ -402,8 +405,10 @@ outside the daemon unit that creates the worktree itself was never scoped (it
 satisfies neither half of the gate and is not in the daemon's cgroup), and a
 **non-Linux** host has no systemd and no cgroup accounting at all. Read
 `/proc/<hook pid>/cgroup` while a hook runs rather than inferring which side of
-#3650 a given build is on. Either way, size the **box** for what your local hooks
-build — that memory did not disappear, it moved to a scope of its own.
+#3650 a given build is on. For daemon-started hooks on Linux, size the **box**
+for what your local hooks build — that memory did not disappear, it moved to a
+scope of its own. In the two exceptions above, there is no `af-hook-*` scope to
+look for: the build is simply wherever its parent runs.
 
 ### High child-process churn, which is not a measured driver
 
