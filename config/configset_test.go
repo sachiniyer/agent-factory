@@ -766,7 +766,6 @@ func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
 }
 
 func TestSetGlobalConfigValueWholeProgramOverridesCanRemoveDetectedDefault(t *testing.T) {
-	resetClaudeDetectionForTest(t)
 	binDir := t.TempDir()
 	stub := filepath.Join(binDir, "claude")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0755); err != nil {
@@ -802,7 +801,6 @@ func TestSetGlobalConfigValueWholeProgramOverridesCanRemoveDetectedDefault(t *te
 }
 
 func TestSetGlobalConfigValuePreservesHiddenTombstoneWhileDetectorIsUnavailable(t *testing.T) {
-	resetClaudeDetectionForTest(t)
 	binDir := t.TempDir()
 	stub := filepath.Join(binDir, "claude")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0755); err != nil {
@@ -818,13 +816,11 @@ func TestSetGlobalConfigValuePreservesHiddenTombstoneWhileDetectorIsUnavailable(
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", t.TempDir())
-	ResetClaudeDetectionForTest() // Simulate the next process, where claude is absent.
 	if _, err := SetGlobalConfigValue("program_overrides", `{"codex":"codex --model gpt-5"}`); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("PATH", availablePath)
-	ResetClaudeDetectionForTest() // Simulate another process after claude returns.
 	after, err := LoadConfig()
 	if err != nil {
 		t.Fatal(err)

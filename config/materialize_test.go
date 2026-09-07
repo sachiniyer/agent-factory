@@ -17,7 +17,7 @@ import (
 // already carries state, and (c) never clobber a concurrently recreated
 // config.json.
 
-// fastShell keeps DefaultConfig's one-time claude-alias probe off the
+// fastShell keeps DefaultConfig's cached claude-alias probe off the
 // interactive bash/zsh path so these tests do not pay for shell startup.
 func fastShell(t *testing.T) {
 	t.Helper()

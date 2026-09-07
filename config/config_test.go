@@ -80,7 +80,6 @@ func TestGetClaudeCommand(t *testing.T) {
 	originalPath := os.Getenv("PATH")
 
 	t.Run("finds claude in PATH", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// Create a temporary directory with a mock claude executable
 		tempDir := t.TempDir()
 		claudePath := filepath.Join(tempDir, "claude")
@@ -102,7 +101,6 @@ func TestGetClaudeCommand(t *testing.T) {
 	})
 
 	t.Run("handles missing claude command", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// Set PATH to a directory that doesn't contain claude
 		tempDir := t.TempDir()
 		t.Setenv("PATH", tempDir)
@@ -117,7 +115,6 @@ func TestGetClaudeCommand(t *testing.T) {
 	})
 
 	t.Run("handles empty SHELL environment", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// Create a temporary directory with a mock claude executable
 		tempDir := t.TempDir()
 		claudePath := filepath.Join(tempDir, "claude")
@@ -139,7 +136,6 @@ func TestGetClaudeCommand(t *testing.T) {
 	})
 
 	t.Run("detects bash alias with flags", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// End-to-end: a claude alias defined in a distro-style guarded
 		// ~/.bashrc must be detected including its flags, even with no
 		// claude binary on PATH (#688).
@@ -158,7 +154,6 @@ func TestGetClaudeCommand(t *testing.T) {
 	})
 
 	t.Run("returns within bound when rc file backgrounds a pipe-holding child", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// Regression test for #856: a .bashrc that backgrounds a process
 		// inheriting the shell's stdout/stderr leaves the probe's capture
 		// pipes open after the shell exits. Without cmd.WaitDelay, Output()
@@ -198,7 +193,6 @@ func TestGetClaudeCommand(t *testing.T) {
 	})
 
 	t.Run("parses alias output produced before a pipe-holding child", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// #856 companion: when the rc file both defines the alias and
 		// backgrounds a pipe-holder, the probe output is complete at shell
 		// exit — exec.ErrWaitDelay must be treated as non-fatal and the
@@ -287,7 +281,6 @@ func TestGetClaudeCommand(t *testing.T) {
 
 func TestDefaultConfig(t *testing.T) {
 	t.Run("default_program is the bare claude enum and override carries the detected command", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// Force GetClaudeCommand to find a stub claude in PATH so the test
 		// exercises the auto-detect populate path independent of the dev
 		// machine layout.
@@ -329,7 +322,6 @@ func TestDefaultConfig(t *testing.T) {
 	})
 
 	t.Run("default_program is enum even when claude is not on PATH", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		t.Setenv("PATH", t.TempDir())
 		t.Setenv("SHELL", "/bin/bash")
 		t.Setenv("HOME", t.TempDir())
@@ -344,7 +336,6 @@ func TestDefaultConfig(t *testing.T) {
 	})
 
 	t.Run("bash alias with flags lands in override unquoted", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// An alias value is already shell syntax: it must reach the
 		// override verbatim, NOT wrapped in quotes by ShellQuotePath as a
 		// single "path" (#688).
@@ -365,7 +356,6 @@ func TestDefaultConfig(t *testing.T) {
 	})
 
 	t.Run("alias to existing path with spaces is still quoted", func(t *testing.T) {
-		resetClaudeDetectionForTest(t)
 		// A detected value that is a real on-disk path keeps the #569
 		// quoting treatment so tmux's `sh -c` doesn't split it.
 		bashPath := requireBash(t)

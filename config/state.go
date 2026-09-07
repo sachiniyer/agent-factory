@@ -69,7 +69,7 @@ type State struct {
 	// side effect (config_load.go, materializeDefaultConfig) and the TUI calls it
 	// during boot, so "no config.toml yet" has already stopped being true by the
 	// time anything could ask. "Config looks default" is no better —
-	// DefaultConfig() uses the process-cached claude command detection, so its
+	// DefaultConfig() uses environment-cached claude command detection, so its
 	// content still varies by machine. Positive evidence is the only thing that
 	// survives.
 	//

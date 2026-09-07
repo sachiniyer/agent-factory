@@ -12,17 +12,11 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-func resetClaudeDetectionForTest(t *testing.T) {
-	t.Helper()
-	ResetClaudeDetectionForTest()
-	t.Cleanup(ResetClaudeDetectionForTest)
-}
-
-// TestGetClaudeCommandMemoized pins the #883/#3999 process boundary: repeated
-// calls source the rc only once, even if a caller changes HOME. The exported
-// test reset starts a fresh process-equivalent detection against the new HOME.
+// TestGetClaudeCommandMemoized pins the #883 fix: repeated probes that share
+// the same SHELL/PATH/HOME must source the rc only once, while a changed HOME
+// re-probes under a new cache key. A heavy interactive rc otherwise ran the
+// bash probe up to four times per TUI startup.
 func TestGetClaudeCommandMemoized(t *testing.T) {
-	resetClaudeDetectionForTest(t)
 	bashPath := requireBash(t)
 
 	// A .bashrc that records every interactive sourcing into a marker file and
@@ -57,8 +51,7 @@ func TestGetClaudeCommandMemoized(t *testing.T) {
 	}
 	assert.Equal(t, 1, sourceCount(marker1), "stable env should probe (source the rc) exactly once")
 
-	// Environment changes within the process do not invalidate the one-shot
-	// detection.
+	// Changing HOME must invalidate the cache and probe again.
 	home2 := t.TempDir()
 	marker2 := filepath.Join(t.TempDir(), "sourced")
 	writeCountingBashrc(home2, marker2)
@@ -67,17 +60,10 @@ func TestGetClaudeCommandMemoized(t *testing.T) {
 	result, err := GetClaudeCommand()
 	require.NoError(t, err)
 	assert.Equal(t, "/custom/bin/claude", result)
-	assert.Equal(t, 0, sourceCount(marker2), "a changed HOME must not re-probe within the process")
-
-	ResetClaudeDetectionForTest()
-	result, err = GetClaudeCommand()
-	require.NoError(t, err)
-	assert.Equal(t, "/custom/bin/claude", result)
-	assert.Equal(t, 1, sourceCount(marker2), "the test reset should force a fresh probe")
+	assert.Equal(t, 1, sourceCount(marker2), "a changed HOME should re-probe under a new cache key")
 }
 
 func TestDefaultConfigLogsMissingClaudeOnce(t *testing.T) {
-	resetClaudeDetectionForTest(t)
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("SHELL", "/bin/sh")
 	t.Setenv("HOME", t.TempDir())
@@ -94,4 +80,22 @@ func TestDefaultConfigLogsMissingClaudeOnce(t *testing.T) {
 	assert.Contains(t, warnings.String(), "optional")
 	assert.Contains(t, warnings.String(), "program_overrides.claude")
 	assert.Contains(t, warnings.String(), "another program")
+}
+
+func TestGetClaudeCommandReprobesAfterPATHChange(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	_, err := GetClaudeCommand()
+	require.Error(t, err)
+
+	binDir := t.TempDir()
+	claudePath := filepath.Join(binDir, "claude")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\n"), 0755))
+	t.Setenv("PATH", binDir)
+
+	result, err := GetClaudeCommand()
+	require.NoError(t, err)
+	assert.Equal(t, claudePath, result)
 }

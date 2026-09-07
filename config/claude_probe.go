@@ -48,16 +48,15 @@ const missingClaudeWarning = "the Claude Code binary is optional and no claude c
 var bashTypeOutputRegex = regexp.MustCompile(`^\S+ is (/.+)$`)
 
 // claudeProbeResult caches a single (path, err) outcome of the claude shell
-// probe.
+// probe, keyed by the environment that determines it.
 type claudeProbeResult struct {
 	path string
 	err  error
 }
 
 var (
-	claudeProbeMu     sync.RWMutex
-	claudeProbeOnce   sync.Once
-	claudeProbeCached claudeProbeResult
+	claudeProbeMu    sync.Mutex
+	claudeProbeCache = map[string]claudeProbeResult{}
 )
 
 // GetClaudeCommand attempts to find the "claude" command in the user's shell
@@ -67,34 +66,37 @@ var (
 //
 // If both fail, it returns an error.
 //
-// The result is memoized once per process. A single TUI startup loads the config
-// repeatedly, and every load rebuilds DefaultConfig. The probe spawns `bash -i`
-// (or sources ~/.zshrc) to surface aliases, so it must run only once (#883,
-// #3999). SHELL, PATH, and HOME are process-startup inputs in production; tests
-// that change them use ResetClaudeDetectionForTest to start a fresh detection.
-// An absent command emits the actionable warning here, inside the same Once, so
-// callers cannot repeat it while handling the cached error.
+// The result is memoized per environment. A single TUI startup loads the config
+// up to four times (main's ResolveConfig, newHome's LoadConfig, the remote
+// hook import's ResolveConfig, and newHome's hooks ResolveConfig), and every
+// load rebuilds DefaultConfig — which ran this probe from scratch each time.
+// The probe spawns `bash -i` (or sources ~/.zshrc) to surface aliases, so on a
+// heavy interactive rc each call costs hundreds of milliseconds to seconds;
+// four of them dominated startup latency (#883). The claude resolution is a
+// pure function of SHELL, PATH, and HOME (HOME selects the rc file that can
+// define a claude alias), so caching on that triple collapses the four probes
+// into one while staying correct: any caller — or test — that changes those
+// vars gets a fresh probe under a new key. When a real probe does not find the
+// optional binary, this cache-miss path emits one actionable warning; callers
+// of the cached error do not repeat it (#3999).
 func GetClaudeCommand() (string, error) {
-	claudeProbeMu.RLock()
-	defer claudeProbeMu.RUnlock()
-
-	claudeProbeOnce.Do(func() {
-		claudeProbeCached.path, claudeProbeCached.err = probeClaudeCommand()
-		if claudeProbeCached.err != nil {
-			log.WarningLog.Print(missingClaudeWarning)
-		}
-	})
-	return claudeProbeCached.path, claudeProbeCached.err
-}
-
-// ResetClaudeDetectionForTest clears the process-wide Claude detection cache.
-// Production code must not call it; the lock exists so tests can safely reset
-// between environment fixtures without racing a detection already in flight.
-func ResetClaudeDetectionForTest() {
+	key := os.Getenv("SHELL") + "\x00" + os.Getenv("PATH") + "\x00" + os.Getenv("HOME")
 	claudeProbeMu.Lock()
-	defer claudeProbeMu.Unlock()
-	claudeProbeOnce = sync.Once{}
-	claudeProbeCached = claudeProbeResult{}
+	cached, ok := claudeProbeCache[key]
+	claudeProbeMu.Unlock()
+	if ok {
+		return cached.path, cached.err
+	}
+
+	path, err := probeClaudeCommand()
+	if err != nil {
+		log.WarningLog.Print(missingClaudeWarning)
+	}
+
+	claudeProbeMu.Lock()
+	claudeProbeCache[key] = claudeProbeResult{path: path, err: err}
+	claudeProbeMu.Unlock()
+	return path, err
 }
 
 // shellQuoteDetectedCommand quotes the filesystem-backed executable at the
@@ -132,7 +134,7 @@ func shellQuoteDetectedCommand(command string) string {
 }
 
 // probeClaudeCommand performs the actual shell probe for the claude command.
-// GetClaudeCommand wraps it with process-wide memoization.
+// GetClaudeCommand wraps it with per-environment memoization.
 func probeClaudeCommand() (string, error) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
