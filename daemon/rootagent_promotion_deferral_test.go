@@ -345,6 +345,7 @@ func TestStartupReconciliationRetriesUntilItSucceeds(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(corrupt, "project.json"), []byte("{ not json"), 0o644); err != nil {
 		t.Fatalf("write corrupt record: %v", err)
 	}
+	installInstantMainWorktreeProofGit(t, repoPath)
 
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
@@ -589,6 +590,7 @@ func TestReconcileRetryIsPacedByTheHealBackoff(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(corrupt, "project.json"), []byte("{ not json"), 0o644); err != nil {
 		t.Fatalf("write corrupt record: %v", err)
 	}
+	installInstantMainWorktreeProofGit(t, repoPath)
 
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
@@ -658,6 +660,7 @@ func TestUnprovenLegacyRowIsRetried(t *testing.T) {
 	if err := os.Chmod(marker, 0o644); err != nil {
 		t.Fatalf("restore marker: %v", err)
 	}
+	installInstantMainWorktreeProofGit(t, repoPath)
 	manager.EnsureRootAgents()
 
 	if recorded := onlyIdentityFor(t, project.ID); recorded != realID {
@@ -687,6 +690,78 @@ func checkoutMarkerPathForTest(t *testing.T, repoPath string) string {
 		t.Fatalf("expected exactly one checkout marker, got %v", candidates)
 	}
 	return markers[0]
+}
+
+// installInstantRegisteredProjectProofGit puts a strict, immediate git on PATH
+// for ResolveRegisteredProjectRepoID. It answers only the repository facts that
+// make up a successful proof and records the final --git-common-dir query, so a
+// test cannot pass without reaching the checkout-marker half of that proof.
+func installInstantRegisteredProjectProofGit(t *testing.T, root, gitDir, commonDir string, bare bool) {
+	t.Helper()
+	binDir := t.TempDir()
+	reached := filepath.Join(binDir, "proof-reached")
+	unexpected := filepath.Join(binDir, "unexpected")
+	bareAnswer := "false"
+	if bare {
+		bareAnswer = "true"
+	}
+	script := `#!/bin/sh
+if [ "$#" -eq 4 ] && [ "$1" = "-C" ] && [ "$2" = "$AF_TEST_PROOF_ROOT" ] && [ "$3" = "rev-parse" ]; then
+	case "$4" in
+	--show-toplevel)
+		printf '%s\n' "$AF_TEST_PROOF_ROOT"
+		exit 0
+		;;
+	--git-common-dir)
+		printf '%s\n' "$AF_TEST_PROOF_COMMON_DIR"
+		: > "$AF_TEST_PROOF_REACHED"
+		exit 0
+		;;
+	esac
+fi
+if [ "$#" -eq 5 ] && [ "$1" = "-C" ] && [ "$2" = "$AF_TEST_PROOF_ROOT" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--git-dir" ] && [ "$5" = "--git-common-dir" ]; then
+	printf '%s\n%s\n' "$AF_TEST_PROOF_GIT_DIR" "$AF_TEST_PROOF_COMMON_DIR"
+	exit 0
+fi
+if [ "$#" -eq 4 ] && [ "$1" = "--git-dir" ] && [ "$2" = "$AF_TEST_PROOF_COMMON_DIR" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--is-bare-repository" ]; then
+	printf '%s\n' "$AF_TEST_PROOF_BARE"
+	exit 0
+fi
+if [ "$#" -eq 4 ] && [ "$1" = "config" ] && [ "$2" = "--file" ] && [ "$3" = "$AF_TEST_PROOF_CONFIG" ] && [ "$4" = "core.worktree" ]; then
+	exit 1
+fi
+printf '%s\n' "$*" > "$AF_TEST_PROOF_UNEXPECTED"
+printf 'unexpected git invocation:' >&2
+printf ' <%s>' "$@" >&2
+printf '\n' >&2
+exit 97
+`
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write instant proof git: %v", err)
+	}
+	t.Setenv("AF_TEST_PROOF_ROOT", root)
+	t.Setenv("AF_TEST_PROOF_GIT_DIR", gitDir)
+	t.Setenv("AF_TEST_PROOF_COMMON_DIR", commonDir)
+	t.Setenv("AF_TEST_PROOF_CONFIG", filepath.Join(commonDir, "config"))
+	t.Setenv("AF_TEST_PROOF_BARE", bareAnswer)
+	t.Setenv("AF_TEST_PROOF_REACHED", reached)
+	t.Setenv("AF_TEST_PROOF_UNEXPECTED", unexpected)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(func() {
+		if _, err := os.Stat(reached); err != nil {
+			t.Errorf("the instant git stand-in never reached the checkout-marker proof: %v", err)
+		}
+		if args, err := os.ReadFile(unexpected); err == nil {
+			t.Errorf("the instant git stand-in received an unexpected invocation: %s", args)
+		} else if !os.IsNotExist(err) {
+			t.Errorf("inspect unexpected proof-git invocations: %v", err)
+		}
+	})
+}
+
+func installInstantMainWorktreeProofGit(t *testing.T, root string) {
+	t.Helper()
+	installInstantRegisteredProjectProofGit(t, root, ".git", ".git", false)
 }
 
 // TestContestedIdentityDefersThePromotion pins #3530 review id 3918535470.
@@ -848,19 +923,20 @@ func TestUnprovenLatchSurvivesAnUnreadableRegistry(t *testing.T) {
 		t.Fatalf("the proof must not retry before its backoff is due: %q", recorded)
 	}
 
-	// A healthy probe may still lose a window on a loaded runner. Advance the
-	// cadence's clock and wait for the durable outcome, retaining the exact ID
-	// assertion. Losing the latch must fail immediately, not be retried away.
-	waitUntil(t, 10*time.Second, "the repaired registry's retained identity proof", func() bool {
-		if _, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; !kept {
-			t.Fatal("the latch disappeared before the identity was recorded")
-		}
-		manager.mu.Lock()
-		now = manager.rootHealNextAttempt
-		manager.mu.Unlock()
-		manager.EnsureRootAgents()
-		return onlyIdentityFor(t, project.ID) != ""
-	})
+	// Advance the cadence's clock and make the recovery proof answer
+	// immediately. Its exact answers, including the checkout-marker lookup, are
+	// fixed by the stand-in rather than by a real git racing the 250ms budget.
+	if _, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; !kept {
+		t.Fatal("the latch disappeared before the identity was recorded")
+	}
+	installInstantMainWorktreeProofGit(t, repoPath)
+	manager.mu.Lock()
+	now = manager.rootHealNextAttempt
+	manager.mu.Unlock()
+	manager.EnsureRootAgents()
+	if proofCalls != 2 {
+		t.Fatalf("the due recovery pass must perform exactly one new proof: %d total calls", proofCalls)
+	}
 
 	if recorded := onlyIdentityFor(t, project.ID); recorded != realID {
 		t.Fatalf("the retained latch must complete once the registry reads again: recorded %q, want %s", recorded, realID)
@@ -918,6 +994,7 @@ func TestReprovedIdentityCarriesTheProjectWithIt(t *testing.T) {
 		t.Fatalf("restore marker: %v", err)
 	}
 
+	installInstantMainWorktreeProofGit(t, repoPath)
 	manager.EnsureRootAgents()
 
 	after := manager.rootAgentLayers.Load()
@@ -978,6 +1055,14 @@ func TestStartupProofUnderANewIdentityPublishesIt(t *testing.T) {
 	if idA == idB {
 		t.Fatalf("fixture needs two distinct bare identities")
 	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("find real git before installing the proof stand-in: %v", err)
+	}
+	realGit, err = filepath.Abs(realGit)
+	if err != nil {
+		t.Fatalf("make the real git path absolute: %v", err)
+	}
 
 	// Between the resolution and the proof, the SAME marked checkout comes to
 	// resolve under B: its common directory moved, and the marker moved with
@@ -1002,12 +1087,17 @@ func TestStartupProofUnderANewIdentityPublishesIt(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(bareB, "agent-factory", filepath.Base(markers[0])), data, 0o644); err != nil {
 			t.Fatalf("write marker: %v", err)
 		}
-		if err := exec.Command("git", "-C", bareA, "worktree", "remove", "--force", workspace).Run(); err != nil {
+		// These fixture mutations must bypass the proof stand-in installed below.
+		// Keeping their command absolute prevents a PATH change from turning the
+		// intended successful proof into another answer.
+		if err := exec.Command(realGit, "-C", bareA, "worktree", "remove", "--force", workspace).Run(); err != nil {
 			t.Fatalf("detach the workspace from A: %v", err)
 		}
-		if err := exec.Command("git", "-C", bareB, "worktree", "add", "--detach", workspace).Run(); err != nil {
+		if err := exec.Command(realGit, "-C", bareB, "worktree", "add", "--detach", workspace).Run(); err != nil {
 			t.Fatalf("attach the workspace to B: %v", err)
 		}
+		installInstantRegisteredProjectProofGit(t, workspace,
+			filepath.Join(bareB, "worktrees", filepath.Base(workspace)), bareB, true)
 	})
 
 	manager, err := NewManager(config.DefaultConfig())
@@ -1141,6 +1231,7 @@ func TestSuccessfulProofSurvivesAFailedWrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(recordDir, "probe"), nil, 0o644); err == nil {
 		t.Skip("this test needs an unwritable directory to be unwritable; running as a user that ignores it")
 	}
+	installInstantMainWorktreeProofGit(t, repoPath)
 	manager.EnsureRootAgents()
 
 	entry, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]
@@ -1276,6 +1367,7 @@ func TestRegistryRecoveryReconciliationRespectsTheFence(t *testing.T) {
 		t.Fatalf("repair registry: %v", err)
 	}
 	restored = true
+	installInstantMainWorktreeProofGit(t, repoPath)
 	// Recovery publishes only on a second consecutive matching read, so the
 	// cadence is driven twice.
 	for range 4 {
