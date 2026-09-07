@@ -67,8 +67,31 @@ export function appbarControls(controls: HTMLElement[], phone = window.matchMedi
   return { ...menu, dispose: () => { phone.removeEventListener("change", sync); menu.dispose(); } };
 }
 
+/** Session-first follows selected content, not transient keyboard ownership. */
+export function isSessionFirst(phone: boolean, drawer: boolean, view: string, kind: number | null): boolean {
+  return phone && !drawer && view === "sessions" && kind !== null && kind >= 0 && kind <= 2;
+}
+
+/** Move only chrome, preserving live nodes and their event handlers. Reverse restore
+ * keeps sibling order exact even when adjacent controls move to different groups. */
+export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
+  let active = false;
+  let homes: { node: HTMLElement; parent: Node; next: ChildNode | null }[] = [];
+  return { setActive(value: boolean) {
+    if (value === active) return;
+    active = value;
+    if (active) {
+      homes = moves.map(([node]) => ({ node, parent: node.parentNode!, next: node.nextSibling }));
+      for (const [node, target] of moves) target.append(node);
+    } else {
+      for (const { node, parent, next } of homes.reverse()) parent.insertBefore(node, next);
+      homes = [];
+    }
+  } };
+}
+
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void }) {
+export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; closePane?(): void }) {
   const menu = actionsDisclosure();
   const action = (label: string, className: string, run: () => void) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
@@ -76,6 +99,7 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
     return button;
   };
   const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
+  title.setAttribute("aria-label", opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -97,9 +121,11 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
-  menu.panel.append(newTabSlot, copy, handoff, actions);
+  const closePane = action("Close pane", "af-phone-pane-close", () => opts.closePane?.());
+  closePane.hidden = true;
+  menu.panel.append(newTabSlot, copy, handoff, actions, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, pr, keyboard, retry, handoff, actions, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, tabs, pr, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */

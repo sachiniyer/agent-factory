@@ -36,23 +36,28 @@ matrix, including Light · Dark · System. Empty/error web specimens link to the
 
 ## Phone layout
 
-At widths up to 768px, keep project context and Sessions · Tasks · Config in the
-app header, alongside the session drawer toggle. Fold install, Light · Dark ·
-System and Disconnect into one … disclosure. Keep these controls available when
-a session is focused.
+At widths up to 768px, a selected terminal is the screen. With the drawer closed,
+use one 48px top row: drawer toggle, truncating session title, static Keyboard
+ownership label and one … disclosure. Preserve the full title in title and aria
+text. The disclosure holds project choices, Sessions · Tasks · Config, install,
+Light · Dark · System, Disconnect, pane actions and the session tab switcher.
+Project choices and new-tab types are inline inside it, without nested disclosures.
+For a split session, show the focused pane and keep Close pane in the menu; restore
+the split when returning to desktop.
+Escape closes the disclosure and returns focus to its trigger. The drawer, Tasks,
+Config and nonterminal content retain their existing phone layouts.
 
-Give the pane title, static Keyboard ownership label and Actions disclosure their
-own row. Session titles truncate with …; preserve the complete name in accessible
-text and the title tooltip. Tabs stay on one horizontally scrolling row. Controls
-have a minimum 44px touch target, using the existing spacing tokens. Use the same
-colours, glyphs and focus model as desktop.
+While a terminal owns the keyboard, show one 44px keybar above the soft keyboard,
+following the visual viewport and safe-area insets. Ctrl, Alt, Esc, Tab, ^C and
+Arrows share the row. Arrows replaces it with Back and ← ↑ ↓ →; Back restores the
+primary row. At 360px, six targets fit with 4px gaps and 8px horizontal insets.
+Hide the bar when ownership leaves the terminal or the viewport exceeds 768px.
+Refit the terminal so its last row remains above the bar.
 
-While a terminal owns the keyboard, show a surface-raised bottom keybar above the
-soft keyboard, following the visual viewport and safe-area insets. Refit the
-terminal so its last row stays above the bar. Hide it when ownership leaves the
-terminal or the viewport exceeds 768px. Keep Ctrl, Alt, Esc, Tab and ^C on the
-first row and ← ↑ ↓ → on a second row: at 360px, the first row's targets are
-62.4px wide and 44px high with the standard insets and gaps.
+With the soft keyboard closed, the terminal element must occupy at least 85% of
+the visual viewport at 360, 390 and 430px. Browser assertions enforce this in both
+themes. Keep all targets at least 44px, truncate instead of wrapping, use existing
+tokens and static glyphs, and do not animate.
 
 Ctrl and Alt apply once to the next typed character, including composed text.
 Double tap within 350ms to lock; tap again to release. An armed modifier has the
@@ -60,7 +65,7 @@ selected-row surface, bold ink and accent edge. A locked modifier also has an
 accent outline and static ▸ marker. Buttons retain terminal focus on pointerdown;
 there is no animation. ^C always interrupts, even with a modifier armed.
 
-![Phone terminal with locked Ctrl](../assets/design/3977/phone-terminal-modifier-locked.png)
+![Session-first phone terminal](../assets/design/3981/after-phone-session-390.png)
 
 ## Implementation reference
 

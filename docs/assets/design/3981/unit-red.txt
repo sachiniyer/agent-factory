@@ -1,0 +1,138 @@
+TAP version 13
+# Subtest: phone header at 360 folds secondary controls; desktop renders the same controls inline
+ok 1 - phone header at 360 folds secondary controls; desktop renders the same controls inline
+  ---
+  duration_ms: 3.104942
+  type: 'test'
+  ...
+# Subtest: phone overflow has native keyboard activation and Escape returns focus to its trigger
+ok 2 - phone overflow has native keyboard activation and Escape returns focus to its trigger
+  ---
+  duration_ms: 3.229171
+  type: 'test'
+  ...
+# Subtest: truncated session title retains the complete name for pointer and accessible text
+ok 3 - truncated session title retains the complete name for pointer and accessible text
+  ---
+  duration_ms: 1.417627
+  type: 'test'
+  ...
+# Subtest: session-first composition moves all secondary controls into one menu and restores desktop order
+not ok 4 - session-first composition moves all secondary controls into one menu and restores desktop order
+  ---
+  duration_ms: 10.196474
+  type: 'test'
+  location: '/home/siyer/Desktop/claude-squad-fix-3981-phone-session-first/web/src/phone-header.test.ts:1:4071'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+    
+    + 'undefined'
+    - 'function'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'function'
+  actual: 'undefined'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/home/siyer/Desktop/claude-squad-fix-3981-phone-session-first/web/src/phone-header.test.ts:105:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: terminal key bytes match physical keys
+ok 5 - terminal key bytes match physical keys
+  ---
+  duration_ms: 2.15898
+  type: 'test'
+  ...
+# Subtest: one shot consumes only the next character, including committed composition text
+ok 6 - one shot consumes only the next character, including committed composition text
+  ---
+  duration_ms: 0.582498
+  type: 'test'
+  ...
+# Subtest: double tap locks; tap unlocks; slow second tap cancels; reset clears both
+ok 7 - double tap locks; tap unlocks; slow second tap cancels; reset clears both
+  ---
+  duration_ms: 0.407125
+  type: 'test'
+  ...
+# Subtest: escape sequences and control bytes do not consume a character modifier
+ok 8 - escape sequences and control bytes do not consume a character modifier
+  ---
+  duration_ms: 0.231769
+  type: 'test'
+  ...
+# Subtest: pointerdown prevents focus transfer before acting
+ok 9 - pointerdown prevents focus transfer before acting
+  ---
+  duration_ms: 0.38344
+  type: 'test'
+  ...
+# Subtest: one-row keybar uses six primary targets and a replacement arrows row at 360px
+not ok 10 - one-row keybar uses six primary targets and a replacement arrows row at 360px
+  ---
+  duration_ms: 14.195254
+  type: 'test'
+  location: '/home/siyer/Desktop/claude-squad-fix-3981-phone-session-first/web/src/terminal-keybar.test.ts:1:1908'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+    + undefined
+    - [
+    -   [
+    -     'Ctrl',
+    -     'Alt',
+    -     'Esc',
+    -     'Tab',
+    -     '^C',
+    -     'Arrows'
+    -   ],
+    -   [
+    -     'Back',
+    -     '←',
+    -     '↑',
+    -     '↓',
+    -     '→'
+    -   ]
+    - ]
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0:
+      0: 'Ctrl'
+      1: 'Alt'
+      2: 'Esc'
+      3: 'Tab'
+      4: '^C'
+      5: 'Arrows'
+    1:
+      0: 'Back'
+      1: '←'
+      2: '↑'
+      3: '↓'
+      4: '→'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/home/siyer/Desktop/claude-squad-fix-3981-phone-session-first/web/src/terminal-keybar.test.ts:54:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 8
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1678.753862

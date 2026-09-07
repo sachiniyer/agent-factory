@@ -5,6 +5,14 @@ import * as components from "./components.js";
 // Small eventful DOM for component units; real geometry is asserted by the recorder.
 class Element extends EventTarget {
   children: Element[] = [];
+  parentNode: Element | null = null;
+  get nextSibling(): Element | null { return this.parentNode?.children[this.parentNode.children.indexOf(this) + 1] ?? null; }
+  insertBefore(child: Element, next: Element | null) {
+    if (child.parentNode) child.parentNode.children = child.parentNode.children.filter(el => el !== child);
+    child.parentNode = this;
+    const at = next ? this.children.indexOf(next) : -1;
+    this.children.splice(at < 0 ? this.children.length : at, 0, child);
+  }
   className = "";
   hidden = false;
   title = "";
@@ -14,7 +22,7 @@ class Element extends EventTarget {
   append(...children: (Element | string)[]) {
     for (const child of children) {
       if (typeof child === "string") this.textContent += child;
-      else this.children.push(child);
+      else this.insertBefore(child, null);
     }
   }
   replaceChildren(...children: (Element | string)[]) { this.children = []; this.textContent = ""; this.append(...children); }
@@ -88,6 +96,41 @@ test("truncated session title retains the complete name for pointer and accessib
   const chrome = components.terminalChrome({ title, copyLink() {}, handoff() {}, retry() {} });
   assert.equal(chrome.title.title, title, "ellipsis must have a full-name route");
   assert.equal(chrome.title.textContent, title);
+  assert.equal(chrome.title.getAttribute("aria-label"), title);
   assert.equal((chrome.keyboard as unknown as Element).tagName, "span", "Keyboard is static");
   chrome.dispose();
+});
+
+test("session-first composition moves all secondary controls into one menu and restores desktop order", () => {
+  const compose = components.sessionFirstComposition;
+  assert.equal(typeof compose, "function");
+  const header = new Element();
+  const head = new Element();
+  const panel = new Element();
+  const title = new Element();
+  const keyboard = new Element();
+  const controls = ["Switch project", "Sessions · Tasks · Config", "Light · Dark · System", "Disconnect", "Actions", "Session tabs"].map(label => {
+    const el = new Element(); el.textContent = label; return el;
+  });
+  head.append(title, keyboard);
+  header.append(...controls);
+  const composition = compose([[title, header], [keyboard, header], ...controls.map(el => [el, panel])] as unknown as [HTMLElement, HTMLElement][]);
+  composition.setActive(false);
+  assert.deepEqual(header.children, controls, "desktop keeps controls inline");
+  composition.setActive(true);
+  assert.deepEqual(panel.children, controls, "360px has every secondary control in the disclosure");
+  assert.deepEqual(header.children, [title, keyboard]);
+  composition.setActive(false);
+  assert.deepEqual(header.children, controls);
+  assert.deepEqual(head.children, [title, keyboard]);
+});
+
+test("session-first applies to selected terminals at phone widths, regardless of keyboard ownership", () => {
+  for (const width of [360, 390, 430, 768, 1440]) {
+    for (const kind of [0, 1, 2, 3, 4, null]) {
+      assert.equal(components.isSessionFirst(width <= 768, false, "sessions", kind), width <= 768 && kind !== null && kind <= 2);
+      assert.equal(components.isSessionFirst(width <= 768, true, "sessions", kind), false);
+      for (const view of ["tasks", "config"]) assert.equal(components.isSessionFirst(width <= 768, false, view, kind), false);
+    }
+  }
 });

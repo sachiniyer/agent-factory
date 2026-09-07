@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
+import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
 import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -246,6 +246,8 @@ export interface Actions {
    *  xterm; this explicit boundary keeps those two owners synchronized without a
    *  resize-event shim or a polling timer. */
   layoutChanged(): void;
+  /** Close the focused split pane; the session itself remains open. */
+  closePane?(): void;
   /** Switches to a tab AND attaches its terminal (a tab-bar click, mirroring how a
    *  session-row click attaches). */
   openTab(index: number): void;
@@ -742,6 +744,26 @@ export class AppShell {
   private readonly viewTabs: Map<View, HTMLElement>;
   // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
+  private readonly phone = window.matchMedia("(max-width: 768px)");
+  private readonly header: HTMLElement;
+  private readonly viewNav: HTMLElement;
+  private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
+  private terminalSelected = false;
+  private readonly syncPhone = (): void => {
+    const active = this.phone.matches && this.terminalSelected && !this.navOpen;
+    if (this.el.classList.contains("af-session-first") === active) return;
+    const focus = document.activeElement as HTMLElement | null;
+    this.appControls.close();
+    this.terminalChrome?.menu.close();
+    this.closeProjectMenu();
+    this.sessionFirst?.setActive(active);
+    this.el.classList.toggle("af-session-first", active);
+    if (focus && focus !== document.activeElement) {
+      if (focus.getClientRects().length) focus.focus();
+      else this.appControls.trigger.focus();
+    }
+    this.actions.layoutChanged();
+  };
   private readonly appControls: ReturnType<typeof appbarControls>;
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
   private lastThemeChoice: ThemeChoice | null = null;
@@ -868,14 +890,7 @@ export class AppShell {
   private mainRendered = false;
   private readonly idleAgeTimer: number;
 
-  // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
-  // off-canvas drawer that the .af-nav-toggle hamburger slides over the terminal, so a
-  // phone gives the terminal the full width. This is the ONLY piece of the responsive
-  // work that needs JS — everything else is @media CSS. `navOpen` is pure UI ephemera
-  // (never store state): the drawer is closed on load, opens on the toggle, and
-  // auto-closes when an action leaves the rail (create/select/lifecycle) or the view
-  // changes. Filtering stays in the rail and deliberately keeps it open (#2226).
-  // On desktop the CSS ignores the class, so setNav is an inert no-op there.
+  // Drawer state is local UI ephemera; closing it restores session-first chrome.
   private readonly navToggle: HTMLButtonElement;
   private readonly navScrim: HTMLElement;
   private navOpen = false;
@@ -916,6 +931,7 @@ export class AppShell {
     // through actions.switchView, exactly like the keyboard path.
     const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
     this.viewTabs = tabs;
+    this.viewNav = viewNav;
 
     // The project switcher (redesign PR2): a button showing the current project and a
     // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
@@ -951,10 +967,7 @@ export class AppShell {
       }
     });
 
-    // The narrow-viewport rail toggle (web mobile pass): a hamburger that slides the
-    // session drawer over the terminal. CSS keeps it display:none on desktop and shows
-    // it only in the sessions view on a phone (the tasks/config views have no rail), so
-    // it never competes with the appbar controls on a comfortable width.
+    // The drawer toggle shares the compact session row at phone widths.
     this.navToggle = h("button", { type: "button", class: "af-nav-toggle" }, icon("menu"));
     this.navToggle.setAttribute("aria-label", "Toggle sessions");
     this.navToggle.setAttribute("aria-controls", "af-rail");
@@ -979,6 +992,14 @@ export class AppShell {
       this.projectSwitchWrap,
       this.appControls.el,
     );
+
+    this.header = header;
+    this.phone.addEventListener("change", this.syncPhone);
+    this.appControls.panel.addEventListener("click", event => {
+      const target = (event.target as HTMLElement).closest("button, a");
+      if (this.el.classList.contains("af-session-first") && target &&
+        !target.closest(".af-theme-toggle")) this.appControls.close();
+    });
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
@@ -1082,6 +1103,8 @@ export class AppShell {
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
+    this.phone.removeEventListener("change", this.syncPhone);
+    this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
   }
@@ -1108,6 +1131,7 @@ export class AppShell {
     this.navOpen = open;
     this.el.classList.toggle("af-nav-open", open);
     this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    this.syncPhone();
     // The drawer overlays the pane, so its transition need not change the host's
     // border box and ResizeObserver may correctly stay silent. It is still a usable-
     // area/visibility transition: explicitly reconcile xterm on the next paint.
@@ -1317,6 +1341,10 @@ export class AppShell {
     // instead of using the now-known stable id. Adding ids to the signature would fix
     // the cache by reintroducing exactly the #1737 rebuild — so the cache is synced
     // independently of the render instead.
+    const selectedForPhone = selectedSession(state);
+    const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
+    this.terminalSelected = isSessionFirst(true, false, state.view, kind);
+    this.syncPhone();
     this.syncTabIdentityCaches(state);
   }
 
@@ -1657,6 +1685,7 @@ export class AppShell {
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
+      this.appControls.close();
       this.actions.addProject();
     });
     footChildren.push(add);
@@ -1688,6 +1717,7 @@ export class AppShell {
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
+          this.appControls.close();
           this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
         });
       }
@@ -1718,6 +1748,7 @@ export class AppShell {
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
+      this.appControls.close();
       this.actions.switchProject(p.root);
     });
     return item;
@@ -1819,6 +1850,7 @@ export class AppShell {
         e.stopPropagation();
         close();
         this.terminalChrome?.menu.close();
+        this.appControls.close();
         this.actions.newTab(kind);
       });
       return b;
@@ -1888,6 +1920,9 @@ export class AppShell {
   }
 
   private renderMain(state: AppState): void {
+    this.sessionFirst?.setActive(false);
+    this.sessionFirst = null;
+    this.el.classList.remove("af-session-first");
     this.terminalChrome?.dispose();
     this.terminalChrome = null;
     const selected = selectedSession(state);
@@ -1925,6 +1960,7 @@ export class AppShell {
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
+      closePane: () => this.actions.closePane?.(),
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
@@ -1974,6 +2010,13 @@ export class AppShell {
     } else {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
+    this.sessionFirst = sessionFirstComposition([
+      [chrome.title, this.header], [chrome.keyboard, this.header],
+      [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
+      ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
+      [chrome.tabs, this.appControls.panel], [chrome.pr, this.appControls.panel],
+      [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
+    ]);
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -2241,7 +2284,7 @@ export class AppShell {
       // Picked up: this gesture is ours, so stop the page reacting to it as a scroll.
       e.preventDefault();
       // Over a pane → that pane's split zone; otherwise the bar's insertion gap.
-      if (this.actions.paneDropHintAt(e.clientX, e.clientY)) {
+      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
         this.hideTabInsert();
       } else {
         this.showTabInsert(bar, e.clientX);
@@ -2260,7 +2303,7 @@ export class AppShell {
       if (!held) {
         return; // a tap: the button's own click handler owns it
       }
-      if (this.actions.dropTabOnPaneAt(x, y, drag)) {
+      if (!bar.contains(document.elementFromPoint(x, y)) && this.actions.dropTabOnPaneAt(x, y, drag)) {
         return; // landed in a pane: split or replaced
       }
       // Outside the bar is a CANCEL. The mouse path only reorders when the drop lands
@@ -2486,7 +2529,11 @@ export class AppShell {
     }
     this.headTitle.textContent = selected.title;
     this.headTitle.title = selected.title;
-    if (this.terminalChrome) this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
+    this.headTitle.setAttribute("aria-label", selected.title);
+    if (this.terminalChrome) {
+      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
+      this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
+    }
     const warningText = archiveWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {

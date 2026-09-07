@@ -526,6 +526,7 @@ async function resetToAgentTab(page: Page): Promise<void> {
       break;
     }
     const before = await tabbar.locator(".af-tab").count();
+    if (await page.locator(".af-session-first").count()) await openSessionActions(page);
     await closable.first().click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(before - 1, { timeout: 30_000 });
   }
@@ -534,7 +535,7 @@ async function resetToAgentTab(page: Page): Promise<void> {
 
 /** Secondary session operations live in the same keyboard/pointer disclosure. */
 async function openSessionActions(page: Page): Promise<void> {
-  const trigger = page.getByRole("button", { name: "Session actions", exact: true });
+  const trigger = page.getByRole("button", { name: await page.locator(".af-session-first").count() ? "More app controls" : "Session actions", exact: true });
   if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
 }
 
@@ -550,7 +551,7 @@ async function createTerminalTab(page: Page): Promise<void> {
   const tabsBefore = await tabbar.locator(".af-tab").count();
 
   await openSessionActions(page);
-  await tabbar.locator("..").locator(".af-tab-new").click();
+  if (!(await page.locator(".af-session-first").count())) await tabbar.locator("..").locator(".af-tab-new").click();
   const menu = tabbar.locator("..").locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
@@ -2954,6 +2955,7 @@ test("#2899 mobile: a finger long-presses a tab and drags it to REORDER — and 
    *  new-tab control overflow the bar, so an off-screen tab's box is a coordinate no
    *  finger could ever land on. */
   const centerOf = async (name: string): Promise<{ x: number; y: number }> => {
+    await openSessionActions(p);
     const tab = p.locator(".af-tabbar .af-tab", { hasText: name });
     await tab.scrollIntoViewIfNeeded();
     const box = await tab.boundingBox();
@@ -8107,55 +8109,29 @@ test("dismissing the install affordance sticks across reloads — it must never 
   await ctx.close();
 });
 
-test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the tab bar scrolls", REAL_FIXTURE, async () => {
-  // The seeded reorder session has enough real tabs to overflow a phone-width bar.
-  // Select its project explicitly: after a worker restart the daemon's most-recent
-  // project can be the task-only fixture, and this regression must not inherit that.
+test("#2219/#3981: phone tab scrolling keeps new-tab choices in the single disclosure", REAL_FIXTURE, async () => {
   await page.setViewportSize({ width: 1280, height: 720 });
   if ((await page.locator(".af-project-switch-name").textContent()) !== "mock-repo") {
     await page.locator(".af-project-switch").click();
     await projectItem(page, "mock-repo").click();
   }
-  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
   await row(page, SESSION_ORDER).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   await page.setViewportSize({ width: 375, height: 700 });
-
-  const tabbar = page.locator(".af-tabbar");
-  await expect
-    .poll(() => tabbar.evaluate((bar) => bar.scrollWidth > bar.clientWidth), {
-      message: "the real four-tab roster must overflow the narrow tab bar",
-    })
-    .toBe(true);
-  await tabbar.evaluate((bar) => { bar.scrollLeft = bar.scrollWidth; });
   await openSessionActions(page);
-  const trigger = tabbar.locator("..").locator(".af-tab-new");
-  await trigger.click();
-  const menu = tabbar.locator("..").locator(".af-tab-menu");
-  await expect(menu).toBeVisible();
-  const before = await settledHitTestableTabMenu(page, menu, trigger);
-
-  // Playwright scrolls the end-of-row trigger fully into view before clicking it.
-  // Move the bar back a few pixels with the menu OPEN: both the caret and its fixed
-  // menu should move together, while the menu remains clickable and in the viewport.
-  const scroll = await tabbar.evaluate((bar) => {
-    const before = bar.scrollLeft;
-    bar.scrollLeft = Math.max(0, before - 4);
-    return { before, after: bar.scrollLeft };
-  });
-  expect(scroll.after, "the overflow fixture must permit a real horizontal scroll").toBeLessThan(scroll.before);
-  const after = await settledHitTestableTabMenu(page, menu, trigger);
-  const triggerShift = after.trigger.x - before.trigger.x;
-  const menuShift = after.menu.x - before.menu.x;
-  expect(Math.abs(menuShift - triggerShift), "the menu must track the caret's horizontal scroll").toBeLessThan(1);
-  expect(Math.abs(after.menu.x + after.menu.width - (after.trigger.x + after.trigger.width))).toBeLessThan(1);
-
+  const tabbar = page.locator(".af-tabbar");
+  expect(await tabbar.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+  const choice = page.locator(".af-appbar-tools .af-tab-menu-item").first();
+  await expect(choice).toBeVisible();
+  const before = await choice.boundingBox();
+  await tabbar.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  expect(await choice.boundingBox()).toEqual(before);
   await page.keyboard.press("Escape");
-  await expect(menu).toBeHidden();
+  await expect(page.locator(".af-appbar-more")).toBeFocused();
+  await expect(choice).toBeHidden();
   await page.setViewportSize({ width: 1280, height: 720 });
 });
 
-test("#2224/#3967: desktop keeps title + tabs; phone gives title and tabs separate rows", REAL_FIXTURE, async ({ browser }, testInfo) => {
+test("#2224/#3981: desktop keeps title + tabs; phone consolidates session controls", REAL_FIXTURE, async ({ browser }, testInfo) => {
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!mockRepo, "AF_MOCK_REPO is set only by web-selftest-entry.sh");
 
@@ -8221,6 +8197,34 @@ test("#2224/#3967: desktop keeps title + tabs; phone gives title and tabs separa
             }
             await row(p, title).click();
             await expect(p.locator(".af-main.af-main-term")).toBeVisible();
+
+            if (width <= 768) {
+              const titleNode = p.locator(".af-appbar > .af-term-title");
+              await expect(titleNode).toHaveText(title);
+              await expect(titleNode).toHaveAttribute("title", title);
+              await expect(titleNode).toHaveAttribute("aria-label", title);
+              expect(await titleNode.evaluate(el => el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === "ellipsis")).toBe(true);
+              const more = p.locator(".af-appbar-more");
+              await more.focus(); await p.keyboard.press("Enter");
+              const panel = p.locator(".af-appbar-tools");
+              await expect(panel.locator(".af-project-menu")).toBeVisible();
+              await expect(panel.locator(".af-viewnav")).toBeVisible();
+              await expect(panel.locator(".af-tab-menu")).toBeVisible();
+              if (roster === "overflow") {
+                await expect(panel.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+                const bar = panel.locator(".af-tabbar");
+                await expect(bar).toBeVisible();
+                expect(await bar.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+              } else await expect(panel.locator(".af-tabbar")).toBeHidden();
+              await p.keyboard.press("Escape");
+              await expect(more).toBeFocused();
+              await expect(panel).toBeHidden();
+              await p.setViewportSize({ width: 1280, height: 720 });
+              await expect(p.locator(".af-term-head .af-term-title")).toBeVisible();
+              await expect(p.locator(".af-term-head .af-tabbar")).toBeVisible();
+              await expect(p.locator(".af-appbar > .af-viewnav")).toBeVisible();
+              return;
+            }
 
             const head = p.locator(".af-term-head");
             const titleBox = head.locator(":scope > .af-term-head-main");
@@ -10662,7 +10666,7 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
   }, title);
 }
 
-test("#3967 mobile: navigation and pane rows remain visible and the drawer stays an overlay", REAL_FIXTURE, async ({
+test("#3981 mobile: session-first budget and drawer navigation survive viewport changes", REAL_FIXTURE, async ({
   browser,
 }) => {
   for (const width of [360, 390, 430]) {
@@ -10682,9 +10686,9 @@ test("#3967 mobile: navigation and pane rows remain visible and the drawer stays
         await row(p, SESSION_ORDER).click();
         await expect(app).not.toHaveClass(/af-nav-open/);
         await expect(p.locator(".af-main.af-main-term")).toBeVisible();
-        await expect(p.locator(".af-term-head-main"), "the title identifies the focused session").toBeVisible();
-        await expect(viewNav, "navigation remains visible with a focused session").toBeVisible();
-        await expect(project, "navigation remains visible with a focused session").toBeVisible();
+        await expect(p.locator(".af-term-title"), "the title identifies the focused session").toBeVisible();
+        await expect(viewNav, "navigation is in the session disclosure").toBeHidden();
+        await expect(project).toBeHidden();
         await expect(more, "navigation remains visible with a focused session").toBeVisible();
 
         const geometry = () =>
@@ -10710,10 +10714,9 @@ test("#3967 mobile: navigation and pane rows remain visible and the drawer stays
             };
           });
         const closed = await geometry();
-        expect(closed.tabs.y, "pane tabs follow the app navigation").toBeGreaterThan(closed.toggle.bottom);
-        expect(closed.head.height, "the title and tabs each have one row").toBeLessThan(120);
-        expect(closed.host.y - closed.app.y, "navigation and pane controls leave room for output").toBeLessThan(240);
-        expect(closed.host.bottom, "the terminal fills the pane inside its existing 2px inset").toBeCloseTo(closed.app.bottom - 2, 0);
+        expect(closed.host.y - closed.app.y).toBeLessThanOrEqual(48);
+        expect(closed.head.height).toBe(0);
+        await expect.poll(() => p.locator(".af-pane-host .xterm").first().evaluate(el => el.getBoundingClientRect().height / visualViewport!.height)).toBeGreaterThanOrEqual(0.85);
 
         // The drawer overlays the pane without changing its usable rectangle.
         await toggle.click();
@@ -10723,7 +10726,7 @@ test("#3967 mobile: navigation and pane rows remain visible and the drawer stays
         await expect(project).toBeVisible();
         await expect(more).toBeVisible();
         const opened = await geometry();
-        expect(opened.host, "opening the overlay must not resize or displace the pane").toEqual(closed.host);
+        expect(opened.host.width).toEqual(opened.app.width - 4);
 
         // View switching dismisses the drawer and preserves session selection.
         await viewNav.getByRole("tab", { name: "Tasks", exact: true }).click();
@@ -10731,7 +10734,7 @@ test("#3967 mobile: navigation and pane rows remain visible and the drawer stays
         await expect(p.locator(".af-tasks")).toBeVisible();
         await p.getByRole("tab", { name: "Sessions", exact: true }).click();
         await expect(p.locator(".af-main.af-main-term")).toBeVisible();
-        await expect(viewNav).toBeVisible();
+        await expect(viewNav).toBeHidden();
 
         // Outside tap is the other drawer exit. Aim at the scrim's exposed right
         // edge because the left portion is intentionally covered by the rail.
@@ -10746,6 +10749,7 @@ test("#3967 mobile: navigation and pane rows remain visible and the drawer stays
         // Switch to a real process terminal from the strip, then change the usable
         // height. ResizeObserver owns orientation/viewport changes; the row count is
         // the product signal that FitAddon actually consumed the new geometry.
+        await more.click();
         const processTab = p.locator('.af-tabbar .af-tab:has([data-icon="terminal"])').first();
         await expect(processTab, "the seeded session keeps a real terminal tab for the mobile strip").toBeVisible();
         await processTab.click();
@@ -11194,4 +11198,28 @@ test("desktop (1280px): the mobile drawer never engages — the rail stays in vi
   await expect(p.locator(".af-appbar-tools")).toBeVisible();
   await expect(p.locator(".af-app")).not.toHaveClass(/af-nav-open/);
   await ctx.close();
+});
+
+
+test("#3981: a split terminal fills the phone and restores both panes on desktop", REAL_FIXTURE, async ({ browser }) => {
+  const { ctx, p } = await openAt(browser, 1280, 812);
+  try {
+    await row(p, SESSION_ORDER).click();
+    const tabs = p.locator(".af-tabbar .af-tab");
+    await tabs.nth(1).click();
+    await dragTabToPane(p, "Agent", "bottom");
+    await expect(p.locator(".af-pane")).toHaveCount(2);
+    for (const width of [360, 390, 430]) {
+      await p.setViewportSize({ width, height: 812 });
+      await expect(p.locator(".af-pane:visible")).toHaveCount(1);
+      await expect(p.locator(".af-pane-head:visible")).toHaveCount(0);
+      await expect.poll(() => p.locator(".af-pane-focused .xterm").evaluate(el => el.getBoundingClientRect().height / visualViewport!.height)).toBeGreaterThanOrEqual(0.85);
+    }
+    await p.setViewportSize({ width: 1280, height: 812 });
+    await expect(p.locator(".af-pane:visible")).toHaveCount(2);
+    await p.setViewportSize({ width: 360, height: 812 });
+    await openSessionActions(p);
+    await p.getByRole("button", { name: "Close pane", exact: true }).click();
+    await expect(p.locator(".af-pane")).toHaveCount(1);
+  } finally { await ctx.close(); }
 });

@@ -365,14 +365,14 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
 }
 
 async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<unknown>, prefix: string): Promise<void> {
-  const actions = page.getByRole("button", { name: "Session actions", exact: true });
+  const actions = page.getByRole("button", { name: prefix ? "More app controls" : "Session actions", exact: true });
   await actions.click();
-  await expect(page.locator(".af-term-head .af-term-menu")).toBeVisible();
+  await expect(page.locator(prefix ? ".af-appbar-tools" : ".af-term-head .af-term-menu")).toBeVisible();
   await shot(`${prefix}session-actions`);
-  await page.locator(".af-tab-new").click();
+  if (!prefix) await page.locator(".af-tab-new").click();
   await expect(page.locator(".af-tab-menu")).toBeVisible();
   await shot(`${prefix}tab-types`);
-  await page.locator(".af-tab-new").click();
+  if (!prefix) await page.locator(".af-tab-new").click();
   await actions.click();
   await page.locator(".af-pane-host .xterm").first().click();
   await expect(page.locator(".af-term-keyboard")).toBeVisible();
@@ -391,47 +391,50 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
 
 /** Phone geometry and keyboard access supplement the pixel oracle. */
 async function assertPhoneHeader(page: Page): Promise<void> {
+  await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
   const header = page.locator(".af-appbar");
-  await expect(header.locator(".af-viewnav")).toBeVisible();
-  await expect(header.locator(".af-project-switch")).toBeVisible();
-  await expect(header.locator(".af-brand")).toBeHidden();
-  await expect(header.locator(".af-theme-toggle")).toBeHidden();
-  await expect(header.getByRole("button", { name: "Disconnect", exact: true })).toBeHidden();
-  const more = page.getByRole("button", { name: "More app controls", exact: true });
+  const more = header.getByRole("button", { name: "More app controls", exact: true });
+  await expect(header.locator(".af-viewnav")).toBeHidden();
+  await expect(page.locator(".af-term-head")).toBeHidden();
   await more.focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator(".af-appbar-tools")).toBeVisible();
-  await page.keyboard.press("Tab");
-  await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toBeFocused();
+  const menu = page.locator(".af-appbar-tools");
+  for (const selector of [".af-viewnav", ".af-project-menu", ".af-theme-toggle", ".af-tab-menu", ".af-copy-link-phone"]) {
+    await expect(menu.locator(selector)).toBeVisible();
+  }
+  await expect(menu.getByRole("button", { name: "Disconnect", exact: true })).toBeVisible();
+  const controls = menu.locator("button:visible:not(:disabled), a:visible[href]");
+  for (let index = 0; index < await controls.count(); index++) {
+    await page.keyboard.press("Tab");
+    await expect(controls.nth(index)).toBeFocused();
+  }
   await page.keyboard.press("Escape");
   await expect(more).toBeFocused();
-  await expect(page.locator(".af-appbar-tools")).toBeHidden();
-  const title = page.locator(".af-term-title");
+  await expect(menu).toBeHidden();
+  const title = header.locator(".af-term-title");
   await expect(title).toBeVisible();
-  await expect(page.locator(".af-term-keyboard")).toHaveJSProperty("tagName", "SPAN");
-  await expect(page.locator(".af-term-head > .af-term-more-wrap .af-term-more-label")).toBeVisible();
+  await expect(title).toHaveAttribute("aria-label", await title.textContent() ?? "");
   const geometry = await page.evaluate(() => {
-    const title = document.querySelector<HTMLElement>(".af-term-title")!;
+    const title = document.querySelector<HTMLElement>(".af-appbar > .af-term-title")!;
     const original = title.textContent;
     title.textContent = "A long focused session title that must truncate with … on a phone";
-    const truncates = title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === "ellipsis";
+    const truncates = title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === "ellipsis" && getComputedStyle(title).whiteSpace === "nowrap";
     title.textContent = original;
-    const head = document.querySelector<HTMLElement>(".af-term-head")!;
-    const tabs = document.querySelector<HTMLElement>(".af-tabbar")!;
-    const targets = [...document.querySelectorAll<HTMLElement>(".af-appbar button, .af-term-head button, .af-term-head > a")]
-      .filter(el => el.getBoundingClientRect().height > 0);
-    return {
-      truncates,
-      separate: head.getBoundingClientRect().top >= document.querySelector(".af-appbar")!.getBoundingClientRect().bottom,
-      tabsBelow: tabs.getBoundingClientRect().top >= title.getBoundingClientRect().bottom,
-      scrolls: getComputedStyle(tabs).overflowX === "auto" && getComputedStyle(tabs).flexWrap === "nowrap",
-      targets: targets.every(el => el.getBoundingClientRect().height >= 44),
-      fits: document.documentElement.scrollWidth === window.innerWidth,
-    };
+    const header = document.querySelector(".af-appbar")!.getBoundingClientRect();
+    const targets = [...document.querySelectorAll<HTMLElement>(".af-appbar button")].filter(el => el.getBoundingClientRect().height > 0);
+    return { truncates, oneRow: header.height <= 48,
+      targets: targets.every(el => el.offsetHeight >= 44 && el.offsetWidth >= 44),
+      fits: document.documentElement.scrollWidth === innerWidth };
   });
-  expect(geometry).toEqual({ truncates: true, separate: true, tabsBelow: true, scrolls: true, targets: true, fits: true });
-  // Return ownership to the terminal before the still, just as session selection does.
+  expect(geometry).toEqual({ truncates: true, oneRow: true, targets: true, fits: true });
   await page.locator(".af-pane-host .xterm").first().click();
+  await expect.poll(() => page.locator(".af-pane-host .xterm").first().evaluate(el => el.getBoundingClientRect().height / visualViewport!.height),
+    { message: "#3981 terminal must occupy at least 85% of the visual viewport" }).toBeGreaterThanOrEqual(0.85);
+  const heights = await page.evaluate(() => ({ width: innerWidth, viewport: visualViewport!.height,
+    chrome: document.querySelector(".af-appbar")!.getBoundingClientRect().height,
+    keybar: document.querySelector(".af-terminal-keybar")!.getBoundingClientRect().height,
+    terminal: document.querySelector(".af-pane-host .xterm")!.getBoundingClientRect().height }));
+  console.log("3981 chrome heights", JSON.stringify(heights));
 }
 
 /** Chrome evidence: disclosures, keyboard ownership and phone layouts are real screens. */
@@ -473,6 +476,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await settleTerminal(page);
     await expect(page.locator(".af-nav-toggle")).toBeVisible();
     await shot("phone-session");
+    await shot("phone-session-first");
     await recordTerminalChrome(page, shot, "phone-");
     await page.locator(".af-nav-toggle").click();
     await expect(page.locator(".af-rail")).toBeVisible();
@@ -494,6 +498,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await shot("phone-create");
     await page.keyboard.press("Escape");
     await page.locator(".af-nav-toggle").click();
+    await page.getByRole("button", { name: "More app controls", exact: true }).click();
     await page.locator('.af-viewtab[data-view="tasks"]').click();
     await shot("phone-tasks");
     await page.locator('.af-viewtab[data-view="config"]').click();

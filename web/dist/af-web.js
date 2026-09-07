@@ -7228,6 +7228,24 @@ function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"
     menu.dispose();
   } };
 }
+function isSessionFirst(phone, drawer, view, kind) {
+  return phone && !drawer && view === "sessions" && kind !== null && kind >= 0 && kind <= 2;
+}
+function sessionFirstComposition(moves) {
+  let active = false;
+  let homes = [];
+  return { setActive(value) {
+    if (value === active) return;
+    active = value;
+    if (active) {
+      homes = moves.map(([node]) => ({ node, parent: node.parentNode, next: node.nextSibling }));
+      for (const [node, target] of moves) target.append(node);
+    } else {
+      for (const { node, parent, next } of homes.reverse()) parent.insertBefore(node, next);
+      homes = [];
+    }
+  } };
+}
 function terminalChrome(opts) {
   const menu = actionsDisclosure();
   const action = (label, className, run) => {
@@ -7239,6 +7257,7 @@ function terminalChrome(opts) {
     return button;
   };
   const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
+  title.setAttribute("aria-label", opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -7260,9 +7279,11 @@ function terminalChrome(opts) {
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
-  menu.panel.append(newTabSlot, copy, handoff, actions2);
+  const closePane = action("Close pane", "af-phone-pane-close", () => opts.closePane?.());
+  closePane.hidden = true;
+  menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, pr, keyboard, retry, handoff, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, tabs, pr, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -8058,6 +8079,7 @@ function keybarPointerDown(event, act) {
   event.preventDefault();
   act();
 }
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["Back", "\u2190", "\u2191", "\u2193", "\u2192"]];
 var TerminalKeybar = class {
   constructor(host, input, refit, applicationCursor) {
     this.host = host;
@@ -8068,9 +8090,10 @@ var TerminalKeybar = class {
     this.bar.className = "af-terminal-keybar";
     this.bar.setAttribute("role", "group");
     this.bar.setAttribute("aria-label", "Terminal keys");
-    for (const keys of [["Ctrl", "Alt", "Esc", "Tab", "^C"], ["\u2190", "\u2191", "\u2193", "\u2192"]]) {
+    for (const keys of KEYBAR_ROWS) {
       const row = document.createElement("div");
       row.className = "af-keybar-row";
+      this.rows.push(row);
       for (const key of keys) {
         const button = document.createElement("button");
         button.type = "button";
@@ -8078,7 +8101,8 @@ var TerminalKeybar = class {
         button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
         const act = () => {
           if (!this.focused || !this.phone.matches) return;
-          if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
+          if (key === "Arrows" || key === "Back") this.arrows = key === "Arrows";
+          else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           else this.input(keyBytes(key, false, false, this.applicationCursor()));
           this.paint();
         };
@@ -8104,6 +8128,8 @@ var TerminalKeybar = class {
     host.addEventListener("input", this.onSoftInput, true);
     this.paint();
   }
+  arrows = false;
+  rows = [];
   modifiers = new StickyModifiers();
   bar = document.createElement("div");
   phone = window.matchMedia("(max-width: 768px)");
@@ -8131,6 +8157,7 @@ var TerminalKeybar = class {
     if (!focused) {
       this.modifiers.reset();
       this.physicalInput = false;
+      this.arrows = false;
     }
     this.paint();
     this.layout();
@@ -8141,6 +8168,9 @@ var TerminalKeybar = class {
     return output;
   }
   paint() {
+    this.rows.forEach((row, index) => {
+      row.hidden = index !== (this.arrows ? 1 : 0);
+    });
     for (const [key, button] of this.buttons) {
       const state = this.modifiers.state(key);
       button.dataset.state = state;
@@ -14396,6 +14426,7 @@ var AppShell = class {
     }
     const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
     this.viewTabs = tabs;
+    this.viewNav = viewNav;
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
     const switchGlyph = icon("folder-git", "af-project-glyph");
     const switchCaret = icon("chevron-down", "af-project-caret");
@@ -14448,6 +14479,12 @@ var AppShell = class {
       this.projectSwitchWrap,
       this.appControls.el
     );
+    this.header = header;
+    this.phone.addEventListener("change", this.syncPhone);
+    this.appControls.panel.addEventListener("click", (event) => {
+      const target = event.target.closest("button, a");
+      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle")) this.appControls.close();
+    });
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
       "button",
@@ -14533,6 +14570,26 @@ var AppShell = class {
   viewTabs;
   // The appbar theme toggle (redesign PR1): one button per Light/Dark/System choice,
   // the active one highlighted in update().
+  phone = window.matchMedia("(max-width: 768px)");
+  header;
+  viewNav;
+  sessionFirst = null;
+  terminalSelected = false;
+  syncPhone = () => {
+    const active = this.phone.matches && this.terminalSelected && !this.navOpen;
+    if (this.el.classList.contains("af-session-first") === active) return;
+    const focus = document.activeElement;
+    this.appControls.close();
+    this.terminalChrome?.menu.close();
+    this.closeProjectMenu();
+    this.sessionFirst?.setActive(active);
+    this.el.classList.toggle("af-session-first", active);
+    if (focus && focus !== document.activeElement) {
+      if (focus.getClientRects().length) focus.focus();
+      else this.appControls.trigger.focus();
+    }
+    this.actions.layoutChanged();
+  };
   appControls;
   themeOpts = /* @__PURE__ */ new Map();
   lastThemeChoice = null;
@@ -14654,14 +14711,7 @@ var AppShell = class {
   lastEmptyKey = "";
   mainRendered = false;
   idleAgeTimer;
-  // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
-  // off-canvas drawer that the .af-nav-toggle hamburger slides over the terminal, so a
-  // phone gives the terminal the full width. This is the ONLY piece of the responsive
-  // work that needs JS — everything else is @media CSS. `navOpen` is pure UI ephemera
-  // (never store state): the drawer is closed on load, opens on the toggle, and
-  // auto-closes when an action leaves the rail (create/select/lifecycle) or the view
-  // changes. Filtering stays in the rail and deliberately keeps it open (#2226).
-  // On desktop the CSS ignores the class, so setNav is an inert no-op there.
+  // Drawer state is local UI ephemera; closing it restores session-first chrome.
   navToggle;
   navScrim;
   navOpen = false;
@@ -14671,6 +14721,8 @@ var AppShell = class {
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
+    this.phone.removeEventListener("change", this.syncPhone);
+    this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
   }
@@ -14695,6 +14747,7 @@ var AppShell = class {
     this.navOpen = open;
     this.el.classList.toggle("af-nav-open", open);
     this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    this.syncPhone();
     this.actions.layoutChanged();
   }
   /** Runs an action whose result lives outside the session drawer (#2226). Drawer
@@ -14816,6 +14869,10 @@ var AppShell = class {
         this.renderTabBar(state);
       }
     }
+    const selectedForPhone = selectedSession(state);
+    const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
+    this.terminalSelected = isSessionFirst(true, false, state.view, kind);
+    this.syncPhone();
     this.syncTabIdentityCaches(state);
   }
   railPainted = false;
@@ -15127,6 +15184,7 @@ var AppShell = class {
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
+      this.appControls.close();
       this.actions.addProject();
     });
     footChildren.push(add);
@@ -15148,6 +15206,7 @@ var AppShell = class {
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
+          this.appControls.close();
           this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
         });
       }
@@ -15176,6 +15235,7 @@ var AppShell = class {
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
+      this.appControls.close();
       this.actions.switchProject(p.root);
     });
     return item;
@@ -15258,6 +15318,7 @@ var AppShell = class {
         e.stopPropagation();
         close();
         this.terminalChrome?.menu.close();
+        this.appControls.close();
         this.actions.newTab(kind);
       });
       return b;
@@ -15317,6 +15378,9 @@ var AppShell = class {
     this.projectSwitchBtn.setAttribute("aria-expanded", "false");
   }
   renderMain(state) {
+    this.sessionFirst?.setActive(false);
+    this.sessionFirst = null;
+    this.el.classList.remove("af-session-first");
     this.terminalChrome?.dispose();
     this.terminalChrome = null;
     const selected = selectedSession(state);
@@ -15358,7 +15422,8 @@ var AppShell = class {
       title: selected.title,
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
-      retry: () => this.actions.retryLimit()
+      retry: () => this.actions.retryLimit(),
+      closePane: () => this.actions.closePane?.()
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
@@ -15393,6 +15458,17 @@ var AppShell = class {
     } else {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
+    this.sessionFirst = sessionFirstComposition([
+      [chrome.title, this.header],
+      [chrome.keyboard, this.header],
+      [this.viewNav, this.appControls.panel],
+      [this.projectSwitchWrap, this.appControls.panel],
+      ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
+      [chrome.tabs, this.appControls.panel],
+      [chrome.pr, this.appControls.panel],
+      [chrome.retry, this.appControls.panel],
+      [chrome.menu.panel, this.appControls.panel]
+    ]);
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -15578,7 +15654,7 @@ var AppShell = class {
         return;
       }
       e.preventDefault();
-      if (this.actions.paneDropHintAt(e.clientX, e.clientY)) {
+      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
         this.hideTabInsert();
       } else {
         this.showTabInsert(bar, e.clientX);
@@ -15596,7 +15672,7 @@ var AppShell = class {
       if (!held) {
         return;
       }
-      if (this.actions.dropTabOnPaneAt(x, y, drag)) {
+      if (!bar.contains(document.elementFromPoint(x, y)) && this.actions.dropTabOnPaneAt(x, y, drag)) {
         return;
       }
       const r = bar.getBoundingClientRect();
@@ -15769,7 +15845,11 @@ var AppShell = class {
     }
     this.headTitle.textContent = selected.title;
     this.headTitle.title = selected.title;
-    if (this.terminalChrome) this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
+    this.headTitle.setAttribute("aria-label", selected.title);
+    if (this.terminalChrome) {
+      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
+      this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
+    }
     const warningText = archiveWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
@@ -17120,6 +17200,7 @@ var actions = {
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
+  closePane: () => splitView.closeFocusedPane(),
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,
