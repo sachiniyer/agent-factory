@@ -74,6 +74,7 @@ import {
   newSessionModal,
   removeTaskModal,
 } from "./modals.js";
+import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
@@ -1157,6 +1158,30 @@ function closeSessionTab(index: number): void {
   if (!target) {
     return;
   }
+  const identity = tabIdentity(target);
+  const sessionId = sel.id;
+  openModal(confirmDeleteTabModal({
+    sessionTitle: sel.title,
+    tabName: target.name,
+    kind: target.kind,
+    onCancel: closeModal,
+    onConfirm: () => {
+      const current = store.get().sessions.find(session => session.id === sessionId);
+      const at = current ? sessionTabs(current).findIndex(tab => tabIdentity(tab) === identity) : -1;
+      if (!current || at <= 0 || !canCloseTabs(current)) {
+        modal?.setError("This tab is no longer available to delete.");
+        return;
+      }
+      closeModal();
+      deleteConfirmedSessionTab(current, at, tok);
+    },
+  }));
+}
+
+/** Apply the existing mutation to the confirmed identity's current slot. */
+function deleteConfirmedSessionTab(sel: SessionData, index: number, tok: string): void {
+  const tabs = sessionTabs(sel);
+  const target = tabs[index];
   clearTabError();
   const selId = sel.id ?? "";
   // Decide WHICH TAB the pane should end on by IDENTITY, not by arithmetic on an

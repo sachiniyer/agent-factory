@@ -528,6 +528,7 @@ async function resetToAgentTab(page: Page): Promise<void> {
     const before = await tabbar.locator(".af-tab").count();
     if (!(await tabbar.isVisible())) await openSessionActions(page);
     await closable.first().click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(before - 1, { timeout: 30_000 });
   }
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
@@ -3528,6 +3529,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   // the next CloseTab to error, click ×, and assert the toast — the tab stays.
   failClose = true;
   await shellTab.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(page.locator(".af-toast.af-toast-show")).toContainText("simulated tab-close failure");
   // A failed close leaves the tab in place.
   await expect(tabbar.locator(".af-tab")).toHaveCount(2);
@@ -3541,6 +3543,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   // shrinks; the agent pane's ready marker is back on screen).
   failClose = false;
   await shellTab.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
@@ -3645,6 +3648,7 @@ test.describe("split panes (SESSION_A roster)", () => {
 
     // Restore A to a single tab for the later create/kill/archive flows.
     await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   });
 
@@ -3700,6 +3704,7 @@ test.describe("split panes (SESSION_A roster)", () => {
     await shellPane.locator(".af-pane-close").click();
     await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
     await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   });
 
@@ -3746,8 +3751,10 @@ test.describe("split panes (SESSION_A roster)", () => {
 
     // Restore A to a single tab for the later flows.
     await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
     await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   });
 
@@ -3796,6 +3803,7 @@ test.describe("split panes (SESSION_A roster)", () => {
     await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
     await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
     await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   });
 });
@@ -3859,6 +3867,7 @@ test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT 
   await agentPane.locator(".af-pane-close").click();
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
@@ -4168,6 +4177,7 @@ test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev
 
   // The developer closes an UNRELATED, LOWER tab.
   await tabbar.locator(".af-tab", { hasText: "lower" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab", { hasText: "lower" })).toHaveCount(0, { timeout: 30_000 });
   // The shift really happened — without this the assertion below proves nothing.
   await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
@@ -4555,6 +4565,7 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
 
   // Close the LOWER "preview" tab: the shown external tab shifts from index 2 to 1.
   await tabbar.locator(".af-tab", { hasText: "preview" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab", { hasText: "preview" })).toHaveCount(0, { timeout: 30_000 });
   // The shift really happened — without this the assertion below would prove nothing.
   // Asserted as "external now sits at ordinal 1", not as a roster total (#1863): probe-web
@@ -4667,6 +4678,7 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   // (The bar always renders the SELECTED session, and probe-web is selected here, so
   // `throwaway` resolves against probe-web's Terminal — not the one probe-b grew above.)
   await throwaway.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   // Again by name (#1863): the disappearance of THIS tab is the event being waited on,
   // and the seeded nourl tab means the surviving total is 3, not 2.
   await expect(throwaway).toHaveCount(0, { timeout: 30_000 });
@@ -4677,6 +4689,7 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   await row(page, SESSION_B).click();
   await expect(tabbar.locator(".af-tab", { hasText: "Terminal" })).toHaveCount(1);
   await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
@@ -4710,6 +4723,7 @@ test("split panes (feat): logout clears retained trees — a fresh login shows t
   const shellTab = bar.locator(".af-tab", { hasText: "Terminal" });
   if ((await shellTab.count()) > 0) {
     await shellTab.locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(bar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   }
 });
@@ -7510,6 +7524,7 @@ test("#1812 review: a close held in flight must not clobber a tab the user picks
   });
 
   await doomed.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
 
   // Mid-flight: the user picks the agent tab. This is the intent the close must respect.
@@ -7584,6 +7599,7 @@ test("#1815 review: a concurrent out-of-band close cannot re-point the pane to a
   });
 
   await tabbar.locator(".af-tab", { hasText: "t3" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
 
   // The other client closes a LOWER tab mid-flight. Waiting for it to leave the bar
@@ -7663,6 +7679,7 @@ test("#1815 review: a pane focused mid-close keeps its own tab", REAL_FIXTURE, a
   });
 
   await tabbar.locator(".af-tab", { hasText: "k1" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
 
   // Mid-flight the user clicks the OTHER pane. That is a deliberate move of focus, and
@@ -10556,6 +10573,7 @@ test("#1929/#1971: a rename, a reorder and a close from the web carry the tab's 
     await route.continue(); // the REAL daemon must resolve the id, not just receive it
   });
   await tabByLabel(page, doomed).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   // It really closed — and only it. A close that resolved the wrong tab would still
   // shrink the bar by one, so assert the surviving ROSTER, not just the count.
   await expect

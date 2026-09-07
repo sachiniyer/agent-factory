@@ -400,6 +400,7 @@ func TestHandleCloseTabSelectsNeighbor(t *testing.T) {
 	require.Equal(t, 2, h.store.ActiveTab())
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, 1, *closed, "close must route through the daemon CloseTab RPC")
 	require.Equal(t, 2, inst.TabCount(), "close must remove the active tab")
@@ -417,6 +418,7 @@ func TestHandleCloseTabAgentTabNoOp(t *testing.T) {
 	require.Equal(t, 2, inst.TabCount())
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, 2, inst.TabCount(), "the agent tab must never be closed")
 	h.errBox.SetSize(200, 1)
@@ -533,6 +535,7 @@ func TestFreshInstanceSingleTabSlotUI(t *testing.T) {
 	// w can only mean the agent tab now, so the user gets the actionable
 	// message — never the phantom slot's misleading "tab cannot be closed".
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 	require.Equal(t, 1, inst.TabCount())
 	h.errBox.SetSize(200, 1)
 	require.Contains(t, h.errBox.String(), "agent tab can't be closed")

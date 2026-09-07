@@ -199,6 +199,38 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(fmt.Errorf("tab cannot be closed"))
 	}
 	tab := tabs[idx]
+	target := captureSessionActionTarget(inst, m.repoID)
+	tabID, tabName := tab.ID, tab.Name
+	message := fmt.Sprintf("Delete tab %q from session %q?", tabName, inst.Title)
+	detail := "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."
+	if tab.Kind == session.TabKindWeb {
+		detail = "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available."
+	}
+	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
+		current := m.resolveSessionActionTarget(target)
+		if current == nil || current.HasInFlightOp() || !current.Capabilities().TabManagement {
+			return nil
+		}
+		for at, candidate := range current.GetTabs() {
+			// IDs survive reorder/snapshot replacement. An ID-less legacy tab
+			// must still be the same object; a reused name is never consent.
+			if at > 0 && ((tabID != "" && candidate.ID == tabID) || (tabID == "" && candidate == tab)) {
+				_, cmd := m.deleteConfirmedTab(current, at)
+				if cmd != nil {
+					return cmd()
+				}
+				return nil
+			}
+		}
+		return nil
+	})
+}
+
+// deleteConfirmedTab applies the existing daemon mutation and pane reconciliation
+// only after the captured tab has been confirmed and resolved in the current roster.
+func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, tea.Cmd) {
+	tabs := inst.GetTabs()
+	tab := tabs[idx]
 	tabName := tab.Name
 	// Capture the slot→identity list before the drop: reconcilePanesForTabs maps
 	// the open panes' bindings across the change by stable tab id (#1088/#1886).
