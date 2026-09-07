@@ -67,9 +67,9 @@ export function appbarControls(controls: HTMLElement[], phone = window.matchMedi
   return { ...menu, dispose: () => { phone.removeEventListener("change", sync); menu.dispose(); } };
 }
 
-/** Session-first follows selected content, not transient keyboard ownership. */
-export function isSessionFirst(phone: boolean, drawer: boolean, view: string, kind: number | null): boolean {
-  return phone && !drawer && view === "sessions" && kind !== null && kind >= 0 && kind <= 2;
+/** Session-first follows selected content, not drawer visibility or transient keyboard ownership. */
+export function isSessionFirst(phone: boolean, view: string, kind: number | null): boolean {
+  return phone && view === "sessions" && kind !== null && kind >= 0 && kind <= 2;
 }
 
 /** Move only chrome, preserving live nodes and their event handlers. Reverse restore

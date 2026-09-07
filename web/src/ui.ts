@@ -750,7 +750,7 @@ export class AppShell {
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
   private terminalSelected = false;
   private readonly syncPhone = (): void => {
-    const active = this.phone.matches && this.terminalSelected && !this.navOpen;
+    const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement as HTMLElement | null;
     this.appControls.close();
@@ -1131,7 +1131,6 @@ export class AppShell {
     this.navOpen = open;
     this.el.classList.toggle("af-nav-open", open);
     this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
-    this.syncPhone();
     // The drawer overlays the pane, so its transition need not change the host's
     // border box and ResizeObserver may correctly stay silent. It is still a usable-
     // area/visibility transition: explicitly reconcile xterm on the next paint.
@@ -1343,7 +1342,7 @@ export class AppShell {
     // independently of the render instead.
     const selectedForPhone = selectedSession(state);
     const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.terminalSelected = isSessionFirst(true, false, state.view, kind);
+    this.terminalSelected = isSessionFirst(true, state.view, kind);
     this.syncPhone();
     this.syncTabIdentityCaches(state);
   }

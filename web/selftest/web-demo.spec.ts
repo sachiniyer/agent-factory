@@ -173,10 +173,15 @@ function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: 
           // toHaveScreenshot retries internally without rechecking readiness.
           // Capture exactly one image instead; only this outer bounded retry
           // may take another, after repeating every state assertion above.
+          // PTY input can update operator state while Chromium takes the image.
+          // Validate both sides so update mode cannot bless a transient Working row.
+          const ready = await observe();
+          expect(ready.states.every(state => state === "Needs you")).toBe(true);
           const pixels = await page.screenshot({
             animations: "disabled", caret: "hide", style: visualStyle,
             timeout: remaining(5_000),
           });
+          expect(await observe()).toEqual(ready);
           expect(pixels).toMatchSnapshot(`${name}${suffix}.png`, { maxDiffPixels: 0, threshold: 0.2 });
         }).toPass({ timeout: remaining(30_000) });
       } catch (error) {
@@ -435,6 +440,34 @@ async function assertPhoneHeader(page: Page): Promise<void> {
     keybar: document.querySelector(".af-terminal-keybar")!.getBoundingClientRect().height,
     terminal: document.querySelector(".af-pane-host .xterm")!.getBoundingClientRect().height }));
   console.log("3981 chrome heights", JSON.stringify(heights));
+  const host = page.locator(".af-term-host");
+  const closed = await host.boundingBox();
+  await page.locator(".af-nav-toggle").click();
+  const opened = await host.boundingBox();
+  console.log("3981 drawer geometry", JSON.stringify({ width: heights.width, closed, opened }));
+  expect(opened, "P2 opening the overlay must not resize or displace the pane").toEqual(closed);
+  await page.locator(".af-nav-toggle").click();
+  expect(await host.boundingBox(), "P2 closing the overlay preserves the pane").toEqual(closed);
+  await page.locator(".af-pane-host .xterm").first().click();
+}
+
+async function assertPhoneTerminalAlignment(page: Page): Promise<void> {
+  const alignment = await page.locator(".af-pane-host").first().evaluate(host => {
+    const box = host.getBoundingClientRect();
+    const css = getComputedStyle(host);
+    const screen = host.querySelector(".xterm-screen")!.getBoundingClientRect();
+    const main = host.closest(".af-main")!;
+    const border = getComputedStyle(main, "::after");
+    return { width: innerWidth, left: screen.left, right: screen.right,
+      contentLeft: box.left + parseFloat(css.borderLeftWidth) + parseFloat(css.paddingLeft),
+      hostRight: box.right, scrollLeft: host.scrollLeft,
+      paintLeft: main.getBoundingClientRect().left + parseFloat(border.borderLeftWidth) };
+  });
+  console.log("3981 terminal alignment", JSON.stringify(alignment));
+  expect(alignment.left, "P1 column one clears the painted focus border").toBeGreaterThanOrEqual(alignment.paintLeft);
+  expect(alignment.left, "P1 screen starts inside the pane content box").toBeGreaterThanOrEqual(alignment.contentLeft);
+  expect(alignment.right, "P1 screen ends inside the pane").toBeLessThanOrEqual(alignment.hostRight);
+  expect(alignment.scrollLeft, "P1 pane host has no horizontal scroll").toBe(0);
 }
 
 /** Chrome evidence: disclosures, keyboard ownership and phone layouts are real screens. */
@@ -462,13 +495,15 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
       await recordLogin(page, shot);
       return;
     }
-    // Issue #3967 evidence: the same real focused session at three phone widths.
+    // Issue #3981 evidence: the same real focused session at three phone widths.
     for (const width of [360, 390, 430]) {
       await page.setViewportSize({ width, height: 812 });
+      await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
       await settleTerminal(page);
       await assertPhoneHeader(page);
       await assertPhoneKeybar(page, inputStream);
       await settleTerminal(page);
+      await assertPhoneTerminalAlignment(page);
       await page.screenshot({ path: visual ? test.info().outputPath(`after-phone-session-${width}${pass.suffix}.png`) : join(SHOT_DIR, `phone-session-${width}${pass.suffix}.png`),
         animations: "disabled", caret: "hide", style: visualStyle });
     }
@@ -481,10 +516,10 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await page.locator(".af-nav-toggle").click();
     await expect(page.locator(".af-rail")).toBeVisible();
     await shot("phone-drawer");
-    await page.getByRole("button", { name: "Switch project", exact: true }).click();
+    await page.getByRole("button", { name: "More app controls", exact: true }).click();
     await expect(page.locator(".af-project-menu")).toBeVisible();
     await shot("phone-project-menu");
-    await page.getByRole("button", { name: "Switch project", exact: true }).click();
+    await page.getByRole("button", { name: "More app controls", exact: true }).click();
     await page.getByRole("button", { name: "Filter sessions", exact: true }).click();
     await expect(page.locator(".af-filter-menu")).toBeVisible();
     await shot("phone-filter");

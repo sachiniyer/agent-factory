@@ -79,7 +79,8 @@ On a phone, selecting a terminal gives it the screen: one compact row holds
 The menu contains project choices, Sessions · Tasks · Config, Light · Dark ·
 System, Disconnect, session actions and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
-backdrop closes it. Tasks and Config keep their phone layouts.
+backdrop closes it. Opening the drawer leaves the terminal in place at the same
+size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
 Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow

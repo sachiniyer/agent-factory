@@ -526,7 +526,7 @@ async function resetToAgentTab(page: Page): Promise<void> {
       break;
     }
     const before = await tabbar.locator(".af-tab").count();
-    if (await page.locator(".af-session-first").count()) await openSessionActions(page);
+    if (!(await tabbar.isVisible())) await openSessionActions(page);
     await closable.first().click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(before - 1, { timeout: 30_000 });
   }
@@ -535,7 +535,8 @@ async function resetToAgentTab(page: Page): Promise<void> {
 
 /** Secondary session operations live in the same keyboard/pointer disclosure. */
 async function openSessionActions(page: Page): Promise<void> {
-  const trigger = page.getByRole("button", { name: await page.locator(".af-session-first").count() ? "More app controls" : "Session actions", exact: true });
+  const trigger = page.getByRole("button", { name: /^(More app controls|Session actions)$/ }).filter({ visible: true });
+  await expect(trigger).toBeVisible();
   if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
 }
 
@@ -551,7 +552,8 @@ async function createTerminalTab(page: Page): Promise<void> {
   const tabsBefore = await tabbar.locator(".af-tab").count();
 
   await openSessionActions(page);
-  if (!(await page.locator(".af-session-first").count())) await tabbar.locator("..").locator(".af-tab-new").click();
+  const newTab = tabbar.locator("..").locator(".af-tab-new");
+  if (await newTab.isVisible()) await newTab.click();
   const menu = tabbar.locator("..").locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
@@ -1647,9 +1649,11 @@ test("pane header PR badge (#3285): the daemon-discovered PR is a safe link, abs
 
   // Session-first keeps the PR link reachable inside the single phone disclosure.
   await p.setViewportSize({ width: 390, height: 844 });
+  await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
   await openSessionActions(p);
   await expect(badge, "the PR link remains reachable at phone width").toBeVisible();
   await p.setViewportSize({ width: 1280, height: 720 });
+  await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
 
   // Fail closed: moving the selection to a row whose projection is the empty
   // struct must withdraw the badge — not leave a stale chip pointing at the
@@ -2753,6 +2757,7 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     await openTokenless(p);
     await p.locator(".af-nav-toggle").click();
     await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
     await resetToAgentTab(p);
     await createTerminalTab(p);
     await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
@@ -2969,6 +2974,7 @@ test("#2899 mobile: a finger long-presses a tab and drags it to REORDER — and 
     // (Codex on #2901). The hamburger is the same control the mobile tests use.
     await p.locator(".af-nav-toggle").click();
     await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
     await resetToAgentTab(p);
 
     af("sessions", "tab-create", SESSION_B, "--command", "bash", "--name", first);
@@ -8108,14 +8114,18 @@ test("dismissing the install affordance sticks across reloads — it must never 
   await ctx.close();
 });
 
+// This phone replacement does not exercise the desktop caret anchoring path;
+// the desktop fixture does not overflow at 1280px.
 test("#2219/#3981: phone tab scrolling keeps new-tab choices in the single disclosure", REAL_FIXTURE, async () => {
   await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
   if ((await page.locator(".af-project-switch-name").textContent()) !== "mock-repo") {
     await page.locator(".af-project-switch").click();
     await projectItem(page, "mock-repo").click();
   }
   await row(page, SESSION_ORDER).click();
   await page.setViewportSize({ width: 375, height: 700 });
+  await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
   await openSessionActions(page);
   const tabbar = page.locator(".af-tabbar");
   expect(await tabbar.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
@@ -8128,6 +8138,7 @@ test("#2219/#3981: phone tab scrolling keeps new-tab choices in the single discl
   await expect(page.locator(".af-appbar-more")).toBeFocused();
   await expect(choice).toBeHidden();
   await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
 });
 
 test("#2224/#3981: desktop keeps title + tabs; phone consolidates session controls", REAL_FIXTURE, async ({ browser }, testInfo) => {
@@ -8219,6 +8230,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               await expect(more).toBeFocused();
               await expect(panel).toBeHidden();
               await p.setViewportSize({ width: 1280, height: 720 });
+              await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
               await expect(p.locator(".af-term-head .af-term-title")).toBeVisible();
               await expect(p.locator(".af-term-head .af-tabbar")).toBeVisible();
               await expect(p.locator(".af-appbar > .af-viewnav")).toBeVisible();
@@ -10713,7 +10725,7 @@ test("#3981 mobile: session-first budget and drawer navigation survive viewport 
             };
           });
         const closed = await geometry();
-        expect(closed.host.y - closed.app.y).toBeLessThanOrEqual(48);
+        expect(closed.host.y - closed.app.y).toBeLessThanOrEqual(50);
         expect(closed.head.height).toBe(0);
         await expect.poll(() => p.locator(".af-pane-host .xterm").first().evaluate(el => el.getBoundingClientRect().height / visualViewport!.height)).toBeGreaterThanOrEqual(0.85);
 
@@ -10721,13 +10733,15 @@ test("#3981 mobile: session-first budget and drawer navigation survive viewport 
         await toggle.click();
         await expect(app).toHaveClass(/af-nav-open/);
         await expect(rail).toBeVisible();
-        await expect(viewNav).toBeVisible();
-        await expect(project).toBeVisible();
+        await expect(app).toHaveClass(/af-session-first/);
+        await expect(viewNav).toBeHidden();
+        await expect(project).toBeHidden();
         await expect(more).toBeVisible();
         const opened = await geometry();
-        expect(opened.host.width).toEqual(opened.app.width - 4);
+        expect(opened.host, "opening the overlay must not resize or displace the pane").toEqual(closed.host);
 
-        // View switching dismisses the drawer and preserves session selection.
+        // The single disclosure reaches view switching even with the drawer open.
+        await more.click();
         await viewNav.getByRole("tab", { name: "Tasks", exact: true }).click();
         await expect(app).not.toHaveClass(/af-nav-open/);
         await expect(p.locator(".af-tasks")).toBeVisible();
@@ -10757,6 +10771,7 @@ test("#3981 mobile: session-first budget and drawer navigation survive viewport 
         await expect.poll(rows, { message: "the selected mobile tab has fitted terminal rows" }).toBeGreaterThan(0);
         const beforeResizeRows = await rows();
         await p.setViewportSize({ width, height: height + 120 });
+        await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
         await expect
           .poll(rows, { message: "a taller mobile viewport refits the active terminal without manual recovery" })
           .toBeGreaterThan(beforeResizeRows);
@@ -11210,13 +11225,16 @@ test("#3981: a split terminal fills the phone and restores both panes on desktop
     await expect(p.locator(".af-pane")).toHaveCount(2);
     for (const width of [360, 390, 430]) {
       await p.setViewportSize({ width, height: 812 });
+      await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
       await expect(p.locator(".af-pane:visible")).toHaveCount(1);
       await expect(p.locator(".af-pane-head:visible")).toHaveCount(0);
       await expect.poll(() => p.locator(".af-pane-focused .xterm").evaluate(el => el.getBoundingClientRect().height / visualViewport!.height)).toBeGreaterThanOrEqual(0.85);
     }
     await p.setViewportSize({ width: 1280, height: 812 });
+    await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
     await expect(p.locator(".af-pane:visible")).toHaveCount(2);
     await p.setViewportSize({ width: 360, height: 812 });
+    await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
     await openSessionActions(p);
     await p.getByRole("button", { name: "Close pane", exact: true }).click();
     await expect(p.locator(".af-pane")).toHaveCount(1);

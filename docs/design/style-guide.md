@@ -331,8 +331,9 @@ Connecting…</pre></section>
 
 ## Phone layout
 
-At widths up to 768px, a selected terminal is the screen. With the drawer closed,
-use one 48px top row: drawer toggle, truncating session title, static Keyboard
+At widths up to 768px, a selected terminal is the screen. Keep this composition
+active while the drawer overlays it, without moving or resizing the terminal.
+Use one 48px top row: drawer toggle, truncating session title, static Keyboard
 ownership label and one … disclosure. Preserve the full title in title and aria
 text. The disclosure holds project choices, Sessions · Tasks · Config, install,
 Light · Dark · System, Disconnect, pane actions and the session tab switcher.
@@ -351,7 +352,9 @@ Refit the terminal so its last row remains above the bar.
 
 With the soft keyboard closed, the terminal element must occupy at least 85% of
 the visual viewport at 360, 390 and 430px. Browser assertions enforce this in both
-themes. Keep all targets at least 44px, truncate instead of wrapping, use existing
+themes. Preserve the pane padding so the inset focus border cannot paint over
+column one; the screen must stay inside the host with no horizontal scroll.
+Keep all targets at least 44px, truncate instead of wrapping, use existing
 tokens and static glyphs, and do not animate.
 
 Ctrl and Alt apply once to the next typed character, including composed text.

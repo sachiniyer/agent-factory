@@ -3058,9 +3058,6 @@ textarea[class] {
   .af-session-first .af-term-head {
     display: none;
   }
-  .af-session-first .af-main-term {
-    padding: 0;
-  }
   .af-session-first .af-appbar-tools {
     width: calc(100vw - var(--af-space-3));
   }

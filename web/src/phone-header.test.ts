@@ -125,12 +125,11 @@ test("session-first composition moves all secondary controls into one menu and r
   assert.deepEqual(head.children, [title, keyboard]);
 });
 
-test("session-first applies to selected terminals at phone widths, regardless of keyboard ownership", () => {
+test("session-first applies to selected terminals at phone widths, regardless of drawer visibility or keyboard ownership", () => {
   for (const width of [360, 390, 430, 768, 1440]) {
     for (const kind of [0, 1, 2, 3, 4, null]) {
-      assert.equal(components.isSessionFirst(width <= 768, false, "sessions", kind), width <= 768 && kind !== null && kind <= 2);
-      assert.equal(components.isSessionFirst(width <= 768, true, "sessions", kind), false);
-      for (const view of ["tasks", "config"]) assert.equal(components.isSessionFirst(width <= 768, false, view, kind), false);
+      assert.equal(components.isSessionFirst(width <= 768, "sessions", kind), width <= 768 && kind !== null && kind <= 2);
+      for (const view of ["tasks", "config"]) assert.equal(components.isSessionFirst(width <= 768, view, kind), false);
     }
   }
 });

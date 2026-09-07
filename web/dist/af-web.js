@@ -7228,8 +7228,8 @@ function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"
     menu.dispose();
   } };
 }
-function isSessionFirst(phone, drawer, view, kind) {
-  return phone && !drawer && view === "sessions" && kind !== null && kind >= 0 && kind <= 2;
+function isSessionFirst(phone, view, kind) {
+  return phone && view === "sessions" && kind !== null && kind >= 0 && kind <= 2;
 }
 function sessionFirstComposition(moves) {
   let active = false;
@@ -14576,7 +14576,7 @@ var AppShell = class {
   sessionFirst = null;
   terminalSelected = false;
   syncPhone = () => {
-    const active = this.phone.matches && this.terminalSelected && !this.navOpen;
+    const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement;
     this.appControls.close();
@@ -14747,7 +14747,6 @@ var AppShell = class {
     this.navOpen = open;
     this.el.classList.toggle("af-nav-open", open);
     this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
-    this.syncPhone();
     this.actions.layoutChanged();
   }
   /** Runs an action whose result lives outside the session drawer (#2226). Drawer
@@ -14871,7 +14870,7 @@ var AppShell = class {
     }
     const selectedForPhone = selectedSession(state);
     const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.terminalSelected = isSessionFirst(true, false, state.view, kind);
+    this.terminalSelected = isSessionFirst(true, state.view, kind);
     this.syncPhone();
     this.syncTabIdentityCaches(state);
   }

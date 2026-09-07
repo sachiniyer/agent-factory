@@ -5,7 +5,8 @@ session title, static Keyboard state and one … disclosure. The disclosure keep
 project choices, Sessions · Tasks · Config, Light · Dark · System, Disconnect,
 install, pane actions, new-tab choices and the tab switcher reachable. Escape
 closes it and returns focus. Drawer, Tasks, Config and desktop layouts remain
-available. Split sessions show the focused pane, with Close pane in the menu,
+available. Opening the drawer preserves the session-first composition and the
+terminal rectangle. Split sessions show the focused pane, with Close pane in the menu,
 and restore both panes on desktop. The six-button primary keybar is one 44px row; Arrows replaces it with
 Back and four arrow keys, preserving 44px targets and terminal focus.
 
@@ -17,15 +18,16 @@ produce the same geometry. The terminal element is `.af-pane-host .xterm`.
 
 | Width | Theme | Visual viewport | Top chrome | Keybar | Terminal | Terminal share |
 | --- | --- | --- | --- | --- | --- | --- |
-| 360px | Light | 812px | 48px | 44px | 720px | 88.7% |
-| 360px | Dark | 812px | 48px | 44px | 720px | 88.7% |
-| 390px | Light | 812px | 48px | 44px | 720px | 88.7% |
-| 390px | Dark | 812px | 48px | 44px | 720px | 88.7% |
-| 430px | Light | 812px | 48px | 44px | 720px | 88.7% |
-| 430px | Dark | 812px | 48px | 44px | 720px | 88.7% |
+| 360px | Light | 812px | 48px | 44px | 718px | 88.4% |
+| 360px | Dark | 812px | 48px | 44px | 718px | 88.4% |
+| 390px | Light | 812px | 48px | 44px | 718px | 88.4% |
+| 390px | Dark | 812px | 48px | 44px | 718px | 88.4% |
+| 430px | Light | 812px | 48px | 44px | 718px | 88.4% |
+| 430px | Dark | 812px | 48px | 44px | 718px | 88.4% |
 
 The regression assertion requires at least 85% at all three widths in both
 themes. The unchanged bundle failed at 360px with a 476px terminal (58.6%).
+The pane retains its 2px padding so its inset focus border clears column one.
 Browser emulation does not show an actual OS keyboard; the stream suite also
 simulates visual viewport resize and pan to verify terminal fit above it.
 
@@ -53,7 +55,9 @@ against the original tracked bundle: [browser red evidence](browser-red.txt).
 
 The browser recorder checks one-row chrome, title truncation and full accessible
 text, 44px targets, disclosure activation and Escape focus return, and the height
-budget in both themes. The existing outgoing binary PTY Input assertions cover
+budget in both themes. Screen bounds must remain inside the pane-host content
+box and clear the painted focus border; the host must have zero horizontal
+scroll. Opening and closing the drawer must preserve the host rectangle. The existing outgoing binary PTY Input assertions cover
 interrupt, one-shot Ctrl, composed input, locked Ctrl, focus retention and
 viewport changes; arrow selection additionally checks the outgoing arrow bytes.
 
@@ -61,16 +65,34 @@ Sources: [composition](https://github.com/sachiniyer/agent-factory/blob/master/w
 [keybar](https://github.com/sachiniyer/agent-factory/blob/master/web/src/terminal-keybar.ts),
 [browser assertions](https://github.com/sachiniyer/agent-factory/blob/master/web/selftest/web-demo.spec.ts).
 
-All 740 web unit tests passed, with source and recorder typechecking and the
-tracked bundle rebuilt. Eight focused browser regressions passed, including
-real touch scrolling/copying/reordering, overflow navigation, drawer transitions
-and split-pane restoration. The old drawer lifecycle test additionally assumes
-an archived fixture from an earlier full-suite test; it is not self-contained
-when selected alone.
+The review regressions were watched fail on head `9edbad57` before the fixes:
+[unit output](review-unit-red.txt) and [browser output](review-browser-red.txt).
+[Corrected browser output](review-browser-green.txt) records all six measurements.
+The requested host bounds and `scrollLeft` checks already passed on that head;
+the additional painted-border assertion exposed the clipping (`0px < 2px`).
+Restoring token-based padding puts the screen at 2px, clear of the border.
+The drawer formerly moved the host from y=48px to y=228px; it now leaves both
+its position and size unchanged.
 
-`AF_UPDATE_GOLDENS=1 make perf-container` regenerated the goldens; comparison
+| Width (both themes) | Screen left / painted edge | Screen right / host right | Host scrollLeft | Closed = open host (x, y, width, height) |
+| --- | --- | --- | --- | --- |
+| 360px | 2px / 2px | 340px / 358px | 0 | (2, 50, 356, 760) |
+| 390px | 2px / 2px | 373px / 388px | 0 | (2, 50, 386, 760) |
+| 430px | 2px / 2px | 412px / 428px | 0 | (2, 50, 426, 760) |
+
+The browser helpers resolve the visible disclosure trigger and wait for phone or
+desktop composition after viewport changes, including the PR-badge regression.
+The #2219 phone test explicitly documents that desktop caret anchoring is outside
+its coverage.
+
+All 740 web unit tests passed, with source and recorder typechecking and the
+tracked bundle rebuilt. The full containerized `web-driver.spec.ts` passed all
+146 tests with zero retries, including the PR badge, tab reordering, drawer
+navigation and split-terminal restoration.
+
+`AF_UPDATE_GOLDENS=1 make perf-container` regenerated both themes; comparison
 without the flag passed all five visual scenarios and every unchanged performance
-budget. Ten unrelated golden refreshes contain only 4–45 changed control-edge
-pixels each. The pixel oracle and performance thresholds are unchanged.
+budget. Capture readiness is checked before and after screenshots so transient
+operator-state changes cannot become goldens. The pixel oracle and performance thresholds are unchanged.
 `scripts/gen-docs.sh`, design-token tests, generated-design checking, file-length
 lint and the Docs job's exact `mkdocs build --strict` passed. No Go source changed.

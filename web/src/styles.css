@@ -3549,7 +3549,6 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-session-first .af-term-keyboard { order: 2; flex-shrink: 0; font-size: var(--af-type-caption); }
   .af-session-first .af-appbar-tools-wrap { order: 3; flex-shrink: 0; }
   .af-session-first .af-term-head { display: none; }
-  .af-session-first .af-main-term { padding: 0; }
   .af-session-first .af-appbar-tools { width: calc(100vw - var(--af-space-3)); }
   .af-session-first .af-project-switch,
   .af-session-first .af-tab-new { display: none; }
