@@ -277,7 +277,8 @@ can tune the detection regex per agent with
 Claude reset times honor a parenthesized timezone accepted by Go's
 `time.LoadLocation`, including single-component names such as `(UTC)` and
 `(Japan)` and slash names such as `(America/New_York)` or `(Etc/GMT+5)`.
-An unrecognized parenthesized zone produces a warning naming the banner and
+When several parenthesized groups appear, the first loadable zone wins. If none
+loads, one warning names the banner and all rejected candidates, and parsing
 falls back to the daemon's timezone. A banner without a zone also uses the
 daemon's timezone. The sidebar displays the resulting instant in your local
 timezone; auto-resume uses that same instant plus its grace buffer.

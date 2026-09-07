@@ -272,12 +272,17 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 	reset := anchor[1]
 
 	loc := now.Location()
-	if m := parenTZ.FindStringSubmatch(reset); m != nil {
+	candidates := parenTZ.FindAllStringSubmatch(reset, -1)
+	var rejected []string
+	for _, m := range candidates {
 		if l, err := time.LoadLocation(m[1]); err == nil {
 			loc = l
-		} else {
-			log.WarningLog.Printf("Claude usage-limit banner %q: cannot load timezone %q (%v); falling back to daemon zone %q", strings.SplitN(content, "\n", 2)[0], m[1], err, loc.String())
+			break
 		}
+		rejected = append(rejected, m[1])
+	}
+	if len(rejected) > 0 && len(rejected) == len(candidates) {
+		log.WarningLog.Printf("Claude usage-limit banner %q: cannot load timezone candidates %q; falling back to daemon zone %q", strings.SplitN(content, "\n", 2)[0], rejected, loc.String())
 	}
 
 	hour, minute, ok := parseClockTime(reset)
