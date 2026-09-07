@@ -920,19 +920,67 @@ _af_tab_count() {
 # behind `?`, and an empty list has no run action at all (#3995).
 : "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
 
-# _AF_TASKS_TITLE — a title inside the task overlay's own vertical frame. The
-# list title is present for populated, empty and load-failure states; `m` opens
-# a populated selection directly in its `Edit task <id>` form (#1249), so that
-# title is included too. Requiring both frame glyphs keeps ordinary pane output
-# containing "Tasks" or "Edit task" from becoming a false completion marker.
+# _AF_TASKS_TITLE — a title inside the task overlay's vertical frame. The list
+# title is present for populated, empty and load-failure states; `m` opens a
+# populated selection directly in its `Edit task <id>` form (#1249), so that
+# title is included too.
 : "${_AF_TASKS_TITLE:=│[[:space:]]+(Tasks|Edit task[[:space:]][^[:space:]]+)[[:space:]]+│}"
 
+# _AF_TASKS_FRAME_TOP is the rounded top border shared by the tasks dialog's
+# list and edit modes. A workspace pane uses square corners, and its OWN │
+# borders can surround output whose complete line is "Tasks". Pairing the
+# title with this rounded border prevents that pane text from satisfying the
+# open marker or keeping the close marker alive (review on #3995).
+#
+# Group the repeated horizontal glyph: under the sandbox's C/POSIX locale,
+# `─+` repeats only the last byte of the UTF-8 sequence, while `(─)+` repeats
+# the whole glyph (the same locale trap documented by _AF_PANE_BORDER_FS).
+: "${_AF_TASKS_FRAME_TOP:=╭(─)+╮}"
+
+# _af_tasks_overlay_visible <title-regex> reads a captured screen on stdin.
+# DialogStyle has one row of vertical padding, so the task title is exactly two
+# rows below the rounded top border in every list/edit state and supported width.
+# Requiring both rows gives the marker dialog-specific context while retaining
+# the stable title that #3995 made present in every list recovery state.
+_af_tasks_overlay_visible() {
+    local title_re="$1"
+    awk -v frame_re="$_AF_TASKS_FRAME_TOP" -v title_re="$title_re" '
+        $0 ~ frame_re { title_rows = 2; next }
+        title_rows > 0 {
+            if ($0 ~ title_re) { found = 1 }
+            title_rows--
+        }
+        END { exit found ? 0 : 1 }
+    '
+}
+
+# _af_wait_for_tasks_overlay_state <0|1> [timeout_s] [label] — wait for the
+# dialog-specific frame/title pair to disappear or appear.
+_af_wait_for_tasks_overlay_state() {
+    local expected="$1" timeout="${2:-$AF_DRIVER_TIMEOUT}" label="${3:-tasks overlay}" screen visible
+    local deadline; deadline=$(( $(_af_now) + timeout ))
+    while :; do
+        screen="$(af_capture)"
+        visible=0
+        _af_tasks_overlay_visible "$_AF_TASKS_TITLE" <<<"$screen" && visible=1
+        if [ "$visible" -eq "$expected" ]; then
+            return 0
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "TIMEOUT ${timeout}s waiting for: $label"
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+}
+
 # af_open_tasks — open the task-manager overlay (`m`) and synchronize on its
-# framed title, which does not disappear when list actions are collapsed.
+# rounded frame plus title, which do not disappear when actions are collapsed.
 af_open_tasks() {
     af_ensure_nav
     af_send m
-    af_wait_for "$_AF_TASKS_TITLE" "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
+    _af_wait_for_tasks_overlay_state 1 "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 
 # af_close_tasks — dismiss the tasks overlay (Escape). When the overlay opened
@@ -944,14 +992,14 @@ af_close_tasks() {
     deadline=$(( $(_af_now) + 4 ))
     while :; do
         screen="$(af_capture)"
-        if ! grep -qE -- "$_AF_TASKS_TITLE" <<<"$screen"; then
+        if ! _af_tasks_overlay_visible "$_AF_TASKS_TITLE" <<<"$screen"; then
             return 0
         fi
         [ "$(_af_now)" -ge "$deadline" ] && break
         sleep "$AF_DRIVER_POLL"
     done
     af_send Escape
-    af_wait_gone "$_AF_TASKS_TITLE" 8 'tasks overlay closed' || return 1
+    _af_wait_for_tasks_overlay_state 0 8 'tasks overlay closed' || return 1
 }
 
 # The config editor's own marker. Anchored on the hint row rather than a key

@@ -26,9 +26,10 @@ func (s *TaskPane) SetUnavailable(err error) bool {
 	return previous != s.unavailable
 }
 
-// renderListRecovery keeps the task manager's identity and exit affordance
+// renderListRecovery keeps the task manager's identity and live affordances
 // pinned around the centered P4 empty/failure treatment. These states are still
-// list mode: n and Esc remain live, and the modal must advertise that fact.
+// list mode: n opens the create form even when the last load failed, and Esc
+// closes the modal. Selection-dependent actions stay hidden until a task exists.
 func (s *TaskPane) renderListRecovery(condition, detail, action string, failed bool) string {
 	const headerRows = 2
 	const footerRows = 1
@@ -45,7 +46,7 @@ func (s *TaskPane) renderListRecovery(condition, detail, action string, failed b
 	if body != "" {
 		b.WriteString("\n")
 	}
-	b.WriteString(DialogHintStyle().Render(fitLine(s.listModeHint(), s.width)))
+	b.WriteString(DialogHintStyle().Render(fitLine("n new · esc back", s.width)))
 	return fitBlockToSize(b.String(), s.width, s.height, footerRows)
 }
 

@@ -836,10 +836,26 @@ step "af_select handles a target with an open pane (#1996)"  _expect_af_select_o
 # than the optional run action. Reveal secondary actions only in list mode,
 # then retain #1757's assertion that the compact run action is discoverable.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_overlay_marker_context() {
+    local pane modal
+    pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
+    if printf '%s\n' "$pane" | _af_tasks_overlay_visible "$_AF_TASKS_TITLE"; then
+        _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
+        return 1
+    fi
+
+    modal=$'        ╭────────────────────╮\n        │                    │\n        │  Tasks             │\n        ╰────────────────────╯'
+    if ! printf '%s\n' "$modal" | _af_tasks_overlay_visible "$_AF_TASKS_TITLE"; then
+        _af_fail 'the rounded task dialog and its list title did not satisfy the marker'
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_task_run_action() {
     local screen
     screen="$(af_capture)"
-    if grep -qE -- '│[[:space:]]+Tasks[[:space:]]+│' <<<"$screen"; then
+    if _af_tasks_overlay_visible '│[[:space:]]+Tasks[[:space:]]+│' <<<"$screen"; then
         af_send '?'
     fi
     af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'task-overlay run action' || return 1
@@ -1001,6 +1017,7 @@ _expect_config_agent_attaches_in_tmux() {
     return 0
 }
 
+step "task marker rejects a pane's bare Tasks line"         _expect_task_overlay_marker_context
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
 step "reopen tasks — overlay title recognized (#1757/#3995)" af_open_tasks
