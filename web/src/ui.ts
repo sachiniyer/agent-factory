@@ -1753,12 +1753,22 @@ export class AppShell {
     return item;
   }
 
+  /** Keyboard twin of the New tab button, including its per-kind availability. */
+  openNewTabPicker(): void {
+    const slot = this.terminalChrome?.newTabSlot;
+    const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
+    if (!trigger) return;
+    this.terminalChrome?.menu.open();
+    if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
+    slot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }
+
   /** The visible New tab button and its kind menu.
    *
    *  The old split control created a terminal from a plus and hid VS Code behind a
    *  separate, unlabeled caret. Even the project's maintainer could not find that
    *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut remains the direct shell fast path.
+   *  editor will appear. The `t` shortcut opens this same picker.
    *
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check

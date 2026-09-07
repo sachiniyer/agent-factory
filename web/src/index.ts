@@ -1096,8 +1096,7 @@ function guardedTabRebind(
     .catch((e) => surfaceTabError(e));
 }
 
-/** Creates the requested tab on the selected session (`t` sends shell; the
- *  labelled New tab menu can also send vscode), then
+/** Creates the tab kind chosen in the New tab menu on the selected session, then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
  *  kept for THIS window's own mutation because it must select+attach the new tab
@@ -2333,8 +2332,6 @@ function onKeydown(e: KeyboardEvent): void {
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
-      // `t` opens a shell specifically, so it asks the shell verdict (#3060).
-      shellCreatable: actionableSelected ? canCreateTabKind(actionableSelected, "shell") : false,
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
@@ -2373,7 +2370,7 @@ function onKeydown(e: KeyboardEvent): void {
       switchTab(action.index);
       break;
     case "newTab":
-      createSessionTab();
+      shell?.openNewTabPicker();
       break;
     case "closeTab":
       closeSessionTab(store.get().activeTab);

@@ -6901,7 +6901,7 @@ function decideKey(key, ctx, mods = {}) {
       return { kind: "none" };
     }
     if (key === "t") {
-      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
+      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
     }
     if (key === "w") {
       return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
@@ -15239,12 +15239,21 @@ var AppShell = class {
     });
     return item;
   }
+  /** Keyboard twin of the New tab button, including its per-kind availability. */
+  openNewTabPicker() {
+    const slot = this.terminalChrome?.newTabSlot;
+    const trigger = slot?.querySelector(".af-tab-new");
+    if (!trigger) return;
+    this.terminalChrome?.menu.open();
+    if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
+    slot?.querySelector('[role="menuitem"]')?.focus();
+  }
   /** The visible New tab button and its kind menu.
    *
    *  The old split control created a terminal from a plus and hid VS Code behind a
    *  separate, unlabeled caret. Even the project's maintainer could not find that
    *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut remains the direct shell fast path.
+   *  editor will appear. The `t` shortcut opens this same picker.
    *
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
@@ -17413,8 +17422,6 @@ function onKeydown(e) {
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
-      // `t` opens a shell specifically, so it asks the shell verdict (#3060).
-      shellCreatable: actionableSelected ? canCreateTabKind(actionableSelected, "shell") : false,
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
@@ -17444,7 +17451,7 @@ function onKeydown(e) {
       switchTab(action.index);
       break;
     case "newTab":
-      createSessionTab();
+      shell?.openNewTabPicker();
       break;
     case "closeTab":
       closeSessionTab(store.get().activeTab);
