@@ -447,10 +447,10 @@ async function assertPhoneHeader(page: Page): Promise<void> {
       `Tab ${position + 1} focuses ${control.role} “${control.name}”`,
     ).toBeFocused();
     if (control.role === "button" && control.name === "+ Add project") {
-      // Force #4007 instead of waiting for daemon timing. A refreshed project
-      // row inserted before the focused footer shifts every subsequent live
-      // index, while the snapshotted named order still identifies Delete.
-      await menu.evaluate((panel) => {
+      // Force #4007 instead of waiting for daemon timing. Match the production
+      // renderer by replacing every project-menu child with a fresh node, and
+      // insert a row so the live indices shift at the same time.
+      const rebuild = await menu.evaluate((panel) => {
         const projectMenu = panel.querySelector<HTMLElement>(".af-project-menu")!;
         const current = projectMenu.querySelector<HTMLElement>(".af-project-item-current")!;
         const inserted = current.cloneNode(true) as HTMLElement;
@@ -462,10 +462,23 @@ async function assertPhoneHeader(page: Page): Promise<void> {
         inserted.querySelector<HTMLElement>(".af-project-item-meta")!.textContent = "0 sessions";
         const focused = document.activeElement as HTMLElement;
         projectMenu.replaceChildren(
-          ...Array.from(projectMenu.childNodes).flatMap((node) => node === current ? [inserted, node] : [node]),
+          ...Array.from(projectMenu.childNodes).flatMap((node) => {
+            const replacement = node.cloneNode(true);
+            return node === current ? [inserted, replacement] : [replacement];
+          }),
         );
-        focused.focus({ preventScroll: true });
+        return {
+          priorFocusDetached: !focused.isConnected,
+          focusDroppedToBody: document.activeElement === document.body,
+        };
       });
+      expect(rebuild, "a production-style project refresh replaces the focused control").toEqual({
+        priorFocusDetached: true,
+        focusDroppedToBody: true,
+      });
+      // Re-resolve the replacement by the identity snapshotted above. This keeps
+      // the red/index and green/name forms on the same rebuild and next Tab.
+      await menu.getByRole(control.role, { name: control.name, exact: true }).focus();
       injectedRebuild = true;
     }
   }
