@@ -233,16 +233,7 @@ func TestEditorOrigin_SurvivesTheRegisteringTabClosing(t *testing.T) {
 
 	_, repoID, title, err := m.resolveStreamSession(sessionID, "")
 	require.NoError(t, err)
-	inst, _, _, err2 := m.resolveStreamSession(sessionID, "")
-	require.NoError(t, err2)
-	nameOf := ""
-	for _, tb := range inst.GetTabs() {
-		if tb.ID == second {
-			nameOf = tb.Name
-		}
-	}
-	require.NotEmpty(t, nameOf)
-	_, err = m.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: nameOf})
+	_, err = m.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabID: second})
 	require.NoError(t, err)
 
 	// The first editor tab is still open, so the shared origin must still resolve.

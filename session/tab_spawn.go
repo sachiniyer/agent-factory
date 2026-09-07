@@ -270,20 +270,18 @@ func (i *Instance) appendReconciledTab(matchID, name string, tab *Tab) bool {
 // pure metadata (a URL the web UI iframes and, for loopback targets, the daemon
 // reverse-proxies), so there is nothing to spawn: the append itself is the whole
 // operation. url must already be normalized (session.NormalizeWebTabURL); the
-// name is requestedName when non-empty, otherwise "web", made unique
-// within the instance ("web", "web-2", …). A web tab is persisted on the
-// instance record and rebuilt from it on restart; capability admission decides
-// which targets a local or off-box backend can serve. Errors when the instance
-// is not started or its agent tab has not been materialized yet.
+// name is requestedName, sanitized and made unique, when non-empty. Otherwise
+// Name stays empty so TabLabel supplies "Web" without storing the wire kind as
+// presentation data. A web tab is persisted on the instance record and rebuilt
+// from it on restart; capability admission decides which targets a local or
+// off-box backend can serve. Errors when the instance is not started or its
+// agent tab has not been materialized yet.
 func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, fmt.Errorf("a web tab requires a non-empty URL")
 	}
 
-	base := webTabName
-	if n := sanitizeTabName(requestedName); n != "" {
-		base = n
-	}
+	name := sanitizeTabName(requestedName)
 
 	i.mu.Lock()
 	// Everything a web tab needs happens under the single write lock: unlike
@@ -307,7 +305,9 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 		return nil, fmt.Errorf("cannot add a web tab before the session's agent tab is ready")
 	}
 	tab := newWebTab(url)
-	tab.Name = uniqueTabName(i.Tabs, base)
+	if name != "" {
+		tab.Name = uniqueTabName(i.Tabs, name)
+	}
 	i.Tabs = append(i.Tabs, tab)
 	i.touchLocked()
 	return tab, nil
@@ -319,14 +319,12 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 // opens. It takes no target: a vscode tab ALWAYS edits this instance's worktree,
 // and the code-server serving it is daemon-managed per session and resolved
 // lazily at proxy time (see TabKindVSCode), so there is no URL to store. The
-// name is requestedName when non-empty, otherwise "vscode", made unique
-// within the instance ("vscode", "vscode-2", …). Errors when the instance is not
-// started or has no worktree.
+// name is requestedName, sanitized and made unique, when non-empty. Otherwise
+// Name stays empty so TabLabel supplies "VS Code" without storing the wire kind
+// as presentation data. Errors when the instance is not started or has no
+// worktree.
 func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
-	base := vscodeTabName
-	if n := sanitizeTabName(requestedName); n != "" {
-		base = n
-	}
+	name := sanitizeTabName(requestedName)
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -337,7 +335,9 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 		return nil, err
 	}
 	tab := newVSCodeTab()
-	tab.Name = uniqueTabName(i.Tabs, base)
+	if name != "" {
+		tab.Name = uniqueTabName(i.Tabs, name)
+	}
 	i.Tabs = append(i.Tabs, tab)
 	i.touchLocked()
 	return tab, nil

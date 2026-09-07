@@ -56,8 +56,9 @@ export function tabIcon(kind: number): IconName {
 
 /**
  * The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
- * the agent tab is "Agent", a shell tab is "Terminal", a web tab shows its name (or
- * "Web"), and any other kind shows its name (or "Tab").
+ * the agent tab is "Agent", a shell tab is "Terminal", and web/VS Code tabs
+ * show a custom name or their proper display label. The kind-string names older
+ * daemons persisted are default sentinels, not custom labels.
  *
  * Agent and shell deliberately IGNORE tab.name — the TUI does the same, and the
  * daemon refuses to rename them for it.
@@ -69,9 +70,9 @@ export function tabLabel(tab: NamedTab): string {
     case TabKind.Shell:
       return "Terminal";
     case TabKind.Web:
-      return tab.name || "Web";
+      return tab.name && tab.name !== "web" ? tab.name : "Web";
     case TabKind.VSCode:
-      return tab.name || "VS Code";
+      return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     default:
       return tab.name || "Tab";
   }
@@ -95,11 +96,11 @@ export function tabDisplayLabel(tab: NamedTab): string {
  * there could only produce a guaranteed-to-fail call (the daemon rejects it) or,
  * worse, a rename that appears to succeed and shows no result.
  *
- * VS Code (#1817) is renameable for exactly that reason and needed no new rule: it
- * renders `name || "VS Code"`, so the same "does this kind display its Name" test
- * that admits web and process admits it. If tabLabel ever starts reading `name` for
- * another kind, this must change with it — the two are one rule stated twice, and
- * the Go side keeps the same pairing beside its own label mapping.
+ * VS Code (#1817) is renameable for exactly that reason and needed no new rule:
+ * a custom name changes its label even though the empty/legacy default sentinel
+ * renders as "VS Code". If tabLabel ever starts reading `name` for another kind,
+ * this must change with it — the two are one rule stated twice, and the Go side
+ * keeps the same pairing beside its own label mapping.
  */
 export function isRenameableTab(kind: number): boolean {
   return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode;

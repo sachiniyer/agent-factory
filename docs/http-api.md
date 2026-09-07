@@ -233,8 +233,10 @@ did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
-(`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
-web/vscode tab that owns no PTY; it normally tracks the name but diverges
+(`id` is the stable tab id minted by the daemon, which an older daemon may omit;
+`name` is empty for a default-created web or VS Code tab, whose UI label comes
+from its kind; `tmux_name` is the tmux session the tab was spawned under, omitted
+for a web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
 `CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
 `{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`

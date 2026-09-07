@@ -449,7 +449,10 @@ type CreateTabResponse struct {
 	// ID is the stable identity minted by the daemon in the same transaction
 	// that creates and persists the tab. It is additive for mixed-version
 	// clients: an older daemon omits it, yielding the explicit empty-id fallback.
-	ID   string `json:"id,omitempty"`
+	ID string `json:"id,omitempty"`
+	// Name is the resolved custom name. It is empty for a default-created web
+	// or VS Code tab; those metadata-only tabs are addressed by ID and derive
+	// their presentation label from Kind.
 	Name string `json:"name"`
 	// TmuxName is the tmux session the tab was actually spawned under, or empty
 	// for a kind that owns no PTY (web, vscode — see session.TabKind.HasTmux).

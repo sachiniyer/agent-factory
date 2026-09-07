@@ -78,12 +78,24 @@ func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
 		replacedSession := s.lastCursorInstanceID != target.ID
 		switch {
 		case replacedSession:
-			// A same-title kill/recreate mints fresh tab IDs. Preserve the
-			// equivalent replacement tab by name, matching the pane reconcile.
-			for i, tab := range tabs {
-				if tab.Name == s.lastCursorTabName {
-					wantTab = i
-					break
+			// Root healing carries stable tab IDs even though it replaces the
+			// session object. Prefer that exact identity so duplicate unnamed
+			// metadata tabs stay distinct. A kill/recreate mints fresh IDs, so
+			// fall back to the equivalent name when no carried ID resolves.
+			if s.lastCursorTabID != "" {
+				for i, tab := range tabs {
+					if tab.ID == s.lastCursorTabID {
+						wantTab = i
+						break
+					}
+				}
+			}
+			if wantTab < 0 {
+				for i, tab := range tabs {
+					if tab.Name == s.lastCursorTabName {
+						wantTab = i
+						break
+					}
 				}
 			}
 		case s.lastCursorTabID != "":

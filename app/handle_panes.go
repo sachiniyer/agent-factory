@@ -415,16 +415,21 @@ func newTabSlotResolver(instance *session.Instance, domain tabIdentityDomain) ta
 }
 
 // resolve returns the key's index in the current roster, or false when that tab
-// is really gone. The name is the key exactly where the id is not an identity —
-// a replaced session (every id freshly minted) or an id-less key (the agent
-// slot, a legacy pre-#1738 row, an AttachShellTab tab before its backfill) —
-// which is the same rule paneTabKeys and tabIdentityDomain already encode.
+// is really gone. A stable ID wins whenever it survived the replacement (root
+// healing carries tab IDs, including duplicate unnamed metadata tabs). Only a
+// replaced session whose IDs were freshly minted falls back to name; an id-less
+// key (the agent slot or a legacy row) also uses name. This is the same rule
+// paneTabKeys and tabIdentityDomain encode.
 func (r tabSlotResolver) resolve(key tabSlotKey) (int, bool) {
-	if r.domain == replacedSessionTabs || key.id == "" {
-		idx, ok := r.idxByName[key.name]
-		return idx, ok
+	if key.id != "" {
+		if idx, ok := r.idxByID[key.id]; ok {
+			return idx, true
+		}
+		if r.domain != replacedSessionTabs {
+			return 0, false
+		}
 	}
-	idx, ok := r.idxByID[key.id]
+	idx, ok := r.idxByName[key.name]
 	return idx, ok
 }
 

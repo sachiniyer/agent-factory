@@ -79,11 +79,14 @@ func (i *Instance) restoreCarriedTabs() {
 		}
 
 		name := sanitizeTabName(td.Name)
-		if name == "" {
+		unnamedMetadata := name == "" && (kind == TabKindWeb || kind == TabKindVSCode)
+		if name == "" && !unnamedMetadata {
 			name = carriedTabBaseName(kind, td.Command)
 		}
-		name = firstFreeName(usedNames, name)
-		usedNames[name] = true
+		if name != "" {
+			name = firstFreeName(usedNames, name)
+			usedNames[name] = true
+		}
 
 		id := td.ID
 		if id == "" {
@@ -126,15 +129,11 @@ func (i *Instance) restoreCarriedTabs() {
 	i.mu.Unlock()
 }
 
-// carriedTabBaseName names a carried tab whose recorded name is empty or is not
-// usable in a tmux session name. Each kind falls back to the same base its own
-// Add*Tab path would have used, so a repaired name reads like one af chose.
+// carriedTabBaseName names a carried PTY tab whose recorded name is empty or is
+// not usable in a tmux session name. Metadata-only web and VS Code tabs keep an
+// empty default name and never call this helper.
 func carriedTabBaseName(kind TabKind, command string) string {
 	switch kind {
-	case TabKindWeb:
-		return webTabName
-	case TabKindVSCode:
-		return vscodeTabName
 	case TabKindProcess:
 		return processTabBaseName("", command)
 	default:

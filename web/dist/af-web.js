@@ -6681,7 +6681,7 @@ async function createTab(id, title, token2) {
   if (resp.warning) {
     throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
-  return resp.name;
+  return { id: resp.id ?? "", name: resp.name ?? "" };
 }
 async function createVSCodeTab(id, title, token2) {
   requireSessionID(id, "create a VS Code tab");
@@ -6693,7 +6693,7 @@ async function createVSCodeTab(id, title, token2) {
   if (resp.warning) {
     throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
-  return resp.name;
+  return { id: resp.id ?? "", name: resp.name ?? "" };
 }
 async function closeTab(id, title, tabName, tabId, token2) {
   requireSessionID(id, "close a tab");
@@ -11849,9 +11849,9 @@ function tabLabel(tab) {
     case TabKind.Shell:
       return "Terminal";
     case TabKind.Web:
-      return tab.name || "Web";
+      return tab.name && tab.name !== "web" ? tab.name : "Web";
     case TabKind.VSCode:
-      return tab.name || "VS Code";
+      return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     default:
       return tab.name || "Tab";
   }
@@ -16718,21 +16718,22 @@ function createSessionTab(kind = "shell") {
   clearTabError();
   const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
-  let createdName = "";
+  let createdTab = { id: "", name: "" };
   guardedTabRebind(
     selId,
-    () => create(selId, sel.title, tok).then((name) => {
-      createdName = name;
+    () => create(selId, sel.title, tok).then((created) => {
+      createdTab = created;
       return fetchProjectedSnapshot(tok);
     }),
-    // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
-    // an ordinal, and a concurrent create from another client landing inside this
-    // round trip would make it THEIR tab. Resolving the name to its current ordinal in
-    // the post-await roster is the create-side twin of closeSessionTab's keepId, and a
-    // -1 (name gone, or session vanished) bails rather than guessing (#2000).
+    // Focus the created tab BY its daemon-minted id, never `length - 1`: the last
+    // slot is an ordinal, and a concurrent create from another client landing
+    // inside this round trip would make it THEIR tab. The name fallback exists
+    // only for mixed-version daemons that do not return the additive id.
     (sessions) => {
       const grown = sessions.find((s) => s.id === selId);
-      return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
+      if (!grown) return -1;
+      const tabs = sessionTabs(grown);
+      return createdTab.id !== "" ? tabs.findIndex((t) => tabRealId(t) === createdTab.id) : tabs.findIndex((t) => t.name === createdTab.name);
     },
     "create"
   );

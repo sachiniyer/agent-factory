@@ -86,7 +86,7 @@ func (m *home) restoreTUIViewPanes(saved []config.TUIStateOpenPane) int {
 		}
 		key := paneState.Key
 		if key == "" {
-			key = tuiPaneKey(paneState.InstanceID, paneState.Title, paneState.TabName)
+			key = tuiPaneIdentityKey(paneState.InstanceID, paneState.Title, paneState.TabID, paneState.TabName)
 		}
 		if seen[key] {
 			continue
@@ -99,10 +99,10 @@ func (m *home) restoreTUIViewPanes(saved []config.TUIStateOpenPane) int {
 		if pane == nil {
 			continue
 		}
-		// Pane keys intentionally stay name-based for persisted-state backward
-		// compatibility. If ID-first restore followed a renamed tab, translate
-		// the pending focus from its saved key to that pane's current name key so
-		// the first sized relayout can still restore keyboard focus.
+		// New pane keys use stable tab IDs, while older persisted state remains
+		// name-keyed. If restore followed a renamed/replaced tab from a legacy key,
+		// translate pending focus to the current identity key so the first sized
+		// relayout can still restore keyboard focus.
 		if savedFocusPaneKey != "" && savedFocusPaneKey == key {
 			m.pendingTUIViewFocus.PaneKey = tuiPaneKeyForOpenPane(pane)
 		}
@@ -233,7 +233,7 @@ func (m *home) captureTUIViewState() config.TUIRepoViewState {
 			continue
 		}
 		openPanes = append(openPanes, config.TUIStateOpenPane{
-			Key:        tuiPaneKeyForInstance(inst, tabName),
+			Key:        tuiPaneKeyForTab(inst, tabID, tabName),
 			InstanceID: inst.ID,
 			Title:      inst.Title,
 			TabID:      tabID,
@@ -411,13 +411,23 @@ func tuiPaneKeyForOpenPane(p *store.OpenPane) string {
 	if p == nil || p.Instance() == nil {
 		return ""
 	}
-	tabName, ok := tabNameAt(p.Instance(), p.Tab())
+	tabID, tabName, ok := tabIdentityAt(p.Instance(), p.Tab())
 	if !ok {
 		return ""
 	}
-	return tuiPaneKeyForInstance(p.Instance(), tabName)
+	return tuiPaneKeyForTab(p.Instance(), tabID, tabName)
 }
 
+func tuiPaneKeyForTab(inst *session.Instance, tabID, tabName string) string {
+	if inst == nil {
+		return ""
+	}
+	return tuiPaneIdentityKey(inst.ID, inst.Title, tabID, tabName)
+}
+
+// tuiPaneKeyForInstance returns the legacy name-keyed spelling used by old
+// persisted view state and tests that construct it. New captures go through
+// tuiPaneKeyForTab so duplicate empty metadata names remain distinct.
 func tuiPaneKeyForInstance(inst *session.Instance, tabName string) string {
 	if inst == nil {
 		return ""
@@ -426,10 +436,18 @@ func tuiPaneKeyForInstance(inst *session.Instance, tabName string) string {
 }
 
 func tuiPaneKey(instanceID, title, tabName string) string {
+	return tuiPaneIdentityKey(instanceID, title, "", tabName)
+}
+
+func tuiPaneIdentityKey(instanceID, title, tabID, tabName string) string {
+	prefix := fmt.Sprintf("id:%s", instanceID)
 	if title != "" {
-		return fmt.Sprintf("title:%s:tab:%s", title, tabName)
+		prefix = fmt.Sprintf("title:%s", title)
 	}
-	return fmt.Sprintf("id:%s:tab:%s", instanceID, tabName)
+	if tabID != "" {
+		return fmt.Sprintf("%s:tab-id:%s", prefix, tabID)
+	}
+	return fmt.Sprintf("%s:tab:%s", prefix, tabName)
 }
 
 func sameTUIStateInstance(a, b config.TUIStateTarget) bool {

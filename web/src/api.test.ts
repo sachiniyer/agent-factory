@@ -14,6 +14,7 @@ import {
   createSession,
   type CreateSessionInput,
   createTab,
+  createVSCodeTab,
   errorText,
   fetchPreviewOrigin,
   handoffSession,
@@ -278,18 +279,30 @@ test("restoreSession posts the stable id alongside the title", async () => {
 
 test("createTab / closeTab post the stable id alongside the title", async () => {
   const cap = stubFetch();
-  await createTab("id-repoB", "feature", "tok");
+  const created = await createTab("id-repoB", "feature", "tok");
   assert.equal(cap.url, "/v1/CreateTab");
   assert.equal(cap.body.id, "id-repoB", "CreateTab must resolve by id, not the cross-repo title");
   assert.equal(cap.body.title, "feature");
   assert.equal(cap.body.repo_id, "");
   assert.equal(cap.body.shell, true, "the web `t` creates a $SHELL tab, like the TUI");
+  assert.deepEqual(created, { id: "", name: "shell" }, "an older daemon may omit the additive tab id");
 
   await closeTab("id-repoB", "feature", "shell", "tab-abc", "tok");
   assert.equal(cap.url, "/v1/CloseTab");
   assert.equal(cap.body.id, "id-repoB");
   assert.equal(cap.body.tab_name, "shell");
   assert.equal(cap.body.repo_id, "");
+});
+
+test("createVSCodeTab keeps the daemon id when the default name is empty (#3997)", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: { id: "tab-vscode", name: "" }, error: null }),
+  });
+
+  const created = await createVSCodeTab("session-id", "feature", "tok");
+  assert.deepEqual(created, { id: "tab-vscode", name: "" });
 });
 
 test("createTab / closeTab FAIL CLOSED on a missing id — no title-scoped request", async () => {

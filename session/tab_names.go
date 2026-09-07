@@ -57,7 +57,8 @@ func uniqueTabName(tabs []*Tab, base string) string {
 // where they arise, at spawn.
 //
 // This is the shared collision handling for shell tabs (AddShellTab), CLI-spawned
-// process tabs (AddProcessTab), web tabs (AddWebTab), and renames (RenameTab).
+// process tabs (AddProcessTab), explicitly named web/VS Code tabs, and renames
+// (RenameTab). Unnamed web/VS Code tabs are keyed by their stable IDs instead.
 func uniqueTabNameExcluding(tabs []*Tab, base string, exclude *Tab) string {
 	used := make(map[string]bool, len(tabs))
 	for _, t := range tabs {

@@ -10,7 +10,7 @@ import (
 )
 
 // TestAddVSCodeTab_AppendsWithNoTmuxAndNoURL verifies a vscode tab is appended
-// with the vscode kind, an auto-derived name, no tmux session (it has no PTY),
+// with the vscode kind, no default name, no tmux session (it has no PTY),
 // and — the design point — NO URL: its editor is a daemon-managed per-session
 // code-server on an ephemeral port, resolved at proxy time.
 func TestAddVSCodeTab_AppendsWithNoTmuxAndNoURL(t *testing.T) {
@@ -21,7 +21,7 @@ func TestAddVSCodeTab_AppendsWithNoTmuxAndNoURL(t *testing.T) {
 
 	tab, err := inst.AddVSCodeTab("")
 	require.NoError(t, err)
-	assert.Equal(t, "vscode", tab.Name, "default vscode-tab name is \"vscode\"")
+	assert.Empty(t, tab.Name, "a default VS Code tab leaves Name unset for TabLabel")
 	assert.Equal(t, TabKindVSCode, tab.Kind)
 	assert.Equal(t, "", tab.URL, "a vscode tab stores no URL: the port is chosen fresh on every spawn, so a stored one would always be stale")
 	assert.Nil(t, tab.tmux, "a vscode tab has no tmux session")
@@ -48,7 +48,7 @@ func TestAddVSCodeTab_ExplicitNameAndCollisionSuffixing(t *testing.T) {
 
 	third, err := inst.AddVSCodeTab("")
 	require.NoError(t, err)
-	assert.Equal(t, "vscode", third.Name)
+	assert.Empty(t, third.Name)
 }
 
 // TestAttachVSCodeTabReflectsDaemonOwnedTab verifies the TUI-side projection

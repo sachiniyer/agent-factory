@@ -36,9 +36,9 @@ func TabKindRenameable(kind TabKind) bool {
 //
 // The requested name is sanitized to the tmux-safe token set exactly as tab
 // creation sanitizes it (sanitizeTabName). A name that sanitizes to nothing is an
-// error rather than a silent fall back to a default: at creation "web" is a
-// sensible default for an unnamed tab, but a user explicitly renaming a tab to
-// "...." asked for something specific, and quietly naming it "web" instead is the
+// error rather than silently clearing the name: an unnamed web/VS Code tab may
+// deliberately use its kind label, but a user explicitly renaming a tab to
+// "...." asked for something specific, and quietly treating it as unnamed is the
 // silent mangling #1813 calls out.
 //
 // Only kinds that display their name can be renamed (TabKindRenameable); the
@@ -156,15 +156,14 @@ func (i *Instance) reorderTabLocked(from, to int) error {
 }
 
 // reorderTabsFromData permutes the live tab list to the daemon's authoritative
-// order, keyed by name — every local non-agent tab shares its name with a target
-// entry once the drop/add loops have run, and names are unique per instance, so
-// name is a sound join key even for a pre-#1738 roster with no ids. The agent tab
-// is pinned at index 0: Tabs[0] is load-bearing (archive keeps it, the agent
-// conversation and tmux session resolve through it), so it is never moved and no
-// tab is ever placed in front of it. A local tab the target order does not
-// mention (a skipped/failed add) is kept at the end rather than lost. Returns
-// whether the order actually changed — an unchanged snapshot must not report a
-// change, or the TUI repaints on every poll.
+// order. Stable IDs are the primary join key because default web and VS Code tabs
+// can share an empty name; name remains the compatibility key for a pre-#1738
+// target row with no ID. The agent tab is pinned at index 0: Tabs[0] is
+// load-bearing (archive keeps it, the agent conversation and tmux session resolve
+// through it), so it is never moved and no tab is ever placed in front of it. A
+// local tab the target order does not mention (a skipped/failed add) is kept at
+// the end rather than lost. Returns whether the order actually changed — an
+// unchanged snapshot must not report a change, or the TUI repaints on every poll.
 func (i *Instance) reorderTabsFromData(target []TabData) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -172,9 +171,13 @@ func (i *Instance) reorderTabsFromData(target []TabData) bool {
 		// The agent tab plus at most one other: no order to change.
 		return false
 	}
-	byName := make(map[string]*Tab, len(i.Tabs))
+	byID := make(map[string]*Tab, len(i.Tabs))
+	byName := make(map[string][]*Tab, len(i.Tabs))
 	for _, t := range i.Tabs {
-		byName[t.Name] = t
+		if t.ID != "" {
+			byID[t.ID] = t
+		}
+		byName[t.Name] = append(byName[t.Name], t)
 	}
 	newOrder := make([]*Tab, 0, len(i.Tabs))
 	newOrder = append(newOrder, i.Tabs[0]) // agent pinned at 0
@@ -183,7 +186,17 @@ func (i *Instance) reorderTabsFromData(target []TabData) bool {
 		if td.Kind == TabKindAgent {
 			continue
 		}
-		t := byName[td.Name]
+		var t *Tab
+		if td.ID != "" {
+			t = byID[td.ID]
+		} else {
+			for _, candidate := range byName[td.Name] {
+				if !placed[candidate] {
+					t = candidate
+					break
+				}
+			}
+		}
 		if t == nil || placed[t] {
 			continue
 		}
