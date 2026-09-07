@@ -193,7 +193,15 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 		if waitForProcesses {
 			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 		} else {
-			go reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+			// Capture the test seam and waits before launching the goroutine.
+			done, name := t.closeReapDone, t.sanitizedName
+			grace, term := reapGraceWait, reapTermWait
+			go func() {
+				reapSessionProcesses(reapOnRequest, name, leaked, grace, term)
+				if done != nil {
+					done()
+				}
+			}()
 		}
 	}
 

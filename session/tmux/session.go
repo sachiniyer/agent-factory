@@ -143,6 +143,10 @@ func EnsureDevinWorkspaceTrustSuppressed(command string) string {
 
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {
+	// closeReapDone is a test seam, set before Close and never mutated during
+	// teardown. It runs after the asynchronous reap, including all its logs.
+	closeReapDone func()
+
 	// Initialized by NewTmuxSession
 	//
 	// The name of the tmux session and the sanitized name used for tmux commands.

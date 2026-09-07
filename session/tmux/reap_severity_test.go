@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -62,22 +61,14 @@ func TestCloseDoesNotReportRequestedTeardownAsALeak(t *testing.T) {
 	warnings, infos := captureReapLogs(t)
 
 	session := NewTmuxSessionFromSanitizedName(name, "sh")
+	waitForReap := awaitCloseReap(t, session)
 	_, closeErr := session.Close()
 	require.NoError(t, closeErr)
 
-	// Close reaps asynchronously, so wait for the reap to actually happen before
-	// reading the logs — otherwise an empty WARNING buffer would pass for the
-	// wrong reason (nothing was reaped yet).
-	require.Eventually(t, func() bool { return !proctree.AliveSame(escapee) },
-		5*time.Second, 25*time.Millisecond,
+	waitForReap()
+	require.False(t, proctree.AliveSame(escapee),
 		"SIGHUP-immune pane child survived Close — nothing was reaped, so this test proves nothing")
-	// Wait on EITHER buffer, not just INFO: the reap signals before it logs, so
-	// the escapee can be dead a moment before the line lands. Gating on INFO alone
-	// would make the pre-fix behaviour — a line written at WARNING — time out here
-	// reporting "nothing was logged", which is not what went wrong. Waiting for a
-	// line at any severity lets the assertions below name the real defect.
-	require.Eventually(t, func() bool { return infos() != "" || warnings() != "" },
-		5*time.Second, 25*time.Millisecond,
+	require.True(t, infos() != "" || warnings() != "",
 		"the reap logged nothing at all, at either severity")
 
 	require.NotContains(t, warnings(), "leaked",
