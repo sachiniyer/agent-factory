@@ -303,6 +303,14 @@ assertions. `make tui-driver-selftest` is the acceptance gate; `make
 tui-driver` drops you into a live driven session. See
 [tui-manual-testing.md](tui-manual-testing.md).
 
+GitHub's `TUI driver selftest` workflow runs the same
+`scripts/testbox.sh selftest` container entry point after TUI-scoped pushes to
+`master` and on manual dispatch. Auto Gate also re-dispatches it after every
+later merge because the gate's `GITHUB_TOKEN` suppresses push workflows;
+dispatch intentionally ignores the path filter. This #4000 step-1 run is a
+post-merge signal, not a pull-request gate; a failure uploads the driver's
+console transcript from the runner.
+
 ## `make lifecycle-container` — clean install + upgrade
 
 ```bash
