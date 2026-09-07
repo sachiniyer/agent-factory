@@ -10,6 +10,8 @@ paths, injects rejected mutations, and checks that session and task input
 survives. The SVGs faithfully convert the resulting ANSI cell grid. Matching
 SVG goldens in `app/testdata/recovery` make geometry, copy, weight and colour
 changes reviewable in tests. Existing surrounding TUI chrome is outside P4.
+The zero-task and task-load-failure scenes keep the task manager's `Tasks`
+title and its pinned hint row, including the advertised `esc` exit.
 
 | State | Light | Dark |
 | --- | --- | --- |

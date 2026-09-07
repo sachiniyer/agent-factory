@@ -662,15 +662,16 @@ af_open_pane() {
 # Solve), and each pane's frame puts its ` <title> · <tab> ` header on the
 # first line inside the frame — so all visible pane headers share one screen
 # row, immediately below the workspace box's top border. Anchoring on that
-# border (the first `╭` on screen — the sidebar has no left border, so the
+# border (the first `┌`/`╭` on screen — the sidebar has no left border, so the
 # workspace box owns the first one) and taking the NEXT line yields the whole
-# visible-pane identity set in one string.
+# visible-pane identity set in one string. Current workspace panes use a square
+# `┌`; older captures used the rounded `╭`, so the driver accepts both.
 #
-# `╭` is matched as a literal, not a bracket expression: the sandbox runs a
-# C/POSIX locale where a bracket expression would match only the first byte of
-# the 3-byte glyph (cf. _af_tab_count's `(├|└)` alternation note).
+# The corners are matched with alternation, not a bracket expression: the
+# sandbox runs a C/POSIX locale where a bracket expression would match only the
+# first byte of either 3-byte glyph (cf. _af_tab_count's `(├|└)` note).
 _af_pane_header_row() {
-    af_capture | awk '/╭/ { if ((getline line) > 0) print line; exit }'
+    af_capture | awk '/(╭|┌)/ { if ((getline line) > 0) print line; exit }'
 }
 
 # af_hide_pane — hide the focused pane back to the background (nothing is
@@ -914,62 +915,43 @@ _af_tab_count() {
     af_capture | grep -cE '^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]' || true
 }
 
-# _AF_TASKS_RUN_HINT — the run-action affordance that marks the task overlay as
-# open. `m` drops STRAIGHT into the selected task's edit form when a task exists
-# (#1249), whose narrow-width footer collapses `r run now` to `r run` — so the
-# old `run now` marker matched the empty-list view but MISSED the edit view at
-# 80x24 and af_open_tasks reported a false timeout (#1757). `r run[ now]` is the
-# one run affordance common to every list/edit × wide/narrow variant.
-#
-# ANCHOR it on BOTH sides of the `r` key hint so it can only match the overlay's
-# own menu line, never arbitrary visible pane text that happens to contain the
-# substring `r run` (Greptile, PR #1769):
-#   * LEFT — `(^|[^[:alnum:]])`: the `r` must start a token (line start, or a
-#     non-alphanumeric like the frame padding / a `· ` separator before it), so
-#     the trailing `r` of a word does NOT count ("serve`r run` ·", "you`r run`").
-#   * RIGHT — ` ·` (U+00B7): the run action is ALWAYS followed by the TASK
-#     OVERLAY's space-and-middle-dot separator (`r run now · …` / `r run · …`),
-#     which no shell output line ("no longe`r run`ning.", "you`r run` finished")
-#     carries.
-# The middle dot is matched as a literal byte sequence, not a bracket
-# expression, so it works under the sandbox's C/POSIX locale (cf.
-# _af_tab_count).
-#
-# This separator is the TASK OVERLAY's (ui/task_pane.go / ui/task_pane_edit.go).
-# The overlay hints historically kept the old bullet (`•`) after the status menu
-# moved to the repo-standard ` · ` in #2399, and this anchor pinned the bullet —
-# until the overlay itself converted to ` · ` and the stale anchor made the
-# self-test time out on a visibly open overlay (#3268). The anchor tracks the
-# overlay renderers, nothing else: if their separator ever changes again, change
-# this with it.
+# _AF_TASKS_RUN_HINT remains the edit-mode assertion marker. It is deliberately
+# not the open/close anchor: the default list footer hides secondary actions
+# behind `?`, and an empty list has no run action at all (#3995).
 : "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
 
-# af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
-# `r run` run-action hint, present whether it opens in list or edit mode.
+# _AF_TASKS_TITLE — a title inside the task overlay's own vertical frame. The
+# list title is present for populated, empty and load-failure states; `m` opens
+# a populated selection directly in its `Edit task <id>` form (#1249), so that
+# title is included too. Requiring both frame glyphs keeps ordinary pane output
+# containing "Tasks" or "Edit task" from becoming a false completion marker.
+: "${_AF_TASKS_TITLE:=│[[:space:]]+(Tasks|Edit task[[:space:]][^[:space:]]+)[[:space:]]+│}"
+
+# af_open_tasks — open the task-manager overlay (`m`) and synchronize on its
+# framed title, which does not disappear when list actions are collapsed.
 af_open_tasks() {
     af_ensure_nav
     af_send m
-    af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
+    af_wait_for "$_AF_TASKS_TITLE" "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 
 # af_close_tasks — dismiss the tasks overlay (Escape). When the overlay opened
-# in edit mode the first Escape drops back to the list (still showing the run
-# hint), so a second Escape closes it; both cases sync on the run hint going
-# away.
+# in edit mode the first Escape drops back to the titled list, so a second
+# Escape closes it; both cases sync on the framed title going away.
 af_close_tasks() {
     local deadline screen
     af_send Escape
     deadline=$(( $(_af_now) + 4 ))
     while :; do
         screen="$(af_capture)"
-        if ! printf '%s\n' "$screen" | grep -qE -- "$_AF_TASKS_RUN_HINT"; then
+        if ! grep -qE -- "$_AF_TASKS_TITLE" <<<"$screen"; then
             return 0
         fi
         [ "$(_af_now)" -ge "$deadline" ] && break
         sleep "$AF_DRIVER_POLL"
     done
     af_send Escape
-    af_wait_gone "$_AF_TASKS_RUN_HINT" 8 'tasks overlay closed' || return 1
+    af_wait_gone "$_AF_TASKS_TITLE" 8 'tasks overlay closed' || return 1
 }
 
 # The config editor's own marker. Anchored on the hint row rather than a key

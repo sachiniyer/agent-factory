@@ -729,9 +729,11 @@ SCREEN
     )
 }
 
-# _expect_scrolled_rail_relaunch — the LIVE half of #2148. Three sessions at
-# 80x24 with the lowest selected is exactly the reported state: the rail scrolls,
-# the header is gone, and the boot gate has to read the frame as booted anyway.
+# _expect_scrolled_rail_relaunch — the LIVE half of #2148. The original 80x24
+# frame is pinned by the synthetic proof above; the denser current rail fits its
+# three sessions there, so the live half uses the supported 80x10 floor to make
+# the same session tree deterministically scroll. The header is gone, and the
+# boot gate has to read the frame as booted anyway.
 # af_relaunch shares af_boot's gate, so this drives the real thing end to end.
 #
 # The premise is asserted AFTER the relaunch rather than assumed: if the rail
@@ -741,12 +743,11 @@ SCREEN
 _expect_scrolled_rail_relaunch() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS" rc=0
 
-    af_resize 80 24 || return 1
-    if af_select cycle; then
+    if af_select cycle && af_resize 80 10; then
         af_relaunch || rc=$?
         if [ "$rc" -eq 0 ]; then
             if ! af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
-                _af_log "#2148 premise not met: the 80x24 rail did NOT scroll, so this step proves nothing"
+                _af_log "#2148 premise not met: the 80x10 rail did NOT scroll, so this step proves nothing"
                 rc=1
             elif af_capture | grep -qE -- 'Sessions \('; then
                 _af_log "#2148 premise not met: the header is still visible, so the old gate would have passed too"
@@ -829,10 +830,22 @@ step "assert beta is selected"                              af_expect_selected b
 step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
 step "af_select handles a target with an open pane (#1996)"  _expect_af_select_open_pane
 
-# --- #1757 regression: the task-overlay run action ---
-# `m` drops straight into the selected task's EDIT form when a task exists, and
-# at 80x24 its footer collapses `r run now` to `r run`. af_open_tasks used to
-# wait for the stale `run now` and time out here; it now syncs on `r run`.
+# --- #1757/#3995 regressions: task-overlay title and run action ---
+# A populated reopen may settle in list mode after a refresh or remain in the
+# selected task's edit form. af_open_tasks syncs on either framed title rather
+# than the optional run action. Reveal secondary actions only in list mode,
+# then retain #1757's assertion that the compact run action is discoverable.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_run_action() {
+    local screen
+    screen="$(af_capture)"
+    if grep -qE -- '│[[:space:]]+Tasks[[:space:]]+│' <<<"$screen"; then
+        af_send '?'
+    fi
+    af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'task-overlay run action' || return 1
+    af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+}
+
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 # _expect_config_editor_writes — the config editor's end-to-end flow against the
 # sandbox's throwaway AF home: open it, assert it rendered a tier-1 key FROM THE
@@ -990,8 +1003,8 @@ _expect_config_agent_attaches_in_tmux() {
 
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
-step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
-step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+step "reopen tasks — overlay title recognized (#1757/#3995)" af_open_tasks
+step "reveal and assert the task run action"                _expect_task_run_action
 step "close the tasks overlay"                              af_close_tasks
 
 # --- #2019 regression: the config agent (C) must attach even though af is nested

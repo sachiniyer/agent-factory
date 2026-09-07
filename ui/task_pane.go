@@ -9,7 +9,6 @@ import (
 	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
-	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -646,10 +645,10 @@ func taskDeliverySummary(tsk task.Task) string {
 
 func (s *TaskPane) renderListMode() string {
 	if s.unavailable != "" {
-		return DialogRecoveryScreen(layout.Rect{W: s.width, H: s.height}, "Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
+		return s.renderListRecovery("Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
 	}
 	if len(s.tasks) == 0 {
-		return DialogRecoveryScreen(layout.Rect{W: s.width, H: s.height}, "No tasks", "", "Press n to create one.", false)
+		return s.renderListRecovery("No tasks", "", "Press n to create one.", false)
 	}
 	t := CurrentTheme()
 	tStyle := DialogTitleStyle()
@@ -774,26 +773,7 @@ func (s *TaskPane) renderListMode() string {
 		}
 	}
 
-	if s.hasFocus {
-		hint := "↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back"
-		short := "r run now · x toggle · D delete · ? back · esc"
-		// A watch task can't be manually run (#1758): drop "r run now" so the
-		// hint never advertises an action that always fails.
-		if s.selectedTaskIsWatch() {
-			hint = "↑/↓ select · n new · enter edit · x toggle · D delete · esc back"
-			short = "x toggle · D delete · ? back · esc"
-		}
-		if !s.showActions {
-			hint = "enter edit · n new · ? actions · esc back"
-			short = "enter edit · ? actions · esc"
-		}
-		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = short
-		}
-		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
-	} else {
-		b.WriteString(hintStyle.Render(fitLine("enter to focus and edit tasks", s.width)))
-	}
+	b.WriteString(hintStyle.Render(fitLine(s.listModeHint(), s.width)))
 
 	return fitTaskList(b.String(), s.width, s.height, pinnedFooter, selectedStart, selectedEnd)
 }
