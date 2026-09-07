@@ -9,15 +9,23 @@ was a duplicate of it opened by the next hourly run. Fixes are dispatched by the
 maintainer to lanes that stay alive until the merge.
 
 PROMPT DRIFT — before the checks below and before any no-findings early exit:
-From the master checkout at /home/siyer/Desktop/claude-squad, run:
-  go run ./scripts/prompt-drift 4ab7ba4f .agent-factory/tasks/master-health-watch.md
-This only reads the live task with `af tasks get 4ab7ba4f --json` and compares
-its prompt byte-for-byte with the versioned file, including whitespace. Silent
-success means no drift. Treat a FINDING line, or inability to run the helper,
-as a finding with the command output as evidence; use the existing dedupe and
-OUTPUT rules below (one line of new evidence on an existing issue when known).
+From your own session worktree's repository root, build and run:
+  prompt_drift_bin=$(mktemp)
+  go build -o "$prompt_drift_bin" ./scripts/prompt-drift && "$prompt_drift_bin" 4ab7ba4f .agent-factory/tasks/master-health-watch.md
+  prompt_drift_status=$?
+  rm -f "$prompt_drift_bin"
+  printf 'prompt-drift exit: %s\n' "$prompt_drift_status"
+The helper fetches origin/master with `git fetch origin master`, then reads
+`git show origin/master:.agent-factory/tasks/master-health-watch.md`. It reads
+the live task with `af tasks get 4ab7ba4f --json` and compares exact prompt
+bytes, including whitespace. Silent exit 0 means no drift. Report exit 1
+(FINDING) as a drift finding and exit 2 (TOOLING), or inability to build/run the
+helper, as a tooling finding, each with the command output as evidence. Use the
+existing dedupe and OUTPUT rules below (one line of new evidence on an existing
+issue when known).
 Never fix drift or run `af tasks update`. Captain applies reviewed prompt edits
-after merge. Continue the four existing checks even if this comparison fails.
+after merge with `af tasks update --prompt-file`. Continue the four existing
+checks even if this comparison fails.
 
 Check these four things, in order:
 

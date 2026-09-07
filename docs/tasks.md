@@ -98,23 +98,38 @@ and whitespace-only files are rejected before any write. For remote updates the
 file is still read on the caller's machine. The empty `AF_DAEMON_URL`
 above clears any remote target in the environment.
 
-The live task will be **behind the checked-in file from merge until Captain
+The live task will be **behind origin/master from merge until Captain
 applies it**. The comparison is expected to report drift during that window.
-For this initial rollout the old live prompt does not yet carry the new step,
-so automatic drift reporting starts only after the first application. The
-read-only comparison can also be run manually from the master checkout:
+Run the read-only comparison from your session worktree's repository root:
 
 ```bash
-go run ./scripts/prompt-drift 4ab7ba4f .agent-factory/tasks/master-health-watch.md
+# Build a binary so its exit 1 (drift) and exit 2 (tooling) stay distinct;
+# go run wraps both as exit 1.
+prompt_drift_bin=$(mktemp)
+go build -o "$prompt_drift_bin" ./scripts/prompt-drift &&
+  "$prompt_drift_bin" 4ab7ba4f .agent-factory/tasks/master-health-watch.md
+prompt_drift_status=$?
+rm -f "$prompt_drift_bin"
+printf 'prompt-drift exit: %s\n' "$prompt_drift_status"
 ```
 
-The helper uses `af tasks get <id> --json` and compares exact prompt bytes. It
-prints a `FINDING` and exits 1 on drift or an unreadable task/file, and is silent
-with exit 0 on equality. It never applies changes or executes prompt contents.
-The prompt instructs the watch to report this through its existing dedupe and
-issue conventions and continue its existing checks. After application the
-comparison goes quiet. Tests inject task JSON and temporary files; they never
-execute the watch's commands.
+The [helper](https://github.com/sachiniyer/agent-factory/blob/master/scripts/prompt-drift/main.go)
+runs `git fetch origin master` in the invoking repository, then reads the
+expected bytes with `git show origin/master:<repo-relative-prompt-file>`.
+It never reads the working file, so a stale checkout cannot manufacture drift.
+It uses `af tasks get <id> --json` to read the live prompt and compares exact
+bytes. Exit 0 is silent on equality; exit 1 starts with `FINDING:` for real
+drift; exit 2 starts with `TOOLING:` when fetching, reading the ref, or reading
+or decoding the task fails. Failure diagnostics preserve command stderr,
+including the task error envelope that `af` writes there.
+
+The watch reports drift and tooling findings separately, with command output
+as evidence, through its existing dedupe and issue conventions, and continues
+its existing checks. The helper never applies changes or executes prompt
+contents. Captain applies PR-reviewed prompt edits only after merge with
+`af tasks update --prompt-file`; the watch never runs `af tasks update`.
+Tests use temporary Git repositories and a stub `af`, including an intentionally
+stale working file and error envelopes on stderr; they never execute the watch.
 
 ## Task fields
 
