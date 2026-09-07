@@ -237,6 +237,23 @@ func (c *Client) RestartTask(id string, expect task.ProjectExpectation) error {
 	return c.call("RestartTask", daemon.RestartTaskRequest{ID: id, Expect: expect}, &daemon.RestartTaskResponse{})
 }
 
+// There is deliberately no ListOnComplete here (#3961). The daemon serves
+// /v1/ListOnComplete for the web, whose task modal renders the lifecycle choices
+// and their consequence text (web/src/api.ts listOnComplete); being TypeScript,
+// it has no way to read them but over the wire. Go does: the handler only zips
+// task.OnCompleteValues() together with task.OnCompleteHint(), both compiled-in
+// constants, so anything that links apiclient links those too and computes a
+// byte-identical answer with no round trip. The TUI takes exactly that path —
+// ui/task_pane.go builds the "On done" row from task.OnCompleteValues() and
+// ui/task_pane_edit.go renders the same hints — as does the CLI's
+// `af tasks add/update --on-complete`. A wrapper here would be dead code whose
+// only caller was its own test.
+//
+// Contrast ListBackends below, which IS a round trip: that answer is a property
+// of the daemon's host and repo, so computing it locally would describe the
+// wrong machine. A fixed enum carries no such host dependency. Add a wrapper the
+// day the choices stop being constants and start depending on daemon state.
+
 // SnapshotWithAlarms is Snapshot plus the persistent delivery-failure alarms
 // carried on the same authoritative response (#1238). It is the TUI's read
 // path: the session list and the alarm projection arrive from one call, so the
