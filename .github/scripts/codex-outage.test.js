@@ -3,6 +3,7 @@ const test = require('node:test');
 const { aggregate, render, readRecord, sweep, gateNotice } = require('./codex-outage.js');
 const gate = require('./auto-gate.js');
 const t = (hour) => `2026-09-05T${String(hour).padStart(2, '0')}:00:00.000Z`;
+const tomorrow = (hour) => `2026-09-06T${String(hour).padStart(2, '0')}:00:00.000Z`;
 const head = 'a'.repeat(40);
 const limits = [
   'You have reached your Codex usage limits for code ' + 'reviews.',
@@ -24,6 +25,23 @@ function fixture() {
     { number: 4, head: { sha: head }, merged_at: t(10), artifacts: [comment(8, limits[2]), comment(9, limits[1])] },
     { number: 5, head: { sha: head }, merged_at: null, artifacts: [comment(11, limits[0], { user: { login: 'someone' } })] },
   ];
+}
+async function runRecordedSweep({ episodes, pulls, artifactsByRoute, now }) {
+  let record = { id: 42, user: { login: 'sachiniyer' }, body: render(episodes, now) };
+  const calls = [];
+  const api = async (route, options = {}) => {
+    calls.push(route);
+    if (options.method === 'PATCH') {
+      record = { ...record, body: options.body };
+      return record;
+    }
+    if (route.includes('/issues/3932/comments')) return [record];
+    if (route.includes('/pulls?')) return pulls;
+    const match = Object.entries(artifactsByRoute).find(([part]) => route.includes(part));
+    return match?.[1] || [];
+  };
+  await sweep(api, 'owner/repo', now);
+  return { calls, episodes: readRecord(record).episodes };
 }
 test('usage-limit predicate recognizes all three captured variants', () => {
   for (const body of limits) assert.equal(gate.codexEvidence.codexReportsReviewUsageLimit(body), true);
@@ -67,6 +85,165 @@ test('sweep paginates both comment endpoints unfiltered, updates existing record
   assert.match(write[1].body, /Degraded merges: 1/);
   assert.equal(calls.filter(([, o]) => o.method === 'POST').length, 0);
 });
+test('sweep recomputes a recent completed episode with the current classifier', async () => {
+  const opener = comment(2, limits[1]);
+  const usage = comment(3, limits[0], { html_url: 'https://example.com/real-usage-limit' });
+  const finding = comment(4, findingBody, {
+    html_url: 'https://example.com/stale-finding',
+    pull_request_review_id: 5128730196,
+    commit_id: head,
+  });
+  const recovery = verdict(5);
+  const stale = {
+    start: t(2),
+    end: t(5),
+    latest: { time: t(4), url: finding.html_url, body: finding.body, kind: 'unrecognised' },
+    merged: [3984],
+    causes: ['usage-limit', 'unrecognised'],
+    recovery: recovery.html_url,
+  };
+  let record = {
+    id: 42,
+    user: { login: 'sachiniyer' },
+    body: render([stale], t(6)),
+  };
+  const api = async (route, options = {}) => {
+    if (options.method === 'PATCH') {
+      record = { ...record, body: options.body };
+      return record;
+    }
+    if (route.includes('/issues/3932/comments')) return [record];
+    if (route.includes('/pulls?')) return [{
+      number: 3984, updated_at: t(9), merged_at: t(4), head: { sha: head },
+    }];
+    if (route.includes('/pulls/3984/comments')) return [finding];
+    if (route.includes('/issues/3984/comments')) return [opener, usage];
+    if (route.includes('/pulls/3984/reviews')) return [recovery];
+    throw new Error(route);
+  };
+
+  await sweep(api, 'owner/repo', t(10));
+  const [actual] = readRecord(record).episodes;
+  assert.deepEqual(
+    { start: actual.start, end: actual.end, merged: actual.merged, recovery: actual.recovery },
+    { start: stale.start, end: stale.end, merged: stale.merged, recovery: stale.recovery },
+  );
+  assert.deepEqual(actual.causes, ['usage-limit']);
+  assert.deepEqual(actual.latest, {
+    time: t(3), url: usage.html_url, body: usage.body, kind: 'usage-limit',
+  });
+  assert.deepEqual(
+    readRecord({ body: render([actual], t(10)), user: { login: 'sachiniyer' } }).episodes,
+    [actual],
+  );
+});
+test('recompute scan includes newly recognised evidence before the stored start', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const newlyRecognised = comment(1,
+    'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error');
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [recent],
+    pulls: [
+      { number: 2, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 1, updated_at: t(1), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/1/comments': [newlyRecognised],
+      '/issues/2/comments': [recentNotice],
+      '/pulls/2/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.equal(result.episodes[0].start, t(1));
+  assert.deepEqual(result.episodes[0].causes, ['failure', 'usage-limit']);
+  assert.ok(result.calls.some(route => route.includes('/issues/1/comments')));
+});
+test('recompute scan recovers a missed episode after frozen history', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const frozenEnd = '2026-09-05T00:30:00.000Z';
+  const frozen = {
+    start: '2026-09-05T00:10:00.000Z', end: frozenEnd,
+    latest: { time: '2026-09-05T00:20:00.000Z', url: 'frozen-notice', body: limits[0], kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: 'frozen-recovery',
+  };
+  const missedNotice = comment(1, limits[1]);
+  const missedRecovery = verdict(2);
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [frozen, recent],
+    pulls: [
+      { number: 3, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 2, updated_at: t(2), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/2/comments': [missedNotice],
+      '/pulls/2/reviews': [missedRecovery],
+      '/issues/3/comments': [recentNotice],
+      '/pulls/3/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.deepEqual(result.episodes.map(episode => [episode.start, episode.end]), [
+    [frozen.start, frozen.end], [t(1), t(2)], [t(3), t(5)],
+  ]);
+});
+test('recompute scan never re-aggregates frozen history', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const frozenNotice = comment(0, limits[0], {
+    created_at: '2026-09-05T00:10:00.000Z', html_url: 'frozen-notice',
+  });
+  const frozenRecovery = verdict(0);
+  frozenRecovery.created_at = '2026-09-05T00:30:00.000Z';
+  frozenRecovery.html_url = 'frozen-recovery';
+  const frozen = {
+    start: frozenNotice.created_at, end: frozenRecovery.created_at,
+    latest: {
+      time: frozenNotice.created_at, url: frozenNotice.html_url,
+      body: frozenNotice.body, kind: 'usage-limit',
+    },
+    merged: [], causes: ['usage-limit'], recovery: frozenRecovery.html_url,
+  };
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [frozen, recent],
+    pulls: [
+      { number: 2, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 1, updated_at: t(6), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/1/comments': [frozenNotice],
+      '/pulls/1/reviews': [frozenRecovery],
+      '/issues/2/comments': [recentNotice],
+      '/pulls/2/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.ok(result.calls.some(route => route.includes('/issues/1/comments')));
+  assert.equal(result.episodes.filter(episode => episode.start === frozen.start).length, 1);
+  assert.deepEqual(result.episodes[0], frozen);
+});
 test('gate duration uses shared record and falls back without changing policy', async () => {
   const episodes = aggregate(fixture(), t(12));
   const github = { rest: { issues: { listComments() {} } }, paginate: async () => [
@@ -103,7 +280,7 @@ test('a failed sweep preserves the previous record; a first sweep creates only o
   assert.equal(record.body, previous);
   assert.deepEqual(writes, ['POST', 'PATCH']);
 });
-test('successive sweeps close the same record and retain recovery beyond the scan window', async () => {
+test('an expired completed episode is preserved after its artifacts leave scan history', async () => {
   let artifacts = [comment(2, limits[1])];
   let record;
   let pulls = [{ number: 2, updated_at: t(9), merged_at: t(4), head: { sha: head } }];
@@ -126,7 +303,7 @@ test('successive sweeps close the same record and retain recovery beyond the sca
   assert.equal(closed[0].end, t(6));
   assert.deepEqual(closed[0].merged, [2]);
   pulls = [];
-  await sweep(api, 'owner/repo', t(12));
+  await sweep(api, 'owner/repo', tomorrow(7));
   assert.deepEqual(readRecord(record).episodes, closed);
   assert.deepEqual(methods, ['POST', 'PATCH', 'PATCH']);
 });
