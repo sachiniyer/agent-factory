@@ -41,7 +41,12 @@ export function keybarPointerDown(event: Pick<Event, "preventDefault">, act: () 
   act();
 }
 
+export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["Back", "←", "↑", "↓", "→"]] as const;
+
 export class TerminalKeybar {
+  private arrows = false;
+  private readonly rows: HTMLElement[] = [];
+
   private readonly modifiers = new StickyModifiers();
   private readonly bar = document.createElement("div");
   private readonly phone = window.matchMedia("(max-width: 768px)");
@@ -74,9 +79,10 @@ export class TerminalKeybar {
     this.bar.className = "af-terminal-keybar";
     this.bar.setAttribute("role", "group");
     this.bar.setAttribute("aria-label", "Terminal keys");
-    for (const keys of [["Ctrl", "Alt", "Esc", "Tab", "^C"], ["←", "↑", "↓", "→"]]) {
+    for (const keys of KEYBAR_ROWS) {
       const row = document.createElement("div");
       row.className = "af-keybar-row";
+      this.rows.push(row);
       for (const key of keys) {
         const button = document.createElement("button");
         button.type = "button";
@@ -84,7 +90,8 @@ export class TerminalKeybar {
         button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
         const act = () => {
           if (!this.focused || !this.phone.matches) return;
-          if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
+          if (key === "Arrows" || key === "Back") this.arrows = key === "Arrows";
+          else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           else this.input(keyBytes(key, false, false, this.applicationCursor()));
           this.paint();
         };
@@ -113,7 +120,7 @@ export class TerminalKeybar {
 
   setFocused(focused: boolean): void {
     this.focused = focused;
-    if (!focused) { this.modifiers.reset(); this.physicalInput = false; }
+    if (!focused) { this.modifiers.reset(); this.physicalInput = false; this.arrows = false; }
     this.paint();
     this.layout();
   }
@@ -123,6 +130,7 @@ export class TerminalKeybar {
     return output;
   }
   private paint(): void {
+    this.rows.forEach((row, index) => { row.hidden = index !== (this.arrows ? 1 : 0); });
     for (const [key, button] of this.buttons) {
       const state = this.modifiers.state(key);
       button.dataset.state = state;

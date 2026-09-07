@@ -48,3 +48,9 @@ test("pointerdown prevents focus transfer before acting", () => {
   let prevented = false;
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));
 });
+
+test("one-row keybar uses six primary targets and a replacement arrows row at 360px", async () => {
+  const { KEYBAR_ROWS } = await import("./terminal-keybar.js");
+  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["Back", "←", "↑", "↓", "→"]]);
+  for (const row of KEYBAR_ROWS) assert.ok(row.length * 44 + (row.length - 1) * 4 + 16 <= 360);
+});

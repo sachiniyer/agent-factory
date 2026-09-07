@@ -2993,8 +2993,8 @@ textarea[class] {
     inset-inline: 0;
     z-index: var(--af-z-appbar);
     gap: var(--af-space-1);
-    padding: var(--af-space-2);
-    padding-bottom: max(var(--af-space-2), env(safe-area-inset-bottom));
+    padding: 0 var(--af-space-2);
+    padding-bottom: env(safe-area-inset-bottom);
     padding-left: max(var(--af-space-2), env(safe-area-inset-left));
     padding-right: max(var(--af-space-2), env(safe-area-inset-right));
     background: var(--af-surface-raised);
@@ -3002,7 +3002,10 @@ textarea[class] {
   }
   .af-keybar-row {
     display: flex;
-    gap: var(--af-space-2);
+    gap: var(--af-space-1);
+  }
+  .af-keybar-row[hidden] {
+    display: none;
   }
   .af-keybar-row button {
     position: relative;
@@ -3025,6 +3028,86 @@ textarea[class] {
   .af-keybar-row button[data-state=locked] {
     outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
     outline-offset: calc(0 - var(--af-space-1) / 2);
+  }
+}
+@media (max-width: 768px) {
+  .af-session-first .af-appbar {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: var(--af-space-1);
+    padding: calc(var(--af-space-1) / 2) max(var(--af-space-2), env(safe-area-inset-right)) calc(var(--af-space-1) / 2) max(var(--af-space-2), env(safe-area-inset-left));
+    padding-top: max(calc(var(--af-space-1) / 2), env(safe-area-inset-top));
+    flex-shrink: 0;
+  }
+  .af-session-first .af-nav-toggle {
+    flex-shrink: 0;
+  }
+  .af-session-first .af-term-title {
+    order: 1;
+    flex: 1;
+  }
+  .af-session-first .af-term-keyboard {
+    order: 2;
+    flex-shrink: 0;
+    font-size: var(--af-type-caption);
+  }
+  .af-session-first .af-appbar-tools-wrap {
+    order: 3;
+    flex-shrink: 0;
+  }
+  .af-session-first .af-term-head {
+    display: none;
+  }
+  .af-session-first .af-appbar-tools {
+    width: calc(100vw - var(--af-space-3));
+  }
+  .af-session-first .af-project-switch,
+  .af-session-first .af-tab-new {
+    display: none;
+  }
+  .af-session-first .af-project-menu,
+  .af-session-first .af-tab-menu,
+  .af-session-first .af-appbar-tools > .af-term-menu {
+    display: flex !important;
+    position: static;
+    width: 100%;
+    min-width: 0;
+    max-height: none;
+    overflow: visible;
+    padding: 0;
+    border: 0;
+    flex-direction: column;
+    box-shadow: none;
+  }
+  .af-session-first .af-tabbar {
+    flex: none;
+    width: 100%;
+  }
+  .af-session-first .af-tabbar:not(:has(.af-tab:nth-of-type(2))) {
+    display: none;
+  }
+  .af-session-first .af-appbar-tools a {
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  }
+  .af-session-first .af-appbar-tools .af-copy-link-phone {
+    display: inline-flex;
+  }
+}
+.af-phone-pane-close {
+  display: none;
+}
+@media (max-width: 768px) {
+  .af-session-first .af-phone-pane-close:not([hidden]) {
+    display: block;
+  }
+  .af-session-first :is(.af-split, .af-pane) {
+    flex-grow: 1 !important;
+  }
+  .af-session-first .af-pane-head,
+  .af-session-first .af-divider,
+  .af-session-first .af-pane:not(.af-pane-focused),
+  .af-session-first .af-split:not(:has(.af-pane-focused)) {
+    display: none;
   }
 }
 

@@ -1,0 +1,29 @@
+    Error: #3981 terminal must occupy at least 85% of the visual viewport
+
+    expect(received).toBeGreaterThanOrEqual(expected)
+
+    Expected: >= 0.85
+    Received:    0.5862068965517241
+
+      393 | async function assertPhoneHeader(page: Page): Promise<void> {
+      394 |   const budget = await page.locator(".af-pane-host .xterm").first().evaluate(el => el.getBoundingClientRect().height / visualViewport!.height);
+    > 395 |   expect(budget, "#3981 terminal must occupy at least 85% of the visual viewport").toBeGreaterThanOrEqual(0.85);
+          |                                                                                    ^
+      396 |   const header = page.locator(".af-appbar");
+      397 |   await expect(header.locator(".af-viewnav")).toBeVisible();
+      398 |   await expect(header.locator(".af-project-switch")).toBeVisible();
+        at assertPhoneHeader (/work/web/selftest/web-demo.spec.ts:395:84)
+        at recordChrome (/work/web/selftest/web-demo.spec.ts:468:7)
+        at /work/web/selftest/web-demo.spec.ts:540:5
+
+    attachment #1: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/visual/web-demo-web-chrome-·-both-themes-demo/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/visual/web-demo-web-chrome-·-both-themes-demo/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [demo] › selftest/web-demo.spec.ts:538:1 › web chrome · both themes ────────────────────────────
+  4 passed (1.4m)

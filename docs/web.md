@@ -74,18 +74,22 @@ Broken · Archived**. Archived sessions start hidden. The filter applies inside 
 selected project and is remembered by this browser; a dot on the funnel marks a
 non-default filter. If it hides everything, the empty state reports hidden rows.
 
-On a phone, **Toggle sessions** opens the rail drawer. Selecting a session closes
-it; tapping the backdrop dismisses it. Project context and the view switch remain
-in the app header. **More app controls** holds install, Light · Dark · System and
-Disconnect. The pane has its own title, static Keyboard label and Actions row;
-long titles truncate with … and tabs scroll horizontally. Controls have at least
-44px touch targets. While the terminal owns the keyboard, a bottom bar provides
-Ctrl, Alt, Esc, Tab, arrows and **^C** above the soft keyboard. Tap Ctrl or Alt
-then type a character; double tap to lock (shown by ▸ and an outline), and tap
-again to release. Arrows occupy a second row so every key fits. The terminal
-resizes to keep its last line visible, and tapping keys keeps the keyboard open.
+On a phone, selecting a terminal gives it the screen: one compact row holds
+**Toggle sessions**, the truncating session title, static Keyboard state and **…**.
+The menu contains project choices, Sessions · Tasks · Config, Light · Dark ·
+System, Disconnect, session actions and tabs. Escape closes it and returns focus.
+**Toggle sessions** opens the rail drawer; selecting a session or tapping its
+backdrop closes it. Opening the drawer leaves the terminal in place at the same
+size. Tasks and Config keep their phone layouts.
 
-![Phone terminal with the modifier keybar](assets/design/3977/after-phone-session-390.png)
+While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
+Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
+keys and Back. Tap Ctrl or Alt then type a character; double tap to lock (shown
+by ▸ and an outline), then tap again to release. Keys retain terminal focus and
+the terminal resizes above the soft keyboard. With that keyboard closed, the
+terminal occupies at least 85% of the visual viewport at the verified phone widths.
+
+![Session-first phone terminal](assets/design/3981/after-phone-session-390.png)
 
 **Share a link to a session.** Click the link icon (**Copy link**) beside the selected session's
 header title to copy its link, or copy the address bar: it follows your selection.

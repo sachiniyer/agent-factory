@@ -22,11 +22,19 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
   const geometry = await bar.evaluate(el => {
     const rect = el.getBoundingClientRect();
     return { fits: rect.left >= 0 && rect.right <= innerWidth,
-      targets: [...el.querySelectorAll("button")].every(b => b.offsetWidth >= 44 && b.offsetHeight >= 44),
+      oneRow: rect.height === 44,
+      targets: [...el.querySelectorAll("button")].filter(b => b.offsetHeight > 0).every(b => b.offsetWidth >= 44 && b.offsetHeight >= 44),
       aboveKeyboard: Math.abs(rect.bottom - (visualViewport!.offsetTop + visualViewport!.height)) < 2 };
   });
-  expect(geometry).toEqual({ fits: true, targets: true, aboveKeyboard: true });
+  expect(geometry).toEqual({ fits: true, oneRow: true, targets: true, aboveKeyboard: true });
   let before = stream();
+  await bar.getByRole("button", { name: "Arrows", exact: true }).click();
+  await expect(textarea).toBeFocused();
+  await bar.getByRole("button", { name: "↑", exact: true }).click();
+  await expect.poll(stream).toBe(before + "\x1b[A");
+  await bar.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(textarea).toBeFocused();
+  before = stream();
   await bar.getByRole("button", { name: "Interrupt (^C)", exact: true }).click();
   await expect(textarea).toBeFocused();
   await expect.poll(stream).toBe(before + "\x03");
