@@ -1167,3 +1167,10 @@ test("only a boolean daemon marker establishes rejection, and committed outcomes
     });
   }
 });
+
+test("handoffSession sends an operator-selected account with optional agent", async () => {
+ const cap = stubFetch();
+ await handoffSession("id", "feature", "", "tok", "personal");
+ assert.equal(cap.body.account, "personal");
+ assert.equal(cap.body.to, "");
+});

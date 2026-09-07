@@ -2007,7 +2007,9 @@ function doHandoff(): void {
     handoffModal(sel.title, sel.current_agent ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
-      onSubmit: (to: string) => {
+      loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
+      currentAccount: sel.account,
+      onSubmit: (to: string, account?: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
@@ -2015,7 +2017,7 @@ function doHandoff(): void {
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok)
+        void handoffSession(target.id, target.title, to, tok, account)
           .then(closeModal)
           .catch((e) => {
             m.setBusy(false);

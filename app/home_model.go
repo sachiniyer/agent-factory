@@ -382,7 +382,8 @@ type home struct {
 	// (#2013). It is held alongside the overlay because the list is FILTERED (it
 	// omits the running agent), so the overlay's selected index cannot be mapped
 	// back through tmux.SupportedPrograms the way the create-time picker's can.
-	handoffChoices []string
+	handoffChoices  []string
+	handoffAccounts []string
 	// handoffTarget is the immutable session identity that opened the picker.
 	// Background snapshots may move the sidebar cursor or replace a same-title
 	// row while the modal owns the keyboard; submit must never re-read that

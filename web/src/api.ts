@@ -547,8 +547,8 @@ export interface HandoffResult {
  *
  *  A failed handoff (not found, busy, unsupported backend, same agent) comes back
  *  as an envelope error and throws ApiError, so callers share one error path. */
-export async function handoffSession(id: string, title: string, to: string, token: string): Promise<HandoffResult> {
-  return af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to }, token);
+export async function handoffSession(id: string, title: string, to: string, token: string, account = ""): Promise<HandoffResult> {
+  return af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to, account }, token);
 }
 
 /** The daemon's DeleteProject response: how many sessions it archived vs tore

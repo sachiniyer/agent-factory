@@ -76,10 +76,11 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	m.handoffChoices = choices
+	m.handoffAccounts = nil
 	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
 	m.state = stateSelectHandoffAgent
-	return m, nil
+	return m, m.loadHandoffAccounts(current, selected.GetRepoPath())
 }
 
 // handleStateSelectHandoffAgent handles key events while the handoff agent
@@ -96,10 +97,12 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	submitted := m.selectionOverlay.IsSubmitted()
 	idx := m.selectionOverlay.GetSelectedIndex()
 	choices := m.handoffChoices
+	accounts := m.handoffAccounts
 	pickerTarget := m.handoffTarget
 
 	m.selectionOverlay = nil
 	m.handoffChoices = nil
+	m.handoffAccounts = nil
 	m.handoffTarget = handoffPickerTarget{}
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
@@ -108,6 +111,10 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	target := choices[idx]
+	account := ""
+	if idx < len(accounts) {
+		account = accounts[idx]
+	}
 
 	selected := m.resolveSessionActionTarget(pickerTarget)
 	if selected == nil {
@@ -117,6 +124,9 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	from := selected.CurrentAgentName()
 
 	message := handoffConfirmMessage(title, from, target)
+	if account != "" {
+		message = fmt.Sprintf("Hand %q to %s account %q?", title, target, account)
+	}
 	detail := "The new agent starts fresh with a summary of the work so far. " +
 		"Same worktree and branch — nothing is discarded."
 
@@ -127,7 +137,8 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		if m.resolveSessionActionTarget(pickerTarget) == nil {
 			return nil
 		}
-		return startHandoffMsg{request: pickerTarget.handoffRequest(target), target: pickerTarget}
+		req := pickerTarget.handoffRequest(target, account)
+		return startHandoffMsg{request: req, target: pickerTarget}
 	})
 }
 

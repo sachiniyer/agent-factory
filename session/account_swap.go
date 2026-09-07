@@ -97,6 +97,15 @@ func (i *Instance) SupportsAutomaticAccountSwap() bool {
 // account creation remains supported, but a crash-safe automatic reprovision
 // needs a durable container identity and immutable provision plan of its own.
 func (i *Instance) ValidateAccountSwap(name string) error {
+	return i.validateAccountSwap(name, "", false)
+}
+
+// ValidateManualAccountSwap uses the same launch proof with an operator-selected identity.
+func (i *Instance) ValidateManualAccountSwap(name, agent string) error {
+	return i.validateAccountSwap(name, agent, true)
+}
+
+func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
@@ -111,7 +120,8 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	if op != OpRespawning {
 		return fmt.Errorf("account swap for %q requires the limit-resume fence", i.Title)
 	}
-	if strings.TrimSpace(current) != "" && !auto {
+	committedManual := pending != nil && pending.Manual && pending.To == current && name == current
+	if strings.TrimSpace(current) != "" && !auto && !manual && !committedManual {
 		return fmt.Errorf("account %q was explicitly pinned for session %q and will not be overridden", current, i.Title)
 	}
 	if backend == nil {
@@ -124,6 +134,12 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
+	if agent != "" && agent != i.CurrentAgentName() {
+		program = agent
+		resolved := resolveResolvedConfigForInstance(i)
+		resolution.command = resolveProgramForAgent(i, agent)
+		resolution.trustBase = builtInProgramOverride(resolved, agent, resolution.command)
+	}
 	resolvedProgram := resolution.command
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
 		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap requires a fresh conversation, so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
@@ -273,8 +289,16 @@ func (i *Instance) StopRemainingPanesForAccountSwap() error {
 // SelectAccountAutomatically commits the scheduler's replacement identity in
 // memory. The caller must persist it before starting the replacement runtime.
 func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversationData, error) {
+	return i.selectAccount(from, name, true)
+}
+
+func (i *Instance) selectAccount(from, name string, automatic bool) (AgentConversationData, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.selectAccountLocked(from, name, automatic)
+}
+
+func (i *Instance) selectAccountLocked(from, name string, automatic bool) (AgentConversationData, error) {
 	if i.inFlightOp != OpRespawning {
 		return AgentConversationData{}, fmt.Errorf("selecting account for %q requires the limit-resume fence", i.Title)
 	}
@@ -291,8 +315,8 @@ func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversat
 		i.Account = name
 		i.touchLocked()
 	}
-	if !i.accountAutoSelected {
-		i.accountAutoSelected = true
+	if i.accountAutoSelected != automatic {
+		i.accountAutoSelected = automatic
 		i.touchLocked()
 	}
 	pending := &AccountSwapData{From: from, To: name}

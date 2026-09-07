@@ -39,7 +39,9 @@ type AgentHandoff struct {
 	// conversation id was ever captured.
 	From AgentConversationData `json:"from,omitempty"`
 	// To is the incoming agent (a tmux.SupportedPrograms name).
-	To string `json:"to"`
+	To          string `json:"to"`
+	FromAccount string `json:"from_account,omitempty"`
+	ToAccount   string `json:"to_account,omitempty"`
 	// At is when the swap was recorded.
 	At time.Time `json:"at"`
 	// HeadSHA is the branch tip at swap time — everything at or before it is the

@@ -19,7 +19,8 @@ type HandoffSessionRequest struct {
 	// keeps the legacy title path.
 	ID string `json:"id"`
 	// To is the incoming agent (a supported agent enum name).
-	To string `json:"to"`
+	To      string `json:"to"`
+	Account string `json:"account,omitempty"`
 	// Brief optionally replaces the session's stored prompt as the mission handed
 	// to the incoming agent. It is what a user typed at handoff time, so it wins:
 	// more specific and more current than a prompt stored at create time.
@@ -27,7 +28,9 @@ type HandoffSessionRequest struct {
 }
 
 type HandoffSessionResponse struct {
-	OK bool `json:"ok"`
+	OK          bool   `json:"ok"`
+	FromAccount string `json:"from_account,omitempty"`
+	ToAccount   string `json:"to_account,omitempty"`
 	// From and To are the outgoing and incoming agents, echoed so a client can
 	// report the swap without re-reading the snapshot.
 	From string `json:"from"`
@@ -109,6 +112,9 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// the two from disagreeing about the same session again.
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
 		return HandoffSessionResponse{}, err
+	}
+	if strings.TrimSpace(req.Account) != "" {
+		return m.handoffAccount(req, instance, repoID)
 	}
 	target := strings.TrimSpace(req.To)
 	if err := instance.ValidateHandoffTarget(target); err != nil {

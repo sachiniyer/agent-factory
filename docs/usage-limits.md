@@ -357,7 +357,7 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   Docker account-scoped creates remain supported, but automatic Docker
   replacement stays disabled until its complete provision plan and container
   cleanup identity can survive a daemon crash.
-- **An explicit `--account` is immutable.** It is a pin, so automatic switching
+- **An explicit `--account` is pinned.** It is a pin, so automatic switching
   never overrides it. Accounts selected by the scheduler may move again after
   they later hit their own limit.
 - **No invented quota claim.** Providers expose no quota API af can read. The
@@ -391,6 +391,32 @@ af config set limit_account_candidates work,personal
 Or add `--project <id-or-path>` for a personal per-project override.
 
 Full config reference: [configuration.md](configuration.md#usage-limit-auto-resume).
+
+## Hand off to another account
+
+To continue under another registered account of the same agent:
+
+```sh
+af sessions handoff fix-auth --account personal
+```
+
+The session keeps its identity, worktree, branch tip, and stored prompt. The
+new account starts a fresh conversation. Use `--brief` to replace the prompt,
+or combine `--to claude --account work` to change both agent and account.
+The recorded handoff includes the outgoing and incoming accounts and branch tip.
+
+This is an operator-chosen account swap: the target must be registered for the
+incoming agent and have no current limit observation in the daemon's ledger.
+An unregistered or currently limited target is refused before stopping the old
+runtime. No `limit_auto_resume` or `limit_account_candidates` setting is needed.
+An explicit pin moves to the chosen account and remains pinned against automatic
+rotation. The same local account-swap path replaces all credential-bearing panes;
+its launch checks and restrictions, including VS Code tabs, still apply.
+
+In the TUI, press **F** on the `[limit]` session and choose another account.
+The project default is preselected when it is another registered account. In the
+web, use **Handoff** beside **Retry**, then choose the agent and account. Both
+pickers list accounts belonging to the selected agent.
 
 ## Hand off to another agent
 

@@ -1807,7 +1807,12 @@ af sessions get <title>
 
 Continue a session under a different agent, in place
 
-Hand a session's work over to a different agent without losing it.
+Hand a session's work over to another agent or account without losing it.
+
+Use --account to choose a registered account. Omit --to to keep the same
+agent and stored prompt, or combine both flags to change agent and account.
+A manual handoff moves an explicit account pin; automatic rotation still
+respects it. Targets with current usage-limit evidence are refused.
 
 The session keeps its identity, its git worktree, and its branch — only the
 agent process changes. The incoming agent starts a fresh conversation and is
@@ -1828,6 +1833,7 @@ Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.
 
 Examples:
+  af sessions handoff fix-auth --account personal
   af sessions handoff fix-auth --to claude
   af sessions handoff fix-auth --to gemini --brief "finish the retry test, skip the docs"
 
@@ -1839,6 +1845,7 @@ af sessions handoff <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--account` | `string` | Registered target account; omit --to to keep the same agent |
 | `--brief` | `string` | Mission for the incoming agent, replacing the session's stored prompt |
 | `--to` | `string` | Agent to hand the session off to (one of claude, codex, aider, gemini, amp, opencode, devin) |
 

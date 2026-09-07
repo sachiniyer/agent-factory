@@ -1,3 +1,4 @@
+import { handoffAccountChoices } from "./handoff_accounts.js";
 // The web client's modal overlays (#1592 Phase 5 PR5): the new-session form, the
 // send-prompt box, and the kill/archive confirms — the write surface that
 // completes the v1 loop (list → attach → type → create/kill). They mirror the
@@ -441,7 +442,9 @@ export function handoffModal(
   sessionTitle: string,
   currentAgent: string,
   callbacks: {
-    onSubmit: (target: string) => void;
+    onSubmit: (target: string, account?: string) => void;
+    loadAccounts?: () => Promise<AccountsResponse>;
+    currentAccount?: string;
     onCancel: () => void;
     loadPrograms: () => Promise<ProgramCatalog>;
   },
@@ -453,6 +456,21 @@ export function handoffModal(
     onCancel: callbacks.onCancel,
   });
 
+  let accounts: AccountsResponse = { entries: [], agents: [] };
+  let accountsLoaded = !callbacks.loadAccounts;
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "New account");
+  const refreshAccounts = (): void => {
+    const agent = agentSelect.value;
+    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    accountSelect.replaceChildren();
+    if (agent !== currentAgent) accountSelect.append(h("option", { value: "" }, "Current account selection"));
+    for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
+    const fallback = accounts.defaults?.[agent];
+    if (fallback && choices.some((choice) => choice.value === fallback)) accountSelect.value = fallback;
+    accountSelect.disabled = choices.length === 0;
+    confirmBtn.disabled = !accountsLoaded || !agent || (agent === currentAgent && !accountSelect.value);
+  };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
   // Nothing to pick until the catalog lands; Hand off is disabled until it does.
@@ -468,6 +486,7 @@ export function handoffModal(
 
   body.append(
     field("New agent", agentSelect),
+    field("New account", accountSelect),
     h(
       "p",
       { class: "af-modal-text" },
@@ -479,7 +498,9 @@ export function handoffModal(
     .loadPrograms()
     .then((catalog) => {
       const choices = handoffAgentChoices(catalog, currentAgent);
+      if (callbacks.loadAccounts && currentAgent) choices.unshift({value: currentAgent, label: currentAgent + " (another account)"});
       renderChoices(choices);
+      refreshAccounts();
       if (choices.length === 0) {
         handle.setError("No other agent is available to hand off to.");
       }
@@ -492,6 +513,12 @@ export function handoffModal(
       handle.setError("Could not load the agent list. Try again.");
     });
 
+  agentSelect.addEventListener("change", refreshAccounts);
+  if (callbacks.loadAccounts) {
+    void callbacks.loadAccounts().then((result) => {
+      accounts = result; accountsLoaded = true; refreshAccounts();
+    }).catch(() => { confirmBtn.disabled = true; handle.setError("Could not load accounts. Try again."); });
+  }
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
     const target = agentSelect.value;
@@ -500,7 +527,10 @@ export function handoffModal(
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(target);
+    if (!accountsLoaded || (target === currentAgent && !accountSelect.value)) {
+      handle.setError("Pick another registered account."); return;
+    }
+    callbacks.onSubmit(target, accountSelect.value);
   });
 
   queueMicrotask(() => agentSelect.focus());

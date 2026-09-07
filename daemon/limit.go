@@ -460,7 +460,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	var settleErr error
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
-	if !instance.LimitReached() {
+	manual := accountSwap != nil && accountSwap.manual
+	if !instance.LimitReached() && !manual {
 		return resumeNotPerformed, nil
 	}
 	m.mu.Lock()
@@ -509,7 +510,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// Deferred release covers every exit: it is a no-op once Respawn's ConfirmLive has
 	// cleared the op on the success path, and it is what keeps a refused or failed
 	// resume from stranding the session as permanently busy.
-	if err := instance.BeginLimitResume(); err != nil {
+	begin := instance.BeginLimitResume
+	if manual {
+		begin = instance.BeginManualAccountSwap
+	}
+	if err := begin(); err != nil {
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: %w", requestedTitle, err)
 	}
 	// Tell the clients. The web rail is event-driven and performs no optimistic update
@@ -554,7 +559,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		m.accountLimitMu.Lock()
 		accountLimitFenceHeld = true
 		liveConfig := m.Config()
-		if !liveConfig.LimitAutoResume {
+		if !liveConfig.LimitAutoResume && !manual {
 			// A live opt-out forbids every new automatic action, including an
 			// already-due ordinary same-account retry. Committed replacements use
 			// the independent recovery path and never enter this branch.

@@ -821,7 +821,7 @@
       },
       "verdict": "parity",
       "issue": "#2013",
-      "notes": "Closed across all three surfaces. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web now calls the existing HandoffSession public route through the same daemon path the TUI/CLI use — no parallel recovery logic — and renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSession.brief)."
+      "notes": "Closed across all three surfaces. #4018 adds an operator-selected account: app/handoff_accounts.go filters the current agent's registered accounts and preselects the project default; web/src/modals.ts filters accounts for the selected agent; api/sessions_handoff.go accepts --account with optional --to. All submit HandoffSessionRequest.Account to the shared account-swap transaction. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web now calls the existing HandoffSession public route through the same daemon path the TUI/CLI use — no parallel recovery logic — and renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSession.brief)."
     },
     {
       "id": "session.kill",
@@ -1816,6 +1816,7 @@
       "af sessions create --program": "session.create.opt.program",
       "af sessions create --prompt": "session.create.opt.prompt",
       "af sessions get --help": "meta.discovery",
+      "af sessions handoff --account": "session.handoff",
       "af sessions handoff --brief": "session.handoff",
       "af sessions handoff --help": "meta.discovery",
       "af sessions handoff --to": "session.handoff",

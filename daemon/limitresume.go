@@ -169,7 +169,7 @@ func (m *Manager) resumeLimitedSession(
 	retryInterval time.Duration,
 	loadEvidence accountLimitEvidenceLoader,
 ) {
-	if inst == nil || !inst.Started() || inst.GetLiveness() != session.LiveLimitReached {
+	if inst == nil || !inst.Started() || !accountSwapResumeEligible(inst) {
 		return
 	}
 	if !cfg.LimitAutoResume {
@@ -264,7 +264,7 @@ func (m *Manager) resumeLimitedSession(
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || inst.GetLiveness() != session.LiveLimitReached {
+	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapResumeEligible(inst) {
 		return
 	}
 	if accountSwap != nil {

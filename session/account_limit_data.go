@@ -6,6 +6,8 @@ import "time"
 // From may be empty for the ambient identity; the pointer's presence, rather
 // than either string, is the recovery obligation.
 type AccountSwapData struct {
+	Manual                  bool   `json:"manual,omitempty"`
+	Mission                 string `json:"mission,omitempty"`
 	From                    string `json:"from,omitempty"`
 	To                      string `json:"to"`
 	ConversationID          string `json:"conversation_id,omitempty"`

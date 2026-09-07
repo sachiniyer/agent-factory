@@ -18,16 +18,19 @@ import (
 // returns it under the limit-resume fence. from is the account that produced the
 // wall (empty means ambient); to is a configured candidate.
 type autoAccountSwap struct {
-	from                 string
-	previousAccount      string
-	previousAuto         bool
-	previousConversation session.AgentConversationData
-	to                   string
-	candidates           []string
-	agent                string
-	alreadySet           bool
-	fallbackDue          bool
-	fellBack             bool
+	manual                   bool
+	mission, headSHA, reason string
+	promptOverride           string
+	from                     string
+	previousAccount          string
+	previousAuto             bool
+	previousConversation     session.AgentConversationData
+	to                       string
+	candidates               []string
+	agent                    string
+	alreadySet               bool
+	fallbackDue              bool
+	fellBack                 bool
 }
 
 var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
@@ -104,13 +107,19 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	}
 	from, to, pending := instance.PendingAccountSwap()
 	current, currentAuto := instance.AccountSelection()
-	if !pending || !currentAuto || strings.TrimSpace(to) == "" || current != to {
+	manual, mission := instance.PendingManualAccountSwap()
+	agent := instance.CurrentAgentName()
+	if manual {
+		agent = instance.AgentProgram()
+	}
+	if !pending || (!currentAuto && !manual) || strings.TrimSpace(to) == "" || current != to {
 		return nil
 	}
 	return &autoAccountSwap{
+		manual: manual, mission: mission,
 		from:       from,
 		to:         to,
-		agent:      instance.CurrentAgentName(),
+		agent:      agent,
 		alreadySet: true,
 	}
 }
@@ -164,7 +173,7 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 	global *config.Config,
 	loadEvidence accountLimitEvidenceLoader,
 ) (*autoAccountSwap, error) {
-	if instance == nil || !instance.LimitReached() || !instance.SupportsAutomaticAccountSwap() {
+	if instance == nil || !accountSwapResumeEligible(instance) || !instance.SupportsAutomaticAccountSwap() {
 		return nil, nil
 	}
 	if committed := committedAccountSwap(instance); committed != nil {
@@ -199,52 +208,9 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 		return nil, fmt.Errorf("list registered %s accounts for %q: %w", agent, instance.Title, err)
 	}
 
-	m.mu.Lock()
-	instances := make([]*session.Instance, 0, len(m.instances))
-	for _, other := range m.instances {
-		instances = append(instances, other)
-	}
-	m.mu.Unlock()
-	limitedSet := make(map[string]struct{})
-	now := nowFunc()
-	retained, err := loadEvidence()
+	limited, err := m.limitedAccountsForSwap(agent, loadEvidence)
 	if err != nil {
-		return nil, fmt.Errorf("load durable account-limit evidence for %q: %w", instance.Title, err)
-	}
-	for _, observation := range retained {
-		if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
-			continue
-		}
-		if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
-			continue
-		}
-		limitedSet[observation.Account] = struct{}{}
-	}
-	for _, other := range instances {
-		if other == nil {
-			continue
-		}
-		if sessionenv.AgentForCommand(other.AgentProgram()) == agent {
-			if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
-				resetAt, hasReset := other.LimitResetAt()
-				if !hasReset || now.Before(resetAt.Add(limitResumeGrace)) {
-					limitedSet[account] = struct{}{}
-				}
-			}
-		}
-		for _, observation := range other.AccountLimitObservations() {
-			if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
-				continue
-			}
-			if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
-				continue
-			}
-			limitedSet[observation.Account] = struct{}{}
-		}
-	}
-	limited := make([]string, 0, len(limitedSet))
-	for account := range limitedSet {
-		limited = append(limited, account)
+		return nil, err
 	}
 	candidates := quota.SelectAccountCandidates(quota.AccountSelection{
 		CurrentAccount:      current,
@@ -333,7 +299,12 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	global *config.Config,
 ) (fallbackEligible bool, err error) {
 	fallbackDue := scheduled.fallbackDue
-	admitted, err := m.admitAccountSwap(instance, global)
+	var admitted *autoAccountSwap
+	if scheduled.manual {
+		admitted, err = m.admitManualAccountSwap(instance, scheduled)
+	} else {
+		admitted, err = m.admitAccountSwap(instance, global)
+	}
 	if err != nil {
 		return true, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
 	}
@@ -346,15 +317,30 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	if err := m.prepareRuntimeForAccountSwap(key, instance); err != nil {
 		return true, err
 	}
-	previousConversation, err := instance.SelectAccountAutomatically(scheduled.from, scheduled.to)
+	var previousConversation session.AgentConversationData
+	var handoff session.HandoffSwap
+	previousPrompt := instance.GetPrompt()
+	if scheduled.manual {
+		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.reason, scheduled.headSHA, scheduled.mission)
+		previousConversation = handoff.From
+	} else {
+		previousConversation, err = instance.SelectAccountAutomatically(scheduled.from, scheduled.to)
+	}
 	if err != nil {
 		return false, err
 	}
 	scheduled.previousConversation = previousConversation
+	if scheduled.manual && strings.TrimSpace(scheduled.promptOverride) != "" {
+		instance.SetPrompt(strings.TrimSpace(scheduled.promptOverride))
+	}
 	// The old runtime is conclusively stopped. Make the new identity durable
 	// BEFORE starting it, so a crash can never relaunch on the old account while
 	// the session reports the replacement.
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
+		if scheduled.manual {
+			_ = instance.RevertHandoff(handoff)
+			instance.SetPrompt(previousPrompt)
+		}
 		_ = instance.RestoreAccountSelectionUnderResumeFence(
 			scheduled.previousAccount, scheduled.previousAuto, scheduled.previousConversation)
 		return false, err
@@ -370,6 +356,9 @@ func accountSwapIdentity(agent, account string) string {
 }
 
 func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
+	if swap.manual {
+		return fmt.Sprintf("[Agent Factory] Handed off from account %q to %s account %q. Continue the same task.\n\n%s", swap.from, swap.agent, swap.to, swap.mission)
+	}
 	notice := fmt.Sprintf(
 		"[Agent Factory] This session switched from %s to %s after the previous identity reached its usage limit. "+
 			"The replacement was explicitly allowed by limit_account_candidates and had no current limit observation. "+
@@ -482,4 +471,59 @@ func (m *Manager) stopVSCodeForAccountSwap(key string, instance *session.Instanc
 		return fmt.Errorf("cannot switch accounts for %q: cannot confirm its VS Code editor stopped: %w", instance.Title, err)
 	}
 	return nil
+}
+
+func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimitEvidenceLoader) ([]string, error) {
+	m.mu.Lock()
+	instances := make([]*session.Instance, 0, len(m.instances))
+	for _, other := range m.instances {
+		instances = append(instances, other)
+	}
+	m.mu.Unlock()
+	limitedSet := make(map[string]struct{})
+	now := nowFunc()
+	retained, err := loadEvidence()
+	if err != nil {
+		return nil, fmt.Errorf("load durable account-limit evidence: %w", err)
+	}
+	for _, observation := range retained {
+		if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
+			continue
+		}
+		if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
+			continue
+		}
+		limitedSet[observation.Account] = struct{}{}
+	}
+	for _, other := range instances {
+		if other == nil {
+			continue
+		}
+		manual, _ := other.PendingManualAccountSwap()
+		// A manual handoff may already have rewritten Program to a different
+		// agent. Its retained observations still name the outgoing namespace;
+		// do not reinterpret the old live limit under the incoming one.
+		if !manual && sessionenv.AgentForCommand(other.AgentProgram()) == agent {
+			if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
+				resetAt, hasReset := other.LimitResetAt()
+				if !hasReset || now.Before(resetAt.Add(limitResumeGrace)) {
+					limitedSet[account] = struct{}{}
+				}
+			}
+		}
+		for _, observation := range other.AccountLimitObservations() {
+			if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
+				continue
+			}
+			if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
+				continue
+			}
+			limitedSet[observation.Account] = struct{}{}
+		}
+	}
+	limited := make([]string, 0, len(limitedSet))
+	for account := range limitedSet {
+		limited = append(limited, account)
+	}
+	return limited, nil
 }
