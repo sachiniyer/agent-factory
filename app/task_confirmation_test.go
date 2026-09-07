@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,4 +34,18 @@ func TestTaskDeleteConfirmationRetainsTargetAndFocus(t *testing.T) {
 	require.Equal(t, stateTasks, h.state)
 	require.True(t, pane.HasFocus())
 	require.Equal(t, []task.Task{b}, pane.GetTasks())
+}
+
+func TestUnavailableTasksDoNotOpenDeleteConfirmation(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateTasks
+	pane := h.automations.TaskPane()
+	pane.SetTasks([]task.Task{{ID: "a", Name: "retained"}, {ID: "b", Name: "other"}})
+	pane.SetFocus(true)
+	pane.SetUnavailable(errors.New("task file is unreadable"))
+
+	h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+
+	require.Equal(t, stateTasks, h.state)
+	require.Nil(t, h.confirmationOverlay, "unavailable recovery must not confirm a retained task")
 }

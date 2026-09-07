@@ -108,3 +108,20 @@ func TestTaskPaneUnavailableDisablesSelectionActions(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskPaneSelectedTaskUnavailable(t *testing.T) {
+	pane := NewTaskPane()
+	pane.SetTasks([]task.Task{
+		{ID: "first", Name: "first"},
+		{ID: "second", Name: "second"},
+	})
+	pane.SetUnavailable(errors.New("task file is unreadable"))
+
+	_, ok := pane.SelectedTask()
+	require.False(t, ok, "recovery mode must not expose a retained selection")
+
+	pane.SetUnavailable(nil)
+	selected, ok := pane.SelectedTask()
+	require.True(t, ok)
+	require.Equal(t, "first", selected.ID)
+}

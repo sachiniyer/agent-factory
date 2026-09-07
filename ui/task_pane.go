@@ -524,6 +524,12 @@ func (s *TaskPane) toggleSelectedTask() {
 
 // SelectedTask returns the selected identity for target-specific confirmations.
 func (s *TaskPane) SelectedTask() (task.Task, bool) {
+	if s.unavailable != "" {
+		// Recovery mode retains tasks internally for the next successful sync,
+		// but renders no selection and must not hand that hidden identity to
+		// root-routed actions such as the task delete confirmation.
+		return task.Task{}, false
+	}
 	if !s.selectedTaskInRange() {
 		return task.Task{}, false
 	}
