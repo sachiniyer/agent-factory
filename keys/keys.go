@@ -337,6 +337,8 @@ var keyDisplayNames = map[string]string{
 	"shift+down": "⇧↓",
 	" ":          "space",
 	"ctrl+@":     "ctrl+space",
+	"alt+ ":      "alt+space",
+	"alt+ctrl+@": "alt+ctrl+space",
 }
 
 // namedKeys are the non-rune key names bubbletea produces (tea.KeyMsg.String()
@@ -690,11 +692,17 @@ func normalizeKeySpec(s string) (string, bool) {
 			shift = true
 			rest = rest[len("shift+"):]
 		default:
+			// Bubble Tea represents Ctrl/Shift on named keys as distinct
+			// KeyTypes, not arbitrary modifier flags. Reject combinations it
+			// cannot emit; Alt can prefix every supported KeyType.
+			if namedKeys[rest] && !namedKeyModifiersSupported(rest, ctrl, shift) {
+				return "", false
+			}
 			if rest == "space" {
 				if ctrl {
 					rest = "@"
-				} else if !alt && !shift {
-					return " ", true
+				} else {
+					rest = " "
 				}
 			}
 			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
@@ -716,5 +724,23 @@ func normalizeKeySpec(s string) (string, bool) {
 		if rest == "" {
 			return "", false
 		}
+	}
+}
+
+// Mirrors the modified KeyTypes in Bubble Tea v1's key.go. The table test
+// checks every namedKeys entry and modifier combination against Key.String.
+func namedKeyModifiersSupported(name string, ctrl, shift bool) bool {
+	if !ctrl && !shift {
+		return true
+	}
+	switch name {
+	case "up", "down", "left", "right", "home", "end":
+		return true
+	case "pgup", "pgdown", "space":
+		return !shift
+	case "tab":
+		return !ctrl
+	default:
+		return false
 	}
 }
