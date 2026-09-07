@@ -9,6 +9,7 @@ const limits = [
   'Codex usage limits have been reached for code reviews. Please check with the admins of this repo to increase the limits by adding credits.',
   'You have reached your Codex usage limits.',
 ];
+const environmentMissing = 'To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).';
 const comment = (hour, body, extra = {}) => ({ created_at: t(hour), body,
   user: { login: 'chatgpt-codex-connector[bot]' }, html_url: `https://example.com/${hour}`, ...extra });
 const verdict = (hour, sha = head) => comment(hour, `Codex Review\nReviewed commit: \`${sha.slice(0, 10)}\``);
@@ -21,7 +22,7 @@ function fixture() {
     { number: 5, head: { sha: head }, merged_at: null, artifacts: [comment(11, limits[0], { user: { login: 'someone' } })] },
   ];
 }
-test('shared predicate recognizes all three observed wordings', () => {
+test('usage-limit predicate recognizes all three captured variants', () => {
   for (const body of limits) assert.equal(gate.codexEvidence.codexReportsReviewUsageLimit(body), true);
 });
 test('mixed history closes at first verdict, counts merged heads once, keeps recurrence', () => {
@@ -145,6 +146,35 @@ test('outage history records failure and quota causes without a false diagnosis'
   assert.match(render(mixed, t(5)), /transient failure, usage limit/);
 });
 
+test('an unrecognised response extends an outage but never opens an episode alone', () => {
+  const unknown = comment(3, environmentMissing);
+  const alone = [{ number: 3985, head: { sha: head }, merged_at: t(4), artifacts: [unknown] }];
+  assert.deepEqual(aggregate(alone, t(5)), [], 'weak evidence must not open an outage or count a merge');
+
+  const active = aggregate([{
+    number: 3985,
+    head: { sha: head },
+    merged_at: t(4),
+    artifacts: [comment(2, limits[0]), unknown],
+  }], t(5));
+  assert.equal(active.length, 1);
+  assert.equal(active[0].start, t(2));
+  assert.deepEqual(active[0].causes, ['usage-limit', 'unrecognised']);
+  assert.deepEqual(active[0].merged, [3985]);
+  assert.deepEqual(active[0].latest, {
+    time: t(3), url: unknown.html_url, body: environmentMissing, kind: 'unrecognised',
+  });
+  assert.match(render(active, t(5)), /usage limit, unrecognised response/);
+
+  const afterRecovery = aggregate([{
+    number: 3985,
+    head: { sha: head },
+    merged_at: t(5),
+    artifacts: [comment(2, limits[0]), verdict(3), comment(4, environmentMissing)],
+  }], t(6));
+  assert.deepEqual(afterRecovery.map(e => [e.start, e.end, e.merged]), [[t(2), t(3), []]]);
+});
+
 function summaryRow(hour, { status = 'Completed', commit = 'bbbbbbb' } = {}) {
   const timestamp = hour == null ? '' : `<relative-time datetime="${t(hour)}"></relative-time>`;
   return `| Code Review | ${status} ${timestamp} | \`${commit}\` | New commits |`;
@@ -179,6 +209,7 @@ test('record-backed notices use the episode causes for the entire adopted span',
     [['usage-limit'], 'failure', 'unavailable since'],
     [['failure'], 'failure', 'unavailable after a transient failure since'],
     [['usage-limit'], 'usage-limit', 'usage-limited since'],
+    [['usage-limit', 'unrecognised'], 'unrecognised', 'unavailable since'],
     [undefined, 'usage-limit', 'unavailable since'],
   ]) {
     const episodes = [{ start: t(2), end: null, causes, merged: [], latest: { time: t(3), body: '', url: 'notice' } }];
@@ -188,18 +219,24 @@ test('record-backed notices use the episode causes for the entire adopted span',
     const notice = await gateNotice({ github, context: { repo: {} }, since: t(3), now: t(4), kind });
     assert.ok(notice.startsWith(`Codex ${expected} ${t(2)}, 2.0h ago`), notice);
     if (expected === 'unavailable since' && causes) {
-      const labels = causes.map(c => c === 'failure' ? 'transient failure' : 'usage limit').join(', then ');
+      const labels = causes.map(c => ({
+        failure: 'transient failure', 'usage-limit': 'usage limit', unrecognised: 'unrecognised response',
+      })[c]).join(', then ');
       assert.ok(notice.includes(`(${labels})`), notice);
     }
   }
 });
 
 test('missing and unreadable records retain local cause and local duration', async () => {
-  for (const kind of ['failure', 'usage-limit']) {
+  for (const kind of ['failure', 'usage-limit', 'unrecognised']) {
     for (const paginate of [async () => [], async () => { throw Error('offline'); }]) {
       const github = { rest: { issues: { listComments() {} } }, paginate };
       const notice = await gateNotice({ github, context: { repo: {} }, since: t(3), now: t(4), kind });
-      const label = kind === 'failure' ? 'unavailable after a transient failure' : 'usage-limited';
+      const label = ({
+        failure: 'unavailable after a transient failure',
+        'usage-limit': 'usage-limited',
+        unrecognised: 'unavailable after an unrecognised response',
+      })[kind];
       assert.ok(notice.startsWith(`Codex ${label} since ${t(3)}, 1.0h ago`), notice);
     }
   }

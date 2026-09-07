@@ -146,8 +146,8 @@ marks that thread outdated, which a rebase or a fix to the neighbouring line doe
 as readily as the fix itself — so an outdated thread blocks exactly like any
 other until it is answered in-thread (#3689).
 
-When the Codex reviewer is observed to be usage-limited against the head no
-verdict can arrive, so the gate degrades to maintainer review rather than wait
+When the latest Codex response against the head is reviewer-unavailable, no
+verdict arrived, so the gate degrades to maintainer review rather than wait
 indefinitely. That degradation is a block, not a pass (#3819): the decision
 stays red with the unmet item
 
@@ -164,18 +164,31 @@ leaving the review to a convention — #3760 landed that way with no review of a
 kind, and #3824 closed that everywhere except the external path, which kept
 publishing the same green pass until #3825.
 
-`Codex Review: Something went wrong. Try again later by commenting "@codex
-review". Unknown error` is also reviewer-unavailable evidence (#3951), with the
-same strictly-after-`headCurrentSince` timing rule and maintainer-review
-requirement as usage-limit answers. The shared outage-record predicate counts
-this failure too and records `failure` separately from `usage-limit`, so gate
-notices and the health record name the observed cause. An episode can include
-both causes. When a notice adopts the repository episode's earlier start, it
-uses specific wording only if that episode has the same single cause as the
-local answer. Mixed or differing causes use “Codex unavailable since” and list
-the recorded causes in onset order. Without a usable record, the local answer
-supplies both the start and the cause. A real review quoting the message remains
-a review.
+The known responses keep distinct causes: the usage-limit family is
+`usage-limit`, and `Codex Review: Something went wrong. Try again later by
+commenting "@codex review". Unknown error` is `failure` (#3951). The production
+response “To use Codex here, [create an environment for this
+repo](https://chatgpt.com/codex/cloud/settings/environments).” exposed why
+enumerating vendor stems is not sufficient (#3985). Classification is now
+structural: after preserving a review body (`CODEX_REVIEW_RE` plus
+`REVIEWED_COMMIT_RE`), a finding-shaped inline reply, and a parseable summary or
+verdict, every other non-empty Codex-authored artifact is reviewer-unavailable
+with kind `unrecognised`. Its first body line is retained as the cause so the
+gate summary names what it saw. Silence remains ordinary missing-review state;
+the absence of an artifact is not an unrecognised artifact. All unavailable
+responses use the same strictly-after-`headCurrentSince` timing rule and
+maintainer-review requirement.
+
+The shared outage record treats `usage-limit` and `failure` as strong enough to
+open an episode. An `unrecognised` response is weaker evidence of a
+repository-wide outage, so it extends an open episode but never opens one alone;
+within an open episode it remains strong evidence that no review happened on
+that PR. The record preserves all three causes. When a notice adopts the
+repository episode's earlier start, it uses specific wording only if that
+episode has the same single cause as the local answer. Mixed or differing causes
+use “Codex unavailable since” and list the recorded causes in onset order.
+Without a usable record, the local answer supplies both the start and the cause.
+A real review quoting an unavailable message remains a review.
 
 `<!-- codex-pull-request-review-summary -->` identifies the maintained
 “Codex Review Summary” activity comment. Its edit time is excluded from
@@ -189,15 +202,17 @@ likewise treats every authenticated Completed row as recovery at its own time,
 regardless of the commit; only merge accounting requires a verdict for the
 merged head.
 
-Usage-limit evidence includes Codex inline review replies (`in_reply_to_id` set),
-including replies carried by an empty `COMMENTED` review (#3900). The reply's
+Reviewer-unavailable evidence includes Codex inline review replies
+(`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
+(#3900). The reply's
 `commit_id` must match the head, and its `created_at` must be strictly later than
 `headCurrentSince`; an edit cannot refresh an old answer. The latest artifact
 across issue comments, reviews and eligible replies wins (the reply wins a tie
-with its empty enclosing review), and a later real verdict supersedes the limit
-answer. The decision names the inline comment id. Replies do not supply verdicts
-or enter the body-finding artifact list, and finding-shaped text is not accepted
-as an inline outage answer. The existing finding predicates are unchanged.
+with its empty enclosing review), and a later real verdict supersedes the
+unavailable response. The decision names the inline comment id. Replies do not
+supply verdicts or enter the body-finding artifact list, and finding-shaped text
+is not accepted as an inline outage answer. The existing finding predicates are
+unchanged.
 
 What counts as that observation is one rule, stated once as `CODEX_LIMIT_RULE` in
 `.github/scripts/auto-gate.js` and quoted here verbatim because a test requires
@@ -306,22 +321,24 @@ The sweep paginates PRs in updated order back to the #3932 evidence window
 (2026-09-05 UTC) on bootstrap, including open and closed PRs. Later sweeps
 retain closed episodes and scan back to the active start or last recovery, so
 history does not disappear after 24h or require rescanning all past PRs. An
-episode starts at the first observed limit, not the preceding verdict. It reads **both**
-`/pulls/N/comments` and `/issues/N/comments` unfiltered, plus review bodies.
-It reconstructs degraded merges using #3932's method: a limit before merge and
-no real verdict covering the actual merged head before merge. This is historical
-coverage accounting, not a second implementation of the merge gate; the count
-is labelled with its method in the record. Late reviews cannot undo a degraded
-merge. The shared `codexEvidence` export from `auto-gate.js` supplies detection,
-quotation exclusions and verdict parsing, including all three observed limit
-wordings. Finding predicates and the hand gate's jq are unchanged.
+episode starts at the first observed known limit or transient failure, not the
+preceding verdict. An unrecognised response extends an episode already open but
+does not open one by itself. The sweep reads **both** `/pulls/N/comments` and
+`/issues/N/comments` unfiltered, plus review bodies. It reconstructs degraded
+merges using #3932's method: a reviewer-unavailable response before merge and no
+real verdict covering the actual merged head before merge, within a recorded
+episode. This is historical coverage accounting, not a second implementation of
+the merge gate; the count is labelled with its method in the record. Late
+reviews cannot undo a degraded merge. The shared `codexEvidence` export from
+`auto-gate.js` supplies structural classification, quotation/finding exclusions,
+and verdict parsing. Finding predicates and the hand gate's jq are unchanged.
 
 On a degraded evaluation, Auto Gate reads this record once and writes the
 outage duration to the job summary. It labels the watch's observation time;
 between sweeps, or if the record cannot be read, it falls back to the duration
 observed on the PR and says so. The record never authorizes a merge, and an
-unreadable record never changes a gate decision. Per-head limit evidence and
-maintainer approval are still required exactly as before.
+unreadable record never changes a gate decision. Per-head unavailable evidence
+and maintainer approval are still required exactly as before.
 
 The live task prompt must run the helper before its no-findings early exit.
 Until this helper lands on master, it skips that command when the file is absent.

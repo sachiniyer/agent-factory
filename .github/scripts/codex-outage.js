@@ -7,7 +7,11 @@ const MARKER = '<!-- codex-reviewer-outage:v1 ';
 // rolling 24h window cannot forget an outage and completed history stays fixed.
 const SCAN_SINCE = '2026-09-05T00:00:00.000Z';
 const time = (value) => Date.parse(value || '');
-const causeLabel = kind => ({ failure: 'transient failure', 'usage-limit': 'usage limit' })[kind] || 'unknown cause';
+const causeLabel = kind => ({
+  failure: 'transient failure',
+  'usage-limit': 'usage limit',
+  unrecognised: 'unrecognised response',
+})[kind] || 'unknown cause';
 const hours = (start, end) => (Math.max(0, time(end) - time(start)) / 3600000).toFixed(1);
 
 function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
@@ -38,7 +42,10 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
   }
   // Verdict wins a timestamp tie. A real verdict is recovery even if it reports
   // findings; recovery means review capacity returned, not that the code is clean.
-  events.sort((a, b) => time(a.time) - time(b.time) || Number(!!a.verdict) - Number(!!b.verdict));
+  events.sort((a, b) =>
+    time(a.time) - time(b.time) ||
+    Number(!!a.verdict) - Number(!!b.verdict) ||
+    Number(a.kind === 'unrecognised') - Number(b.kind === 'unrecognised'));
   const episodes = [];
   let active;
   for (const event of events) {
@@ -49,6 +56,10 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
         active = null;
       }
     } else {
+      // An unrecognised Codex response strongly says that no review happened,
+      // but by itself is weak evidence of a repository-wide outage. It extends
+      // an episode opened by a known limit/failure and never opens one alone.
+      if (!active && event.kind === 'unrecognised') continue;
       if (!active) {
         active = { start: event.time, end: null, latest: null, merged: [], causes: [] };
         episodes.push(active);
@@ -108,7 +119,11 @@ function readRecord(comment) {
 async function gateNotice({ github, context, since, kind = "usage-limit", now = new Date().toISOString() }) {
   let suffix = ' (repository record not yet updated; duration observed on this PR)';
   let start = since;
-  let description = kind === 'failure' ? 'unavailable after a transient failure' : 'usage-limited';
+  let description = kind === 'failure'
+    ? 'unavailable after a transient failure'
+    : kind === 'unrecognised'
+      ? 'unavailable after an unrecognised response'
+      : 'usage-limited';
   let observedCauses = '';
   try {
     const comments = await github.paginate(github.rest.issues.listComments, {

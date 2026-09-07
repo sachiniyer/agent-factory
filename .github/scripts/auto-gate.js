@@ -832,18 +832,16 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
   notes.push(...codex.notes);
 
-  // A reviewer that is out of quota cannot ever produce the verdict this gate
-  // waits for, so waiting is not caution — it is a permanent stop on the whole
-  // repository (#3378). Degrade to the maintainer-merge path that already
-  // exists for non-auto-merge authors: the decision check passes so branch
-  // protection does not sit red, and nothing merges automatically. This is
-  // reached ONLY on observed evidence — the reviewer's own usage-limit message
-  // on its latest comment. Silence stays blocking, because an absent verdict
-  // with no explanation is unknown, not proven-unavailable.
+  // A reviewer-unavailable response cannot provide the verdict this gate waits
+  // for, so waiting may be a permanent stop on the whole repository (#3378).
+  // Degrade to the maintainer-review path, which stays red until a maintainer
+  // supplies the explicit approval. This is reached ONLY when the reviewer's
+  // latest artifact classifies as unavailable. Silence stays blocking, because
+  // an absent verdict with no response is unknown, not proven-unavailable.
   //
   // It waives exactly ONE requirement: the verdict that cannot arrive. Every
   // other gate — unresolved findings, the play-tested label, required checks,
-  // mergeability — is independent of the reviewer's quota, and since
+  // mergeability — is independent of reviewer availability, and since
   // manualMergeRequired makes the decision pass, waiving them alongside it
   // would let "the reviewer is down" green-light a PR with a known finding.
   const otherBlockers = codex.reviewerUnavailable
@@ -1115,7 +1113,7 @@ async function reportDecision({ github, context, core, result, manual = false })
       : result.manualMergeRequired
         ? manualMergePasses
           ? result.degradedForUnavailableReviewer
-            ? `PASS: reviewer ${result.reviewerUnavailableKind === "failure" ? "unavailable after a transient failure" : "usage-limited"}; maintainer review and manual merge required`
+            ? `PASS: reviewer ${describeCodexUnavailable({ kind: result.reviewerUnavailableKind })}; maintainer review and manual merge required`
             : "PASS: maintainer review and manual merge required"
           : `BLOCKED: ${firstManualMergeBlocker(result) || "a manual merge has an unanswered blocker"}`
         : result.shouldMerge
@@ -4217,8 +4215,8 @@ async function evaluateCodex({
 }) {
   const notes = [];
   const reasons = [];
-  // Set only where it is proven: no exact-head verdict AND the reviewer's own
-  // usage-limit message on its latest comment. Anything else leaves it false.
+  // Set only where it is proven: no exact-head verdict AND the reviewer's latest
+  // artifact classifies as unavailable. Silence leaves it false.
   // reviewerUnavailableReason is the one reason a degradation may waive; the
   // caller uses it to tell that reason apart from every independent blocker.
   let reviewerUnavailable = false;
@@ -4307,14 +4305,18 @@ async function evaluateCodex({
     }));
   // Replies precede their empty enclosing review on a timestamp tie: GitHub
   // posts both in the same second. Later reviews still supersede the answer.
-  const codexUsageLimitArtifacts = [...codexInlineReplies, ...codexReviewArtifacts]
+  const codexAvailabilityArtifacts = [...codexInlineReplies, ...codexReviewArtifacts]
     // A completed row proves Codex answered again, even for an older head.
     // Ignore table edits and incomplete rows; only the row's own time counts.
     .flatMap((artifact) => {
       if (!String(artifact.body || "").trimStart().startsWith(CODEX_SUMMARY_MARKER)) return [artifact];
       return completedCodexSummaryRows(artifact)
         .map((row) => ({
-          body: "", created_at: new Date(row.time).toISOString(),
+          ...artifact,
+          // Preserve the authenticated summary body so the shared unavailable
+          // classifier can still recognise this synthetic row as a verdict.
+          // Only the row's time participates in latest-response ordering.
+          updated_at: new Date(row.time).toISOString(),
         }));
     })
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
@@ -4329,17 +4331,18 @@ async function evaluateCodex({
   const verdict = matchingReviewArtifacts[0];
 
   if (!verdict) {
-    // The reviewer saying it is out of quota is the only accepted evidence, and
-    // only on its latest response: an older usage-limit note that a later
-    // response superseded proves nothing about now. A read that fails throws out
-    // of retryRead rather than reaching here, so an unreadable list can never be
-    // mistaken for "no rate limit" — or for a rate limit.
+    // Only the latest response decides availability: an older unavailable note
+    // that a later verdict superseded proves nothing about now. Conversely, a
+    // later Codex response that is neither a review, finding nor verdict remains
+    // reviewer-unavailable instead of silently withdrawing the degradation
+    // (#3985). A read failure throws out of retryRead rather than reaching here,
+    // so an unreadable list can never be mistaken for silence or availability.
     //
     // Latest across issue comments, reviews AND inline replies — already sorted
     // newest-first. Reading only issue comments would miss a review posted after
     // a quota message, which proves the reviewer answered again and therefore
     // that the quota message no longer describes the present.
-    const latestCodexArtifact = codexUsageLimitArtifacts[0];
+    const latestCodexArtifact = codexAvailabilityArtifacts[0];
     const isInlineReply = codexInlineReplies.includes(latestCodexArtifact);
     // The detector is an unanchored substring match, so a review that merely
     // QUOTES the usage-limit phrase trips it — reviewing this very gate is
@@ -4350,20 +4353,25 @@ async function evaluateCodex({
     // gate lands on "keep blocking" rather than on a false degradation.
     const unavailable = classifyCodexUnavailableArtifact(latestCodexArtifact, isInlineReply);
     const rateLimited = Boolean(unavailable);
-    const cause = unavailable?.kind === "failure" ? "unavailable after a transient failure" : "usage-limited";
+    const cause = describeCodexUnavailable(unavailable);
     // …and it has to be evidence about THIS head, on the same freshness rule the
-    // verdict below is held to. A usage-limit answer only proves the reviewer was
-    // out of quota when it answered; a head pushed after it may simply not have
+    // verdict below is held to. A response only proves the reviewer was
+    // unavailable when it answered; a head pushed after it may simply not have
     // been reached yet, which is the silence case and must keep blocking. Without
-    // this the degradation is sticky: one usage-limit comment would put the PR in
-    // manual-merge mode for every later push, forever. Fails closed on an unknown
-    // order, like every other timestamp comparison in this file.
+    // this the degradation is sticky: one response would put the PR in
+    // maintainer-review mode for every later push, forever. Fails closed on an
+    // unknown order, like every other timestamp comparison in this file.
     const rateLimitTime = rateLimited ? reviewArtifactTime(latestCodexArtifact) : 0;
     reviewerUnavailable =
       rateLimited && headCurrentSince != null && rateLimitTime > headCurrentSince;
     const inlineSource = isInlineReply ? ` (inline comment ${latestCodexArtifact.id})` : "";
     if (reviewerUnavailable && isInlineReply) {
-      notes.push(`Codex ${unavailable.kind === "failure" ? "transient failure" : "usage-limit"} answer${inlineSource}`);
+      notes.push(`Codex ${cause}${inlineSource}`);
+    } else if (reviewerUnavailable && unavailable.kind === "unrecognised") {
+      // An approval removes the missing-verdict reason, so keep the observed
+      // first line in notes as well; every published decision still names what
+      // the classifier saw.
+      notes.push(`Codex ${cause}`);
     }
     const suffix = !rateLimited
       ? ""
@@ -4637,20 +4645,38 @@ async function evaluateCodex({
   };
 }
 
-// Shared by the health watch and gate. Keep review-shaped quotations out of
-// outage evidence, including finding-shaped inline replies.
+// Shared by the health watch and gate. Known vendor responses retain their
+// specific kinds; any other Codex response defaults to unrecognised after the
+// review, finding and verdict guards have had the first word (#3985).
 function classifyCodexUnavailableArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
-  const body = artifact?.body || "";
+  if (!artifact) return null;
+  const body = String(artifact.body || "");
   const looksLikeReviewArtifact = CODEX_REVIEW_RE.test(body) && REVIEWED_COMMIT_RE.test(body);
   // #3951: the transient failure carries the review heading but no verdict.
   // Share this classification with codex-outage.js; preserve the quote/finding guards.
   const failed = /^\s*Codex Review: Something went wrong\b/i.test(body);
   if (looksLikeReviewArtifact || (isInlineReply && CODEX_BODY_FINDING_RE.test(body))) return null;
+  // A completed summary row is a verdict too. evaluateCodex projects each row
+  // into latest-response ordering at the row's own time, while the health watch
+  // consumes the original artifact; both paths reach this same guard.
+  if (completedCodexSummaryRows(artifact).length > 0) return null;
   if (failed) return { kind: "failure" };
-  return codexReportsReviewUsageLimit(body) ? { kind: "usage-limit" } : null;
+  if (codexReportsReviewUsageLimit(body)) return { kind: "usage-limit" };
+  // GitHub pairs an inline reply with an empty enclosing review. The wrapper is
+  // transport, not a response, and has no first line to report as a cause.
+  if (!body.trim()) return null;
+  return { kind: "unrecognised", cause: body.split(/\r?\n/, 1)[0].trim() };
 }
 
-// Compatibility predicate for callers that only need availability, not cause.
+function describeCodexUnavailable(unavailable) {
+  if (unavailable?.kind === "failure") return "unavailable after a transient failure";
+  if (unavailable?.kind === "usage-limit") return "usage-limited";
+  const cause = unavailable?.cause ? `: ${unavailable.cause}` : "";
+  return `unavailable after an unrecognised response${cause}`;
+}
+
+// Compatibility name retained for callers that only need availability, not the
+// classified kind/cause. It now covers every reviewer-unavailable response.
 function isCodexUsageLimitArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
   return Boolean(classifyCodexUnavailableArtifact(artifact, isInlineReply));
 }
