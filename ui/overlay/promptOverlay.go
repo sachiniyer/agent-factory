@@ -33,8 +33,8 @@ const promptOverlayDefaultHeight = 6
 // prompt field (ui/task_pane_edit.go), the other multi-line prompt input in the
 // TUI. Tab and Esc both close the overlay KEEPING the text: this is a field of
 // the create form, not a dialog, so backing out of it must not destroy what was
-// typed. Cancelling the whole create stays on ctrl+c, exactly as in the naming
-// flow the overlay returns to.
+// typed. Ctrl+C cancels this field edit; the enclosing form decides where to
+// return and retains its previously saved value.
 //
 // Switching on msg.Type (not msg.String()) is load-bearing for paste: Bubble
 // Tea delivers a bracketed paste as one KeyRunes message whose contents are
@@ -93,8 +93,7 @@ func (p *PromptOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	return false
 }
 
-// IsCanceled reports whether the overlay closed on ctrl+c, which cancels the
-// whole session create rather than just this field.
+// IsCanceled reports whether Ctrl+C discarded this field edit.
 func (p *PromptOverlay) IsCanceled() bool {
 	return p.canceled
 }

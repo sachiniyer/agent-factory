@@ -290,20 +290,43 @@ func TestStartNewInstanceResetsThePromptField(t *testing.T) {
 		"beginning a create must start with an empty initial-prompt field")
 }
 
-// TestInitialPromptCtrlCCancelsTheCreate pins that ctrl+c keeps meaning "cancel
-// this create" inside the field, rather than being a dead key behind a modal.
-func TestInitialPromptCtrlCCancelsTheCreate(t *testing.T) {
+// Canceling a nested field preserves the enclosing create form (#4017 item 9).
+func TestInitialPromptCancelPreservesNamingForm(t *testing.T) {
 	h := newTestHome(t)
-	h.errBox.SetSize(120, 1)
-	startNaming(t, h, "abandoned")
+	h.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	inst := startNaming(t, h, "pending-session")
+	h.pendingPrompt = "saved prompt"
+	h.pendingProgram = "codex"
+	h.pendingBackend = "local"
+	h.pendingAccount = "work"
+	h.pendingAccountChosen = true
+	h.pendingForceRemote = true
+	h.namingPlaceholder = "suggested-name"
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyShiftTab})
-	typeRunes(t, h, "never mind")
+	typeRunes(t, h, " discarded edit")
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlC})
+	t.Logf("80x24 after cancel:\n%s", h.View())
 
-	assert.Equal(t, stateDefault, h.state, "ctrl+c must leave the naming form entirely")
-	assert.Nil(t, h.namingInstance, "ctrl+c must cancel the pending create")
+	require.Equal(t, stateNew, h.state, "cancel must return to naming")
+	require.Same(t, inst, h.namingInstance)
+	assert.Equal(t, "pending-session", inst.Title)
+	assert.Equal(t, "saved prompt", h.pendingPrompt)
+	assert.Equal(t, "codex", h.pendingProgram)
+	assert.Equal(t, "local", h.pendingBackend)
+	assert.Equal(t, "work", h.pendingAccount)
+	assert.True(t, h.pendingAccountChosen)
+	assert.True(t, h.pendingForceRemote)
+	assert.Equal(t, "suggested-name", h.namingPlaceholder)
 	assert.Nil(t, h.promptOverlay)
+	assert.Contains(t, h.menu.String(), "initial prompt")
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyShiftTab})
+	require.Equal(t, "saved prompt", h.promptOverlay.Value())
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlC})
+	assert.Equal(t, stateDefault, h.state, "ctrl+c in naming still cancels the create")
+	assert.Nil(t, h.namingInstance)
 }
 
 // TestWhitespaceOnlyPromptSendsNoPrompt mirrors the #973 title rule: a field
