@@ -342,6 +342,21 @@ text and the title tooltip. Tabs stay on one horizontally scrolling row. Control
 have a minimum 44px touch target, using the existing spacing tokens. Use the same
 colours, glyphs and focus model as desktop.
 
+While a terminal owns the keyboard, show a surface-raised bottom keybar above the
+soft keyboard, following the visual viewport and safe-area insets. Refit the
+terminal so its last row stays above the bar. Hide it when ownership leaves the
+terminal or the viewport exceeds 768px. Keep Ctrl, Alt, Esc, Tab and ^C on the
+first row and ← ↑ ↓ → on a second row: at 360px, the first row's targets are
+62.4px wide and 44px high with the standard insets and gaps.
+
+Ctrl and Alt apply once to the next typed character, including composed text.
+Double tap within 350ms to lock; tap again to release. An armed modifier has the
+selected-row surface, bold ink and accent edge. A locked modifier also has an
+accent outline and static ▸ marker. Buttons retain terminal focus on pointerdown;
+there is no animation. ^C always interrupts, even with a modifier armed.
+
+![Phone terminal with locked Ctrl](../assets/design/3977/phone-terminal-modifier-locked.png)
+
 ## Implementation reference
 
 The examples above are the specification; this compact reference is for implementers,

@@ -1,0 +1,38 @@
+  1) [demo] › selftest/web-demo.spec.ts:534:1 › web chrome · both themes ───────────────────────────
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: locator('.af-terminal-keybar:visible')
+    Expected: visible
+    Timeout: 30000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toBeVisible" with timeout 30000ms
+      - waiting for locator('.af-terminal-keybar:visible')
+
+
+       at phone-keybar.ts:21
+
+      19 |   const bar = page.locator(".af-terminal-keybar:visible");
+      20 |   const textarea = page.locator(".af-pane-host .xterm-helper-textarea").first();
+    > 21 |   await expect(bar).toBeVisible();
+         |                     ^
+      22 |   const geometry = await bar.evaluate(el => {
+      23 |     const rect = el.getBoundingClientRect();
+      24 |     return { fits: rect.left >= 0 && rect.right <= innerWidth,
+        at assertPhoneKeybar (/work/web/selftest/phone-keybar.ts:21:21)
+        at recordChrome (/work/web/selftest/web-demo.spec.ts:466:13)
+        at /work/web/selftest/web-demo.spec.ts:536:5
+
+    attachment #1: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/visual/web-demo-web-chrome-·-both-themes-demo/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/visual/web-demo-web-chrome-·-both-themes-demo/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [demo] › selftest/web-demo.spec.ts:534:1 › web chrome · both themes ────────────────────────────
+  4 passed (1.7m)
