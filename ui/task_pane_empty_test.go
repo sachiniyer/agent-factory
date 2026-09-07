@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
@@ -264,5 +266,25 @@ func TestTaskPaneUnavailableEditorExplainsLiveActions(t *testing.T) {
 		require.NotContains(t, plain, "Cannot load tasks")
 		require.Equal(t, "unsaved name", pane.editName.Value())
 		require.Equal(t, "unsaved prompt", pane.editPrompt.Value())
+	}
+}
+
+func TestTaskPaneUnavailableSanitizesControlBytes(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	for _, editing := range []bool{false, true} {
+		pane := NewTaskPane()
+		pane.SetSize(100, 40)
+		pane.SetTasks([]task.Task{{ID: "first", Name: "first"}})
+		pane.SetFocus(true)
+		if editing {
+			pane.EnterEditSelected()
+		}
+		pane.SetUnavailable(errors.New("bad\x1b[31mpath\r"))
+		rendered := pane.String()
+		require.Contains(t, rendered, "badpath")
+		require.NotContains(t, rendered, "\x1b", "error controls must not reach either renderer")
+		require.NotContains(t, rendered, "\r")
 	}
 }

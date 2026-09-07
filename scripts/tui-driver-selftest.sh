@@ -904,6 +904,13 @@ _expect_task_overlay_marker_context() {
         return 1
     fi
 
+    local side_by_side
+    side_by_side=$'╭───╮ ╭────────────────────╮\n│   │ │ Tasks              │\n│   │ │ n new · esc back   │\n╰───╯ ╰────────────────────╯'
+    if ! printf '%s\n' "$side_by_side" | _af_tasks_overlay_visible; then
+        _af_fail 'a complete foreign box left of the same-row task frame hid it'
+        return 1
+    fi
+
     local create_modal
     create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab/shift+tab fields · enter create · esc cancel · q quit   │\n╰────────────────────────────────────────────────────────────╯'
     if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then

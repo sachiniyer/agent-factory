@@ -947,10 +947,9 @@ _af_tab_count() {
 
 # _af_tasks_dialog_has <content-regex> reads a captured screen on stdin and
 # succeeds only when the marker is enclosed by one complete rounded dialog. The
-# first matching top edge establishes the outer geometry; only a later bottom
-# with the same start column and match width closes it, so nested boxes are
-# ignored and no footer-like pane row below the outer bottom is considered.
-# A completed frame without the marker is discarded so later dialogs can match.
+# scanner tracks side-by-side candidates independently, including edges sharing
+# a row. Only a matching bottom closes each candidate; nested boxes are ignored,
+# and footer-like text beyond a candidate bottom cannot revive it.
 # Force byte semantics for mawk/gawk parity, then count prefix characters by
 # removing UTF-8 continuation bytes. This makes a multibyte sidebar glyph count
 # as one column on both edges; double-width CJK glyphs remain out of scope.
@@ -964,48 +963,67 @@ _af_tasks_dialog_has() {
         # Columns are code points, not cells; a wide character left of the
         # overlay shifts the geometry. Session titles in the selftest fixtures
         # are ASCII by design; this is an accepted harness limitation.
-        function frame_row(row,    i, column, byte, result) {
+        function columns(text) {
+            gsub(/[\200-\277]/, "", text)
+            return length(text)
+        }
+        function frame_row(row, left, width,    i, column, byte, result) {
             column = -1
             result = ""
             for (i = 1; i <= length(row); i++) {
                 byte = substr(row, i, 1)
                 if (byte !~ /[\200-\277]/) { column++ }
-                if (column >= top_start && column < top_start + top_chars) {
+                if (column >= left && column < left + width) {
                     result = result byte
                 }
             }
             return result
         }
-        $0 ~ top_re {
-            if (!inside && !found) {
-                inside = 1
-                top_line = NR
-                match($0, top_re)
-                prefix = substr($0, 1, RSTART - 1)
-                gsub(/[\200-\277]/, "", prefix)
-                top_start = length(prefix)
-                # RLENGTH is byte-based under LC_ALL=C; both frame edges use
-                # the same UTF-8 glyph sequence, so equal byte widths suffice.
-                top_width = RLENGTH
-                edge = substr($0, RSTART, RLENGTH)
-                gsub(/[\200-\277]/, "", edge)
-                top_chars = length(edge)
-                matched = 0
-                last_footer = 0
-                next
+        {
+            rest = $0
+            offset = 0
+            # Register every outer top edge, not just the leftmost match.
+            while (match(rest, top_re)) {
+                edge_start = offset + RSTART - 1
+                edge_bytes = RLENGTH
+                left = columns(substr($0, 1, edge_start))
+                width = columns(substr(rest, RSTART, edge_bytes))
+                nested = 0
+                for (id in active) {
+                    if (left >= starts[id] && left + width <= starts[id] + widths[id]) {
+                        nested = 1
+                    }
+                }
+                if (!nested) {
+                    id = ++candidate
+                    active[id] = NR
+                    starts[id] = left
+                    widths[id] = width
+                }
+                offset = edge_start + edge_bytes
+                rest = substr($0, offset + 1)
             }
-        }
-        inside {
-            if (frame_row($0) ~ content_re) { matched = 1; last_footer = NR }
-            if ($0 ~ bottom_re) {
-                match($0, bottom_re)
-                prefix = substr($0, 1, RSTART - 1)
-                gsub(/[\200-\277]/, "", prefix)
-                bottom_start = length(prefix)
-                if (bottom_start == top_start && RLENGTH == top_width) {
-                    if (matched && last_footer > top_line && last_footer < NR) { found = 1 }
-                    inside = 0
-                    next
+            for (id in active) {
+                if (NR <= active[id]) { continue }
+                if (frame_row($0, starts[id], widths[id]) ~ content_re) { footer[id] = NR }
+                rest = $0
+                offset = 0
+                # A same-row foreign bottom must not hide this candidates edge.
+                while (match(rest, bottom_re)) {
+                    edge_start = offset + RSTART - 1
+                    edge_bytes = RLENGTH
+                    left = columns(substr($0, 1, edge_start))
+                    width = columns(substr(rest, RSTART, edge_bytes))
+                    if (left == starts[id] && width == widths[id]) {
+                        if (footer[id] > active[id] && footer[id] < NR) { found = 1 }
+                        delete active[id]
+                        delete starts[id]
+                        delete widths[id]
+                        delete footer[id]
+                        break
+                    }
+                    offset = edge_start + edge_bytes
+                    rest = substr($0, offset + 1)
                 }
             }
         }

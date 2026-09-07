@@ -22,7 +22,11 @@ func (s *TaskPane) SetUnavailable(err error) bool {
 	previous := s.unavailable
 	s.unavailable = ""
 	if err != nil {
-		s.unavailable = err.Error()
+		s.unavailable = sanitizeError(err.Error())
+		// A control-only error still represents a failed load.
+		if s.unavailable == "" {
+			s.unavailable = "Task load failed"
+		}
 	}
 	return previous != s.unavailable
 }
