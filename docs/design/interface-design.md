@@ -424,12 +424,13 @@ roles/steps. Treat changing that budget as a design decision, not a customizatio
 feature. No config, API or end-user editor exposes token values.
 
 `go run ./scripts/gen-design` produces `web/src/tokens.css`, `ui/theme/theme.go`,
-the identical docs CSS copy and `docs/design/style-guide.md`. CSS has exactly
-23 custom properties per theme, scoped to `[data-af-theme="light"]` and
-`[data-af-theme="dark"]`. System selects one of those scopes. Go supplies the
-same adaptive light/dark roles and prescribed lipgloss component styles. The
-maps are internal implementation values, not user override facilities. The live
-`ui.Theme` and browser theme code remain untouched in this foundation slice.
+`docs/stylesheets/tokens.css` and `docs/design/style-guide.md`; it also stamps
+this page's contrast report, the HTML shell metas and the manifest colors. CSS has
+exactly 23 custom properties per theme, scoped to `[data-af-theme="light"]` and
+`[data-af-theme="dark"]`. The docs CSS adds Material's default/slate scheme
+selectors to the same declarations. System selects one of the two palettes. Go
+supplies the same adaptive light/dark roles and prescribed lipgloss component
+styles. The maps are internal implementation values, not user override facilities.
 
 `make docs` calls the same `scripts/gen-docs.sh` entry point as reference/plugin
 generation. `go run ./scripts/gen-design --check` compares outputs without writing.
