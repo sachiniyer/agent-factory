@@ -951,16 +951,23 @@ _af_tab_count() {
 # first matching top edge establishes the outer geometry; only a later bottom
 # with the same start column and match width closes it, so nested boxes are
 # ignored and no footer-like pane row below the outer bottom is considered.
+# Force byte semantics for mawk/gawk parity, then count prefix characters by
+# removing UTF-8 continuation bytes. This makes a multibyte sidebar glyph count
+# as one column on both edges; double-width CJK glyphs remain out of scope.
 _af_tasks_dialog_has() {
     local content_re="$1"
-    awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" \
+    LC_ALL=C awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" \
         -v content_re="$content_re" '
         $0 ~ top_re {
             if (!inside && !done) {
                 inside = 1
                 top_line = NR
-                top_start = index($0, "╭")
+                prefix = substr($0, 1, index($0, "╭") - 1)
+                gsub(/[\200-\277]/, "", prefix)
+                top_start = length(prefix)
                 match($0, top_re)
+                # RLENGTH is byte-based under LC_ALL=C; both frame edges use
+                # the same UTF-8 glyph sequence, so equal byte widths suffice.
                 top_width = RLENGTH
                 matched = 0
                 last_footer = 0
@@ -971,7 +978,9 @@ _af_tasks_dialog_has() {
         inside {
             if ($0 ~ content_re) { matched = 1; last_footer = NR }
             if ($0 ~ bottom_re) {
-                bottom_start = index($0, "╰")
+                prefix = substr($0, 1, index($0, "╰") - 1)
+                gsub(/[\200-\277]/, "", prefix)
+                bottom_start = length(prefix)
                 match($0, bottom_re)
                 last_bottom = NR
                 if (bottom_start == top_start && RLENGTH == top_width) {

@@ -840,7 +840,7 @@ step "af_select handles a target with an open pane (#1996)"  _expect_af_select_o
 # compact run action is discoverable.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_task_overlay_marker_context() {
-    local pane foreign_modal list_modal compact_list_modal nested_edit footer_below no_footer_below scrolled_edit
+    local pane foreign_modal list_modal compact_list_modal nested_edit footer_below no_footer_below glyph_footer_below glyph_no_footer_below scrolled_edit
     pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
     if printf '%s\n' "$pane" | _af_tasks_overlay_visible; then
         _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
@@ -880,6 +880,18 @@ _expect_task_overlay_marker_context() {
     no_footer_below=$'╭────────────────────╮\n│  Agent prompt      │\n╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
     if printf '%s\n' "$no_footer_below" | _af_tasks_overlay_visible; then
         _af_fail 'footer-like pane output below a foreign frame satisfied the task marker'
+        return 1
+    fi
+
+    glyph_footer_below=$'● agent  ╭────────────────────╮\n  shell  │  Tasks             │\n◆ beta   │  n new · esc back  │\n         ╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if ! printf '%s\n' "$glyph_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'multibyte-prefix task frame with footer-like output below was rejected'
+        return 1
+    fi
+
+    glyph_no_footer_below=$'● agent  ╭────────────────────╮\n  shell  │  Tasks             │\n◆ beta   │                    │\n         ╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if printf '%s\n' "$glyph_no_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'multibyte-prefix frame with only footer-like output below was accepted'
         return 1
     fi
 
