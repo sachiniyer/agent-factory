@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -258,6 +259,21 @@ func TestSchedulePickerCustomPreviewShowsNextRun(t *testing.T) {
 	assert.NotContains(t, out, "Next run",
 		"a half-typed expression has no next run to show")
 	assert.Contains(t, out, "Schedule:", "the rest of the block still renders")
+}
+
+func TestAutomationsPaneTestClockReachesOwnedSchedulePicker(t *testing.T) {
+	a := NewAutomationsPane(store.NewProjection())
+	a.SetNowForTest(func() time.Time {
+		return time.Date(2026, time.August, 4, 12, 0, 0, 0, time.UTC)
+	})
+
+	pane := a.TaskPane()
+	pane.initForm(nil, "")
+	pane.schedule.setType(schedule.Custom)
+	pane.schedule.raw.SetValue("0 0 1 1 *")
+	pane.schedule.setWidth(80)
+
+	require.Contains(t, stripANSI(pane.schedule.render()), "Next run Jan 01 00:00")
 }
 
 // TestSchedulePickerCustomPreviewOmitsUnsatisfiableNextRun covers the cron

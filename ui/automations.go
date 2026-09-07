@@ -112,6 +112,13 @@ func (a *AutomationsPane) TaskPane() *TaskPane {
 	return a.taskPane
 }
 
+// SetNowForTest replaces the wall clock used by the rail and its owned task
+// editor. Production leaves the clock installed by NewAutomationsPane intact.
+func (a *AutomationsPane) SetNowForTest(now func() time.Time) {
+	a.now = now
+	a.taskPane.setNowForTest(now)
+}
+
 // SetRect implements layout.Pane.
 func (a *AutomationsPane) SetRect(r layout.Rect) {
 	a.rect = r

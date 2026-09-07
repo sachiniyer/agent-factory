@@ -21,9 +21,9 @@ func newTestAutomations(tasks []task.Task) *AutomationsPane {
 	proj := store.NewProjection()
 	proj.SetTasks(tasks)
 	a := NewAutomationsPane(proj)
-	a.now = func() time.Time {
+	a.SetNowForTest(func() time.Time {
 		return time.Date(2026, time.July, 2, 2, 0, 0, 0, time.UTC)
-	}
+	})
 	return a
 }
 
