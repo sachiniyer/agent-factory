@@ -49,7 +49,14 @@ func TestKeysDisplayConfigRoundTrip(t *testing.T) {
 							Action string   `json:"action"`
 							Keys   []string `json:"keys"`
 						}
-						if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+						var envelope map[string]json.RawMessage
+						if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+							t.Fatalf("af keys --json must return an envelope: %v", err)
+						}
+						if len(envelope) != 2 || string(envelope["error"]) != "null" {
+							t.Fatalf("want {data: [...], error: null}, got %s", out.String())
+						}
+						if err := json.Unmarshal(envelope["data"], &rows); err != nil {
 							t.Fatal(err)
 						}
 						for _, row := range rows {
@@ -80,5 +87,51 @@ func TestKeysDisplayConfigRoundTrip(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestKeysJSONConfigErrorEnvelope(t *testing.T) {
+	tempAFHome(t)
+	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
+	if err := os.WriteFile(path, []byte("[keys]\nnew = \"alt+\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	keysCmd.SetOut(&out)
+	keysCmd.SetErr(&errOut)
+	root := keysCmd.Root()
+	rootErrors, rootUsage := root.SilenceErrors, root.SilenceUsage
+	cmdErrors, cmdUsage := keysCmd.SilenceErrors, keysCmd.SilenceUsage
+	t.Cleanup(func() {
+		keysCmd.SetOut(nil)
+		keysCmd.SetErr(nil)
+		_ = keysCmd.Flags().Set("json", "false")
+		root.SilenceErrors, root.SilenceUsage = rootErrors, rootUsage
+		keysCmd.SilenceErrors, keysCmd.SilenceUsage = cmdErrors, cmdUsage
+	})
+	if err := keysCmd.ParseFlags([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := keysCmd.RunE(keysCmd, nil); err == nil {
+		t.Fatal("invalid config must fail")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("failure wrote stdout: %s", out.String())
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(errOut.Bytes(), &envelope); err != nil {
+		t.Fatalf("stderr must contain the error envelope: %v; got %q", err, errOut.String())
+	}
+	if len(envelope) != 2 || string(envelope["data"]) != "null" {
+		t.Fatalf("want {data: null, error: {...}}, got %s", errOut.String())
+	}
+	var failure struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(envelope["error"], &failure); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(failure.Message, path) {
+		t.Fatalf("config error must name %s: %s", path, failure.Message)
 	}
 }

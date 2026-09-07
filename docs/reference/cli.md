@@ -1348,7 +1348,7 @@ actions such as pane_prev/pane_next are included; their default arrow keys
 apply only while a workspace pane has focus.
 
 Key values use config spellings you can paste into [keys]. With --json,
-the keys and default arrays use those same spellings.
+bindings are wrapped in {data,error}; keys/default keep those spellings.
 
 ```
 af keys [flags]
@@ -1358,7 +1358,7 @@ af keys [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--json` |  | Print bindings as JSON using config key spellings |
+| `--json` |  | Wrap output in the {data,error} JSON envelope |
 
 **Global flags**
 
