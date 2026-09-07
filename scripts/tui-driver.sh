@@ -961,6 +961,9 @@ _af_tasks_dialog_has() {
         # Slice by character columns while preserving UTF-8 for content_re.
         # A continuation byte belongs to the preceding character, including
         # all three bytes of each bounding │. Columns are zero-based.
+        # Columns are code points, not cells; a wide character left of the
+        # overlay shifts the geometry. Session titles in the selftest fixtures
+        # are ASCII by design; this is an accepted harness limitation.
         function frame_row(row,    i, column, byte, result) {
             column = -1
             result = ""
@@ -989,8 +992,8 @@ _af_tasks_dialog_has() {
                 top_chars = length(edge)
                 matched = 0
                 last_footer = 0
+                next
             }
-            next
         }
         inside {
             if (frame_row($0) ~ content_re) { matched = 1; last_footer = NR }

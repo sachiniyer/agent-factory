@@ -221,3 +221,18 @@ func TestTaskPaneUnavailableMutators(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskPaneUnavailableAllowsCreation(t *testing.T) {
+	pane := NewTaskPane()
+	pane.createPath = newGitRepo(t)
+	pane.SetFocus(true)
+	pane.SetUnavailable(errors.New("task file is unreadable"))
+	pane.HandleKeyPress(keyRunes("n"))
+	require.True(t, pane.IsCreating())
+	pane.editName.SetValue("new task")
+	pane.editPrompt.SetValue("do it")
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, pane.HasPendingCreate(), "recovery must allow creating a new task")
+	require.Empty(t, pane.GetTasks(), "creation must not mutate retained task data")
+	require.False(t, pane.IsDirty())
+}

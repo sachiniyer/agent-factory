@@ -883,6 +883,13 @@ _expect_task_overlay_marker_context() {
         return 1
     fi
 
+    local footer_with_top
+    footer_with_top=$'╭────────────────────╮\n│  Tasks             │\n│  n new · esc back  │ ╭──╮\n╰────────────────────╯'
+    if ! printf '%s\n' "$footer_with_top" | _af_tasks_overlay_visible; then
+        _af_fail 'a pane top-edge fragment beside the footer hid the real task dialog'
+        return 1
+    fi
+
     local create_modal
     create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab/shift+tab fields · enter create · esc cancel · q quit   │\n╰────────────────────────────────────────────────────────────╯'
     if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then
