@@ -10,7 +10,7 @@ Button comparison: pre-#3972 dark borders were #a1aaba against #434c5e; master c
 
 One-time account explanation: accounts are agent identities, not configuration keys. af runs the agent’s own login in that account’s directory and does not read, store or forward its credential. Follow the URL/device-code instructions in the login pane. The empty account choice inherits configured defaults; it is not an explicit ambient override. Existing option values and request omission rules remain unchanged.
 
-Preservation: local archive retains owned worktrees and refs. Sandbox archive publishes work before removal. Ordinary sandbox restore preserves/pushes work before replacement and refuses uncertain preservation. Session deletion permanently removes its record and af-owned resources; external checkouts and user-owned branches follow existing ownership rules. CLI/wire names and force behavior are unchanged.
+Preservation: local archive retains owned worktrees and refs. Sandbox archive publishes work before removal. Ordinary sandbox restore preserves/pushes work before replacement and refuses uncertain preservation. Session deletion permanently removes its record, af-owned worktree and af-created branch. Uncommitted changes and unpushed commits in them are lost; archive instead to keep them. External checkouts and pre-existing branches follow existing ownership rules. CLI/wire names and force behavior are unchanged.
 
 All app/daemon execution and captures use containers. No dev-install, host daemon, reset, or AF-home mutation is part of this work.
 
@@ -34,3 +34,5 @@ Before/after examples (before links use the base-commit goldens):
 | Deletion | [Before](https://raw.githubusercontent.com/sachiniyer/agent-factory/e4e67cb294b70e215067e7410c4dbf3035f08b02/web/selftest/goldens/kill-confirmation-dark.png) | [After](../../selftest/goldens/kill-confirmation-dark.png) |
 | Phone creation | [Before](https://raw.githubusercontent.com/sachiniyer/agent-factory/e4e67cb294b70e215067e7410c4dbf3035f08b02/web/selftest/goldens/phone-create.png) | [After](../../selftest/goldens/phone-create.png) |
 | Accounts | [Before](https://raw.githubusercontent.com/sachiniyer/agent-factory/e4e67cb294b70e215067e7410c4dbf3035f08b02/web/selftest/goldens/config-accounts-dark.png) | [After](../../selftest/goldens/config-accounts-dark.png) |
+
+Review correction: deletion explicitly warns about losing uncommitted changes and unpushed commits and offers Archive. Zero-live project removal names retained archives/tasks and when the project remains in the switcher. Read the four updated goldens: both kill-confirmation dialogs grow to fit the warning; both kill-failed error crops grow from 126 to 127 pixels due to centering, with error text unchanged. Unrelated demo capture drift was not rebaselined.

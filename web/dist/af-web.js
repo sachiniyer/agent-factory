@@ -10716,7 +10716,7 @@ function confirmModal(opts) {
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-primary",
-      body: "Permanently delete the session and resources owned by af. User-owned work stays."
+      body: "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
@@ -10753,7 +10753,10 @@ function confirmDeleteProjectModal(opts) {
     confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
-  const message = opts.sessionCount === 0 ? "Remove the empty project. Keep the repo; add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  let message = opts.sessionCount === 0 ? "No live sessions to archive. Remove the project; the repo stays and you can add it again." : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  if (opts.sessionCount === 0) {
+    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
+  }
   body.append(h("p", { class: "af-modal-text" }, message));
   const card = handle.el.firstElementChild;
   asForm(card, () => {
