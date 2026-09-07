@@ -28,6 +28,7 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
       aboveKeyboard: Math.abs(rect.bottom - (visualViewport!.offsetTop + visualViewport!.height)) < 2 };
   });
   expect(geometry).toEqual({ fits: true, lastFits: true, oneRow: true, targets: true, aboveKeyboard: true });
+  await assertPhoneBarModifiers(page, stream);
   let before = stream();
   await bar.getByRole("button", { name: "Arrows", exact: true }).click();
   await expect(textarea).toBeFocused();
@@ -90,4 +91,39 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
   await expect(page.locator(".af-terminal-keybar")).toHaveCount(0);
   await textarea.focus();
   await expect(bar).toBeVisible();
+}
+
+/** The focused regression also runs with the ordinary selftest cat fixture. */
+export async function assertPhoneBarModifiers(page: Page, stream: () => string): Promise<void> {
+  const bar = page.locator(".af-terminal-keybar:visible");
+  // Navigation between rows is not a keypress and must retain the one-shot.
+  for (const [modifier, arrow, bytes] of [
+    ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],
+  ]) {
+    const before = stream();
+    const button = bar.getByRole("button", { name: modifier, exact: true });
+    await button.click();
+    await expect(button).toHaveAttribute("data-state", "once");
+    await bar.getByRole("button", { name: "Arrows", exact: true }).click();
+    await bar.getByRole("button", { name: arrow, exact: true }).click();
+    await bar.getByRole("button", { name: "Back", exact: true }).click();
+    await expect(button).toHaveAttribute("data-state", "off");
+    await expect(button).toHaveAttribute("aria-description", "Double tap to lock");
+    await page.keyboard.insertText("ls");
+    await expect.poll(stream).toBe(before + bytes + "ls");
+  }
+  const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
+  await ctrl.dblclick({ delay: 80 });
+  const before = stream();
+  await bar.getByRole("button", { name: "Arrows", exact: true }).click();
+  await bar.getByRole("button", { name: "↑", exact: true }).click();
+  await bar.getByRole("button", { name: "Back", exact: true }).click();
+  await expect.poll(stream).toBe(before + "\x1b[1;5A");
+  await expect(ctrl).toHaveAttribute("data-state", "locked");
+  await ctrl.click();
+  await bar.getByRole("button", { name: "Alt", exact: true }).click();
+  await bar.getByRole("button", { name: "Tab", exact: true }).click();
+  await page.keyboard.insertText("z");
+  await expect.poll(stream).toBe(before + "\x1b[1;5A\x1b\tz");
+  await expect(bar.getByRole("button", { name: "Alt", exact: true })).toHaveAttribute("data-state", "off");
 }

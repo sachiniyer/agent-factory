@@ -1,9 +1,16 @@
-/** Phone terminal controls. All output still enters xterm's public input path. */
+/** Phone terminal controls and xterm-compatible key encodings. */
 export function keyBytes(key: string, ctrl = false, alt = false, applicationCursor = false): string {
   const arrows: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
   const special: Record<string, string> = { Esc: "\x1b", Tab: "\t", "^C": "\x03" };
-  if (arrows[key]) return `\x1b${applicationCursor ? "O" : "["}${arrows[key]}`;
-  if (special[key]) return special[key];
+  if (arrows[key]) {
+    const modifier = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    // Modified arrows always use CSI, including in application-cursor mode.
+    return modifier > 1 ? `\x1b[1;${modifier}${arrows[key]}`
+      : `\x1b${applicationCursor ? "O" : "["}${arrows[key]}`;
+  }
+  // Ctrl+Tab has no legacy byte form: send Tab and consume the one-shot.
+  // Esc and ^C already encode control bytes; Alt prefixes all three with ESC.
+  if (special[key]) return (alt ? "\x1b" : "") + special[key];
   const code = key.toUpperCase().charCodeAt(0);
   const text = ctrl && /^[\x40-\x7f]$/.test(key) && code >= 64 && code <= 95 ? String.fromCharCode(code & 31) : key;
   return (alt ? "\x1b" : "") + text;
@@ -24,15 +31,16 @@ export class StickyModifiers {
     this.values = { Ctrl: "off", Alt: "off" };
     this.tapped = { Ctrl: -Infinity, Alt: -Infinity };
   }
+  key(key: string, applicationCursor = false): string {
+    const result = keyBytes(key, this.values.Ctrl !== "off", this.values.Alt !== "off", applicationCursor);
+    for (const modifier of ["Ctrl", "Alt"] as const) if (this.values[modifier] === "once") this.values[modifier] = "off";
+    return result;
+  }
   input(text: string): string {
     // xterm emits complete escape sequences, control keys and terminal replies.
     // Those are not the next soft-keyboard character; never rewrite their tails.
     if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
-    return Array.from(text, char => {
-      const result = keyBytes(char, this.values.Ctrl !== "off", this.values.Alt !== "off");
-      for (const key of ["Ctrl", "Alt"] as const) if (this.values[key] === "once") this.values[key] = "off";
-      return result;
-    }).join("");
+    return Array.from(text, char => this.key(char)).join("");
   }
 }
 
@@ -74,7 +82,8 @@ export class TerminalKeybar {
   private readonly originalMaxHeight: string;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
-    private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
+    private readonly refit: () => void, private readonly applicationCursor: () => boolean,
+    private readonly sendKey: (data: string) => void) {
     this.originalMaxHeight = host.style.maxHeight;
     this.bar.className = "af-terminal-keybar";
     this.bar.setAttribute("role", "group");
@@ -92,7 +101,7 @@ export class TerminalKeybar {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else this.input(keyBytes(key, false, false, this.applicationCursor()));
+          else this.sendKey(this.modifiers.key(key, this.applicationCursor()));
           this.paint();
         };
         button.addEventListener("pointerdown", event => keybarPointerDown(event, act));
@@ -135,7 +144,7 @@ export class TerminalKeybar {
       const state = this.modifiers.state(key);
       button.dataset.state = state;
       button.setAttribute("aria-pressed", String(state !== "off"));
-      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next character" : "Double tap to lock");
+      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
       button.title = state === "locked" ? `${key} locked · Tap to release` : `${key} · Double tap to lock`;
       button.textContent = state === "locked" ? `▸ ${key}` : key;
     }

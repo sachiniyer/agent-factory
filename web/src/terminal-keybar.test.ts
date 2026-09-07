@@ -54,3 +54,49 @@ test("one-row keybar uses six primary targets and a replacement arrows row at 36
   assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]]);
   for (const row of KEYBAR_ROWS) assert.ok(row.length * 44 + (row.length - 1) * 4 + 16 <= 360);
 });
+
+test("keyBytes drops ctrl/alt for arrows and specials", () => {
+  assert.notEqual(keyBytes("←", false, true), "\x1b[D");
+  assert.notEqual(keyBytes("Tab", false, true), "\t");
+});
+
+test("an armed one-shot survives a keybar arrow press and hits the NEXT letter", () => {
+  const m = new StickyModifiers();
+  m.tap("Ctrl", 0);
+  // Bar keys use the explicit source path; xterm replies keep input().
+  assert.equal(m.key("←"), "\x1b[1;5D");
+  assert.equal(m.state("Ctrl"), "off");
+  assert.equal(m.input("l"), "l");
+});
+
+test("bar keys apply and consume one-shots before the following letter", () => {
+  for (const [modifier, key, bytes] of [
+    ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],
+    ["Alt", "Tab", "\x1b\t"], ["Alt", "Esc", "\x1b\x1b"],
+    ["Alt", "^C", "\x1b\x03"], ["Ctrl", "Tab", "\t"],
+    ["Ctrl", "Esc", "\x1b"], ["Ctrl", "^C", "\x03"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(modifier, 0);
+    assert.equal(state.key(key), bytes);
+    assert.equal(state.state(modifier), "off");
+    assert.equal(state.input("ls"), "ls");
+  }
+});
+
+test("locked Ctrl survives an arrow and combined modifiers use CSI in both cursor modes", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0); state.tap("Ctrl", 100);
+  assert.equal(state.key("↑", true), "\x1b[1;5A");
+  assert.equal(state.state("Ctrl"), "locked");
+  state.tap("Alt", 200);
+  assert.equal(state.key("←"), "\x1b[1;7D");
+  assert.equal(state.state("Alt"), "off");
+  assert.equal(state.state("Ctrl"), "locked");
+  for (const app of [false, true]) {
+    for (const [key, suffix] of [["↑", "A"], ["↓", "B"], ["→", "C"], ["←", "D"]]) {
+      assert.equal(keyBytes(key, true, true, app), `\x1b[1;7${suffix}`);
+      assert.equal(keyBytes(key, false, false, app), `\x1b${app ? "O" : "["}${suffix}`);
+    }
+  }
+});
