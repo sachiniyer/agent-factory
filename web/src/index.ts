@@ -1972,6 +1972,7 @@ const actions = {
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
+  closePane: () => splitView.closeFocusedPane(),
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,
