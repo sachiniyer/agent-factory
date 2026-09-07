@@ -8,53 +8,71 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
-func comparePrompt(id, file string, readTask func() ([]byte, error)) error {
-	expected, err := os.ReadFile(file)
-	if err != nil {
-		return fmt.Errorf("read prompt file: %w", err)
+func runCommand(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		diagnostic := strings.TrimSpace(stderr.String())
+		if name == "af" {
+			var envelope struct {
+				Error json.RawMessage `json:"error"`
+			}
+			if json.Unmarshal(stderr.Bytes(), &envelope) == nil && len(envelope.Error) > 0 && string(envelope.Error) != "null" {
+				diagnostic = fmt.Sprintf("task read returned an error: %s; stderr: %s", envelope.Error, diagnostic)
+			}
+		}
+		return nil, fmt.Errorf("%s %s: %w; stderr: %s", name, strings.Join(args, " "), err, diagnostic)
 	}
-	raw, err := readTask()
+	return stdout.Bytes(), nil
+}
+
+func comparePrompt(id, file string) (bool, error) {
+	if _, err := runCommand("git", "fetch", "origin", "master"); err != nil {
+		return false, err
+	}
+	expected, err := runCommand("git", "show", "origin/master:"+file)
 	if err != nil {
-		return fmt.Errorf("read task: %w", err)
+		return false, err
+	}
+	raw, err := runCommand("af", "tasks", "get", id, "--json")
+	if err != nil {
+		return false, fmt.Errorf("read task: %w", err)
 	}
 	var response struct {
 		Data *struct {
 			ID     string  `json:"id"`
 			Prompt *string `json:"prompt"`
 		} `json:"data"`
-		Error json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &response); err != nil {
-		return fmt.Errorf("decode task: %w", err)
-	}
-	if len(response.Error) > 0 && string(response.Error) != "null" {
-		return fmt.Errorf("task read returned an error: %s", response.Error)
+		return false, fmt.Errorf("decode task: %w", err)
 	}
 	if response.Data == nil || response.Data.ID != id || response.Data.Prompt == nil {
-		return fmt.Errorf("task read did not return prompt for %s", id)
+		return false, fmt.Errorf("task read did not return prompt for %s", id)
 	}
-	if !bytes.Equal(expected, []byte(*response.Data.Prompt)) {
-		return fmt.Errorf("live prompt differs from %s (byte comparison)", file)
-	}
-	return nil
+	return !bytes.Equal(expected, []byte(*response.Data.Prompt)), nil
 }
 
 func main() {
 	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: prompt-drift <task-id> <prompt-file>")
+		fmt.Println("TOOLING: could not establish master's version (usage: prompt-drift <task-id> <repo-relative-prompt-file>)")
 		os.Exit(2)
 	}
 	id, file := os.Args[1], os.Args[2]
-	err := comparePrompt(id, file, func() ([]byte, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		return exec.CommandContext(ctx, "af", "tasks", "get", id, "--json").Output()
-	})
+	drift, err := comparePrompt(id, file)
 	if err != nil {
-		fmt.Printf("FINDING: task %s prompt drift check: %v. Report only; do not update the task.\n", id, err)
+		fmt.Printf("TOOLING: task %s prompt drift check: could not establish master's version (%v). Report only; do not update the task.\n", id, err)
+		os.Exit(2)
+	}
+	if drift {
+		fmt.Printf("FINDING: task %s live prompt differs from origin/master:%s (byte comparison). Report only; do not update the task.\n", id, file)
 		os.Exit(1)
 	}
 }
