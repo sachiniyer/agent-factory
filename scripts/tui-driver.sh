@@ -980,10 +980,10 @@ _af_tasks_dialog_has() {
             if (!inside && !found) {
                 inside = 1
                 top_line = NR
-                prefix = substr($0, 1, index($0, "╭") - 1)
+                match($0, top_re)
+                prefix = substr($0, 1, RSTART - 1)
                 gsub(/[\200-\277]/, "", prefix)
                 top_start = length(prefix)
-                match($0, top_re)
                 # RLENGTH is byte-based under LC_ALL=C; both frame edges use
                 # the same UTF-8 glyph sequence, so equal byte widths suffice.
                 top_width = RLENGTH
@@ -998,10 +998,10 @@ _af_tasks_dialog_has() {
         inside {
             if (frame_row($0) ~ content_re) { matched = 1; last_footer = NR }
             if ($0 ~ bottom_re) {
-                prefix = substr($0, 1, index($0, "╰") - 1)
+                match($0, bottom_re)
+                prefix = substr($0, 1, RSTART - 1)
                 gsub(/[\200-\277]/, "", prefix)
                 bottom_start = length(prefix)
-                match($0, bottom_re)
                 if (bottom_start == top_start && RLENGTH == top_width) {
                     if (matched && last_footer > top_line && last_footer < NR) { found = 1 }
                     inside = 0

@@ -80,3 +80,17 @@ func TestUnavailableTasksRefusePendingDeleteConfirmation(t *testing.T) {
 	require.Len(t, pane.GetTasks(), 1)
 	require.Len(t, pane.ConsumeDeleted(), 1)
 }
+
+func TestUnavailableTasksEditorCapture(t *testing.T) {
+	h := newTestHome(t)
+	h.termWidth, h.termHeight = 80, 24
+	h.relayout()
+	pane := h.automations.TaskPane()
+	pane.SetTasks([]task.Task{{ID: "review", Name: "Review changes", Prompt: "Keep my unsaved prompt"}})
+	h.showTasksOverlay()
+	pane.SetUnavailable(errors.New("task file is unreadable"))
+	frame := h.View()
+	t.Logf("80x24 unavailable editor:\n%s", frame)
+	require.Contains(t, pane.String(), "Cannot load tasks")
+	require.NotContains(t, pane.String(), "enter save")
+}

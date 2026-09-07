@@ -268,6 +268,7 @@ func (s *TaskPane) updateEditFocus() {
 }
 
 func (s *TaskPane) renderEditMode() string {
+	unavailable := s.unavailable != "" && s.editing && !s.creating
 	t := CurrentTheme()
 	editTitleStyle := DialogTitleStyle().
 		MarginBottom(1)
@@ -419,7 +420,9 @@ func (s *TaskPane) renderEditMode() string {
 		submitLabel = " Create "
 	}
 	markStart(taskFocusSave)
-	if s.focusIndex == taskFocusSave {
+	if unavailable {
+		b.WriteString(hintStyle.Render("Save unavailable"))
+	} else if s.focusIndex == taskFocusSave {
 		b.WriteString(focusedButtonStyle.Render(submitLabel))
 	} else {
 		b.WriteString(buttonStyle.Render(submitLabel))
@@ -434,6 +437,10 @@ func (s *TaskPane) renderEditMode() string {
 			hint = "tab fields · enter · esc cancel · " + quitHint
 		}
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
+	} else if unavailable {
+		b.WriteString(s.unavailableEditNotice())
+		b.WriteString("\n")
+		b.WriteString(hintStyle.Render(fitLine("tab fields · typing · esc back", s.width)))
 	} else {
 		hint := "tab/shift+tab fields · enter save"
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
@@ -491,9 +498,13 @@ func (s *TaskPane) clampFormToHeight(content string, focusStart, focusEnd int) s
 	if maxH < 3 {
 		maxH = 3
 	}
-	hint := lines[len(lines)-1]
-	body := lines[:len(lines)-1]
-	visible := maxH - 1
+	footerRows := 1
+	if s.unavailable != "" && s.editing && !s.creating {
+		footerRows += strings.Count(s.unavailableEditNotice(), "\n") + 1
+	}
+	hint := strings.Join(lines[len(lines)-footerRows:], "\n")
+	body := lines[:len(lines)-footerRows]
+	visible := maxH - footerRows
 	if visible > len(body) {
 		// The raised floor can exceed a short body (degenerate heights); a
 		// window larger than the body would slice past its end.

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
@@ -71,4 +72,15 @@ func (s *TaskPane) listModeHint() string {
 		return short
 	}
 	return hint
+}
+
+// unavailableEditNotice stays pinned with the live-key footer while the form
+// scrolls, so a failed refresh never leaves a silently disabled editor.
+func (s *TaskPane) unavailableEditNotice() string {
+	notice := xansi.Wrap("Cannot load tasks · "+s.unavailable+" · changes cannot be saved until the next successful refresh", max(1, s.width), "")
+	if s.height > 0 {
+		// Leave one row each for the focused field and the live-key footer.
+		notice = fitBlockToSize(notice, s.width, max(1, s.height-2), 0)
+	}
+	return lipgloss.NewStyle().Foreground(CurrentTheme().Dead).Render(notice)
 }

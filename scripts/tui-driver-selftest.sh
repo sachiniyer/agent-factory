@@ -890,6 +890,20 @@ _expect_task_overlay_marker_context() {
         return 1
     fi
 
+    local stray_corner
+    stray_corner=$'╭ text  ╭────────────────────╮\n        │  Tasks             │\n        │  n new · esc back  │\n╰ text  ╰────────────────────╯'
+    if ! printf '%s\n' "$stray_corner" | _af_tasks_overlay_visible; then
+        _af_fail 'stray corner glyphs before the matched edges hid the task dialog'
+        return 1
+    fi
+
+    local unavailable_editor
+    unavailable_editor=$'╭────────────────────────────────────────────╮\n│ Cannot load tasks                          │\n│ tab fields · typing · esc back             │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$unavailable_editor" | _af_tasks_overlay_visible; then
+        _af_fail 'the unavailable editor live-key footer was not recognized'
+        return 1
+    fi
+
     local create_modal
     create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab/shift+tab fields · enter create · esc cancel · q quit   │\n╰────────────────────────────────────────────────────────────╯'
     if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then

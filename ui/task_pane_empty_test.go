@@ -236,3 +236,33 @@ func TestTaskPaneUnavailableAllowsCreation(t *testing.T) {
 	require.Empty(t, pane.GetTasks(), "creation must not mutate retained task data")
 	require.False(t, pane.IsDirty())
 }
+
+func TestTaskPaneUnavailableEditorExplainsLiveActions(t *testing.T) {
+	for _, height := range []int{10, 40} {
+		pane := NewTaskPane()
+		pane.SetSize(100, height)
+		pane.SetTasks([]task.Task{{ID: "first", Name: "first", Prompt: "original prompt"}})
+		pane.SetFocus(true)
+		pane.EnterEditSelected()
+		pane.editName.SetValue("unsaved name")
+		pane.editPrompt.SetValue("unsaved prompt")
+		pane.SetUnavailable(errors.New("task file is unreadable"))
+		plain := stripANSI(pane.String())
+		require.Contains(t, plain, "Cannot load tasks")
+		require.Contains(t, plain, "task file is unreadable")
+		require.Contains(t, strings.ReplaceAll(plain, "\n", " "), "changes cannot be saved until the next successful refresh")
+		for _, dead := range []string{"r run now ·", "r run ·", "D delete", "x toggle", "enter save"} {
+			require.NotContains(t, plain, dead)
+		}
+		require.Contains(t, plain, "tab fields · typing · esc back")
+		require.LessOrEqual(t, len(strings.Split(plain, "\n")), height)
+		pane.SetUnavailable(nil)
+		pane.SetSize(100, 40)
+		plain = stripANSI(pane.String())
+		require.Contains(t, plain, "enter save")
+		require.Contains(t, plain, "x toggle")
+		require.NotContains(t, plain, "Cannot load tasks")
+		require.Equal(t, "unsaved name", pane.editName.Value())
+		require.Equal(t, "unsaved prompt", pane.editPrompt.Value())
+	}
+}
