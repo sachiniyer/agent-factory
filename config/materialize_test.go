@@ -17,8 +17,8 @@ import (
 // already carries state, and (c) never clobber a concurrently recreated
 // config.json.
 
-// fastShell keeps DefaultConfig's claude-alias probe off the interactive
-// bash/zsh path so these tests don't pay seconds per LoadConfig call.
+// fastShell keeps DefaultConfig's one-time claude-alias probe off the
+// interactive bash/zsh path so these tests do not pay for shell startup.
 func fastShell(t *testing.T) {
 	t.Helper()
 	t.Setenv("SHELL", "/bin/sh")
@@ -34,11 +34,7 @@ func TestLoadConfig_MaterializeSilentOnFirstRun(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	// Don't assert an empty buffer: DefaultConfig() logs an unrelated ERROR
-	// ("failed to get claude command") on machines without claude on PATH
-	// (e.g. CI). First-run only has to skip the settings-loss warning.
-	assert.NotContains(t, errBuf.String(), "materializing defaults",
-		"first-run materialization must not log the settings-loss error")
+	assert.Empty(t, errBuf.String(), "first-run materialization must not log an error")
 	assert.FileExists(t, filepath.Join(home, TomlConfigFileName), "first run must persist the defaults as config.toml")
 	assert.NoFileExists(t, filepath.Join(home, ConfigFileName), "first run must not write config.json")
 }

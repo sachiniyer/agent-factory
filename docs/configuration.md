@@ -93,6 +93,13 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `appearance` | TUI Light / Dark / System; `light`, `dark`, or `system` (default). Applied on the next TUI launch. |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
+On the first config read in each af process, af checks shell aliases and `PATH`
+for `claude`. When found, that command becomes the built-in
+`program_overrides.claude` value and later reads reuse the result. Claude Code is
+optional: when neither an alias nor its binary is found, af leaves that override
+unset and writes one warning. Set `program_overrides.claude` to point af at
+another program.
+
 ### Agent approval behavior
 
 Agent Factory does not answer an agent's routine approval prompts. Configure

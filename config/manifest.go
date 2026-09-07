@@ -339,7 +339,7 @@ var configManifest = []ManifestEntry{
 	{
 		Key:        "program_overrides",
 		Type:       "table",
-		Default:    "claude, pointed at the claude command found when af first ran",
+		Default:    "claude, pointed at the claude command detected once for this af process when available",
 		Purpose:    "The full command to run for an agent, when it needs a specific path or extra flags · one entry per agent.",
 		Tier:       TierAdvanced,
 		Settable:   true,

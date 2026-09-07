@@ -13,6 +13,7 @@ import (
 )
 
 func TestDefaultConfigQuotesAliasPathWithSpacesBeforeFlags(t *testing.T) {
+	resetClaudeDetectionForTest(t)
 	// The shell probe returns the alias expansion as one string. Statting that
 	// whole string fails once flags are present, but leaving it unquoted makes
 	// sh split the executable path at its first space. Execute the resulting
@@ -79,6 +80,7 @@ func TestShellQuoteDetectedCommandUsesFilesystemBoundary(t *testing.T) {
 // `exec` through unchanged, AND the proof/validation pair accepts the
 // account-scoped launch the launcher would actually run.
 func TestDefaultConfigWithExecPrefixAlias(t *testing.T) {
+	resetClaudeDetectionForTest(t)
 	bashPath := requireBash(t)
 	homeDir := t.TempDir()
 	binDir := filepath.Join(t.TempDir(), "opt")

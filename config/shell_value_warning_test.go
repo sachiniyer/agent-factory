@@ -339,11 +339,11 @@ func TestExecSeparatorWarning_SilentDuringLegacyConversion(t *testing.T) {
 
 // rigDetectedClaudeAlias points the claude probe at a fake shell that reports an
 // alias carrying the `exec --` prefix, which is how this shape reaches af
-// without any config file mentioning it. The probe memoizes on SHELL+PATH+HOME,
-// and every one of those is a fresh temp dir here, so the rig cannot be served a
-// cached answer from another test.
+// without any config file mentioning it. Reset the process-wide detection so
+// the rig cannot be served a cached answer from another test.
 func rigDetectedClaudeAlias(t *testing.T) {
 	t.Helper()
+	resetClaudeDetectionForTest(t)
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "zsh")
 	require.NoError(t, os.WriteFile(fake, []byte("#!/bin/sh\necho 'claude: aliased to exec -- /opt/claude'\n"), 0o755))

@@ -615,8 +615,8 @@ func ResolveProgram(cfg *Config, agent string) string {
 // trusting any additional arguments that came from an operator's shell alias.
 const DetectedClaudePermissionsFlag = "--dangerously-skip-permissions"
 
-// DefaultConfig returns the default configuration. The auto-detected claude
-// command (e.g. "/home/user/.local/bin/claude") is stored in
+// DefaultConfig returns the default configuration. The process-cached,
+// auto-detected claude command (e.g. "/home/user/.local/bin/claude") is stored in
 // ProgramOverrides["claude"] together with --dangerously-skip-permissions
 // rather than being concatenated into DefaultProgram, which is restricted to
 // a bare agent enum name.
@@ -658,8 +658,6 @@ func DefaultConfig() *Config {
 		cfg.ProgramOverrides = map[string]string{
 			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
 		}
-	} else if err != nil {
-		log.ErrorLog.Printf("failed to get claude command: %v", err)
 	}
 
 	return cfg
