@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -224,6 +225,12 @@ func (s *Sidebar) SetSize(width, height int) {
 // empty title, its row shows text as muted placeholder. (nil, "") clears it.
 func (s *Sidebar) SetNamingPlaceholder(inst *session.Instance, text string) {
 	s.renderer.SetNamePlaceholder(inst, text)
+}
+
+// SetNowForTest replaces the session row renderer's wall clock. Production
+// leaves the clock installed by NewSidebar intact.
+func (s *Sidebar) SetNowForTest(now func() time.Time) {
+	s.renderer.SetNowForTest(now)
 }
 
 // contentWidth is the effective row width inside the sidebar allocation: the

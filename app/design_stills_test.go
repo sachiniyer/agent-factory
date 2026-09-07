@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -19,27 +21,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	// Noon UTC on the day before the fixture's daily 09:00 schedule preserves the
+	// approved "next Sep 07" still while keeping it independent of capture time.
+	designStillsNowRFC3339    = "2026-09-06T12:00:00Z"
+	designStillsPinnedNextRun = "from cron: next Sep 07"
+)
+
 // Run exclusively in the playtest container. These supplement P4 recovery
 // scenes with each chrome family; RPCs and terminal output are deterministic.
 func TestDesignDriverScenes(t *testing.T) {
-	profile, dark := lipgloss.ColorProfile(), lipgloss.HasDarkBackground()
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	t.Cleanup(func() { lipgloss.SetColorProfile(profile); lipgloss.SetHasDarkBackground(dark) })
+	configureDesignStillsOutput(t)
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
 		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
-				lipgloss.SetHasDarkBackground(mode == "dark")
-				h := newTestHome(t)
-				ui.ApplyAppearance(mode)
-				h.termWidth, h.termHeight = 120, 36
-				h.repoRoot = "/project"
-				inst := newLoadingInstance(t, "Apply design roles")
-				inst.SetStatusForTest(session.Ready)
-				h.store.AddInstance(inst)
-				h.sidebar.SelectInstance(inst)
-				h.relayout()
+				h, inst := newDesignDriverSceneHome(t, mode, nil)
 				switch scene {
 				case "appearance", "appearance-system":
 					h.state = stateConfigEditor
@@ -57,8 +55,9 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.configPane.SetEntries(rows, "Local daemon · /home/operator/.agent-factory/config.toml")
 					h.configPane.SetFocus(true)
 				case "sessions-dense":
+					createdAt := designStillsNow(t)
 					for i, status := range []session.Status{session.Running, session.Ready, session.Lost, session.Dead} {
-						other := newLoadingInstance(t, fmt.Sprintf("Review change %d", i+1))
+						other := newDesignDriverInstance(t, fmt.Sprintf("Review change %d", i+1), createdAt.Add(time.Duration(i+1)*time.Minute))
 						other.SetStatusForTest(status)
 						other.Branch = fmt.Sprintf("review-%d", i+1)
 						h.store.AddInstance(other)
@@ -198,8 +197,9 @@ func TestDesignDriverScenes(t *testing.T) {
 				case "search":
 					h.state = stateSearch
 					results := []*session.Instance{inst}
+					createdAt := designStillsNow(t)
 					for title, status := range []session.Status{session.Running, session.Lost, session.Dead, session.Archived, session.Loading} {
-						result := newLoadingInstance(t, []string{"Running session", "Lost session", "Dead session", "Archived session", "Creating session"}[title])
+						result := newDesignDriverInstance(t, []string{"Running session", "Lost session", "Dead session", "Archived session", "Creating session"}[title], createdAt.Add(time.Duration(title+1)*time.Minute))
 						result.SetStatusForTest(status)
 						results = append(results, result)
 					}
@@ -212,14 +212,7 @@ func TestDesignDriverScenes(t *testing.T) {
 						h.errBox.SetNotice(fmt.Errorf("Configuration saved; restart the session to apply it"))
 					}
 				case "rail-task-selection", "rail-project-selection":
-					h.store.SetTasks([]task.Task{{ID: "design", Name: "Daily review", Enabled: true, CronExpr: "0 9 * * *"}})
-					h.projects.SetProjects([]ui.SidebarProject{{Name: "Agent Factory", Root: h.repoRoot, Active: true}, {Name: "Second project", Root: "/second"}})
-					h.relayout()
-					if scene == "rail-task-selection" {
-						h.automations.Focus()
-					} else {
-						h.projects.Focus()
-					}
+					configureDesignDriverRailScene(h, scene)
 				case "project-picker", "project-picker-existing":
 					h.state = stateSwitchProject
 					h.projectPickerOverlay = overlay.NewProjectPickerOverlay(nil, h.repoRoot)
@@ -249,6 +242,114 @@ func TestDesignDriverScenes(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, string(golden), svg, "inspect and recapture design driver stills in the container")
 			})
+		}
+	}
+}
+
+func configureDesignStillsOutput(t *testing.T) {
+	t.Helper()
+	profile, dark := lipgloss.ColorProfile(), lipgloss.HasDarkBackground()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile); lipgloss.SetHasDarkBackground(dark) })
+}
+
+func designStillsNow(t *testing.T) time.Time {
+	t.Helper()
+	now, err := time.Parse(time.RFC3339, designStillsNowRFC3339)
+	require.NoError(t, err)
+	return now
+}
+
+// pinDesignStillsClocks freezes every render-owned clock the scene matrix can
+// reach. Keep the pin after any injected ambient clock so the regression below
+// proves that captures do not inherit the machine's date.
+func pinDesignStillsClocks(t *testing.T, h *home) {
+	t.Helper()
+	pinned := designStillsNow(t)
+	now := func() time.Time { return pinned }
+	h.automations.SetNowForTest(now)
+	h.sidebar.SetNowForTest(now)
+}
+
+func newDesignDriverInstance(t *testing.T, title string, createdAt time.Time) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:     title,
+		Path:      t.TempDir(),
+		Program:   "claude",
+		CreatedAt: createdAt,
+	})
+	require.NoError(t, err)
+	inst.SetStatusForTest(session.Loading)
+	return inst
+}
+
+func newDesignDriverSceneHome(t *testing.T, mode string, initialNow func() time.Time) (*home, *session.Instance) {
+	t.Helper()
+	lipgloss.SetHasDarkBackground(mode == "dark")
+	h := newTestHome(t)
+	if initialNow != nil {
+		h.automations.SetNowForTest(initialNow)
+		h.sidebar.SetNowForTest(initialNow)
+	}
+	pinDesignStillsClocks(t, h)
+	ui.ApplyAppearance(mode)
+	h.termWidth, h.termHeight = 120, 36
+	h.repoRoot = "/project"
+	inst := newDesignDriverInstance(t, "Apply design roles", designStillsNow(t))
+	inst.SetStatusForTest(session.Ready)
+	h.store.AddInstance(inst)
+	h.sidebar.SelectInstance(inst)
+	h.relayout()
+	return h, inst
+}
+
+func configureDesignDriverRailScene(h *home, scene string) {
+	h.store.SetTasks([]task.Task{{ID: "design", Name: "Daily review", Enabled: true, CronExpr: "0 9 * * *"}})
+	h.projects.SetProjects([]ui.SidebarProject{{Name: "Agent Factory", Root: h.repoRoot, Active: true}, {Name: "Second project", Root: "/second"}})
+	h.relayout()
+	if scene == "rail-task-selection" {
+		h.automations.Focus()
+	} else {
+		h.projects.Focus()
+	}
+}
+
+func renderRailTaskSelectionAt(t *testing.T, mode string, initialNow time.Time) (string, string) {
+	t.Helper()
+	h, _ := newDesignDriverSceneHome(t, mode, func() time.Time { return initialNow })
+	configureDesignDriverRailScene(h, "rail-task-selection")
+	frame := h.View()
+	return frame, recoverySVG(frame, mode, 120, 36)
+}
+
+// TestDesignDriverRailTaskSelectionIgnoresWallClock renders the real scene
+// after seeding two ambient clocks four days apart. The stills pin must override
+// both and leave the serialized SVG bytes identical in each palette.
+func TestDesignDriverRailTaskSelectionIgnoresWallClock(t *testing.T) {
+	configureDesignStillsOutput(t)
+	first := designStillsNow(t)
+	second := first.Add(4 * 24 * time.Hour)
+
+	for _, mode := range []string{"light", "dark"} {
+		t.Run(mode, func(t *testing.T) {
+			_, firstSVG := renderRailTaskSelectionAt(t, mode, first)
+			_, secondSVG := renderRailTaskSelectionAt(t, mode, second)
+			require.True(t, bytes.Equal([]byte(firstSVG), []byte(secondSVG)),
+				"the rail-task-selection SVG must be byte-identical under clocks days apart")
+		})
+	}
+}
+
+// TestDesignDriverRailTaskSelectionContainsPinnedDate guards the visible fact
+// the fixed instant is meant to preserve, independently of the ambient clock.
+func TestDesignDriverRailTaskSelectionContainsPinnedDate(t *testing.T) {
+	configureDesignStillsOutput(t)
+	wallClock := designStillsNow(t)
+	for _, mode := range []string{"light", "dark"} {
+		for _, initialNow := range []time.Time{wallClock.Add(-4 * 24 * time.Hour), wallClock.Add(4 * 24 * time.Hour)} {
+			frame, _ := renderRailTaskSelectionAt(t, mode, initialNow)
+			require.Contains(t, xansi.Strip(frame), designStillsPinnedNextRun)
 		}
 	}
 }

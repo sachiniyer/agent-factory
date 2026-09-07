@@ -96,12 +96,12 @@ var limitStyle = lipgloss.NewStyle()
 // session (#1146): "[limit] resets <t> " when a reset time is known, else a bare
 // "[limit] ". Kept a helper (not inlined) so the tab pane / search overlay could
 // reuse the exact same wording if they later surface it.
-func limitBadgePrefix(i *session.Instance) string {
+func limitBadgePrefix(i *session.Instance, now time.Time) string {
 	resetAt, ok := i.LimitResetAt()
 	if !ok {
 		return "[limit] "
 	}
-	return fmt.Sprintf("[limit] resets %s ", formatLimitReset(resetAt, time.Now()))
+	return fmt.Sprintf("[limit] resets %s ", formatLimitReset(resetAt, now))
 }
 
 // formatLimitReset renders a usage-limit reset time for the sidebar badge in the
@@ -231,11 +231,21 @@ type InstanceRenderer struct {
 	// caller (and every existing test) renders exactly as before.
 	namingInstance  *session.Instance
 	namePlaceholder string
+
+	// now supplies wall time for limit-reset and idle-age labels. Production uses
+	// time.Now; deterministic app-model stills replace it through SetNowForTest.
+	now func() time.Time
 }
 
 // NewInstanceRenderer creates a renderer.
 func NewInstanceRenderer() *InstanceRenderer {
-	return &InstanceRenderer{}
+	return &InstanceRenderer{now: time.Now}
+}
+
+// SetNowForTest replaces the wall clock used by rendered relative-time labels.
+// Production leaves the clock installed by NewInstanceRenderer intact.
+func (r *InstanceRenderer) SetNowForTest(now func() time.Time) {
+	r.now = now
 }
 
 // SetWidth sets the effective content width rows render into.
@@ -428,7 +438,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// session is stalled and roughly when it frees up — retry now with c. The title
 	// keeps full contrast (like [lost]): the session is blocked, not gone.
 	if liveness == session.LiveLimitReached {
-		titleText = limitBadgePrefix(i) + titleText
+		titleText = limitBadgePrefix(i, r.now()) + titleText
 	}
 	// A re-created root that did not come back on its prior conversation (#2629)
 	// is orthogonal to liveness too — the row is Ready and looks exactly like one
@@ -519,7 +529,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	description := branch
 	restoreFailed := false
 	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
-		detail := idleReasonDetail(reason, churnAt, time.Now())
+		detail := idleReasonDetail(reason, churnAt, r.now())
 		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
 			detail = restoreFailure.Detail()
 			restoreFailed = true
