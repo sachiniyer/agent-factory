@@ -420,10 +420,10 @@ satisfies neither half of the gate and is not in the daemon's cgroup); a
 neither the PID marker nor unit-cgroup membership, so `RunningDaemonProcess()` is
 false and its hooks run unscoped with plain `exec`. Read
 `/proc/<hook pid>/cgroup` while a hook runs rather than inferring which side of
-#3650 a given build is on. For daemon-started hooks on Linux, size the **box**
-for what your local hooks build — that memory did not disappear, it moved to a
-scope of its own. In these three exceptions, there is no `af-hook-*` scope to
-look for: the build is simply wherever its parent runs.
+#3650 a given build is on. For hooks started by a systemd-managed daemon on
+Linux, size the **box** for what your local hooks build — that memory did not
+disappear, it moved to a scope of its own. In these three exceptions, there is
+no `af-hook-*` scope to look for: the build is simply wherever its parent runs.
 
 ### High child-process churn, which is not a measured driver
 
@@ -476,10 +476,10 @@ only the hook correlation above connects anything to the peak.
   replaced any legacy one left in the service cgroup by a pre-upgrade daemon.
 - **Plus whatever `post_worktree_commands` builds**, per worktree — on whichever
   machine hosts the workspace/agent-server: this box when the
-  server runs here, or the remote machine otherwise. For daemon-started hooks on
-  Linux, #3650 puts the hook process tree in a sibling scope outside the
-  daemon's cgroup, but output capture remains daemon memory until #4010; size
-  that machine for it.
+  server runs here, or the remote machine otherwise. For hooks started by a
+  systemd-managed daemon on Linux, #3650 puts the hook process tree in a sibling
+  scope outside the daemon's cgroup, but output capture remains daemon memory
+  until #4010; size that machine for it.
 - **Plus everything else a session can start.** A session may hold any number of
   extra process-bearing tabs — shell, process, editor — and there is no cap on
   how many (#3021). Watch tasks run their command, editors and watchers run
