@@ -388,10 +388,16 @@ one scope per entry, so a daemon exit mid-list means later entries are never
 spawned; `AdoptRunningHooks` observes the survivor but does not rerun the entries
 that were never spawned.
 [#4014](https://github.com/sachiniyer/agent-factory/issues/4014) tracks resuming
-or reporting an incomplete run. Both hook runners, however, give the child pipes
-whose readers live in the daemon — a `bytes.Buffer` in `session/git/hooks.go` and an
+or reporting an incomplete run. When a hook runner executes in the **daemon
+process** (the direct local-backend case), it gives the child pipes whose readers
+live in the daemon — a `bytes.Buffer` in `session/git/hooks.go` or an
 `archiveHookOutputTail` in `daemon/archive_hook.go`. A hook that writes after the
-daemon exits can therefore die on `SIGPIPE`/`EPIPE`; [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
+daemon exits can therefore die on `SIGPIPE`/`EPIPE`. In the same-host hook-backend
+flow, `post_worktree_commands` runs in the separate `af agent-server` process
+created by `RunAgentServer`, so its `bytes.Buffer` and pipe-reader goroutine live
+there; `KillMode=process` leaves that server alive across a daemon restart, and
+its hook's writes do not fail merely because the daemon exited. That case is
+exposed only if the agent-server itself restarts. [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
 tracks moving both runners to a per-run log file. It covers **both** hooks:
 repository-controlled `post_worktree_commands` (`session/git/hooks.go`) and
 operator-controlled `on_archive_command` (`daemon/archive_hook.go`). The watcher
