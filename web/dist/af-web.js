@@ -10713,8 +10713,8 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
 function confirmModal(opts) {
   const copy = {
     kill: {
-      title: `Kill ${opts.sessionTitle}?`,
-      confirmLabel: "Kill",
+      title: opts.isRoot ? `Delete session ${opts.sessionTitle}?` : `Kill ${opts.sessionTitle}?`,
+      confirmLabel: opts.isRoot ? "Delete session" : "Kill",
       confirmClass: "af-primary",
       body: "This permanently destroys the session and prunes its branch. This can't be undone."
     },
@@ -10738,8 +10738,22 @@ function confirmModal(opts) {
     onCancel: opts.onCancel
   });
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
+  let acknowledgment;
+  if (opts.action === "kill" && opts.isRoot) {
+    body.append(h(
+      "p",
+      { class: "af-modal-text af-modal-danger" },
+      `\u201C${opts.sessionTitle}\u201D is the daemon-managed root agent. Deleting it stops scheduled and watch-task delivery to it until it self-heals (usually about two minutes) or you restart the daemon.`
+    ));
+    acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
+    body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
+  }
   const card = handle.el.firstElementChild;
   asForm(card, () => {
+    if (acknowledgment && !acknowledgment.checked) {
+      handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
+      return;
+    }
     handle.setError(null);
     opts.onConfirm();
   });
@@ -16556,6 +16570,7 @@ function openConfirm(action, session) {
     confirmModal({
       action,
       sessionTitle: target.title,
+      isRoot: session.is_root === true,
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {
