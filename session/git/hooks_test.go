@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hooklog"
+	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T) {
@@ -51,6 +54,71 @@ func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T
 	}
 	if slices.Contains(names, deniedName) {
 		t.Fatalf("post-worktree hook inherited disallowed variable %s", deniedName)
+	}
+}
+
+func TestPostWorktreeHookFailureSurfacesBoundedTailAndLogPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	payloadPath := filepath.Join(t.TempDir(), "hook-output")
+	payload := "discarded beginning\n" + strings.Repeat("x", hooklog.TailLimit) + "\nkept ending\n"
+	if err := os.WriteFile(payloadPath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repoPath), &config.RepoConfig{
+		PostWorktreeCommands: []string{fmt.Sprintf("cat %q; exit 23", payloadPath)},
+	})
+
+	var errors logtest.Buffer
+	previous := aflog.ErrorLog.Writer()
+	aflog.ErrorLog.SetOutput(&errors)
+	t.Cleanup(func() { aflog.ErrorLog.SetOutput(previous) })
+	<-RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), nil)
+
+	logs, err := filepath.Glob(filepath.Join(home, "logs", "hooks", "post-worktree-*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("found %d post-worktree logs, want 1", len(logs))
+	}
+	got := errors.String()
+	for _, want := range []string{"exit status 23", logs[0], "[output truncated to last 65536 bytes]", "kept ending"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("post-worktree failure omitted %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "discarded beginning") {
+		t.Fatalf("post-worktree failure surfaced more than the bounded tail:\n%s", got)
+	}
+	full, err := os.ReadFile(logs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"discarded beginning", "kept ending"} {
+		if !strings.Contains(string(full), want) {
+			t.Fatalf("full hook log omitted %q", want)
+		}
+	}
+}
+
+func TestPostWorktreeHookSuccessRemovesOutputLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repoPath), &config.RepoConfig{
+		PostWorktreeCommands: []string{"printf success"},
+	})
+
+	<-RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), nil)
+
+	logs, err := filepath.Glob(filepath.Join(home, "logs", "hooks", "post-worktree-*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("successful post-worktree hook retained output logs: %v", logs)
 	}
 }
 
@@ -146,8 +214,8 @@ func TestHookCompletion_BackgroundedGrandchildKilled(t *testing.T) {
 	pid := waitForPidFile(t, pidFile, 5*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 
-	// cmd.Wait unblocks ~hookWaitDelay after the shell exits, then the group
-	// kill fires; allow margin over that bound for the grandchild to be reaped.
+	// The hook's direct output file lets cmd.Wait return as soon as the shell
+	// exits; allow margin for the group kill and reaping that follow.
 	if !waitForProcessExit(pid, 6*time.Second) {
 		t.Fatalf("backgrounded grandchild pid %d survived hook completion — process group not killed on the success path", pid)
 	}
