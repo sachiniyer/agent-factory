@@ -1,31 +1,20 @@
 package git
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hooklog"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
-
-// hookWaitDelay bounds how long cmd.Wait blocks after a hook's shell exits
-// before the inherited stdout/stderr pipes are force-closed. A script that
-// backgrounds a process with `&`/`disown` and exits immediately leaves that
-// grandchild holding the write end of the capture pipe, so without a bound
-// cmd.Wait would block until the grandchild itself exits (defeating the
-// process-group cleanup below). It only elapses when something outlives the
-// shell — normal hooks complete their I/O at shell exit and return instantly.
-const hookWaitDelay = 2 * time.Second
 
 // hookRun is one post-worktree hook run's inputs. ScopeSessionID is empty for
 // every TUI- and CLI-initiated worktree, which is what keeps that path
@@ -129,17 +118,25 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				return
 			default:
 			}
-			log.InfoLog.Printf("running post-worktree hook in %s: %s", run.worktreePath, cmdStr)
+			outputFile, outputErr := hooklog.Open(hooklog.PostWorktree)
+			if outputErr != nil {
+				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", cmdStr, outputErr)
+				continue
+			}
+			outputPath := outputFile.Name()
+			log.InfoLog.Printf("running post-worktree hook in %s (output: %s): %s", run.worktreePath, outputPath, cmdStr)
 
-			var output bytes.Buffer
 			// The daemon-spawned hook enters a transient scope with NO edge to the
 			// daemon unit, so the operator's build is charged to its own cgroup and
-			// survives a daemon restart or auto-upgrade (#3650). systemd-run --scope
-			// EXECs the command rather than forking it — measured: the pid the caller
-			// started is the pid of the hook shell — so Setpgid below still makes the
-			// shell its own process-group leader and the group teardown further down
-			// keeps meaning exactly what it meant before. The scope is a strictly
-			// wider net over the same tree, not a replacement for it.
+			// survives a daemon restart or auto-upgrade (#3650). Its stdout and stderr
+			// are the *os.File above rather than an in-memory writer: os/exec therefore
+			// gives the child the descriptor directly, with no capture-pipe reader in
+			// the daemon whose exit could SIGPIPE the surviving hook (#4010).
+			// systemd-run --scope EXECs the command rather than forking it — measured:
+			// the pid the caller started is the pid of the hook shell — so Setpgid
+			// below still makes the shell its own process-group leader and the group
+			// teardown further down keeps meaning exactly what it meant before. The
+			// scope is a strictly wider net over the same tree, not a replacement.
 			scopeUnit := systemdunit.HookScopeUnit(scopePrefix, generation, index)
 			cmd := exec.Command("sh", "-c", cmdStr)
 			if scopeUnit != "" {
@@ -147,20 +144,17 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			}
 			cmd.Env = sessionenv.Filter(os.Environ(), "", run.passthrough)
 			cmd.Dir = run.worktreePath
-			cmd.Stdout = &output
-			cmd.Stderr = &output
+			cmd.Stdout = outputFile
+			cmd.Stderr = outputFile
 			// Place sh in its own process group so we can signal the whole
 			// tree on cancellation. exec.CommandContext only kills the
 			// immediate shell, leaving grandchildren the script backgrounded
 			// with `&` or `disown` alive — they get reparented to init and
 			// outlive the session (see #610).
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			// Bound the post-exit wait so a backgrounded grandchild holding the
-			// capture pipe cannot keep cmd.Wait blocked until it exits.
-			cmd.WaitDelay = hookWaitDelay
-
 			if err := cmd.Start(); err != nil {
-				log.ErrorLog.Printf("post-worktree hook %q failed: %v", cmdStr, err)
+				_ = outputFile.Close()
+				log.ErrorLog.Printf("post-worktree hook %q failed to start (full output: %s): %v", cmdStr, outputPath, err)
 				continue
 			}
 			// Record the durable handle as soon as one scope exists, not when the
@@ -206,30 +200,49 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			// the scope too — a grandchild that escaped the process group (a
 			// setsid'd child) is still inside the scope's control group. Stopping
 			// an already-collected scope is a no-op.
+			var scopeStopErr error
 			if scopeUnit != "" {
 				if err := systemdunit.StopScopeUnits(scopeUnit); err != nil {
-					log.WarningLog.Printf("post-worktree hook scope %s did not stop: %v", scopeUnit, err)
+					scopeStopErr = err
+					log.WarningLog.Printf("post-worktree hook scope %s did not stop (full output: %s): %v", scopeUnit, outputPath, err)
 				}
+			}
+			outputTail, outputReadErr := hooklog.CloseAndReadTail(outputFile)
+			if outputReadErr != nil {
+				log.WarningLog.Printf("post-worktree hook %q output tail could not be read from %s: %v", cmdStr, outputPath, outputReadErr)
 			}
 
 			if ctx.Err() != nil {
+				if scopeStopErr == nil {
+					removeCompletedHookLog(cmdStr, outputPath, outputReadErr)
+				}
 				log.InfoLog.Printf("post-worktree hooks cancelled for %s", run.worktreePath)
 				return
 			}
-			switch {
-			case waitErr == nil:
+			if waitErr == nil {
+				if scopeStopErr == nil {
+					removeCompletedHookLog(cmdStr, outputPath, outputReadErr)
+				}
 				log.InfoLog.Printf("post-worktree hook %q completed successfully", cmdStr)
-			case errors.Is(waitErr, exec.ErrWaitDelay):
-				// The shell exited but a backgrounded grandchild held the
-				// capture pipe open past hookWaitDelay; it was just killed with
-				// the process group above. This is not a hook failure.
-				log.InfoLog.Printf("post-worktree hook %q completed; terminated backgrounded processes that outlived the shell", cmdStr)
-			default:
-				log.ErrorLog.Printf("post-worktree hook %q failed: %v\n%s", cmdStr, waitErr, output.String())
+			} else {
+				log.ErrorLog.Printf("post-worktree hook %q failed (full output: %s): %v\n%s", cmdStr, outputPath, waitErr, outputTail)
 			}
 		}
 	}()
 	return done
+}
+
+// Successful and deliberately cancelled hooks historically retained no output.
+// Keep that contract (and avoid an unbounded success-log collection), while a
+// failed run, an unconfirmed scope teardown, or one whose daemon disappeared
+// before cleanup leaves the full file named in its diagnostic.
+func removeCompletedHookLog(cmdStr, path string, readErr error) {
+	if readErr != nil {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.WarningLog.Printf("post-worktree hook %q completed but its output log %s could not be removed: %v", cmdStr, path, err)
+	}
 }
 
 // worktreePathScopeIdentity is the fallback scope identity for a hook run with
