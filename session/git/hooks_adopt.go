@@ -29,14 +29,12 @@ var hookAdoptionPollInterval = 2 * time.Second
 // process-group pgid all died with the daemon that started the run — so every
 // consumer of the session's hook state read "nothing in flight" (#3682).
 //
-// Adoption is exactly that: it takes over the REPORTING, not the run. It never
-// starts a hook (re-running the operator's provisioning commands over a tree
-// whose first run is still going is the #2770 hazard) and it never stops one
-// (the paths that rebuild, remove or move the tree still own that, through
-// cancelAndWaitHooks). The only thing it produces is the same hooksDone channel
-// a first run produces, so nothing downstream has to learn a second way to ask.
+// Runs with a durable list snapshot resume only entries that never started,
+// after the surviving scopes and launchers are gone. Legacy runs without a
+// snapshot retain observation-only adoption. Neither path replays the entry
+// in flight or stops its survivor; rebuild/remove still own that teardown.
 //
-// One batched probe answers for the whole fleet. The caller is a daemon
+// One batched probe answers for legacy survivors. The caller is a daemon
 // restoring every session it owns, on the path that gates readiness, so a
 // per-session pair of oracle reads would be a round trip and a /proc walk each;
 // this is one of each, whatever the session count.
@@ -60,6 +58,9 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 		// Restore always arrives here with none, so this is a guard rather than a
 		// case: adoption must never be the thing that loses a run's own handle.
 		if g.hooksDone != nil {
+			continue
+		}
+		if g.adoptHookProgress() {
 			continue
 		}
 		prefixes := g.hookScopePrefixes()

@@ -384,13 +384,18 @@ the daemon's books. Because that scope carries no dependency edge to the unit,
 the scope itself survives a daemon restart or auto-upgrade. With
 [#4010](https://github.com/sachiniyer/agent-factory/issues/4010) fixed by
 [PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012), a hook can also
-keep writing output after its runner exits. The survival guarantee is for the
-**entry already in flight**, not the whole list: `runPostWorktreeHooks` runs
-entries sequentially and creates one scope per entry, so a daemon exit mid-list
-means later entries are never spawned; `AdoptRunningHooks` observes the survivor
-but does not rerun the entries that were never spawned.
-[#4014](https://github.com/sachiniyer/agent-factory/issues/4014) tracks resuming
-or reporting an incomplete run.
+keep writing output after its runner exits. The daemon persists the original
+command list and per-entry start/exit receipts alongside the scope identity.
+On restart it leaves the in-flight entry alone, waits until its scope and any
+pending launcher are gone, then resumes the entries that never started, in
+order and each in its own unbound scope with its own hooklog file. Entries
+already started are never replayed, including failed entries (the normal runner
+also continues after failure). The session reports hooks in flight until the
+remaining list finishes. The snapshot preserves the original commands and
+explicit environment pass-through names across configuration edits; environment
+values come from the restarted daemon. Completed or deliberately cancelled
+lists are not resumed. Older runs without a progress record retain survivor
+observation only.
 
 Both repository-controlled `post_worktree_commands` (`session/git/hooks.go`)
 and operator-controlled `on_archive_command` (`daemon/archive_hook.go`) now use

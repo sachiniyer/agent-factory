@@ -561,6 +561,12 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   worktree, and left alone otherwise.
 
   The restarted daemon also picks that hook back up rather than forgetting it.
+  It waits for the survivor to finish, then resumes the remaining
+  `post_worktree_commands` entries in order, each in its own scope and output
+  log. The original list is saved before launch; configuration edits do not
+  change a pending run. Started entries are never replayed, and completed or
+  deliberately cancelled lists are not resumed. Runs started by older versions
+  without a progress record keep survivor observation only.
   A session whose hook is still running reports it as in flight exactly as it
   did on its first run, so the agent's startup budget is not charged for the
   build, and a task's `on_complete` teardown waits instead of moving the tree

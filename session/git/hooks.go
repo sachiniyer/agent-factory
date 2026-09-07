@@ -21,6 +21,7 @@ import (
 // byte-for-byte as it was: no scope name is derived, no systemd-run is spawned,
 // and no durable handle is recorded.
 type hookRun struct {
+	progress     *hookProgress
 	repoPath     string
 	worktreePath string
 	passthrough  []string
@@ -70,25 +71,30 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 	// legacy config on the bare directory and checked-in config on the checkout.
 	// Retain the raw-path fallback for recovery and callers whose recorded repo is
 	// temporarily unavailable.
-	repo, repoErr := config.RepoFromPath(run.worktreePath)
-	var repoCfg *config.ResolvedConfig
-	var err error
-	if repoErr == nil {
-		repoCfg, err = config.ResolveConfigForRepo(repo)
+	var cmds []string
+	if run.progress != nil {
+		cmds = run.progress.Commands
 	} else {
-		repoCfg, err = config.ResolveConfig(run.repoPath)
-	}
-	if err != nil {
-		log.WarningLog.Printf("failed to resolve repo config for hooks: %v", err)
-		close(done)
-		return done
-	}
-	if len(repoCfg.PostWorktreeCommands) == 0 {
-		close(done)
-		return done
-	}
+		repo, repoErr := config.RepoFromPath(run.worktreePath)
+		var repoCfg *config.ResolvedConfig
+		var err error
+		if repoErr == nil {
+			repoCfg, err = config.ResolveConfigForRepo(repo)
+		} else {
+			repoCfg, err = config.ResolveConfig(run.repoPath)
+		}
+		if err != nil {
+			log.WarningLog.Printf("failed to resolve repo config for hooks: %v", err)
+			close(done)
+			return done
+		}
+		if len(repoCfg.PostWorktreeCommands) == 0 {
+			close(done)
+			return done
+		}
 
-	cmds := repoCfg.PostWorktreeCommands
+		cmds = repoCfg.PostWorktreeCommands
+	}
 	// Derived once per RUN, so every command of this run shares a generation and
 	// the recorded prefix names all of them. Being the process systemd started is
 	// the WHOLE gate: a TUI or CLI that creates the worktree itself spawns exactly
@@ -108,10 +114,28 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		scopePrefix = systemdunit.HookScopeUnitPrefix(identity)
 	}
 	generation := systemdunit.NewHookScopeGeneration()
+	if run.progress != nil {
+		scopePrefix = run.progress.Prefix
+		generation = run.progress.Generation
+	} else if scopePrefix != "" {
+		var progressErr error
+		run.progress, progressErr = newHookProgress(run, cmds, scopePrefix, generation)
+		if progressErr != nil {
+			log.ErrorLog.Printf("post-worktree hooks not started: persist list: %v", progressErr)
+			close(done)
+			return done
+		}
+	}
 	go func() {
 		defer close(done)
+		if run.progress != nil {
+			defer run.progress.finish()
+		}
 		scopeRecorded := false
 		for index, cmdStr := range cmds {
+			if run.progress != nil && run.progress.claimed(index) {
+				continue
+			}
 			select {
 			case <-ctx.Done():
 				log.InfoLog.Printf("post-worktree hooks cancelled for %s", run.worktreePath)
@@ -140,7 +164,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			scopeUnit := systemdunit.HookScopeUnit(scopePrefix, generation, index)
 			cmd := exec.Command("sh", "-c", cmdStr)
 			if scopeUnit != "" {
-				cmd = systemdunit.NewUnboundScopeCommand(scopeUnit, "sh", "-c", cmdStr)
+				cmd = systemdunit.NewUnboundScopeCommand(scopeUnit, "sh", run.progress.command(index, cmdStr)...)
 			}
 			cmd.Env = sessionenv.Filter(os.Environ(), "", run.passthrough)
 			cmd.Dir = run.worktreePath
