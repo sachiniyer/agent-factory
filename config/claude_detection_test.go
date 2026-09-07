@@ -99,3 +99,36 @@ func TestGetClaudeCommandReprobesAfterPATHChange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, claudePath, result)
 }
+
+func TestGetClaudeCommandCoalescesConcurrentMissingProbe(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "probes")
+	t.Setenv("AF_CLAUDE_PROBE_MARKER", marker)
+	fakeShell := filepath.Join(t.TempDir(), "probe-shell")
+	require.NoError(t, os.WriteFile(fakeShell, []byte(
+		"#!/bin/sh\nprintf x >> \"$AF_CLAUDE_PROBE_MARKER\"\n/bin/sleep 0.2\nexit 1\n",
+	), 0755))
+	t.Setenv("SHELL", fakeShell)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	warnings := captureLog(t, &log.WarningLog)
+
+	const callers = 8
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			<-start
+			_, err := GetClaudeCommand()
+			errs <- err
+		}()
+	}
+	close(start)
+	for range callers {
+		require.Error(t, <-errs)
+	}
+
+	probes, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(probes), "x"), "one environment should run one probe")
+	assert.Equal(t, 1, strings.Count(warnings.String(), "\n"), "one failed probe should emit one warning")
+}

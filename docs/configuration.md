@@ -99,6 +99,9 @@ triggers a fresh probe. When found, the command becomes the built-in
 `program_overrides.claude` value. Claude Code is optional: when neither an alias
 nor its binary is found, af leaves that override unset and writes one warning for
 that environment. Set `program_overrides.claude` to point af at another program.
+On first run, af materializes the detected override into `config.toml`; that
+persisted value remains until you edit it, even if the detection environment
+later changes.
 
 ### Agent approval behavior
 
