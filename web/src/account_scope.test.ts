@@ -266,3 +266,11 @@ test("a default naming an unregistered account is OFFERED, labelled, and not blo
   assert.equal(accountSelectable(choices, "retired"), true);
   assert.match(accountNotice(choices, "retired"), /refused/, "and the note says the create will be refused");
 });
+
+test("empty account choice describes configured inheritance without adding an override", () => {
+  assert.equal(accountChoices(null, "claude")[0].label, "Use configured default");
+  const registry = { agents: ["claude"], entries: [], defaults: { claude: "work" } } as AccountsResponse;
+  const choice = accountChoices(registry, "claude")[0];
+  assert.equal(choice.label, "Use configured default (work)");
+  assert.equal(choice.value, AMBIENT_ACCOUNT);
+});

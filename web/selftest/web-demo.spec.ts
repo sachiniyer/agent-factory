@@ -691,7 +691,7 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await page.keyboard.press("Escape");
   await row(page, SESSION_JSON).getByRole("button", { name: `Actions for ${SESSION_JSON}`, exact: true }).click();
   await shot("session-lifecycle");
-  await row(page, SESSION_JSON).getByRole("button", { name: `Kill session “${SESSION_JSON}”`, exact: true }).click();
+  await row(page, SESSION_JSON).getByRole("button", { name: `Delete session “${SESSION_JSON}”`, exact: true }).click();
   await shot("kill-confirmation");
   await page.keyboard.press("Escape");
   await page.locator('.af-viewtab[data-view="tasks"]').click();
@@ -709,7 +709,7 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await onDone.selectOption("archive");
   await page.getByRole("textbox", { name: "Target session", exact: true }).fill("reused");
   await expect(onDone).toBeHidden();
-  await expect(page.getByText("Not applicable — the target session is meant to be reused.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Target session will be reused.", { exact: true })).toBeVisible();
   await page.getByRole("textbox", { name: "Target session", exact: true }).fill("");
   await expect(onDone).toBeVisible();
   await expect(onDone).toHaveValue("archive");
@@ -824,7 +824,7 @@ test("task completion catalog failure is visible and preserves the seed", async 
   await page.locator('.af-viewtab[data-view="tasks"]').click();
   await page.locator(".af-task-row").first().getByRole("button", { name: "Edit", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.locator(".af-on-complete-hint")).toHaveText("Could not load choices; the current value is kept.", { timeout: 5_000 });
+  await expect(dialog.locator(".af-on-complete-hint")).toHaveText("Choices unavailable · current value kept.", { timeout: 5_000 });
   await expect(dialog.locator(".af-on-complete-hint")).toBeVisible();
   await expect(dialog.getByRole("combobox", { name: "On done", exact: true })).toHaveValue("archive");
   await expect(dialog.getByRole("combobox", { name: "On done", exact: true })).toBeDisabled();

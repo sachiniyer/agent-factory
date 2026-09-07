@@ -3491,7 +3491,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   }
 }
 
-/* Phone terminal keys: six primary controls or Back plus four arrows. */
+/* Phone terminal keys: six primary controls or More keys plus four arrows. */
 .af-terminal-keybar { display: none; }
 @media (max-width: 768px) {
   .af-terminal-keybar {
@@ -3511,7 +3511,8 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-keybar-row[hidden] { display: none; }
   .af-keybar-row button {
     position: relative;
-    flex: 1;
+    flex: 1 0 auto;
+    white-space: nowrap;
     min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     padding: var(--af-space-1);
@@ -3573,4 +3574,26 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-session-first .af-divider,
   .af-session-first .af-pane:not(.af-pane-focused),
   .af-session-first .af-split:not(:has(.af-pane-focused)) { display: none; }
+}
+
+/* Shared action treatment: visible edges in both palettes, quiet hover, and
+ * balanced label padding. Navigation keeps its existing geometry and selection. */
+:is(.af-app, .af-modal-card, .af-recovery) button[class]:not([aria-pressed="true"]):not([aria-selected="true"]) {
+  border-color: var(--af-ink-muted);
+  font-weight: 500;
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:hover:not(:disabled) {
+  border-color: var(--af-accent);
+  text-decoration: none;
+}
+:is(.af-app, .af-modal-card, .af-recovery) :is(.af-primary, .af-ghost, .af-danger, .af-recovery-action) {
+  padding-inline: var(--af-space-3);
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:focus-visible {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+  outline-offset: calc(var(--af-space-1) / 2);
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:disabled {
+  color: var(--af-ink-muted);
+  border-style: dashed;
 }

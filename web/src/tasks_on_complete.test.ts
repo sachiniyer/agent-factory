@@ -22,5 +22,5 @@ test("buildTask forwards keep to daemon canonicalization and clears lifecycle fo
 test("target-session state replaces the picker with its reason", () => {
   assert.equal(tasks.onCompleteUnavailableReason(""), null);
   assert.equal(tasks.onCompleteUnavailableReason("  "), null);
-  assert.match(tasks.onCompleteUnavailableReason("reused")!, /target session.*reused/);
+  assert.match(tasks.onCompleteUnavailableReason("reused")!, /Target session.*reused/);
 });

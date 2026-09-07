@@ -97,7 +97,7 @@ export function buildTask(input: AddTaskInput): TaskData {
 
 /** Targeted tasks reuse a session, so a spawned-session policy cannot apply. */
 export function onCompleteUnavailableReason(targetSession: string): string | null {
-  return targetSession.trim() ? "Not applicable — the target session is meant to be reused." : null;
+  return targetSession.trim() ? "Target session will be reused." : null;
 }
 
 /** The task's trigger as a one-line summary, mirroring the TUI's row detail
@@ -734,10 +734,10 @@ class SchedulePicker {
    *  the picker-level constraints that would otherwise generate a nonsense cron. */
   validate(): string | null {
     if (this.type === "custom" && this.rawInput.value.trim() === "") {
-      return "A cron expression is required for a cron task.";
+      return "Enter a cron expression.";
     }
     if (this.type === "weekly" && this.weekdaysOn.size === 0) {
-      return "Select at least one day of the week.";
+      return "Select at least one day.";
     }
     return null;
   }
@@ -822,7 +822,7 @@ function taskFormModal(opts: {
     // Post-#2456 a registered repo is a valid task target (opts.projects ∪ the
     // registry), so the coherent action is the switcher's "+ Add project", not a
     // session — matching the New session modal's empty state.
-    const opt = h("option", { value: "" }, "No projects yet — add one from the project switcher first");
+    const opt = h("option", { value: "" }, "Add a project first.");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
@@ -915,7 +915,7 @@ function taskFormModal(opts: {
     onCompleteSelect.disabled = false;
     renderOnCompleteHint();
   }).catch(() => {
-    onCompleteHint.textContent = "Could not load choices; the current value is kept.";
+    onCompleteHint.textContent = "Choices unavailable · current value kept.";
   });
 
   // The program field (#1970). Its options come from the daemon, never from a list
@@ -1008,7 +1008,7 @@ function taskFormModal(opts: {
     const watchCmd = watchInput.value.trim();
     const prompt = promptArea.value.trim();
     if (name === "" || projectSelect.value === "") {
-      handle.setError("A name and a project are required.");
+      handle.setError("Enter a name and choose a project.");
       return;
     }
     // The picker always yields a well-formed expression for a preset; validate()
@@ -1021,11 +1021,11 @@ function taskFormModal(opts: {
     }
     const cron = trigger === "cron" ? picker.cron() : "";
     if (trigger === "cron" && prompt === "") {
-      handle.setError("A prompt is required for a cron task.");
+      handle.setError("Enter a prompt.");
       return;
     }
     if (trigger === "watch" && watchCmd === "") {
-      handle.setError("A watch command is required for a watch task.");
+      handle.setError("Enter a watch command.");
       return;
     }
     handle.setError(null);

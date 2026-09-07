@@ -126,7 +126,9 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string)
   const choices: AccountChoice[] = [
     {
       value: AMBIENT_ACCOUNT,
-      label: "Ambient identity (the agent's own login)",
+      label: accountDefaultFor(accounts, agent)
+        ? `Use configured default (${accountDefaultFor(accounts, agent)})`
+        : "Use configured default",
       agent,
       blocked: "",
       note: "",

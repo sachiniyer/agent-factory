@@ -32,7 +32,7 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
   await expect(textarea).toBeFocused();
   await bar.getByRole("button", { name: "↑", exact: true }).click();
   await expect.poll(stream).toBe(before + "\x1b[A");
-  await bar.getByRole("button", { name: "Back", exact: true }).click();
+  await bar.getByRole("button", { name: "More keys", exact: true }).click();
   await expect(textarea).toBeFocused();
   before = stream();
   await bar.getByRole("button", { name: "Interrupt (^C)", exact: true }).click();

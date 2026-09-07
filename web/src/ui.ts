@@ -205,7 +205,7 @@ export interface AppState {
  *  be a drop target (the browser then shows a no-drop cursor); a finger has no cursor
  *  to read, so the same refusal has to be said out loud. Sentence case, `·` as the
  *  fragment separator, per the repo's copy conventions. */
-export const TAB_PINNED_NOTICE = "The agent tab stays first · drag it onto a pane to split instead";
+export const TAB_PINNED_NOTICE = "Agent tab stays first · drag to a pane to split";
 
 export interface Actions {
   connect(token: string): void;
@@ -612,7 +612,7 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
 function loginView(state: AppState, actions: Actions): HTMLElement {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
-      detail: state.loginError ?? "Check the daemon and its listener address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
+      detail: state.loginError ?? "Check the daemon address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
       run: () => actions.retryConnection?.(), });
     screen.classList.add("af-recovery-login");
     return screen;
@@ -665,14 +665,14 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
     h(
       "p",
       { class: "af-subtitle" },
-      "Paste the daemon bearer token to connect. Get it from ",
+      "Paste the daemon token from ",
       h("code", {}, "af token show"),
       " on the host.",
     ),
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you disconnect."),
     form,
   ];
   if (state.loginError) {
@@ -711,7 +711,7 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
     h(
       "p",
       { class: "af-subtitle" },
-      "This daemon does not require a token for your connection.",
+      "No token needed.",
     ),
     form,
   ];
@@ -1518,9 +1518,9 @@ export class AppShell {
       const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        "Kill",
+        "Delete session",
       );
-      const killLabel = `Kill session “${killSession.title}”`;
+      const killLabel = `Delete session “${killSession.title}”`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
       killBtn.addEventListener("click", (e) => {
@@ -1597,7 +1597,7 @@ export class AppShell {
       return h(
         "li",
         { class: "af-rail-empty-project" },
-        `No sessions match the filter — ${hiddenCount(scoped, state.statusFilter)} hidden `,
+        `No matches · ${hiddenCount(scoped, state.statusFilter)} hidden `,
         reset,
       );
     }
@@ -1767,7 +1767,7 @@ export class AppShell {
     const wrap = h("div", { class: "af-tab-new-wrap" });
     const trigger = h(
       "button",
-      { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
+      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
       icon("plus", "af-tab-new-plus"),
       h("span", {}, "New tab"),
       icon("chevron-down", "af-tab-new-caret"),
@@ -2822,7 +2822,7 @@ function tabButton(
   }
   // The agent tab (index 0) is unclosable — killing the session tears it down.
   if (index > 0 && canClose) {
-    const close = h("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
+    const close = h("span", { class: "af-tab-close", title: "Delete tab" }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();

@@ -194,7 +194,7 @@ export function newSessionModal(
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
     const choiceLabel = (select: HTMLSelectElement) => (select.selectedOptions[0]?.textContent ?? "Loading…")
       .replace(/^Repo default \((.*)\)$/, "$1 (default)")
-      .replace("Ambient identity (the agent's own login)", "ambient");
+      .replace(/^Use configured default \((.*)\)$/, "$1 (default)");
     // Ambiguity, unavailable choices and explicit overrides must remain in view.
     const accountNeedsChoice = !!accountHint.textContent || accountPicked
       || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent));
@@ -442,37 +442,6 @@ export function newSessionModal(
   return handle;
 }
 
-/** The send-prompt modal: a textarea whose text is sent to the named session. */
-export function promptModal(
-  sessionTitle: string,
-  callbacks: { onSubmit: (text: string) => void; onCancel: () => void },
-): ModalHandle {
-  const { handle, body } = modalChrome({
-    title: `Send prompt to ${sessionTitle}`,
-    confirmLabel: "Send",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel,
-  });
-
-  const area = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt", rows: 4 });
-  area.setAttribute("aria-label", "Prompt");
-  body.append(area);
-
-  const card = handle.el.firstElementChild as HTMLElement;
-  asForm(card, () => {
-    const text = area.value.trim();
-    if (text === "") {
-      handle.setError("Enter a prompt to send.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit(text);
-  });
-
-  queueMicrotask(() => area.focus());
-  return handle;
-}
-
 /** The handoff modal (#2013): pick the agent to continue the session under — the
  *  web half of the TUI's `F`. It collapses the TUI's pick-then-confirm into one
  *  dialog: a web modal already gates the swap behind an explicit submit, and the
@@ -517,7 +486,7 @@ export function handoffModal(
     h(
       "p",
       { class: "af-modal-text" },
-      "The new agent starts fresh with a summary of the work so far. Same worktree and branch — nothing is discarded.",
+      "Start a new agent with a summary. Keep the worktree and branch.",
     ),
   );
 
@@ -565,22 +534,22 @@ export function confirmModal(
   // archive confirm already prints.
   const copy = {
     kill: {
-      title: `Kill ${opts.sessionTitle}?`,
-      confirmLabel: "Kill",
+      title: `Delete session ${opts.sessionTitle}?`,
+      confirmLabel: "Delete session",
       confirmClass: "af-primary",
-      body: "This permanently destroys the session and prunes its branch. This can't be undone.",
+      body: "Permanently delete the session and resources owned by af. User-owned work stays.",
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
       confirmLabel: "Archive",
       confirmClass: "af-primary",
-      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later.",
+      body: "Local: move the worktree to the archive. Sandboxes: publish work, then remove the sandbox. Restore anytime.",
     },
     restore: {
       title: `Restore ${opts.sessionTitle}?`,
       confirmLabel: "Restore",
       confirmClass: "af-primary",
-      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail.",
+      body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain.",
     },
   }[opts.action];
 
@@ -620,8 +589,8 @@ export function confirmDeleteProjectModal(
   // delete just drops its registry record. Say so, rather than "Archive 0 sessions".
   const message =
     opts.sessionCount === 0
-      ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched — you can add it again anytime."
-      : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`;
+      ? "Remove the empty project. Keep the repo; add it again anytime."
+      : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
   body.append(h("p", { class: "af-modal-text" }, message));
 
   const card = handle.el.firstElementChild as HTMLElement;
@@ -698,7 +667,7 @@ export function addProjectModal(callbacks: {
       h(
         "div",
         { class: "af-modal-field" },
-        h("span", { class: "af-modal-label" }, "Browse the daemon host"),
+        h("span", { class: "af-modal-label" }, "Browse host"),
         picker.el,
       ),
     );
@@ -709,7 +678,7 @@ export function addProjectModal(callbacks: {
     h(
       "p",
       { class: "af-modal-hint" },
-      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into.",
+      "Enter a repo path on the daemon host (~ works).",
     ),
   );
 
@@ -721,7 +690,7 @@ export function addProjectModal(callbacks: {
   asForm(card, () => {
     const path = pathInput.value.trim();
     if (path === "") {
-      handle.setError("Enter a repository path, or pick one above.");
+      handle.setError("Enter or choose a repo path.");
       return;
     }
     handle.setError(null);
@@ -767,7 +736,7 @@ export function projectLabel(root: string): string {
 /** Target-specific task deletion; failures retain the open confirmation. */
 export function removeTaskModal(name: string, onConfirm: () => void, onCancel: () => void): ModalHandle {
   const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
-  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "This deletes the task and stops future runs. Existing sessions are kept."));
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
   asForm(handle.el.firstElementChild as HTMLElement, onConfirm);
   return handle;
 }
