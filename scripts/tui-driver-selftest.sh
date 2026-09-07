@@ -61,6 +61,19 @@ _expect_regex_escape_literal() {
     fi
 }
 
+# A rail title can contain a corner glyph before the actual matched border.
+# Keep top and bottom prefixes independent so either edge can regress (#4048).
+# shellcheck disable=SC2317
+_expect_tasks_frame_after_rail_corner() {
+    if ! printf '%s%s\n' \
+        "$1" '╭────────────────────────────────╮' \
+        '                   ' '│ n new · esc back               │' \
+        "$2" '╰────────────────────────────────╯' | _af_tasks_overlay_visible; then
+        _af_log 'task dialog rejected because a rail corner precedes its matched border'
+        return 1
+    fi
+}
+
 # Both lists are empty: the workspace and task recovery share their action copy.
 # Inject one captured pre-overlay frame to make the stale-frame race deterministic,
 # then exercise the real dialog and prove closing it sends exactly one Escape.
@@ -865,6 +878,10 @@ step "literal alternation (#4037)" _expect_regex_escape_literal 'a|b' 'a'
 step "literal dollar (#4037)" _expect_regex_escape_literal '$HOME' 'HOME'
 step "literal backslash (#4037)" _expect_regex_escape_literal 'path\title' 'pathtitle'
 step "all ERE metacharacters (#4037)" _expect_regex_escape_literal '.[](){}*+?^$|\' 'unrelated'
+
+step "task frame accepts an earlier top corner in the rail" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project-name     '
+step "task frame accepts an earlier bottom corner in the rail" _expect_tasks_frame_after_rail_corner '  project-name     ' '  project╰name     '
+step "task frame accepts earlier rail corners on both edges" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project╰name     '
 
 step "reset sandbox to a clean state"                       af_reset_sandbox
 step "seed a non-codex default before daemon boot"           _seed_config_editor_start_value
