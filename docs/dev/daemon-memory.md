@@ -382,8 +382,14 @@ backend is not `local`.
 under `app.slice` rather than a child of the daemon unit — so the build is off
 the daemon's books. Because that scope carries no dependency edge to the unit,
 the scope itself survives a daemon restart or auto-upgrade, and a silent build
-survives with it. Both hook runners, however, give the child pipes whose readers
-live in the daemon — a `bytes.Buffer` in `session/git/hooks.go` and an
+survives with it. The survival guarantee is for the **entry already in flight**,
+not the whole list: `runPostWorktreeHooks` runs entries sequentially and creates
+one scope per entry, so a daemon exit mid-list means later entries are never
+spawned; `AdoptRunningHooks` observes the survivor but does not rerun the entries
+that were never spawned.
+[#4014](https://github.com/sachiniyer/agent-factory/issues/4014) tracks resuming
+or reporting an incomplete run. Both hook runners, however, give the child pipes
+whose readers live in the daemon — a `bytes.Buffer` in `session/git/hooks.go` and an
 `archiveHookOutputTail` in `daemon/archive_hook.go`. A hook that writes after the
 daemon exits can therefore die on `SIGPIPE`/`EPIPE`; [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
 tracks moving both runners to a per-run log file. It covers **both** hooks:
@@ -394,20 +400,29 @@ bound shape.
 
 So on a current daemon the repository-controlled `post_worktree_commands` and
 operator-controlled `on_archive_command` should not reproduce the correlation
-above: their builds no longer contribute to the unit's `MemoryPeak`. That does
-not make `MemoryPeak` a daemon-process number. Only those two hooks moved out;
-every other unscoped descendant still charges the unit,
+above: their hook process trees no longer contribute to the unit's `MemoryPeak`.
+Today both runners still capture hook output in daemon memory — an unbounded
+`bytes.Buffer` or a bounded tail — so a noisy hook's output is still charged to
+the unit. [#4010](https://github.com/sachiniyer/agent-factory/issues/4010) tracks
+moving that capture to a per-run file in [PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012),
+which is in flight. That does not make `MemoryPeak` a daemon-process number. Only
+those two hooks moved out; every other unscoped descendant still charges the unit,
 including a hook backend's plain-`exec` `launch_cmd` on the daemon host.
 `MemoryPeak`, `MemoryMax=`, and `CPUQuota=` therefore still cover more than the
-daemon process. Two things still put a hook back in the old place, and both are
+daemon process. Three things still put a hook back in the old place, and all are
 worth checking before concluding otherwise: a hook run by a **TUI or CLI**
 outside the daemon unit that creates the worktree itself was never scoped (it
-satisfies neither half of the gate and is not in the daemon's cgroup), and a
-**non-Linux** host has no systemd and no cgroup accounting at all. Read
+satisfies neither half of the gate and is not in the daemon's cgroup); a
+**non-Linux** host has no systemd and no cgroup accounting at all; and a
+**Linux daemon not managed by systemd** — when the unit cannot start and
+`ensureDaemonThroughUnit` falls back to `ensureDaemonAdHoc`
+(`daemon/control_client.go`), or an operator runs `af --daemon` directly — has
+neither the PID marker nor unit-cgroup membership, so `RunningDaemonProcess()` is
+false and its hooks run unscoped with plain `exec`. Read
 `/proc/<hook pid>/cgroup` while a hook runs rather than inferring which side of
 #3650 a given build is on. For daemon-started hooks on Linux, size the **box**
 for what your local hooks build — that memory did not disappear, it moved to a
-scope of its own. In the two exceptions above, there is no `af-hook-*` scope to
+scope of its own. In these three exceptions, there is no `af-hook-*` scope to
 look for: the build is simply wherever its parent runs.
 
 ### High child-process churn, which is not a measured driver
