@@ -141,7 +141,7 @@ var selectedDescStyle = lipgloss.NewStyle()
 // Agent/active tab label (#1456). Selection still supplies the row highlight.
 var tabRowStyle = lipgloss.NewStyle()
 
-// tabRowActiveStyle keeps tab rows in the same foreground; the tmux-style "*"
+// tabRowActiveStyle keeps tab rows in the same foreground; the " · open"
 // marker carries the active cue.
 var tabRowActiveStyle = lipgloss.NewStyle()
 
@@ -682,7 +682,7 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		}
 		// Spend the overflow on the NAME, not on the marker (#1983): content
 		// elides, indicators don't. Truncating the whole row right-to-left dropped
-		// the trailing " *" first, and that marker is the only thing distinguishing
+		// the trailing " · open" first, and that marker is the only thing distinguishing
 		// an active tab — tabRowActiveStyle is deliberately identical to
 		// tabRowStyle — so an active tab with a long name rendered byte-identically
 		// to an inactive one while the tab bar's header still called it active. The

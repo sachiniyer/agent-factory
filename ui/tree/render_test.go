@@ -675,7 +675,7 @@ func TestRenderTabRows(t *testing.T) {
 	r.SetWidth(30)
 
 	mid := ansiEscape.ReplaceAllString(r.RenderTab("Agent", 1, false, false, true), "")
-	assert.Contains(t, mid, "├ 1 Agent · open", "active non-last tab: ├ connector + slot number + * marker")
+	assert.Contains(t, mid, "├ 1 Agent · open", "active non-last tab: ├ connector + slot number + · open marker")
 
 	last := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, false), "")
 	assert.Contains(t, last, "└ 2 Terminal", "last tab uses the └ connector")
@@ -728,7 +728,7 @@ func TestRenderTab_ActiveMarkerSurvivesTruncation(t *testing.T) {
 		require.Greater(t, runewidth.StringWidth(label), width,
 			"the label must actually overflow for this case to test anything")
 		assert.True(t, activeMarkerVisible(row),
-			"width %d: the active tab lost its * marker to truncation — no cue is left that it is active (row: %q)",
+			"width %d: the active tab lost its · open marker to truncation — no cue is left that it is active (row: %q)",
 			width, clean)
 		assert.LessOrEqual(t, lipgloss.Width(row), width+2,
 			"width %d: reserving the marker must not push the row past the container", width)
