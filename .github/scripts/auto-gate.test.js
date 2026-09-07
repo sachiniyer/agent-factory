@@ -3543,6 +3543,25 @@ test("#3985: a later Codex unavailable wording never withdraws a standing degrad
   }
 });
 
+test("incomplete Codex summaries stay out of the availability pool", async () => {
+  for (const summary of [
+    codexSummaryTable(HEAD_SHA, { status: "🔄 **Running**" }),
+    codexSummaryTable(HEAD_SHA, { status: "✅ **Completed**", commitCell: "", rowTime: null }),
+  ]) {
+    const result = await __test.evaluateCodex({
+      github: fakeGateGithub({ issueComments: [
+        codexRateLimit("2026-07-09T01:10:00Z", CODEX_LIMIT_CODE_REVIEWS),
+        summary,
+      ] }),
+      context: fakeContext(), number: 1465, sha: HEAD_SHA,
+      lastCommitDate: "2026-07-09T01:00:00Z", prCreatedAt: "2026-07-09T00:00:00Z",
+    });
+    assert.equal(result.reviewerUnavailable, true);
+    assert.equal(result.reviewerUnavailableKind, "usage-limit");
+    assert.equal(autoGate.codexEvidence.classifyCodexUnavailableArtifact(summary), null);
+  }
+});
+
 test("unavailable classification preserves review, finding, and verdict guards", () => {
   const quotingReview = codexVerdict(HEAD_SHA);
   quotingReview.body += `\n\nQuoted outage response: ${CODEX_LIMIT_ACCOUNT}`;

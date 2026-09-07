@@ -33,10 +33,11 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
         time: (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at,
         verdict, kind: unavailable?.kind,
       });
+      const eventBody = unavailable?.kind === 'unrecognised' ? unavailable.cause : body;
       for (const response of responses) {
         const at = time(response.time);
         if (!Number.isFinite(at) || at > time(now) || at < time(since)) continue;
-        events.push({ ...response, url: artifact.html_url, body });
+        events.push({ ...response, url: artifact.html_url, body: eventBody });
       }
     }
   }
@@ -75,7 +76,11 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       const artifacts = pull.artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER);
       // #3932's reconstruction: an observed limit before merge and no verdict
       // covering the merged head at that time. Late reviews cannot erase a merge.
-      return artifacts.some(a => evidence.isCodexUsageLimitArtifact(a) && time(a.created_at || a.submitted_at) <= merged) &&
+      const episodeEnd = time(episode.end || now);
+      return artifacts.some(a => {
+        const at = time(a.created_at || a.submitted_at || a.updated_at);
+        return evidence.isCodexUsageLimitArtifact(a) && at >= time(episode.start) && at <= episodeEnd && at <= merged;
+      }) &&
         !artifacts.some(a => {
           const verdict = evidence.parseVerdictArtifact(a, pull.head.sha);
           return verdict && verdict.time <= merged;
@@ -97,12 +102,17 @@ function render(episodes, now) {
     lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
       `Observed causes: ${(episode.causes || []).map(causeLabel).join(', ') || 'not recorded'}.`,
       `Latest reviewer-unavailable notice: [${episode.latest.time}](${episode.latest.url})`,
-      `> ${episode.latest.body.replace(/\n/g, '\n> ')}`,
+      `> ${escapeCommentDelimiters(episode.latest.body).replace(/\n/g, '\n> ')}`,
       `Degraded merges: ${episode.merged.length}${episode.merged.length ? ` (${episode.merged.map(n => `#${n}`).join(', ')})` : ''}.`,
       episode.end ? `Recovered: ${episode.end} — [first real verdict](${episode.recovery}). Final degraded-merge count: ${episode.merged.length}.` : 'Status: unavailable.', '');
   }
-  lines.push(`${MARKER}${JSON.stringify({ episodes, observedAt: now })} -->`);
+  const json = JSON.stringify({ episodes, observedAt: now }).replace(/--/g, '-\\u002d');
+  lines.push(`${MARKER}${json} -->`);
   return lines.join('\n');
+}
+
+function escapeCommentDelimiters(value) {
+  return String(value || '').replace(/--/g, '-\\u002d');
 }
 
 function readRecord(comment) {

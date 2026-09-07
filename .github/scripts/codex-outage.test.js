@@ -175,6 +175,36 @@ test('an unrecognised response extends an outage but never opens an episode alon
   assert.deepEqual(afterRecovery.map(e => [e.start, e.end, e.merged]), [[t(2), t(3), []]]);
 });
 
+test('summary status rows never add outage evidence or replace the latest notice', () => {
+  const running = summaryArtifact([summaryRow(3, { status: 'Running' })]);
+  const episodes = aggregate([{ number: 1, head: { sha: head }, artifacts: [comment(2, limits[0]), running] }], t(5));
+  assert.deepEqual(episodes[0].causes, ['usage-limit']);
+  assert.equal(episodes[0].latest.body, limits[0]);
+});
+
+test('outage records escape comment delimiters and round-trip their state', () => {
+  const body = 'first --> second\n<!-- summary -->';
+  const episodes = [{ start: t(2), end: null, merged: [], causes: ['unrecognised'],
+    latest: { time: t(3), url: 'https://example.com/3', body, kind: 'unrecognised' } }];
+  const rendered = render(episodes, t(4));
+  assert.equal(rendered.slice(0, rendered.lastIndexOf(' -->')).includes('-->'), false);
+  assert.deepEqual(readRecord({ body: rendered, user: { login: 'sachiniyer' } }).episodes, episodes);
+});
+
+test('pre-episode unrecognised evidence does not degrade a merge, but in-episode evidence does', () => {
+  const before = comment(1, environmentMissing);
+  const opener = comment(2, limits[0]);
+  const inEpisode = comment(2, environmentMissing, { created_at: '2026-09-05T02:30:00.000Z' });
+  const base = [
+    { number: 1, head: { sha: head }, merged_at: t(3), artifacts: [before] },
+    { number: 2, head: { sha: head }, merged_at: null, artifacts: [opener] },
+  ];
+  assert.deepEqual(aggregate(base, t(4))[0].merged, []);
+  assert.deepEqual(aggregate([
+    { ...base[0], artifacts: [before, inEpisode] }, base[1],
+  ], t(4))[0].merged, [1]);
+});
+
 function summaryRow(hour, { status = 'Completed', commit = 'bbbbbbb' } = {}) {
   const timestamp = hour == null ? '' : `<relative-time datetime="${t(hour)}"></relative-time>`;
   return `| Code Review | ${status} ${timestamp} | \`${commit}\` | New commits |`;

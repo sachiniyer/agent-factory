@@ -4656,16 +4656,15 @@ function classifyCodexUnavailableArtifact(artifact, isInlineReply = Boolean(arti
   // Share this classification with codex-outage.js; preserve the quote/finding guards.
   const failed = /^\s*Codex Review: Something went wrong\b/i.test(body);
   if (looksLikeReviewArtifact || (isInlineReply && CODEX_BODY_FINDING_RE.test(body))) return null;
-  // A completed summary row is a verdict too. evaluateCodex projects each row
-  // into latest-response ordering at the row's own time, while the health watch
-  // consumes the original artifact; both paths reach this same guard.
-  if (completedCodexSummaryRows(artifact).length > 0) return null;
+  // Any maintained summary is status, not an availability answer. evaluateCodex
+  // separately projects only valid Completed rows into response ordering.
+  if (body.trimStart().startsWith(CODEX_SUMMARY_MARKER)) return null;
   if (failed) return { kind: "failure" };
   if (codexReportsReviewUsageLimit(body)) return { kind: "usage-limit" };
   // GitHub pairs an inline reply with an empty enclosing review. The wrapper is
   // transport, not a response, and has no first line to report as a cause.
   if (!body.trim()) return null;
-  return { kind: "unrecognised", cause: body.split(/\r?\n/, 1)[0].trim() };
+  return { kind: "unrecognised", cause: body.split(/\r?\n/, 1)[0].trim().slice(0, 240) };
 }
 
 function describeCodexUnavailable(unavailable) {

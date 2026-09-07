@@ -195,12 +195,15 @@ A real review quoting an unavailable message remains a review.
 latest-response selection: an edit cannot supersede an earlier head-current
 unavailable answer. Parseable Completed rows participate using their own times,
 even for an older commit, because they prove Codex answered again. Running rows
-and rows without a commit or timestamp remain excluded. A completed row older
-than the unavailable answer does not supersede it. Verdict parsing for the
-current head continues to use the row's own time. The repository outage record
-likewise treats every authenticated Completed row as recovery at its own time,
-regardless of the commit; only merge accounting requires a verdict for the
-merged head.
+and rows without a commit or timestamp remain excluded from the availability
+pool. Any artifact carrying the summary marker is status, never an
+unrecognised outage response, whether it has valid Completed rows or not; an
+incomplete summary therefore cannot add a cause or replace the latest notice.
+A completed row older than the unavailable answer does not supersede it.
+Verdict parsing for the current head continues to use the row's own time. The
+repository outage record likewise treats every authenticated Completed row as
+recovery at its own time, regardless of the commit; only merge accounting
+requires a verdict for the merged head.
 
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
@@ -325,10 +328,12 @@ episode starts at the first observed known limit or transient failure, not the
 preceding verdict. An unrecognised response extends an episode already open but
 does not open one by itself. The sweep reads **both** `/pulls/N/comments` and
 `/issues/N/comments` unfiltered, plus review bodies. It reconstructs degraded
-merges using #3932's method: a reviewer-unavailable response before merge and no
-real verdict covering the actual merged head before merge, within a recorded
-episode. This is historical coverage accounting, not a second implementation of
-the merge gate; the count is labelled with its method in the record. Late
+merges using #3932's method: a reviewer-unavailable response whose artifact
+timestamp falls inside the episode and before merge, plus no real verdict
+covering the actual merged head before merge. This is historical coverage
+accounting, not a second implementation of the merge gate; the count is
+labelled with its method in the record. An unrecognised artifact before the
+episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
 `auto-gate.js` supplies structural classification, quotation/finding exclusions,
 and verdict parsing. Finding predicates and the hand gate's jq are unchanged.
