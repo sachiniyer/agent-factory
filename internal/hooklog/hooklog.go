@@ -33,6 +33,10 @@ const (
 // *os.File is load-bearing: os/exec passes it straight to the child instead of
 // creating a pipe and a copying goroutine in the launcher.
 func Open(kind Kind) (*os.File, error) {
+	return open(kind, syscall.Flock)
+}
+
+func open(kind Kind, flock func(int, int) error) (*os.File, error) {
 	switch kind {
 	case PostWorktree, OnArchive:
 	default:
@@ -53,7 +57,7 @@ func Open(kind Kind) (*os.File, error) {
 	// flock belongs to the open file description. The child's inherited
 	// stdout/stderr keep it alive even after the launcher exits or closes its
 	// copy. Never explicitly unlock: the last descriptor close releases it.
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
 		_ = os.Remove(file.Name())
 		return nil, fmt.Errorf("lock active hook log %s: %w", file.Name(), err)
