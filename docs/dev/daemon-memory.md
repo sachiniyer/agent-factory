@@ -474,11 +474,12 @@ only the hook correlation above connects anything to the peak.
   daemon's footprint and outside this page; no figure for it was measured here.
   It is outside the *unit's* figure too — but only once a scoped tmux server has
   replaced any legacy one left in the service cgroup by a pre-upgrade daemon.
-- **Plus whatever `post_worktree_commands` builds**, per worktree — since #3650
-  charged to its own sibling scope rather than the daemon's cgroup, so it is
-  outside the unit's figure but still on this box's RAM. Only for a worktree the
-  daemon creates here: an off-box backend builds it on the machine hosting the
-  workspace instead, and you size that machine for it.
+- **Plus whatever `post_worktree_commands` builds**, per worktree — on whichever
+  machine hosts the workspace/agent-server: this box when the
+  server runs here, or the remote machine otherwise. For daemon-started hooks on
+  Linux, #3650 puts the hook process tree in a sibling scope outside the
+  daemon's cgroup, but output capture remains daemon memory until #4010; size
+  that machine for it.
 - **Plus everything else a session can start.** A session may hold any number of
   extra process-bearing tabs — shell, process, editor — and there is no cap on
   how many (#3021). Watch tasks run their command, editors and watchers run
