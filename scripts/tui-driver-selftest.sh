@@ -840,7 +840,7 @@ step "af_select handles a target with an open pane (#1996)"  _expect_af_select_o
 # compact run action is discoverable.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_task_overlay_marker_context() {
-    local pane foreign_modal list_modal compact_list_modal nested_edit scrolled_edit
+    local pane foreign_modal list_modal compact_list_modal nested_edit footer_below no_footer_below scrolled_edit
     pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
     if printf '%s\n' "$pane" | _af_tasks_overlay_visible; then
         _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
@@ -868,6 +868,18 @@ _expect_task_overlay_marker_context() {
     nested_edit=$'╭────────────────────────────────────────────╮\n│  Edit task 1234                            │\n│  Prompt: ╭────────╮                       │\n│          │ inner  │                       │\n│          ╰────────╯                       │\n│  x toggle · D del · esc · q quit          │\n╰────────────────────────────────────────────╯'
     if ! printf '%s\n' "$nested_edit" | _af_tasks_overlay_visible; then
         _af_fail 'a task prompt containing a rounded box displaced the outer frame marker'
+        return 1
+    fi
+
+    footer_below=$'╭────────────────────╮\n│  Tasks             │\n│  n new · esc back  │\n╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if ! printf '%s\n' "$footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'footer-like pane output below the task frame rejected an open dialog'
+        return 1
+    fi
+
+    no_footer_below=$'╭────────────────────╮\n│  Agent prompt      │\n╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if printf '%s\n' "$no_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'footer-like pane output below a foreign frame satisfied the task marker'
         return 1
     fi
 

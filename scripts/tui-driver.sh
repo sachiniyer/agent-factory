@@ -948,16 +948,20 @@ _af_tab_count() {
 
 # _af_tasks_dialog_has <content-regex> reads a captured screen on stdin and
 # succeeds only when the marker is enclosed by one complete rounded dialog. The
-# first matching top edge establishes the outer frame; rounded boxes in task
-# prompt text are ignored, and the last matching rounded bottom in the capture
-# closes that outer frame.
+# first matching top edge establishes the outer geometry; only a later bottom
+# with the same start column and match width closes it, so nested boxes are
+# ignored and no footer-like pane row below the outer bottom is considered.
 _af_tasks_dialog_has() {
     local content_re="$1"
     awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" \
         -v content_re="$content_re" '
         $0 ~ top_re {
-            if (!inside) {
+            if (!inside && !done) {
                 inside = 1
+                top_line = NR
+                top_start = index($0, "╭")
+                match($0, top_re)
+                top_width = RLENGTH
                 matched = 0
                 last_footer = 0
                 last_bottom = 0
@@ -966,9 +970,22 @@ _af_tasks_dialog_has() {
         }
         inside {
             if ($0 ~ content_re) { matched = 1; last_footer = NR }
-            if ($0 ~ bottom_re) { last_bottom = NR }
+            if ($0 ~ bottom_re) {
+                bottom_start = index($0, "╰")
+                match($0, bottom_re)
+                last_bottom = NR
+                if (bottom_start == top_start && RLENGTH == top_width) {
+                    if (matched && last_footer > top_line && last_footer < NR) { found = 1 }
+                    inside = 0
+                    done = 1
+                    next
+                }
+            }
         }
-        END { exit (inside && last_bottom > last_footer && matched) ? 0 : 1 }
+        END {
+            if (!found && inside && last_bottom > last_footer && matched) { found = 1 }
+            exit found ? 0 : 1
+        }
     '
 }
 
