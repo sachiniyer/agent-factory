@@ -644,9 +644,9 @@ func orderedSections(rows []renderRow) []string {
 
 // summaryLine LEADS with the actionable count, then gives the status-row
 // breakdown (#1979). A reader who stops at "0 FAIL" must not conclude "healthy"
-// while `af doctor` exits nonzero: the exit code keys on the actionable count
-// (UnresolvedCount), so that count is the headline and the exit code cannot
-// contradict it. The PASS/WARN/FAIL tally is a different axis — it counts ROWS,
+// while `af doctor` exits nonzero: actionable issues lead the summary, and
+// incomplete checks appear at its end. Either makes the command exit 1.
+// The PASS/WARN/FAIL tally is a different axis — it counts ROWS,
 // not issues, which is why it trails in parentheses and why one collapsed WARN
 // row can stand for many issues.
 func summaryLine(r *Report, rows []renderRow, fixMode bool) string {
