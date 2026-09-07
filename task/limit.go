@@ -223,9 +223,10 @@ func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher
 var (
 	// clockTime matches a 12-hour clock token like "2pm", "2:30 PM", "11am".
 	clockTime = regexp.MustCompile(`(?i)\b(\d{1,2})(?::(\d{2}))?\s*([ap])m\b`)
-	// parenTZ captures an IANA timezone inside parentheses, e.g.
-	// "(America/New_York)".
-	parenTZ = regexp.MustCompile(`\(([A-Za-z]+(?:/[A-Za-z_+\-]+)+)\)`)
+	// parenTZ captures a timezone candidate, including single-component names
+	// and numeric offsets. LoadLocation validates it; capturing non-zones too
+	// makes the fallback explicit instead of silently ignoring unknown text.
+	parenTZ = regexp.MustCompile(`\(([^()\r\n]+)\)`)
 	// monthDay matches an optional-year calendar date like "Jul 25th, 2026",
 	// "Nov 6", "November 6 2026". The ordinal suffix and year are optional.
 	monthDay = regexp.MustCompile(`(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?`)
@@ -256,7 +257,7 @@ var claudeResetAnchor = regexp.MustCompile(`(?i)reset\s+(?:at\s+)?([^\r\n]+)`)
 
 // parseClaudeReset scans the detector-matched tail for Claude's "reset at
 // <tail>" clause and resolves the tail, in order: an optional timezone in parens
-// (falling back to now's location when absent — Claude renders in the account
+// (falling back to now's location when absent or invalid — Claude renders in the account
 // tz, which we cannot know without the paren, so the injected clock's zone is
 // the deterministic stand-in), a required 12-hour clock time, and an optional
 // calendar date or weekday (the weekly variant). Without any date it mints the
@@ -274,6 +275,8 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 	if m := parenTZ.FindStringSubmatch(reset); m != nil {
 		if l, err := time.LoadLocation(m[1]); err == nil {
 			loc = l
+		} else {
+			log.WarningLog.Printf("Claude usage-limit banner %q: cannot load timezone %q (%v); falling back to daemon zone %q", strings.SplitN(content, "\n", 2)[0], m[1], err, loc.String())
 		}
 	}
 

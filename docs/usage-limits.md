@@ -274,6 +274,14 @@ Detection runs on captured pane content, so it needs no agent cooperation. You
 can tune the detection regex per agent with
 [`limit_patterns`](#custom-detection-patterns).
 
+Claude reset times honor a parenthesized timezone accepted by Go's
+`time.LoadLocation`, including single-component names such as `(UTC)` and
+`(Japan)` and slash names such as `(America/New_York)` or `(Etc/GMT+5)`.
+An unrecognized parenthesized zone produces a warning naming the banner and
+falls back to the daemon's timezone. A banner without a zone also uses the
+daemon's timezone. The sidebar displays the resulting instant in your local
+timezone; auto-resume uses that same instant plus its grace buffer.
+
 ## The `[limit]` badge
 
 When the daemon's status poll sees a usage-limit banner for a `claude`, `codex`,
