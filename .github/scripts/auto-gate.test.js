@@ -3494,6 +3494,98 @@ test("the degraded pass with a head-bound approval still merges itself", async (
 // #3951 live reproductions; #3948's summary edit time was captured from GitHub
 // after the issue was filed (the issue gives no timestamp for that summary).
 const CODEX_TRANSIENT_FAILURE = 'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error';
+const CODEX_ENVIRONMENT_MISSING =
+  "To use Codex here, [create an environment for this repo]" +
+  "(https://chatgpt.com/codex/cloud/settings/environments).";
+
+// The three production wordings that successively exposed the same newest-only
+// failure (#3728, #3951, #3985). Each is driven as the response AFTER a known
+// usage-limit notice, because that ordering is the claim: the later artifact
+// must not withdraw reviewer-unavailable evidence for a head that was already
+// current when both answers arrived.
+const REVIEWER_UNAVAILABLE_WORDINGS = [
+  ["#3728 bare usage limits", CODEX_LIMIT_ACCOUNT, "usage-limit"],
+  ["#3951 transient failure", CODEX_TRANSIENT_FAILURE, "failure"],
+  ["#3985 missing environment", CODEX_ENVIRONMENT_MISSING, "unrecognised"],
+];
+
+test("#3985: a later Codex unavailable wording never withdraws a standing degradation", async () => {
+  for (const [label, body, kind] of REVIEWER_UNAVAILABLE_WORDINGS) {
+    const latest = codexRateLimit("2026-07-09T01:20:00Z", body);
+    const unavailable = autoGate.codexEvidence.classifyCodexUnavailableArtifact(latest);
+    const result = await __test.evaluateCodex({
+      github: fakeGateGithub({ issueComments: [
+        codexRateLimit("2026-07-09T01:10:00Z", CODEX_LIMIT_CODE_REVIEWS),
+        latest,
+      ] }),
+      context: fakeContext(),
+      number: 1465,
+      sha: HEAD_SHA,
+      lastCommitDate: "2026-07-09T01:00:00Z",
+      prCreatedAt: "2026-07-09T00:00:00Z",
+    });
+
+    assert.deepEqual(
+      { rateLimited: Boolean(unavailable), reviewerUnavailable: result.reviewerUnavailable },
+      { rateLimited: true, reviewerUnavailable: true },
+      label,
+    );
+    assert.equal(unavailable.kind, kind, label);
+    if (kind === "unrecognised") {
+      assert.equal(unavailable.cause, body.split("\n", 1)[0], label);
+      assert.ok(result.reasons.join("\n").includes(unavailable.cause), label);
+      const gateResult = await evaluateGate({ issueComments: [
+        codexRateLimit("2026-07-09T01:10:00Z", CODEX_LIMIT_CODE_REVIEWS),
+        latest,
+      ] });
+      assert.ok(gateResult.summary.includes(unavailable.cause), gateResult.summary);
+    }
+  }
+});
+
+test("incomplete Codex summaries stay out of the availability pool", async () => {
+  for (const summary of [
+    codexSummaryTable(HEAD_SHA, { status: "🔄 **Running**" }),
+    codexSummaryTable(HEAD_SHA, { status: "✅ **Completed**", commitCell: "", rowTime: null }),
+  ]) {
+    const result = await __test.evaluateCodex({
+      github: fakeGateGithub({ issueComments: [
+        codexRateLimit("2026-07-09T01:10:00Z", CODEX_LIMIT_CODE_REVIEWS),
+        summary,
+      ] }),
+      context: fakeContext(), number: 1465, sha: HEAD_SHA,
+      lastCommitDate: "2026-07-09T01:00:00Z", prCreatedAt: "2026-07-09T00:00:00Z",
+    });
+    assert.equal(result.reviewerUnavailable, true);
+    assert.equal(result.reviewerUnavailableKind, "usage-limit");
+    assert.equal(autoGate.codexEvidence.classifyCodexUnavailableArtifact(summary), null);
+  }
+});
+
+test("unavailable classification preserves review, finding, and verdict guards", () => {
+  const quotingReview = codexVerdict(HEAD_SHA);
+  quotingReview.body += `\n\nQuoted outage response: ${CODEX_LIMIT_ACCOUNT}`;
+  const findingReply = {
+    ...codexRateLimit(CODEX_ARTIFACT_AT, `P1: detector quotes ${CODEX_ENVIRONMENT_MISSING}`),
+    in_reply_to_id: 123,
+  };
+  const fixtures = [
+    ["review quoting a usage-limit message", quotingReview, false],
+    ["finding-shaped inline reply", findingReply, true],
+    ["prose verdict", codexVerdict(HEAD_SHA), false],
+    ["completed summary verdict", codexSummaryTable(HEAD_SHA), false],
+  ];
+
+  for (const [label, artifact, isInlineReply] of fixtures) {
+    assert.equal(
+      autoGate.codexEvidence.classifyCodexUnavailableArtifact(artifact, isInlineReply),
+      null,
+      label,
+    );
+  }
+  assert.equal(__test.parseReviewedCommit(quotingReview.body), HEAD_SHA.slice(0, 10));
+});
+
 for (const [pr, head, committed, limit, later, body] of [
   [3937, "9528ae06", "12:22:12", "12:22:34", "12:30:46", CODEX_TRANSIENT_FAILURE],
   [3948, "a40e7aac", "12:38:27", "12:38:32", "12:48:27", "<!-- codex-pull-request-review-summary -->\n## Codex Review Summary"],
@@ -3700,15 +3792,17 @@ test("an inline reply cannot supply a verdict or supersede a body finding", asyn
   assert.match(result.reasons.join("\n"), /finding/);
 });
 
-test("a later review response supersedes inline quota evidence even without a verdict", async () => {
+test("a later unrecognised review response preserves inline unavailable evidence", async () => {
   const fixture = inlineLimitFixture();
   fixture.reviews.push({
     user: { login: "chatgpt-codex-connector[bot]" }, body: "Review started.",
     commit_id: HEAD_SHA, submitted_at: "2026-07-09T01:30:00Z",
   });
   const result = await evaluateGate(fixture);
-  assert.equal(result.shouldMerge, false);
-  assert.equal(result.degradedForUnavailableReviewer, false);
+  assert.equal(result.shouldMerge, true, result.reasons.join("; "));
+  assert.equal(result.degradedForUnavailableReviewer, true);
+  assert.equal(result.reviewerUnavailableKind, "unrecognised");
+  assert.ok(result.summary.includes("Review started."), result.summary);
 });
 
 test("a later real verdict supersedes an inline usage-limit answer", async () => {

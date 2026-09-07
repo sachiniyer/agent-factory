@@ -7,7 +7,11 @@ const MARKER = '<!-- codex-reviewer-outage:v1 ';
 // rolling 24h window cannot forget an outage and completed history stays fixed.
 const SCAN_SINCE = '2026-09-05T00:00:00.000Z';
 const time = (value) => Date.parse(value || '');
-const causeLabel = kind => ({ failure: 'transient failure', 'usage-limit': 'usage limit' })[kind] || 'unknown cause';
+const causeLabel = kind => ({
+  failure: 'transient failure',
+  'usage-limit': 'usage limit',
+  unrecognised: 'unrecognised response',
+})[kind] || 'unknown cause';
 const hours = (start, end) => (Math.max(0, time(end) - time(start)) / 3600000).toFixed(1);
 
 function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
@@ -29,16 +33,20 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
         time: (verdict && artifact.updated_at) || artifact.submitted_at || artifact.created_at,
         verdict, kind: unavailable?.kind,
       });
+      const eventBody = unavailable?.kind === 'unrecognised' ? unavailable.cause : body;
       for (const response of responses) {
         const at = time(response.time);
         if (!Number.isFinite(at) || at > time(now) || at < time(since)) continue;
-        events.push({ ...response, url: artifact.html_url, body });
+        events.push({ ...response, url: artifact.html_url, body: eventBody });
       }
     }
   }
   // Verdict wins a timestamp tie. A real verdict is recovery even if it reports
   // findings; recovery means review capacity returned, not that the code is clean.
-  events.sort((a, b) => time(a.time) - time(b.time) || Number(!!a.verdict) - Number(!!b.verdict));
+  events.sort((a, b) =>
+    time(a.time) - time(b.time) ||
+    Number(!!a.verdict) - Number(!!b.verdict) ||
+    Number(a.kind === 'unrecognised') - Number(b.kind === 'unrecognised'));
   const episodes = [];
   let active;
   for (const event of events) {
@@ -49,6 +57,10 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
         active = null;
       }
     } else {
+      // An unrecognised Codex response strongly says that no review happened,
+      // but by itself is weak evidence of a repository-wide outage. It extends
+      // an episode opened by a known limit/failure and never opens one alone.
+      if (!active && event.kind === 'unrecognised') continue;
       if (!active) {
         active = { start: event.time, end: null, latest: null, merged: [], causes: [] };
         episodes.push(active);
@@ -64,7 +76,11 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       const artifacts = pull.artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER);
       // #3932's reconstruction: an observed limit before merge and no verdict
       // covering the merged head at that time. Late reviews cannot erase a merge.
-      return artifacts.some(a => evidence.isCodexUsageLimitArtifact(a) && time(a.created_at || a.submitted_at) <= merged) &&
+      const episodeEnd = time(episode.end || now);
+      return artifacts.some(a => {
+        const at = time(a.created_at || a.submitted_at || a.updated_at);
+        return evidence.isCodexUsageLimitArtifact(a) && at >= time(episode.start) && at <= episodeEnd && at <= merged;
+      }) &&
         !artifacts.some(a => {
           const verdict = evidence.parseVerdictArtifact(a, pull.head.sha);
           return verdict && verdict.time <= merged;
@@ -86,12 +102,17 @@ function render(episodes, now) {
     lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
       `Observed causes: ${(episode.causes || []).map(causeLabel).join(', ') || 'not recorded'}.`,
       `Latest reviewer-unavailable notice: [${episode.latest.time}](${episode.latest.url})`,
-      `> ${episode.latest.body.replace(/\n/g, '\n> ')}`,
+      `> ${escapeCommentDelimiters(episode.latest.body).replace(/\n/g, '\n> ')}`,
       `Degraded merges: ${episode.merged.length}${episode.merged.length ? ` (${episode.merged.map(n => `#${n}`).join(', ')})` : ''}.`,
       episode.end ? `Recovered: ${episode.end} — [first real verdict](${episode.recovery}). Final degraded-merge count: ${episode.merged.length}.` : 'Status: unavailable.', '');
   }
-  lines.push(`${MARKER}${JSON.stringify({ episodes, observedAt: now })} -->`);
+  const json = JSON.stringify({ episodes, observedAt: now }).replace(/--/g, '-\\u002d');
+  lines.push(`${MARKER}${json} -->`);
   return lines.join('\n');
+}
+
+function escapeCommentDelimiters(value) {
+  return String(value || '').replace(/--/g, '-\\u002d');
 }
 
 function readRecord(comment) {
@@ -108,7 +129,11 @@ function readRecord(comment) {
 async function gateNotice({ github, context, since, kind = "usage-limit", now = new Date().toISOString() }) {
   let suffix = ' (repository record not yet updated; duration observed on this PR)';
   let start = since;
-  let description = kind === 'failure' ? 'unavailable after a transient failure' : 'usage-limited';
+  let description = kind === 'failure'
+    ? 'unavailable after a transient failure'
+    : kind === 'unrecognised'
+      ? 'unavailable after an unrecognised response'
+      : 'usage-limited';
   let observedCauses = '';
   try {
     const comments = await github.paginate(github.rest.issues.listComments, {

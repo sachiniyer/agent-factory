@@ -640,21 +640,30 @@ explicitly if not.
 
 ## When no review exists
 
-Codex reviewing is intermittent: the account hits usage limits, and stretches
-pass where PRs get no verdict at all. Absence shows up two ways, and **neither
-is a pass**:
+Codex reviewing is intermittent, and stretches pass where PRs get no verdict at
+all. Absence shows up two ways, and **neither is a pass**:
 
 - **No artifact.** Step 2 writes an empty `verdict.json`. That means the review
   step *did not run*, not that it ran and found nothing.
-- **A usage-limit comment.** Codex sends at least two wordings for this and they
-  mean the same thing: `…usage limits for code reviews.` and a bare
-  `…usage limits.` — the second reads as the account-wide limit, i.e. the WORSE
-  outage. Treat BOTH as "no review happened". A message saying the reviewer
-  declined to look is the opposite of a clean verdict, and it is the one most
-  likely to be misread as "Codex responded".
+- **A reviewer-unavailable response.** The observed forms include the scoped and
+  bare usage-limit messages (#3728), `Codex Review: Something went wrong. Try
+  again later by commenting "@codex review". Unknown error` (#3951), and “To use
+  Codex here, [create an environment for this
+  repo](https://chatgpt.com/codex/cloud/settings/environments).” (#3985). Each
+  means no review happened. A message saying the reviewer declined to look is
+  the opposite of a clean verdict, and it is the one most likely to be misread
+  as "Codex responded".
 
-  **Two questions, two rules** (#3728, #3743). They are not the same test, and
-  `auto-gate.js` keeps them apart on purpose.
+  `classifyCodexUnavailableArtifact()` no longer tries to enumerate every vendor
+  wording. It first preserves a review body (`CODEX_REVIEW_RE` plus
+  `REVIEWED_COMMIT_RE`), a finding-shaped inline reply, and a parseable summary
+  or verdict. Known usage-limit and transient-failure responses retain their
+  `usage-limit` and `failure` kinds. Any other non-empty Codex artifact is
+  `unrecognised`, carrying its first body line as the cause shown in the gate
+  summary. Silence and GitHub's empty enclosing-review wrapper remain ordinary
+  missing-review state.
+
+  **The unavailable, quota-scope, and verdict questions stay separate.**
 
   *Is the reviewer out of quota?* — `codexReportsReviewUsageLimit()`. It matches
   the stems `reached your Codex usage limits?` and `Codex usage limits have
@@ -676,8 +685,9 @@ is a pass**:
   the list holds no inference. The residual: an unobserved other-scope wording
   degrades to maintainer review until it is observed and added to the list.
   Documented and accepted on #3743.
-  Practically: if the latest Codex artifact is a usage-limit message of any
-  phrasing, treat the reviewer as unavailable — the same answer the gate gives.
+  Practically: if the latest Codex artifact is not one of the preserved review,
+  finding, or verdict shapes, treat the reviewer as unavailable — the same
+  answer the gate gives.
 
   *Is this body disqualified from being a verdict?* — step 2's jq filter above,
   and `parseReviewedCommit`. This one REQUIRES the literal code-review scope
@@ -688,13 +698,17 @@ is a pass**:
   `!looksLikeReviewArtifact` also denies it the degradation. `Codex has not
   reviewed head <sha>` about a head it just reviewed, with no exit.
 
+  Step 2's jq is only this `parseReviewedCommit` mirror. It does not duplicate
+  the unavailable classifier or list its wordings; an absent verdict already
+  blocks this hand gate.
+
   For the same reason, do not write the literal phrase out in these files.
   `auto-gate.js` elides it, `auto-gate.test.js` splits it across a
   concatenation, and a test fails if any of the four regains it.
 
 Auto Gate does not auto-merge an unreviewed head, and since #3819 it does not
 publish a green decision on one either. Silence blocks it, and a fresh
-usage-limit reply blocks it too, with the unmet item
+reviewer-unavailable response blocks it too, with the unmet item
 
 > awaiting maintainer review — post `## Review — approve` on this head
 
@@ -722,7 +736,7 @@ either way it will not merge for you. What to do:
 
 ### Approving in Codex's place, so the gate can land it
 
-When Codex is usage-limited the gate blocks with *awaiting maintainer review —
+When Codex is unavailable the gate blocks with *awaiting maintainer review —
 post `## Review — approve` on this head* and declines to merge — correct, no
 review arrived. Before #3790 it also skipped the update-and-merge loop, so
 landing it meant landing by hand; under a strict up-to-date rule that means
