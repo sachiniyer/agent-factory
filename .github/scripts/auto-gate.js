@@ -6,7 +6,7 @@ const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 // [master]`. A push made with GITHUB_TOKEN does not trigger further workflow
 // runs — documented Actions behavior that exists to prevent recursion — so an
 // auto-gate merge lands a commit none of these ever see, while the identical
-// merge performed by a maintainer runs all four (#3435). A squash lands a tree
+// merge performed by a maintainer runs all five (#3435). A squash lands a tree
 // neither the PR head nor the previous master ever had, so "the PR was green"
 // is not the same claim.
 //
@@ -19,7 +19,13 @@ const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 // .github/workflows and fails if any workflow carries that push trigger without
 // appearing here, or appears here without declaring workflow_dispatch — so the
 // copy cannot rot silently.
-const MASTER_PUSH_WORKFLOWS = ["build.yml", "docs.yml", "lint.yml", "web-selftest.yml"];
+const MASTER_PUSH_WORKFLOWS = [
+  "build.yml",
+  "docs.yml",
+  "lint.yml",
+  "tui-driver-selftest.yml",
+  "web-selftest.yml",
+];
 // docs.yml is the one entry that also *publishes*, and it decides WHETHER to
 // publish for itself: the dispatch names the commit, never the paths. A copy of
 // its deploy-path list here would be a second source of truth, and the kind that
@@ -2586,9 +2592,10 @@ async function merge({
 
   // Re-raise every gate the merge suppressed. This runs unconditionally rather
   // than replicating each workflow's `paths:` filter: a dispatch ignores those
-  // filters anyway, and a second copy of four path lists is precisely the thing
-  // that rots. The cost is a few runner-minutes on a merge that could not have
-  // broken them; the alternative cost is master carrying an unverified commit.
+  // filters anyway, and a second copy of five path lists is precisely the thing
+  // that rots. This deliberately includes the roughly ten-minute TUI container
+  // run on a merge that could not have broken it; public-runner time is cheaper
+  // than master carrying an unverified commit.
   for (const workflowId of MASTER_PUSH_WORKFLOWS) {
     try {
       // Single-shot, deliberately: a dispatch is a write, and retrying one that
@@ -2621,7 +2628,7 @@ async function merge({
           `${response.data.sha}.`,
       );
     } catch (error) {
-      // Keep going: one unavailable workflow must not cost master the other three.
+      // Keep going: one unavailable workflow must not cost master the other four.
       postMergeErrors.push(error);
     }
   }

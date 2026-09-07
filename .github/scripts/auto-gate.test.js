@@ -5754,6 +5754,7 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
     "dispatch:build.yml",
     "dispatch:docs.yml",
     "dispatch:lint.yml",
+    "dispatch:tui-driver-selftest.yml",
     "dispatch:web-selftest.yml",
   ]);
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");

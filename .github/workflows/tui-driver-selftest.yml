@@ -5,6 +5,12 @@ name: TUI driver selftest
 # the ephemeral testbox container. Before #4000 no workflow ran it, so #3995 sat
 # red on master for two days — the same failure mode #2576 exposed and #2762
 # fixed for the web selftest.
+#
+# Auto Gate merges with GITHUB_TOKEN, which suppresses push workflows. Its
+# MASTER_PUSH_WORKFLOWS loop therefore dispatches this workflow after EVERY
+# later merge, regardless of the paths below (dispatch ignores path filters).
+# The roughly ten-minute container run on each merge is accepted for this
+# signal-only workflow on free public runners; the hard timeout still matters.
 
 on:
   # Step 1 of #4000 is a signal on master, not a PR gate. A matching commit has
@@ -51,9 +57,10 @@ jobs:
           scripts/testbox.sh selftest 2>&1 | tee "$TUI_SELFTEST_TRANSCRIPT"
 
       # The streamed console transcript includes the failed step and the driver's
-      # final tmux capture. Best-effort upload must not change the harness verdict.
+      # final tmux capture. Admit cancellation too, so a step timeout keeps its
+      # diagnostics; best-effort upload must not change the harness verdict.
       - name: Upload the TUI driver transcript
-        if: failure()
+        if: failure() || cancelled()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
