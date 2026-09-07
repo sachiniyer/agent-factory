@@ -41,14 +41,15 @@ const agentTabName = "agent"
 // see TabLabel).
 const shellTabName = "shell"
 
-// webTabName is the wire name of the web/iframe tab kind. Older versions also
-// persisted it as the default Tab.Name; TabLabel continues to recognize that
-// legacy sentinel while new unnamed web tabs leave Name empty.
+// webTabName is the default canonical name of a web/iframe tab ('web', then
+// 'web-2', … on collision). Created via `af sessions tab-create --kind web`. For
+// web tabs the label equals the name (see TabLabel).
 const webTabName = "web"
 
-// vscodeTabName is the wire name of the VS Code tab kind. Older versions also
-// persisted it as the default Tab.Name; TabLabel continues to recognize that
-// legacy sentinel while new unnamed VS Code tabs leave Name empty.
+// vscodeTabName is the default canonical name of a VS Code tab ('vscode', then
+// 'vscode-2', … on collision). Created via `af sessions tab-create --kind vscode`
+// or the web UI's + New tab flow. For vscode tabs the label equals the name (see
+// TabLabel).
 const vscodeTabName = "vscode"
 
 // processTabName is the fallback canonical name of a CLI-spawned Process tab —
@@ -199,11 +200,10 @@ type Tab struct {
 	// (reused on close+recreate). Empty only for a legacy persisted tab written
 	// before #1738, which restoreLocalTabs backfills with a fresh id on load.
 	ID string
-	// Name is the tab's canonical handle: the human-typable string a user
+	// Name is the tab's canonical handle: the stable, human-typable string a user
 	// addresses it by (`agent`, `shell`, `btop`, or a name set at create/rename),
-	// unique within the instance when non-empty. It is what name-based tab verbs
-	// resolve against (`--name`, via TabMatches), alongside the stable ID above.
-	// An unnamed web or VS Code tab leaves this empty and is addressed by ID.
+	// unique within the instance. It is what every tab verb resolves against
+	// (`--name`, via TabMatches), alongside the stable ID above.
 	//
 	// It is NOT the display label. What the UI renders is TabLabel, a
 	// presentation-only string that is never resolved against — the two
@@ -273,18 +273,17 @@ func newRemoteAgentTab() *Tab {
 
 // newWebTab returns a TabKindWeb tab pointing at url. It carries no tmux
 // session (web tabs have no PTY): the target is rendered as an iframe in the web
-// UI and as a placeholder in the TUI. The caller sets a unique name only when
-// one was requested explicitly.
+// UI and as a placeholder in the TUI. The caller sets a unique name.
 func newWebTab(url string) *Tab {
-	return &Tab{ID: newTabID(), Kind: TabKindWeb, URL: url}
+	return &Tab{ID: newTabID(), Name: webTabName, Kind: TabKindWeb, URL: url}
 }
 
 // newVSCodeTab returns a TabKindVSCode tab. It carries neither a tmux session nor
 // a URL: the editor is a daemon-managed per-session code-server whose loopback
 // address is resolved at proxy time (see TabKindVSCode). The caller sets a
-// unique name only when one was requested explicitly.
+// unique name.
 func newVSCodeTab() *Tab {
-	return &Tab{ID: newTabID(), Kind: TabKindVSCode}
+	return &Tab{ID: newTabID(), Name: vscodeTabName, Kind: TabKindVSCode}
 }
 
 // tabKindVocabulary is the canonical TabKind ↔ name table, in enum order. It is
@@ -389,7 +388,7 @@ func tabKindForData(k TabKind) TabKind {
 // render fixed labels ("Agent", "Terminal") that are deliberately not their
 // names (`agent`/`shell`). Web and VS Code tabs likewise use their proper display
 // labels when Name is empty or still carries the kind-string default written by
-// older versions; an explicit custom name wins.
+// creation; an explicit custom name wins.
 //
 // This is the #1986 split: Name is the one handle a user types, the label is the
 // one string a user reads, and they are allowed to differ because the label

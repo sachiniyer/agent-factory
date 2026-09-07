@@ -21,23 +21,6 @@ func TestAttachVSCodeTabUsesDaemonMintedStableID(t *testing.T) {
 		"a raced same-name projection must not replace the identity returned by CreateTab")
 }
 
-func TestAttachUnnamedVSCodeTabsUsesDaemonMintedStableIDs(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-	inst := startedMockInstance(t, "af_vscode_unnamed_response_id")
-
-	first, err := inst.AttachVSCodeTab("", "daemon-vscode-id-1")
-	require.NoError(t, err)
-	second, err := inst.AttachVSCodeTab("", "daemon-vscode-id-2")
-	require.NoError(t, err)
-
-	require.Empty(t, first.Name)
-	require.Empty(t, second.Name)
-	require.Equal(t, "daemon-vscode-id-1", first.ID)
-	require.Equal(t, "daemon-vscode-id-2", second.ID)
-	require.Len(t, inst.GetTabs(), 3, "empty default names must not collapse distinct stable IDs")
-}
-
 func TestAttachShellTabUsesDaemonMintedStableID(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()

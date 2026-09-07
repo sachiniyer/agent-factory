@@ -1361,7 +1361,7 @@ func TestVSCodeSupervisor_ReadyThenCrashedStillSelfHeals(t *testing.T) {
 // ever stop it. The re-check AFTER the spawn is what closes that window.
 func TestEnsureVSCodeServer_StopsAnEditorWhoseTabWasClosedMidSpawn(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)
-	manager, _, tabID, _ := newVSCodeFixture(t, binary)
+	manager, _, _, _ := newVSCodeFixture(t, binary)
 	const title = "vscodeproxy"
 
 	repo := ""
@@ -1379,7 +1379,7 @@ func TestEnsureVSCodeServer_StopsAnEditorWhoseTabWasClosedMidSpawn(t *testing.T)
 	}
 
 	// Close the vscode tab: this is the state an in-flight spawn returns into.
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo, TabID: tabID}); err != nil {
+	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo, TabName: "vscode"}); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 

@@ -10,7 +10,7 @@ import (
 )
 
 // TestAddWebTab_AppendsWithURLAndNoTmux verifies a web tab is appended with the
-// web kind, its target URL, no default name, and NO tmux session (it has no
+// web kind, its target URL, an auto-derived name, and NO tmux session (it has no
 // PTY).
 func TestAddWebTab_AppendsWithURLAndNoTmux(t *testing.T) {
 	log.Initialize(false)
@@ -20,7 +20,7 @@ func TestAddWebTab_AppendsWithURLAndNoTmux(t *testing.T) {
 
 	tab, err := inst.AddWebTab("http://localhost:3000", "")
 	require.NoError(t, err)
-	assert.Empty(t, tab.Name, "a default web tab leaves Name unset for TabLabel")
+	assert.Equal(t, "web", tab.Name, "default web-tab name is \"web\"")
 	assert.Equal(t, TabKindWeb, tab.Kind)
 	assert.Equal(t, "http://localhost:3000", tab.URL)
 	assert.Nil(t, tab.tmux, "a web tab has no tmux session")

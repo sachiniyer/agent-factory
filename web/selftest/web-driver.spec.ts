@@ -9242,7 +9242,7 @@ test("vscode tab (#2743): one session's editor state is readable in another's on
   }
 });
 
-test("vscode tab (#2077/#3997): the labelled New tab menu creates a properly labelled VS Code tab and serves it through the proxy", REAL_FIXTURE, async () => {
+test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", REAL_FIXTURE, async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
   // real one) on a 0600 unix socket it names, rooted at THIS session's worktree,
@@ -9273,9 +9273,7 @@ test("vscode tab (#2077/#3997): the labelled New tab menu creates a properly lab
   await menu.locator(".af-tab-menu-item", { hasText: "VS Code" }).click();
   await expect(menu).toBeHidden();
 
-  const editorTab = tabbar.locator(".af-tab").filter({
-    has: page.locator(".af-tab-label", { hasText: /^VS Code$/ }),
-  });
+  const editorTab = tabbar.locator(".af-tab", { hasText: "vscode" });
   await expect(editorTab).toHaveCount(1, { timeout: 30_000 });
 
   // Creating the tab must NOT strand the keyboard in terminal mode. createSessionTab

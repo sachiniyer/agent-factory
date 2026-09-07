@@ -266,7 +266,7 @@ func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
 		require.Equal(t, inst.Title, request.Title)
 		require.Equal(t, h.repoID, request.RepoID)
 		require.Equal(t, "vscode", request.Kind)
-		return daemon.CreateTabResponse{ID: "daemon-vscode-id"}, nil
+		return daemon.CreateTabResponse{ID: "daemon-vscode-id", Name: "vscode"}, nil
 	}))
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}}, keys.KeyNewTab)
@@ -290,9 +290,8 @@ func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
 	require.Equal(t, "daemon-vscode-id", tabs[1].ID,
 		"the projection must adopt the create response identity before the next snapshot")
 	require.Equal(t, 1, h.store.ActiveTab(), "the fresh VS Code tab must be selected")
-	require.Empty(t, tabs[1].Name, "a default-created VS Code tab keeps Name unset")
 	require.Equal(t, []string{"Agent", "◱ VS Code"}, tree.TabLabels(inst),
-		"the default VS Code label must keep the product's proper-noun casing")
+		"the addressable default name renders with the VS Code proper-noun label")
 }
 
 // A tab picker retains intent about one session while its modal owns the

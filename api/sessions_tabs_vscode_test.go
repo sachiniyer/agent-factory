@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -76,35 +75,6 @@ func TestSessionsTabCreate_VSCodeNeedsNoTarget(t *testing.T) {
 	}
 	if got.Title != "sess" {
 		t.Fatalf("Title = %q, want %q", got.Title, "sess")
-	}
-}
-
-func TestSessionsTabCreate_VSCodeDefaultNameJSON(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	previousRepo := repoFlag
-	repoFlag = ""
-	t.Cleanup(func() { repoFlag = previousRepo })
-	setTabCreateFlagsForTest(t, "", "", "vscode", "", 0)
-
-	previousCreate := createTabViaDaemon
-	createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
-		if req.Name != "" {
-			t.Fatalf("default request Name = %q, want empty", req.Name)
-		}
-		return daemon.CreateTabResponse{ID: "daemon-vscode-id"}, nil
-	}
-	t.Cleanup(func() { createTabViaDaemon = previousCreate })
-
-	out, err := runCmdCaptureStdout(t, sessionsTabCreateCmd, []string{"sess"})
-	if err != nil {
-		t.Fatalf("tab-create --kind vscode: %v", err)
-	}
-	var parsed map[string]string
-	if err := json.Unmarshal(out, &parsed); err != nil {
-		t.Fatalf("output is not JSON (%q): %v", string(out), err)
-	}
-	if parsed["name"] != "" {
-		t.Fatalf("JSON name = %q, want empty for a default-named VS Code tab", parsed["name"])
 	}
 }
 

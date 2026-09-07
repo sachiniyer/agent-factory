@@ -59,17 +59,14 @@ renders as an iframe in the web UI and as a placeholder in the TUI.
 
 The tab persists and reconnects across a daemon/af restart like every other tab.
 
---name sets a process, web, or VS Code tab's name. A shell tab does not accept
---name: its canonical name is "shell" (auto-suffixed on collision), while the TUI
-renders the presentation-only label "Terminal". An unnamed web or VS Code tab
-keeps an empty name and is addressed by its stable id in the UIs; its label is
-"Web" or "VS Code". Pass --name when a script will address one through a
-name-only CLI tab verb. Other names are sanitized before use:
+--name sets a process, web, or VS Code tab's name — the handle every other tab
+verb addresses it by. A shell tab does not accept --name: its canonical name is
+"shell" (auto-suffixed on collision), while the TUI renders the
+presentation-only label "Terminal". Other names are sanitized before use:
 characters outside [A-Za-z0-9_-] become "-". The name is then made unique within
 the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
-the name-only tab verbs address. A default unnamed web or VS Code tab prints an
-empty "name" value.
+the other tab verbs address.
 
 For remote sessions, only external HTTPS web tabs are admitted. That kind is
 metadata-only: it needs no PTY and spawns no process in the missing daemon-side
@@ -172,11 +169,11 @@ var sessionsTabDeleteCmd = &cobra.Command{
 
 The tab is removed from the daemon's session state and its tmux window is
 killed. The removal is persistent: the daemon will not respawn the tab, and it
-does not return on a daemon/af restart. The name to pass is a non-empty tab name
-reported by "af sessions get" — not the label the TUI tab bar shows. A default
-unnamed web or VS Code tab must first be named through an ID-aware UI. A miss
-lists the tabs that exist, with their labels, so a wrong name is a next step
-rather than a dead end.
+does not return on a daemon/af restart. The name to pass is the tab name
+tab-create printed, as reported by "af sessions get" — not the label the TUI
+tab bar shows, which is a fixed "Agent"/"Terminal" for agent and shell tabs. A
+miss lists the tabs that exist, with those labels, so a wrong name is a next
+step rather than a dead end.
 
 The agent tab can't be deleted — use "af sessions kill" to tear down the whole
 session. Deleting a tab or session that doesn't exist is an error, not a silent

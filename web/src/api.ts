@@ -681,17 +681,11 @@ function requireSessionID(id: string, action: string): void {
   }
 }
 
-export interface CreatedTab {
-  id: string;
-  name: string;
-}
-
 /** Creates a $SHELL tab on the session (mirrors the TUI `t` key). Returns the
- *  daemon's stable id and resolved, collision-suffixed tab name. Refuses a
- *  session with no id. */
-export async function createTab(id: string, title: string, token: string): Promise<CreatedTab> {
+ *  daemon's resolved, collision-suffixed tab name. Refuses a session with no id. */
+export async function createTab(id: string, title: string, token: string): Promise<string> {
   requireSessionID(id, "create a tab");
-  const resp = await af<{ id?: string; name: string; warning?: string }>(
+  const resp = await af<{ name: string; warning?: string }>(
     "CreateTab",
     { id, title, repo_id: "", shell: true, command: "", name: "" },
     token,
@@ -703,19 +697,18 @@ export async function createTab(id: string, title: string, token: string): Promi
     // explanation instead of rendering the unpersisted tab as created.
     throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
-  return { id: resp.id ?? "", name: resp.name ?? "" };
+  return resp.name;
 }
 
 /** Creates a VS Code tab on the session: a code-server the daemon runs on that
  *  session's worktree. It takes no target — the worktree IS the target — so
  *  unlike a web tab there is nothing to prompt the user for, which is why this is
  *  offerable from the + menu at all. Mirrors
- *  `af sessions tab-create <title> --kind vscode`. Returns the daemon's stable id
- *  and optional custom name; a default-created editor deliberately has an empty
- *  name and uses "VS Code" only as its label. Refuses a session with no id. */
-export async function createVSCodeTab(id: string, title: string, token: string): Promise<CreatedTab> {
+ *  `af sessions tab-create <title> --kind vscode`. Returns the daemon's resolved,
+ *  collision-suffixed tab name. Refuses a session with no id. */
+export async function createVSCodeTab(id: string, title: string, token: string): Promise<string> {
   requireSessionID(id, "create a VS Code tab");
-  const resp = await af<{ id?: string; name: string; warning?: string }>(
+  const resp = await af<{ name: string; warning?: string }>(
     "CreateTab",
     { id, title, repo_id: "", shell: false, command: "", name: "", kind: "vscode" },
     token,
@@ -724,7 +717,7 @@ export async function createVSCodeTab(id: string, title: string, token: string):
     // Same committed contract as createTab (#3237).
     throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
-  return { id: resp.id ?? "", name: resp.name ?? "" };
+  return resp.name;
 }
 
 /** Closes a non-agent tab (mirrors the TUI `w` key). The agent tab (index 0) is

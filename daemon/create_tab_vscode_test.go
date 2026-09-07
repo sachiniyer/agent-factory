@@ -43,8 +43,8 @@ func TestCreateTab_VSCodeKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
-	if created.Name != "" {
-		t.Fatalf("tab name = %q, want empty so TabLabel supplies the default", created.Name)
+	if created.Name != "vscode" {
+		t.Fatalf("tab name = %q, want %q", created.Name, "vscode")
 	}
 
 	inst := manager.instances[daemonInstanceKey(repoID, title)]
@@ -149,8 +149,7 @@ func TestCloseTab_LastVSCodeTabPropagatesUnconfirmedEditorStop(t *testing.T) {
 	manager, repoID, title := newVSCodeCreateFixture(t)
 	key := daemonInstanceKey(repoID, title)
 	inst := manager.instances[key]
-	created, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
-	if err != nil {
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
 	cmd, _ := startOwnedSleep(t)
@@ -160,7 +159,7 @@ func TestCloseTab_LastVSCodeTabPropagatesUnconfirmedEditorStop(t *testing.T) {
 		killGroup: func(int, syscall.Signal) error { return nil },
 	}
 
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabID: created.ID}); err == nil {
+	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}); err == nil {
 		t.Fatal("CloseTab reported success after the last VS Code tab editor could not confirm exit")
 	}
 	if !instanceHasVSCodeTab(inst) {
@@ -245,8 +244,7 @@ func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
 	manager, repoID, title := newVSCodeCreateFixture(t)
 	key := daemonInstanceKey(repoID, title)
 
-	created, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
-	if err != nil {
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
 	manager.vscode.servers[key] = &vscodeServer{
@@ -265,7 +263,7 @@ func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
 		t.Fatalf("corrupting the instances file: %v", err)
 	}
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabID: created.ID})
+	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"})
 	if err == nil {
 		t.Fatal("CloseTab succeeded despite a persist failure; the test's premise is wrong")
 	}

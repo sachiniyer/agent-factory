@@ -57,8 +57,8 @@ func TestCreateTab_WebSpawnsPersistsAndReturnsName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTab(web): %v", err)
 	}
-	if created.Name != "" {
-		t.Fatalf("resolved web tab name = %q, want empty so TabLabel supplies the default", created.Name)
+	if created.Name != "web" {
+		t.Fatalf("resolved web tab name = %q, want %q", created.Name, "web")
 	}
 
 	web := loadWebTab(t, repo.ID)

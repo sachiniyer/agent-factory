@@ -69,14 +69,14 @@ func vscodeRegistered(m *Manager, key string) bool {
 // case the immediately-binding fake in vscode_server_test.go cannot reach.
 func TestEnsureVSCodeServer_StopsStillStartingEditorWhoseTabWasClosed(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", map[string]string{fakeVSCodeHangEnv: "1"})
-	manager, _, tabID, _ := newVSCodeFixture(t, binary)
+	manager, _, _, _ := newVSCodeFixture(t, binary)
 	// Outrun the grace deterministically rather than by racing a real Node start.
 	manager.vscode.startGrace = 100 * time.Millisecond
 	const title = "vscodeproxy"
 	inst, repo := vscodeFixtureInstance(t, manager, title)
 
 	// Close the vscode tab: this is the state the in-flight spawn returns into.
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo, TabID: tabID}); err != nil {
+	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo, TabName: "vscode"}); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 

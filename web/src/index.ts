@@ -1117,27 +1117,24 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   clearTabError();
   const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
-  // The stable tab id, not the optional name, identifies the row this mutation
-  // created. Default VS Code tabs deliberately have no name (#3997).
-  let createdTab = { id: "", name: "" };
+  // createTab returns the daemon's resolved, collision-suffixed name; hold it so the
+  // rebind lands on the tab THIS create made.
+  let createdName = "";
   guardedTabRebind(
     selId,
     () =>
-      create(selId, sel.title, tok).then((created) => {
-        createdTab = created;
+      create(selId, sel.title, tok).then((name) => {
+        createdName = name;
         return fetchProjectedSnapshot(tok);
       }),
-    // Focus the created tab BY its daemon-minted id, never `length - 1`: the last
-    // slot is an ordinal, and a concurrent create from another client landing
-    // inside this round trip would make it THEIR tab. The name fallback exists
-    // only for mixed-version daemons that do not return the additive id.
+    // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
+    // an ordinal, and a concurrent create from another client landing inside this
+    // round trip would make it THEIR tab. Resolving the name to its current ordinal in
+    // the post-await roster is the create-side twin of closeSessionTab's keepId, and a
+    // -1 (name gone, or session vanished) bails rather than guessing (#2000).
     (sessions) => {
       const grown = sessions.find((s) => s.id === selId);
-      if (!grown) return -1;
-      const tabs = sessionTabs(grown);
-      return createdTab.id !== ""
-        ? tabs.findIndex((t) => tabRealId(t) === createdTab.id)
-        : tabs.findIndex((t) => t.name === createdTab.name);
+      return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
     },
     "create",
   );

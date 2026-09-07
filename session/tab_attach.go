@@ -16,8 +16,8 @@ import (
 // name-keyed only until the next authoritative snapshot.
 func (i *Instance) AttachVSCodeTab(name, tabID string) (*Tab, error) {
 	name = strings.TrimSpace(name)
-	if name == "" && tabID == "" {
-		return nil, fmt.Errorf("cannot attach an unnamed VS Code tab without an id")
+	if name == "" {
+		return nil, fmt.Errorf("cannot attach a VS Code tab without a name")
 	}
 
 	i.mu.Lock()
@@ -52,9 +52,6 @@ func (i *Instance) resolveAttachedTabLocked(name, tabID string) (*Tab, bool, err
 				return tab, true, nil
 			}
 		}
-	}
-	if name == "" {
-		return nil, false, nil
 	}
 	for idx, tab := range i.Tabs {
 		if tab.Name != name {

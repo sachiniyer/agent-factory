@@ -163,35 +163,3 @@ func TestSidebarTreeRepinFollowsLegacyToNewSwap(t *testing.T) {
 	assert.Equal(t, 2, sel.TabIndex,
 		"tab a moved to slot 2 in the recreated roster; the re-pin follows its identity, not the stale ordinal")
 }
-
-func TestSidebarTreeRepinReplacementPrefersCarriedIDForUnnamedTabs(t *testing.T) {
-	s := newTreeSidebar(t, 0)
-	dir := t.TempDir()
-
-	original, err := session.NewInstance(session.InstanceOptions{Title: "t-00", Path: dir, Program: "test"})
-	require.NoError(t, err)
-	original.AddTabForTest("agent", session.TabKindAgent)
-	original.AddWebTabForTest("", "http://localhost:3000")
-	original.AddWebTabForTest("", "http://localhost:3001")
-	original.GetTabs()[1].ID = "carried-a"
-	original.GetTabs()[2].ID = "carried-b"
-	addTestInstance(s, original)
-	s.SetSelectedInstance(0)
-	s.SelectTabRow(original.Title, 1)
-
-	replacement, err := session.NewInstance(session.InstanceOptions{Title: original.Title, Path: dir, Program: "test"})
-	require.NoError(t, err)
-	replacement.AddTabForTest("agent", session.TabKindAgent)
-	replacement.AddWebTabForTest("", "http://localhost:3001")
-	replacement.AddWebTabForTest("", "http://localhost:3000")
-	replacement.GetTabs()[1].ID = "carried-b"
-	replacement.GetTabs()[2].ID = "carried-a"
-
-	require.True(t, s.proj.ReplaceInstanceByTitle(original.Title, replacement))
-	s.proj.SelectInstance(replacement)
-
-	sel := s.GetSelection()
-	require.True(t, sel.IsTab)
-	require.Equal(t, "carried-a", replacement.GetTabs()[sel.TabIndex].ID,
-		"a replacement that carries tab IDs must not resolve duplicate empty names")
-}

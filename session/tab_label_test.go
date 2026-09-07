@@ -9,10 +9,10 @@ func TestTabLabel_DefaultKindNamesUseDisplayLabels(t *testing.T) {
 		want string
 	}{
 		{name: "vscode empty name", tab: &Tab{Kind: TabKindVSCode}, want: "VS Code"},
-		{name: "vscode legacy default name", tab: &Tab{Name: "vscode", Kind: TabKindVSCode}, want: "VS Code"},
+		{name: "vscode kind-string name", tab: &Tab{Name: "vscode", Kind: TabKindVSCode}, want: "VS Code"},
 		{name: "vscode custom name", tab: &Tab{Name: "My editor", Kind: TabKindVSCode}, want: "My editor"},
 		{name: "web empty name", tab: &Tab{Kind: TabKindWeb}, want: "Web"},
-		{name: "web legacy default name", tab: &Tab{Name: "web", Kind: TabKindWeb}, want: "Web"},
+		{name: "web kind-string name", tab: &Tab{Name: "web", Kind: TabKindWeb}, want: "Web"},
 		{name: "web custom name", tab: &Tab{Name: "My browser", Kind: TabKindWeb}, want: "My browser"},
 	}
 
