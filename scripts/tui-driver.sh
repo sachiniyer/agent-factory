@@ -926,13 +926,12 @@ _af_tab_count() {
 # supported 80x10 floor.
 : "${_AF_TASKS_LIST_TITLE:=│[[:space:]]+Tasks[[:space:]]+│}"
 
-# _AF_TASKS_FOOTER is the task-manager-specific footer predicate, not merely an
-# Esc affordance. Its fragments mirror listModeHint (ui/task_pane_recovery.go),
-# renderListMode (ui/task_pane.go), and renderEditMode (ui/task_pane_edit.go):
-# every list/edit/recovery/create hint has one of these verbs before Esc. Keep
-# this union paired with those source functions when their hints change; the
-# rounded-frame scan then cannot mistake another agent dialog for Tasks.
-: "${_AF_TASKS_FOOTER:=(n new|[?] actions|[?] back|x toggle|D (delete|del)|tab fields|enter edit).*esc.*│}"
+# _AF_TASKS_FOOTER uses combinations unique to Tasks among the built-in dialogs:
+# recovery/list has n new or ? actions, edit/watch has x toggle, and create has
+# tab[/shift+tab] fields. Do not accept enter edit or D delete alone: Hooks and
+# the project picker share them. These mirror task_pane_recovery.go and
+# task_pane_edit.go; unlike the title, the footer survives the 80x10 form scroll.
+: "${_AF_TASKS_FOOTER:=(n new ·|[?] actions ·|x toggle ·|tab(/shift[+]tab)? fields ·).*esc.*│}"
 
 # _AF_TASKS_FRAME_TOP/BOTTOM are the rounded borders shared by every task
 # dialog mode. A workspace pane uses square corners, and its OWN │ borders can
@@ -959,6 +958,21 @@ _af_tasks_dialog_has() {
     local content_re="$1"
     LC_ALL=C awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" \
         -v content_re="$content_re" '
+        # Slice by character columns while preserving UTF-8 for content_re.
+        # A continuation byte belongs to the preceding character, including
+        # all three bytes of each bounding │. Columns are zero-based.
+        function frame_row(row,    i, column, byte, result) {
+            column = -1
+            result = ""
+            for (i = 1; i <= length(row); i++) {
+                byte = substr(row, i, 1)
+                if (byte !~ /[\200-\277]/) { column++ }
+                if (column >= top_start && column < top_start + top_chars) {
+                    result = result byte
+                }
+            }
+            return result
+        }
         $0 ~ top_re {
             if (!inside && !found) {
                 inside = 1
@@ -970,13 +984,16 @@ _af_tasks_dialog_has() {
                 # RLENGTH is byte-based under LC_ALL=C; both frame edges use
                 # the same UTF-8 glyph sequence, so equal byte widths suffice.
                 top_width = RLENGTH
+                edge = substr($0, RSTART, RLENGTH)
+                gsub(/[\200-\277]/, "", edge)
+                top_chars = length(edge)
                 matched = 0
                 last_footer = 0
             }
             next
         }
         inside {
-            if ($0 ~ content_re) { matched = 1; last_footer = NR }
+            if (frame_row($0) ~ content_re) { matched = 1; last_footer = NR }
             if ($0 ~ bottom_re) {
                 prefix = substr($0, 1, index($0, "╰") - 1)
                 gsub(/[\200-\277]/, "", prefix)

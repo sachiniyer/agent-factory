@@ -515,7 +515,7 @@ func (s *TaskPane) selectedTaskIsWatch() bool {
 }
 
 func (s *TaskPane) toggleSelectedTask() {
-	if !s.selectedTaskInRange() {
+	if s.unavailable != "" || !s.selectedTaskInRange() {
 		return
 	}
 	s.tasks[s.selectedIdx].Enabled = !s.tasks[s.selectedIdx].Enabled
@@ -537,18 +537,23 @@ func (s *TaskPane) SelectedTask() (task.Task, bool) {
 }
 
 // DeleteTask removes the confirmed identity even if a refresh moved the cursor.
-func (s *TaskPane) DeleteTask(id string) {
+// It refuses stale confirmations after a failed refresh without changing selection.
+func (s *TaskPane) DeleteTask(id string) bool {
+	if s.unavailable != "" {
+		return false
+	}
 	for i := range s.tasks {
 		if s.tasks[i].ID == id {
 			s.selectedIdx = i
 			s.deleteSelectedTask()
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func (s *TaskPane) deleteSelectedTask() {
-	if !s.selectedTaskInRange() {
+	if s.unavailable != "" || !s.selectedTaskInRange() {
 		return
 	}
 	deleted := s.tasks[s.selectedIdx]
@@ -573,6 +578,9 @@ func (s *TaskPane) deleteSelectedTask() {
 }
 
 func (s *TaskPane) runSelectedTask() {
+	if s.unavailable != "" {
+		return
+	}
 	if !s.selectedTaskInRange() {
 		s.pendingTrigger = true
 		s.pendingTriggerID = ""

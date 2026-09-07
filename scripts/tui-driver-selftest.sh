@@ -871,6 +871,30 @@ _expect_task_overlay_marker_context() {
         return 1
     fi
 
+    local outside_footer hooks_modal
+    outside_footer=$'╭───────╮\n│ agent │ n new · esc back │\n╰───────╯'
+    if printf '%s\n' "$outside_footer" | _af_tasks_overlay_visible; then
+        _af_fail 'task-like text outside the candidate frame satisfied the marker'
+        return 1
+    fi
+    hooks_modal=$'╭────────────────────────────────────────────╮\n│ Post-worktree hooks                        │\n│ n add · enter edit · D delete · esc back    │\n╰────────────────────────────────────────────╯'
+    if printf '%s\n' "$hooks_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the hooks overlay footer satisfied the task marker'
+        return 1
+    fi
+
+    local create_modal
+    create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab/shift+tab fields · enter create · esc cancel · q quit   │\n╰────────────────────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a task create form footer was not recognized'
+        return 1
+    fi
+    create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab fields · enter · esc cancel · q quit                    │\n╰────────────────────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a task create form footer was not recognized'
+        return 1
+    fi
+
     compact_list_modal=$'╭──────────────────────────────────────╮\n│                                      │\n│  enter edit · ? actions · esc        │\n│                                      │\n╰──────────────────────────────────────╯'
     if ! printf '%s\n' "$compact_list_modal" | _af_tasks_overlay_visible; then
         _af_fail 'the rounded task dialog and its compact list footer did not satisfy the marker'

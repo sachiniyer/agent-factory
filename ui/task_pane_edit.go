@@ -112,6 +112,9 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.editPrompt, _ = s.editPrompt.Update(msg)
 			return true
 		}
+		if s.unavailable != "" {
+			return true
+		}
 		if errMsg, errField := s.validateForm(); errMsg != "" {
 			s.editError = errMsg
 			s.editErrorField = errField

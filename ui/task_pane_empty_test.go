@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
@@ -154,6 +156,67 @@ func TestTaskPaneUnavailableOpenEditorPreservesEditsAndBlocksActions(t *testing.
 				require.False(t, pane.GetTasks()[0].Enabled)
 			case "D":
 				require.Len(t, pane.GetTasks(), 1)
+			}
+		})
+	}
+}
+
+func TestTaskPaneUnavailableBlocksSubmission(t *testing.T) {
+	pane := NewTaskPane()
+	original := task.Task{ID: "first", Name: "first", Prompt: "do it", CronExpr: "* * * * *", ProjectPath: newGitRepo(t), Program: "claude"}
+	pane.SetTasks([]task.Task{original})
+	pane.SetFocus(true)
+	pane.EnterEditSelected()
+	pane.editName.SetValue("unsaved")
+	pane.SetUnavailable(errors.New("task file is unreadable"))
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, original, pane.GetTasks()[0])
+	require.False(t, pane.IsDirty())
+	require.True(t, pane.IsEditing())
+	pane.focusIndex = taskFocusPrompt
+	pane.updateEditFocus()
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Contains(t, pane.editPrompt.Value(), "\n")
+	pane.focusIndex = taskFocusName
+	pane.updateEditFocus()
+	pane.SetUnavailable(nil)
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, "unsaved", pane.GetTasks()[0].Name)
+	require.True(t, pane.IsDirty())
+	require.False(t, pane.IsEditing())
+}
+
+func TestTaskPaneUnavailableMutators(t *testing.T) {
+	for _, action := range []string{"delete ID", "delete selected", "toggle", "run"} {
+		t.Run(action, func(t *testing.T) {
+			pane := NewTaskPane()
+			original := []task.Task{{ID: "first", Name: "first", Enabled: true}, {ID: "second", Name: "second"}}
+			pane.SetTasks(append([]task.Task(nil), original...))
+			mutate := func() {
+				switch action {
+				case "delete ID":
+					pane.DeleteTask("second")
+				case "delete selected":
+					pane.deleteSelectedTask()
+				case "toggle":
+					pane.toggleSelectedTask()
+				case "run":
+					pane.runSelectedTask()
+				}
+			}
+			pane.SetUnavailable(errors.New("task file is unreadable"))
+			mutate()
+			require.Equal(t, original, pane.GetTasks())
+			require.Equal(t, 0, pane.selectedIdx)
+			require.False(t, pane.IsDirty())
+			require.False(t, pane.HasPendingTrigger())
+			require.Empty(t, pane.ConsumeDeleted())
+			pane.SetUnavailable(nil)
+			mutate()
+			if action == "run" {
+				require.True(t, pane.HasPendingTrigger())
+			} else {
+				require.True(t, pane.IsDirty())
 			}
 		})
 	}

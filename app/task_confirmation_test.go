@@ -51,3 +51,32 @@ func TestUnavailableTasksDoNotOpenDeleteConfirmation(t *testing.T) {
 	require.Equal(t, stateTasks, h.state)
 	require.Nil(t, h.confirmationOverlay, "unavailable recovery must not confirm a retained task")
 }
+
+func TestUnavailableTasksRefusePendingDeleteConfirmation(t *testing.T) {
+	h := newTestHome(t)
+	h.termWidth, h.termHeight = 120, 36
+	h.relayout()
+	h.state = stateTasks
+	pane := h.automations.TaskPane()
+	pane.SetTasks([]task.Task{{ID: "a", Name: "retained"}, {ID: "b", Name: "other"}})
+	pane.SetFocus(true)
+	deleteKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")}
+	confirmKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
+	h.handleStateTasks(deleteKey)
+	require.Equal(t, stateConfirm, h.state)
+	pane.SetUnavailable(errors.New("task file is unreadable"))
+	h.handleStateConfirm(confirmKey)
+	require.Equal(t, stateTasks, h.state)
+	require.Len(t, pane.GetTasks(), 2)
+	require.Empty(t, pane.ConsumeDeleted())
+	require.False(t, pane.IsDirty())
+	require.Contains(t, pane.String(), "Cannot load tasks")
+	require.Contains(t, pane.String(), "task file is unreadable")
+	pane.SetUnavailable(nil)
+	h.handleStateTasks(deleteKey)
+	require.Equal(t, stateConfirm, h.state)
+	h.handleStateConfirm(confirmKey)
+	require.Equal(t, stateTasks, h.state)
+	require.Len(t, pane.GetTasks(), 1)
+	require.Len(t, pane.ConsumeDeleted(), 1)
+}
