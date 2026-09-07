@@ -414,8 +414,12 @@ daemon-process memory, so it appears in both `VmHWM` and the unit's `MemoryPeak`
 For a same-host `af agent-server` — the hook backend whose `launch_cmd` starts it
 on this box inside the unit's cgroup — the `bytes.Buffer` is that server's
 memory: it is charged to the unit's `MemoryPeak`, but not to the daemon's
-`VmHWM`. For an off-host agent-server, the output lives on the remote machine
-and is charged to nothing here. [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
+`VmHWM`. A same-host server started through Docker or SSH (including a hook
+`provision_cmd` returning this machine) instead lives outside the unit:
+`RunningDaemonProcess()` is false, so its hooks use plain `exec`; both hooks and
+output charge the container's / sshd's cgroup, neither the unit's `MemoryPeak`
+nor the daemon's `VmHWM`. For an off-host agent-server, the output lives on the
+remote machine and is charged to nothing here. [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
 tracks moving that capture to a per-run file in [PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012),
 which is in flight. That does not make `MemoryPeak` a daemon-process number. Only
 those two hooks moved out; every other unscoped descendant still charges the unit,
@@ -492,9 +496,13 @@ only the hook correlation above connects anything to the peak.
   systemd-managed daemon on Linux, #3650 puts the hook process tree in a sibling
   scope outside the daemon's cgroup. Output capture is charged to its runner:
   daemon-process runners contribute to both the daemon's `VmHWM` and the unit's
-  `MemoryPeak`; a same-host agent-server contributes to the unit's `MemoryPeak`
-  but not the daemon's `VmHWM`; an off-host agent-server is charged on the remote
-  machine, not here. Size that host for it; [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
+  `MemoryPeak`; a same-host agent-server inside the unit contributes to its
+  `MemoryPeak` but not the daemon's `VmHWM`; a same-host Docker/SSH server
+  (including a hook `provision_cmd` returning this machine) runs hooks with plain
+  `exec` outside the unit, charging hooks and output to the container's / sshd's
+  cgroup, neither the unit's `MemoryPeak` nor the daemon's `VmHWM`; an off-host
+  agent-server is charged on the remote machine, not here. Size that host for it;
+  [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
   tracks moving the capture to a per-run file.
 - **Plus everything else a session can start.** A session may hold any number of
   extra process-bearing tabs — shell, process, editor — and there is no cap on
