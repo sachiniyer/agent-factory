@@ -134,7 +134,7 @@ func TestSidebarOrdinaryRowsFillTheRectangleExactly(t *testing.T) {
 	}
 }
 
-// A clustered tab label must not cost the row its " *" active marker either. The
+// A clustered tab label must not cost the row its " · open" marker either. The
 // cue is the ONLY thing distinguishing an active tab (tabRowActiveStyle is
 // deliberately identical to tabRowStyle, #1983), so losing it to width accounting
 // makes an active tab byte-identical with an inactive one.
@@ -149,6 +149,7 @@ func TestSidebarTabRowKeepsItsActiveMarker(t *testing.T) {
 	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
 	addAgentShellTabs(inst)
 	addTestInstance(s, inst)
+	s.proj.AddOpenPane(inst, 0)
 	s.SetSize(width, height)
 	s.proj.SetSelectedInstance(inst)
 	s.syncFromStore()
