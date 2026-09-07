@@ -3,9 +3,11 @@
 const POLICY_ISSUE = 3932;
 const MARKER = '<!-- codex-reviewer-outage:v1 ';
 // Bootstrap includes the evidence window on #3932. Later sweeps retain closed
-// episodes and reconstruct from the active start (or last recovery), so a
-// rolling 24h window cannot forget an outage and completed history stays fixed.
+// episodes only after their recovery leaves the 24h recompute window. Episodes
+// still inside it are rebuilt from the oldest start, so classifier fixes can
+// heal recent history without letting the rolling scan forget older outages.
 const SCAN_SINCE = '2026-09-05T00:00:00.000Z';
+const RECOMPUTE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const time = (value) => Date.parse(value || '');
 const causeLabel = kind => ({
   failure: 'transient failure',
@@ -165,7 +167,12 @@ async function sweep(api, repo, now = new Date().toISOString()) {
   if (records.length > 1) throw new Error('Multiple outage records; reconcile before updating');
   const previous = records.length ? readRecord(records[0]).episodes : [];
   const last = previous.at(-1);
-  const since = last?.end ? new Date(time(last.end) + 1).toISOString() : last?.start || SCAN_SINCE;
+  const recomputeCutoff = time(now) - RECOMPUTE_WINDOW_MS;
+  const isFrozen = episode => episode.end && time(episode.end) < recomputeCutoff;
+  const frozen = previous.filter(isFrozen);
+  const oldestRecomputed = previous.find(episode => !isFrozen(episode));
+  const since = oldestRecomputed?.start ||
+    (last?.end ? new Date(time(last.end) + 1).toISOString() : last?.start || SCAN_SINCE);
   const pulls = [];
   // Updated ordering includes old PRs receiving late reviews. Stop only after
   // the active outage/last recovery; never cap a search at GitHub's 1000-item limit.
@@ -181,7 +188,7 @@ async function sweep(api, repo, now = new Date().toISOString()) {
     }
     if (batch.length < 100 || time(batch.at(-1).updated_at) < time(since)) break;
   }
-  const episodes = [...previous.filter(e => e.end), ...aggregate(pulls, now, since)];
+  const episodes = [...frozen, ...aggregate(pulls, now, since)];
   if (!episodes.length && !records.length) return null;
   const body = render(episodes, now);
   if (records.length) {
