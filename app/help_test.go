@@ -1,6 +1,7 @@
 package app
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,6 +14,12 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+func TestGeneralHelpEntryTextOmitsIssueNumbers(t *testing.T) {
+	issueNumber := regexp.MustCompile(`#[0-9]{3,}`)
+
+	require.NotRegexp(t, issueNumber, helpTypeGeneral{}.toContent())
+}
 
 // TestHelpReflectsKeymapRebinds is the regression guard for the #1141
 // play-test blocker 2: the help overlay rendered hardcoded key literals, so a
