@@ -8021,6 +8021,169 @@ function accountLoginStreamEndpoint(agent, name) {
   };
 }
 
+// src/terminal-keybar.ts
+function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
+  const arrows = { "\u2190": "D", "\u2191": "A", "\u2193": "B", "\u2192": "C" };
+  const special = { Esc: "\x1B", Tab: "	", "^C": "" };
+  if (arrows[key]) return `\x1B${applicationCursor ? "O" : "["}${arrows[key]}`;
+  if (special[key]) return special[key];
+  const code = key.toUpperCase().charCodeAt(0);
+  const text = ctrl && /^[\x40-\x7f]$/.test(key) && code >= 64 && code <= 95 ? String.fromCharCode(code & 31) : key;
+  return (alt ? "\x1B" : "") + text;
+}
+var StickyModifiers = class {
+  values = { Ctrl: "off", Alt: "off" };
+  tapped = { Ctrl: -Infinity, Alt: -Infinity };
+  state(key) {
+    return this.values[key];
+  }
+  tap(key, now) {
+    this.values[key] = this.values[key] === "off" ? "once" : this.values[key] === "once" && now - this.tapped[key] <= 350 ? "locked" : "off";
+    this.tapped[key] = now;
+  }
+  reset() {
+    this.values = { Ctrl: "off", Alt: "off" };
+    this.tapped = { Ctrl: -Infinity, Alt: -Infinity };
+  }
+  input(text) {
+    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
+    return Array.from(text, (char) => {
+      const result = keyBytes(char, this.values.Ctrl !== "off", this.values.Alt !== "off");
+      for (const key of ["Ctrl", "Alt"]) if (this.values[key] === "once") this.values[key] = "off";
+      return result;
+    }).join("");
+  }
+};
+function keybarPointerDown(event, act) {
+  event.preventDefault();
+  act();
+}
+var TerminalKeybar = class {
+  constructor(host, input, refit, applicationCursor) {
+    this.host = host;
+    this.input = input;
+    this.refit = refit;
+    this.applicationCursor = applicationCursor;
+    this.originalMaxHeight = host.style.maxHeight;
+    this.bar.className = "af-terminal-keybar";
+    this.bar.setAttribute("role", "group");
+    this.bar.setAttribute("aria-label", "Terminal keys");
+    for (const keys of [["Ctrl", "Alt", "Esc", "Tab", "^C"], ["\u2190", "\u2191", "\u2193", "\u2192"]]) {
+      const row = document.createElement("div");
+      row.className = "af-keybar-row";
+      for (const key of keys) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = key;
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
+        const act = () => {
+          if (!this.focused || !this.phone.matches) return;
+          if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
+          else this.input(keyBytes(key, false, false, this.applicationCursor()));
+          this.paint();
+        };
+        button.addEventListener("pointerdown", (event) => keybarPointerDown(event, act));
+        button.addEventListener("click", (event) => {
+          if (event.detail === 0) act();
+        });
+        if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
+        row.append(button);
+      }
+      this.bar.append(row);
+    }
+    this.observer = new ResizeObserver(this.layout);
+    this.observer.observe(this.bar);
+    this.observer.observe(host);
+    this.phone.addEventListener("change", this.layout);
+    this.viewport?.addEventListener("resize", this.layout);
+    this.viewport?.addEventListener("scroll", this.layout);
+    window.addEventListener("resize", this.layout);
+    host.addEventListener("keydown", this.onKeyDown, true);
+    host.addEventListener("keyup", this.onKeyUp, true);
+    host.addEventListener("beforeinput", this.onSoftInput, true);
+    host.addEventListener("input", this.onSoftInput, true);
+    this.paint();
+  }
+  modifiers = new StickyModifiers();
+  bar = document.createElement("div");
+  phone = window.matchMedia("(max-width: 768px)");
+  viewport = window.visualViewport;
+  observer;
+  focused = false;
+  physicalInput = false;
+  onKeyDown = (event) => {
+    this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
+  };
+  onKeyUp = () => {
+    this.physicalInput = false;
+  };
+  onSoftInput = (event) => {
+    if (!this.focused || !this.phone.matches || this.physicalInput || event.isComposing || event.inputType !== "insertText" || !event.data || this.modifiers.state("Ctrl") === "off" && this.modifiers.state("Alt") === "off") return;
+    if (event.type === "beforeinput" && !event.cancelable) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    this.input(event.data);
+  };
+  buttons = /* @__PURE__ */ new Map();
+  originalMaxHeight;
+  setFocused(focused) {
+    this.focused = focused;
+    if (!focused) {
+      this.modifiers.reset();
+      this.physicalInput = false;
+    }
+    this.paint();
+    this.layout();
+  }
+  transform(text) {
+    const output = this.focused && this.phone.matches ? this.modifiers.input(text) : text;
+    this.paint();
+    return output;
+  }
+  paint() {
+    for (const [key, button] of this.buttons) {
+      const state = this.modifiers.state(key);
+      button.dataset.state = state;
+      button.setAttribute("aria-pressed", String(state !== "off"));
+      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next character" : "Double tap to lock");
+      button.title = state === "locked" ? `${key} locked \xB7 Tap to release` : `${key} \xB7 Double tap to lock`;
+      button.textContent = state === "locked" ? `\u25B8 ${key}` : key;
+    }
+  }
+  layout = () => {
+    if (!this.focused || !this.phone.matches) {
+      this.bar.remove();
+      this.host.style.maxHeight = this.originalMaxHeight;
+      if (!this.phone.matches) {
+        this.modifiers.reset();
+        this.paint();
+      }
+    } else {
+      if (!this.bar.isConnected) document.body.append(this.bar);
+      const bottom = this.viewport ? this.viewport.offsetTop + this.viewport.height : window.innerHeight;
+      this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
+      this.bar.style.width = `${this.viewport?.width ?? window.innerWidth}px`;
+      this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
+      const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
+      this.host.style.maxHeight = `${height}px`;
+    }
+    this.refit();
+  };
+  dispose() {
+    this.host.removeEventListener("keydown", this.onKeyDown, true);
+    this.host.removeEventListener("keyup", this.onKeyUp, true);
+    this.host.removeEventListener("beforeinput", this.onSoftInput, true);
+    this.host.removeEventListener("input", this.onSoftInput, true);
+    this.observer.disconnect();
+    this.phone.removeEventListener("change", this.layout);
+    this.viewport?.removeEventListener("resize", this.layout);
+    this.viewport?.removeEventListener("scroll", this.layout);
+    window.removeEventListener("resize", this.layout);
+    this.host.style.maxHeight = this.originalMaxHeight;
+    this.bar.remove();
+  }
+};
+
 // src/terminal.ts
 var import_addon_fit = __toESM(require_addon_fit(), 1);
 var import_xterm = __toESM(require_xterm(), 1);
@@ -8502,6 +8665,12 @@ var AttachTerminal = class {
     this.fit = new import_addon_fit.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
+    this.keybar = new TerminalKeybar(
+      container,
+      (data) => this.term.input(data, true),
+      () => this.scheduleVisibleFit(),
+      () => this.term.modes.applicationCursorKeysMode
+    );
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -8515,17 +8684,19 @@ var AttachTerminal = class {
     if (textarea) {
       textarea.addEventListener("focus", () => {
         if (!this.stopped) {
+          this.keybar.setFocused(true);
           this.cb.onFocusChange(true);
         }
       });
       textarea.addEventListener("blur", () => {
         this.mouseOverrideKeyHeld = false;
         if (!this.stopped) {
+          this.keybar.setFocused(false);
           this.cb.onFocusChange(false);
         }
       });
     }
-    this.term.onData((data) => this.sendInput(data));
+    this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.attachCustomKeyEventHandler((ev) => {
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
@@ -8570,6 +8741,7 @@ var AttachTerminal = class {
   }
   term;
   fit;
+  keybar;
   enc = new TextEncoder();
   // Type-ahead: what was typed while the socket was down, replayed on open
   // (#2811). Held here rather than dropped in send().
@@ -8881,6 +9053,7 @@ var AttachTerminal = class {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose() {
     this.stopped = true;
+    this.keybar.dispose();
     this.releaseMidLine();
     this.pendingInput.clear();
     if (this.mouseCaptureHintTimer !== null) {

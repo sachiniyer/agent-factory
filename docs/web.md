@@ -79,9 +79,13 @@ it; tapping the backdrop dismisses it. Project context and the view switch remai
 in the app header. **More app controls** holds install, Light · Dark · System and
 Disconnect. The pane has its own title, static Keyboard label and Actions row;
 long titles truncate with … and tabs scroll horizontally. Controls have at least
-44px touch targets.
+44px touch targets. While the terminal owns the keyboard, a bottom bar provides
+Ctrl, Alt, Esc, Tab, arrows and **^C** above the soft keyboard. Tap Ctrl or Alt
+then type a character; double tap to lock (shown by ▸ and an outline), and tap
+again to release. Arrows occupy a second row so every key fits. The terminal
+resizes to keep its last line visible, and tapping keys keeps the keyboard open.
 
-![Focused session on a phone, with project navigation above the pane title and tabs](assets/web/phone-session.png)
+![Phone terminal with the modifier keybar](assets/design/3977/after-phone-session-390.png)
 
 **Share a link to a session.** Click the link icon (**Copy link**) beside the selected session's
 header title to copy its link, or copy the address bar: it follows your selection.

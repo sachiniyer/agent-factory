@@ -36,6 +36,7 @@
 // 'unsafe-inline'` to permit them while keeping every FETCH same-origin — see
 // daemon/webserve.go.)
 
+import { TerminalKeybar } from "./terminal-keybar.js";
 import { FitAddon } from "@xterm/addon-fit";
 import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -148,6 +149,7 @@ interface PendingViewportAnchor {
 export class AttachTerminal {
   private readonly term: Terminal;
   private readonly fit: FitAddon;
+  private readonly keybar: TerminalKeybar;
   private readonly enc = new TextEncoder();
   // Type-ahead: what was typed while the socket was down, replayed on open
   // (#2811). Held here rather than dropped in send().
@@ -565,6 +567,8 @@ export class AttachTerminal {
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
+    this.keybar = new TerminalKeybar(container, data => this.term.input(data, true),
+      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -594,12 +598,14 @@ export class AttachTerminal {
     if (textarea) {
       textarea.addEventListener("focus", () => {
         if (!this.stopped) {
+          this.keybar.setFocused(true);
           this.cb.onFocusChange(true);
         }
       });
       textarea.addEventListener("blur", () => {
         this.mouseOverrideKeyHeld = false;
         if (!this.stopped) {
+          this.keybar.setFocused(false);
           this.cb.onFocusChange(false);
         }
       });
@@ -608,7 +614,7 @@ export class AttachTerminal {
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
     // (regular chars and key escape sequences alike); UTF-8 encode it so a typed
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
-    this.term.onData((data) => this.sendInput(data));
+    this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
     // BEFORE xterm turns it into input. Bare Shift+Enter emits LF only for the
@@ -683,6 +689,7 @@ export class AttachTerminal {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose(): void {
     this.stopped = true;
+    this.keybar.dispose();
     // Hand the lease back before this pane stops existing (#3024).
     this.releaseMidLine();
     this.pendingInput.clear();
