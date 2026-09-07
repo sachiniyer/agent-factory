@@ -316,7 +316,12 @@ func TestArchiveSessionMoveFailureAlsoSurfacesHookFailure(t *testing.T) {
 	writeOnArchiveCommand(t, "printf 'prune failed loudly\\n'; exit 23")
 	dest, err := archivedWorktreePath(repoID, "worker")
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(dest, 0755))
+	prev := archiveTeardown
+	archiveTeardown = func(i *session.Instance, dest string, claim sessiongit.RelocationClaim, hook func() error, trust bool) (error, error) {
+		require.NoError(t, os.MkdirAll(dest, 0755))
+		return prev(i, dest, claim, hook, trust)
+	}
+	t.Cleanup(func() { archiveTeardown = prev })
 
 	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 
@@ -423,13 +428,16 @@ func TestArchiveSession_MoveFailureMarksLost(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
 
-	// Force the move to fail by pre-creating the destination (MoveWorktree
-	// refuses to clobber an existing dest), before any bytes are moved.
-	dest, err := archivedWorktreePath(repoID, "worker")
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(dest, 0755))
+	// Introduce an obstacle after destination admission to exercise a failure
+	// at the move boundary rather than the pre-teardown occupancy refusal.
+	prev := archiveTeardown
+	archiveTeardown = func(i *session.Instance, dest string, claim sessiongit.RelocationClaim, hook func() error, trust bool) (error, error) {
+		require.NoError(t, os.MkdirAll(dest, 0755))
+		return prev(i, dest, claim, hook, trust)
+	}
+	t.Cleanup(func() { archiveTeardown = prev })
 
-	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err, "a failed move must surface an error")
 
 	assert.Equal(t, session.Lost, inst.GetStatus(), "a failed archive marks the session Lost for self-heal")

@@ -86,6 +86,8 @@ Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), the split follows the 
 
 Caveat for the reads: `--repo` becomes an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path. Prefer a bare title against a remote and let the ambiguity error tell you when to narrow it.
 
+Titles must also map to distinct **archive directories within the project**, across live and archived sessions. For example, `feature/login` and `feature-login` both map to `feature-login`, so creating the second is refused with the colliding title. If an archive destination is already occupied, archive refuses before stopping tabs and names the directory and its recorded owner; the session stays live.
+
 One exception to per-project titles: **remote hook** sessions share a global name namespace, because the slug reaches `launch_cmd`/`delete_cmd` verbatim and external provisioners key real sandboxes on it — see [remote-hooks.md](remote-hooks.md#session-names).
 
 ```bash
