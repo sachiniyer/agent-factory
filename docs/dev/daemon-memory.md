@@ -182,18 +182,23 @@ daemon unit rather than children of it:
   `internal/systemdunit/childscope_linux.go`);
 - operator-authored hooks — `post_worktree_commands` (`session/git/hooks.go`)
   and `on_archive_command` (`daemon/archive_hook.go`) — in an *unbound* scope
-  with no dependency edge at all, so a long build survives a daemon restart or
-  auto-upgrade (`systemdunit.NewUnboundScopeCommand`, #3650).
+  with no dependency edge at all, so the scope survives a daemon restart or
+  auto-upgrade (`systemdunit.NewUnboundScopeCommand`, #3650); see the hook-output
+  caveat below.
 
 Agent processes are descendants of a tmux server, so once that server is a
 scoped one they sit outside the unit's figure, which is why the sizing section
 below counts them separately.
 
-**Being the process systemd started is the whole gate.** All three routes check
-`systemdunit.RunningDaemonProcess()` first, so they apply to the daemon running
-as `agent-factory-daemon.service` on Linux. A TUI or CLI that creates a worktree
-itself spawns exactly what it always spawned — which is not in the daemon's
-cgroup either, because it is not the daemon.
+**The gate accepts either the process systemd started or daemon-unit cgroup
+membership.** All three routes check `systemdunit.RunningDaemonProcess()` first.
+It accepts the PID systemd started and, as a fallback, any process whose
+`/proc/self/cgroup` names `agent-factory-daemon.service`
+(`internal/systemdunit/daemon_linux.go`). That fallback is why a same-host
+agent-server left in the unit's cgroup takes these routes too. A TUI or CLI
+running outside that unit and creating a worktree itself spawns exactly what it
+always spawned; it satisfies neither half of the gate and is not in the daemon's
+cgroup.
 
 **One case where they do not: a legacy tmux server after an upgrade.**
 `ensureDedicatedServer` deliberately leaves a foreign or legacy server alone
@@ -364,7 +369,7 @@ may perfectly well start that server **on the daemon host**, which
 plain `exec` (`session/backend_hook_backend.go`), so af moves nothing out of the
 cgroup it lands in: such a tree is a descendant of the daemon unit after all,
 and it counts toward the unit's peak. What its *hooks* do is a separate
-question — `RunningDaemonProcess()` reads `/proc/self/cgroup`, so a server
+question — the cgroup fallback in `RunningDaemonProcess()` means a server
 sitting inside the unit's cgroup takes the same scoped path the daemon does. So
 if a peak is unexplained, check where that session's agent-server actually runs
 and read its `/proc/<pid>/cgroup` — do not rule a session out merely because its
@@ -374,24 +379,31 @@ backend is not `local`.
 
 #3650 landed, and moved those spawns into their own transient scope — a sibling
 under `app.slice` rather than a child of the daemon unit — so the build is off
-the daemon's books and, because that scope carries no dependency edge to the
-unit, it also survives a daemon restart or auto-upgrade instead of being killed
-mid-build. It covers **both** operator hooks: `post_worktree_commands`
-(`session/git/hooks.go`) and `on_archive_command` (`daemon/archive_hook.go`).
-The watcher and the VS Code start gate had already routed through a scope
-(#2299), in the bound shape.
+the daemon's books. Because that scope carries no dependency edge to the unit,
+the scope itself survives a daemon restart or auto-upgrade, and a silent build
+survives with it. Both hook runners, however, give the child pipes whose readers
+live in the daemon — a `bytes.Buffer` in `session/git/hooks.go` and an
+`archiveHookOutputTail` in `daemon/archive_hook.go`. A hook that writes after the
+daemon exits can therefore die on `SIGPIPE`/`EPIPE`; [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
+tracks moving both runners to a per-run log file. It covers **both** operator
+hooks: `post_worktree_commands` (`session/git/hooks.go`) and
+`on_archive_command` (`daemon/archive_hook.go`). The watcher and the VS Code
+start gate had already routed through a scope (#2299), in the bound shape.
 
-So on a current daemon the correlation above should not reproduce, and the unit's
-`MemoryPeak` is a daemon number again — which is what makes a `MemoryMax=` or
-`CPUQuota=` on the unit size the daemon rather than the operator's build. Two
-things still put a hook back in the old place, and both are worth checking before
-concluding otherwise: a hook run by a **TUI or CLI** that creates the worktree
-itself was never scoped (it is not the daemon, so it is not in the daemon's
-cgroup either), and a **non-Linux** host has no systemd and no cgroup accounting
-at all. Read `/proc/<hook pid>/cgroup` while a hook runs rather than inferring
-which side of #3650 a given build is on. Either way, size the **box** for what
-your local hooks build — that memory did not disappear, it moved to a scope of
-its own.
+So on a current daemon the two operator hooks should not reproduce the
+correlation above: their builds no longer contribute to the unit's `MemoryPeak`.
+That does not make `MemoryPeak` a daemon-process number. Only those two operator
+hooks moved out; every other unscoped descendant still charges the unit,
+including a hook backend's plain-`exec` `launch_cmd` on the daemon host.
+`MemoryPeak`, `MemoryMax=`, and `CPUQuota=` therefore still cover more than the
+daemon process. Two things still put a hook back in the old place, and both are
+worth checking before concluding otherwise: a hook run by a **TUI or CLI**
+outside the daemon unit that creates the worktree itself was never scoped (it
+satisfies neither half of the gate and is not in the daemon's cgroup), and a
+**non-Linux** host has no systemd and no cgroup accounting at all. Read
+`/proc/<hook pid>/cgroup` while a hook runs rather than inferring which side of
+#3650 a given build is on. Either way, size the **box** for what your local hooks
+build — that memory did not disappear, it moved to a scope of its own.
 
 ### High child-process churn, which is not a measured driver
 
