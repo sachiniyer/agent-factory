@@ -20,9 +20,8 @@ func setupResolveTest(t *testing.T, globalConfig string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	// LoadConfig probes the user's shell for a claude alias on every call;
-	// an interactive bash probe costs seconds. A plain sh takes the fast
-	// `which` path and keeps the resolver tests snappy.
+	// LoadConfig may perform a cached claude alias probe. A plain
+	// sh takes the fast `which` path and keeps the resolver tests snappy.
 	t.Setenv("SHELL", "/bin/sh")
 	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), []byte(globalConfig), 0644))
 	return t.TempDir()
