@@ -6,23 +6,28 @@ import (
 	"os"
 	"strings"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
-// validateArchiveTitleLocked covers live, archived, and in-flight title claims.
+// validateArchiveTitleLocked covers live, archived, and in-flight LOCAL claims.
+// The caller has already established that the candidate uses a local worktree.
 // Branch names keep slashes, but archive directories fold them into dashes.
 // ignore is the archived row the create is about to rename out of the way.
 func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []session.InstanceData, ignore *session.Instance) error {
-	candidate := sanitizeArchiveTitle(title)
+	candidate := archiveTitleKey(title)
 	collision := func(existing string) error {
-		if sanitizeArchiveTitle(existing) == candidate {
-			return fmt.Errorf("session titled %q already maps to archive directory %q", existing, candidate)
+		if archiveTitleKey(existing) == candidate {
+			return fmt.Errorf("session titled %q already maps to archive directory %q", existing, sanitizeArchiveTitle(title))
 		}
 		return nil
 	}
-	for key := range m.reservedTitles {
-		rid, existing := splitDaemonInstanceKey(key)
+	// Only local creates reserve tmux names; reservedTitles also contains
+	// off-box creates that never claim an archive directory on this machine.
+	for key, existing := range m.reservedTmuxNames {
+		rid, _ := splitDaemonInstanceKey(key)
 		if rid == repoID {
 			if err := collision(existing); err != nil {
 				return err
@@ -31,7 +36,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 	}
 	for key, inst := range m.instances {
 		rid, _ := splitDaemonInstanceKey(key)
-		if rid != repoID || inst == nil || inst == ignore {
+		if rid != repoID || inst == nil || inst == ignore || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 			continue
 		}
 		if err := collision(inst.Title); err != nil {
@@ -39,7 +44,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		}
 	}
 	for _, data := range disk {
-		if data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
+		if !data.UsesLocalTmux() || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
 			continue
 		}
 		if err := collision(data.Title); err != nil {
@@ -47,6 +52,13 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		}
 	}
 	return nil
+}
+
+// archiveTitleKey deliberately uses one portable comparison on every platform,
+// including case-sensitive Linux filesystems. Keep sanitizeArchiveTitle as the
+// on-disk spelling; only namespace admission folds case and Unicode composition.
+func archiveTitleKey(title string) string {
+	return strings.ToLower(norm.NFC.String(sanitizeArchiveTitle(title)))
 }
 
 // checkArchiveDestination runs before editors, hooks, or tabs are stopped.

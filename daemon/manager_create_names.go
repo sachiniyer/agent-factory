@@ -311,11 +311,11 @@ func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program
 			return fmt.Errorf("remote session titled %q in project %s already maps to hook name %q; remote hook names are shared across projects because the hook scripts receive them verbatim as --name — pick another title for this remote session", owner, ownerRepo, candidate)
 		}
 	}
-	if err := m.validateArchiveTitleLocked(repoID, title, diskData, ignore); err != nil {
-		return err
-	}
 	if namespace != runtimeNamespaceLocalTmux {
 		return nil
+	}
+	if err := m.validateArchiveTitleLocked(repoID, title, diskData, ignore); err != nil {
+		return err
 	}
 	tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program)
 	// Existence gates the create here, so read the tri-state, not the lossy bool

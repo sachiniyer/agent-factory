@@ -29,7 +29,7 @@ func TestCreateSessionRejectsArchiveDirectoryCollision(t *testing.T) {
 func TestArchiveDirectoryNamespaceClaims(t *testing.T) {
 	for _, source := range []string{"live", "archived", "disk live", "disk archived", "reserved", "other repo"} {
 		t.Run(source, func(t *testing.T) {
-			m := &Manager{instances: make(map[string]*session.Instance), reservedTitles: make(map[string]struct{})}
+			m := &Manager{instances: make(map[string]*session.Instance), reservedTmuxNames: make(map[string]string)}
 			inst := &session.Instance{Title: "feature/login"}
 			var disk []session.InstanceData
 			switch source {
@@ -45,11 +45,11 @@ func TestArchiveDirectoryNamespaceClaims(t *testing.T) {
 				}
 				disk = []session.InstanceData{{Title: inst.Title, Status: status}}
 			case "reserved":
-				m.reservedTitles[daemonInstanceKey("repo", inst.Title)] = struct{}{}
+				m.reservedTmuxNames[daemonInstanceKey("repo", "reserved-tmux-name")] = inst.Title
 			case "other repo":
 				m.instances[daemonInstanceKey("other", inst.Title)] = inst
 			}
-			err := m.validateTitleNamespacesLocked("repo", "", "feature-login", "claude", runtimeNamespaceSandbox, disk, nil)
+			err := m.validateArchiveTitleLocked("repo", "feature-login", disk, nil)
 			if source == "other repo" {
 				require.NoError(t, err)
 				return
