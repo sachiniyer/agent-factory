@@ -2470,6 +2470,8 @@ Identify the current Agent Factory session
 
 Returns the session info for the current tmux session by matching the tmux session name against stored sessions.
 
+Requires TMUX and TMUX_PANE. Uses the inherited AF_SESSION identity when available, cross-checked against that pane on the inherited tmux socket. Missing context or an identity mismatch is an error.
+
 Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not.
 
 ```
