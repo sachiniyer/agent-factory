@@ -112,7 +112,7 @@ type Menu struct {
 	origin layout.Point
 }
 
-var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
+var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 
 // newInstanceMenuOptions are the naming-form hints. The third, fourth and fifth
 // slots are the form's optional fields — the initial prompt (#1936), the backend
@@ -633,7 +633,6 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyShiftUp, keys.KeyShiftDown},
 	{keys.KeyAttach},
 	{keys.KeySearch},
-	{keys.KeyNewRemote},
 	{keys.KeyHooks},
 	{keys.KeyArchive},
 	{keys.KeyRestore},

@@ -117,7 +117,7 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 func TestNamingProgramPickerTitleUsesSentenceCase(t *testing.T) {
 	h := activeProjectHome(t)
 	resizeHome(h, 80, 24)
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	require.Equal(t, stateNew, h.state)
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyTab})
@@ -198,7 +198,7 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 	h.store.AddInstance(existing)
 	h.sidebar.SetSelectedInstance(0)
 
-	model, _ := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 	require.Same(t, h, model)
 	requireNamingFormOpened(t, h)
 	require.NotNil(t, h.namingInstance)
@@ -212,90 +212,6 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 	assert.Equal(t, stateNew, h.state)
 	assert.Equal(t, session.OpCreating, h.namingInstance.GetInFlightOp(),
 		"the #1350 BeginCreate chokepoint still fires exactly once when naming starts")
-}
-
-// TestStartNewRemoteWithoutHooksExplains is the #2020 regression guard. The menu
-// advertises `N new remote` as a peer of `n new`, but for a repo with no
-// remote_hooks — nearly every repo — N used to be a silent no-op: byte-identical
-// screen, no overlay, no error, no hint that remote sessions need setup. This
-// asserts the visible outcome, naming remote_hooks so the user knows what to
-// configure. It inverts the earlier TestStartNewRemoteWithoutHooksNoops, which
-// pinned the swallow as intended behavior.
-func TestStartNewRemoteWithoutHooksExplains(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	h.repoRoot = repoDir
-	h.errBox.SetSize(120, 1)
-
-	model, cmd := h.startNewInstance(true)
-
-	require.Same(t, h, model)
-	require.NotNil(t, cmd, "pressing an advertised key must produce a visible outcome, never a swallowed keypress")
-	// No session is created and no naming overlay opens — the refusal itself is
-	// unchanged; only its silence is.
-	assert.Equal(t, stateDefault, h.state)
-	assert.Nil(t, h.namingInstance)
-	assert.Equal(t, 0, h.store.NumInstances())
-
-	full := h.errBox.FullError()
-	assert.Contains(t, full, "remote_hooks", "the message must name the config the user has to add")
-	assert.Contains(t, full, "n for a local session", "the message must offer the action that does work here")
-}
-
-// TestStartNewRemoteWithoutHooksLeadsWithTheCause pins the ordering the #1973
-// clipping class forces: the transient notice is truncated to the terminal
-// width and the TAIL is what vanishes, so the cause has to arrive before the
-// guide URL rather than after it.
-func TestStartNewRemoteWithoutHooksLeadsWithTheCause(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	h.repoRoot = repoDir
-	h.errBox.SetSize(120, 1)
-
-	h.startNewInstance(true)
-
-	full := h.errBox.FullError()
-	cause := strings.Index(full, "remote_hooks")
-	url := strings.Index(full, "https://")
-	require.NotEqual(t, -1, cause)
-	require.NotEqual(t, -1, url)
-	assert.Less(t, cause, url, "the cause must survive width-clipping; the URL is the part that may be cut")
-}
-
-func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	h.repoRoot = repoDir
-	h.errBox.SetSize(120, 1)
-	repo, err := config.CurrentRepo()
-	require.NoError(t, err)
-	writeLegacyRepoConfig(t, repo.ID, &config.RepoConfig{
-		RemoteHooks: &config.RemoteHooks{
-			DeleteCmd: "/bin/echo",
-		},
-	})
-
-	model, cmd := h.startNewInstance(true)
-
-	require.Same(t, h, model)
-	require.NotNil(t, cmd)
-	assert.Equal(t, stateDefault, h.state)
-	assert.Nil(t, h.namingInstance)
-	assert.Equal(t, 0, h.store.NumInstances())
-	// The fixture is still invalid under the #2847 contract — it sets neither
-	// provision_cmd nor launch_cmd — so the assertion that invalid hooks error
-	// stands unchanged. It is STRENGTHENED to require both keys be named: a repo
-	// on the ssh-host contract that is sent to fix launch_cmd would be edited in
-	// the wrong place, which is the failure an error message exists to prevent.
-	assert.Contains(t, h.errBox.FullError(), "remote_hooks.launch_cmd")
-	assert.Contains(t, h.errBox.FullError(), "remote_hooks.provision_cmd",
-		"an invalid hook config must name BOTH contracts, or a provision_cmd user is sent to the wrong key")
 }
 
 // TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
@@ -437,7 +353,7 @@ func TestHandleStateNewWhitespaceViaRealInput(t *testing.T) {
 	h := activeProjectHome(t)
 	h.errBox.SetSize(120, 1)
 
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	require.NotNil(t, h.namingInstance)
 	require.NotEmpty(t, h.namingPlaceholder, "startNewInstance always generates a placeholder")
 
@@ -529,10 +445,7 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	require.NoError(t, err)
 	h.store.AddInstance(existing)
 
-	// The naming row does not. It provisions nothing (#2599), so `N` is carried on
-	// the model and the gate resolves the create's kind from that instead of from
-	// this instance's capabilities. A repo path with no `backend` key plus
-	// ForceRemote resolves to hook — the same answer the daemon will reach.
+	// The inert naming row stays local; the selected backend determines slug validation.
 	naming, err := session.NewInstance(session.InstanceOptions{
 		Title:   "my_app",
 		Path:    t.TempDir(),
@@ -541,7 +454,7 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	})
 	require.NoError(t, err)
 	h.namingInstance = naming
-	h.pendingForceRemote = true
+	h.pendingBackend = "hook"
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -589,7 +502,7 @@ func TestHandleStateNewHookSlugIgnoresNonHookRemoteSessions(t *testing.T) {
 			})
 			require.NoError(t, err)
 			h.namingInstance = naming
-			h.pendingForceRemote = true
+			h.pendingBackend = "hook"
 
 			_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -613,7 +526,7 @@ func TestHandleStateNewRejectsRemoteHookTitleWithoutASCIIAlphanumeric(t *testing
 	})
 	require.NoError(t, err)
 	h.namingInstance = naming
-	h.pendingForceRemote = true
+	h.pendingBackend = "hook"
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -684,7 +597,7 @@ func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
 	h := activeProjectHome(t)
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the name field starts empty")
@@ -713,7 +626,7 @@ func TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder(t *testing.T) {
 		return errors.New("Claude Code is not installed or not on PATH")
 	}))
 
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the field starts empty")
@@ -742,7 +655,7 @@ func TestCancelNamingClearsPlaceholder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := activeProjectHome(t)
-			_, _ = h.startNewInstance(false)
+			_, _ = h.startNewInstance()
 			require.NotNil(t, h.namingInstance)
 			require.NotEmpty(t, h.namingPlaceholder, "precondition: a placeholder was generated")
 

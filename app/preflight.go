@@ -35,16 +35,8 @@ func (m *home) preflightSessionCreate() error {
 	// `claude` is not what is wrong with it. The daemon owns the verdict on a
 	// backend it could not resolve, and states it when the create is submitted.
 	//
-	// Every input is now a fact about the CREATE rather than about the placeholder
-	// (#2599): the picked backend, and `N` via m.pendingForceRemote. The placeholder
-	// used to answer the `N` half through its capabilities, which only worked
-	// because it had been provisioned as a hook runtime while the user was still
-	// typing a title. It is pinned local now and provisions nothing, so reading its
-	// capabilities would report every create local and refuse a docker/ssh/hook
-	// session for a missing local `claude` — #2592, reintroduced in the TUI.
 	local, _ := session.LocalPrereqsRequired(session.InstanceOptions{
-		Backend:     session.BackendKind(m.pendingBackend),
-		ForceRemote: m.pendingForceRemote,
+		Backend: session.BackendKind(m.pendingBackend),
 	}, m.repoRoot)
 	if !local {
 		return nil

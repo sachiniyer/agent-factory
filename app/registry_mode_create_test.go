@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 
@@ -20,18 +22,13 @@ import (
 // anyway, so the user typed a name, pressed enter, and only THEN learned it
 // could not work: the daemon resolved the non-git cwd and answered `failed to
 // get git repo root for <path>: exit status 128`.
-//
-// Both creation keys are covered. `N` already refused early in registry mode,
-// but for the wrong reason and with the wrong words — it reported the cwd as a
-// repo with no remote_hooks configured, which tells a user with no project
-// selected to go configure something.
 func TestStartNewInstanceInRegistryModeRefusesWithoutProject(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		remote bool
+		name string
+		key  keys.KeyName
 	}{
-		{name: "local", remote: false},
-		{name: "remote", remote: true},
+		{name: "local", key: keys.KeyNew},
+		{name: "remote", key: keys.KeyNewRemote},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)
@@ -39,7 +36,7 @@ func TestStartNewInstanceInRegistryModeRefusesWithoutProject(t *testing.T) {
 			h.repoRoot = ""
 			h.errBox.SetSize(200, 1)
 
-			model, cmd := h.startNewInstance(tc.remote)
+			model, cmd := h.handleDefaultKeyPress(tea.KeyMsg{}, tc.key)
 
 			require.Same(t, h, model)
 			require.NotNil(t, cmd, "an advertised key must produce a visible outcome, never a swallowed keypress")
@@ -77,7 +74,7 @@ func TestStartNewInstanceWithActiveProjectStillOpensNaming(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = repoDir
 
-	model, _ := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 
 	require.Same(t, h, model)
 	requireNamingFormOpened(t, h)

@@ -323,7 +323,6 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 	return renderHelpSections(header, []helpSection{
 		{title: "Managing:", rows: []helpRow{
 			{helpKey(keys.KeyNew), "Create a new session"},
-			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
 			// The naming form's four optional fields, named here because its own
 			// status-bar hints shed by terminal width (ui/menu.go hintDropOrder): on a
 			// narrow bar this is the only surface that still advertises them.
