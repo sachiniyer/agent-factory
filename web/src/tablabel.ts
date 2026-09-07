@@ -56,8 +56,9 @@ export function tabIcon(kind: number): IconName {
 
 /**
  * The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
- * the agent tab is "Agent", a shell tab is "Terminal", a web tab shows its name (or
- * "Web"), and any other kind shows its name (or "Tab").
+ * the agent tab is "Agent", a shell tab is "Terminal", and web/VS Code tabs
+ * show a custom name or their proper display label. The kind-string names used
+ * for default-created tabs are sentinels, not custom labels.
  *
  * Agent and shell deliberately IGNORE tab.name — the TUI does the same, and the
  * daemon refuses to rename them for it.
@@ -69,9 +70,9 @@ export function tabLabel(tab: NamedTab): string {
     case TabKind.Shell:
       return "Terminal";
     case TabKind.Web:
-      return tab.name || "Web";
+      return tab.name && tab.name !== "web" ? tab.name : "Web";
     case TabKind.VSCode:
-      return tab.name || "VS Code";
+      return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     default:
       return tab.name || "Tab";
   }

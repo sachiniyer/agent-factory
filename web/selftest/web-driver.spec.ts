@@ -9273,7 +9273,9 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
   await menu.locator(".af-tab-menu-item", { hasText: "VS Code" }).click();
   await expect(menu).toBeHidden();
 
-  const editorTab = tabbar.locator(".af-tab", { hasText: "vscode" });
+  const editorTab = tabbar.locator(".af-tab").filter({
+    has: page.locator(".af-tab-label", { hasText: /^VS Code$/ }),
+  });
   await expect(editorTab).toHaveCount(1, { timeout: 30_000 });
 
   // Creating the tab must NOT strand the keyboard in terminal mode. createSessionTab
