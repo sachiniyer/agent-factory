@@ -4,8 +4,8 @@ const POLICY_ISSUE = 3932;
 const MARKER = '<!-- codex-reviewer-outage:v1 ';
 // Bootstrap includes the evidence window on #3932. Later sweeps retain closed
 // episodes only after their recovery leaves the 24h recompute window. Episodes
-// still inside it are rebuilt from the oldest start, so classifier fixes can
-// heal recent history without letting the rolling scan forget older outages.
+// after the last frozen recovery are rebuilt, so classifier fixes can discover
+// earlier evidence without letting the rolling scan duplicate older outages.
 const SCAN_SINCE = '2026-09-05T00:00:00.000Z';
 const RECOMPUTE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const time = (value) => Date.parse(value || '');
@@ -166,13 +166,13 @@ async function sweep(api, repo, now = new Date().toISOString()) {
   const records = comments.filter(c => readRecord(c));
   if (records.length > 1) throw new Error('Multiple outage records; reconcile before updating');
   const previous = records.length ? readRecord(records[0]).episodes : [];
-  const last = previous.at(-1);
   const recomputeCutoff = time(now) - RECOMPUTE_WINDOW_MS;
   const isFrozen = episode => episode.end && time(episode.end) < recomputeCutoff;
   const frozen = previous.filter(isFrozen);
-  const oldestRecomputed = previous.find(episode => !isFrozen(episode));
-  const since = oldestRecomputed?.start ||
-    (last?.end ? new Date(time(last.end) + 1).toISOString() : last?.start || SCAN_SINCE);
+  const lastFrozen = frozen.at(-1);
+  const since = lastFrozen?.end
+    ? new Date(time(lastFrozen.end) + 1).toISOString()
+    : SCAN_SINCE;
   const pulls = [];
   // Updated ordering includes old PRs receiving late reviews. Stop only after
   // the active outage/last recovery; never cap a search at GitHub's 1000-item limit.

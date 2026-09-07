@@ -26,6 +26,23 @@ function fixture() {
     { number: 5, head: { sha: head }, merged_at: null, artifacts: [comment(11, limits[0], { user: { login: 'someone' } })] },
   ];
 }
+async function runRecordedSweep({ episodes, pulls, artifactsByRoute, now }) {
+  let record = { id: 42, user: { login: 'sachiniyer' }, body: render(episodes, now) };
+  const calls = [];
+  const api = async (route, options = {}) => {
+    calls.push(route);
+    if (options.method === 'PATCH') {
+      record = { ...record, body: options.body };
+      return record;
+    }
+    if (route.includes('/issues/3932/comments')) return [record];
+    if (route.includes('/pulls?')) return pulls;
+    const match = Object.entries(artifactsByRoute).find(([part]) => route.includes(part));
+    return match?.[1] || [];
+  };
+  await sweep(api, 'owner/repo', now);
+  return { calls, episodes: readRecord(record).episodes };
+}
 test('usage-limit predicate recognizes all three captured variants', () => {
   for (const body of limits) assert.equal(gate.codexEvidence.codexReportsReviewUsageLimit(body), true);
 });
@@ -120,33 +137,112 @@ test('sweep recomputes a recent completed episode with the current classifier', 
     [actual],
   );
 });
-test('sweep scans from the oldest recent episode start', async () => {
-  const previous = aggregate([{
-    number: 1,
-    head: { sha: head },
-    merged_at: null,
-    artifacts: [comment(2, limits[0]), verdict(3), comment(5, limits[1]), verdict(6)],
-  }], t(7));
-  const existing = {
-    id: 42,
-    user: { login: 'sachiniyer' },
-    body: render(previous, t(7)),
+test('recompute scan includes newly recognised evidence before the stored start', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const newlyRecognised = comment(1,
+    'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error');
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
   };
-  const calls = [];
-  const api = async (route, options = {}) => {
-    calls.push(route);
-    if (options.method === 'PATCH') return { ...existing, body: options.body };
-    if (route.includes('/issues/3932/comments')) return [existing];
-    if (route.includes('/pulls?')) return [
-      { number: 10, updated_at: t(2), merged_at: null, head: { sha: head } },
-      { number: 11, updated_at: t(1), merged_at: null, head: { sha: head } },
-    ];
-    return [];
-  };
+  const result = await runRecordedSweep({
+    episodes: [recent],
+    pulls: [
+      { number: 2, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 1, updated_at: t(1), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/1/comments': [newlyRecognised],
+      '/issues/2/comments': [recentNotice],
+      '/pulls/2/reviews': [recentRecovery],
+    },
+    now,
+  });
 
-  await sweep(api, 'owner/repo', t(10));
-  const fetched = calls.flatMap(route => route.match(/\/pulls\/(\d+)\/comments/)?.slice(1) || []);
-  assert.deepEqual(fetched, ['10']);
+  assert.equal(result.episodes[0].start, t(1));
+  assert.deepEqual(result.episodes[0].causes, ['failure', 'usage-limit']);
+  assert.ok(result.calls.some(route => route.includes('/issues/1/comments')));
+});
+test('recompute scan recovers a missed episode after frozen history', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const frozenEnd = '2026-09-05T00:30:00.000Z';
+  const frozen = {
+    start: '2026-09-05T00:10:00.000Z', end: frozenEnd,
+    latest: { time: '2026-09-05T00:20:00.000Z', url: 'frozen-notice', body: limits[0], kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: 'frozen-recovery',
+  };
+  const missedNotice = comment(1, limits[1]);
+  const missedRecovery = verdict(2);
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [frozen, recent],
+    pulls: [
+      { number: 3, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 2, updated_at: t(2), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/2/comments': [missedNotice],
+      '/pulls/2/reviews': [missedRecovery],
+      '/issues/3/comments': [recentNotice],
+      '/pulls/3/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.deepEqual(result.episodes.map(episode => [episode.start, episode.end]), [
+    [frozen.start, frozen.end], [t(1), t(2)], [t(3), t(5)],
+  ]);
+});
+test('recompute scan never re-aggregates frozen history', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const frozenNotice = comment(0, limits[0], {
+    created_at: '2026-09-05T00:10:00.000Z', html_url: 'frozen-notice',
+  });
+  const frozenRecovery = verdict(0);
+  frozenRecovery.created_at = '2026-09-05T00:30:00.000Z';
+  frozenRecovery.html_url = 'frozen-recovery';
+  const frozen = {
+    start: frozenNotice.created_at, end: frozenRecovery.created_at,
+    latest: {
+      time: frozenNotice.created_at, url: frozenNotice.html_url,
+      body: frozenNotice.body, kind: 'usage-limit',
+    },
+    merged: [], causes: ['usage-limit'], recovery: frozenRecovery.html_url,
+  };
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [frozen, recent],
+    pulls: [
+      { number: 2, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 1, updated_at: t(6), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/1/comments': [frozenNotice],
+      '/pulls/1/reviews': [frozenRecovery],
+      '/issues/2/comments': [recentNotice],
+      '/pulls/2/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.ok(result.calls.some(route => route.includes('/issues/1/comments')));
+  assert.equal(result.episodes.filter(episode => episode.start === frozen.start).length, 1);
+  assert.deepEqual(result.episodes[0], frozen);
 });
 test('gate duration uses shared record and falls back without changing policy', async () => {
   const episodes = aggregate(fixture(), t(12));

@@ -325,15 +325,17 @@ argument to inspect the proposed body without writing it.
 The sweep paginates PRs in updated order back to the #3932 evidence window
 (2026-09-05 UTC) on bootstrap, including open and closed PRs. Later sweeps use a
 named 24-hour recompute window: a completed episode is frozen verbatim only when
-its recovery is older than `now - 24h`. The sweep scans from the oldest prior
-episode still inside that window (including an open episode) and re-aggregates
-that recent history with the current classifier. With no such episode, it scans
-after the last recovery as before. Corrected classification therefore self-heals
-while the evidence remains in reach, while older history cannot disappear and
-does not require rescanning all past PRs. An episode starts at the first observed
-known limit or transient failure, not the preceding verdict. An unrecognised
-response extends an episode already open but does not open one by itself. The
-sweep reads **both** `/pulls/N/comments` and
+its recovery is older than `now - 24h`. The sweep scans from 1 ms after the
+latest frozen recovery, or from the bootstrap boundary when none is frozen, and
+re-aggregates everything after that boundary with the current classifier. This
+lets corrected classification discover earlier evidence and wholly missed
+recent episodes without re-aggregating frozen history. With no episode inside
+the window, the latest frozen recovery supplies the same scan start as before.
+Older history therefore cannot disappear and does not require rescanning all
+past PRs. An episode starts at the first observed known limit or transient
+failure, not the preceding verdict. An unrecognised response extends an episode
+already open but does not open one by itself. The sweep reads **both**
+`/pulls/N/comments` and
 `/issues/N/comments` unfiltered, plus review bodies. The shared classifier
 structurally removes top-level pull-review comments from that feed before body
 classification; those artifacts are finding surfaces, while replies retain the
