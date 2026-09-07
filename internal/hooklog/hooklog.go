@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -48,6 +49,14 @@ func Open(kind Kind) (*os.File, error) {
 	file, err := os.CreateTemp(dir, string(kind)+"-*.log")
 	if err != nil {
 		return nil, fmt.Errorf("create %s hook log in %s: %w", kind, dir, err)
+	}
+	// flock belongs to the open file description. The child's inherited
+	// stdout/stderr keep it alive even after the launcher exits or closes its
+	// copy. Never explicitly unlock: the last descriptor close releases it.
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return nil, fmt.Errorf("lock active hook log %s: %w", file.Name(), err)
 	}
 	pruned, pruneErr := prune(dir, file.Name(), time.Now())
 	if pruned > 0 {

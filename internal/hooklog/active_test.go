@@ -2,6 +2,7 @@ package hooklog
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -27,6 +28,17 @@ func TestOpenPreservesQuietActiveLogs(t *testing.T) {
 		}
 		want[filepath.Base(file.Name())] = true
 	}
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("post-worktree-kept-%02d.log", i)
+		seedLog(t, dir, name, time.Now().Add(-24*time.Hour))
+		want[name] = true
+	}
+	next, err := Open(PostWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = next.Close() })
+	want[filepath.Base(next.Name())] = true
 	assertLogNames(t, dir, want)
 }
 

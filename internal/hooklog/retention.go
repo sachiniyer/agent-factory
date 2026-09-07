@@ -16,9 +16,9 @@ const (
 )
 
 // prune is best-effort housekeeping, never a prerequisite for starting a hook.
-// Only recognized regular log files participate. Modification age is our
-// lock-free activity heuristic: recent files and the file Open just created
-// are excluded from both deletion and the kept-log quota. Retention is checked
+// Only recognized regular log files participate. Active descriptor locks,
+// recent files, and the file Open just created are excluded from both deletion
+// and the kept-log quota. Retention is checked
 // on the next Open, not on a timer, and does not impose a byte cap on a run.
 func prune(dir, opened string, now time.Time) (int, error) {
 	entries, err := os.ReadDir(dir)
@@ -39,6 +39,13 @@ func prune(dir, opened string, now time.Time) (int, error) {
 		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) < logGraceAge {
 			continue
 		}
+		// A quiet hook can be older than the grace period. Its inherited
+		// descriptor lock, rather than output activity, proves it is live.
+		file, err := lockKeptLog(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		_ = file.Close()
 		byKind[kind] = append(byKind[kind], info)
 	}
 	var pruneErr error
@@ -55,19 +62,11 @@ func prune(dir, opened string, now time.Time) (int, error) {
 			if i < keptLogLimit && now.Sub(info.ModTime()) <= keptLogAge {
 				continue
 			}
-			path := filepath.Join(dir, info.Name())
-			// A concurrent hook may have written since the directory scan.
-			// Recheck the identity and metadata before unlinking; symlinks and
-			// replacement files must not inherit a stale pruning decision.
-			current, err := os.Lstat(path)
-			if err != nil || !current.Mode().IsRegular() || !os.SameFile(info, current) ||
-				!info.ModTime().Equal(current.ModTime()) || info.Size() != current.Size() ||
-				now.Sub(current.ModTime()) < logGraceAge {
-				continue
-			}
-			if err := os.Remove(path); err == nil {
+			removed, err := removeKeptLog(filepath.Join(dir, info.Name()), info, now)
+			if removed {
 				pruned++
-			} else if !os.IsNotExist(err) {
+			}
+			if err != nil {
 				pruneErr = errors.Join(pruneErr, err)
 			}
 		}
