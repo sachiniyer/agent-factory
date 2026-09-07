@@ -5864,7 +5864,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     await expect(modal).toBeHidden();
     await p.getByRole("button", { name: "Session actions", exact: true }).click();
     await headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true }).click();
-    await expect(modal).toContainText(`Kill ${title}?`);
+    await expect(modal).toContainText(`Delete session ${title}?`);
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   } finally {
     await ctx.close();
@@ -10938,7 +10938,7 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await openDrawer();
   await clickRailAction(p, SESSION_A, "Kill session");
   await expectDrawerClosed();
-  await expect(modal).toContainText(`Kill ${SESSION_A}?`);
+  await expect(modal).toContainText(`Delete session ${SESSION_A}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(modal).toBeHidden();
   expect(lifecyclePosts, "cancelling Kill must not post a lifecycle mutation").toEqual([]);

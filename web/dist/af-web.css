@@ -2648,7 +2648,6 @@ summary,
   min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
 }
 .af-ghost,
-.af-danger,
 .af-input {
   padding: var(--af-space-2);
   background: var(--af-surface-raised);
@@ -2656,8 +2655,9 @@ summary,
   border: calc(var(--af-space-1) / 4) solid var(--af-border);
   border-radius: var(--af-radius-control);
 }
-.af-danger:hover:not(:disabled) {
-  color: var(--af-ink);
+.af-danger:focus-visible {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-dead);
+  outline-offset: calc(var(--af-space-1) / 2);
 }
 .af-primary {
   padding: var(--af-space-2);
