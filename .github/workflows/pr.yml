@@ -62,6 +62,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check served design colors without a browser
+        run: go test ./internal/designtokens -run TestDesignWebChromeServedBytes -count=1
+
       # copylocks and the rest of vet's passes (#3613). This cannot live in the
       # golangci-lint step above: that runs with --fast, which disables govet
       # outright (it is fast: false), so enabling govet in a config file would

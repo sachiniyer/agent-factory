@@ -7818,7 +7818,7 @@ test("the shell links an SVG favicon, PNG fallbacks, an apple-touch icon, and th
   await ctx.close();
 });
 
-test("theme-color is declared per scheme, and an explicit theme choice repoints the chrome (#1826)", async ({
+test("post-boot theme-color rewrite follows system and explicit choices (#1826, #3978)", async ({
   browser,
 }) => {
   const ctx = await browser.newContext();
@@ -7826,6 +7826,8 @@ test("theme-color is declared per scheme, and an explicit theme choice repoints 
   await p.goto("/");
   await expect(p.locator(".af-app")).toBeVisible();
 
+  // Served literals are checked without a browser by TestDesignWebChromeServedBytes.
+  // This test deliberately exercises theme.ts after boot.
   const metas = p.locator('meta[name="theme-color"]');
   await expect(metas).toHaveCount(2);
   await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.light);
@@ -7873,8 +7875,8 @@ test("the manifest is fetched by the browser, typed application/manifest+json, a
     display: "standalone",
   });
   expect(manifest.body.description).toBeTruthy();
-  expect(manifest.body.theme_color).toBeTruthy();
-  expect(manifest.body.background_color).toBeTruthy();
+  expect(manifest.body.theme_color).toBe(surfaceTokens.light);
+  expect(manifest.body.background_color).toBe(surfaceTokens.light);
 
   // Every icon the manifest promises must actually be served — Chrome silently drops
   // an install offer over a manifest whose icons 404.
