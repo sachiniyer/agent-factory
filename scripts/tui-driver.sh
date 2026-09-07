@@ -920,49 +920,63 @@ _af_tab_count() {
 # behind `?`, and an empty list has no run action at all (#3995).
 : "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
 
-# _AF_TASKS_TITLE — a title inside the task overlay's vertical frame. The list
-# title is present for populated, empty and load-failure states; `m` opens a
-# populated selection directly in its `Edit task <id>` form (#1249), so that
-# title is included too.
-: "${_AF_TASKS_TITLE:=│[[:space:]]+(Tasks|Edit task[[:space:]][^[:space:]]+)[[:space:]]+│}"
+# _AF_TASKS_LIST_TITLE is only the list/edit discriminator used by the self-test
+# before revealing secondary list actions. It is NOT the open/close anchor: the
+# edit form scrolls its title away to keep the focused field visible at the
+# supported 80x10 floor.
+: "${_AF_TASKS_LIST_TITLE:=│[[:space:]]+Tasks[[:space:]]+│}"
 
-# _AF_TASKS_FRAME_TOP is the rounded top border shared by the tasks dialog's
-# list and edit modes. A workspace pane uses square corners, and its OWN │
-# borders can surround output whose complete line is "Tasks". Pairing the
-# title with this rounded border prevents that pane text from satisfying the
-# open marker or keeping the close marker alive (review on #3995).
+# _AF_TASKS_FOOTER matches the task manager's PINNED last hint row. Every list
+# state retains n+Esc or selection actions+Esc, and every edit state retains
+# toggle/delete/Esc; the create form's tab/Esc row is included so close remains
+# correct there too. Unlike a title, clampFormToHeight never scrolls this row.
+: "${_AF_TASKS_FOOTER:=(n new.*esc back|x toggle.*D (delete|del).*esc|tab fields.*esc cancel)}"
+
+# _AF_TASKS_FRAME_TOP/BOTTOM are the rounded borders shared by every task
+# dialog mode. A workspace pane uses square corners, and its OWN │ borders can
+# surround output whose complete line is "Tasks". Requiring a task footer
+# between both rounded borders prevents that pane text from satisfying the open
+# marker or keeping the close marker alive (review on #3995).
 #
 # Group the repeated horizontal glyph: under the sandbox's C/POSIX locale,
 # `─+` repeats only the last byte of the UTF-8 sequence, while `(─)+` repeats
 # the whole glyph (the same locale trap documented by _AF_PANE_BORDER_FS).
 : "${_AF_TASKS_FRAME_TOP:=╭(─)+╮}"
+: "${_AF_TASKS_FRAME_BOTTOM:=╰(─)+╯}"
 
-# _af_tasks_overlay_visible <title-regex> reads a captured screen on stdin.
-# DialogStyle has one row of vertical padding, so the task title is exactly two
-# rows below the rounded top border in every list/edit state and supported width.
-# Requiring both rows gives the marker dialog-specific context while retaining
-# the stable title that #3995 made present in every list recovery state.
-_af_tasks_overlay_visible() {
-    local title_re="$1"
-    awk -v frame_re="$_AF_TASKS_FRAME_TOP" -v title_re="$title_re" '
-        $0 ~ frame_re { title_rows = 2; next }
-        title_rows > 0 {
-            if ($0 ~ title_re) { found = 1 }
-            title_rows--
+# _af_tasks_dialog_has <content-regex> reads a captured screen on stdin and
+# succeeds only when the marker is enclosed by a complete rounded dialog.
+_af_tasks_dialog_has() {
+    local content_re="$1"
+    awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" -v content_re="$content_re" '
+        $0 ~ top_re { inside = 1; matched = 0; next }
+        inside && $0 ~ content_re { matched = 1 }
+        inside && $0 ~ bottom_re {
+            if (matched) { found = 1 }
+            inside = 0
+            matched = 0
         }
         END { exit found ? 0 : 1 }
     '
 }
 
+_af_tasks_overlay_visible() {
+    _af_tasks_dialog_has "$_AF_TASKS_FOOTER"
+}
+
+_af_tasks_list_visible() {
+    _af_tasks_dialog_has "$_AF_TASKS_LIST_TITLE"
+}
+
 # _af_wait_for_tasks_overlay_state <0|1> [timeout_s] [label] — wait for the
-# dialog-specific frame/title pair to disappear or appear.
+# dialog-specific frame/footer pair to disappear or appear.
 _af_wait_for_tasks_overlay_state() {
     local expected="$1" timeout="${2:-$AF_DRIVER_TIMEOUT}" label="${3:-tasks overlay}" screen visible
     local deadline; deadline=$(( $(_af_now) + timeout ))
     while :; do
         screen="$(af_capture)"
         visible=0
-        _af_tasks_overlay_visible "$_AF_TASKS_TITLE" <<<"$screen" && visible=1
+        _af_tasks_overlay_visible <<<"$screen" && visible=1
         if [ "$visible" -eq "$expected" ]; then
             return 0
         fi
@@ -976,7 +990,7 @@ _af_wait_for_tasks_overlay_state() {
 }
 
 # af_open_tasks — open the task-manager overlay (`m`) and synchronize on its
-# rounded frame plus title, which do not disappear when actions are collapsed.
+# rounded frame plus pinned footer, which survives scrolling/collapsed actions.
 af_open_tasks() {
     af_ensure_nav
     af_send m
@@ -985,14 +999,14 @@ af_open_tasks() {
 
 # af_close_tasks — dismiss the tasks overlay (Escape). When the overlay opened
 # in edit mode the first Escape drops back to the titled list, so a second
-# Escape closes it; both cases sync on the framed title going away.
+# Escape closes it; both cases sync on the framed footer going away.
 af_close_tasks() {
     local deadline screen
     af_send Escape
     deadline=$(( $(_af_now) + 4 ))
     while :; do
         screen="$(af_capture)"
-        if ! _af_tasks_overlay_visible "$_AF_TASKS_TITLE" <<<"$screen"; then
+        if ! _af_tasks_overlay_visible <<<"$screen"; then
             return 0
         fi
         [ "$(_af_now)" -ge "$deadline" ] && break

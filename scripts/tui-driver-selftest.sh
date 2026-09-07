@@ -781,6 +781,8 @@ _seed_config_editor_start_value() {
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
+SELFTEST_BASE_COLS="$AF_DRIVER_COLS"
+SELFTEST_BASE_ROWS="$AF_DRIVER_ROWS"
 
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
@@ -830,23 +832,30 @@ step "assert beta is selected"                              af_expect_selected b
 step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
 step "af_select handles a target with an open pane (#1996)"  _expect_af_select_open_pane
 
-# --- #1757/#3995 regressions: task-overlay title and run action ---
+# --- #1757/#3995 regressions: task-overlay context and run action ---
 # A populated reopen may settle in list mode after a refresh or remain in the
-# selected task's edit form. af_open_tasks syncs on either framed title rather
-# than the optional run action. Reveal secondary actions only in list mode,
-# then retain #1757's assertion that the compact run action is discoverable.
+# selected task's edit form. af_open_tasks syncs on the rounded dialog plus its
+# pinned footer rather than a scrollable title or optional run action. Reveal
+# secondary actions only in list mode, then retain #1757's assertion that the
+# compact run action is discoverable.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_task_overlay_marker_context() {
-    local pane modal
+    local pane list_modal scrolled_edit
     pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
-    if printf '%s\n' "$pane" | _af_tasks_overlay_visible "$_AF_TASKS_TITLE"; then
+    if printf '%s\n' "$pane" | _af_tasks_overlay_visible; then
         _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
         return 1
     fi
 
-    modal=$'        ╭────────────────────╮\n        │                    │\n        │  Tasks             │\n        ╰────────────────────╯'
-    if ! printf '%s\n' "$modal" | _af_tasks_overlay_visible "$_AF_TASKS_TITLE"; then
-        _af_fail 'the rounded task dialog and its list title did not satisfy the marker'
+    list_modal=$'        ╭────────────────────╮\n        │                    │\n        │  Tasks             │\n        │  n new · esc back  │\n        │                    │\n        ╰────────────────────╯'
+    if ! printf '%s\n' "$list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the rounded task dialog and its pinned list footer did not satisfy the marker'
+        return 1
+    fi
+
+    scrolled_edit=$'╭────────────────────────────────────────────╮\n│  ↑ more                                    │\n│  Name: focused                             │\n│  r run · x toggle · D del · esc · q quit   │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$scrolled_edit" | _af_tasks_overlay_visible; then
+        _af_fail 'a windowed edit dialog without its title did not satisfy the pinned-footer marker'
         return 1
     fi
 }
@@ -855,11 +864,25 @@ _expect_task_overlay_marker_context() {
 _expect_task_run_action() {
     local screen
     screen="$(af_capture)"
-    if _af_tasks_overlay_visible '│[[:space:]]+Tasks[[:space:]]+│' <<<"$screen"; then
+    if _af_tasks_list_visible <<<"$screen"; then
         af_send '?'
     fi
     af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'task-overlay run action' || return 1
     af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_edit_title_scrolled() {
+    local screen
+    screen="$(af_capture)"
+    if grep -qE -- 'Edit task[[:space:]][^[:space:]]+' <<<"$screen"; then
+        _af_fail '80x10 still shows the edit title, so the footer-only premise was not reached'
+        return 1
+    fi
+    if ! _af_tasks_overlay_visible <<<"$screen"; then
+        _af_fail 'the open 80x10 edit dialog was not recognized after its title scrolled away'
+        return 1
+    fi
 }
 
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
@@ -1020,9 +1043,12 @@ _expect_config_agent_attaches_in_tmux() {
 step "task marker rejects a pane's bare Tasks line"         _expect_task_overlay_marker_context
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
-step "reopen tasks — overlay title recognized (#1757/#3995)" af_open_tasks
+step "resize to the supported 80x10 floor"                  af_resize 80 10
+step "reopen tasks — pinned footer recognized (#1757/#3995)" af_open_tasks
+step "edit marker survives its scrolled-away title"         _expect_task_edit_title_scrolled
 step "reveal and assert the task run action"                _expect_task_run_action
 step "close the tasks overlay"                              af_close_tasks
+step "restore the self-test launch size"                    af_resize "$SELFTEST_BASE_COLS" "$SELFTEST_BASE_ROWS"
 
 # --- #2019 regression: the config agent (C) must attach even though af is nested
 # inside tmux. On unfixed code the takeover collapses to "config agent: exit
