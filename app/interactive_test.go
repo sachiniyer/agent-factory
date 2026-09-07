@@ -491,9 +491,9 @@ func TestFirstInteractiveEntryShowsHelpScreenOnce(t *testing.T) {
 			view := h.View()
 			requireViewSized(t, view, size.width, size.height)
 			copy := flatten(view)
-			assert.Contains(t, copy, "You are typing into this pane's",
+			assert.Contains(t, copy, "All keys, including tab",
 				"the help screen follows the TUI sentence-case convention")
-			assert.Contains(t, copy, "terminal: every key",
+			assert.Contains(t, copy, "agent.",
 				"the wrapped sentence remains visible at compact widths")
 			assert.NotContains(t, copy, "typing INTO", "the help screen must not caps-shout")
 			assert.Contains(t, copy, "ctrl+]",

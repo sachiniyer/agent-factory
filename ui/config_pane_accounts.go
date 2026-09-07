@@ -123,7 +123,7 @@ const accountsHeading = "Accounts"
 // config/, and a row that reads as a config row implies a settable key
 // participating in the precedence chain. The note says what these are before the
 // first row can suggest otherwise.
-const accountsHeadingNote = "agent identities, not config keys · af runs the agent's own login and never reads the credential"
+const accountsHeadingNote = "Sign in with the agent’s login flow · follow the URL in the pane"
 
 // SetAccounts loads the section from what the daemon reported.
 //
@@ -403,14 +403,9 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 // deliberately made sure will not open.
 func accountRowPurpose(account AccountRow) string {
 	if account.LoggedIn {
-		return fmt.Sprintf(
-			"Holds a %s credential · ↵ runs %s's own login again in a tmux session scoped to this account, "+
-				"replacing it. af never reads the credential.", account.Agent, account.Agent)
+		return fmt.Sprintf("%s credential saved · enter to log in again and replace it.", account.Agent)
 	}
-	return fmt.Sprintf(
-		"No %s credential yet · ↵ runs %s's own login in a tmux session scoped to this account and hands you "+
-			"the terminal. It is a device code — the pane prints a URL, you finish it in your own browser. "+
-			"af never reads the credential.", account.Agent, account.Agent)
+	return fmt.Sprintf("Log in to %s · follow the URL and device code in the pane.", account.Agent)
 }
 
 // renderAccountsUnavailable renders the section's failure line in place of rows.

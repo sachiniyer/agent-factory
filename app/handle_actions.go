@@ -366,7 +366,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(fmt.Errorf("cannot archive in-place session '%s': archive relocates the worktree, which it doesn't own", title))
 	}
 
-	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s.", title, restoreKeyHint())
+	message := fmt.Sprintf("Archive session '%s'?\n\nLocal: stop terminals and move the worktree to the archive.\nSandboxes: publish work, then remove the sandbox.\nRestore with %s.", title, restoreKeyHint())
 	return m, m.confirmAction(message, func() tea.Msg {
 		// Raise the optimistic OpArchiving op so the row visibly shows archiving
 		// while the RPC runs (#1195). It composes to Deleting for rendering; the
@@ -467,7 +467,7 @@ func (m *home) restoreIfResting(selected *session.Instance) (tea.Cmd, bool) {
 func (m *home) confirmReprovisioningRestore(selected *session.Instance) tea.Cmd {
 	title := selected.Title
 	target := captureSessionActionTarget(selected, m.repoID)
-	message := fmt.Sprintf("[!] Restore remote session '%s'?\n\nIf its sandbox can't be reached, restore refuses to replace it because unreachability is not proof that it is gone. If the sandbox answers that its agent is gone, restore provisions a fresh one from the last pushed commit and discards any changes on the old sandbox that were never pushed. A reachable live sandbox just reconnects, losing nothing.", title)
+	message := fmt.Sprintf("Restore sandbox session '%s'?\n\nReconnect if live. Otherwise, push work before replacement.\nRestore refuses if reachability or preservation is uncertain.", title)
 	return m.confirmAction(message, func() tea.Msg {
 		inst := m.resolveSessionActionTarget(target)
 		if inst == nil {

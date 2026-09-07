@@ -16,7 +16,7 @@ import (
 // TUI must not look — or be dispatched — like killing a throwaway worktree.
 //
 // The 2026-07-05 outage was a muscle-memory D+y on root's row: the generic
-// "[!] Kill session 'root'?" confirm gave no hint that root is the daemon-
+// "Delete session 'root'?" confirm gave no hint that root is the daemon-
 // managed singleton, and the ordinary 'y' confirm tore it down, silently
 // decapitating the inbound event pipeline. The guard gives root distinct,
 // consequence-bearing copy AND a distinct confirm key so a reflexive 'y' is a
@@ -29,11 +29,11 @@ import (
 // scratch-session prompt.
 func TestKillConfirmMessage_RootIsDistinctAndNamesConsequence(t *testing.T) {
 	generic := killConfirmMessage("scratch-1", "", false)
-	assert.Equal(t, "[!] Kill session 'scratch-1'?", generic,
-		"non-reserved copy must be unchanged")
+	assert.Equal(t, "Delete session 'scratch-1'?\nPermanently remove the session and resources owned by af.", generic,
+		"ordinary deletion must name permanence and ownership")
 
 	root := killConfirmMessage(session.RootSessionTitle, "", true)
-	assert.NotEqual(t, "[!] Kill session 'root'?", root,
+	assert.NotEqual(t, "Delete session 'root'?", root,
 		"root must not show the generic scratch-session prompt")
 	assert.Contains(t, root, "daemon-managed root agent",
 		"root copy must identify the singleton")

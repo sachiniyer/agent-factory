@@ -110,7 +110,6 @@ func (s *SelectionOverlay) Render() string {
 	titleStyle := ui.DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := ui.DialogHintStyle()
 	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 
 	style := selectionOverlayStyle()
@@ -152,7 +151,7 @@ func (s *SelectionOverlay) Render() string {
 	// first, then navigation itself; `esc cancel` is the load-bearing last item.
 	hint := "esc cancel"
 	candidates := []string{
-		"↑/↓ navigate · enter select · esc cancel",
+		"↑/↓ select · enter confirm · esc cancel",
 		"↑/↓ nav · enter · esc cancel",
 		"enter · esc cancel",
 	}
@@ -165,7 +164,7 @@ func (s *SelectionOverlay) Render() string {
 			break
 		}
 	}
-	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
+	lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), textRect.W))
 
 	style = style.Width(fit.W)
 	if fit.H > 0 && len(lines) >= textRect.H {

@@ -25,7 +25,7 @@ const programDefaultLabel = "Use config default"
 // watchRunNowRefusal explains why "run now" is unavailable on a watch task.
 // Both surfaces that accept r (the list and the editor) report it, so it lives
 // in one place rather than drifting between them.
-const watchRunNowRefusal = "watch tasks run on their watch command's output, not on manual trigger"
+const watchRunNowRefusal = "Watch tasks run on output, not manually."
 
 // taskPlaceholderStyle renders form placeholders faint so an example (the
 // cron "e.g. 0 9 * * 1-5") can never be mistaken for a typed value.
@@ -187,7 +187,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	picker.now = s.now
 
 	watch := textinput.New()
-	watch.Placeholder = "long-running cmd; 1 stdout line = 1 event"
+	watch.Placeholder = "One output line triggers one run"
 	watch.PlaceholderStyle = taskPlaceholderStyle
 	watch.CharLimit = 256
 	watch.Blur()
@@ -656,7 +656,6 @@ func (s *TaskPane) renderListMode() string {
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	enabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
 	disabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := DialogHintStyle()
 	detailStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	erroredStyle := lipgloss.NewStyle().Foreground(t.Dead)
 
@@ -790,9 +789,9 @@ func (s *TaskPane) renderListMode() string {
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
 			hint = short
 		}
-		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
+		b.WriteString(ActionHint(fitLine(hint, s.width)))
 	} else {
-		b.WriteString(hintStyle.Render(fitLine("enter to focus and edit tasks", s.width)))
+		b.WriteString(ActionHint(fitLine("enter edit tasks", s.width)))
 	}
 
 	return fitTaskList(b.String(), s.width, s.height, pinnedFooter, selectedStart, selectedEnd)

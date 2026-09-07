@@ -13,7 +13,7 @@ import (
 // #2029: the committed-unmerged-work warning (#2022) was gated behind
 // GetGitWorktree(), which errors when started=false. So a session that has a
 // worktree but was never started — e.g. one whose restore failed — got the bare,
-// safe-looking "[!] Kill session 'x'?" prompt with no data-loss warning, even
+// safe-looking "Delete session 'x'?" prompt with no data-loss warning, even
 // though killing still force-deletes its branch and orphans the same committed
 // work. The dirty-worktree check (via GetWorktreePath) was NOT so gated, so the two
 // checks covered different session states. The fix runs both under the ungated
@@ -94,7 +94,7 @@ func TestHandleKill_NonStarted_CleanLevelBranch_KeepsBareConfirmation(t *testing
 	_, hm := armKill(t, inst)
 
 	rendered := flatten(hm.confirmationOverlay.Render())
-	assert.Contains(t, rendered, "Kill session 'nonstarted-empty'?")
+	assert.Contains(t, rendered, "Delete session 'nonstarted-empty'?")
 	assert.NotContains(t, rendered, "commit", "a level branch must not warn about commits")
 	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey,
 		"a non-started session with nothing to lose must keep the ordinary 'y' confirm")
