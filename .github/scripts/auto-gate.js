@@ -4650,6 +4650,11 @@ async function evaluateCodex({
 // review, finding and verdict guards have had the first word (#3985).
 function classifyCodexUnavailableArtifact(artifact, isInlineReply = Boolean(artifact?.in_reply_to_id)) {
   if (!artifact) return null;
+  // A top-level pull-review comment is a finding surface, never an availability
+  // answer. Classify this transport shape here so consumers that feed different
+  // artifact populations cannot disagree (#3989). Replies still use the body
+  // guard below because Codex can carry an unavailable answer in one (#3900).
+  if (artifact.pull_request_review_id != null && artifact.in_reply_to_id == null) return null;
   const body = String(artifact.body || "");
   const looksLikeReviewArtifact = CODEX_REVIEW_RE.test(body) && REVIEWED_COMMIT_RE.test(body);
   // #3951: the transient failure carries the review heading but no verdict.

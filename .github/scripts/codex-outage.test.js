@@ -10,6 +10,9 @@ const limits = [
   'You have reached your Codex usage limits.',
 ];
 const environmentMissing = 'To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).';
+const findingBody =
+  '**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ' +
+  'Keep incomplete summary rows out of outage evidence**';
 const comment = (hour, body, extra = {}) => ({ created_at: t(hour), body,
   user: { login: 'chatgpt-codex-connector[bot]' }, html_url: `https://example.com/${hour}`, ...extra });
 const verdict = (hour, sha = head) => comment(hour, `Codex Review\nReviewed commit: \`${sha.slice(0, 10)}\``);
@@ -173,6 +176,40 @@ test('an unrecognised response extends an outage but never opens an episode alon
     artifacts: [comment(2, limits[0]), verdict(3), comment(4, environmentMissing)],
   }], t(6));
   assert.deepEqual(afterRecovery.map(e => [e.start, e.end, e.merged]), [[t(2), t(3), []]]);
+});
+
+test('top-level inline findings never add outage evidence or degrade a merge', () => {
+  const finding = comment(3, findingBody, {
+    id: 3947119505,
+    pull_request_review_id: 5128730196,
+    commit_id: head,
+  });
+  const opener = comment(2, limits[0]);
+  const episodes = aggregate([
+    { number: 3985, head: { sha: head }, merged_at: null, artifacts: [opener] },
+    { number: 3987, head: { sha: head }, merged_at: t(4), artifacts: [finding] },
+  ], t(5));
+
+  assert.deepEqual(episodes[0].causes, ['usage-limit']);
+  assert.deepEqual(episodes[0].latest, {
+    time: t(2), url: opener.html_url, body: limits[0], kind: 'usage-limit',
+  });
+  assert.deepEqual(episodes[0].merged, []);
+  assert.equal(gate.codexEvidence.classifyCodexUnavailableArtifact(finding), null);
+});
+
+test('finding-shaped pull-review replies keep their body guard', () => {
+  const reply = comment(3, findingBody, {
+    pull_request_review_id: 5128730196,
+    in_reply_to_id: 3947119505,
+    commit_id: head,
+  });
+
+  assert.equal(gate.codexEvidence.classifyCodexUnavailableArtifact(reply), null);
+  assert.deepEqual(
+    gate.codexEvidence.classifyCodexUnavailableArtifact({ ...reply, body: limits[0] }),
+    { kind: 'usage-limit' },
+  );
 });
 
 test('summary status rows never add outage evidence or replace the latest notice', () => {
