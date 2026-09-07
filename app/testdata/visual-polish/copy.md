@@ -31,7 +31,7 @@
 | app/help.go | While naming a new session: pick its agent / initial prompt / backend / account | 79 | New session: agent · prompt · backend · account | 47 |
 | app/help.go | Switch to another project (repo) in place | 41 | Switch projects | 15 |
 | app/help.go | Manage tasks (n inside the manager creates one, r runs one) | 59 | Manage tasks · n create · r run | 31 |
-| app/help.go | Kill (delete) the selected session | 34 | Delete session · remove only af-owned resources | 47 |
+| app/help.go | Kill (delete) the selected session | 34 | Delete session · its worktree and branch are removed | 52 |
 | app/help.go | Archive the selected live session | 33 | Archive locally · sandboxes publish work first | 46 |
 | app/help.go | Restore the selected archived / lost / dead session | 51 | Restore · sandboxes push before replacement or refuse | 53 |
 | app/help.go | Retry a session blocked at a usage limit (re-spawn + resume) | 60 | Resume after a usage limit | 26 |
@@ -67,8 +67,8 @@
 | ui/config_pane_accounts.go | Holds a %s credential · ↵ runs %s's own login again in a tmux session scoped to this account, replacing it. af never reads the credential. | 138 | %s credential saved · enter to log in again and replace it. | 59 |
 | ui/config_pane_accounts.go | No %s credential yet · ↵ runs %s's own login in a tmux session scoped to this account and hands you the terminal. It is a device code — the pane prints a URL, you finish it in your own browser. af never reads the credential. | 224 | Log in to %s · follow the URL and device code in the pane. | 58 |
 | ui/overlay/confirmationOverlay.go | Press y/enter to confirm, n or esc to cancel | 44 | y/enter confirm · n/esc cancel | 30 |
-| app/design_stills_test.go | Kill Apply design roles? Its running process will stop. | 55 | Delete session Apply design roles? Permanently remove its af-owned resources. | 77 |
-| app/design_stills_test.go | The worktree and conversation remain available. | 47 | User-owned work stays. Archive instead to keep af-owned work. | 61 |
+| app/design_stills_test.go | Kill Apply design roles? Its running process will stop. | 55 | Delete session Apply design roles? Permanently remove its af-owned worktree and branch. | 87 |
+| app/design_stills_test.go | The worktree and conversation remain available. | 47 | Uncommitted changes and unpushed commits in them are lost. Archive to keep them. | 80 |
 | api/sessions_watch.go | idle (ready for review) | 23 | idle · awaiting input | 21 |
 | api/sessions_watch.go | session %q is idle (ready for review) | 37 | session %q is idle · awaiting input | 35 |
 | api/sessions_watch.go | Block until a session goes idle, or until any session in the fleet changes state | 80 | Wait for idle, or a fleet stop-state change or disappearance | 60 |
@@ -83,7 +83,7 @@
 | app/help.go |  | 0 | Search sessions | 15 |
 | app/handle_actions.go | [!] Archive session '%s'? ⏎  ⏎ Its tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s. | 168 | Archive session '%s'? ⏎  ⏎ Local: stop terminals and move the worktree to the archive. ⏎ Sandboxes: publish work, then remove the sandbox. ⏎ Restore with %s. | 149 |
 | app/handle_actions.go | [!] Restore remote session '%s'? ⏎  ⏎ If its sandbox can't be reached, restore refuses to replace it because unreachability is not proof that it is gone. If the sandbox answers that its agent is gone, restore provisions a fresh one from the last pushed commit and discards any changes on the old sandbox that were never pushed. A reachable live sandbox just reconnects, losing nothing. | 381 | Restore sandbox session '%s'? ⏎  ⏎ Reconnect if live. Otherwise, push work before replacement. ⏎ Restore refuses if reachability or preservation is uncertain. | 152 |
-| app/kill_confirm.go | [!] Kill session '%s'? | 22 | Delete session '%s'? ⏎ Permanently remove the session and resources owned by af. | 78 |
+| app/kill_confirm.go | [!] Kill session '%s'? | 22 | Delete session '%s'? ⏎ Permanently remove the session and its af-owned worktree and branch. | 89 |
 | app/kill_confirm.go | Kill the root agent anyway? | 27 | Delete the root session and its af-owned resources? | 51 |
 | keys/keys.go | kill | 4 | delete session | 14 |
 | api/sessions_lifecycle.go | Permanently destroy a session and prune its worktree branch | 59 | Permanently delete a session and af-owned resources | 51 |
@@ -94,3 +94,4 @@
 | app/help.go |      - Kill (delete) the selected session | 41 |      - Permanently delete the session | 37 |
 | app/help.go |      - Detach from a full-screen session | 40 |      - Leave full-screen | 24 |
 | ui/overlay/confirmationOverlay.go | Press %s to confirm, %s or esc to cancel | 40 | %s confirm · %s/esc cancel | 26 |
+| app/kill_confirm.go |  | 0 |  ⏎ Uncommitted changes and unpushed commits in them are lost. Archive to keep them. | 81 |

@@ -111,8 +111,9 @@ func killConfirmMessage(title, warning string, reserved bool) string {
 				"self-heals (~2 min) or you restart the daemon.\n\n"+
 				"Delete the root session and its af-owned resources?", title, title)
 	} else {
-		message = fmt.Sprintf("Delete session '%s'?\nPermanently remove the session and resources owned by af.", title)
+		message = fmt.Sprintf("Delete session '%s'?\nPermanently remove the session and its af-owned worktree and branch.", title)
 	}
+	message += "\nUncommitted changes and unpushed commits in them are lost. Archive to keep them."
 	if warning != "" {
 		message += "\n\n" + warning
 	}

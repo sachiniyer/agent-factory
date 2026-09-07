@@ -293,7 +293,7 @@ func TestHandleKill_NoUniqueCommits_KeepsBareConfirmation(t *testing.T) {
 
 	rendered := flatten(hm.confirmationOverlay.Render())
 	assert.Contains(t, rendered, "Delete session 'empty'?")
-	assert.NotContains(t, rendered, "commit", "a level branch must not warn about commits")
+	assert.NotContains(t, rendered, "not pushed anywhere", "a level branch must not receive the dynamic unique-commit warning")
 	assert.NotContains(t, rendered, "Could not verify")
 	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey,
 		"a session with nothing to lose must keep the ordinary 'y' confirm")

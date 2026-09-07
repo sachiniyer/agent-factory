@@ -29,7 +29,7 @@ import (
 // scratch-session prompt.
 func TestKillConfirmMessage_RootIsDistinctAndNamesConsequence(t *testing.T) {
 	generic := killConfirmMessage("scratch-1", "", false)
-	assert.Equal(t, "Delete session 'scratch-1'?\nPermanently remove the session and resources owned by af.", generic,
+	assert.Equal(t, "Delete session 'scratch-1'?\nPermanently remove the session and its af-owned worktree and branch.\nUncommitted changes and unpushed commits in them are lost. Archive to keep them.", generic,
 		"ordinary deletion must name permanence and ownership")
 
 	root := killConfirmMessage(session.RootSessionTitle, "", true)
@@ -160,4 +160,15 @@ func TestHandleKill_RootIgnoresEnter(t *testing.T) {
 	assert.Equal(t, stateDefault, model.(*home).state, "the named key must still confirm")
 	require.NotNil(t, cmd)
 	assert.Equal(t, session.Deleting, root.GetStatus())
+}
+
+func TestKillConfirmWarnsAboutWorkLoss(t *testing.T) {
+	for _, reserved := range []bool{false, true} {
+		message := killConfirmMessage("review", "dynamic unmerged-commit warning", reserved)
+		assert.Contains(t, message, "Uncommitted changes and unpushed commits")
+		assert.Contains(t, message, "lost")
+		assert.Contains(t, message, "Archive")
+		assert.Contains(t, message, "dynamic unmerged-commit warning")
+		assert.NotContains(t, message, "User-owned work stays")
+	}
 }

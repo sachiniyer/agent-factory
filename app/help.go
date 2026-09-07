@@ -341,7 +341,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 				"New session: agent · prompt · backend · account"},
 			{helpKey(keys.KeySwitchProject), "Switch projects"},
 			{helpKey(keys.KeyTaskList), "Manage tasks · n create · r run"},
-			{helpKey(keys.KeyKill), "Delete session · remove only af-owned resources"},
+			{helpKey(keys.KeyKill), "Delete session · its worktree and branch are removed"},
 			{helpKey(keys.KeyHandoff), "Hand off to another agent"},
 			{helpKey(keys.KeySearch), "Search sessions"},
 			{helpKey(keys.KeyArchive), "Archive locally · sandboxes publish work first"},

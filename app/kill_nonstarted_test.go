@@ -95,7 +95,7 @@ func TestHandleKill_NonStarted_CleanLevelBranch_KeepsBareConfirmation(t *testing
 
 	rendered := flatten(hm.confirmationOverlay.Render())
 	assert.Contains(t, rendered, "Delete session 'nonstarted-empty'?")
-	assert.NotContains(t, rendered, "commit", "a level branch must not warn about commits")
+	assert.NotContains(t, rendered, "not pushed anywhere", "a level branch must not receive the dynamic unique-commit warning")
 	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey,
 		"a non-started session with nothing to lose must keep the ordinary 'y' confirm")
 }

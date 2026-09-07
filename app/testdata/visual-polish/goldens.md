@@ -22,8 +22,8 @@ Shared changes restore accent/bold footer actions without adding cells. Modal ba
 | config-edit-dark.svg | Byte-identical; inspected and retained. |
 | config-edit-light.svg | Byte-identical; inspected and retained. |
 | config-light.svg | Byte-identical; inspected and retained. |
-| confirmation-dark.svg | Accent/bold footer actions. Delete session names permanent af-owned removal; keep/archive detail corrected; full confirm/cancel labels are shaded. |
-| confirmation-light.svg | Accent/bold footer actions. Delete session names permanent af-owned removal; keep/archive detail corrected; full confirm/cancel labels are shaded. |
+| confirmation-dark.svg | Accent/bold footer actions. Delete session names permanent worktree/branch removal and warns about losing uncommitted changes/unpushed commits; Archive is the alternative. Full confirm/cancel labels remain visible. |
+| confirmation-light.svg | Accent/bold footer actions. Delete session names permanent worktree/branch removal and warns about losing uncommitted changes/unpushed commits; Archive is the alternative. Full confirm/cancel labels remain visible. |
 | failure-notice-dark.svg | Accent/bold footer actions. Empty workspace now says “No panes · s open tab.” |
 | failure-notice-light.svg | Accent/bold footer actions. Empty workspace now says “No panes · s open tab.” |
 | help-dark.svg | Accent/bold footer actions. Shorter descriptions; existing F handoff and / search appear; archive/restore preservation and delete ownership named. |
@@ -94,3 +94,5 @@ Shared changes restore accent/bold footer actions without adding cells. Modal ba
 | task-weekdays-unchecked-light.svg | Accent/bold footer actions. Complete footer action labels shaded; form fields and overflow retained. |
 | tasks-dark.svg | Accent/bold footer actions. Complete footer action labels shaded; form fields and overflow retained. |
 | tasks-light.svg | Accent/bold footer actions. Complete footer action labels shaded; form fields and overflow retained. |
+
+P1 review recapture: confirmation light/dark warns about work loss; help and preview-help light/dark wrap the revised deletion description onto one extra line. All six changed SVGs were read; footer/scroll hints remain visible.

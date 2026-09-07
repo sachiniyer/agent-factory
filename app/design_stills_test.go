@@ -167,7 +167,7 @@ func TestDesignDriverScenes(t *testing.T) {
 				case "help":
 					h.showHelpScreen(helpTypeGeneral{}, nil)
 				case "confirmation":
-					h.confirmActionWithDetail("Delete session Apply design roles? Permanently remove its af-owned resources.", "User-owned work stays. Archive instead to keep af-owned work.", nil)
+					h.confirmActionWithDetail("Delete session Apply design roles? Permanently remove its af-owned worktree and branch.", "Uncommitted changes and unpushed commits in them are lost. Archive to keep them.", nil)
 				case "search-overflow", "selection-overflow", "project-picker-overflow":
 					var items []string
 					var instances []*session.Instance
