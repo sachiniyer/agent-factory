@@ -138,14 +138,14 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // anything (#2415). Any new check belongs in one of the two halves rather than
 // inline here, so the pre-rename path picks it up automatically — a check added
 // only to this function is exactly how #2415 happened.
-func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData) error {
+func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool) error {
 	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
 		return err
 	}
 	if err := m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData); err != nil {
 		return err
 	}
-	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, nil)
+	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, nil, inPlace)
 }
 
 // validateTitleClaimableLocked is every refusal that does NOT depend on af's own
@@ -158,11 +158,11 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 // It is not excluded from the tmux probe: archiving kills the session's pane, so
 // an archived row never owns a live tmux name, and anything the probe finds is a
 // genuine orphan the rename has no effect on.
-func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance) error {
+func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance, inPlace bool) error {
 	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
 		return err
 	}
-	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, ignore)
+	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, ignore, inPlace)
 }
 
 // validateTitleShapeLocked rejects titles that are malformed for the selected
@@ -244,7 +244,7 @@ func (m *Manager) findTitleRecordConflictLocked(repoID, repoPath, title string, 
 // already taken: the per-repo archive directory, the global hook-slug namespace
 // external provisioners key on, and a live tmux session of the same name.
 // See validateTitleClaimableLocked for what ignore excludes and why.
-func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData []session.InstanceData, ignore *session.Instance) error {
+func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData []session.InstanceData, ignore *session.Instance, inPlace bool) error {
 	if namespace == runtimeNamespaceRemoteHook {
 		candidate := session.Slugify(title)
 		var ignoreTitle string
@@ -314,7 +314,7 @@ func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program
 	if namespace != runtimeNamespaceLocalTmux {
 		return nil
 	}
-	if err := m.validateArchiveTitleLocked(repoID, title, diskData, ignore); err != nil {
+	if err := m.validateArchiveTitleLocked(repoID, title, diskData, ignore, inPlace); err != nil {
 		return err
 	}
 	tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program)

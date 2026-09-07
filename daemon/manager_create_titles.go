@@ -232,12 +232,12 @@ func archivedWorktreeHoldsBranch(archived *session.Instance, holder string) bool
 //     It is the claim the rename is about to release, so counting it would refuse
 //     a reuse that would have succeeded — turning a data-integrity fix into a
 //     feature regression.
-func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData) error {
+func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool) error {
 	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
 	if err != nil || archived == nil {
 		return err
 	}
-	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived)
+	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived, inPlace)
 }
 
 // reuseArchivedRenamePersist is the durable title rewrite the archived-name-reuse
@@ -539,7 +539,7 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 		if i > 1 {
 			candidate = fmt.Sprintf("%s (archived %d)", base, i)
 		}
-		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData)
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData, false)
 		if err == nil {
 			return candidate, nil
 		}
@@ -550,7 +550,7 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 	return "", fmt.Errorf("could not find an available archived name for %q", base)
 }
 
-func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, namespace runtimeNameNamespace, diskData []session.InstanceData) (string, error) {
+func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, namespace runtimeNameNamespace, diskData []session.InstanceData, inPlace bool) (string, error) {
 	// Shape errors belong to the base, not to any candidate's availability.
 	// Validate once before the suffix walk so controls do not burn all 10,000
 	// rungs and whitespace cannot turn into a punctuation-only "   -2" title.
@@ -588,7 +588,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 			skipped = append(skipped, heldRung{title: candidate, holder: holder})
 			continue
 		}
-		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData)
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData, inPlace)
 		if err == nil {
 			m.logHeldSuffixWalkLocked(baseTitle, candidate, skipped)
 			return candidate, nil

@@ -5,7 +5,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +57,7 @@ func TestArchiveDirectoryPortableComparison(t *testing.T) {
 	for _, pair := range [][2]string{{"Caf\u00e9", "Cafe\u0301"}, {"Feature", "feature"}, {"Feature", "unrelated"}} {
 		for _, source := range []string{"live", "disk", "reserved"} {
 			t.Run(pair[0]+"_"+pair[1]+"_"+source, func(t *testing.T) {
-				m := &Manager{instances: make(map[string]*session.Instance), reservedTitles: make(map[string]struct{}), reservedTmuxNames: make(map[string]string)}
+				m := &Manager{instances: make(map[string]*session.Instance), reservedTitles: make(map[string]struct{}), reservedArchiveTitles: make(map[string]struct{})}
 				var disk []session.InstanceData
 				switch source {
 				case "live":
@@ -67,9 +66,9 @@ func TestArchiveDirectoryPortableComparison(t *testing.T) {
 					disk = []session.InstanceData{{Title: pair[0], Status: session.Archived}}
 				case "reserved":
 					m.reservedTitles[daemonInstanceKey("repo", pair[0])] = struct{}{}
-					m.reservedTmuxNames[daemonInstanceKey("repo", tmux.SanitizedNameForRepo(pair[0], ""))] = pair[0]
+					m.reservedArchiveTitles[daemonInstanceKey("repo", pair[0])] = struct{}{}
 				}
-				err := m.validateArchiveTitleLocked("repo", pair[1], disk, nil)
+				err := m.validateArchiveTitleLocked("repo", pair[1], disk, nil, false)
 				if pair[1] == "unrelated" {
 					require.NoError(t, err)
 				} else {
@@ -97,7 +96,7 @@ func TestArchiveDirectoryIgnoresRemoteClaims(t *testing.T) {
 				case "reserved":
 					m.reservedTitles[daemonInstanceKey("repo", title)] = struct{}{}
 				}
-				require.NoError(t, m.validateArchiveTitleLocked("repo", "feature-login", disk, nil))
+				require.NoError(t, m.validateArchiveTitleLocked("repo", "feature-login", disk, nil, false))
 			})
 		}
 	}

@@ -12,11 +12,14 @@ import (
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
-// validateArchiveTitleLocked covers live, archived, and in-flight LOCAL claims.
+// validateArchiveTitleLocked covers local, relocatable worktree name claims.
 // The caller has already established that the candidate uses a local worktree.
 // Branch names keep slashes, but archive directories fold them into dashes.
 // ignore is the archived row the create is about to rename out of the way.
-func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []session.InstanceData, ignore *session.Instance) error {
+func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []session.InstanceData, ignore *session.Instance, inPlace bool) error {
+	if inPlace {
+		return nil
+	}
 	candidate := archiveTitleKey(title)
 	collision := func(existing string) error {
 		if archiveTitleKey(existing) == candidate {
@@ -24,10 +27,8 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		}
 		return nil
 	}
-	// Only local creates reserve tmux names; reservedTitles also contains
-	// off-box creates that never claim an archive directory on this machine.
-	for key, existing := range m.reservedTmuxNames {
-		rid, _ := splitDaemonInstanceKey(key)
+	for key := range m.reservedArchiveTitles {
+		rid, existing := splitDaemonInstanceKey(key)
 		if rid == repoID {
 			if err := collision(existing); err != nil {
 				return err
@@ -36,7 +37,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 	}
 	for key, inst := range m.instances {
 		rid, _ := splitDaemonInstanceKey(key)
-		if rid != repoID || inst == nil || inst == ignore || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree {
+		if rid != repoID || inst == nil || inst == ignore || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree || inst.IsExternalWorktree() {
 			continue
 		}
 		if err := collision(inst.Title); err != nil {
@@ -44,7 +45,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		}
 	}
 	for _, data := range disk {
-		if !data.UsesLocalTmux() || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
+		if !data.UsesLocalTmux() || data.Worktree.ExternalWorktree || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
 			continue
 		}
 		if err := collision(data.Title); err != nil {
