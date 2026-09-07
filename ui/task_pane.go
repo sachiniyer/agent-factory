@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -130,11 +131,22 @@ type TaskPane struct {
 	originals map[string]task.Task
 	deleted   []task.Task
 	hasFocus  bool
+
+	// now is inherited from the owning AutomationsPane and passed to each
+	// schedule picker for its custom-cron next-run preview.
+	now func() time.Time
 }
 
 // NewTaskPane creates a new task pane.
 func NewTaskPane() *TaskPane {
-	return &TaskPane{}
+	return &TaskPane{now: time.Now}
+}
+
+func (s *TaskPane) setNowForTest(now func() time.Time) {
+	s.now = now
+	if s.schedule != nil {
+		s.schedule.now = now
+	}
 }
 
 // SetSize sets the display dimensions.
@@ -172,6 +184,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	// rather than a raw-cron field; the picker generates the cron the store
 	// still persists. It is seeded below from the task's existing cron.
 	picker := newSchedulePicker()
+	picker.now = s.now
 
 	watch := textinput.New()
 	watch.Placeholder = "long-running cmd; 1 stdout line = 1 event"
