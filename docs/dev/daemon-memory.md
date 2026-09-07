@@ -490,8 +490,12 @@ only the hook correlation above connects anything to the peak.
   machine hosts the workspace/agent-server: this box when the
   server runs here, or the remote machine otherwise. For hooks started by a
   systemd-managed daemon on Linux, #3650 puts the hook process tree in a sibling
-  scope outside the daemon's cgroup, but output capture remains daemon memory
-  until #4010; size that machine for it.
+  scope outside the daemon's cgroup. Output capture is charged to its runner:
+  daemon-process runners contribute to both the daemon's `VmHWM` and the unit's
+  `MemoryPeak`; a same-host agent-server contributes to the unit's `MemoryPeak`
+  but not the daemon's `VmHWM`; an off-host agent-server is charged on the remote
+  machine, not here. Size that host for it; [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
+  tracks moving the capture to a per-run file.
 - **Plus everything else a session can start.** A session may hold any number of
   extra process-bearing tabs — shell, process, editor — and there is no cap on
   how many (#3021). Watch tasks run their command, editors and watchers run
