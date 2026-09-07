@@ -11,11 +11,13 @@ name: TUI driver selftest
 # later merge, regardless of the paths below (dispatch ignores path filters).
 # The roughly ten-minute container run on each merge is accepted for this
 # signal-only workflow on free public runners; the hard timeout still matters.
+# Gate-raised runs intentionally verify the current master tip rather than
+# replaying a pinned merge SHA; unlike Docs publishing, this signal is monotonic.
 
 on:
   # Step 1 of #4000 is a signal on master, not a PR gate. A matching commit has
-  # already merged; this run names the commit that made the acceptance scenario
-  # red instead of leaving the next TUI PR to inherit the failure.
+  # already merged; a native push run identifies that commit, while an Auto Gate
+  # dispatch verifies whichever master tip is current when the run starts.
   push:
     branches: [master]
     paths:
