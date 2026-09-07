@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // TailLimit is the most hook output retained in an error message. The complete
@@ -46,6 +48,13 @@ func Open(kind Kind) (*os.File, error) {
 	file, err := os.CreateTemp(dir, string(kind)+"-*.log")
 	if err != nil {
 		return nil, fmt.Errorf("create %s hook log in %s: %w", kind, dir, err)
+	}
+	pruned, pruneErr := prune(dir, file.Name(), time.Now())
+	if pruned > 0 {
+		log.InfoLog.Printf("hook logs: pruned %d kept logs from %s", pruned, dir)
+	}
+	if pruneErr != nil {
+		log.WarningLog.Printf("hook log retention in %s: %v", dir, pruneErr)
 	}
 	return file, nil
 }

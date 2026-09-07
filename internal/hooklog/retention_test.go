@@ -98,6 +98,47 @@ func TestOpenBelowRetentionLimitUntouched(t *testing.T) {
 	assertLogNames(t, dir, want)
 }
 
+func TestPruneAgeBoundariesAndOpenedFile(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	for name, age := range map[string]time.Duration{
+		"post-worktree-expired.log":  14*24*time.Hour + time.Second,
+		"post-worktree-boundary.log": 14 * 24 * time.Hour,
+		"on-archive-expired.log":     15 * 24 * time.Hour,
+		"on-archive-opened.log":      30 * 24 * time.Hour,
+	} {
+		seedLog(t, dir, name, now.Add(-age))
+	}
+	// Even with old metadata, the explicitly opened file is never eligible.
+	count, err := prune(dir, filepath.Join(dir, "on-archive-opened.log"), now)
+	if err != nil || count != 2 {
+		t.Fatalf("prune = %d, %v; want 2, nil", count, err)
+	}
+	assertLogNames(t, dir, map[string]bool{
+		"post-worktree-boundary.log": true,
+		"on-archive-opened.log":      true,
+	})
+}
+
+func TestPruneGraceBoundaryAndTies(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	want := map[string]bool{"post-worktree-recent.log": true}
+	seedLog(t, dir, "post-worktree-recent.log", now.Add(-4*time.Second))
+	for i := 0; i < 22; i++ {
+		name := fmt.Sprintf("post-worktree-%02d.log", i)
+		seedLog(t, dir, name, now.Add(-5*time.Second))
+		if i < 20 {
+			want[name] = true
+		}
+	}
+	count, err := prune(dir, filepath.Join(dir, "not-created.log"), now)
+	if err != nil || count != 2 {
+		t.Fatalf("prune = %d, %v; want 2, nil", count, err)
+	}
+	assertLogNames(t, dir, want)
+}
+
 func seedLog(t *testing.T, dir, name string, modified time.Time) {
 	t.Helper()
 	path := filepath.Join(dir, name)
