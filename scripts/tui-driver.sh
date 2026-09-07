@@ -926,11 +926,14 @@ _af_tab_count() {
 # supported 80x10 floor.
 : "${_AF_TASKS_LIST_TITLE:=│[[:space:]]+Tasks[[:space:]]+│}"
 
-# _AF_TASKS_FOOTER matches the task manager's PINNED last hint row. Every list
-# state retains n+Esc or selection actions+Esc, and every edit state retains
-# toggle/delete/Esc; the create form's tab/Esc row is included so close remains
-# correct there too. Unlike a title, clampFormToHeight never scrolls this row.
-: "${_AF_TASKS_FOOTER:=(n new.*esc back|x toggle.*D (delete|del).*esc|tab fields.*esc cancel)}"
+# _AF_TASKS_FOOTER anchors on the `esc` affordance and the remainder of its
+# footer cell before the closing border. Every task-manager hint variant
+# contains it: full or compact list/edit actions, recovery, and create. Width
+# fitting may leave a label (`back`, `cancel`, `list`) or a clipped Unicode tail
+# such as `· …` after Esc, so accept the rest of this single footer line through
+# its closing border. Matching this stable affordance lets wording/order evolve
+# without marker drift, while the enclosing rounded frame rejects pane text.
+: "${_AF_TASKS_FOOTER:=esc.*│}"
 
 # _AF_TASKS_FRAME_TOP/BOTTOM are the rounded borders shared by every task
 # dialog mode. A workspace pane uses square corners, and its OWN │ borders can

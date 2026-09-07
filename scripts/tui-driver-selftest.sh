@@ -840,7 +840,7 @@ step "af_select handles a target with an open pane (#1996)"  _expect_af_select_o
 # compact run action is discoverable.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_task_overlay_marker_context() {
-    local pane list_modal scrolled_edit
+    local pane list_modal compact_list_modal scrolled_edit
     pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
     if printf '%s\n' "$pane" | _af_tasks_overlay_visible; then
         _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
@@ -850,6 +850,12 @@ _expect_task_overlay_marker_context() {
     list_modal=$'        ╭────────────────────╮\n        │                    │\n        │  Tasks             │\n        │  n new · esc back  │\n        │                    │\n        ╰────────────────────╯'
     if ! printf '%s\n' "$list_modal" | _af_tasks_overlay_visible; then
         _af_fail 'the rounded task dialog and its pinned list footer did not satisfy the marker'
+        return 1
+    fi
+
+    compact_list_modal=$'╭──────────────────────────────────────╮\n│                                      │\n│  enter edit · ? actions · esc        │\n│                                      │\n╰──────────────────────────────────────╯'
+    if ! printf '%s\n' "$compact_list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the rounded task dialog and its compact list footer did not satisfy the marker'
         return 1
     fi
 
@@ -881,6 +887,16 @@ _expect_task_edit_title_scrolled() {
     fi
     if ! _af_tasks_overlay_visible <<<"$screen"; then
         _af_fail 'the open 80x10 edit dialog was not recognized after its title scrolled away'
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_overlay_closed() {
+    local screen
+    screen="$(af_capture)"
+    if _af_tasks_overlay_visible <<<"$screen"; then
+        _af_fail 'the compact task overlay remained visible after af_close_tasks'
         return 1
     fi
 }
@@ -1048,6 +1064,10 @@ step "reopen tasks — pinned footer recognized (#1757/#3995)" af_open_tasks
 step "edit marker survives its scrolled-away title"         _expect_task_edit_title_scrolled
 step "reveal and assert the task run action"                _expect_task_run_action
 step "close the tasks overlay"                              af_close_tasks
+step "resize to the documented 40x10 floor"                 af_resize 40 10
+step "open the populated task at 40x10"                     af_open_tasks
+step "close the compact task overlay"                       af_close_tasks
+step "assert the compact task overlay is gone"               _expect_task_overlay_closed
 step "restore the self-test launch size"                    af_resize "$SELFTEST_BASE_COLS" "$SELFTEST_BASE_ROWS"
 
 # --- #2019 regression: the config agent (C) must attach even though af is nested
