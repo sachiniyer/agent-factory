@@ -11849,9 +11849,9 @@ function tabLabel(tab) {
     case TabKind.Shell:
       return "Terminal";
     case TabKind.Web:
-      return tab.name || "Web";
+      return tab.name && tab.name !== "web" ? tab.name : "Web";
     case TabKind.VSCode:
-      return tab.name || "VS Code";
+      return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     default:
       return tab.name || "Tab";
   }

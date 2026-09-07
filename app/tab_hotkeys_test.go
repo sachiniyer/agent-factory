@@ -290,8 +290,8 @@ func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
 	require.Equal(t, "daemon-vscode-id", tabs[1].ID,
 		"the projection must adopt the create response identity before the next snapshot")
 	require.Equal(t, 1, h.store.ActiveTab(), "the fresh VS Code tab must be selected")
-	require.Equal(t, []string{"Agent", "◱ vscode"}, tree.TabLabels(inst),
-		"the resolved daemon name is the tab's addressable label, matching CLI creation")
+	require.Equal(t, []string{"Agent", "◱ VS Code"}, tree.TabLabels(inst),
+		"the addressable default name renders with the VS Code proper-noun label")
 }
 
 // A tab picker retains intent about one session while its modal owns the
@@ -446,6 +446,57 @@ func TestHandleTabJump(t *testing.T) {
 	_, _ = h.handleTabJump(9)
 	require.Equal(t, 2, h.store.ActiveTab(),
 		"an out-of-range number must be a no-op")
+}
+
+func TestJumpTabPromptAcceptsDisplayLabelsAndCanonicalNames(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "jump-labels")
+	inst.AddTabForTest("vscode", session.TabKindVSCode)
+	inst.AddTabForTest("web", session.TabKindWeb)
+	inst.AddTabForTest("My editor", session.TabKindVSCode)
+	selectInstance(h, inst)
+
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{query: "VS Code", want: 1},
+		{query: "vs code", want: 1},
+		{query: "vscode", want: 1},
+		{query: "Web", want: 2},
+		{query: "web", want: 2},
+		{query: "My editor", want: 3},
+	} {
+		t.Run(test.query, func(t *testing.T) {
+			h.store.SetActiveTab(0)
+			h.sidebar.SyncCursorToActiveTab()
+
+			_, _ = h.showJumpTabPrompt()
+			require.NotNil(t, h.promptOverlay)
+			_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(test.query)})
+			_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyEnter})
+
+			require.Equal(t, test.want, h.store.ActiveTab())
+		})
+	}
+}
+
+func TestJumpTabPromptMissListsLabelsAndCanonicalNames(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "jump-miss")
+	inst.AddTabForTest("vscode", session.TabKindVSCode)
+	inst.AddTabForTest("web", session.TabKindWeb)
+	selectInstance(h, inst)
+
+	_, _ = h.showJumpTabPrompt()
+	require.NotNil(t, h.promptOverlay)
+	_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("missing")})
+	_, _ = h.handleStateJumpTab(tea.KeyMsg{Type: tea.KeyEnter})
+
+	h.errBox.SetSize(200, 1)
+	notice := h.errBox.String()
+	require.Contains(t, notice, "VS Code (vscode)")
+	require.Contains(t, notice, "Web (web)")
 }
 
 // TestNumberKeyRoutesToTabJump proves the digit dispatch in handleKeyPress routes
