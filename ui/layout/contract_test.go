@@ -237,10 +237,9 @@ func TestRowWithRightAffixClosesStyleAtTheCut(t *testing.T) {
 	}
 }
 
-// The sibling shape: an indicator that belongs NEXT TO its content rather than at
-// the rectangle's edge — a tab row's " *" active cue (#1983). Same reservation in
-// the same measure, so the clamp has no tail to take; the blanks just sit after
-// the marker instead of before it.
+// The sibling shape: an indicator that belongs NEXT TO its content rather than
+// at the rectangle's edge. Same reservation in the same measure, so the clamp
+// has no tail to take; the blanks just sit after the marker instead of before it.
 func TestRowKeepingTailReservesTheTailAdjacent(t *testing.T) {
 	const marker = " *"
 	for _, c := range []struct {

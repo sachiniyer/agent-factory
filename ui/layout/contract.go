@@ -167,7 +167,7 @@ func padToContract(s string, width int) string {
 // over-estimated title costs a SHORTER TITLE, which is what elides everywhere
 // else in this tree, and the dot stays.
 //
-// The same reasoning is already written out on RenderTab's " *" active marker
+// The same reasoning is already written out on RenderTab's " · open" marker
 // (#1983): content elides, indicators do not. This is that rule with the
 // rectangle's own measure behind it.
 //
@@ -199,7 +199,7 @@ func RowWithRightAffix(flex, affix string, width int) string {
 // the rectangle and the clamp has no tail to take. The difference is only where
 // the slack sits, and that is a design fact about the indicator, not about the
 // measure: the sidebar's ● status glyph IS the right-hand column of its row, and
-// a tab row's " *" active marker is a tmux-style cue appended to the tab's name
+// a tab row's " · open" marker is a cue appended to the tab's name
 // (#1983). Moving either one to the other's position would be a redesign.
 func RowKeepingTail(flex, tail string, width int) string {
 	if width <= 0 {
