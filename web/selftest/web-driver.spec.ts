@@ -47,8 +47,15 @@ import {
   type Route,
   test,
 } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { decode, Op } from "../src/frame.js";
 import { openAfterInitialResync } from "./initial-resync.js";
+
+const surfaceTokens: { light: string; dark: string } = JSON.parse(
+  readFileSync(new URL("../../design/tokens.json", import.meta.url), "utf8"),
+).colors.surface;
+const surfaceRGB = (mode: "light" | "dark") =>
+  `rgb(${[1, 3, 5].map(i => parseInt(surfaceTokens[mode].slice(i, i + 2), 16)).join(", ")})`;
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -6562,8 +6569,8 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
   // Slice A uses the fixed generated surface in both modes.
-  expect(lightRail).toBe("rgb(248, 249, 252)");
-  expect(darkRail).toBe("rgb(46, 52, 64)");
+  expect(lightRail).toBe(surfaceRGB("light"));
+  expect(darkRail).toBe(surfaceRGB("dark"));
   expect(await bgColor(page, ".af-appbar")).toBe(lightRail);
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
 
@@ -6572,7 +6579,7 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await page.route("**/v1/GetTheme", (route) => { paletteReads++; return route.fulfill({status: 500}); });
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
-  expect(await bgColor(page, "body")).toBe("rgb(248, 249, 252)");
+  expect(await bgColor(page, "body")).toBe(surfaceRGB("light"));
   expect(paletteReads).toBe(0);
   await page.unroute("**/v1/GetTheme");
   await page.locator('.af-theme-opt[data-theme-opt="system"]').click();
@@ -7821,25 +7828,25 @@ test("theme-color is declared per scheme, and an explicit theme choice repoints 
 
   const metas = p.locator('meta[name="theme-color"]');
   await expect(metas).toHaveCount(2);
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#f8f9fc");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#2e3440");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.light);
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
 
   // The audit item is "the chrome matches the app theme", and per-scheme metas alone
   // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
   // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
   await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
   await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#2e3440");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#2e3440");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.dark);
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
 
   await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#f8f9fc");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.light);
 
   // Back to Auto and the metas go per-scheme again, handing the decision back to the
   // media queries.
   await p.locator('.af-theme-opt[data-theme-opt="system"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#f8f9fc");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#2e3440");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.light);
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
   await ctx.close();
 });
 

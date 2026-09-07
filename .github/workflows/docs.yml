@@ -126,7 +126,7 @@ jobs:
       # is untracked, which `git diff` does not see at all.
       - name: Regenerate autogen artifacts and check for drift
         run: |
-          generated=(docs/reference plugins .agents .claude-plugin web/src/tokens.css ui/theme docs/stylesheets/tokens.css docs/design/style-guide.md)
+          generated=(docs/reference plugins .agents .claude-plugin web/src/tokens.css ui/theme docs/stylesheets/tokens.css docs/design/style-guide.md docs/design/interface-design.md)
           scripts/gen-docs.sh
           go test ./internal/designtokens
           go run ./scripts/gen-design --check

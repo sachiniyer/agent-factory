@@ -55,6 +55,10 @@ func Generate(root string) (map[string][]byte, error) {
 	if err = validate(t); err != nil {
 		return nil, err
 	}
+	interfaceDoc, err := interfacePage(root, t)
+	if err != nil {
+		return nil, err
+	}
 	css := cssTokens(t)
 	goFile, err := goTokens(t)
 	if err != nil {
@@ -65,10 +69,11 @@ func Generate(root string) (map[string][]byte, error) {
 		return nil, err
 	}
 	return map[string][]byte{
-		"web/src/tokens.css":          css,
-		"ui/theme/theme.go":           goFile,
-		"docs/stylesheets/tokens.css": css,
-		"docs/design/style-guide.md":  guide,
+		"docs/design/interface-design.md": interfaceDoc,
+		"web/src/tokens.css":              css,
+		"ui/theme/theme.go":               goFile,
+		"docs/stylesheets/tokens.css":     css,
+		"docs/design/style-guide.md":      guide,
 	}, nil
 }
 

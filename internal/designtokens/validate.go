@@ -65,8 +65,18 @@ func validate(t Tokens) error {
 				return err
 			}
 		}
-		if err := contrastPair(t, "border", bg, 3); err != nil {
-			return err
+	}
+	// Dark Modern uses quiet neutral outlines; #3971 requires 1.5:1 on
+	// the page surface. Light retains its existing 3:1 on both backgrounds.
+	if err := contrastPair(t, "ink", "surface", 7); err != nil {
+		return err
+	}
+	if contrast(t.Colors["border"].Dark, t.Colors["surface"].Dark) < 1.5 {
+		return fmt.Errorf("dark border on surface contrast must be at least 1.5:1")
+	}
+	for _, bg := range []string{"surface", "surface-raised"} {
+		if contrast(t.Colors["border"].Light, t.Colors[bg].Light) < 3 {
+			return fmt.Errorf("light border on %s contrast must be at least 3:1", bg)
 		}
 	}
 	// The blurred sidebar title reverses muted text into a readable chip.

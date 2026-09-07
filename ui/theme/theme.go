@@ -13,18 +13,18 @@ type State struct {
 // Colors returns fresh semantic light/dark pairs; terminal capability resolution belongs to lipgloss.
 func Colors() map[string]lipgloss.AdaptiveColor {
 	return map[string]lipgloss.AdaptiveColor{
-		"accent":         {Light: "#2d6271", Dark: "#90c4d3"},
+		"accent":         {Light: "#2d6271", Dark: "#2296f3"},
 		"archived":       {Light: "#4c566a", Dark: "#d8dee9"},
-		"border":         {Light: "#657084", Dark: "#a1aaba"},
+		"border":         {Light: "#657084", Dark: "#3d3d3d"},
 		"dead":           {Light: "#883b43", Dark: "#e4c8cd"},
-		"ink":            {Light: "#2e3440", Dark: "#eceff4"},
-		"ink-muted":      {Light: "#4c566a", Dark: "#b7c0ce"},
+		"ink":            {Light: "#2e3440", Dark: "#cccccc"},
+		"ink-muted":      {Light: "#4c566a", Dark: "#9d9d9d"},
 		"limit-reached":  {Light: "#73436b", Dark: "#dbb9d5"},
 		"lost":           {Light: "#705014", Dark: "#ebcb8b"},
 		"ready":          {Light: "#405430", Dark: "#d5e2cc"},
 		"running":        {Light: "#4c566a", Dark: "#d8dee9"},
-		"surface":        {Light: "#f8f9fc", Dark: "#2e3440"},
-		"surface-raised": {Light: "#eceff4", Dark: "#434c5e"},
+		"surface":        {Light: "#f8f9fc", Dark: "#1f1f1f"},
+		"surface-raised": {Light: "#eceff4", Dark: "#2b2b2b"},
 	}
 }
 
