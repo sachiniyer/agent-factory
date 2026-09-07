@@ -185,7 +185,7 @@ daemon unit rather than children of it:
   `on_archive_command` (`daemon/archive_hook.go`) — in an *unbound* scope with
   no dependency edge at all, so the scope survives a daemon restart or
   auto-upgrade (`systemdunit.NewUnboundScopeCommand`, #3650); see the hook-output
-  caveat below.
+  capture details below.
 
 Agent processes are descendants of a tmux server, so once that server is a
 scoped one they sit outside the unit's figure, which is why the sizing section
@@ -381,48 +381,59 @@ backend is not `local`.
 #3650 landed, and moved those spawns into their own transient scope — a sibling
 under `app.slice` rather than a child of the daemon unit — so the build is off
 the daemon's books. Because that scope carries no dependency edge to the unit,
-the scope itself survives a daemon restart or auto-upgrade, and a silent build
-survives with it. The survival guarantee is for the **entry already in flight**,
-not the whole list: `runPostWorktreeHooks` runs entries sequentially and creates
-one scope per entry, so a daemon exit mid-list means later entries are never
-spawned; `AdoptRunningHooks` observes the survivor but does not rerun the entries
-that were never spawned.
+the scope itself survives a daemon restart or auto-upgrade. With
+[#4010](https://github.com/sachiniyer/agent-factory/issues/4010) fixed by
+[PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012), a hook can also
+keep writing output after its runner exits. The survival guarantee is for the
+**entry already in flight**, not the whole list: `runPostWorktreeHooks` runs
+entries sequentially and creates one scope per entry, so a daemon exit mid-list
+means later entries are never spawned; `AdoptRunningHooks` observes the survivor
+but does not rerun the entries that were never spawned.
 [#4014](https://github.com/sachiniyer/agent-factory/issues/4014) tracks resuming
-or reporting an incomplete run. When a hook runner executes in the **daemon
-process** (the direct local-backend case), it gives the child pipes whose readers
-live in the daemon — a `bytes.Buffer` in `session/git/hooks.go` or an
-`archiveHookOutputTail` in `daemon/archive_hook.go`. A hook that writes after the
-daemon exits can therefore die on `SIGPIPE`/`EPIPE`. In the same-host hook-backend
-flow, `post_worktree_commands` runs in the separate `af agent-server` process
-created by `RunAgentServer`, so its `bytes.Buffer` and pipe-reader goroutine live
-there; `KillMode=process` leaves that server alive across a daemon restart, and
-its hook's writes do not fail merely because the daemon exited. That case is
-exposed only if the agent-server itself restarts. [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
-tracks moving both runners to a per-run log file. It covers **both** hooks:
-repository-controlled `post_worktree_commands` (`session/git/hooks.go`) and
-operator-controlled `on_archive_command` (`daemon/archive_hook.go`). The watcher
-and the VS Code start gate had already routed through a scope (#2299), in the
-bound shape.
+or reporting an incomplete run.
+
+Both repository-controlled `post_worktree_commands` (`session/git/hooks.go`)
+and operator-controlled `on_archive_command` (`daemon/archive_hook.go`) now use
+`internal/hooklog`: stdout and stderr go directly to a per-run file under the
+runner's `$AGENT_FACTORY_HOME/logs/hooks/`. The child inherits the file descriptor;
+there is no capture pipe or reader goroutine whose disappearance could cause
+`SIGPIPE`/`EPIPE`. This applies whether the runner is the **daemon process** or a
+separate `af agent-server`. In the same-host hook-backend flow, `KillMode=process`
+also leaves that server alive across a daemon restart; file capture no longer
+depends on the server staying alive either. The runner reads back only a bounded
+tail (at most 64 KiB of output) for diagnostics. Failed runs keep the full file
+and report its path; successful runs remove it after confirmed cleanup and a
+successful tail read. Deliberately cancelled post-worktree hooks also remove
+their logs after confirmed cleanup. If the runner exits before cleanup, the
+file remains. A noisy hook's full output therefore no longer accumulates in any
+process's memory, though the file still uses disk space and can populate page
+cache. The watcher and the VS Code start gate had already routed through a
+scope (#2299), in the bound shape.
 
 So on a current daemon the repository-controlled `post_worktree_commands` and
 operator-controlled `on_archive_command` should not reproduce the correlation
 above: their hook process trees no longer contribute to the unit's `MemoryPeak`.
-Today hook output is charged according to the runner's process. For a runner in
-the **daemon process** — `post_worktree_commands` on the direct local backend,
-and `on_archive_command` always — its unbounded `bytes.Buffer` or bounded tail is
-daemon-process memory, so it appears in both `VmHWM` and the unit's `MemoryPeak`.
-For a same-host `af agent-server` — the hook backend whose `launch_cmd` starts it
-on this box inside the unit's cgroup — the `bytes.Buffer` is that server's
-memory: it is charged to the unit's `MemoryPeak`, but not to the daemon's
-`VmHWM`. A same-host server started through Docker or SSH (including a hook
+Output capture now lives in files; only the bounded diagnostic tail is read
+into the runner's memory. For a runner in the **daemon process** —
+`post_worktree_commands` on the direct local backend, and `on_archive_command`
+always — that tail contributes to both the daemon's `VmHWM` and the unit's
+`MemoryPeak`. For a same-host `af agent-server` — the hook backend whose
+`launch_cmd` starts it on this box inside the unit's cgroup — the tail is that
+server's memory: it contributes to the unit's `MemoryPeak`, but not to the
+daemon's `VmHWM`. In both cases the hook process tree runs in its own scope, and
+output-file pages first instantiated by its writes are charged to that scope,
+not the daemon unit. File-backed memory still follows the first-touch accounting
+described above; moving capture to disk does not eliminate page-cache costs.
+
+A same-host server started through Docker or SSH (including a hook
 `provision_cmd` returning this machine) instead lives outside the unit:
-`RunningDaemonProcess()` is false, so its hooks use plain `exec`; both hooks and
-output charge the container's / sshd's cgroup, neither the unit's `MemoryPeak`
-nor the daemon's `VmHWM`. For an off-host agent-server, the output lives on the
-remote machine and is charged to nothing here. [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
-tracks moving that capture to a per-run file in [PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012),
-which is in flight. That does not make `MemoryPeak` a daemon-process number. Only
-those two hooks moved out; every other unscoped descendant still charges the unit,
+`RunningDaemonProcess()` is false, so its hooks use plain `exec`; hook processes,
+the runner's bounded tail, and output-file pages they first instantiate charge
+the container's / sshd's cgroup, neither the unit's `MemoryPeak` nor the daemon's
+`VmHWM`. For an off-host agent-server, the file and bounded tail live on the
+remote machine and are charged to nothing here. File capture does not make
+`MemoryPeak` a daemon-process number. Only those two hooks moved out; every other
+unscoped descendant still charges the unit,
 including a hook backend's plain-`exec` `launch_cmd` on the daemon host.
 `MemoryPeak`, `MemoryMax=`, and `CPUQuota=` therefore still cover more than the
 daemon process. Three things still put a hook back in the old place, and all are
@@ -494,16 +505,21 @@ only the hook correlation above connects anything to the peak.
   machine hosts the workspace/agent-server: this box when the
   server runs here, or the remote machine otherwise. For hooks started by a
   systemd-managed daemon on Linux, #3650 puts the hook process tree in a sibling
-  scope outside the daemon's cgroup. Output capture is charged to its runner:
-  daemon-process runners contribute to both the daemon's `VmHWM` and the unit's
-  `MemoryPeak`; a same-host agent-server inside the unit contributes to its
-  `MemoryPeak` but not the daemon's `VmHWM`; a same-host Docker/SSH server
-  (including a hook `provision_cmd` returning this machine) runs hooks with plain
-  `exec` outside the unit, charging hooks and output to the container's / sshd's
-  cgroup, neither the unit's `MemoryPeak` nor the daemon's `VmHWM`; an off-host
-  agent-server is charged on the remote machine, not here. Size that host for it;
-  [#4010](https://github.com/sachiniyer/agent-factory/issues/4010)
-  tracks moving the capture to a per-run file.
+  scope outside the daemon's cgroup. Hook output goes to per-run files under
+  the runner's `$AGENT_FACTORY_HOME/logs/hooks/`, retained on failure and removed
+  on success after cleanup. Budget disk space and file-backed memory for noisy
+  hooks, rather than an unbounded process-memory capture. Only a bounded tail
+  (64 KiB of output) is read into the runner: daemon-process runners contribute
+  to both the daemon's `VmHWM` and the unit's `MemoryPeak`; a same-host
+  agent-server inside the unit contributes to its `MemoryPeak` but not the
+  daemon's `VmHWM`. Their scoped hooks' output writes first instantiate pages in
+  the hook scope. A same-host Docker/SSH server (including a hook `provision_cmd`
+  returning this machine) runs hooks with plain `exec` outside the unit,
+  charging hook processes, the bounded tail, and file pages they first
+  instantiate to the container's / sshd's cgroup, neither the unit's
+  `MemoryPeak` nor the daemon's `VmHWM`. An off-host agent-server keeps its files
+  and tail on the remote machine, not here. Size that host for them; see the
+  [capture and cleanup details above](#after-3650).
 - **Plus everything else a session can start.** A session may hold any number of
   extra process-bearing tabs — shell, process, editor — and there is no cap on
   how many (#3021). Watch tasks run their command, editors and watchers run
