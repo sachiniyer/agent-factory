@@ -263,6 +263,25 @@ scenario that failed in #1156, now deterministic:
 Green means the driver drives the TUI reliably. Any failure prints the step
 and the offending screen.
 
+#### In CI
+
+The `TUI driver selftest` workflow
+(`.github/workflows/tui-driver-selftest.yml`) runs the same
+`scripts/testbox.sh selftest` entry point on pushes to `master` that touch the
+TUI, its tmux session layer, or the container/driver harness. Auto Gate merges
+with `GITHUB_TOKEN`, which suppresses those push events, so its master-side
+workflow list re-dispatches the selftest after every later merge. Manual and
+gate-raised dispatches always run regardless of changed paths. The roughly
+ten-minute run on each merge is intentional while the signal is measured; the
+runner is free for this public repository. The daemon, TUI, stand-in sessions,
+and private tmux server remain inside the ephemeral testbox container.
+
+This is the signal-only first step from #4000: it deliberately has no
+`pull_request` trigger and does not gate merges. Its purpose is to identify the
+exact master commit that makes the scenario red while runtime is measured.
+Failed or cancelled runs upload the full console stream, including the driver's
+last-screen dump, as the `tui-driver-selftest-transcript` artifact.
+
 ### One scenario script (a per-fix real-TUI gate)
 
 ```bash

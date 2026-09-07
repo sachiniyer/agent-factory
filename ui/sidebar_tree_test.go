@@ -48,8 +48,8 @@ func tabRowCount(s *Sidebar) int {
 
 // TestSidebarTreeRendersTabChildren pins the first visible change of #1024
 // PR 3: the selected instance's tabs render as indented child rows with the
-// same labels (and 1-based numbers) as the tab bar, the active tab carries the
-// tmux-style "*" marker, and non-selected instances stay collapsed with a ▸.
+// same labels (and 1-based numbers) as the tab bar, a tab bound to an open pane
+// carries the " · open" marker, and non-selected instances stay collapsed.
 func TestSidebarTreeRendersTabChildren(t *testing.T) {
 	s := newTreeSidebar(t, 2)
 	s.SetSize(40, 24)
@@ -59,6 +59,8 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 	assert.NotContains(t, out, "├", "no tab children before a selection exists")
 
 	s.SetSelectedInstance(0)
+	inst := s.proj.GetInstances()[0]
+	pane := s.proj.AddOpenPane(inst, 0)
 	out = s.String()
 	assert.Contains(t, out, "├ 1 Agent · open", "agent tab child with slot number and active marker")
 	assert.Contains(t, out, "└ 2 › Terminal", "terminal tab child with └ terminator")
@@ -68,11 +70,47 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 		"instance rows must not render their position number")
 	assert.Equal(t, 2, tabRowCount(s), "only the selected instance contributes tab rows")
 
-	// The active-tab marker follows the store's active tab.
-	s.proj.SetActiveTab(1)
+	// The marker follows the open pane's tab binding.
+	require.True(t, s.proj.RebindOpenPane(pane, inst, 1))
 	out = s.String()
 	assert.Contains(t, out, "└ 2 › Terminal · open")
 	assert.NotContains(t, out, "├ 1 Agent · open")
+}
+
+// TestSidebarTreeOpenMarkerClearsWithLastPane is the first #3996 regression:
+// hiding the only workspace pane leaves no tab marked open in the rail.
+func TestSidebarTreeOpenMarkerClearsWithLastPane(t *testing.T) {
+	s := newTreeSidebar(t, 1)
+	s.SetSize(40, 24)
+	s.SetSelectedInstance(0)
+	inst := s.proj.GetInstances()[0]
+	pane := s.proj.AddOpenPane(inst, 0)
+	require.Contains(t, s.String(), "├ 1 Agent · open")
+
+	require.True(t, s.proj.CloseOpenPane(pane))
+	assert.NotContains(t, s.String(), "· open",
+		"the rail must render no open marker when no workspace pane is open")
+}
+
+// TestSidebarTreeOpenMarkerFollowsPaneNotCursor is the second #3996
+// regression: moving the rail cursor previews another tab without moving the
+// marker away from the tab that remains bound to the workspace pane.
+func TestSidebarTreeOpenMarkerFollowsPaneNotCursor(t *testing.T) {
+	s := newTreeSidebar(t, 1)
+	s.SetSize(40, 24)
+	s.SetSelectedInstance(0)
+	inst := s.proj.GetInstances()[0]
+	s.proj.AddOpenPane(inst, 0)
+
+	s.Down() // Agent tab row.
+	s.Down() // Terminal tab row; the Agent pane remains open.
+	require.Equal(t, 1, s.proj.ActiveTab())
+
+	out := s.String()
+	assert.Contains(t, out, "├ 1 Agent · open",
+		"the marker must follow the tab shown in the workspace pane")
+	assert.NotContains(t, out, "└ 2 › Terminal · open",
+		"the rail cursor's preview tab must not inherit the open marker")
 }
 
 // TestSidebarTreeFreshInstanceSingleTabRow pins the #1100 tree rendering: a
@@ -87,6 +125,7 @@ func TestSidebarTreeFreshInstanceSingleTabRow(t *testing.T) {
 	require.NoError(t, err)
 	inst.AddTabForTest("agent", session.TabKindAgent)
 	addTestInstance(s, inst)
+	s.proj.AddOpenPane(inst, 0)
 	s.SetSize(40, 24)
 	s.SetSelectedInstance(0)
 

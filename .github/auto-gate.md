@@ -263,6 +263,19 @@ required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
 also subscribes to that workflow's terminal `workflow_run` event. This ensures
 their completed state is reevaluated without subscribing Auto Gate to itself.
 
+GitHub also suppresses `push` workflows when Auto Gate merges with its
+`GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
+master-verification workflows named by `MASTER_PUSH_WORKFLOWS`: Build, Docs,
+Lint, TUI driver selftest, and Web selftest. A dispatch ignores each workflow's
+path filter, so all five run after every Auto Gate merge. The literal list is
+kept honest by the required auto-gate helper test, which scans workflow triggers
+and requires every listed workflow to accept `workflow_dispatch`.
+
+The gate runs master's pre-merge helper. A merge that first adds or renames one
+of those workflows cannot re-dispatch that new entry for its own landing commit;
+the post-merge warning names the gap, the maintainer dispatches that first run,
+and every later merge uses the updated list automatically.
+
 Repository-ruleset changes and mergeability changes caused only by `master`
 advancing have no GitHub event here. Use the same manual PR-number dispatch to
 refresh that observational state. The destructive merge path still reevaluates

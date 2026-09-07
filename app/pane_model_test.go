@@ -933,7 +933,8 @@ func TestPane_NumberJumpTargetsFocusedPaneNotSidebarSelection(t *testing.T) {
 // TestPane_NumberJumpAnnotatesSelectedTabDivergence covers the #1289 tab-level
 // mismatch while preserving #1255: when a pane-focused digit jump changes the
 // visible pane tab, the sidebar-selected active tab is not retargeted, so the
-// pane header must make that divergence explicit.
+// pane header must make that divergence explicit while the #3996 open marker
+// follows the tab shown in the pane rather than the rail selection.
 func TestPane_NumberJumpAnnotatesSelectedTabDivergence(t *testing.T) {
 	h := paneTestHome(t)
 	beta := h.store.GetInstanceByTitle("beta")
@@ -953,7 +954,10 @@ func TestPane_NumberJumpAnnotatesSelectedTabDivergence(t *testing.T) {
 	view := h.View()
 	assert.Contains(t, view, "beta · › Terminal — selected: beta · Agent",
 		"pane header shows the jumped tab and the still-selected tree tab")
-	assert.Contains(t, view, "1 Agent · open", "sidebar active-tab marker stays on the selected tab")
+	assert.Contains(t, view, "2 › Terminal · open",
+		"sidebar open marker follows the tab shown in the pane")
+	assert.NotContains(t, view, "1 Agent · open",
+		"sidebar open marker must not follow the rail selection")
 }
 
 // TestPane_FocusRingCyclesNPanes: with three panes open, Tab cycles
