@@ -46,6 +46,21 @@ step() {
     fi
 }
 
+# Every ERE metacharacter must stay literal in session/title assertions (#4037).
+# shellcheck disable=SC2317
+_expect_regex_escape_literal() {
+    local literal="$1" decoy="$2" pattern
+    pattern="$(_af_regex_escape "$literal")"
+    if ! printf '▾ %s\n' "$literal" | grep -qE "^▾ ${pattern}$"; then
+        _af_log "escaped pattern '$pattern' did not match literal '$literal'"
+        return 1
+    fi
+    if printf '▾ %s\n' "$decoy" | grep -qE "^▾ ${pattern}$"; then
+        _af_log "escaped pattern '$pattern' wrongly matched '$decoy'"
+        return 1
+    fi
+}
+
 # _expect_resize_rejected — the NEGATIVE check for af_resize (Greptile, #1201):
 # a resize tmux cannot honor must FAIL LOUDLY, never masquerade as success (or a
 # tiny-size gate would keep running at the wrong size). We point af_resize at a
@@ -729,8 +744,8 @@ SCREEN
     )
 }
 
-# _expect_scrolled_rail_relaunch — the LIVE half of #2148. Three sessions at
-# 80x24 with the lowest selected is exactly the reported state: the rail scrolls,
+# _expect_scrolled_rail_relaunch — the LIVE half of #2148. At 80x24, seed
+# enough sessions for the current row density and select the last: the rail scrolls,
 # the header is gone, and the boot gate has to read the frame as booted anyway.
 # af_relaunch shares af_boot's gate, so this drives the real thing end to end.
 #
@@ -742,7 +757,19 @@ _expect_scrolled_rail_relaunch() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS" rc=0
 
     af_resize 80 24 || return 1
-    if af_select cycle; then
+    # Compact rows can fit the original three-session fixture without scrolling.
+    # Grow the fixture until it establishes the premise, with a bounded cap.
+    local last=cycle n
+    af_select "$last" || return 1
+    for n in $(seq 1 10); do
+        if af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
+            break
+        fi
+        last="scroll-$n"
+        af_new_instance "$last" || return 1
+        af_select "$last" || return 1
+    done
+    if af_select "$last"; then
         af_relaunch || rc=$?
         if [ "$rc" -eq 0 ]; then
             if ! af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
@@ -783,6 +810,15 @@ printf 'session=%s size=%sx%s home=%s\n' \
 
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
+step "literal plus (#4037)" _expect_regex_escape_literal 'a+b' 'ab'
+step "literal dot (#4037)" _expect_regex_escape_literal 'x.y' 'xay'
+step "literal brackets (#4037)" _expect_regex_escape_literal '[tag]' 't'
+step "literal alternation (#4037)" _expect_regex_escape_literal 'a|b' 'a'
+# shellcheck disable=SC2016
+step "literal dollar (#4037)" _expect_regex_escape_literal '$HOME' 'HOME'
+step "literal backslash (#4037)" _expect_regex_escape_literal 'path\title' 'pathtitle'
+step "all ERE metacharacters (#4037)" _expect_regex_escape_literal '.[](){}*+?^$|\' 'unrelated'
+
 step "reset sandbox to a clean state"                       af_reset_sandbox
 step "seed a non-codex default before daemon boot"           _seed_config_editor_start_value
 # af_boot routes launch geometry through af_resize, which verifies the window
@@ -829,10 +865,9 @@ step "assert beta is selected"                              af_expect_selected b
 step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
 step "af_select handles a target with an open pane (#1996)"  _expect_af_select_open_pane
 
-# --- #1757 regression: the task-overlay run action ---
-# `m` drops straight into the selected task's EDIT form when a task exists, and
-# at 80x24 its footer collapses `r run now` to `r run`. af_open_tasks used to
-# wait for the stale `run now` and time out here; it now syncs on `r run`.
+# --- #1757 regression: the task-editor run action ---
+# Open the task list, explicitly enter its editor, then recognize the compact
+# `r run` footer as well as the wider `r run now` spelling.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 # _expect_config_editor_writes — the config editor's end-to-end flow against the
 # sandbox's throwaway AF home: open it, assert it rendered a tier-1 key FROM THE
@@ -990,7 +1025,9 @@ _expect_config_agent_attaches_in_tmux() {
 
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
-step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
+step "reopen tasks list"                                    af_open_tasks
+step "open the selected task editor"                        af_send Enter
+step "task editor run action recognized (#1757)"             af_wait_for "$_AF_TASKS_RUN_HINT" 10
 step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
 step "close the tasks overlay"                              af_close_tasks
 
@@ -1086,9 +1123,8 @@ step "cycle: open the active tab as a pane"                 af_open_pane
 step "cycle: pane number-jumps land and STAY (#1885)"       _expect_cycle_jumps_land
 step "cycle: w closes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
 
-# --- #2148 live: relaunch at 80x24 with three sessions and the lowest selected.
-# Runs last because it needs a third instance ('cycle') to make the rail scroll,
-# and because it relaunches the TUI.
+# --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
+# Runs last because it adds sessions and relaunches the TUI.
 step "relaunch boots with the rail scrolled past the header (#2148)" _expect_scrolled_rail_relaunch
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"

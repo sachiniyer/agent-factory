@@ -112,7 +112,7 @@ _af_resolve_bin() {
 
 # _af_regex_escape <s> — escape ERE metacharacters so a literal can be waited
 # on with af_wait_for.
-_af_regex_escape() { printf '%s' "$1" | sed -E 's/[.[\({*+?^$|)}\]\\]/\\&/g'; }
+_af_regex_escape() { printf '%s' "$1" | sed 's/[][\.^$*+?(){}|\\]/\\&/g'; }
 
 # ----------------------------------------------------------------------------
 # Anti-flake core — wait on the screen, never on the clock.
@@ -662,15 +662,15 @@ af_open_pane() {
 # Solve), and each pane's frame puts its ` <title> · <tab> ` header on the
 # first line inside the frame — so all visible pane headers share one screen
 # row, immediately below the workspace box's top border. Anchoring on that
-# border (the first `╭` on screen — the sidebar has no left border, so the
+# border (the first `╭`, `┌`, or `╔` — the sidebar has no left border, so the
 # workspace box owns the first one) and taking the NEXT line yields the whole
 # visible-pane identity set in one string.
 #
-# `╭` is matched as a literal, not a bracket expression: the sandbox runs a
+# Corners are matched as literal alternatives, not a bracket expression: the sandbox runs a
 # C/POSIX locale where a bracket expression would match only the first byte of
 # the 3-byte glyph (cf. _af_tab_count's `(├|└)` alternation note).
 _af_pane_header_row() {
-    af_capture | awk '/╭/ { if ((getline line) > 0) print line; exit }'
+    af_capture | awk '/╭|┌|╔/ { if ((getline line) > 0) print line; exit }'
 }
 
 # af_hide_pane — hide the focused pane back to the background (nothing is
@@ -944,12 +944,15 @@ _af_tab_count() {
 # this with it.
 : "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
 
+# Empty and populated lists no longer advertise the editor's run action.
+_AF_TASKS_OPEN_HINT="$_AF_TASKS_RUN_HINT|enter edit .*\? actions|Press n to create one\."
+
 # af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
-# `r run` run-action hint, present whether it opens in list or edit mode.
+# `r run` hint in populated list/edit mode, or the empty-list recovery copy.
 af_open_tasks() {
     af_ensure_nav
     af_send m
-    af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
+    af_wait_for "$_AF_TASKS_OPEN_HINT" "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 
 # af_close_tasks — dismiss the tasks overlay (Escape). When the overlay opened
@@ -962,14 +965,14 @@ af_close_tasks() {
     deadline=$(( $(_af_now) + 4 ))
     while :; do
         screen="$(af_capture)"
-        if ! printf '%s\n' "$screen" | grep -qE -- "$_AF_TASKS_RUN_HINT"; then
+        if ! printf '%s\n' "$screen" | grep -qE -- "$_AF_TASKS_OPEN_HINT"; then
             return 0
         fi
         [ "$(_af_now)" -ge "$deadline" ] && break
         sleep "$AF_DRIVER_POLL"
     done
     af_send Escape
-    af_wait_gone "$_AF_TASKS_RUN_HINT" 8 'tasks overlay closed' || return 1
+    af_wait_gone "$_AF_TASKS_OPEN_HINT" 8 'tasks overlay closed' || return 1
 }
 
 # The config editor's own marker. Anchored on the hint row rather than a key
