@@ -203,7 +203,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			"or the rebind from the [keys] table in config.toml (#1026). Fixed bindings —\n" +
 			"structural keys config cannot touch — are listed last. Contextual pane\n" +
 			"actions such as pane_prev/pane_next are included; their default arrow keys\n" +
-			"apply only while a workspace pane has focus.",
+			"apply only while a workspace pane has focus.\n\n" +
+			"Key values use config spellings you can paste into [keys]. With --json,\n" +
+			"the keys and default arrays use those same spellings.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			log.Initialize(false)
 			defer log.Close()
@@ -218,6 +220,14 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			infos, err := keys.EffectiveBindings(cfg.KeymapOverrides())
 			if err != nil {
 				return err
+			}
+
+			asJSON, err := cmd.Flags().GetBool("json")
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(infos)
 			}
 
 			// SOURCE only annotates the rows that carry information: fixed
@@ -319,6 +329,7 @@ func init() {
 			"Get it with 'af token show' on the daemon host.")
 
 	rootCmd.AddCommand(debugCmd)
+	keysCmd.Flags().Bool("json", false, "Print bindings as JSON using config key spellings")
 	rootCmd.AddCommand(keysCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(resetCmd)

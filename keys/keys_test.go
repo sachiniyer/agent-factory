@@ -528,3 +528,33 @@ func TestAltSpaceDispatchAndHelp(t *testing.T) {
 		t.Fatalf("help = %q, want alt+space", got)
 	}
 }
+
+func TestEffectiveKeysShareSpaceDisplayWithHelp(t *testing.T) {
+	for _, spelling := range []string{"space", "ctrl+space", "alt+space", "alt+ctrl+space"} {
+		t.Run(spelling, func(t *testing.T) {
+			resetAfter(t)
+			overrides := map[string][]string{"new": {spelling}}
+			if err := ApplyOverrides(overrides); err != nil {
+				t.Fatal(err)
+			}
+			infos, err := EffectiveBindings(overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, info := range infos {
+				if info.Action != "new" {
+					continue
+				}
+				label := GlobalKeyBindings[KeyNew].Help().Key
+				if len(info.Keys) != 1 || info.Keys[0] != spelling || label != spelling {
+					t.Errorf("CLI keys=%q, help/menu=%q, want %q", info.Keys, label, spelling)
+				}
+				if err := ValidateOverrides(map[string][]string{"new": info.Keys}); err != nil {
+					t.Errorf("displayed keys cannot round trip: %v", err)
+				}
+				return
+			}
+			t.Fatal("new action missing")
+		})
+	}
+}
