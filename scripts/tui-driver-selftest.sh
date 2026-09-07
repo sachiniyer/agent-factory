@@ -74,6 +74,24 @@ _expect_tasks_frame_after_rail_corner() {
     fi
 }
 
+# Same-row candidates must retain their own footer and bottom geometry (#4006).
+# shellcheck disable=SC2317
+_expect_tasks_frame_beside_foreign_box() {
+    local side_by_side
+    side_by_side=$'╭───╮ ╭────────────────────╮\n│   │ │ Tasks              │\n│   │ │ n new · esc back   │\n╰───╯ ╰────────────────────╯'
+    if ! printf '%s\n' "$side_by_side" | _af_tasks_overlay_visible; then
+        _af_fail 'a complete foreign box left of the same-row task frame hid it'
+        return 1
+    fi
+    # The left box cannot close the right candidate before its own bottom.
+    local missing_task_bottom
+    missing_task_bottom=$'╭───╮ ╭────────────────────╮\n│   │ │ n new · esc back   │\n╰───╯ │                    │'
+    if printf '%s\n' "$missing_task_bottom" | _af_tasks_overlay_visible; then
+        _af_fail 'a foreign bottom closed an incomplete task-frame candidate'
+        return 1
+    fi
+}
+
 # Both lists are empty: the workspace and task recovery share their action copy.
 # Inject one captured pre-overlay frame to make the stale-frame race deterministic,
 # then exercise the real dialog and prove closing it sends exactly one Escape.
@@ -882,6 +900,8 @@ step "all ERE metacharacters (#4037)" _expect_regex_escape_literal '.[](){}*+?^$
 step "task frame accepts an earlier top corner in the rail" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project-name     '
 step "task frame accepts an earlier bottom corner in the rail" _expect_tasks_frame_after_rail_corner '  project-name     ' '  project╰name     '
 step "task frame accepts earlier rail corners on both edges" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project╰name     '
+
+step "task frame beside a foreign same-row box retains its own geometry" _expect_tasks_frame_beside_foreign_box
 
 step "reset sandbox to a clean state"                       af_reset_sandbox
 step "seed a non-codex default before daemon boot"           _seed_config_editor_start_value
