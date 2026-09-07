@@ -127,14 +127,13 @@ func TestCloseReapsEscapedPaneProcesses(t *testing.T) {
 	require.True(t, proctree.AliveSame(escapee), "escapee must be alive before Close")
 
 	session := NewTmuxSessionFromSanitizedName(name, "sh")
+	waitForReap := awaitCloseReap(t, session)
 	_, closeErr := session.Close()
 	require.NoError(t, closeErr)
 	require.False(t, session.ExistsOrUnknown(), "session must be gone after Close")
 
-	// Close reaps asynchronously; the escapee ignores SIGHUP, so only the
-	// reaper's SIGTERM/SIGKILL can end it.
-	require.Eventually(t, func() bool { return !proctree.AliveSame(escapee) },
-		5*time.Second, 25*time.Millisecond,
+	waitForReap()
+	require.False(t, proctree.AliveSame(escapee),
 		"SIGHUP-immune pane child survived Close — process tree was not reaped")
 }
 
