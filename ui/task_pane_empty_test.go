@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,6 +38,73 @@ func TestTaskPaneListRecoveryKeepsTitleAndEscHint(t *testing.T) {
 				"the unavailable action menu must stay hidden in a recovery state")
 			require.NotContains(t, plain, "enter")
 			require.NotContains(t, plain, "?")
+		})
+	}
+}
+
+func TestTaskPaneUnavailableDisablesSelectionActions(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		key              string
+		checkUnavailable func(t *testing.T, pane *TaskPane)
+		checkAvailable   func(t *testing.T, pane *TaskPane)
+	}{
+		{
+			name: "toggle",
+			key:  "x",
+			checkUnavailable: func(t *testing.T, pane *TaskPane) {
+				require.True(t, pane.GetTasks()[0].Enabled)
+			},
+			checkAvailable: func(t *testing.T, pane *TaskPane) {
+				require.False(t, pane.GetTasks()[0].Enabled)
+			},
+		},
+		{
+			name: "run",
+			key:  "r",
+			checkUnavailable: func(t *testing.T, pane *TaskPane) {
+				require.False(t, pane.HasPendingTrigger())
+			},
+			checkAvailable: func(t *testing.T, pane *TaskPane) {
+				require.True(t, pane.HasPendingTrigger())
+			},
+		},
+		{
+			name: "delete",
+			key:  "D",
+			checkUnavailable: func(t *testing.T, pane *TaskPane) {
+				require.Len(t, pane.GetTasks(), 2)
+			},
+			checkAvailable: func(t *testing.T, pane *TaskPane) {
+				require.Len(t, pane.GetTasks(), 1)
+			},
+		},
+		{
+			name: "edit",
+			key:  "enter",
+			checkUnavailable: func(t *testing.T, pane *TaskPane) {
+				require.False(t, pane.IsEditing())
+			},
+			checkAvailable: func(t *testing.T, pane *TaskPane) {
+				require.True(t, pane.IsEditing())
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pane := NewTaskPane()
+			pane.SetTasks([]task.Task{
+				{ID: "first", Name: "first", Enabled: true},
+				{ID: "second", Name: "second", Enabled: true},
+			})
+			pane.SetFocus(true)
+			pane.SetUnavailable(errors.New("task file is unreadable"))
+
+			pane.HandleKeyPress(keyRunes(tc.key))
+			tc.checkUnavailable(t, pane)
+
+			pane.SetUnavailable(nil)
+			pane.HandleKeyPress(keyRunes(tc.key))
+			tc.checkAvailable(t, pane)
 		})
 	}
 }

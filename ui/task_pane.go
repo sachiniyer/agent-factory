@@ -453,6 +453,17 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 	if msg.String() == "ctrl+c" || configuredQuitKey(msg) {
 		return false
 	}
+	// A failed refresh retains the last tasks internally so a later successful
+	// sync can reconcile them, but recovery mode deliberately renders no
+	// selection. Keep every selection-dependent key inert until the data is
+	// available again; `n` and Esc remain live affordances in the recovery
+	// footer.
+	if s.unavailable != "" {
+		switch msg.String() {
+		case "up", "k", "down", "j", "x", "D", "enter", "r":
+			return true
+		}
+	}
 	switch msg.String() {
 	case "?":
 		s.showActions = !s.showActions
