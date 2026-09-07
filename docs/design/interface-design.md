@@ -7,9 +7,9 @@ The web remains vanilla TypeScript with no new runtime dependencies.
 The only user-facing theme choice will be **Light / Dark / System**: two fixed
 product palettes, with System selecting between them. No per-token overrides,
 custom palettes or colour configuration keys. This document
-sets the contract for P2 and P5; this slice changes no live screen, user palette,
-terminal output, shortcut or session behaviour. The [style guide](style-guide.md)
-is the only consumer of the new CSS. The new Go theme is not installed in `ui`.
+sets the contract for P2 and P5. The generated tokens now supply the live web,
+TUI, browser chrome and docs palettes. The [style guide](style-guide.md) displays
+both twins together.
 
 ## Evidence and reading order today
 
@@ -59,6 +59,26 @@ The [recorder documentation](../dev/demo-assets.md) identifies real UI and seede
 agent stand-ins. The [style guide](style-guide.md) pairs specimens with those
 stills and marks missing capture coverage. The TUI Sessions/Tasks SVGs are
 supplementary evidence of an older palette, not recoloured recorder outputs.
+
+## Browser and installed-app chrome
+
+[The design generator](https://github.com/sachiniyer/agent-factory/tree/master/internal/designtokens)
+stamps the light and dark `theme-color` metas in
+[the HTML shell](https://github.com/sachiniyer/agent-factory/blob/master/web/src/index.html)
+from the corresponding `surface` tokens. The
+[manifest](https://github.com/sachiniyer/agent-factory/blob/master/web/src/manifest.webmanifest)
+can carry only one `theme_color`: it uses the **light surface**, matching the
+light meta and prefers-color-scheme defaults. Its `background_color` is the light
+surface too. Dark browser chrome comes from the dark meta; at runtime `theme.ts`
+rewrites both metas to follow an explicit Light/Dark choice. The installed-app
+splash retains the manifest's light convention.
+
+`go run ./scripts/gen-design --check` checks both source files for drift.
+`TestDesignWebChromeServedBytes` independently reads the committed `web/dist`
+HTML and manifest before any JavaScript can rewrite them. The browser selftest
+separately proves the post-boot theme rewrite. Docs chrome consumes the generated
+palette through Material's scheme selector; embedded tab notices use the generated
+Go dark surface, ink and accent roles.
 
 ## Principles
 
