@@ -914,65 +914,163 @@ _af_tab_count() {
     af_capture | grep -cE '^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]' || true
 }
 
-# _AF_TASKS_RUN_HINT — the run-action affordance that marks the task overlay as
-# open. `m` drops STRAIGHT into the selected task's edit form when a task exists
-# (#1249), whose narrow-width footer collapses `r run now` to `r run` — so the
-# old `run now` marker matched the empty-list view but MISSED the edit view at
-# 80x24 and af_open_tasks reported a false timeout (#1757). `r run[ now]` is the
-# one run affordance common to every list/edit × wide/narrow variant.
-#
-# ANCHOR it on BOTH sides of the `r` key hint so it can only match the overlay's
-# own menu line, never arbitrary visible pane text that happens to contain the
-# substring `r run` (Greptile, PR #1769):
-#   * LEFT — `(^|[^[:alnum:]])`: the `r` must start a token (line start, or a
-#     non-alphanumeric like the frame padding / a `· ` separator before it), so
-#     the trailing `r` of a word does NOT count ("serve`r run` ·", "you`r run`").
-#   * RIGHT — ` ·` (U+00B7): the run action is ALWAYS followed by the TASK
-#     OVERLAY's space-and-middle-dot separator (`r run now · …` / `r run · …`),
-#     which no shell output line ("no longe`r run`ning.", "you`r run` finished")
-#     carries.
-# The middle dot is matched as a literal byte sequence, not a bracket
-# expression, so it works under the sandbox's C/POSIX locale (cf.
-# _af_tab_count).
-#
-# This separator is the TASK OVERLAY's (ui/task_pane.go / ui/task_pane_edit.go).
-# The overlay hints historically kept the old bullet (`•`) after the status menu
-# moved to the repo-standard ` · ` in #2399, and this anchor pinned the bullet —
-# until the overlay itself converted to ` · ` and the stale anchor made the
-# self-test time out on a visibly open overlay (#3268). The anchor tracks the
-# overlay renderers, nothing else: if their separator ever changes again, change
-# this with it.
+# _AF_TASKS_RUN_HINT remains the edit-mode assertion marker. It is deliberately
+# not the open/close anchor: the default list footer hides secondary actions
+# behind `?`, and an empty list has no run action at all (#3995).
 : "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
 
-# Empty and populated lists no longer advertise the editor's run action.
-_AF_TASKS_OPEN_HINT="$_AF_TASKS_RUN_HINT|enter edit .*\? actions|Press n to create one\."
+# _AF_TASKS_LIST_TITLE is only the list/edit discriminator used by the self-test
+# before revealing secondary list actions. It is NOT the open/close anchor: the
+# edit form scrolls its title away to keep the focused field visible at the
+# supported 80x10 floor.
+: "${_AF_TASKS_LIST_TITLE:=│[[:space:]]+Tasks[[:space:]]+│}"
 
-# af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
-# `r run` hint in populated list/edit mode, or the empty-list recovery copy.
+# _AF_TASKS_FOOTER uses combinations unique to Tasks among the built-in dialogs:
+# recovery/list has n new or ? actions, edit/watch has x toggle, and create has
+# tab[/shift+tab] fields. Do not accept enter edit or D delete alone: Hooks and
+# the project picker share them. These mirror task_pane_recovery.go and
+# task_pane_edit.go; unlike the title, the footer survives the 80x10 form scroll.
+: "${_AF_TASKS_FOOTER:=(n new ·|[?] actions ·|x toggle ·|tab(/shift[+]tab)? fields ·).*esc.*│}"
+
+# _AF_TASKS_FRAME_TOP/BOTTOM are the rounded borders shared by every task
+# dialog mode. A workspace pane uses square corners, and its OWN │ borders can
+# surround output whose complete line is "Tasks". Requiring a task footer
+# between both rounded borders prevents that pane text from satisfying the open
+# marker or keeping the close marker alive (review on #3995).
+#
+# Group the repeated horizontal glyph: under the sandbox's C/POSIX locale,
+# `─+` repeats only the last byte of the UTF-8 sequence, while `(─)+` repeats
+# the whole glyph (the same locale trap documented by _AF_PANE_BORDER_FS).
+: "${_AF_TASKS_FRAME_TOP:=╭(─)+╮}"
+: "${_AF_TASKS_FRAME_BOTTOM:=╰(─)+╯}"
+
+# _af_tasks_dialog_has <content-regex> reads a captured screen on stdin and
+# succeeds only when the marker is enclosed by one complete rounded dialog. The
+# first matching top edge establishes the outer geometry; only a later bottom
+# with the same start column and match width closes it, so nested boxes are
+# ignored and no footer-like pane row below the outer bottom is considered.
+# A completed frame without the marker is discarded so later dialogs can match.
+# Force byte semantics for mawk/gawk parity, then count prefix characters by
+# removing UTF-8 continuation bytes. This makes a multibyte sidebar glyph count
+# as one column on both edges; double-width CJK glyphs remain out of scope.
+_af_tasks_dialog_has() {
+    local content_re="$1"
+    LC_ALL=C awk -v top_re="$_AF_TASKS_FRAME_TOP" -v bottom_re="$_AF_TASKS_FRAME_BOTTOM" \
+        -v content_re="$content_re" '
+        # Slice by character columns while preserving UTF-8 for content_re.
+        # A continuation byte belongs to the preceding character, including
+        # all three bytes of each bounding │. Columns are zero-based.
+        # Columns are code points, not cells; a wide character left of the
+        # overlay shifts the geometry. Session titles in the selftest fixtures
+        # are ASCII by design; this is an accepted harness limitation.
+        function frame_row(row,    i, column, byte, result) {
+            column = -1
+            result = ""
+            for (i = 1; i <= length(row); i++) {
+                byte = substr(row, i, 1)
+                if (byte !~ /[\200-\277]/) { column++ }
+                if (column >= top_start && column < top_start + top_chars) {
+                    result = result byte
+                }
+            }
+            return result
+        }
+        $0 ~ top_re {
+            if (!inside && !found) {
+                inside = 1
+                top_line = NR
+                prefix = substr($0, 1, index($0, "╭") - 1)
+                gsub(/[\200-\277]/, "", prefix)
+                top_start = length(prefix)
+                match($0, top_re)
+                # RLENGTH is byte-based under LC_ALL=C; both frame edges use
+                # the same UTF-8 glyph sequence, so equal byte widths suffice.
+                top_width = RLENGTH
+                edge = substr($0, RSTART, RLENGTH)
+                gsub(/[\200-\277]/, "", edge)
+                top_chars = length(edge)
+                matched = 0
+                last_footer = 0
+                next
+            }
+        }
+        inside {
+            if (frame_row($0) ~ content_re) { matched = 1; last_footer = NR }
+            if ($0 ~ bottom_re) {
+                prefix = substr($0, 1, index($0, "╰") - 1)
+                gsub(/[\200-\277]/, "", prefix)
+                bottom_start = length(prefix)
+                match($0, bottom_re)
+                if (bottom_start == top_start && RLENGTH == top_width) {
+                    if (matched && last_footer > top_line && last_footer < NR) { found = 1 }
+                    inside = 0
+                    next
+                }
+            }
+        }
+        END {
+            exit found ? 0 : 1
+        }
+    '
+}
+
+_af_tasks_overlay_visible() {
+    # Before #4006 lands, the empty recovery has no pinned task footer.
+    # Accept its task-specific title only inside the same complete rounded
+    # frame; the first-run workspace shares the action sentence, not this title.
+    _af_tasks_dialog_has "$_AF_TASKS_FOOTER|│[[:space:]]+No tasks[[:space:]]+│"
+}
+
+_af_tasks_list_visible() {
+    _af_tasks_dialog_has "$_AF_TASKS_LIST_TITLE"
+}
+
+# _af_wait_for_tasks_overlay_state <0|1> [timeout_s] [label] — wait for the
+# dialog-specific frame/footer pair to disappear or appear.
+_af_wait_for_tasks_overlay_state() {
+    local expected="$1" timeout="${2:-$AF_DRIVER_TIMEOUT}" label="${3:-tasks overlay}" screen visible
+    local deadline; deadline=$(( $(_af_now) + timeout ))
+    while :; do
+        screen="$(af_capture)"
+        visible=0
+        _af_tasks_overlay_visible <<<"$screen" && visible=1
+        if [ "$visible" -eq "$expected" ]; then
+            return 0
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "TIMEOUT ${timeout}s waiting for: $label"
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+}
+
+# af_open_tasks — open the task-manager overlay (`m`) and synchronize on its
+# rounded frame plus pinned footer, which survives scrolling/collapsed actions.
 af_open_tasks() {
     af_ensure_nav
     af_send m
-    af_wait_for "$_AF_TASKS_OPEN_HINT" "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
+    _af_wait_for_tasks_overlay_state 1 "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 
 # af_close_tasks — dismiss the tasks overlay (Escape). When the overlay opened
-# in edit mode the first Escape drops back to the list (still showing the run
-# hint), so a second Escape closes it; both cases sync on the run hint going
-# away.
+# in edit mode the first Escape drops back to the titled list, so a second
+# Escape closes it; both cases sync on the framed footer going away.
 af_close_tasks() {
     local deadline screen
     af_send Escape
     deadline=$(( $(_af_now) + 4 ))
     while :; do
         screen="$(af_capture)"
-        if ! printf '%s\n' "$screen" | grep -qE -- "$_AF_TASKS_OPEN_HINT"; then
+        if ! _af_tasks_overlay_visible <<<"$screen"; then
             return 0
         fi
         [ "$(_af_now)" -ge "$deadline" ] && break
         sleep "$AF_DRIVER_POLL"
     done
     af_send Escape
-    af_wait_gone "$_AF_TASKS_OPEN_HINT" 8 'tasks overlay closed' || return 1
+    _af_wait_for_tasks_overlay_state 0 8 'tasks overlay closed' || return 1
 }
 
 # The config editor's own marker. Anchored on the hint row rather than a key

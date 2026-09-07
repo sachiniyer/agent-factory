@@ -61,6 +61,53 @@ _expect_regex_escape_literal() {
     fi
 }
 
+# Both lists are empty: the workspace and task recovery share their action copy.
+# Inject one captured pre-overlay frame to make the stale-frame race deterministic,
+# then exercise the real dialog and prove closing it sends exactly one Escape.
+# shellcheck disable=SC2317
+_expect_empty_tasks_over_empty_workspace() (
+    local probe escape_count=0 rc=0
+    probe="$(mktemp -d)"
+    trap 'rm -rf "$probe"' EXIT
+    af_assert_screen 'Sessions \(0\)' 'session list is empty' || return 1
+    af_assert_screen 'No sessions yet' 'first-run workspace is visible' || return 1
+    af_capture >"$probe/workspace"
+    af_capture() {
+        if [ -f "$probe/stale" ]; then
+            rm "$probe/stale"
+            cat "$probe/workspace"
+        else
+            touch "$probe/fresh"
+            tmux capture-pane -p -t "$AF_DRIVER_SESSION" 2>/dev/null
+        fi
+    }
+    af_send() {
+        [ "$1" != m ] || touch "$probe/stale"
+        if [ "$1" = Escape ]; then
+            escape_count=$((escape_count + 1))
+        fi
+        tmux send-keys -t "$AF_DRIVER_SESSION" "$@"
+    }
+    af_open_tasks || return 1
+    if [ ! -f "$probe/fresh" ]; then
+        _af_log 'empty tasks: open accepted the stale workspace frame'
+        rc=1
+    fi
+    af_wait_for 'No tasks' 10 'empty task dialog really painted' || return 1
+    printf '\n=== empty tasks over empty workspace: before close ===\n'
+    af_capture
+    af_close_tasks || rc=1
+    if [ "$escape_count" -ne 1 ]; then
+        _af_log "empty tasks: close sent $escape_count Escapes, expected exactly one"
+        rc=1
+    fi
+    af_wait_gone 'No tasks' 3 'empty task dialog closed' || return 1
+    af_assert_screen 'No sessions yet' 'plain workspace remains after one Escape' || return 1
+    printf '\n=== empty tasks over empty workspace: after close ===\n'
+    af_capture
+    return "$rc"
+)
+
 # _expect_resize_rejected — the NEGATIVE check for af_resize (Greptile, #1201):
 # a resize tmux cannot honor must FAIL LOUDLY, never masquerade as success (or a
 # tiny-size gate would keep running at the wrong size). We point af_resize at a
@@ -825,6 +872,7 @@ step "seed a non-codex default before daemon boot"           _seed_config_editor
 # actually took the requested size — so a green boot is also positive proof
 # af_resize works (#1174 item 2 / #1201).
 step "boot af at ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}"        af_boot
+step "empty task dialog over empty workspace opens and closes once" _expect_empty_tasks_over_empty_workspace
 step "af_resize fails loudly on an impossible resize"       _expect_resize_rejected
 # --- #2148 regression: the boot gate must survive a scrolled rail ---
 # The `Sessions (N)` header is the rail's first windowed ROW, not chrome, so a
