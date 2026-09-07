@@ -859,6 +859,18 @@ _expect_task_overlay_marker_context() {
         return 1
     fi
 
+    local preceding_box mismatched_bottom
+    preceding_box=$'╭────────╮\n│ output │\n╰────────╯\n│ n new · esc back │'
+    if ! printf '%s\n%s\n' "$preceding_box" "$list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a footer-less rounded box above the real task dialog hid it'
+        return 1
+    fi
+    mismatched_bottom=$'╭────────────────────╮\n│ n new · esc back │\n    ╰────────╯'
+    if printf '%s\n' "$mismatched_bottom" | _af_tasks_overlay_visible; then
+        _af_fail 'an unrelated bottom with different geometry satisfied the task marker'
+        return 1
+    fi
+
     compact_list_modal=$'╭──────────────────────────────────────╮\n│                                      │\n│  enter edit · ? actions · esc        │\n│                                      │\n╰──────────────────────────────────────╯'
     if ! printf '%s\n' "$compact_list_modal" | _af_tasks_overlay_visible; then
         _af_fail 'the rounded task dialog and its compact list footer did not satisfy the marker'

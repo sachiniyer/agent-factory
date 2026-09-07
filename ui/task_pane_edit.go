@@ -68,6 +68,14 @@ func (s *TaskPane) validateForm() (string, int) {
 }
 
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
+	// Retain unsaved form text after a failed refresh, but do not act on the
+	// stale selected task until a successful refresh restores availability.
+	if s.unavailable != "" && s.editing && !s.creating {
+		switch msg.String() {
+		case "r", "x", "D":
+			return true
+		}
+	}
 	if s.editing && !s.creating {
 		switch msg.String() {
 		case "r":

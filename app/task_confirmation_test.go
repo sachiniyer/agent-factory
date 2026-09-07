@@ -44,6 +44,8 @@ func TestUnavailableTasksDoNotOpenDeleteConfirmation(t *testing.T) {
 	pane.SetFocus(true)
 	pane.SetUnavailable(errors.New("task file is unreadable"))
 
+	h.showTasksOverlay()
+	require.False(t, pane.IsEditing(), "unavailable retained tasks must open recovery, not the editor")
 	h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
 
 	require.Equal(t, stateTasks, h.state)

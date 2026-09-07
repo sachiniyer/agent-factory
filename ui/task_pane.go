@@ -595,13 +595,16 @@ func (s *TaskPane) runSelectedTask() {
 }
 
 func (s *TaskPane) enterEditMode() {
+	if s.unavailable != "" {
+		return
+	}
 	tsk := s.tasks[s.selectedIdx]
 	s.initForm(&tsk, "")
 	s.editing = true
 }
 
 // EnterEditSelected drops straight into the edit form for the currently
-// selected task, no-op'ing when the list is empty (so an empty overlay stays
+// selected task, no-op'ing when tasks are unavailable or the list is empty (so it stays
 // in list mode where `n` creates the first task). It bounds-guards the
 // selected index that the unexported enterEditMode assumes, letting the
 // overlay open a task directly into its config in a single action (#1249).

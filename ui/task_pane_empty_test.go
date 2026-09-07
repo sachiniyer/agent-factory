@@ -125,3 +125,36 @@ func TestTaskPaneSelectedTaskUnavailable(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "first", selected.ID)
 }
+
+func TestTaskPaneUnavailableOpenEditorPreservesEditsAndBlocksActions(t *testing.T) {
+	for _, key := range []string{"r", "x", "D"} {
+		t.Run(key, func(t *testing.T) {
+			pane := NewTaskPane()
+			pane.SetTasks([]task.Task{{ID: "first", Name: "first", Enabled: true}, {ID: "second", Name: "second"}})
+			pane.SetFocus(true)
+			pane.EnterEditSelected()
+			pane.editName.SetValue("unsaved")
+			pane.SetUnavailable(errors.New("task file is unreadable"))
+			pane.HandleKeyPress(keyRunes(key))
+			require.False(t, pane.HasPendingTrigger())
+			require.Len(t, pane.GetTasks(), 2)
+			require.True(t, pane.GetTasks()[0].Enabled)
+			require.Empty(t, pane.ConsumeDeleted())
+			require.False(t, pane.IsDirty())
+			require.True(t, pane.IsEditing())
+			require.Equal(t, "unsaved", pane.editName.Value())
+			pane.HandleKeyPress(keyRunes("z"))
+			require.Contains(t, pane.editName.Value(), "z", "text editing continues during failed refresh")
+			pane.SetUnavailable(nil)
+			pane.HandleKeyPress(keyRunes(key))
+			switch key {
+			case "r":
+				require.True(t, pane.HasPendingTrigger())
+			case "x":
+				require.False(t, pane.GetTasks()[0].Enabled)
+			case "D":
+				require.Len(t, pane.GetTasks(), 1)
+			}
+		})
+	}
+}
