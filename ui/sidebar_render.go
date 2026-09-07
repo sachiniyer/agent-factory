@@ -364,16 +364,17 @@ func (s *Sidebar) renderInstance(idx int, selected bool) string {
 
 // renderTabRow renders one tab child row of an expanded instance. The label
 // set comes from tree.TabLabels — the same slots the tab bar shows — and the
-// row whose slot matches the store's active tab carries the "*" marker.
+// row whose instance and slot match an open pane carries the " · open" marker.
 func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 	instances := s.proj.GetInstances()
 	if item.ItemIndex < 0 || item.ItemIndex >= len(instances) {
 		return ""
 	}
-	labels := tree.TabLabels(instances[item.ItemIndex])
+	inst := instances[item.ItemIndex]
+	labels := tree.TabLabels(inst)
 	if item.TabIndex < 0 || item.TabIndex >= len(labels) {
 		return ""
 	}
 	return s.renderer.RenderTab(labels[item.TabIndex], item.TabIndex+1,
-		item.TabIndex == len(labels)-1, selected, s.proj.ActiveTab() == item.TabIndex)
+		item.TabIndex == len(labels)-1, selected, s.proj.FindOpenPane(inst, item.TabIndex) != nil)
 }
