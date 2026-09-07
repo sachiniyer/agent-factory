@@ -200,7 +200,7 @@ func (c *scanContext) tempHomeCandidates() tempHomeSweep {
 // Advisory, not actionable. "I did not finish looking" is an unknown, and this
 // package never lets an unknown assert that a machine is unhealthy — see the
 // Finding.Actionable contract. It reaches the reader through the summary line
-// and summary.incomplete instead of through the exit code.
+// and summary.incomplete, which independently makes the command exit 1.
 func reportTempHomeSweepTruncation(report *Report, tempDir string, sweep tempHomeSweep, budget int) {
 	if !sweep.truncated() {
 		return
