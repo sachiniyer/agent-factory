@@ -18,7 +18,7 @@ func TestTinyClipConfirmationOverlaysFit(t *testing.T) {
 		name    string
 		message string
 	}{
-		{name: "kill", message: "[!] Kill session 'beta'?"},
+		{name: "kill", message: "Delete session 'beta'?"},
 		{
 			name: "archive",
 			message: "[!] Archive session 'beta'?\n\n" +
