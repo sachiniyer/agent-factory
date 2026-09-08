@@ -78,13 +78,6 @@ var loginCommands = map[string][]string{
 	"gemini": {},
 }
 
-// LoginCommand returns the agent's login invocation words, and whether one is
-// known. A false result means "say nothing", never "guess".
-func LoginCommand(agent string) ([]string, bool) {
-	words, ok := loginCommands[agent]
-	return words, ok
-}
-
 // ErrUnsupportedAgent reports an agent whose credential relocation was never
 // verified. It is a distinct error because the answer for the operator is
 // "this agent cannot do accounts", not "you typed the name wrong".
