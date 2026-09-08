@@ -12,7 +12,7 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
     const before = stream();
     await ctrl.click();
     await expect(ctrl).toHaveAttribute("data-state", "once");
-    await textarea.evaluate(async (el, { postCommit, committed, eventData }) => {
+    await textarea.evaluate(async (el, { postCommit, trailing, committed, eventData }) => {
       const input = el as HTMLTextAreaElement;
       const start = input.value.length;
       input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
@@ -35,8 +35,8 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       }
       // Let xterm's compositionend timer finish before checking for duplicates.
       await new Promise(resolve => setTimeout(resolve, 0));
-    }, { postCommit, committed, eventData });
-    await expect.poll(stream).toBe(before + committed);
+    }, { postCommit, trailing, committed, eventData });
+    await expect.poll(stream).toBe(before + committed + (trailing ? "\x18" : ""));
     await expect(ctrl).toHaveAttribute("data-state", "once");
     await expect.poll(stream).toBe(before + committed + (trailing ? "\x18" : ""));
     await expect(ctrl).toHaveAttribute("data-state", trailing ? "off" : "once");
