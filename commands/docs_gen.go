@@ -230,6 +230,8 @@ func writeAPIReference(path string) error {
 		"takes precedence over that boolean and means the mutation must not be retried. " +
 		"See the [response envelope contract](../http-api.md#response-envelope) for details.\n\n")
 
+	b.WriteString("`CreateSession.force_remote` remains accepted for compatibility with older clients. It selects the hook backend when `backend` is empty; an explicit `backend` takes precedence. New clients should use `backend` (for example, `\"hook\"`), as the TUI creation form does.\n\n")
+
 	b.WriteString("## Endpoints\n\n")
 	b.WriteString("Request fields are the JSON keys of each route's request body; " +
 		"a `—` means the route takes no body (or an empty `{}`).\n\n")

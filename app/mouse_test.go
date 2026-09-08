@@ -1153,7 +1153,13 @@ func TestMouse_InteractiveStatusHintExits(t *testing.T) {
 // TestMouse_HintClickMatchesKeyGates: keyMsgFromString covers every primary
 // key the menu can advertise, so a rendered hint is always clickable.
 func TestMouse_HintClickMatchesKeyGates(t *testing.T) {
-	for _, binding := range keys.GlobalKeyBindings {
+	for name, binding := range keys.GlobalKeyBindings {
+		if name == keys.KeyNewRemote {
+			// Compatibility-only action: no default key or advertised hint (#4017).
+			require.Empty(t, binding.Keys(), "retired new_remote must not advertise a default hint")
+			continue
+		}
+		require.NotEmpty(t, binding.Keys(), "advertised binding %v must have a primary key", name)
 		primary := binding.Keys()[0]
 		if primary == "1" { // KeyJumpTab renders no zone by design
 			continue

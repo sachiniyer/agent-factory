@@ -107,7 +107,10 @@ For a named long-running command or a web preview with a URL/port, use
 
 ## Sessions, tasks, and other surfaces
 
-- **`n`** creates a new local session; **`N`** creates a remote one.
+- **`n`** opens the creation form; use **`ctrl+r`** to choose its backend.
+  The legacy **`N`** shortcut is retired. An explicitly configured `[keys].new_remote`
+  binding remains accepted and opens the creation form with the backend field focused;
+  it does not force a remote backend.
 - **`a`** archives the selected live session as the default done action, behind
   a confirmation — on an archived, Lost, or Dead row it does nothing. **`r`**
   restores an archived, Lost, or Dead session. **`D`** permanently kills a
