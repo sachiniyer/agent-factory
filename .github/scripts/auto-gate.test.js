@@ -404,6 +404,60 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
+test("Auto Gate dedupes queued workflows by event target without cancelling transactions", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const concurrency = workflow.match(
+    /^concurrency:\n  group: auto-gate-target-\$\{\{ (.+) \}\}\n  cancel-in-progress: false$/m,
+  );
+  assert.ok(concurrency, "workflow-level queued-only target concurrency is missing");
+  const fields = concurrency[1].split(" || ");
+  assert.deepEqual(fields, [
+    "github.event.issue.number",
+    "github.event.pull_request.number",
+    "inputs.pr_number",
+    "github.event.workflow_run.head_sha",
+    "github.event.check_suite.head_sha",
+    "github.event.sha",
+    "github.run_id",
+  ]);
+  // Evaluate the actual expression's property/OR subset, including Actions'
+  // empty value for missing properties, rather than duplicating its key logic.
+  const group = (event, inputs = {}, runId = 100) => {
+    const context = { github: { event, run_id: runId }, inputs };
+    const target = fields.map((field) => field.split(".").reduce(
+      (value, key) => value?.[key], context,
+    )).find((value) => value);
+    return `auto-gate-target-${target}`;
+  };
+  const cases = {
+    check_suite: [{ check_suite: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    issue_comment: [{ issue: { number: 4060 }, comment: { body: "[gate-ack]" } }, {}, 4060],
+    pull_request_review: [{ pull_request: { number: 4060 } }, {}, 4060],
+    pull_request_review_comment: [{ pull_request: { number: 4060 } }, {}, 4060],
+    pull_request_target: [{ pull_request: { number: 4060 } }, {}, 4060],
+    status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
+    workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
+  };
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.deepEqual(
+    [...triggers.matchAll(/^  (\w+):/gm)].map((match) => match[1]).sort(),
+    Object.keys(cases).sort(),
+    "every subscribed trigger needs a target-key fixture",
+  );
+  for (const [name, [event, inputs, target]] of Object.entries(cases)) {
+    assert.equal(group(event, inputs), `auto-gate-target-${target}`, name);
+    assert.equal(group(event, inputs, 200), group(event, inputs), `${name} must ignore run ID`);
+  }
+  assert.equal(group({}, { pr_number: "4060" }), "auto-gate-target-4060");
+  assert.equal(group({}), "auto-gate-target-100");
+  assert.equal(group({}, {}, 200), "auto-gate-target-200");
+  assert.notEqual(group({ issue: { number: 4061 } }), group({ issue: { number: 4060 } }));
+  assert.notEqual(group({ sha: OTHER_SHA }), group({ sha: HEAD_SHA }));
+  assert.match(triggers, /issue_comment:\n    types: \[created, edited, deleted\]/);
+  assert.doesNotMatch(workflow, /github\.event\.comment\.(?:body|user)/);
+});
+
 test("Auto Gate can be recovered manually by PR number", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const helper = fs.readFileSync(path.join(__dirname, "auto-gate.js"), "utf8");

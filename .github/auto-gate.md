@@ -244,9 +244,28 @@ bypass: a maintainer's direct merge is supposed to meet the same required check
 as the workflow's merge. The stable-release deploy key may retain its narrow
 bypass because that non-session path updates the release commit directly.
 
+## Queued-only deduplication
+
+Workflow concurrency uses `auto-gate-target-<target>`: the issue or pull-request
+number, dispatch PR number, workflow-run head SHA, check-suite head SHA, or status
+SHA (in that order). If none is available, the run ID keeps unnameable runs
+independent. Every comment event remains subscribed, including marker replies.
+
+With `cancel-in-progress: false`, GitHub retains at most one running and one
+pending workflow per target; a new pending run replaces the older pending run.
+This is safe because the surviving run re-reads current PR, review, and check
+state rather than replaying each comment. In-progress runs are never cancelled,
+so a merge transaction finishes uninterrupted.
+
+The separate `auto-gate-aggregate-<head SHA>` job lane remains unchanged. PR-keyed
+and SHA-keyed workflows can overlap (as can different PRs sharing a head), so
+that lane still serializes refresh/report/merge for the same commit. Workflow
+admission happens first; once admitted, invalidation still precedes the
+aggregate lane, and merge preflight still re-reads current state.
+
 ## Event and merge ordering
 
-Each subscribed input event first creates a new non-green aggregate generation
+Each admitted workflow first creates a new non-green aggregate generation
 without waiting for the head's serialized lane. It then refreshes every
 associated PR/head decision, republishes its own generation, and considers a
 merge inside that lane. If a newer event invalidates the head while the older

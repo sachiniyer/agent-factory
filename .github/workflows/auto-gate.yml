@@ -33,6 +33,11 @@ on:
         required: true
         type: number
 
+# Collapse pending duplicates; never interrupt an active merge transaction.
+concurrency:
+  group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
