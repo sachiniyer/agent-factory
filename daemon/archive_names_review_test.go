@@ -54,7 +54,7 @@ func TestArchiveDirectoryBackendScope(t *testing.T) {
 }
 
 func TestArchiveDirectoryPortableComparison(t *testing.T) {
-	for _, pair := range [][2]string{{"Caf\u00e9", "Cafe\u0301"}, {"Feature", "feature"}, {"Feature", "unrelated"}} {
+	for _, pair := range [][2]string{{"Caf\u00e9", "Cafe\u0301"}, {"Feature", "feature"}, {"x/Σz", "x-ςz"}, {"x/Σz", "x-σz"}, {"Feature", "unrelated"}} {
 		for _, source := range []string{"live", "disk", "reserved"} {
 			t.Run(pair[0]+"_"+pair[1]+"_"+source, func(t *testing.T) {
 				m := &Manager{instances: make(map[string]*session.Instance), reservedTitles: make(map[string]struct{}), reservedArchiveTitles: make(map[string]struct{})}

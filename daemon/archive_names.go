@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -45,11 +46,22 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		}
 	}
 	for _, data := range disk {
-		if !data.UsesLocalTmux() || data.Worktree.ExternalWorktree || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
+		if !data.UsesLocalTmux() || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
 			continue
 		}
-		if err := collision(data.Title); err != nil {
-			return err
+		if archiveTitleKey(data.Title) != candidate {
+			continue
+		}
+		// Decode the same ownership projections as FromInstanceData before
+		// interpreting ExternalWorktree. ForStorage sets it for af-owned trees
+		// too, to keep older releases from destroying unresolved archives.
+		decoded := data.RestoreArchiveRollbackFence()
+		decoded, err := decoded.RestoreRelocationRecoveryOriginals()
+		if err != nil {
+			return fmt.Errorf("%w: cannot restore archive ownership for session %q: %v", errTitleCheckFatal, data.Title, err)
+		}
+		if !decoded.Worktree.ExternalWorktree {
+			return collision(data.Title)
 		}
 	}
 	return nil
@@ -59,7 +71,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 // including case-sensitive Linux filesystems. Keep sanitizeArchiveTitle as the
 // on-disk spelling; only namespace admission folds case and Unicode composition.
 func archiveTitleKey(title string) string {
-	return strings.ToLower(norm.NFC.String(sanitizeArchiveTitle(title)))
+	return cases.Fold().String(norm.NFC.String(sanitizeArchiveTitle(title)))
 }
 
 // checkArchiveDestination runs before editors, hooks, or tabs are stopped.
