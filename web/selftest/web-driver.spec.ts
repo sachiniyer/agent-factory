@@ -51,11 +51,12 @@ import { readFileSync } from "node:fs";
 import { decode, Op } from "../src/frame.js";
 import { openAfterInitialResync } from "./initial-resync.js";
 
-const surfaceTokens: { light: string; dark: string } = JSON.parse(
+const colorTokens: Record<"surface" | "surface-raised", { light: string; dark: string }> = JSON.parse(
   readFileSync(new URL("../../design/tokens.json", import.meta.url), "utf8"),
-).colors.surface;
-const surfaceRGB = (mode: "light" | "dark") =>
-  `rgb(${[1, 3, 5].map(i => parseInt(surfaceTokens[mode].slice(i, i + 2), 16)).join(", ")})`;
+).colors;
+const surfaceTokens = colorTokens.surface;
+const surfaceRGB = (mode: "light" | "dark", role: "surface" | "surface-raised" = "surface") =>
+  `rgb(${[1, 3, 5].map(i => parseInt(colorTokens[role][mode].slice(i, i + 2), 16)).join(", ")})`;
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -1503,8 +1504,8 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
   await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
-  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("Needs you · synth-probe-needs-you");
-  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("synth-probe-needs-you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("");
   await expect(row(p, "probe-no-branch").locator(".af-row-branch-name")).toHaveCount(0);
   await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
@@ -1774,7 +1775,7 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
 // unfixed code. The paired data-attribute assertions are the other half — they
 // prove the machinery still reports open, so this is a removal of the indicators
 // and not of the thing they indicated.
-test("#2458: no live indicator by the project selector, no live/branch meta by the title", REAL_FIXTURE, async () => {
+test("#2458: no transport indicator beside project or session identity", REAL_FIXTURE, async () => {
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
@@ -6574,9 +6575,9 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // Slice A uses the fixed generated surface in both modes.
-  expect(lightRail).toBe(surfaceRGB("light"));
-  expect(darkRail).toBe(surfaceRGB("dark"));
+  // #4065 uses the fixed raised surface for Sessions chrome in both modes.
+  expect(lightRail).toBe(surfaceRGB("light", "surface-raised"));
+  expect(darkRail).toBe(surfaceRGB("dark", "surface-raised"));
   expect(await bgColor(page, ".af-appbar")).toBe(lightRail);
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
 
@@ -8168,7 +8169,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               { root: mockRepo!, savedTheme: theme },
             );
             const p = await ctx.newPage();
-            const title = `title-row-${roster}-${width}-${theme}-with-a-useful-distinguishing-suffix`;
+            const title = `title-row-${roster}-${width}-${theme}-${"with-a-useful-distinguishing-suffix-".repeat(3)}`;
             await p.route("**/v1/Snapshot", async (route) => {
               const resp = await route.fetch();
               const body = await resp.json();

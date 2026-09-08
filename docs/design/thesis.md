@@ -39,6 +39,8 @@ work while preserving the surrounding list. These are positive references,
 not counterexamples to “fix”. No TUI style or golden changes remain relative
 to the integrated master. Shared token changes affect CSS values and role
 prose only; generated Go paint and terminal cell values are unchanged.
+The [equality manifest](../assets/design/4065/tui-unchanged.json) records all 100
+container SVG captures: every byte matches master `bb6d6179`.
 
 ### Five failures of web expression
 
