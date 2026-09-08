@@ -14738,6 +14738,7 @@ var AppShell = class {
   viewNav;
   sessionFirst = null;
   terminalSelected = false;
+  newTabPickerPosition = null;
   syncPhone = () => {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
@@ -15421,7 +15422,8 @@ var AppShell = class {
       this.appControls.open();
     }
     this.terminalChrome?.menu.open();
-    if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
+    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
+    else trigger.click();
     slot?.querySelector('[role="menuitem"]')?.focus();
   }
   /** The visible New tab button and its kind menu.
@@ -15463,6 +15465,7 @@ var AppShell = class {
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
     };
+    this.newTabPickerPosition = positionMenu;
     const close = () => {
       menu.hidden = true;
       this.newTabDisclosureReturn.delete(trigger);
@@ -15473,6 +15476,7 @@ var AppShell = class {
       scrollParent = null;
       window.removeEventListener("resize", positionMenu);
       wrap.removeEventListener("focusout", onFocusOut);
+      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
     };
     const onFocusOut = (e) => {
       const next = e.relatedTarget;

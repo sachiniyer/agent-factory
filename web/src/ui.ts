@@ -753,6 +753,7 @@ export class AppShell {
   private readonly viewNav: HTMLElement;
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
   private terminalSelected = false;
+  private newTabPickerPosition: (() => void) | null = null;
   private readonly syncPhone = (): void => {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
@@ -1782,7 +1783,8 @@ export class AppShell {
       this.appControls.open();
     }
     this.terminalChrome?.menu.open();
-    if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
+    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
+    else trigger.click();
     slot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
   }
 
@@ -1828,6 +1830,7 @@ export class AppShell {
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
     };
+    this.newTabPickerPosition = positionMenu;
     const close = (): void => {
       menu.hidden = true;
       this.newTabDisclosureReturn.delete(trigger);
@@ -1838,6 +1841,7 @@ export class AppShell {
       scrollParent = null;
       window.removeEventListener("resize", positionMenu);
       wrap.removeEventListener("focusout", onFocusOut);
+      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
     };
     const onFocusOut = (e: FocusEvent): void => {
       // Keyboard focus can leave the menu without a pointer event. Close before

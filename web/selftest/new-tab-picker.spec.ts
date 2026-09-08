@@ -135,10 +135,19 @@ test("desktop picker stays visible after phone recomposition", async ({ page, re
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(menu).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Terminal", exact: true })).toBeFocused();
+  await page.setViewportSize({ width: 1280, height: 844 });
+  await expect(menu).toBeVisible();
+  await expect.poll(async () => page.evaluate(() => {
+    const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Tab type"]');
+    const trigger = document.querySelector<HTMLElement>(".af-tab-new");
+    if (!menu || !trigger) return false;
+    const menuBox = menu.getBoundingClientRect();
+    const triggerBox = trigger.getBoundingClientRect();
+    return menuBox.top >= triggerBox.bottom && menuBox.left >= 0 && menuBox.right <= window.innerWidth;
+  })).toBe(true);
+  await expect(menu.getByRole("menuitem", { name: "Terminal", exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
-  const controls = page.getByRole("button", { name: "More app controls", exact: true });
-  await expect(controls).toBeFocused();
-  await expect(controls).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true })).toBeFocused();
 });
 
 test("picker closes before keyboard activation of a sibling action", async ({ page, request }) => {
