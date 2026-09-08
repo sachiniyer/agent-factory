@@ -123,8 +123,9 @@ export class TerminalKeybar {
     window.addEventListener("resize", this.layout);
     host.addEventListener("keydown", this.onKeyDown, true);
     host.addEventListener("keyup", this.onKeyUp, true);
-    host.addEventListener("beforeinput", this.onSoftInput as EventListener, true);
-    host.addEventListener("input", this.onSoftInput as EventListener, true);
+    this.softInput = new TerminalSoftInput(host, host.querySelector(".xterm-helper-textarea"),
+      () => this.focused && this.phone.matches, () => this.physicalInput, this.input,
+      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off");
     this.paint();
   }
 
