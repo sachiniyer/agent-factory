@@ -242,3 +242,49 @@ and wrapping remain intact. Read `create-compact.png` and
 visible without a stale loading/failure message. No golden was re-baselined for
 unrelated edge-pixel capture differences. The four ownership browser cases cover
 external, preserved, created, and missing legacy branch flags.
+
+### Round five: sandbox deletion and #4047 merge
+
+Deletion selects workspace kind before local ownership. `isOffBoxWorkspace`
+shares the existing `OFF_BOX_BACKENDS` set with the tab-capability fallback; no
+backend list is duplicated and no daemon field is added. The local external,
+af-created-branch and preserved-branch variants stay unchanged.
+
+| Surface | Before | Length | After | Length |
+| --- | --- | ---: | --- | ---: |
+| Delete session · off-box workspace | Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them. | 135 | Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first. | 119 |
+
+Merged master `bb6d6179c0e9d38d187ffbd4f9143e5be6ad4a52` and kept its
+#4047 rail prefix ordering and tests. The only conflict was `web/dist/sw.js`: took
+master temporarily, then rebuilt all dist assets with `npm ci --prefer-offline`
+and `npm run build`. Source changes reapplied cleanly.
+
+Red evidence: the pure Docker copy-selection test expected `removes the sandbox`
+but received `Your branch and its commits stay`. All four off-box backend tests
+failed before the fix; the local-ownership test passed. The fixed unit coverage
+also checks that off-box semantics win even if local ownership flags are present.
+
+Read each new sandbox-confirmation golden individually:
+
+| Golden | Review |
+| --- | --- |
+| `sandbox-delete-360-light.png` | Full loss warning wraps to three readable lines; Archive guidance fits; Cancel and Delete session remain visible within the 360px viewport. |
+| `sandbox-delete-360-dark.png` | Same three-line disclosure in the dark palette; danger action remains distinct from neutral Cancel. |
+| `sandbox-delete-1440-light.png` | Full warning and Archive guidance fit on two lines in the desktop modal; both actions are visible. |
+| `sandbox-delete-1440-dark.png` | Same two-line desktop layout, with readable warning and distinct action outlines. |
+
+The browser fixture retains only `worktree.repo_path` for the existing rail's
+project routing and omits both ownership flags; the initial attempt that removed
+that routing key entirely exposed the rail's existing scoping limitation and was
+corrected without changing production routing. The unit cases select copy for all
+four off-box backend types, including Docker, independently of local flags.
+
+Final validation: **776 unit tests passed**; typecheck/build passed after
+`npm ci --prefer-offline`; the full unfiltered container web selftest passed
+**219 tests (6.5m)** with snapshot updates off. The first full capture run had
+217 passes and two new-baseline creation failures; all four newly captured
+images were read before the strict retry. The strict design suite passed all
+five tests without regenerating existing goldens, and the three-run 1,000-session
+performance budget passed. Gofmt/build/vet/fast lint/file-length checks and strict
+MkDocs also passed. All container starts observed the shared-box load gate and
+suites ran one at a time.

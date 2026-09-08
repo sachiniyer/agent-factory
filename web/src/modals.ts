@@ -524,10 +524,29 @@ export function handoffModal(
   return handle;
 }
 
+export interface DeletionWorkspace {
+  offBox: boolean;
+  externalWorktree: boolean;
+  branchCreatedByUs: boolean;
+}
+
+/** Deletion consequences, selected from the same workspace ownership facts as teardown. */
+export function deletionConfirmationBody(opts: DeletionWorkspace): string {
+  if (opts.offBox) {
+    return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
+  }
+  if (opts.externalWorktree) {
+    return "Permanently deletes the session record and runtime. Your checkout and branch stay.";
+  }
+  return opts.branchCreatedByUs
+    ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
+    : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.";
+}
+
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -539,11 +558,7 @@ export function confirmModal(
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-danger",
-      body: opts.externalWorktree
-        ? "Permanently deletes the session record and runtime. Your checkout and branch stay."
-        : opts.branchCreatedByUs
-          ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
-          : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.",
+      body: deletionConfirmationBody(opts),
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,

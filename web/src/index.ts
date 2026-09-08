@@ -113,6 +113,7 @@ import {
   renderLogin,
   sessionTabs,
   canManageTabs,
+  isOffBoxWorkspace,
   canMutateTabRoster,
   canCreateTabKind,
   canCloseTabs,
@@ -839,6 +840,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
     confirmModal({
       action,
       sessionTitle: target.title,
+      offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
       branchCreatedByUs: session.worktree?.branch_created_by_us === true,
       onConfirm: () => {

@@ -370,6 +370,11 @@ export interface Actions {
  *  what ui.test.ts pins. */
 const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
 
+/** The existing backend-type fallback for off-box workspace ownership. */
+export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+
 /** The kinds this session may gain a tab of, as the DAEMON decided them.
  *
  *  This reads session.Capabilities.RefuseTabKind projected onto the snapshot
@@ -385,7 +390,7 @@ export function allowedTabKinds(s: SessionData): TabKindAllowance[] {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
     return s.tab_kinds;
   }
-  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  const legacyAllowed = !isOffBoxWorkspace(s);
   return LEGACY_TAB_KINDS.map((kind) => ({
     kind,
     allowed: legacyAllowed,

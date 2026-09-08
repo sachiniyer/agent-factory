@@ -10730,13 +10730,22 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   queueMicrotask(() => agentSelect.focus());
   return handle;
 }
+function deletionConfirmationBody(opts) {
+  if (opts.offBox) {
+    return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
+  }
+  if (opts.externalWorktree) {
+    return "Permanently deletes the session record and runtime. Your checkout and branch stay.";
+  }
+  return opts.branchCreatedByUs ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them." : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.";
+}
 function confirmModal(opts) {
   const copy = {
     kill: {
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-danger",
-      body: opts.externalWorktree ? "Permanently deletes the session record and runtime. Your checkout and branch stay." : opts.branchCreatedByUs ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them." : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them."
+      body: deletionConfirmationBody(opts)
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
@@ -11190,15 +11199,17 @@ function rowTitle(s) {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  } else if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  } else if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
   if (s.backend_type === "remote") {
     title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
   }
   const recreate = rootRecreateNote(s);
   if (recreate) {
@@ -14237,11 +14248,14 @@ function isKillableSession(s) {
 }
 var TAB_PINNED_NOTICE = "Agent tab stays first \xB7 drag to a pane to split";
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function isOffBoxWorkspace(s) {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
 function allowedTabKinds(s) {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
     return s.tab_kinds;
   }
-  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  const legacyAllowed = !isOffBoxWorkspace(s);
   return LEGACY_TAB_KINDS.map((kind) => ({
     kind,
     allowed: legacyAllowed,
@@ -16590,6 +16604,7 @@ function openConfirm(action, session) {
     confirmModal({
       action,
       sessionTitle: target.title,
+      offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
       branchCreatedByUs: session.worktree?.branch_created_by_us === true,
       onConfirm: () => {
