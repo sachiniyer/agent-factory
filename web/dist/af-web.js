@@ -7342,6 +7342,20 @@ function modalChrome(opts) {
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", opts.title);
   card.tabIndex = -1;
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const controls = [...card.querySelectorAll(
+      "button, input, select, textarea, a[href], summary, [tabindex]"
+    )].filter((control) => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length > 0);
+    const first = controls[0], last = controls.at(-1);
+    if (!first) {
+      event.preventDefault();
+      card.focus();
+    } else if (!card.contains(document.activeElement) || document.activeElement === card || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  });
   card.addEventListener("click", (e) => e.stopPropagation());
   const backdrop = h("div", { class: "af-modal-backdrop" }, card);
   backdrop.addEventListener("click", () => opts.onCancel());
@@ -10757,6 +10771,16 @@ function confirmModal(opts) {
     handle.setError(null);
     opts.onConfirm();
   });
+  if (acknowledgment) {
+    const checkbox = acknowledgment;
+    const focusAcknowledgment = () => {
+      if (card.isConnected) (checkbox.disabled ? card : checkbox).focus({ preventScroll: true });
+    };
+    card.addEventListener("focus", () => {
+      if (!checkbox.disabled) focusAcknowledgment();
+    });
+    queueMicrotask(focusAcknowledgment);
+  }
   return handle;
 }
 function confirmDeleteProjectModal(opts) {
@@ -15929,7 +15953,8 @@ var AppShell = class {
       managed.id,
       managed.title,
       managed.lifecycle_action ?? null,
-      managed.can_kill === true
+      managed.can_kill === true,
+      managed.is_root === true
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));
@@ -16467,10 +16492,14 @@ function selectedSession2() {
   const s = sessions.find((x) => x.id === selectedId);
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
+var restoreModalFocus = null;
 function closeModal() {
   if (modal) {
+    const restoreFocus = restoreModalFocus;
+    restoreModalFocus = null;
     modal.close();
     modal = null;
+    restoreFocus?.();
   }
 }
 function closeConfigAssistant() {
@@ -16479,11 +16508,36 @@ function closeConfigAssistant() {
     configAssistant = null;
   }
 }
-function openModal(m) {
+function openModal(m, focusCard = false) {
   closeModal();
   closeConfigAssistant();
+  const focused = document.activeElement;
+  const row = focused?.closest(".af-row");
+  const sessionId = row?.querySelector("[data-session-id]")?.dataset.sessionId;
+  const actionLabel = focused?.getAttribute("aria-label");
+  if (focusCard || row) {
+    restoreModalFocus = () => {
+      if (!row && focused?.isConnected && focused.getClientRects().length) {
+        focused.focus({ preventScroll: true });
+        return;
+      }
+      focusRail();
+      const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+      const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+      const target = action && !action.disabled && action.getClientRects().length ? action : menu?.querySelector("button");
+      if (target && target.getClientRects().length) target.focus({ preventScroll: true });
+      else {
+        const rail = root?.querySelector(".af-rail");
+        if (rail) {
+          rail.tabIndex = -1;
+          rail.focus({ preventScroll: true });
+        }
+      }
+    };
+  }
   modal = m;
   modalHost.replaceChildren(m.el);
+  if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
 }
 function doOpenConfigAssistant() {
   const tok = token;
@@ -16603,7 +16657,7 @@ function openConfirm(action, session) {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal) openModal(m);
+            if (!modal) openModal(m, true);
             else surfaceMutationError(e);
             return;
           }
@@ -16624,7 +16678,8 @@ function openConfirm(action, session) {
         });
       },
       onCancel: closeModal
-    })
+    }),
+    true
   );
 }
 function openDeleteProject(root2, label, sessionCount) {

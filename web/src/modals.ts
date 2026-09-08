@@ -611,6 +611,17 @@ export function confirmModal(
     opts.onConfirm();
   });
 
+  if (acknowledgment) {
+    const checkbox = acknowledgment;
+    const focusAcknowledgment = () => {
+      if (card.isConnected) (checkbox.disabled ? card : checkbox).focus({ preventScroll: true });
+    };
+    // The shared mount hook focuses the card, including a retained failed modal.
+    // Root consent starts at its required field; disabled fields fall back to the
+    // card's existing tabindex=-1. Initial construction can precede mounting.
+    card.addEventListener("focus", () => { if (!checkbox.disabled) focusAcknowledgment(); });
+    queueMicrotask(focusAcknowledgment);
+  }
   return handle;
 }
 

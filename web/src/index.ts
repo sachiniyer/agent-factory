@@ -690,11 +690,16 @@ function selectedSession(): { id: string; title: string } | null {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 
+let restoreModalFocus: (() => void) | null = null;
+
 /** Closes and clears the open modal, if any. */
 function closeModal(): void {
   if (modal) {
+    const restoreFocus = restoreModalFocus;
+    restoreModalFocus = null;
     modal.close();
     modal = null;
+    restoreFocus?.();
   }
 }
 
@@ -710,11 +715,35 @@ function closeConfigAssistant(): void {
 /** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
  *  config-assistant chat) — one overlay at a time, and the assistant is torn down
  *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
-function openModal(m: ModalHandle): void {
+function openModal(m: ModalHandle, focusCard = false): void {
   closeModal();
   closeConfigAssistant();
+  const focused = document.activeElement as HTMLElement | null;
+  const row = focused?.closest(".af-row");
+  const sessionId = row?.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId;
+  const actionLabel = focused?.getAttribute("aria-label");
+  if (focusCard || row) {
+    restoreModalFocus = () => {
+      // Header actions do not live in the rail; return to their invoking control.
+      if (!row && focused?.isConnected && focused.getClientRects().length) {
+        focused.focus({ preventScroll: true });
+        return;
+      }
+      focusRail();
+      const menu = sessionId ? root?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+      const action = actionLabel ? menu?.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+      const target = action && !action.disabled && action.getClientRects().length
+        ? action : menu?.querySelector<HTMLButtonElement>("button");
+      if (target && target.getClientRects().length) target.focus({ preventScroll: true });
+      else {
+        const rail = root?.querySelector<HTMLElement>(".af-rail");
+        if (rail) { rail.tabIndex = -1; rail.focus({ preventScroll: true }); }
+      }
+    };
+  }
   modal = m;
   modalHost.replaceChildren(m.el);
+  if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
 }
 
 /** Opens the conversational config assistant (#2467): spawn-or-reuse, stream into a
@@ -882,7 +911,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal) openModal(m);
+            if (!modal) openModal(m, true);
             else surfaceMutationError(e);
             return;
           }
@@ -904,6 +933,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
       },
       onCancel: closeModal,
     }),
+    true,
   );
 }
 

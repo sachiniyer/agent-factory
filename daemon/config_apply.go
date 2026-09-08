@@ -218,7 +218,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// Turning network.require_token OFF voids the premise every outstanding sandbox callback
 	// credential was issued under (#3012 review).
 	//
-	// mintSandboxCallback REFUSES to issue one while network.require_token is false, on the
+	// mintSandboxCallbackFenced REFUSES to issue one while network.require_token is false, on the
 	// grounds that a scoped credential against a listener that authenticates nobody
 	// "manufactures the appearance of a boundary that nothing enforces". That check
 	// runs once, at provision time — and per the block above, an auth key applies
