@@ -270,9 +270,49 @@ bypass: a maintainer's direct merge is supposed to meet the same required check
 as the workflow's merge. The stable-release deploy key may retain its narrow
 bypass because that non-session path updates the release commit directly.
 
+## Queued-only deduplication
+
+Concurrency belongs to evaluation jobs, never the workflow. Every run follows
+this dependency graph:
+
+```text
+auto-gate (resolve event heads, ungrouped)
+  -> invalidate-gate (ungrouped, including retries)
+    -> apply-gate (one reusable-workflow call per invalidated head)
+      -> aggregate transaction (head-serialized evaluation/report/merge)
+```
+
+Neither the resolver nor invalidation has a concurrency group or waits on a
+grouped job. Every event can therefore invalidate while an older transaction
+is running; dedupe cannot discard an event before its invalidation attempt.
+Only successfully invalidated heads enter evaluation. This preserves generation
+ownership checks immediately before PASS and merge, including write retries.
+Runner availability and API failures still apply; concurrency adds no wait here.
+
+The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
+for the entire reusable aggregate transaction. The target is the issue or PR
+number, dispatch PR number, workflow-run head SHA, check-suite head SHA, or
+status SHA (in that order), falling back to the unique run ID. With
+`cancel-in-progress: false`, newer pending evaluation jobs replace older pending
+jobs for that target/head; active transactions are never cancelled. Every
+comment event remains subscribed, including marker replies. The surviving job
+re-reads current PR, review, and check state.
+
+`resolveAggregateHeads` consumes a synchronize payload's `before` in the
+ungrouped resolver, and invalidation covers both current and previous heads.
+The matrix creates a separate evaluation call for each head. Its head suffix
+prevents a later same-PR comment about the current head from replacing the
+previous-head refresh; that refresh still reevaluates other PRs sharing the
+previous commit. This also preserves a head resolved before a subsequent push.
+
+The reusable workflow keeps the existing `auto-gate-aggregate-<head SHA>` job
+lane with `cancel-in-progress: false`. Different PR or SHA targets sharing a
+commit still serialize there. The target and aggregate prefixes are distinct,
+so the caller never waits on a lock it already holds.
+
 ## Event and merge ordering
 
-Each subscribed input event first creates a new non-green aggregate generation
+Each subscribed run first creates a new non-green aggregate generation
 without waiting for the head's serialized lane. It then refreshes every
 associated PR/head decision, republishes its own generation, and considers a
 merge inside that lane. If a newer event invalidates the head while the older

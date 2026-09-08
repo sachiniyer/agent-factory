@@ -300,7 +300,6 @@ func TestInitialPromptCancelPreservesNamingForm(t *testing.T) {
 	h.pendingBackend = "local"
 	h.pendingAccount = "work"
 	h.pendingAccountChosen = true
-	h.pendingForceRemote = true
 	h.namingPlaceholder = "suggested-name"
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyShiftTab})
@@ -316,7 +315,6 @@ func TestInitialPromptCancelPreservesNamingForm(t *testing.T) {
 	assert.Equal(t, "local", h.pendingBackend)
 	assert.Equal(t, "work", h.pendingAccount)
 	assert.True(t, h.pendingAccountChosen)
-	assert.True(t, h.pendingForceRemote)
 	assert.Equal(t, "suggested-name", h.namingPlaceholder)
 	assert.Nil(t, h.promptOverlay)
 	assert.Contains(t, h.menu.String(), "initial prompt")
