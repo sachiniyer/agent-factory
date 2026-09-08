@@ -113,7 +113,9 @@ While naming a new instance the form owns the keyboard and its keys are fixed:
 `Tab` opens the program picker, `Shift-Tab` opens the initial-prompt field
 (#1936), `Ctrl-R` opens the backend field (#1933), `Enter` submits,
 `Esc`/`Ctrl-C` cancel the create. Inside the prompt field `Enter` is a newline —
-`Tab`/`Esc` close it keeping the text, `Ctrl-C` cancels the whole create.
+`Tab`/`Esc` save the prompt edit and return to naming. `Ctrl-C` discards only
+the current prompt edit and returns to the naming form with the previously saved
+prompt and all other pending values intact. `Ctrl-C` from naming cancels the create.
 
 `Enter`, `Tab`, `Shift-Tab`, `Esc`, `Ctrl-]`, and `1`–`9` are **reserved** and
 cannot be rebound (`[keys]` config). `Ctrl-W` is the configurable detach key
