@@ -97,7 +97,7 @@ func TestErrBoxWithoutANSIUnchanged(t *testing.T) {
 }
 
 func TestErrBoxTruncatedErrorShowsDetailsHint(t *testing.T) {
-	const full = "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); PR URL: https://example.invalid/pr/987"
+	const full = "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); Session URL: https://example.invalid/session/987"
 	e := NewErrBox()
 	e.SetSize(64, 1)
 	e.SetError(errors.New(full))
@@ -106,7 +106,7 @@ func TestErrBoxTruncatedErrorShowsDetailsHint(t *testing.T) {
 	if !strings.Contains(out, "E details") {
 		t.Fatalf("truncated error should advertise the full-details key, got %q", out)
 	}
-	if strings.Contains(out, "https://example.invalid/pr/987") {
+	if strings.Contains(out, "https://example.invalid/session/987") {
 		t.Fatalf("test precondition failed: rendered status line was not truncated: %q", out)
 	}
 	if got := e.FullError(); got != full {

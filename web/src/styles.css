@@ -1293,32 +1293,6 @@ button:disabled,
 .af-kb-terminal .af-pane-focused .af-pane-keyboard { display: inline; }
 .af-term-title-separator { color: var(--af-ink); font-size: var(--af-type-heading); }
 
-/* The session's daemon-discovered PR, as a static text chip that IS the link
- * (#3285) — no glyph animation (#1766). It never steals width from the title
- * (flex 0 0), and the hidden case is pinned as an author rule for the same
- * reason as .af-term-action[hidden] above: the day this gains a `display`
- * for icon alignment, the UA default would lose and an empty badge would
- * appear on every session. */
-.af-pr-badge {
-  flex: 0 0 auto;
-  font-size: var(--af-type-body);
-  color: var(--af-accent);
-  text-decoration: none;
-  border: 0;
-  border-radius: 0;
-  padding: 0;
-  white-space: nowrap;
-}
-
-.af-pr-badge:hover {
-  color: var(--af-accent);
-  border-color: var(--af-accent);
-}
-
-.af-pr-badge[hidden] {
-  display: none;
-}
-
 /* A durable incomplete-archive notice, sourced from the daemon snapshot rather
  * than from the restore call that may have happened before this client existed.
  * Keep the complete bounded text scrollable so retained source paths remain
@@ -2951,13 +2925,6 @@ button:disabled,
     grid-column: 1 / -1;
     min-width: 0;
     flex-wrap: nowrap;
-  }
-  .af-term-head:has(> .af-pr-badge:not([hidden])) .af-tabbar { grid-column: 1; }
-  .af-term-head > .af-pr-badge { grid-row: 2; grid-column: 2 / -1; }
-  .af-term-head > .af-pr-badge:not([hidden]) {
-    display: flex;
-    align-items: center;
-    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
   .af-term-head > .af-term-action:not(.af-copy-link-desktop) { grid-column: 1 / -1; }
 

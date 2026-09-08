@@ -179,8 +179,7 @@ func killConfirmationWarning(wt string) string {
 //     that work is actually being lost.
 //   - ("", false) when we have POSITIVE evidence there is nothing to lose: no
 //     commits beyond base, or every such commit is already pushed to a remote or
-//     carried by a merged PR (branch -D deletes only the LOCAL branch, so
-//     pushed/merged commits survive the kill).
+//     reachable from base (branch -D deletes only the LOCAL branch).
 //
 // The check is deliberately offline (no `git fetch`): a kill confirmation must
 // stay as fast as the existing status check and is no place to touch the
@@ -193,7 +192,7 @@ func killConfirmationWarning(wt string) string {
 // not whichever branch the agent has left checked out at HEAD. The fully
 // qualified local ref must resolve before an empty warning can be returned;
 // missing or unverifiable deletion targets fail closed (#2199).
-func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string, deleteBranch bool) (string, bool) {
+func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA string, deleteBranch bool) (string, bool) {
 	if strings.TrimSpace(worktreePath) == "" {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("no worktree path")), false
 	}
@@ -214,7 +213,7 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 	detachedResult := make(chan warningResult, 1)
 	if deleteBranch {
 		go func() {
-			line, severe := branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState)
+			line, severe := branchCommitWarning(worktreePath, branchName, recordedBaseSHA)
 			branchResult <- warningResult{line: line, severe: severe}
 		}()
 	} else {
@@ -240,7 +239,7 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 // unmergedCommitWarning. branchName is the GitWorktree's canonical branch —
 // the exact ref Cleanup deletes — not Instance.Branch, which can be empty or
 // stale on legacy/restored records (#2209 review).
-func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string) (string, bool) {
+func branchCommitWarning(worktreePath, branchName, recordedBaseSHA string) (string, bool) {
 	branchName = strings.TrimSpace(branchName)
 	if branchName == "" {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("no session branch name")), false
@@ -249,7 +248,7 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState stri
 	if _, err := runKillGit(worktreePath, "rev-parse", "--verify", "--quiet", branchRef+"^{commit}"); err != nil {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("session branch could not be resolved: %w", err)), false
 	}
-	base, baseLabel, ok := resolveKillBase(worktreePath, recordedBaseSHA)
+	base, _, ok := resolveKillBase(worktreePath, recordedBaseSHA)
 	if !ok {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("base branch/commit could not be determined")), false
 	}
@@ -264,12 +263,6 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState stri
 	if countGitLines(uniqueOut) == 0 {
 		return "", false // nothing beyond base — kill loses no committed work
 	}
-	// A merged PR means the work landed in the base's history (even a squash,
-	// whose original commits branch -D would orphan, preserves the diff), so it
-	// survives the kill.
-	if strings.EqualFold(strings.TrimSpace(prState), "MERGED") {
-		return "", false
-	}
 	// Of the session's commits, those NOT reachable from any remote-tracking ref
 	// are the ones that exist only here. branch -D orphans exactly these.
 	localOut, err := runKillGit(worktreePath, "log", "--oneline", base+".."+branchRef, "--not", "--remotes")
@@ -280,7 +273,7 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState stri
 	if localOnly == 0 {
 		return "", false // every commit is pushed somewhere — recoverable
 	}
-	return unmergedSevereLine(branchName, localOnly, baseLabel), true
+	return unmergedSevereLine(branchName, localOnly), true
 }
 
 // detachedHeadCommitWarning reports commits that lose their final surviving ref
@@ -367,15 +360,11 @@ func resolveKillBase(worktreePath, recordedBaseSHA string) (base, baseLabel stri
 // unmergedSevereLine is the #2022 data-loss headline: it names the exact branch
 // and count of commits that would be permanently deleted and that the loss is
 // final. It is the critical (never-clipped, #1973) line of the confirmation.
-func unmergedSevereLine(branchName string, n int, baseLabel string) string {
+func unmergedSevereLine(branchName string, n int) string {
 	commitWord, pronoun := "commits", "them"
-	where := "that aren't merged or pushed anywhere"
+	where := "not reachable from any remote-tracking ref"
 	if n == 1 {
 		commitWord, pronoun = "commit", "it"
-		where = "that isn't merged or pushed anywhere"
-	}
-	if baseLabel != "" {
-		where = fmt.Sprintf("not on %s and not pushed anywhere", baseLabel)
 	}
 	return fmt.Sprintf("Branch %q has %d %s %s. Killing permanently deletes %s — this cannot be undone.", branchName, n, commitWord, where, pronoun)
 }

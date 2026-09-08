@@ -431,7 +431,6 @@ app/sync.go:647 updateInstanceFromSnapshot
   758 condition !sameTabSlotKeys(oldKeys, paneTabKeys(inst))
   759 condition m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs)
   767 condition m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs)
-  777 condition prInfoDiffersFromData(inst, d.PRInfo)
 
 app/sync.go:789 reconcileSnapshotOp
   790 condition op != session.OpNone
