@@ -89,7 +89,7 @@ import {
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, operatorKind, rowStatus, type OperatorKind } from "./status.js";
+import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores } from "./pending_restores.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
@@ -972,7 +972,7 @@ function openConfirm(
         : action === "archive"
           ? archiveSession(target.id, target.title, tok)
           : pendingRestores.run(target.id, () => restoreSession(target.id, target.title, tok),
-            rowStatus({ ...session, in_flight_op: 0 }).kind);
+            isActionableSession(session) && session.lifecycle_action === "restore");
     if (!run) return;
     void run.then(() => {
       if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) return;
@@ -2366,9 +2366,9 @@ function applySessions(sessions: SessionData[]): void {
       : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
-  // Compare the lifecycle state, not the transient busy indicator overlaid on it.
+  // Dead-to-Lost normalization still offers Restore: only loss of that action settles it.
   pendingRestores.observe(sessions.map(s => ({
-    id: s.id, status: rowStatus({ ...s, in_flight_op: 0 }).kind,
+    id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
   })));
 }
 

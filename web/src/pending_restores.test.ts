@@ -20,7 +20,7 @@ test("two Restore clicks send one request without a failure modal; the advanced 
   const click = () => pending.run("session", () => {
     progressModals++;
     return restoreSession("session", "title", "").catch(() => { failureModals++; });
-  }, "archived");
+  }, true);
   const first = click();
   assert.equal(click(), null);
   assert.equal(requests, 1);
@@ -31,9 +31,9 @@ test("two Restore clicks send one request without a failure modal; the advanced 
   await first;
   assert.equal(pending.has("session"), true);
   assert.equal(click(), null);
-  pending.observe([{ id: "session", status: "archived" }]);
+  pending.observe([{ id: "session", restoreEligible: true }]);
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", status: null }]);
+  pending.observe([{ id: "session", restoreEligible: false }]);
   assert.equal(pending.has("session"), false);
   assert.equal(visiblePending.size, 0);
   await click();
@@ -44,8 +44,8 @@ test("two Restore clicks send one request without a failure modal; the advanced 
 test("definitive restore refusal releases only its session fence", async () => {
   const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
   let release!: () => void;
-  const other = pending.run("other", () => new Promise<void>(resolve => { release = resolve; }), "archived");
-  await assert.rejects(pending.run("failed", async () => { throw new ApiError(409, "refused", "", true); }, "archived")!, /refused/);
+  const other = pending.run("other", () => new Promise<void>(resolve => { release = resolve; }), true);
+  await assert.rejects(pending.run("failed", async () => { throw new ApiError(409, "refused", "", true); }, true)!, /refused/);
   assert.equal(pending.has("failed"), false);
   assert.equal(pending.has("other"), true);
   release();
@@ -56,31 +56,31 @@ test("reset prevents an old response from clearing a newer restore", async () =>
   const pending = new PendingRestores(() => {});
   let releaseOld!: () => void;
   let releaseNew!: () => void;
-  const old = pending.run("session", () => new Promise<void>(resolve => { releaseOld = resolve; }), "archived");
+  const old = pending.run("session", () => new Promise<void>(resolve => { releaseOld = resolve; }), true);
   pending.reset();
-  const current = pending.run("session", () => new Promise<void>(resolve => { releaseNew = resolve; }), "archived");
+  const current = pending.run("session", () => new Promise<void>(resolve => { releaseNew = resolve; }), true);
   releaseOld();
   await old;
   assert.equal(pending.has("session"), true);
   releaseNew();
   await current;
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", status: null }]);
+  pending.observe([{ id: "session", restoreEligible: false }]);
   assert.equal(pending.has("session"), false);
 });
 
 
 test("successful restore survives failed resync and releases on absence or reset", async () => {
   const pending = new PendingRestores(() => {});
-  await pending.run("session", async () => {}, "archived");
+  await pending.run("session", async () => {}, true);
   // A failed Snapshot never calls observe: the archived projection remains fenced.
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", status: "archived" }]);
+  pending.observe([{ id: "session", restoreEligible: true }]);
   assert.equal(pending.has("session"), true);
   pending.observe([]);
   assert.equal(pending.has("session"), false);
   pending.reset();
-  await pending.run("session", async () => {}, "archived");
+  await pending.run("session", async () => {}, true);
   assert.equal(pending.has("session"), true);
   pending.reset();
   assert.equal(pending.has("session"), false);
@@ -89,8 +89,8 @@ test("successful restore survives failed resync and releases on absence or reset
 test("row advancement before the response releases only after success", async () => {
   const pending = new PendingRestores(() => {});
   let release!: () => void;
-  const request = pending.run("session", () => new Promise<void>(resolve => { release = resolve; }), "archived");
-  pending.observe([{ id: "session", status: null }]);
+  const request = pending.run("session", () => new Promise<void>(resolve => { release = resolve; }), true);
+  pending.observe([{ id: "session", restoreEligible: false }]);
   assert.equal(pending.has("session"), true);
   release();
   await request;
@@ -103,11 +103,11 @@ for (const [name, error] of [
 ] as const) {
   test(`${name} retains the restore fence until the row advances`, async () => {
     const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
-    await assert.rejects(pending.run("session", async () => { throw error; }, "archived")!, error);
+    await assert.rejects(pending.run("session", async () => { throw error; }, true)!, error);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", status: "archived" }]);
+    pending.observe([{ id: "session", restoreEligible: true }]);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", status: null }]);
+    pending.observe([{ id: "session", restoreEligible: false }]);
     assert.equal(pending.has("session"), false);
   });
 }
@@ -115,12 +115,24 @@ for (const [name, error] of [
 for (const status of ["lost", "dead"]) {
   test(`${status} stays fenced after success until its lifecycle state changes`, async () => {
     const pending = new PendingRestores(() => {});
-    pending.observe([{ id: "session", status }]);
-    await pending.run("session", async () => {}, status);
+    pending.observe([{ id: "session", restoreEligible: true }]);
+    await pending.run("session", async () => {}, true);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", status }]);
+    pending.observe([{ id: "session", restoreEligible: true }]);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", status: null }]);
+    pending.observe([{ id: "session", restoreEligible: false }]);
     assert.equal(pending.has("session"), false);
   });
 }
+
+test("Dead to Lost normalization does not settle an uncertain restore", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  let reject!: (error: unknown) => void;
+  const request = pending.run("session", () => new Promise<void>((_, fail) => { reject = fail; }), true);
+  pending.observe([{ id: "session", restoreEligible: true }]);
+  reject(new ApiError(0, "connection lost"));
+  await assert.rejects(request!, /connection lost/);
+  assert.equal(pending.has("session"), true);
+  pending.observe([{ id: "session", restoreEligible: false }]);
+  assert.equal(pending.has("session"), false);
+});

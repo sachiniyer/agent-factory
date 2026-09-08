@@ -114,3 +114,39 @@ for (const outcome of ["committed", "uncertain", "lost", "dead"]) {
     await expect(page.getByRole("dialog")).toBeHidden();
   });
 }
+
+test("immediate restore owns keyboard focus through progress, retry, and cancel", async ({ page, request }) => {
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_WEB_SHELVED ?? "probe-shelved"));
+  expect(session?.id).toBeTruthy();
+  session.backend_type = "local";
+  await page.routeWebSocket("**/v1/events*", () => {});
+  await page.route("**/v1/Snapshot", route => route.fulfill({ json: { data: { instances: [session] } } }));
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/v1/RestoreSession", async route => {
+    await pending;
+    await route.fulfill({ json: { error: { message: "restore refused for focus test", daemon_rejected: true } } });
+  });
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  const actions = page.locator(".af-row-selected").getByRole("button", { name: `Actions for ${session.title}`, exact: true });
+  await actions.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: `Restore session “${session.title}”`, exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeFocused();
+  await expect(dialog).toHaveAttribute("aria-busy", "true");
+  await expect(dialog.getByRole("status")).toContainText("Restoring");
+  await page.keyboard.press("Tab");
+  await expect(dialog).toBeFocused();
+  release();
+  await expect(dialog.getByRole("button", { name: "Retry restore", exact: true })).toBeFocused();
+  await expect(dialog).toHaveAttribute("aria-busy", "false");
+  await expect(dialog).toContainText("restore refused for focus test");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(actions).toBeFocused();
+});

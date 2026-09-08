@@ -1,8 +1,8 @@
-type RestoreRow = { id?: string; status: string | null };
+type RestoreRow = { id?: string; restoreEligible: boolean };
 
 /** Request fences outlive dialogs and remain until a successful restore is visible. */
 export class PendingRestores {
-  private readonly tickets = new Map<string, { settled: boolean; status: RestoreRow["status"] }>();
+  private readonly tickets = new Map<string, { settled: boolean; restoreEligible: RestoreRow["restoreEligible"] }>();
   private rows: ReadonlyArray<RestoreRow> | null = null;
 
   constructor(
@@ -14,9 +14,9 @@ export class PendingRestores {
     return this.tickets.has(id);
   }
 
-  run<T>(id: string, request: () => Promise<T>, status: RestoreRow["status"]): Promise<T> | null {
+  run<T>(id: string, request: () => Promise<T>, restoreEligible: RestoreRow["restoreEligible"]): Promise<T> | null {
     if (this.has(id)) return null;
-    const ticket = { settled: false, status };
+    const ticket = { settled: false, restoreEligible };
     this.tickets.set(id, ticket);
     this.changed(new Set(this.tickets.keys()));
     return (async () => {
@@ -46,10 +46,10 @@ export class PendingRestores {
 
   observe(rows: ReadonlyArray<RestoreRow>): void {
     this.rows = rows;
-    const statuses = new Map(rows.map(row => [row.id, row.status]));
+    const eligibility = new Map(rows.map(row => [row.id, row.restoreEligible]));
     let changed = false;
     for (const [id, ticket] of this.tickets) {
-      if (ticket.settled && (!statuses.has(id) || statuses.get(id) !== ticket.status)) {
+      if (ticket.settled && (!eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) {
         this.tickets.delete(id);
         changed = true;
       }
