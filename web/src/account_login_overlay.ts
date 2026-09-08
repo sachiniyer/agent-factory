@@ -167,7 +167,7 @@ export function loginTerminalStatusCopy(status: TerminalStatus, login: AccountLo
     case "open":
       return login.reused ? "Joined the running login" : "Live";
     case "exited":
-      return "The login flow ended — close this to see the account's state";
+      return "Login ended · close to check the account";
     default:
       return "Reconnecting…";
   }
