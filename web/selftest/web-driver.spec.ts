@@ -50,6 +50,7 @@ import {
 import { readFileSync } from "node:fs";
 import { decode, Op } from "../src/frame.js";
 import { openAfterInitialResync } from "./initial-resync.js";
+import { stopPolledRoutes } from "./polled-route.js";
 
 const surfaceTokens: { light: string; dark: string } = JSON.parse(
   readFileSync(new URL("../../design/tokens.json", import.meta.url), "utf8"),
@@ -387,7 +388,7 @@ async function distanceFromBottom(viewport: Locator): Promise<number> {
 }
 
 /** One of the quiet lifecycle glyphs revealed on the selected rail row (#2186). */
-function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Locator {
+function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Delete session"): Locator {
   return row(page, title).getByRole("button", { name: `${name} “${title}”`, exact: true, includeHidden: true });
 }
 
@@ -395,7 +396,7 @@ async function openRailActions(p: Page, title: string): Promise<void> {
   const trigger = row(p, title).getByRole("button", { name: `Actions for ${title}`, exact: true });
   if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
 }
-async function clickRailAction(p: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Promise<void> {
+async function clickRailAction(p: Page, title: string, name: "Archive session" | "Restore session" | "Delete session"): Promise<void> {
   await openRailActions(p, title);
   await railAction(p, title, name).click();
 }
@@ -1113,6 +1114,7 @@ test("#2276: a fresh shell with no seeded real row reports rail-plane diagnostic
     expect(snapshotDiagnostic).toContain(JSON.stringify(SESSION_A));
     expect(failure).toContain("real events: open");
   } finally {
+    await stopPolledRoutes(ctx);
     await ctx.close();
   }
 });
@@ -1321,7 +1323,7 @@ test("token persistence: the login screen says the token will be saved", async (
   const ctx = await tokenRequiredContext(browser);
   const p = await ctx.newPage();
   await p.goto("/");
-  await expect(p.locator(".af-login-note")).toContainText("stays saved in this browser until you disconnect");
+  await expect(p.locator(".af-login-note")).toContainText("Saved here until you disconnect");
   await ctx.close();
 });
 
@@ -1529,11 +1531,11 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
   await expect(p.locator(".af-dot-working")).toHaveCount(0);
 
-  // Retry remains the conditional pane-header escape from a usage-limit wall
+  // Retry limit remains the conditional pane-header escape from a usage-limit wall
   // (#1934): selecting the synthetic limit row reveals it, while selecting an
   // ordinary waiting row withdraws it. The rail move must not displace this path.
   await row(p, "probe-limit").click();
-  const retry = p.locator(".af-term-head button", { hasText: "Retry" });
+  const retry = p.locator(".af-term-head").getByRole("button", { name: "Retry limit", exact: true });
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
   const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");
@@ -1579,91 +1581,10 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await row(p, "probe-needs-you").click();
   await expect(retry).toBeHidden();
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
-test("pane header PR badge (#3285): the daemon-discovered PR is a safe link, absent when unknown", REAL_FIXTURE, async ({
-  browser,
-}) => {
-  // Synthetic rows again, and for the same reason as the status probes above:
-  // pr_info is a pure projection of the snapshot, no daemon can be coerced into
-  // discovering a PR on demand inside the sandbox, and a synthetic id receives no
-  // deltas, so the pinned state is the only state there will ever be. This drives
-  // the REAL render path — prBadgeContent → renderMain/patchMainHead — end to end.
-  const ctx = await browser.newContext();
-  const p = await ctx.newPage();
-  await p.route("**/v1/Snapshot", async (route) => {
-    const resp = await route.fetch();
-    const body = await resp.json();
-    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
-    const list = snap?.instances ?? [];
-    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
-    list.push(
-      {
-        ...proto,
-        id: "synth-probe-pr",
-        title: "probe-pr",
-        branch: "synth-probe-pr",
-        liveness: 2,
-        in_flight_op: 0,
-        pr_info: {
-          number: 77,
-          state: "OPEN",
-          url: "https://github.com/example/repo/pull/77",
-          title: "Teach the rail to sing",
-        },
-      },
-      // The wire spells "no PR discovered" as pr_info: {} — Go's omitempty cannot
-      // drop a struct field — so the fail-closed side is asserted against that
-      // exact spelling, not against a conveniently absent field.
-      {
-        ...proto,
-        id: "synth-probe-no-pr",
-        title: "probe-no-pr",
-        branch: "synth-probe-no-pr",
-        liveness: 2,
-        in_flight_op: 0,
-        pr_info: {},
-      },
-    );
-    if (snap) {
-      snap.instances = list;
-    }
-    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
-  });
-  await p.goto("/");
-  await expect(p.locator(".af-app")).toBeVisible();
-
-  await expect(row(p, "probe-pr")).toBeVisible({ timeout: 15_000 });
-  await row(p, "probe-pr").click();
-  const badge = p.locator(".af-pr-badge");
-  await expect(badge).toBeVisible();
-  // Number + lowercased state, sentence case, the repo's ` · ` separator — and the
-  // chip IS the link, carrying the projected URL.
-  await expect(badge).toHaveText("PR #77 · open");
-  await expect(badge).toHaveAttribute("href", "https://github.com/example/repo/pull/77");
-  // Both halves of the safe-link contract (#3300 delta): _blank alone hands the
-  // opened page a window reference; noopener/noreferrer is what revokes it.
-  await expect(badge).toHaveAttribute("target", "_blank");
-  await expect(badge).toHaveAttribute("rel", "noopener noreferrer");
-  await expect(badge).toHaveAttribute("title", /Teach the rail to sing/);
-
-  // Session-first keeps the PR link reachable inside the single phone disclosure.
-  await p.setViewportSize({ width: 390, height: 844 });
-  await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
-  await openSessionActions(p);
-  await expect(badge, "the PR link remains reachable at phone width").toBeVisible();
-  await p.setViewportSize({ width: 1280, height: 720 });
-  await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
-
-  // Fail closed: moving the selection to a row whose projection is the empty
-  // struct must withdraw the badge — not leave a stale chip pointing at the
-  // previous session's PR.
-  await row(p, "probe-no-pr").click();
-  await expect(badge).toBeHidden();
-
-  await ctx.close();
-});
 
 test("#2234: creating and id-less rows expose no lifecycle actions; the shared projection chooses the verb", REAL_FIXTURE, async ({
   browser,
@@ -1718,13 +1639,13 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   const uncertain = row(p, "probe-startup-unknown");
   await expect(uncertain).toBeVisible();
   await uncertain.hover();
-  await expect(railAction(p, "probe-startup-unknown", "Kill session")).toHaveCount(1);
+  await expect(railAction(p, "probe-startup-unknown", "Delete session")).toHaveCount(1);
   await expect(railAction(p, "probe-startup-unknown", "Archive session")).toHaveCount(0);
   await expect(railAction(p, "probe-startup-unknown", "Restore session")).toHaveCount(0);
 
   // Keyboard navigation must apply the same runtime-entry fence as row clicks.
   // Walk the entire visible rail in both directions: a kill-only retained row may
-  // own its explicit Kill button, but j/k must never make it the terminal target.
+  // own its explicit Delete session button, but j/k must never make it the terminal target.
   // The walk WAITS for each press to land instead of sampling for it (#2893). The old
   // shape read aria-selected with a non-waiting getAttribute straight after the press
   // and OR-ed it into a `toBe(false)` assertion, so every read that arrived before the
@@ -1759,10 +1680,11 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   // The same server-owned value selects Archive vs Restore, and every accessible
   // name carries its target now that unselected rows can own controls.
   await expect(railAction(p, "probe-actionable", "Archive session")).toHaveCount(1);
-  await expect(railAction(p, "probe-actionable", "Kill session")).toHaveCount(1);
+  await expect(railAction(p, "probe-actionable", "Delete session")).toHaveCount(1);
   await expect(railAction(p, "probe-restorable", "Restore session")).toHaveCount(1);
   await expect(railAction(p, "probe-restorable", "Archive session")).toHaveCount(0);
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -1848,7 +1770,7 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
 
   // Every actionable instance reserves the quiet action slot, but only the selected
-  // row shows it at rest. Kill remains muted; af-danger is reserved for confirmation.
+  // row shows it at rest. Delete session remains muted; af-danger is reserved for confirmation.
   // Every row reserves the slot — asserted WITHOUT sampling a count (#2893). The old
   // shape passed `await rows.count()` as the EXPECTED value: one non-waiting sample,
   // frozen, while Playwright retried the left side against it. Any roster change in
@@ -1864,11 +1786,11 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await row(page, SESSION_A).hover();
   await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");
   await expect(railAction(page, SESSION_A, "Archive session")).toHaveCount(1);
-  await expect(railAction(page, SESSION_A, "Kill session")).toHaveCount(1);
-  await expect(railAction(page, SESSION_A, "Kill session")).not.toHaveClass(/af-danger/);
+  await expect(railAction(page, SESSION_A, "Delete session")).toHaveCount(1);
+  await expect(railAction(page, SESSION_A, "Delete session")).not.toHaveClass(/af-danger/);
   await expect(page.locator(".af-term-head button", { hasText: "Prompt" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Archive" })).toHaveCount(0);
-  await expect(page.locator(".af-term-head button", { hasText: "Kill" })).toHaveCount(0);
+  await expect(page.locator(".af-term-head button", { hasText: "Delete session" })).toHaveCount(0);
 });
 
 test("#2681/#2787: application mouse mode selects on a plain drag and keeps a modifier escape", REAL_FIXTURE, async ({
@@ -5294,7 +5216,7 @@ test("#2218: slow create closes immediately, shows daemon state, then opens atta
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
 
   // Leave no successful probe behind for later shared-page tests.
-  await clickRailAction(page, created, "Kill session");
+  await clickRailAction(page, created, "Delete session");
   const killModal = page.locator(".af-modal-card");
   await expect(killModal).toBeVisible();
   await killModal.getByRole("button", { name: "Delete session", exact: true }).click();
@@ -5428,7 +5350,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // Only web-signed-in holds the artifact claude's login would leave.
     await expect(accountSelect.locator("option")).toHaveText(
       [
-        "Ambient identity (the agent's own login)",
+        "Use agent login (no default)",
         "design-review-account — not logged in",
         "web-registered — not logged in",
         "web-signed-in",
@@ -5448,7 +5370,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // same spelling is a different identity. codex has no registered accounts here,
     // so the honest list is the ambient row alone.
     await programSelect.selectOption("codex");
-    await expect(accountSelect.locator("option")).toHaveText(["Ambient identity (the agent's own login)"]);
+    await expect(accountSelect.locator("option")).toHaveText(["Use agent login (no default)"]);
     await expect(accountSelect).toHaveValue("");
     await expect(accountHint).toHaveText("");
 
@@ -5495,10 +5417,10 @@ test.describe("create → kill (one session, two flows)", () => {
   test("kill: the kill confirm removes the session's row", REAL_FIXTURE, async () => {
     expect(createdTitle).not.toBe("");
     // The created session is the current selection, so its rail row reveals the
-    // quiet actions. Kill it and confirm.
+    // quiet actions. Delete session it and confirm.
     await row(page, createdTitle).click();
     await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-    await clickRailAction(page, createdTitle, "Kill session");
+    await clickRailAction(page, createdTitle, "Delete session");
 
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
@@ -5828,6 +5750,7 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
     }
   }
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -5851,7 +5774,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     // surface; the pane header must not duplicate them.
     await openRailActions(p, title);
     await expect(railAction(p, title, "Archive session")).toBeVisible();
-    await expect(railAction(p, title, "Kill session")).toBeVisible();
+    await expect(railAction(p, title, "Delete session")).toBeVisible();
     await expect(p.locator(".af-term-actions")).toBeHidden();
 
     // Hide every non-archived state. Selection and the terminal pane intentionally
@@ -5866,7 +5789,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     const headActions = p.locator(".af-term-actions");
     await p.getByRole("button", { name: "Session actions", exact: true }).click();
     await expect(headActions.getByRole("button", { name: `Archive session “${title}”`, exact: true })).toBeVisible();
-    await expect(headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true })).toBeVisible();
+    await expect(headActions.getByRole("button", { name: `Delete session “${title}”`, exact: true })).toBeVisible();
 
     // The fallback is the same action path, not decorative recovery copy: both
     // buttons open the existing target-qualified confirmations. Cancelling keeps the
@@ -5877,7 +5800,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(modal).toBeHidden();
     await p.getByRole("button", { name: "Session actions", exact: true }).click();
-    await headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true }).click();
+    await headActions.getByRole("button", { name: `Delete session “${title}”`, exact: true }).click();
     await expect(modal).toContainText(`Delete session ${title}?`);
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   } finally {
@@ -5989,7 +5912,7 @@ test("add + delete a registered empty project (#2456): appears while another is 
   await del.click();
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
-  await expect(delModal).toContainText("no sessions to archive");
+  await expect(delModal).toContainText("No live sessions to archive.");
   await delModal.locator("button.af-primary").click();
   await expect(delModal).toBeHidden();
 
@@ -6187,7 +6110,7 @@ test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bou
   await del.click();
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
-  await expect(modal).toContainText("restorable");
+  await expect(modal).toContainText("restore sessions anytime");
   await modal.locator("button.af-primary").click();
 
   // The project ACTUALLY GOES AWAY: SESSION_C is archived, the repo now has no live
@@ -6471,6 +6394,7 @@ test("filter (feat): a project whose sessions are ALL archived reads as empty, a
   await expect(empty).toBeVisible();
   await expect(empty).not.toContainText("archived hidden");
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -7230,7 +7154,7 @@ test("#2330: an older reconnect Snapshot cannot overwrite a newer session event"
     if (staleResponseCaptured) {
       await staleFinished;
     }
-    await p.unroute("**/v1/Snapshot");
+    await stopPolledRoutes(ctx);
     if (created) {
       af("tab-delete", SESSION_A, "--name", tabName);
     }
@@ -8238,7 +8162,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               await expect(panel.locator(".af-viewnav")).toBeVisible();
               await expect(panel.locator(".af-tab-menu")).toBeVisible();
               if (roster === "overflow") {
-                await expect(panel.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+                await expect(panel.getByRole("button", { name: "Retry limit", exact: true })).toBeVisible();
                 const bar = panel.locator(".af-tabbar");
                 await expect(bar).toBeVisible();
                 expect(await bar.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
@@ -8258,7 +8182,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
             const titleBox = head.locator(":scope > .af-term-head-main");
             const titleNode = titleBox.locator(".af-term-title");
             const tabbar = head.locator(":scope > .af-tabbar");
-            const retry = head.getByRole("button", { name: "Retry", exact: true });
+            const retry = head.getByRole("button", { name: "Retry limit", exact: true });
             const navToggle = p.locator(".af-nav-toggle");
             await expect(tabbar, "the strip belongs to the pane header").toHaveCount(1);
             await expect(titleNode).toHaveText(title);
@@ -8294,7 +8218,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               const titleEl = document.querySelector<HTMLElement>(".af-term-title")!;
               const bar = document.querySelector<HTMLElement>(".af-tabbar")!;
               // Copy link is also a header action (#3909); measure Retry itself.
-              const retrySelector = ".af-term-action[title='Resume this session from its usage-limit wall']:not([hidden])";
+              const retrySelector = ".af-term-action[title='Retry after the usage limit']:not([hidden])";
               const retryEl = document.querySelector<HTMLElement>(retrySelector);
               const titleStyle = getComputedStyle(titleEl);
               const barStyle = getComputedStyle(bar);
@@ -8445,6 +8369,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               contentType: "image/png",
             });
           } finally {
+            await stopPolledRoutes(ctx);
             await ctx.close();
           }
         });
@@ -9245,7 +9170,7 @@ test("vscode tab (#2743): one session's editor state is readable in another's on
     expect(kept, "and its state must still be there").toBe(PROBE_VALUE + "_ON_A");
   } finally {
     setPreview("");
-    // Kill rather than archive: these sessions exist only for this test, and killing
+    // Delete session rather than archive: these sessions exist only for this test, and killing
     // prunes their worktrees and branches so nothing is left for later tests to trip
     // over. Best-effort — a cleanup failure must not mask the assertion that ran.
     for (const s of [SA, SB]) {
@@ -10952,14 +10877,14 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(p.locator(".af-main.af-main-term")).toBeVisible();
 
   // Row actions MUST keep stopPropagation (otherwise they also select the row), so
-  // Kill and Archive have to dismiss by intent before opening their own confirms.
+  // Delete session and Archive have to dismiss by intent before opening their own confirms.
   await openDrawer();
-  await clickRailAction(p, SESSION_A, "Kill session");
+  await clickRailAction(p, SESSION_A, "Delete session");
   await expectDrawerClosed();
   await expect(modal).toContainText(`Delete session ${SESSION_A}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(modal).toBeHidden();
-  expect(lifecyclePosts, "cancelling Kill must not post a lifecycle mutation").toEqual([]);
+  expect(lifecyclePosts, "cancelling Delete session must not post a lifecycle mutation").toEqual([]);
   await expect(row(p, SESSION_A)).toHaveCount(1);
 
   await openDrawer();
@@ -11194,6 +11119,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
           body: await p.screenshot(),
           contentType: "image/png",
         });
+        await stopPolledRoutes(ctx);
         await ctx.close();
       });
     }
@@ -11256,7 +11182,101 @@ test("#3981: a split terminal fills the phone and restores both panes on desktop
     await p.setViewportSize({ width: 360, height: 812 });
     await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
     await openSessionActions(p);
-    await p.getByRole("button", { name: "Close pane", exact: true }).click();
+    await p.getByRole("button", { name: "Hide pane", exact: true }).click();
     await expect(p.locator(".af-pane")).toHaveCount(1);
   } finally { await ctx.close(); }
 });
+
+for (const external of [true, false]) {
+  test(`project deletion discloses in-place teardown: ${external}`, async ({ browser }) => {
+    const ctx = await browser.newContext();
+    try {
+      const p = await ctx.newPage();
+      await p.routeWebSocket(url => url.pathname === "/v1/events", () => {});
+      await p.route("**/v1/Snapshot", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const session of body.data.instances) {
+          if (session.worktree) session.worktree.external_worktree = external;
+        }
+        await route.fulfill({ json: body });
+      });
+      await openTokenless(p);
+      await p.locator(".af-project-switch").click();
+      await p.locator(".af-project-menu .af-project-delete").click();
+      const modal = p.getByRole("dialog");
+      if (external) {
+        await expect(modal).toContainText("ended permanently and cannot be restored");
+        await expect(modal).not.toContainText("restore sessions anytime");
+      } else {
+        await expect(modal).toContainText("restore sessions anytime");
+        await expect(modal).not.toContainText("ended permanently");
+      }
+      await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    } finally {
+      await stopPolledRoutes(ctx);
+      await ctx.close();
+    }
+  });
+}
+
+test("320px focused keybar keeps its last button inside the viewport", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await row(p, SESSION_A).click();
+    await p.setViewportSize({ width: 320, height: 812 });
+    await p.locator(".af-pane-host .xterm").first().click();
+    const arrows = p.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Arrows", exact: true });
+    await expect(arrows).toBeVisible();
+    expect(await arrows.evaluate(el => el.getBoundingClientRect().right <= innerWidth)).toBe(true);
+  } finally {
+    await ctx.close();
+  }
+});
+
+for (const [external, branchCreated] of [[true, true], [false, false], [false, true], [false, undefined]]) {
+  test(`session deletion ownership disclosure: external=${external}, branchCreated=${branchCreated}`, async ({ browser }) => {
+    const ctx = await browser.newContext();
+    try {
+      const p = await ctx.newPage();
+      await p.routeWebSocket(url => url.pathname === "/v1/events", () => {});
+      await p.route("**/v1/Snapshot", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const session of body.data.instances) {
+          if (session.worktree) {
+            session.worktree.external_worktree = external;
+            session.worktree.branch_created_by_us = branchCreated;
+          }
+        }
+        await route.fulfill({ json: body });
+      });
+      await openTokenless(p);
+      const target = row(p, SESSION_A);
+      await target.hover();
+      await target.getByRole("button", { name: /^Actions for / }).click();
+      await target.getByRole("button", { name: /^Delete session / }).click();
+      const modal = p.getByRole("dialog");
+      if (external) {
+        await expect(modal).toContainText("session record and runtime");
+        await expect(modal).toContainText("checkout and branch stay");
+        await expect(modal).not.toContainText("Archive");
+        await expect(modal).not.toContainText("are lost");
+      } else if (!branchCreated) {
+        await expect(modal).toContainText("worktree");
+        await expect(modal).toContainText("branch and its commits stay");
+        await expect(modal).toContainText("Uncommitted changes are lost");
+        await expect(modal).not.toContainText("unpushed commits are lost");
+      } else {
+        await expect(modal).toContainText("Uncommitted changes and unpushed commits are lost.");
+        await expect(modal).toContainText("Archive to keep them.");
+      }
+      await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    } finally {
+      await stopPolledRoutes(ctx);
+      await ctx.close();
+    }
+  });
+}

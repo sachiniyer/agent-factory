@@ -16,7 +16,7 @@ func TestErrorDetailsOverlayShowsFullTruncatedError(t *testing.T) {
 	resizeHome(h, 80, 24)
 	_, errorLogs := captureHomeMessageLogs(t)
 
-	msg := "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); PR URL: https://example.invalid/pr/987"
+	msg := "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); Session URL: https://example.invalid/session/987"
 	cmd := h.handleError(errors.New(msg))
 	require.NotNil(t, cmd, "handleError still returns the normal clear-message command")
 	require.Contains(t, errorLogs.String(), msg,
@@ -31,7 +31,7 @@ func TestErrorDetailsOverlayShowsFullTruncatedError(t *testing.T) {
 
 	rendered := h.textOverlay.Render()
 	assert.Contains(t, rendered, "Last error")
-	assert.Contains(t, rendered, "https://example.invalid/pr/987",
+	assert.Contains(t, rendered, "https://example.invalid/session/987",
 		"full fallback data must be recoverable from the details overlay")
 }
 
@@ -44,7 +44,7 @@ func TestErrorDetailsSurvivesTheNoticeVisualTimeout(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)
 
-	msg := "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); PR URL: https://example.invalid/pr/987"
+	msg := "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); Session URL: https://example.invalid/session/987"
 	require.NotNil(t, h.handleError(errors.New(msg)))
 	require.Contains(t, h.errBox.String(), "E details", "precondition: the notice is up and clipped")
 
@@ -55,7 +55,7 @@ func TestErrorDetailsSurvivesTheNoticeVisualTimeout(t *testing.T) {
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
 	require.Equal(t, stateHelp, h.state, "E must still open the notice after it left the screen")
 	require.NotNil(t, h.textOverlay)
-	assert.Contains(t, h.textOverlay.Render(), "https://example.invalid/pr/987",
+	assert.Contains(t, h.textOverlay.Render(), "https://example.invalid/session/987",
 		"the half the bar clipped is the whole point of the affordance")
 }
 

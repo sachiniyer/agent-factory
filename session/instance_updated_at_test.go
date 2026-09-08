@@ -84,17 +84,6 @@ func TestUpdatedAtUnchangedWritesAndCaches(t *testing.T) {
 			require.Error(t, err)
 			require.Len(t, i.Tabs, 2)
 		},
-		"PR cache": func(i *Instance) {
-			i.SetPRInfo(nil)
-			i.MarkPRInfoFetched()
-			claim, _ := i.BeginPRInfoFetch(0)
-			i.CancelPRInfoFetch(claim)
-		},
-		"PR cache rollback": func(i *Instance) {
-			rollback := i.BeginPRInfoWrite(nil)
-			i.RollbackPRInfoWrite(rollback)
-			i.SetPRInfoFetchedAtForTest(at)
-		},
 		"derived diagnostics": func(i *Instance) {
 			i.SetAgentModelChangeAtEpoch(NewAgentModelChange("a", "b"), 0)
 			i.ClearAgentModelChange()

@@ -153,8 +153,8 @@ test("both states at once join with the repo's separator, and the blocking reaso
   );
 });
 
-test("the ambient row is always offered, always selectable, and says nothing", () => {
-  for (const choices of [accountChoices(null, ""), accountChoices(registry(), "claude"), accountChoices(registry(), "gemini")]) {
+test("a loaded registry without defaults offers the agent login", () => {
+  for (const choices of [accountChoices(registry(), "claude"), accountChoices(registry(), "gemini")]) {
     assert.equal(choices[0].value, AMBIENT_ACCOUNT, "the pre-#3844 default is never taken away");
     assert.equal(accountSelectable(choices, AMBIENT_ACCOUNT), true);
     assert.equal(accountNotice(choices, AMBIENT_ACCOUNT), "");
@@ -265,4 +265,36 @@ test("a default naming an unregistered account is OFFERED, labelled, and not blo
   assert.equal(row!.blocked, "", "the daemon is the authority on what it accepts; this client only knows its own list");
   assert.equal(accountSelectable(choices, "retired"), true);
   assert.match(accountNotice(choices, "retired"), /refused/, "and the note says the create will be refused");
+  assert.equal(accountNotice(choices, AMBIENT_ACCOUNT), accountNotice(choices, "retired"));
 });
+
+test("empty account choice describes configured inheritance without adding an override", () => {
+  assert.equal(accountChoices({ agents: ["claude"], entries: [], defaults: {} }, "claude")[0].label, "Use agent login (no default)");
+  const registry = { agents: ["claude"], entries: [], defaults: { claude: "work" } } as AccountsResponse;
+  const choice = accountChoices(registry, "claude")[0];
+  assert.equal(choice.label, "Use configured default (work)");
+  assert.equal(choice.value, AMBIENT_ACCOUNT);
+});
+
+for (const [registrationOnly, loggedIn] of [[true, true], [false, true], [false, false]]) {
+  test(`inherited default shares its explicit row's restrictions: registrationOnly=${registrationOnly}, loggedIn=${loggedIn}`, () => {
+    const choices = accountChoices(registry({
+      defaults: { claude: "work" },
+      entries: [{ agent: "claude", name: "work", dir: "/h/a/work", registration_only: registrationOnly, logged_in: loggedIn }],
+    }), "claude");
+    assert.equal(choices[0].blocked, choices[1].blocked);
+    assert.equal(choices[0].note, choices[1].note);
+    assert.equal(accountSelectable(choices, AMBIENT_ACCOUNT), !registrationOnly);
+    assert.equal(accountNotice(choices, AMBIENT_ACCOUNT), accountNotice(choices, "work"));
+  });
+}
+
+for (const failed of [false, true]) {
+  test(`unknown accounts stay honest: failed=${failed}`, () => {
+    const choices = accountChoices(null, "claude", failed);
+    assert.equal(choices[0].label, failed ? "Accounts unavailable" : "Loading accounts…");
+    assert.equal(accountSelectable(choices, AMBIENT_ACCOUNT), failed);
+    assert.doesNotMatch(choices[0].label, /no default/);
+    if (failed) assert.match(accountNotice(choices, AMBIENT_ACCOUNT), /daemon default, if any, applies/);
+  });
+}

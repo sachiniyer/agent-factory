@@ -8,8 +8,12 @@ These are **deterministic app-model driver captures**, not recordings of a live
 daemon. `app/recovery_test.go` drives the real `home.Update` and `home.View`
 paths, injects rejected mutations, and checks that session and task input
 survives. The SVGs faithfully convert the resulting ANSI cell grid. Matching
-SVG goldens in `app/testdata/recovery` make geometry, copy, weight and colour
-changes reviewable in tests. Existing surrounding TUI chrome is outside P4.
+SVG and ANSI goldens in `app/testdata/recovery` are both compared byte-for-byte
+by `TestRecoveryDriverScenes`, making geometry, copy, weight, colour and terminal
+escape sequences reviewable in tests. The 14 scenes in both themes have 28
+`.svg`/`.ansi` pairs. Existing surrounding TUI chrome is outside P4.
+The same test also requires every gallery `.svg` and `.ansi` under
+`docs/assets/recovery/tui-model-driver` to match its asserted golden byte-for-byte.
 The zero-task and task-load-failure scenes keep the task manager's `Tasks`
 title and a pinned `n new · esc back` hint containing only live actions.
 
@@ -45,7 +49,16 @@ An async create failure while another form is open preserves that newer form and
 retains the failed draft for the next create in its original project. Background
 snapshot failures retain loaded sessions and retry automatically.
 
-To verify, run `scripts/testbox.sh test ./app -run TestRecovery` and
+To verify, run `scripts/testbox.sh test ./app -run 'TestRecovery' -count=1` and
 `scripts/testbox.sh scenario scripts/tui-3915-scenario.sh`. To recapture, set
 `AF_TUI_RECOVERY_CAPTURE` to an output directory **inside** the testbox and run
-the recovery tests; inspect the SVGs before replacing both gallery and goldens.
+the recovery tests. Capture mode writes both `<scene>-<theme>.svg` and
+`<scene>-<theme>.ansi` and skips golden comparisons. Inspect every SVG and ANSI
+diff before replacing both halves together under `app/testdata/recovery`.
+Both the SVG and ANSI gallery copies are **generated** from those
+goldens by `scripts/gen-docs.sh` and gated for drift in CI, so run that script
+and commit its output rather than copying either format across by hand.
+The test rejects a stale or missing gallery copy in either format. Keep the
+`.gitattributes` ANSI whitespace rule: cell padding and trailing viewport rows are
+part of the asserted frame. Verify again without `AF_TUI_RECOVERY_CAPTURE` so the
+test checks the committed pairs.

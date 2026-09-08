@@ -16,8 +16,8 @@ import (
 // paragraph set off the same kind of clause with `—`.
 func TestKillConfirmSetsOffItsConsequenceClauseWithADash(t *testing.T) {
 	lines := []string{
-		unmergedSevereLine("dev/todo-core", 1, ""),
-		unmergedSevereLine("dev/todo-core", 3, "main"),
+		unmergedSevereLine("dev/todo-core", 1),
+		unmergedSevereLine("dev/todo-core", 3),
 	}
 	for _, line := range lines {
 		assert.Contains(t, line, "— this cannot be undone",

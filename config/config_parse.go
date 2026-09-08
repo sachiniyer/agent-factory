@@ -308,8 +308,8 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 		config.SSHHostKeyVerification = SSHHostKeyStrict
 	}
 
-	// The [keys] keymap hard-errors on any problem (unknown action, bad key
-	// string, reserved key, conflict) rather than warn-and-default: a keymap
+	// Removed actions are ignored on upgrade. Other [keys] problems (unknown
+	// action, bad key string, reserved key, conflict) remain hard errors: a keymap
 	// that silently falls back to defaults is indistinguishable from a dead
 	// keyboard binding at runtime, which is far harder to debug than a load
 	// error naming the file and action (#1026).
@@ -322,6 +322,7 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	// keybinding typo would keep a user from running the very commands they'd
 	// use to debug it. The binding is validated wherever it is actually
 	// consumed.
+	discardRemovedPRKeyBindings(config.Keys, prettyConfigPath)
 	overrides, err := normalizeKeyOverrides(config.Keys, prettyConfigPath)
 	if err != nil {
 		return nil, err

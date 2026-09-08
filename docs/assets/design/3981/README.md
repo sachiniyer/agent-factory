@@ -6,9 +6,9 @@ project choices, Sessions · Tasks · Config, Light · Dark · System, Disconnec
 install, pane actions, new-tab choices and the tab switcher reachable. Escape
 closes it and returns focus. Drawer, Tasks, Config and desktop layouts remain
 available. Opening the drawer preserves the session-first composition and the
-terminal rectangle. Split sessions show the focused pane, with Close pane in the menu,
+terminal rectangle. Split sessions show the focused pane, with Hide pane in the menu,
 and restore both panes on desktop. The six-button primary keybar is one 44px row; Arrows replaces it with
-Back and four arrow keys, preserving 44px targets and terminal focus.
+More keys and four arrow keys, preserving 44px targets and terminal focus.
 
 ## Measured height budget
 
@@ -81,13 +81,13 @@ its position and size unchanged.
 | 430px | 2px / 2px | 412px / 428px | 0 | (2, 50, 426, 760) |
 
 The browser helpers resolve the visible disclosure trigger and wait for phone or
-desktop composition after viewport changes, including the PR-badge regression.
+desktop composition after viewport changes.
 The #2219 phone test explicitly documents that desktop caret anchoring is outside
 its coverage.
 
 All 740 web unit tests passed, with source and recorder typechecking and the
 tracked bundle rebuilt. The full containerized `web-driver.spec.ts` passed all
-146 tests with zero retries, including the PR badge, tab reordering, drawer
+146 tests with zero retries, including tab reordering, drawer
 navigation and split-terminal restoration.
 
 `AF_UPDATE_GOLDENS=1 make perf-container` regenerated both themes; comparison

@@ -78,7 +78,7 @@ import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
-import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
+import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
   clampActiveTab,
   pickSelection,
@@ -114,6 +114,7 @@ import {
   renderLogin,
   sessionTabs,
   canManageTabs,
+  isOffBoxWorkspace,
   canMutateTabRoster,
   canCreateTabKind,
   canCloseTabs,
@@ -692,11 +693,19 @@ function selectedSession(): { id: string; title: string } | null {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 
+let restoreModalFocus: (() => void) | null = null;
+let stopModalProjectionWatch: (() => void) | null = null;
+
 /** Closes and clears the open modal, if any. */
 function closeModal(): void {
   if (modal) {
+    const restoreFocus = restoreModalFocus;
+    restoreModalFocus = null;
+    stopModalProjectionWatch?.();
+    stopModalProjectionWatch = null;
     modal.close();
     modal = null;
+    restoreFocus?.();
   }
 }
 
@@ -709,14 +718,75 @@ function closeConfigAssistant(): void {
   }
 }
 
+interface ModalInvoker {
+  sessionId?: string;
+  actionLabel: string | null;
+  header: boolean;
+}
+
+/** Stable return identity survives optimistic removal and retained-dialog remounts. */
+function captureModalInvoker(): ModalInvoker {
+  const focused = document.activeElement as HTMLElement | null;
+  const row = focused?.closest(".af-row");
+  return {
+    sessionId: row?.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId,
+    actionLabel: focused?.getAttribute("aria-label") ?? null,
+    header: !row && !!focused?.closest(".af-term-head"),
+  };
+}
+
 /** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
  *  config-assistant chat) — one overlay at a time, and the assistant is torn down
  *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
-function openModal(m: ModalHandle): void {
+function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInvoker): void {
   closeModal();
   closeConfigAssistant();
+  const focused = document.activeElement as HTMLElement | null;
+  const invoker = explicitInvoker ?? captureModalInvoker();
+  const { sessionId, actionLabel } = invoker;
+  const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+  const header = invoker.header ? root?.querySelector<HTMLElement>(".af-term-head") : null;
+  if (focusCard || row) {
+    restoreModalFocus = () => {
+      const canFocus = (el: HTMLElement | null | undefined): el is HTMLElement =>
+        !!el && el.isConnected && el !== document.body && !el.matches(":disabled") &&
+        el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
+      // Header actions do not live in the rail; return to their invoking control.
+      if (!row && !explicitInvoker && canFocus(focused)) {
+        focused.focus({ preventScroll: true });
+        return;
+      }
+      if (!row && header?.isConnected) {
+        // Pending-state reconciliation can replace the original header button.
+        const action = actionLabel ? header.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action) ? action : header.querySelector<HTMLButtonElement>(".af-term-more");
+        if (canFocus(target)) {
+          target.focus({ preventScroll: true });
+          return;
+        }
+      }
+      // A phone row action closes the drawer before mounting its dialog. Hidden
+      // rail controls still have rectangles, but cannot receive keyboard focus.
+      const toggle = root?.querySelector<HTMLButtonElement>(".af-nav-toggle");
+      if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+        focusRail();
+        toggle.focus({ preventScroll: true });
+        return;
+      }
+      focusRail();
+      const menu = sessionId ? root?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+      const action = actionLabel ? menu?.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+      const target = canFocus(action) ? action : menu?.querySelector<HTMLButtonElement>("button");
+      if (canFocus(target)) target.focus({ preventScroll: true });
+      else {
+        const rail = root?.querySelector<HTMLElement>(".af-rail");
+        if (canFocus(rail)) { rail.tabIndex = -1; rail.focus({ preventScroll: true }); }
+      }
+    };
+  }
   modal = m;
   modalHost.replaceChildren(m.el);
+  if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
 }
 
 /** Opens the conversational config assistant (#2467): spawn-or-reuse, stream into a
@@ -835,20 +905,55 @@ function newSession(): void {
 /** Opens the kill/archive/restore confirm modal for the rail row that invoked it.
  *  This cannot derive its target from selection now that hover exposes actions on
  *  unselected rows (#2223). Restore remains the reverse of archive (#1932). */
-function openConfirm(action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession): void {
+function openConfirm(
+  action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession,
+  invoker: ModalInvoker = captureModalInvoker(),
+): void {
   const target = { id: session.id, title: session.title };
-  openModal(
+  const hasRootAcknowledgment = action === "kill" && session.is_root === true;
+  const refreshRootConsent = (latest: SessionData | undefined): boolean => {
+    // Consent may get stronger while this dialog is open, never weaker. Keeping
+    // the existing acknowledgment after root → non-root is harmless.
+    if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
+      openConfirm("kill", { ...session, title: latest.title, is_root: true }, invoker);
+      return true;
+    }
+    return false;
+  };
+  const mountConfirmation = (m: ModalHandle) => {
+    openModal(m, true, invoker);
+    // This also covers retained failed dialogs. The shared close path removes
+    // the watch before restoring focus or mounting another modal.
+    const refresh = () => { refreshRootConsent(store.get().sessions.find(s => s.id === target.id)); };
+    stopModalProjectionWatch = store.subscribe(refresh);
+    refresh();
+  };
+  mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
+      isRoot: hasRootAcknowledgment,
+      archived: isArchived(session),
+      offBox: isOffBoxWorkspace(session),
+      externalWorktree: session.worktree?.external_worktree === true,
+      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
           return;
         }
+        const latest = store.get().sessions.find(s => s.id === target.id);
+        if (action === "kill" && !latest) {
+          modal.setError("This session is no longer available to delete.");
+          return;
+        }
+        // A queued submit can still come from a replaced generic form. Re-read
+        // the projection at the point of mutation even though the watch refreshes
+        // the visible dialog as soon as the root identity changes.
+        if (refreshRootConsent(latest)) return;
         const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, session);
+        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
         if (action !== "restore" && !mutation) return;
         m.setBusy(true);
         if (mutation) {
@@ -877,13 +982,13 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
             requestResync();
             if (outcome !== "reverted") {
               surfaceMutationError(outcome === "uncertain"
-                ? new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`)
+                ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
                 : e, outcome);
               return;
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal) openModal(m);
+            if (!modal) mountConfirmation(m);
             else surfaceMutationError(e);
             return;
           }
@@ -896,7 +1001,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
           if (isMutationOutcomeUncertain(e)) {
             if (modal === m) closeModal();
             requestResync();
-            surfaceMutationError(new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
             return;
           }
           m.setBusy(false);
@@ -912,11 +1017,11 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
  *  archives the repo's regular live sessions, tears down in-place ones, and
  *  removes any durable project registration via DeleteProject; the lifecycle
  *  events + projects.changed resync the rail and drop the project from the view. */
-function openDeleteProject(root: string, label: string, sessionCount: number): void {
+function openDeleteProject(root: string, label: string): void {
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      sessionCount,
+      ...projectDeletionBreakdown(store.get().sessions, root),
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

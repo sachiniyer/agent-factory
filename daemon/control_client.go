@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
@@ -353,6 +354,8 @@ func committedFromLegacyRPCError(err error) error {
 
 type rpcMutationCommittedError struct{ err error }
 
+var _ apiproto.MutationCommittedError = (*rpcMutationCommittedError)(nil)
+
 func (e *rpcMutationCommittedError) Error() string           { return e.err.Error() }
 func (e *rpcMutationCommittedError) Unwrap() error           { return e.err }
 func (e *rpcMutationCommittedError) MutationCommitted() bool { return true }
@@ -596,8 +599,7 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 }
 
 // The TUI's control + read path moved onto the HTTP apiclient in #1592 Phase 2
-// PR3, so the net/rpc client wrappers only the TUI called — SetPRInfo (later
-// replaced by HTTP RefreshPRInfo in #3296), PauseStatusPoll, ResumeStatusPoll
+// PR3, so the net/rpc client wrappers only the TUI called — PauseStatusPoll, ResumeStatusPoll
 // (here) and ResumeFromLimit /
 // SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
 // The controlServer handlers stay: the gob control socket still SERVES every
