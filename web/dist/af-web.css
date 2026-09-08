@@ -2648,16 +2648,12 @@ summary,
   min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
 }
 .af-ghost,
-.af-danger,
 .af-input {
   padding: var(--af-space-2);
   background: var(--af-surface-raised);
   color: var(--af-ink);
   border: calc(var(--af-space-1) / 4) solid var(--af-border);
   border-radius: var(--af-radius-control);
-}
-.af-danger:hover:not(:disabled) {
-  color: var(--af-ink);
 }
 .af-primary {
   padding: var(--af-space-2);
