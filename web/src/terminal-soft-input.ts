@@ -18,8 +18,9 @@ export class TerminalSoftInput {
     this.keyDownSeen = true;
     this.staleKeydown = false;
     const range = this.pending.at(-1);
-    // Xterm treats 229 as IME input, not an ordinary post-composition key.
-    if (range && (event as KeyboardEvent).keyCode !== 229) range.keydownAfterEnd = true;
+    const keyCode = (event as KeyboardEvent).keyCode;
+    // Xterm keeps IME ownership for its composition key and modifier keys.
+    if (range && ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
   };
   private readonly onKeyUp = (): void => { this.keyDownSeen = false; this.staleKeydown = false; };
   private readonly onBlur = (): void => { if (this.keyDownSeen) this.staleKeydown = true; };

@@ -126,12 +126,14 @@ The browser probe exercises commits both with and without post-composition
 It asserts outgoing PTY input is exactly `字`, Ctrl remains armed, and the
 following soft `x` sends exactly `0x18` and clears Ctrl. Ctrl + soft Enter also
 sends CR, consumes the one-shot, and leaves the following `a` unmodified. The
-probe retains the existing stale-input deletion, keybar selection/scrollback,
-and blur/refocus coverage.
+Safari-order boundary follows xterm in treating Shift, Ctrl, Alt, and keycode
+229 as continued IME input. The textarea-diff 229 Backspace sends DEL, consumes
+the armed one-shot as genuine user input, and leaves its following `a` plain.
+The probe retains the keybar selection/scrollback and blur/refocus coverage.
 
 [Unit red](composition-unit-red.txt) shows the duplicate write before the fix;
 [unit green](composition-unit-green.txt) records the original lifecycle proof.
-Final validation has 873 passing web unit tests and the refreshed full container
+Final validation has 876 passing web unit tests and the refreshed full container
 web selftest passes [238/238](full-selftest-green.txt), including the null-data
 IME probe, soft-control consumption, stale-input deletion, keybar effects, and
 the previously reported terminal READY marker cases. Typecheck, regenerated

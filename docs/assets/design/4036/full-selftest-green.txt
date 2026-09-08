@@ -2,12 +2,12 @@ scripts/testbox.sh web-selftest (final-revision excerpt; all tests ran)
 
 Running 238 tests using 1 worker
 
-#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018x\u0018字文\u0018ab\u007f\ra\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz"
-  ✓   33 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (13.8s)
-  ✓  106 [chromium] › selftest/web-driver.spec.ts:2369:1 › #2337: agent Shift+Enter preserves xterm input effects while shell keeps CR @real-fixture (9.2s)
-  ✓  172 [chromium] › selftest/web-driver.spec.ts:6876:1 › #2347: the mobile agent terminal also reclaims peer-owned geometry @real-fixture (10.0s)
-  ✓  188 [chromium] › selftest/web-driver.spec.ts:7959:1 › a live PTY stream and the events WS survive the service worker controlling the page @real-fixture (919ms)
-  ✓  231 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (764ms)
-  ✓  238 [chromium] › selftest/webtab-legacy.spec.ts:7:3 › web tab blocks legacy shorthand 2130706433 without navigation (720ms)
+#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018x\u0018字文\u0018ab\u007fa\ra\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz"
+  ✓   33 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (14.9s)
+  ✓  106 [chromium] › selftest/web-driver.spec.ts:2369:1 › #2337: agent Shift+Enter preserves xterm input effects while shell keeps CR @real-fixture (10.0s)
+  ✓  172 [chromium] › selftest/web-driver.spec.ts:6876:1 › #2347: the mobile agent terminal also reclaims peer-owned geometry @real-fixture (9.9s)
+  ✓  188 [chromium] › selftest/web-driver.spec.ts:7959:1 › a live PTY stream and the events WS survive the service worker controlling the page @real-fixture (877ms)
+  ✓  231 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (761ms)
+  ✓  238 [chromium] › selftest/webtab-legacy.spec.ts:7:3 › web tab blocks legacy shorthand 2130706433 without navigation (688ms)
 
-  238 passed (6.7m)
+  238 passed (6.9m)

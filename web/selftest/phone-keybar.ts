@@ -86,8 +86,9 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
 /** Reproduce stale xterm keydown state and verify its textarea-based 229 deletion. */
 export async function assertPhoneStaleRecovery(page: Page, stream: () => string): Promise<void> {
   const textarea = page.locator(".af-pane-host .xterm-helper-textarea").first();
+  const ctrl = page.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Ctrl", exact: true });
   const before = stream();
-  const recovered = await textarea.evaluate(async el => {
+  const recovered = await textarea.evaluate(el => {
     const input = el as HTMLTextAreaElement;
     const key = (type: string, keyCode: number, name: string) => {
       const event = new KeyboardEvent(type, { bubbles: true, cancelable: true, key: name });
@@ -108,15 +109,29 @@ export async function assertPhoneStaleRecovery(page: Page, stream: () => string)
         bubbles: true, composed: true, data: letter, inputType: "insertText", isComposing: true,
       }));
     }
-    const value = input.value;
+    return input.value;
+  });
+  expect(recovered).toBe("ab");
+  await expect.poll(stream).toBe(before + "ab");
+
+  await ctrl.click();
+  await expect(ctrl).toHaveAttribute("data-state", "once");
+  await textarea.evaluate(async el => {
+    const input = el as HTMLTextAreaElement;
+    const key = (type: string, keyCode: number, name: string) => {
+      const event = new KeyboardEvent(type, { bubbles: true, cancelable: true, key: name });
+      Object.defineProperty(event, "keyCode", { value: keyCode });
+      input.dispatchEvent(event);
+    };
     key("keydown", 229, "Unidentified");
     input.value = input.value.slice(0, -1);
     await new Promise(resolve => setTimeout(resolve, 0));
     key("keyup", 229, "Unidentified");
-    return value;
   });
-  expect(recovered).toBe("ab");
   await expect.poll(stream).toBe(before + "ab\x7f");
+  await expect(ctrl).toHaveAttribute("data-state", "off");
+  await page.keyboard.insertText("a");
+  await expect.poll(stream).toBe(before + "ab\x7fa");
 }
 
 /** The focused regression also runs with the ordinary selftest cat fixture. */

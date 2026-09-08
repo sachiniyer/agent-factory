@@ -73,12 +73,16 @@ export class TerminalKeybar {
   private physicalInput = false;
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
+    // CompositionHelper emits textarea-diff input from a zero-delay callback,
+    // after onKey's synchronous user-input marker would normally be available.
+    if (event.keyCode === 229) this.markUserInput(true);
   };
   private readonly onKeyUp = (): void => { this.physicalInput = false; };
   private readonly softInput: TerminalSoftInput;
   private readonly buttons = new Map<Modifier, HTMLButtonElement>();
   private readonly originalMaxHeight: string;
   private userInput = false;
+  private userInputGeneration = 0;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
     private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
@@ -137,15 +141,23 @@ export class TerminalKeybar {
   transform(text: string): string {
     const source = this.userInput ? "user" : "terminal";
     this.userInput = false;
+    this.userInputGeneration += 1;
     const output = this.softInput.transform(text, value =>
       this.focused && this.phone.matches ? this.modifiers.input(value, source) : value);
     this.paint();
     return output;
   }
-  /** Mark xterm's next synchronous onData emission as genuine user input. */
-  markUserInput(): void {
+  /** Mark xterm's next onData emission as genuine user input. */
+  markUserInput(deferred = false): void {
+    const generation = ++this.userInputGeneration;
     this.userInput = true;
-    queueMicrotask(() => { this.userInput = false; });
+    const clear = () => {
+      if (this.userInputGeneration === generation) this.userInput = false;
+    };
+    // For keycode 229, queue cleanup behind CompositionHelper's setTimeout(0).
+    // Synchronous onKey and term.input paths only need the current event turn.
+    if (deferred) queueMicrotask(() => setTimeout(clear, 0));
+    else queueMicrotask(clear);
   }
   private sendUserInput(data: string): void {
     this.markUserInput();

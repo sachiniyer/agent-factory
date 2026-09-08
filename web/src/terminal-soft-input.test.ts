@@ -164,6 +164,32 @@ test("Safari keycode 229 after compositionend belongs to the IME commit", t => {
   assert.equal(modifiers.state("Alt"), "off");
 });
 
+for (const [keyCode, modifier, modified] of [
+  [16, "Ctrl", "\x18"], [17, "Ctrl", "\x18"], [18, "Alt", "\x1bx"],
+] as const) {
+  test(`Safari modifier keycode ${keyCode} remains inside the pending IME commit`, t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const host = new EventTarget();
+    const textarea = Object.assign(new EventTarget(), { value: "" });
+    const modifiers = new StickyModifiers();
+    modifiers.tap(modifier, 0);
+    const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+    t.after(() => soft.dispose());
+
+    textarea.dispatchEvent(new Event("compositionstart"));
+    textarea.dispatchEvent(composition("compositionend", "字"));
+    textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode }));
+    textarea.value = "字";
+    host.dispatchEvent(insertText("字"));
+
+    assert.equal(soft.transform("字", value => modifiers.input(value)), "字");
+    assert.equal(modifiers.state(modifier), "once");
+    textarea.dispatchEvent(Object.assign(new Event("keyup"), { keyCode }));
+    assert.equal(soft.transform("x", value => modifiers.input(value)), modified);
+    assert.equal(modifiers.state(modifier), "off");
+  });
+}
+
 test("old release leaves the new composition owned; reset and disposal clear all ownership", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget(), textarea = new EventTarget();
