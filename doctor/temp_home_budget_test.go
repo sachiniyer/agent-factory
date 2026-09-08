@@ -185,7 +185,7 @@ func TestTruncatedSweepReportsThatItDidNotFinish(t *testing.T) {
 	require.Len(t, notices, 1, "a sweep that stopped early must say so exactly once")
 	assert.Equal(t, StatusWarn, notices[0].Severity)
 	assert.False(t, notices[0].Actionable,
-		"not finishing is an UNKNOWN, not a proven unhealthy condition; it must not flip the exit code")
+		"not finishing is an UNKNOWN, not a proven unhealthy condition; it must not increase unresolved")
 	assert.Contains(t, notices[0].Detail, "did NOT assess every temp home")
 	// 4, not 3. The fourth directory is empty: reaching the candidate limit
 	// exactly as its listing ends is a COMPLETE expansion, which the EOF probe

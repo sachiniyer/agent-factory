@@ -146,12 +146,11 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 // worktree mutation, so it has to exceed everything a NORMALLY PROGRESSING
 // teardown can spend, or it refuses rebuilds that were about to succeed.
 //
-// Two serial costs sit under it, and they add: cmd.Wait can take up to
-// hookWaitDelay (2s) when a backgrounded grandchild holds the capture pipe, and
-// the scope stop that follows it can take up to systemdunit.HookScopeStopTimeout
-// (10s) when a setsid'd descendant ignores SIGTERM and systemd has to escalate.
-// The previous 10s was below their sum, which made the worst case a refusal
-// rather than a slow success (#3650 review).
+// The scope stop under it can take up to systemdunit.HookScopeStopTimeout (10s)
+// when a setsid'd descendant ignores SIGTERM and systemd has to escalate. Keep
+// headroom over that bound so scheduling delay cannot turn a progressing stop
+// into a false refusal (#3650 review). Hook output uses direct files, so an
+// inherited descriptor no longer adds a pipe-drain WaitDelay here (#4010).
 var hookStopTimeout = 30 * time.Second
 
 // cancelAndWaitHooks retires the current post-worktree hook run. A closed
