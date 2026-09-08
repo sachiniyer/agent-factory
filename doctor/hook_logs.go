@@ -14,14 +14,22 @@ import (
 const hookLogsWarnBytes int64 = 100 * 1024 * 1024
 
 func checkHookLogs(report *Report, dir string) {
-	info, err := os.Stat(dir)
-	if os.IsNotExist(err) {
-		report.Pass(sectionConfig, "hook logs", "not present; created on demand at "+dir)
+	blocking, target, err := hookLogBlockingPath(dir)
+	if err == nil && blocking != "" {
+		detail := blocking + " is not a directory; configured hooks cannot start"
+		remedy := "move or remove the file so af can create its hook log directory"
+		if target != "" {
+			detail = blocking + " is a dangling symlink to " + target + "; configured hooks cannot start"
+			remedy = "fix or remove the link so af can create its hook log directory"
+		}
+		report.Fail(sectionConfig, "hook logs", detail, remedy)
 		return
 	}
-	if (err == nil && !info.IsDir()) || errors.Is(err, syscall.ENOTDIR) {
-		report.Fail(sectionConfig, "hook logs", hookLogBlockingPath(dir)+" is not a directory; configured hooks cannot start",
-			"move or remove the file so af can create its hook log directory")
+	if err == nil {
+		_, err = os.Stat(dir)
+	}
+	if os.IsNotExist(err) {
+		report.Pass(sectionConfig, "hook logs", "not present; created on demand at "+dir)
 		return
 	}
 	var total int64
@@ -71,19 +79,34 @@ func checkHookLogs(report *Report, dir string) {
 	report.Pass(sectionConfig, "hook logs", detail)
 }
 
-// ENOTDIR may identify a blocked ancestor rather than the leaf. The first
-// existing non-directory on the way up is the path the operator must fix.
-func hookLogBlockingPath(dir string) string {
+// Inspect links before following them: ENOENT can mean either an absent path
+// or a dangling link that MkdirAll cannot repair. Return the first blocking
+// path and, for a dangling symlink, its target. Empty paths mean no obstruction;
+// inspection errors remain advisory incomplete scans rather than false PASSes.
+func hookLogBlockingPath(dir string) (string, string, error) {
 	for path := dir; ; path = filepath.Dir(path) {
-		info, err := os.Stat(path)
+		info, err := os.Lstat(path)
 		if err == nil {
-			if !info.IsDir() {
-				return path
+			if info.Mode()&os.ModeSymlink != 0 {
+				info, err = os.Stat(path)
+				if os.IsNotExist(err) {
+					target, readErr := os.Readlink(path)
+					return path, target, readErr
+				}
+				if errors.Is(err, syscall.ENOTDIR) {
+					return path, "", nil
+				}
+				if err != nil {
+					return "", "", err
+				}
 			}
-			return dir
+			if !info.IsDir() {
+				return path, "", nil
+			}
+			return "", "", nil
 		}
-		if !errors.Is(err, syscall.ENOTDIR) || filepath.Dir(path) == path {
-			return dir
+		if (!os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR)) || filepath.Dir(path) == path {
+			return "", "", err
 		}
 	}
 }

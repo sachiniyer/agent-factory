@@ -144,3 +144,36 @@ func TestHomeHealthHookLogsNonDirectoryAncestorFails(t *testing.T) {
 	require.Equal(t, 1, report.UnresolvedCount())
 	require.Empty(t, report.Incomplete)
 }
+
+func TestHomeHealthHookLogsDanglingSymlinkFails(t *testing.T) {
+	for _, relative := range []string{"logs/hooks", "logs", "."} {
+		t.Run(relative, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "home")
+			link := filepath.Join(home, relative)
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+			const target = "missing-target"
+			require.NoError(t, os.Symlink(target, link))
+			report := &Report{}
+			checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
+			row := findCheck(t, report, "hook logs")
+			require.Equal(t, StatusFail, row.Status)
+			require.True(t, row.Problem)
+			require.Contains(t, row.Detail, link+" is a dangling symlink to "+target)
+			require.Contains(t, row.Detail, "hooks cannot start")
+			require.Contains(t, row.Remediation, "fix or remove the link")
+			require.Empty(t, report.Incomplete)
+		})
+	}
+}
+
+func TestHomeHealthHookLogsAbsentUnderWorkingSymlinkPasses(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(home, "logs")))
+	report := &Report{}
+	checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
+	row := findCheck(t, report, "hook logs")
+	require.Equal(t, StatusPass, row.Status)
+	require.Contains(t, row.Detail, "created on demand")
+	require.Zero(t, report.UnresolvedCount())
+	require.Empty(t, report.Incomplete)
+}
