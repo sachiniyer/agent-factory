@@ -92,7 +92,7 @@ delete_cmd = "./.agent-factory/hooks/delete.sh"
 
 `delete_cmd` is **required**, and so is exactly one of `provision_cmd` / `launch_cmd`. An empty or missing value is rejected when the backend is resolved, with an error naming the missing field (e.g. `remote_hooks.provision_cmd or remote_hooks.launch_cmd is required`, `remote_hooks.delete_cmd is required`) rather than a cryptic `exec: no command` at operation time. Setting **both** provisioning keys is rejected too — they are alternatives, not layers.
 
-`remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.toml`. Configuring `backend = "hook"` selects the backend for that repo; you can also create a one-off hook session with `af sessions create --backend hook` or, in the TUI, press `n` to open the creation form and `ctrl+r` to set its backend field to the hook backend.
+`remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.toml`. Configuring `backend = "hook"` selects the backend for that repo; you can also create a one-off hook session with `af sessions create --backend hook` or, in the TUI, press `n` for the creation form, then `ctrl+r` to open the backend picker and select `hook`.
 
 ### Command path resolution
 
