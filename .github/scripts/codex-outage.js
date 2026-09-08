@@ -16,7 +16,7 @@ const causeLabel = kind => ({
 })[kind] || 'unknown cause';
 const hours = (start, end) => (Math.max(0, time(end) - time(start)) / 3600000).toFixed(1);
 
-function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
+function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE, frozen = []) {
   // Lazy import lets the gate read/render the record without a module cycle.
   const evidence = require('./auto-gate.js').codexEvidence;
   const events = [];
@@ -49,7 +49,8 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
     time(a.time) - time(b.time) ||
     Number(!!a.verdict) - Number(!!b.verdict) ||
     Number(a.kind === 'unrecognised') - Number(b.kind === 'unrecognised'));
-  const episodes = [];
+  // Keep frozen episode boundaries, but include them in merge attribution.
+  const episodes = frozen.map(episode => ({ ...episode, merged: [...episode.merged] }));
   let active;
   for (const event of events) {
     if (event.verdict) {
@@ -71,23 +72,36 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       active.latest = { time: event.time, url: event.url, body: event.body, kind: event.kind };
     }
   }
-  for (const episode of episodes) {
-    episode.merged = [...new Set(pulls.filter((pull) => {
-      const merged = time(pull.merged_at);
-      if (!(merged >= time(episode.start) && merged < time(episode.end || now))) return false;
-      const artifacts = pull.artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER);
-      // #3932's reconstruction: an observed limit before merge and no verdict
-      // covering the merged head at that time. Late reviews cannot erase a merge.
+  for (const pull of pulls) {
+    const merged = time(pull.merged_at);
+    if (!Number.isFinite(merged) || merged > time(now)) continue;
+    // Replace this scanned PR's prior attribution, including in frozen history.
+    // Unscanned PRs retain their recorded counts.
+    for (const episode of episodes) episode.merged = episode.merged.filter(n => n !== pull.number);
+    const artifacts = pull.artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER);
+    // Attribute once, to the episode holding the latest qualifying notice.
+    // Recovery can precede the merge; notices after the merge cannot move it.
+    let attributed;
+    let latest = -Infinity;
+    for (const episode of episodes) {
       const episodeEnd = time(episode.end || now);
-      return artifacts.some(a => {
+      for (const a of artifacts) {
         const at = time(a.created_at || a.submitted_at || a.updated_at);
-        return evidence.isCodexUsageLimitArtifact(a) && at >= time(episode.start) && at <= episodeEnd && at <= merged;
-      }) &&
-        !artifacts.some(a => {
-          const verdict = evidence.parseVerdictArtifact(a, pull.head.sha, artifacts, summaryCommitSince(pull, pull.head.sha, merged));
-          return verdict && verdict.time <= merged;
-        });
-    }).map(p => p.number))].sort((a, b) => a - b);
+        if (evidence.isCodexUsageLimitArtifact(a) && at >= time(episode.start) && at <= episodeEnd && at <= merged && at >= latest) {
+          attributed = episode;
+          latest = at;
+        }
+      }
+    }
+    // #3932's reconstruction: an observed limit before merge and no verdict
+    // covering the merged head at that time. Late reviews cannot erase a merge.
+    if (attributed && !artifacts.some(a => {
+      const verdict = evidence.parseVerdictArtifact(a, pull.head.sha, artifacts, summaryCommitSince(pull, pull.head.sha, merged));
+      return verdict && verdict.time <= merged;
+    })) attributed.merged.push(pull.number);
+  }
+  for (const episode of episodes) {
+    episode.merged = [...new Set(episode.merged)].sort((a, b) => a - b);
   }
   return episodes;
 }
@@ -237,7 +251,7 @@ async function sweep(api, repo, now = new Date().toISOString()) {
     }
     if (batch.length < 100 || time(batch.at(-1).updated_at) < time(since)) break;
   }
-  const episodes = [...frozen, ...aggregate(pulls, now, since)];
+  const episodes = aggregate(pulls, now, since, frozen);
   if (!episodes.length && !records.length) return null;
   const body = render(episodes, now);
   if (records.length) {

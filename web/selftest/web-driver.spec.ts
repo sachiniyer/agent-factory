@@ -50,6 +50,7 @@ import {
 import { readFileSync } from "node:fs";
 import { decode, Op } from "../src/frame.js";
 import { openAfterInitialResync } from "./initial-resync.js";
+import { stopPolledRoutes } from "./polled-route.js";
 
 const surfaceTokens: { light: string; dark: string } = JSON.parse(
   readFileSync(new URL("../../design/tokens.json", import.meta.url), "utf8"),
@@ -1113,6 +1114,7 @@ test("#2276: a fresh shell with no seeded real row reports rail-plane diagnostic
     expect(snapshotDiagnostic).toContain(JSON.stringify(SESSION_A));
     expect(failure).toContain("real events: open");
   } finally {
+    await stopPolledRoutes(ctx);
     await ctx.close();
   }
 });
@@ -1579,6 +1581,7 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await row(p, "probe-needs-you").click();
   await expect(retry).toBeHidden();
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -1681,6 +1684,7 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   await expect(railAction(p, "probe-restorable", "Restore session")).toHaveCount(1);
   await expect(railAction(p, "probe-restorable", "Archive session")).toHaveCount(0);
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -5746,6 +5750,7 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
     }
   }
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -6389,6 +6394,7 @@ test("filter (feat): a project whose sessions are ALL archived reads as empty, a
   await expect(empty).toBeVisible();
   await expect(empty).not.toContainText("archived hidden");
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -7148,7 +7154,7 @@ test("#2330: an older reconnect Snapshot cannot overwrite a newer session event"
     if (staleResponseCaptured) {
       await staleFinished;
     }
-    await p.unroute("**/v1/Snapshot");
+    await stopPolledRoutes(ctx);
     if (created) {
       af("tab-delete", SESSION_A, "--name", tabName);
     }
@@ -8363,6 +8369,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               contentType: "image/png",
             });
           } finally {
+            await stopPolledRoutes(ctx);
             await ctx.close();
           }
         });
@@ -11112,6 +11119,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
           body: await p.screenshot(),
           contentType: "image/png",
         });
+        await stopPolledRoutes(ctx);
         await ctx.close();
       });
     }
@@ -11206,6 +11214,7 @@ for (const external of [true, false]) {
       }
       await modal.getByRole("button", { name: "Cancel", exact: true }).click();
     } finally {
+      await stopPolledRoutes(ctx);
       await ctx.close();
     }
   });
@@ -11266,6 +11275,7 @@ for (const [external, branchCreated] of [[true, true], [false, false], [false, t
       }
       await modal.getByRole("button", { name: "Cancel", exact: true }).click();
     } finally {
+      await stopPolledRoutes(ctx);
       await ctx.close();
     }
   });
