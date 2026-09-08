@@ -20,6 +20,10 @@ func (g *GitWorktree) adoptHookProgress() bool {
 	// Capture identity before publication: teardown can replace worktree fields.
 	worktreePath, sessionID := g.worktreePath, g.hookScopeSessionID
 	p, err := readPendingHookProgress(worktreePath, sessionID)
+	return g.installHookProgressAdoption(worktreePath, sessionID, p, err)
+}
+
+func (g *GitWorktree) installHookProgressAdoption(worktreePath, sessionID string, p *hookProgress, err error) bool {
 	if noResumableHookProgress(err) {
 		return false
 	}

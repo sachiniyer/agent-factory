@@ -140,8 +140,11 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		if run.progress != nil {
 			defer func() {
 				if finishProgress && !(run.leaveProgressUnfinishedOnCancel && ctx.Err() != nil) {
-					run.progress.finish()
+					if err := run.progress.markFinished(); err != nil {
+						log.ErrorLog.Printf("cannot record post-worktree hook completion: %v", err)
+					}
 				}
+				run.progress.releaseLease()
 			}()
 		}
 		scopeRecorded := false

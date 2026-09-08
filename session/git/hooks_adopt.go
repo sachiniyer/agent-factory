@@ -46,9 +46,7 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 	if !systemdunit.RunningDaemonProcess() {
 		return
 	}
-	candidates := make([]*GitWorktree, 0, len(worktrees))
-	owned := make([][]string, 0, len(worktrees))
-	var all []string
+	eligible := make([]*GitWorktree, 0, len(worktrees))
 	for _, g := range worktrees {
 		if g == nil || g.IsExternalWorktree() {
 			continue
@@ -63,12 +61,16 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 		}
 		// A worktree with a live in-process run already reports itself, and
 		// overwriting its channel would strand the join cancelAndWaitHooks does.
-		// Restore always arrives here with none, so this is a guard rather than a
-		// case: adoption must never be the thing that loses a run's own handle.
-		if g.hooksDone != nil {
-			continue
+		if g.hooksDone == nil {
+			eligible = append(eligible, g)
 		}
-		if g.adoptHookProgress() {
+	}
+	progressAdopted := adoptHookProgressBatch(eligible)
+	candidates := make([]*GitWorktree, 0, len(eligible))
+	owned := make([][]string, 0, len(worktrees))
+	var all []string
+	for _, g := range eligible {
+		if progressAdopted[g] {
 			continue
 		}
 		prefixes := g.hookScopePrefixes()

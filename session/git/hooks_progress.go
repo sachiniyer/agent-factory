@@ -156,12 +156,16 @@ exit "$status"`, "af-hook-entry", p.receipt(index), command}
 
 func (p *hookProgress) finish() {
 	// Publish terminal evidence before releasing the local runner's lease.
-	if p.lease != nil {
-		defer p.lease.Close()
-	}
-
 	if err := p.markFinished(); err != nil {
 		log.ErrorLog.Printf("cannot record post-worktree hook completion: %v", err)
+	}
+	p.releaseLease()
+}
+
+func (p *hookProgress) releaseLease() {
+	if p.lease != nil {
+		_ = p.lease.Close()
+		p.lease = nil
 	}
 }
 
