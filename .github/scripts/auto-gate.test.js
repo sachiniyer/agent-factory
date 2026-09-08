@@ -15,6 +15,7 @@ const ACTIONS_APP_ID = 15368;
 const CHECK_GENERATION_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_SCRIPT = path.join(__dirname, "auto-gate.js");
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
+const AUTO_GATE_AGGREGATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate-aggregate.yml");
 const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
 const AUTO_GATE_DOC = path.join(__dirname, "..", "auto-gate.md");
 
@@ -404,8 +405,105 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
-test("Auto Gate can be recovered manually by PR number", () => {
+test("Auto Gate dedupes evaluation jobs only after ungrouped invalidation", async () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  assert.doesNotMatch(workflow, /^concurrency:/m,
+    "workflow concurrency must not delay or discard invalidation");
+  const jobs = Object.fromEntries([...workflow.matchAll(
+    /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
+  )].map((match) => [match[1], match[2]]));
+  assert.doesNotMatch(jobs["auto-gate"], /^    (?:concurrency|needs|if):/m);
+  assert.match(jobs["auto-gate"], /autoGate\.resolveAggregateHeads\(\{ context, targets \}\)/);
+  assert.match(jobs["auto-gate"], /payload\.before/);
+  assert.doesNotMatch(jobs["invalidate-gate"], /^    concurrency:/m);
+  assert.match(jobs["invalidate-gate"], /^    needs: auto-gate$/m);
+  assert.match(jobs["invalidate-gate"], /always\(\)/);
+  assert.match(jobs["apply-gate"], /^    needs: \[auto-gate, invalidate-gate\]$/m);
+  assert.match(jobs["apply-gate"], /fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\)/);
+  assert.match(jobs["apply-gate"], /uses: \.\/\.github\/workflows\/auto-gate-aggregate.yml/);
+  assert.match(jobs["apply-gate"], /head_sha: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
+  assert.match(jobs["apply-gate"], /targets_json: \$\{\{ needs\.auto-gate\.outputs\.targets \|\| '\[\]' \}\}/);
+  assert.match(jobs["apply-gate"], /read_failure: \$\{\{ matrix\.aggregate\.read_failure \|\| '' \}\}/);
+  const aggregate = fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
+  assert.doesNotMatch(aggregate, /^concurrency:/m);
+  assert.match(aggregate, /^  workflow_call:/m);
+  assert.match(aggregate, /group: auto-gate-aggregate-\$\{\{ inputs\.head_sha \}\}\n      cancel-in-progress: false/);
+  assert.match(aggregate, /HEAD_SHA: \$\{\{ inputs\.head_sha \}\}/);
+  assert.match(aggregate, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
+  const concurrency = jobs["apply-gate"].match(
+    /^    concurrency:\n      group: auto-gate-target-\$\{\{ (.+) \}\}-head-\$\{\{ matrix\.aggregate\.head_sha \}\}\n      cancel-in-progress: false$/m,
+  );
+  assert.ok(concurrency, "evaluation job needs target/head concurrency after invalidation");
+  const fields = concurrency[1].split(" || ");
+  assert.deepEqual(fields, [
+    "github.event.issue.number",
+    "github.event.pull_request.number",
+    "inputs.pr_number",
+    "github.event.workflow_run.head_sha",
+    "github.event.check_suite.head_sha",
+    "github.event.sha",
+    "github.run_id",
+  ]);
+  // Evaluate the actual expression's property/OR subset, including Actions'
+  // empty value for missing properties, rather than duplicating its key logic.
+  const group = (event, inputs = {}, runId = 100, headSha = HEAD_SHA) => {
+    const context = { github: { event, run_id: runId }, inputs };
+    const target = fields.map((field) => field.split(".").reduce(
+      (value, key) => value?.[key], context,
+    )).find((value) => value);
+    return `auto-gate-target-${target}-head-${headSha}`;
+  };
+  const cases = {
+    check_suite: [{ check_suite: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    issue_comment: [{ issue: { number: 4060 }, comment: { body: "[gate-ack]" } }, {}, 4060],
+    pull_request_review: [{ pull_request: { number: 4060 } }, {}, 4060],
+    pull_request_review_comment: [{ pull_request: { number: 4060 } }, {}, 4060],
+    pull_request_target: [{ pull_request: { number: 4060 } }, {}, 4060],
+    status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
+    workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
+  };
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.deepEqual(
+    [...triggers.matchAll(/^  (\w+):/gm)].map((match) => match[1]).sort(),
+    Object.keys(cases).sort(),
+    "every subscribed trigger needs a target-key fixture",
+  );
+  for (const [name, [event, inputs, target]] of Object.entries(cases)) {
+    assert.equal(group(event, inputs), `auto-gate-target-${target}-head-${HEAD_SHA}`, name);
+    assert.equal(group(event, inputs, 200), group(event, inputs), `${name} must ignore run ID`);
+  }
+  assert.equal(group({}, { pr_number: "4060" }), `auto-gate-target-4060-head-${HEAD_SHA}`);
+  assert.equal(group({}), `auto-gate-target-100-head-${HEAD_SHA}`);
+  assert.equal(group({}, {}, 200), `auto-gate-target-200-head-${HEAD_SHA}`);
+  assert.notEqual(group({ issue: { number: 4061 } }), group({ issue: { number: 4060 } }));
+  assert.notEqual(group({ sha: OTHER_SHA }), group({ sha: HEAD_SHA }));
+  // Synchronize's previous head survives a later same-PR comment: it has
+  // already been resolved/invalidated, and its matrix child has a distinct key.
+  const sync = { before: OTHER_SHA, pull_request: { number: 4060, head: { sha: HEAD_SHA } } };
+  const heads = autoGate.resolveAggregateHeads({ context: { payload: sync } });
+  assert.deepEqual(heads, [HEAD_SHA, OTHER_SHA]);
+  const invalidation = await runInvalidateGateStep({
+    aggregateHeads: heads.map((head_sha) => ({ head_sha })),
+    invalidateResults: {
+      [HEAD_SHA]: [{ writeState: "created" }],
+      [OTHER_SHA]: [{ writeState: "created" }],
+    },
+  });
+  assert.equal(invalidation.error, null);
+  assert.deepEqual(invalidation.attempts, [HEAD_SHA, OTHER_SHA]);
+  const invalidated = JSON.parse(invalidation.outputs.invalidated_heads);
+  assert.deepEqual(invalidated.map((head) => head.head_sha), heads);
+  const syncGroups = invalidated.map(({ head_sha }) => group(sync, {}, 100, head_sha));
+  assert.equal(syncGroups[0], group(cases.issue_comment[0]));
+  assert.notEqual(syncGroups[1], group(cases.issue_comment[0]));
+  assert.match(triggers, /issue_comment:\n    types: \[created, edited, deleted\]/);
+  assert.doesNotMatch(workflow, /github\.event\.comment\.(?:body|user)/);
+});
+
+test("Auto Gate can be recovered manually by PR number", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8") +
+    fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
   const helper = fs.readFileSync(path.join(__dirname, "auto-gate.js"), "utf8");
 
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
@@ -421,7 +519,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /concurrency:\s+group: auto-gate-aggregate-\$\{\{ matrix\.aggregate\.head_sha \}\}\s+cancel-in-progress: false/,
+    /concurrency:\s+group: auto-gate-aggregate-\$\{\{ inputs\.head_sha \}\}\s+cancel-in-progress: false/,
   );
   assert.match(workflow, /strategy:\s+fail-fast: false\s+matrix:\s+aggregate:/);
   assert.match(
@@ -441,8 +539,8 @@ test("Auto Gate can be recovered manually by PR number", () => {
     /apply-gate:[\s\S]*?needs\.invalidate-gate\.outputs\.invalidated_heads != ''[\s\S]*?matrix:\s+aggregate: \$\{\{ fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\) \}\}/,
   );
   assert.doesNotMatch(workflow, /needs\.invalidate-gate\.result == 'success'/);
-  assert.match(workflow, /HEAD_SHA: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
-  assert.match(workflow, /TARGETS_JSON: \$\{\{ needs\.auto-gate\.outputs\.targets \}\}/);
+  assert.match(workflow, /HEAD_SHA: \$\{\{ inputs\.head_sha \}\}/);
+  assert.match(workflow, /TARGETS_JSON: \$\{\{ inputs\.targets_json \}\}/);
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
   assert.match(workflow, /prNumber: explicitPrNumber/);
   assert.match(
@@ -468,7 +566,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
     /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha,\s+payload\.after,[\s\S]*?payload\.before,[\s\S]*?filter\(\(value\) => \/\^\[0-9a-f\]\{40\}\$\/\.test\(value\)\)\)\];/,
   );
   assert.doesNotMatch(workflow, /knownEventHeads =[\s\S]{0,500}\.sort\(\)/);
-  assert.match(workflow, /READ_FAILURE: \$\{\{ matrix\.aggregate\.read_failure \|\| '' \}\}/);
+  assert.match(workflow, /READ_FAILURE: \$\{\{ inputs\.read_failure \}\}/);
   assert.match(workflow, /readFailureReason: process\.env\.READ_FAILURE/);
   assert.match(
     workflow,
@@ -2571,12 +2669,13 @@ test("transient CodeQL neutral waits for Analyze jobs and later passes", async (
   assert.equal(settled.shouldMerge, true);
 });
 
-test("an automatic review clears the gate from its summary row alone", async () => {
+test("an automatic review clears the gate with a corroborated summary timestamp", async () => {
   // #3606: Codex emits the `Reviewed commit:` prose line when a review is
   // REQUESTED, and only edits its summary table when it reviews automatically on
   // a push. The head was reviewed, passed, and blocked forever on "has not
   // reviewed head … yet" until someone posted `@codex review`.
   const github = fakeGateGithub({
+    reviews: [automaticReview()],
     issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
   });
 
@@ -2606,11 +2705,10 @@ test("a Running summary row is progress, not a verdict", async () => {
   });
 
   assert.equal(result.shouldMerge, false);
-  // …and the message says a review exists rather than sending the reader to look
-  // for one that never ran: the row names this head, it just is not a verdict.
+  // A status row alone says nothing about whether a review produced an artifact.
   assert.ok(
     result.reasons.some((reason) =>
-      reason.includes(`a Codex review exists for head ${HEAD_SHA} but carried no parseable verdict`),
+      reason.includes(`Codex has not reviewed head ${HEAD_SHA} yet`),
     ),
     `got: ${result.reasons.join("; ")}`,
   );
@@ -2655,7 +2753,7 @@ test("a summary row older than the head is stale evidence", async () => {
   assert.equal(result.shouldMerge, false);
   assert.ok(
     result.reasons.some((reason) =>
-      reason.includes("Codex verdict for the head commit is older than the head commit timestamp"),
+      reason.includes(`Codex has not reviewed head ${HEAD_SHA} yet`),
     ),
     `got: ${result.reasons.join("; ")}`,
   );
@@ -2731,7 +2829,7 @@ test("summary rows are read positionally, and only when complete", () => {
 
   // The prose form is untouched and still reports its own kind.
   assert.equal(parseVerdictArtifact(codexVerdict(HEAD_SHA), HEAD_SHA).kind, "prose");
-  assert.equal(parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA).kind, "summary-row");
+  assert.equal(parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA, [automaticReview()]).kind, "summary-row");
 });
 
 test("a table-looking body without the summary marker is not a verdict", async () => {
@@ -2849,6 +2947,7 @@ test("an issue-comment finding blocks on the head its own links name", async () 
   // clean artifact, and the PR auto-merged with eight live P2s the gate never
   // read. Every finding in it links `blob/<head>/…`: the head IS stated.
   const github = fakeGateGithub({
+    reviews: [automaticReview()],
     issueComments: [
       codexIssueCommentFinding(HEAD_SHA, { timestamp: "2026-07-09T01:20:00Z" }),
       // The real ordering: Codex rewrites its table when it posts a finding, so
@@ -2923,12 +3022,13 @@ test("a finding artifact that names no commit blocks anyway", async () => {
   );
 });
 
-test("a clean head-bound summary row still passes", async () => {
+test("a clean automatic review with a summary row still passes", async () => {
   // The guard on both halves: neither may turn the ordinary passing shape — an
   // automatic review that completed cleanly and recorded itself in the table —
   // into a block. The summary comment names a commit, so it is not
   // unclassifiable; it carries no finding, so there is nothing to bind.
   const result = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
   });
 
@@ -2946,7 +3046,7 @@ test("only an assertion makes a finding stale, never a link", async () => {
   });
   const stated = await evaluateGate({
     issueComments: [summary],
-    reviews: [codexReview(OTHER_SHA, "P1: a finding about the previous head", "2026-07-09T01:19:00Z")],
+    reviews: [automaticReview(), codexReview(OTHER_SHA, "P1: a finding about the previous head", "2026-07-09T01:19:00Z")],
   });
   assert.equal(stated.shouldMerge, true, `blocked on: ${stated.reasons.join("; ")}`);
 
@@ -3100,7 +3200,7 @@ test("an unclassifiable finding clears only by an answer that names it", async (
     commentTime: "2026-07-09T01:20:06Z",
   });
   const clears = async (comment) =>
-    (await evaluateGate({ issueComments: [stripped, summary, comment] })).shouldMerge;
+    (await evaluateGate({ reviews: [automaticReview()], issueComments: [stripped, summary, comment] })).shouldMerge;
 
   // The lane round comment, verbatim in shape: allowed author, later, carries
   // RESOLVED, and is about something else entirely.
@@ -3163,6 +3263,7 @@ test("an answer to a longer id does not clear the artifact whose id it prefixes"
   });
 
   const neighbour = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [
       shortId,
       summary,
@@ -3172,6 +3273,7 @@ test("an answer to a longer id does not clear the artifact whose id it prefixes"
   assert.equal(neighbour.shouldMerge, false, "an answer to a different comment is not an answer");
 
   const itself = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [
       shortId,
       summary,
@@ -3207,6 +3309,7 @@ test("a RESOLVED answer owes a commit; ACCEPTED and gate-ack do not", async () =
   const anchor = `#issuecomment-${stripped.id}`;
   const withHead = (headCommittedDate, comment) => ({
     headCommittedDate,
+    reviews: [automaticReview(HEAD_SHA, "2026-07-09T01:22:30Z")],
     issueComments: [
       stripped,
       codexSummaryTable(HEAD_SHA, {
@@ -3298,6 +3401,7 @@ test("an answer in the same second as the finding still answers it", async () =>
     timestamp: "2026-07-09T01:20:00Z",
   });
   const result = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [
       stripped,
       codexSummaryTable(HEAD_SHA, {
@@ -3402,7 +3506,7 @@ test("a row whose cell prefixes a different commit does not match this head", ()
 
   const otherHead = codexSummaryTable(OTHER_SHA);
   assert.equal(parseVerdictArtifact(otherHead, HEAD_SHA), null);
-  assert.notEqual(parseVerdictArtifact(otherHead, OTHER_SHA), null, "it is a verdict for its own head");
+  assert.notEqual(parseVerdictArtifact(otherHead, OTHER_SHA, [automaticReview(OTHER_SHA)]), null, "it is a verdict for its own head");
 
   // The prose form is held to the same rule.
   assert.equal(parseVerdictArtifact(codexVerdict(OTHER_SHA), HEAD_SHA), null);
@@ -3671,14 +3775,16 @@ test("transient failure notices do not diagnose a usage limit", async () => {
   }
 });
 
-test("completed summary rows for older heads supersede outages by row time", async () => {
+test("repeat summary rows for older heads cannot reuse proof from before an outage", async () => {
   for (const [rowTime, status, expected] of [
-    ["2026-07-09T01:25:00Z", "✅ **Completed**", false],
+    ["2026-07-09T01:25:00Z", "✅ **Completed**", true],
     ["2026-07-09T01:15:00Z", "✅ **Completed**", true],
     ["2026-07-09T01:25:00Z", "🔄 **Running**", true],
     [null, "✅ **Completed**", true],
   ]) {
-    const result = await evaluateGate({ issueComments: [
+    const result = await evaluateGate({ reviewComments: [{ ...codexFinding({ id: 3606, line: null }),
+      body: "P2: a finding on the older head", commit_id: OTHER_SHA, pull_request_review_id: 3606, created_at: "2026-07-09T01:14:00Z" },
+      findingReply({ id: 3607, inReplyToId: 3606, body: "ACCEPTED" })], issueComments: [
       codexRateLimit("2026-07-09T01:20:00Z"),
       codexSummaryTable(OTHER_SHA, { rowTime, status, commentTime: "2026-07-09T01:30:00Z" }),
     ] });
@@ -3696,7 +3802,7 @@ test("automatic summary verdict closes a transient failure outage at the row tim
   summary.html_url = "https://github.com/sachiniyer/agent-factory/pull/3953#issuecomment-summary";
   const collect = (artifact) => aggregate([{
     number: 3953, head: { sha: HEAD_SHA }, merged_at: at("25"),
-    artifacts: [failure, artifact],
+    artifacts: [failure, artifact, automaticReview(HEAD_SHA, at("19"))],
   }], at("30"));
   const episodes = collect(summary);
   assert.equal(episodes.length, 1);
@@ -3705,12 +3811,15 @@ test("automatic summary verdict closes a transient failure outage at the row tim
   assert.deepEqual(episodes[0].merged, []);
   assert.match(render(episodes, at("30")), /availability — recovered/);
 
+  // A corroborator arriving after the row cannot backdate recovery.
+  const earlyRow = codexSummaryTable(HEAD_SHA, { rowTime: at("05") });
+  assert.equal(collect(earlyRow)[0].end, new Date(at("19")).toISOString());
+
   // An edit after the outage must not refresh a stale row. Recovery can be for
   // any head, but needs a completed, timestamped row that is not in the future.
   for (const options of [
     { status: "🔄 **Running**" },
     { rowTime: null },
-    { rowTime: at("05") },
     { rowTime: at("35") },
   ]) {
     const invalid = codexSummaryTable(HEAD_SHA, {
@@ -7645,7 +7754,7 @@ test("an unknown owned generation concedes nothing", async () => {
 test("the apply-gate step delegates refusal classification to the helper", () => {
   // The shapes are auditable in one place only if the workflow has no second
   // copy of them. Nothing in the step may name a refusal shape of its own.
-  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const workflow = fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
 
   assert.match(workflow, /await autoGate\.resolveMergeRefusal\(\{/);
   assert.match(workflow, /if \(concession\) \{\s+concede\(concession\.message, error, concession\.reason\);/);
@@ -8812,13 +8921,13 @@ async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
 // concession is wired up in that script, so a test that does not run it proves
 // nothing about whether a conceded refusal actually stops reddening the run.
 function applyGateScript() {
-  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const workflow = fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
   const step = workflow.match(
     // The `|$` alternative matters: this is the last step of the last job, so
     // the block ends at end-of-file rather than at the next low-indent line.
     /- name: Evaluate, report, and merge the serialized head[\s\S]*?script: \|\n([\s\S]*?)(?=\n {0,10}\S|$)/,
   );
-  assert.ok(step, "the apply-gate step script is missing from auto-gate.yml");
+  assert.ok(step, "the apply-gate step script is missing from auto-gate-aggregate.yml");
   const indent = step[1].match(/^( +)\S/m);
   assert.ok(indent, "the apply-gate step script is empty");
   const body = step[1]
@@ -10398,3 +10507,158 @@ function findingReply({ id, inReplyToId, body, line = 32 }) {
     line,
   };
 }
+
+test('#4052: Completed 71 seconds after a usage limit is not a verdict', async () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:21:11Z' });
+  const artifacts = [codexRateLimit('2026-07-09T01:20:00Z'), summary];
+  assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, artifacts, Date.parse('2026-07-09T01:00:00Z')), null);
+  const blocked = await evaluateGate({ issueComments: artifacts, reviews: [], reviewComments: [] });
+  assert.equal(blocked.shouldMerge, false);
+  assert.match(blocked.reasons.join('\n'), /Codex has not reviewed head/);
+  assert.equal(blocked.degradedForUnavailableReviewer, true);
+  const approved = await evaluateGate({ issueComments: [...artifacts,
+    prComment('sachiniyer', '## Review — approve', '2026-07-09T01:30:00Z')], reviews: [], reviewComments: [] });
+  assert.equal(approved.shouldMerge, true);
+  assert.equal(approved.degradedForUnavailableReviewer, true);
+});
+
+test('#4052: automatic review plus row still supplies a verdict without prose (#3606)', async () => {
+  const review = { ...codexReview(HEAD_SHA), id: 3606, body: '### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.', state: 'COMMENTED' };
+  const summary = codexSummaryTable(HEAD_SHA);
+  const result = await evaluateGate({ issueComments: [summary], reviews: [review], reviewComments: [] });
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(result.summary, /corroborated by review 3606/);
+});
+
+function automaticReview(sha = HEAD_SHA, timestamp = "2026-07-09T01:01:00Z") {
+  return { id: 3606, user: { login: "chatgpt-codex-connector[bot]" },
+    body: "### 💡 Codex Review\n\nDidn't find any major issues.",
+    commit_id: sha, submitted_at: timestamp, state: "COMMENTED" };
+}
+
+test('#4052: corroboration requires the exact head, author, transport and push freshness', () => {
+  const since = Date.parse('2026-07-09T01:10:00Z');
+  const summary = codexSummaryTable(HEAD_SHA);
+  const review = automaticReview(HEAD_SHA, '2026-07-09T01:15:00Z');
+  for (const invalid of [
+    { ...review, commit_id: OTHER_SHA },
+    { ...review, commit_id: HEAD_SHA.slice(0, 7) },
+    { ...review, commit_id: HEAD_SHA.slice(0, 7) + 'f'.repeat(33) },
+    { ...review, user: { login: 'someone' } },
+    { ...review, submitted_at: '2026-07-09T01:10:00Z' },
+    { ...review, submitted_at: 'invalid' },
+    { ...review, submitted_at: undefined },
+    { ...review, in_reply_to_id: 123 },
+    codexIssueCommentFinding(HEAD_SHA),
+  ]) assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, [invalid], since), null, JSON.stringify(invalid));
+  assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, [review], null), null);
+  assert.ok(__test.parseVerdictArtifact(summary, HEAD_SHA, [review], since));
+  assert.ok(__test.parseVerdictArtifact(summary, HEAD_SHA.toUpperCase(), [review], since));
+  const quoting = { ...summary, body: 'Codex Review quotes:\n' + summary.body };
+  assert.equal(__test.parseVerdictArtifact(quoting, HEAD_SHA, [review], since), null);
+});
+
+test('#4052: fresh inline artifacts corroborate a row while findings remain blocking', async () => {
+  const comments = [1, 2].map(id => ({ ...codexFinding({ id, line: 10 }),
+    commit_id: HEAD_SHA, pull_request_review_id: 3606 }));
+  const summary = codexSummaryTable(HEAD_SHA);
+  const blocked = await evaluateGate({ issueComments: [summary], reviews: [], reviewComments: comments });
+  assert.equal(blocked.shouldMerge, false);
+  assert.match(blocked.summary, /corroborated by 2 inline comments/);
+  const mixed = __test.parseVerdictArtifact(summary, HEAD_SHA, [...comments, automaticReview(HEAD_SHA, '2026-07-09T01:19:00Z')]);
+  assert.equal(mixed.time, Date.parse('2026-07-09T01:20:00Z'));
+  assert.equal(mixed.corroboration, '2 inline comments');
+  assert.match(blocked.reasons.join('\n'), /2 unresolved live Codex inline/);
+  const resolved = await evaluateGate({ issueComments: [summary], reviews: [], reviewComments: [
+    ...comments, ...comments.map(c => findingReply({ id: c.id + 10, inReplyToId: c.id, body: 'ACCEPTED' })),
+  ] });
+  assert.equal(resolved.shouldMerge, true, resolved.summary);
+  const since = Date.parse('2026-07-09T01:16:00Z');
+  assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, comments.map(c => ({
+    ...c, updated_at: '2026-07-09T01:30:00Z' })), since), null);
+});
+
+test('#4052: an unavailable inline reply and its empty review never corroborate completion', async () => {
+  const fixture = inlineLimitFixture();
+  fixture.issueComments = [codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:21:11Z' })];
+  const result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  assert.equal(result.degradedForUnavailableReviewer, true);
+  assert.match(result.reasons.join('\n'), /Codex has not reviewed head/);
+});
+
+test('3954286650: unrecognised submitted reviews never corroborate completion', async () => {
+  const summary = codexSummaryTable(HEAD_SHA);
+  for (const body of [CODEX_ENVIRONMENT_MISSING, 'Review started.', 'An unknown reviewer response.',
+    `### 💡 Codex Review\n\n${CODEX_ENVIRONMENT_MISSING}`]) {
+    const review = { ...automaticReview(HEAD_SHA, '2026-07-09T01:15:00Z'), body };
+    assert.equal(autoGate.codexEvidence.classifyCodexUnavailableArtifact(review).kind, 'unrecognised');
+    assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, [review]), null, body);
+    const result = await __test.evaluateCodex({ github: fakeGateGithub({ issueComments: [summary], reviews: [review] }),
+      context: fakeContext(), number: 1465, sha: HEAD_SHA,
+      lastCommitDate: '2026-07-09T01:00:00Z', prCreatedAt: '2026-07-09T00:00:00Z' });
+    assert.equal(result.reviewerUnavailable, true, body);
+    assert.equal(result.reviewerUnavailableKind, 'unrecognised');
+    assert.ok(result.reasons.join('\n').includes(body.split('\n', 1)[0]));
+  }
+});
+
+test('3954286650: a genuine automatic clean review still corroborates completion', async () => {
+  const review = { ...automaticReview(), body: "### 💡 Codex Review\n\nDidn't find any major issues." };
+  const result = await evaluateGate({ issueComments: [codexSummaryTable(HEAD_SHA)], reviews: [review] });
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(result.summary, /corroborated by review 3606/);
+});
+
+
+test('3954286650: an empty submitted review cannot corroborate completion', () => {
+  const review = { ...automaticReview(), body: '' };
+  assert.equal(__test.parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA, [review]), null);
+});
+
+test('3954623225: a repeated completion needs proof after the latest unavailable response', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:30:00Z' });
+  const oldReview = automaticReview(HEAD_SHA, '2026-07-09T01:10:00Z');
+  const limit = codexRateLimit('2026-07-09T01:20:00Z');
+  const since = Date.parse('2026-07-09T01:00:00Z');
+  const parse = artifacts => __test.parseVerdictArtifact(summary, HEAD_SHA, artifacts, since);
+  assert.equal(parse([oldReview, limit]), null);
+  const newReview = { ...automaticReview(HEAD_SHA, '2026-07-09T01:29:00Z'), id: 3954623225 };
+  assert.equal(parse([oldReview, limit, newReview]).corroboration, 'review 3954623225');
+  assert.equal(parse([oldReview]).corroboration, 'review 3606');
+});
+
+test('3954623225: the latest unavailable event advances the existing per-row floor', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:40:00Z' });
+  const proof = automaticReview(HEAD_SHA, '2026-07-09T01:25:00Z');
+  const earlier = codexRateLimit('2026-07-09T01:20:00Z');
+  const since = (commit, at) => {
+    assert.equal(commit, HEAD_SHA.slice(0, 7));
+    assert.equal(at, Date.parse('2026-07-09T01:40:00Z'));
+    return Date.parse('2026-07-09T01:00:00Z');
+  };
+  for (const body of [CODEX_LIMIT_ACCOUNT, CODEX_TRANSIENT_FAILURE, CODEX_ENVIRONMENT_MISSING]) {
+    const latest = codexRateLimit('2026-07-09T01:30:00Z', body);
+    for (const artifacts of [[proof, earlier, latest], [latest, earlier, proof]]) {
+      assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, artifacts, since), []);
+    }
+    const edited = { ...latest, updated_at: '2026-07-09T01:50:00Z' };
+    assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, [proof, edited], since), []);
+    const inlineReply = { ...edited, commit_id: HEAD_SHA, pull_request_review_id: 123, in_reply_to_id: 456 };
+    assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, [proof, inlineReply], since), []);
+  }
+});
+
+test('3954623225: later, other-head and non-Codex responses do not reset a row', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:20:00Z' });
+  const proof = automaticReview(HEAD_SHA, '2026-07-09T01:10:00Z');
+  for (const response of [
+    codexRateLimit('2026-07-09T01:30:00Z'),
+    { ...codexRateLimit('2026-07-09T01:15:00Z'), commit_id: OTHER_SHA },
+    { ...codexRateLimit('2026-07-09T01:15:00Z'), user: { login: 'someone' } },
+  ]) {
+    const verdict = __test.parseVerdictArtifact(summary, HEAD_SHA, [proof, response]);
+    assert.equal(verdict.corroboration, 'review 3606');
+    assert.equal(verdict.time, Date.parse('2026-07-09T01:20:00Z'));
+  }
+});

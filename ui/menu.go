@@ -112,7 +112,7 @@ type Menu struct {
 	origin layout.Point
 }
 
-var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
+var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 
 // newInstanceMenuOptions are the naming-form hints. The third, fourth and fifth
 // slots are the form's optional fields — the initial prompt (#1936), the backend
@@ -321,11 +321,11 @@ func (m *Menu) updateOptions() {
 	switch m.state {
 	case StateEmpty:
 		m.options = defaultMenuOptions
-		// Groups: creation (n, N) | search (/) | system (?, q)
+		// Groups: creation (n) | search (/) | system (?, q)
 		m.groups = []menuGroup{
-			{start: 0, end: 2, isAction: true},
-			{start: 2, end: 3, isAction: false},
-			{start: 3, end: 5, isAction: false},
+			{start: 0, end: 1, isAction: true},
+			{start: 1, end: 2, isAction: false},
+			{start: 2, end: 4, isAction: false},
 		}
 	case StateDefault:
 		if m.instance != nil {
@@ -335,9 +335,9 @@ func (m *Menu) updateOptions() {
 			// When there is no instance, show the empty state
 			m.options = defaultMenuOptions
 			m.groups = []menuGroup{
-				{start: 0, end: 2, isAction: true},
-				{start: 2, end: 3, isAction: false},
-				{start: 3, end: 5, isAction: false},
+				{start: 0, end: 1, isAction: true},
+				{start: 1, end: 2, isAction: false},
+				{start: 2, end: 4, isAction: false},
 			}
 		}
 	case StateNewInstance:
@@ -633,7 +633,6 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyShiftUp, keys.KeyShiftDown},
 	{keys.KeyAttach},
 	{keys.KeySearch},
-	{keys.KeyNewRemote},
 	{keys.KeyHooks},
 	{keys.KeyArchive},
 	{keys.KeyRestore},

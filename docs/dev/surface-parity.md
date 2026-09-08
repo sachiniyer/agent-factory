@@ -265,7 +265,7 @@ aspirations:
 |---|---|
 | cobra's lazy surface — `af completion bash`, `af help`, `--help`, `--version` | the tree is walked **after** cobra finishes building it |
 | [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web now **does** send `CreateSession.backend` (#1968 landed), via a `const body` variable | the web body parser, incl. variable resolution |
-| #1933 (TUI half) — closed; `sessionStartRequest` now carries `Backend`, so the fixture is repointed to track that the walk still sees the TUI's use of `backend`/`prompt`/`force_remote` **and** its non-use of `in_place` | the Go AST walk |
+| #1933 (TUI half) — closed; `sessionStartRequest` now carries `Backend`, so the fixture is repointed to track that the walk still sees the TUI's use of `backend`/`prompt` **and** its non-use of `in_place`/`force_remote` (#4017) | the Go AST walk |
 | [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — closed; the CLI now sets `Preview.Tab/TabID/TabName/Full`, so the fixture is repointed to track that the walk still sees both the CLI's usage and the TUI's non-use of `tab_name` | the AST **on an internal route**, invisible to the public catalog |
 | [#1935](https://github.com/sachiniyer/agent-factory/issues/1935) — `TaskUpdate.project_path` is now sent by every surface; the web still omits `max_concurrent_runs` | nested recursion **behind a wrapper route**, plus the TS-interface read, web value walk, and the CLI's field-by-field assignment walk |
 

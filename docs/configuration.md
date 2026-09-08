@@ -458,6 +458,9 @@ tasks = "ctrl+t"
 ```
 
 - Key strings are the forms the terminal reports: a single character (`Q`, `/`, `?`), a named key (`up`, `enter`, `f5`, `space`), or a `ctrl+`/`alt+`/`shift+` combination (`ctrl+t`, `shift+up`).
+- **Compatibility binding:** `[keys].new_remote` has no default key. If configured,
+  it opens the creation form with the backend field focused, where you choose the
+  backend; it no longer forces remote creation or checks local `remote_hooks` first.
 - **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `tasks`, `search`, `open_pr`, `copy_pr`, `hooks`, `config_agent`, `config_editor`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `restore`, `limit_retry`, `handoff`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
 - `pane_prev` / `pane_next` are contextual: their default `left` / `right` bindings switch panes only while a workspace pane has focus. With tree focus, the same arrows keep the tree's collapse/expand behavior.
 - **Reserved keys** are rejected: binding any action to `enter`, `tab`, `shift+tab`, `esc`, `ctrl+]`, or a digit `1`–`9` is a startup error naming the key and why it's reserved (they drive interaction, the focus ring, overlay cancel, the interactive-mode exit, and the 1–9 tab jump respectively).

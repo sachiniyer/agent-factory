@@ -195,17 +195,43 @@ A real review quoting an unavailable message remains a review.
 `<!-- codex-pull-request-review-summary -->` identifies the maintained
 “Codex Review Summary” activity comment. Its edit time is excluded from
 latest-response selection: an edit cannot supersede an earlier head-current
-unavailable answer. Parseable Completed rows participate using their own times,
-even for an older commit, because they prove Codex answered again. Running rows
-and rows without a commit or timestamp remain excluded from the availability
-pool. Any artifact carrying the summary marker is status, never an
-unrecognised outage response, whether it has valid Completed rows or not; an
-incomplete summary therefore cannot add a cause or replace the latest notice.
-A completed row older than the unavailable answer does not supersede it.
-Verdict parsing for the current head continues to use the row's own time. The
-repository outage record likewise treats every authenticated Completed row as
-recovery at its own time, regardless of the commit; only merge accounting
-requires a verdict for the merged head.
+unavailable answer. A Completed row is **never a verdict by itself** (#4052).
+It may supply a completion timestamp only when a Codex-authored artifact for
+the same commit corroborates it: a `Reviewed commit:` prose verdict, a submitted
+pull-request review (`/pulls/N/reviews`, matching `commit_id`), or at least one
+top-level inline review comment (`/pulls/N/comments`, matching `commit_id`).
+The row and corroborating artifact must both post-date the head's push anchor
+(`headCurrentSince`). An inline comment uses its creation time, so editing it
+cannot refresh old evidence. A submitted review without the prose footer must
+carry a known automatic-review body: the Codex review heading with a clean
+result, automated-suggestions wrapper, or findings. Empty wrappers and arbitrary
+submitted bodies do not count. Every reviewer-unavailable classification,
+including `unrecognised` (such as the environment-missing response), is rejected
+as corroboration and retains its outage meaning. Replies do not corroborate a
+review, and body links alone do not corroborate one.
+For each row, the existing push floor is advanced to the latest preceding
+unavailable Codex response for that commit. The corroborating artifact must be
+strictly newer than this combined floor: an earlier successful review cannot
+certify a later bare Completed row after a failed retry on the same head.
+Unavailable issue comments bind by time; reviews and replies naming another
+commit do not reset the floor. Response creation/submission times are used so
+later edits cannot hide an earlier failed attempt.
+
+This preserves #3606: an automatic review with real artifacts counts even when
+it omits the prose footer. The gate summary identifies the corroborating review,
+prose verdict, or inline comment count. A bare row instead reports “Codex has not
+reviewed head”; a usage-limit notice still requires maintainer approval through
+the degraded path.
+
+Running rows, malformed rows, and uncorroborated Completed rows are excluded
+from availability ordering as well as verdict selection. A maintained summary
+is status, never an unrecognised outage response. The repository outage record
+uses the same corroboration rule for current and superseded commits, with
+commit dates, PR creation, force-push history and recorded head announcements
+supplying historical freshness floors. Only merge accounting requires the merged head specifically.
+Recovery uses the row's own time, never the summary edit time, and cannot be
+earlier than the corroborating artifact. A later artifact therefore cannot
+backdate a recovery or erase an earlier degraded merge.
 
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
@@ -244,9 +270,49 @@ bypass: a maintainer's direct merge is supposed to meet the same required check
 as the workflow's merge. The stable-release deploy key may retain its narrow
 bypass because that non-session path updates the release commit directly.
 
+## Queued-only deduplication
+
+Concurrency belongs to evaluation jobs, never the workflow. Every run follows
+this dependency graph:
+
+```text
+auto-gate (resolve event heads, ungrouped)
+  -> invalidate-gate (ungrouped, including retries)
+    -> apply-gate (one reusable-workflow call per invalidated head)
+      -> aggregate transaction (head-serialized evaluation/report/merge)
+```
+
+Neither the resolver nor invalidation has a concurrency group or waits on a
+grouped job. Every event can therefore invalidate while an older transaction
+is running; dedupe cannot discard an event before its invalidation attempt.
+Only successfully invalidated heads enter evaluation. This preserves generation
+ownership checks immediately before PASS and merge, including write retries.
+Runner availability and API failures still apply; concurrency adds no wait here.
+
+The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
+for the entire reusable aggregate transaction. The target is the issue or PR
+number, dispatch PR number, workflow-run head SHA, check-suite head SHA, or
+status SHA (in that order), falling back to the unique run ID. With
+`cancel-in-progress: false`, newer pending evaluation jobs replace older pending
+jobs for that target/head; active transactions are never cancelled. Every
+comment event remains subscribed, including marker replies. The surviving job
+re-reads current PR, review, and check state.
+
+`resolveAggregateHeads` consumes a synchronize payload's `before` in the
+ungrouped resolver, and invalidation covers both current and previous heads.
+The matrix creates a separate evaluation call for each head. Its head suffix
+prevents a later same-PR comment about the current head from replacing the
+previous-head refresh; that refresh still reevaluates other PRs sharing the
+previous commit. This also preserves a head resolved before a subsequent push.
+
+The reusable workflow keeps the existing `auto-gate-aggregate-<head SHA>` job
+lane with `cancel-in-progress: false`. Different PR or SHA targets sharing a
+commit still serialize there. The target and aggregate prefixes are distinct,
+so the caller never waits on a lock it already holds.
+
 ## Event and merge ordering
 
-Each subscribed input event first creates a new non-green aggregate generation
+Each subscribed run first creates a new non-green aggregate generation
 without waiting for the head's serialized lane. It then refreshes every
 associated PR/head decision, republishes its own generation, and considers a
 merge inside that lane. If a newer event invalidates the head while the older
