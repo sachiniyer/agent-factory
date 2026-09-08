@@ -284,16 +284,9 @@ const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 // mid-text — which reviewing this very file produces.
 const MAINTAINER_APPROVAL_MARKER = "## Review — approve";
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
-// The second artifact shape. Codex emits the prose line above when a review is
-// REQUESTED; when it reviews automatically on a push it only edits its summary
-// comment, whose table names the commit in a cell (#3606). Both are the same
-// reviewer saying the same thing about the same head, so both count — a PR whose
-// final head was reviewed automatically otherwise blocks forever on a review
-// that already ran, which is how every final head came to need a manual
-// `@codex review`.
-//
-// A row is a verdict only when it is Completed AND names a commit AND carries a
-// parseable time. `Running` is progress, not a verdict.
+// Automatic reviews may omit the prose footer (#3606). Their maintained summary
+// supplies a completion timestamp only when a real review or inline finding
+// corroborates the same commit (#4052). Completion alone proves no verdict.
 // The marker GitHub's Codex integration writes into its own persistent summary
 // comment. Requiring it is what stops any body that merely CONTAINS a
 // table-looking line — a review quoting this very format, which reviewing this
@@ -4312,12 +4305,13 @@ async function evaluateCodex({
     }));
   // Replies precede their empty enclosing review on a timestamp tie: GitHub
   // posts both in the same second. Later reviews still supersede the answer.
+  const corroborationArtifacts = [...codexReviewArtifacts, ...reviewComments];
   const codexAvailabilityArtifacts = [...codexInlineReplies, ...codexReviewArtifacts]
-    // A completed row proves Codex answered again, even for an older head.
+    // Only a corroborated completed row proves Codex answered again.
     // Ignore table edits and incomplete rows; only the row's own time counts.
     .flatMap((artifact) => {
       if (!String(artifact.body || "").trimStart().startsWith(CODEX_SUMMARY_MARKER)) return [artifact];
-      return completedCodexSummaryRows(artifact)
+      return corroboratedCodexSummaryRows(artifact, corroborationArtifacts, headCurrentSince)
         .map((row) => ({
           ...artifact,
           // Preserve the authenticated summary body so the shared unavailable
@@ -4332,7 +4326,7 @@ async function evaluateCodex({
   // comment order, because the summary comment is edited on every review
   // activity and its comment time says nothing about when this review completed.
   const matchingReviewArtifacts = codexReviewArtifacts
-    .map((artifact) => parseVerdictArtifact(artifact, sha))
+    .map((artifact) => parseVerdictArtifact(artifact, sha, corroborationArtifacts, headCurrentSince))
     .filter(Boolean)
     .sort((left, right) => right.time - left.time);
   const verdict = matchingReviewArtifacts[0];
@@ -4389,7 +4383,8 @@ async function evaluateCodex({
     // Split, because the two states need different actions from a reader: one
     // says wait for or request a review, the other says a review ran and this
     // gate could not read it — go look at the artifact, not at Codex.
-    const missingVerdictReason = summaryNamesHead(codexReviewArtifacts, sha)
+    const missingVerdictReason = summaryNamesHead(codexReviewArtifacts, sha) &&
+      summaryCorroboration(corroborationArtifacts, sha, headCurrentSince)
       ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
       : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
@@ -4406,6 +4401,7 @@ async function evaluateCodex({
       reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
     } else {
       notes.push(`Codex verdict matches head ${sha}`);
+      notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
     }
   }
 
@@ -4741,29 +4737,73 @@ function completedCodexSummaryRows(artifact) {
   return parseSummaryRows(body).filter(row => row.completed && row.commit != null && row.time != null);
 }
 
-// A Codex artifact's verdict for this head, or null. Prose first: it is the
-// explicit form and carries the artifact's own timestamp, exactly as before.
-//
-// The commit is matched as a PREFIX of the head, which needs no API lookup: the
-// head SHA is already known here, so there is nothing to resolve and no
-// check-then-use window to be raced. A stale row for an older head has to clear
-// two independent bars — its seven-character cell must equal this head's prefix,
-// and its own timestamp must post-date the head — and freshness is the one doing
-// the work.
-function parseVerdictArtifact(artifact, headSha) {
+// Review transport identity is required: body links and status rows cannot
+// manufacture an artifact. Replies (and their unavailable empty wrappers) are
+// answers to a thread, not a new review of the commit.
+function summaryCorroboration(artifacts, commit, since) {
+  commit = String(commit || "").toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(commit)) return null;
+  if (since == null || !Number.isFinite(since)) return null;
+  const matches = artifacts.filter(artifact => {
+    if (artifact.user?.login !== CODEX_REVIEWER || artifact.in_reply_to_id ||
+        isCodexSummaryArtifact(artifact)) return false;
+    const prose = parseReviewedCommit(artifact.body || "");
+    const sha = String(artifact.commit_id || prose || "").toLowerCase();
+    if (!/^[0-9a-f]{7,40}$/.test(sha) ||
+        !(sha.startsWith(commit) || commit.startsWith(sha))) return false;
+    if (artifact.commit_id && !/^[0-9a-f]{40}$/.test(sha)) return false;
+    const inline = artifact.pull_request_review_id != null;
+    const review = artifact.submitted_at != null && artifact.commit_id != null;
+    if (!prose && !inline && !review) return false;
+    const unavailable = classifyCodexUnavailableArtifact(artifact);
+    if (unavailable && unavailable.kind !== "unrecognised") return false;
+    if (review && !String(artifact.body || "").trim() && artifacts.some(reply =>
+      reply.user?.login === CODEX_REVIEWER && reply.in_reply_to_id &&
+      reply.pull_request_review_id === artifact.id && classifyCodexUnavailableArtifact(reply))) return false;
+    // Editing an old inline comment cannot refresh a review for a later push.
+    const at = inline ? parseTimestamp(artifact.created_at) : reviewArtifactTime(artifact);
+    return at != null && at > since;
+  });
+  const artifactTime = a => a.pull_request_review_id != null ? parseTimestamp(a.created_at) : reviewArtifactTime(a);
+  matches.sort((a, b) => artifactTime(a) - artifactTime(b));
+  const chosen = matches[0];
+  if (chosen && chosen.pull_request_review_id == null) return {
+    time: reviewArtifactTime(chosen),
+    description: chosen.submitted_at != null ? `review ${chosen.id || "(id unavailable)"}`
+      : `prose verdict ${chosen.id || chosen.html_url || "(id unavailable)"}`,
+  };
+  if (!matches.length) return null;
+  const inlineComments = matches.filter(a => a.pull_request_review_id != null);
+  return { time: artifactTime(chosen),
+    description: `${inlineComments.length} inline comment${inlineComments.length === 1 ? "" : "s"}` };
+}
+
+// Shared by verdict parsing, availability ordering and outage reconstruction.
+// The callback lets history apply the push anchor for each superseded commit.
+function corroboratedCodexSummaryRows(artifact, artifacts = [], since = 0, headSha = null) {
+  if (artifact.user?.login !== CODEX_REVIEWER) return [];
+  return completedCodexSummaryRows(artifact).flatMap(row => {
+    const floor = typeof since === "function" ? since(row.commit, row.time) : since;
+    const proof = summaryCorroboration(artifacts, headSha || row.commit, floor);
+    if (!proof || row.time <= floor) return [];
+    return [{ ...row, time: Math.max(row.time, proof.time), corroboration: proof.description }];
+  });
+}
+
+// Prose is a verdict in its own right. A maintained row can only timestamp a
+// real artifact for this head; never let the completion claim stand alone.
+function parseVerdictArtifact(artifact, headSha, artifacts = [], headCurrentSince = 0) {
   const body = artifact.body || "";
   const reviewedCommit = parseReviewedCommit(body);
   if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, headSha)) {
-    return { kind: "prose", time: reviewArtifactTime(artifact), body };
+    return { kind: "prose", time: reviewArtifactTime(artifact), body,
+      corroboration: artifact.submitted_at != null ? `review ${artifact.id || "(id unavailable)"}`
+        : `prose verdict ${artifact.id || artifact.html_url || "(id unavailable)"}` };
   }
-  const row = parseSummaryRows(body).find(
-    (candidate) =>
-      candidate.completed &&
-      candidate.commit != null &&
-      candidate.time != null &&
-      reviewedCommitMatchesHead(candidate.commit, headSha),
-  );
-  return row ? { kind: "summary-row", time: row.time, body } : null;
+  const row = corroboratedCodexSummaryRows(artifact, artifacts, headCurrentSince, headSha)
+    .filter(candidate => reviewedCommitMatchesHead(candidate.commit, headSha))
+    .sort((a, b) => b.time - a.time)[0];
+  return row ? { kind: "summary-row", time: row.time, body, corroboration: row.corroboration } : null;
 }
 
 // Whether any artifact's summary table names this head at all, whatever its
@@ -4998,6 +5038,9 @@ function finish(core, setOutputs, result) {
         : `BLOCKED: ${result.reasons.join("; ")}`;
   }
 
+  const corroboration = (result.notes || []).find(note => note.startsWith("Codex verdict corroborated by "));
+  if (corroboration && !summary.includes(corroboration)) summary += `\n\n${corroboration}.`;
+
   if (result.reasons.length === 0) {
     core.notice(summary);
   } else {
@@ -5027,7 +5070,7 @@ function formatError(error) {
 
 module.exports = {
   codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact, classifyCodexUnavailableArtifact,
-    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows },
+    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,
