@@ -403,7 +403,8 @@ argument to inspect the proposed body without writing it.
 
 The sweep paginates PRs in updated order back to the #3932 evidence window
 (2026-09-05 UTC) on bootstrap, including open and closed PRs. Later sweeps use a
-named 24-hour recompute window: a completed episode is frozen verbatim only when
+named 24-hour recompute window: a completed episode's boundaries and outage
+evidence are frozen only when
 its recovery is older than `now - 24h`. The sweep scans from 1 ms after the
 latest frozen recovery, or from the bootstrap boundary when none is frozen, and
 re-aggregates everything after that boundary with the current classifier. This
@@ -421,7 +422,12 @@ classification; those artifacts are finding surfaces, while replies retain the
 finding-shaped body guard. It reconstructs degraded merges using #3932's method:
 a reviewer-unavailable response whose artifact timestamp falls inside the
 episode and before merge, plus no real verdict covering the actual merged head
-before merge. This is historical coverage accounting, not a second
+before merge. Each degraded merge is attributed once, to the episode holding
+the latest qualifying notice at or before that merge, even when the merge lands
+after recovery. Scanned merged PRs have their attribution refreshed across both
+rebuilt and frozen episodes, so merges after the 24-hour boundary are counted
+too; unscanned PRs retain their recorded counts. This is historical coverage
+accounting, not a second
 implementation of the merge gate; the count is labelled with its method in the
 record. An unrecognised artifact before the episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
