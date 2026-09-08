@@ -215,18 +215,21 @@ also excludes Docker; see [Opt-in auto-resume](#opt-in-auto-resume).
 
 ### Account-scoped handoff
 
-For a local session created with `--account`, `af sessions handoff` returns an
-error naming the account and saying “an account belongs to one agent”, if it
-gets past the earlier state and target checks. The replacement never starts;
-the outgoing agent keeps running with its selected account. The explicit guard
-is in [session/backend_local.go:416](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/backend_local.go#L416),
-before the old pane is stopped. The daemon reaches it through
-[session/instance_backend.go:417](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/instance_backend.go#L417),
-then rolls back the handoff record and returns the failure at
-[daemon/handoff.go:182](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/daemon/handoff.go#L182).
-Create a separate session with the target agent and its account when you need
-that identity. The [handoff instructions](#hand-off-to-another-agent) below apply
-to sessions without account scoping.
+Local account-scoped sessions support both same-agent and cross-agent handoffs.
+Use `af sessions handoff <session> --account <name>` to choose another registered
+account of the current agent. Add `--to <agent>` to change agent and account
+together. The target account must belong to the incoming agent and must not be
+currently walled in the daemon's limit ledger.
+
+An explicit `--account` selects a pinned identity: an existing pin moves to the
+chosen account, and an ambient session becomes pinned to that account. For an
+ambient session, `--to <agent>` without `--account` keeps the replacement ambient.
+A session already scoped to an account must specify a target account when
+changing agents; omitting it does not bypass the pin.
+
+The session keeps its worktree and branch, and the new conversation receives the
+handoff brief. See [Hand off to another account](#hand-off-to-another-account)
+for examples, admission checks, and the TUI and web pickers.
 
 ### Bug report redaction
 
@@ -414,8 +417,8 @@ rotation. The same local account-swap path replaces all credential-bearing panes
 its launch checks and restrictions, including VS Code tabs, still apply.
 
 In the TUI, press **F** on the `[limit]` session and choose another account.
-The project default is preselected when it is another registered account. In the
-web, use **Handoff** beside **Retry**, then choose the agent and account. Both
+The project default is preselected when it is another registered, logged-in
+account. In the web, use **Handoff** beside **Retry**, then choose the agent and account. Both
 pickers list accounts belonging to the selected agent.
 
 ## Hand off to another agent

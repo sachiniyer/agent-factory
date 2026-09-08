@@ -16,14 +16,8 @@ type handoffAccountsLoadedMsg struct {
 
 func (m *home) loadHandoffAccounts(agent, path string) tea.Cmd {
 	target, fetch := m.handoffTarget, listAccountsThroughDaemon
-	queryAgent := agent
-	if selected := m.resolveSessionActionTarget(target); selected != nil {
-		if account, _ := selected.AccountSelection(); account != "" {
-			queryAgent = ""
-		}
-	}
 	return func() tea.Msg {
-		resp, err := fetch(queryAgent, path)
+		resp, err := fetch("", path)
 		return handoffAccountsLoadedMsg{target: target, agent: agent, response: resp, err: err}
 	}
 }
@@ -49,9 +43,8 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 			}
 			agents = append(agents, agent)
 			accounts = append(accounts, "")
-			labels = append(labels, agent)
+			labels = append(labels, agent+" (ambient)")
 			warnings = append(warnings, "")
-			continue
 		}
 		for _, entry := range msg.response.Entries {
 			if entry.Agent != agent || (agent == msg.agent && entry.Name == current) || entry.RegistrationOnly {

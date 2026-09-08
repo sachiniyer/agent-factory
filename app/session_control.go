@@ -244,26 +244,25 @@ var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) e
 // handoffSessionThroughDaemon routes the TUI's handoff verb (#2013) through the
 // daemon — the single writer (#960) — which swaps the session's agent program in
 // place, re-launches it in the same worktree, and delivers the mission brief. It
-// returns the OUTGOING agent the daemon actually resolved, so the TUI reports the
-// swap that happened rather than the one it assumed: the picker's idea of the
-// current agent can be a poll tick stale. A package var so the app test suite can
-// stub it without dialing a real daemon.
-var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (string, error) {
-	var from string
+// returns the agent and account pair the daemon actually resolved, so the TUI
+// reports the swap that happened rather than the picker's potentially stale view.
+// A package var so the app test suite can stub it without dialing a real daemon.
+var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
+	var response daemon.HandoffSessionResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		resp, e := c.HandoffSession(req)
 		if e != nil {
 			return e
 		}
-		from = resp.From
+		response = resp
 		return nil
 	})
-	return from, err
+	return response, err
 }
 
 // SetHandoffRunnerForTest swaps the handoff seam (#2013) so a test can assert the
 // TUI routes its handoff through the daemon — without dialing a real one.
-func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (string, error)) func() {
+func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error)) func() {
 	prev := handoffSessionThroughDaemon
 	handoffSessionThroughDaemon = fn
 	return func() { handoffSessionThroughDaemon = prev }

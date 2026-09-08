@@ -168,21 +168,28 @@ type startHandoffMsg struct {
 }
 
 type handoffDoneMsg struct {
-	title  string
-	from   string
-	target string
-	err    error
+	fromAccount string
+	toAccount   string
+	title       string
+	from        string
+	target      string
+	err         error
 }
 
 // handoffCmd runs the daemon handoff off the event loop.
 func (m *home) handoffCmd(request daemon.HandoffSessionRequest) tea.Cmd {
 	handoff := handoffSessionThroughDaemon
 	return func() tea.Msg {
-		from, err := handoff(request)
+		response, err := handoff(request)
 		if err != nil {
 			log.ErrorLog.Printf("could not hand session %q off to %s: %v", request.Title, request.To, err)
 		}
-		return handoffDoneMsg{title: request.Title, from: from, target: request.To, err: err}
+		target := response.To
+		if target == "" {
+			target = request.To
+		}
+		return handoffDoneMsg{title: request.Title, from: response.From, target: target,
+			fromAccount: response.FromAccount, toAccount: response.ToAccount, err: err}
 	}
 }
 
@@ -197,5 +204,12 @@ func (m *home) handleHandoffDone(msg handoffDoneMsg) (tea.Model, tea.Cmd) {
 	if from == "" {
 		from = "its previous agent"
 	}
-	return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s", msg.title, from, msg.target))
+	return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s", msg.title, handoffIdentityLabel(from, msg.fromAccount), handoffIdentityLabel(msg.target, msg.toAccount)))
+}
+
+func handoffIdentityLabel(agent, account string) string {
+	if account == "" {
+		return agent
+	}
+	return fmt.Sprintf("%s (%s)", agent, account)
 }

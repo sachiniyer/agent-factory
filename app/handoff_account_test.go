@@ -19,10 +19,10 @@ func TestHandoffOffersAgentAccounts(t *testing.T) {
 	})
 	defer restore()
 	_, cmd := h.handleHandoff()
-	require.NotNil(t, cmd, "handoff must load the selected agent's account choices")
+	require.NotNil(t, cmd, "handoff must load all target agents' account choices")
 	h.Update(cmd())
 	require.Contains(t, h.selectionOverlay.Render(), "personal")
-	require.NotContains(t, h.selectionOverlay.Render(), "foreign")
+	require.Contains(t, h.selectionOverlay.Render(), "codex: foreign")
 	require.Contains(t, h.selectionOverlay.Render(), "project default")
 }
 
@@ -40,7 +40,7 @@ func TestHandoffAccountDesignScenes(t *testing.T) {
 			h.termWidth, h.termHeight = 80, 24
 			h.relayout()
 			restore := SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
-				return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "claude", Name: "personal"}}, Defaults: map[string]string{"claude": "personal"}}, nil
+				return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "claude", Name: "personal"}, {Agent: "codex", Name: "work", LoggedIn: true}}, Defaults: map[string]string{"claude": "personal", "codex": "work"}}, nil
 			})
 			defer restore()
 			_, cmd := h.handleHandoff()
