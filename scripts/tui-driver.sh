@@ -378,13 +378,23 @@ af_resize() {
     AF_DRIVER_ROWS="$rows"
 }
 
+# _af_menu_row — isolate the unframed navigation status-bar menu. Tree and
+# pane menus end with the same help/quit signature. Reject pane-border rows
+# even if their output contains a complete copied menu. Keep the final match:
+# the status bar is below the workspace, but notices can follow its menu.
+_af_menu_row() {
+    awk -v borders="$_AF_PANE_BORDER_FS" '
+        $0 !~ borders && /(^|[[:space:]])[?] help · q quit[[:space:]]*$/ { row = $0 }
+        END { if (row != "") print row }'
+}
+
 # af_focus_tree — put ring focus on the instances tree (the state whose menu
 # advertises `n new`). Checks BEFORE pressing, so it never Tabs off the tree
 # when already there. Assumes nav mode (call af_ensure_nav first).
 af_focus_tree() {
     local _
     for _ in $(seq 1 8); do
-        if af_capture | grep -qE -- 'n new'; then
+        if af_capture | _af_menu_row | grep -qE -- 'n new'; then
             return 0
         fi
         af_send Tab
@@ -600,7 +610,7 @@ af_new_instance() {
 # GetSelectedInstance()), so requiring it forces `j` past the header/title rows
 # until the cursor truly lands on an actionable tab row.
 af_select() {
-    local name="$1" i screen name_re
+    local name="$1" i screen menu name_re
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
     name_re="$(_af_regex_escape "$name")"
     af_ensure_nav
@@ -622,7 +632,8 @@ af_select() {
         fi
         screen="$(af_capture)"
         printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" || continue
-        if printf '%s\n' "$screen" | grep -qE -- '(^|[[:space:]])D (kill|delete session)([[:space:]]|$)'; then
+        menu="$(printf '%s\n' "$screen" | _af_menu_row)"
+        if printf '%s\n' "$menu" | grep -qE -- '(^|[[:space:]])D (kill|delete session)([[:space:]]|$)'; then
             return 0
         fi
         # The target is display-selected (▾) but the footer is the pane menu, not
@@ -634,14 +645,14 @@ af_select() {
         # the boundary and reporting a false selection failure. This is NOT the
         # #1759 sticky-header false positive: that shows the tree menu ('n new'),
         # never the pane menu.
-        if printf '%s\n' "$screen" | grep -qE -- 'hide pane'; then
+        if printf '%s\n' "$menu" | grep -qE -- 'hide pane'; then
             af_focus_tree || return 1
             if af_capture | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)"; then
                 return 0
             fi
         fi
     done
-    _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D delete session' (or legacy 'D kill') in the menu)"
+    _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D delete session' (or legacy 'D kill') in the status-bar menu)"
     printf '%s\n' "$screen" >&2
     return 1
 }

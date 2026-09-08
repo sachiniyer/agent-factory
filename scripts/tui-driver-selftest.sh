@@ -383,6 +383,34 @@ SCREEN
     return 0
 }
 
+# Pane output must not impersonate the status bar, even with a complete menu.
+# The target stays display-selected while the cursor is on a section header.
+# shellcheck disable=SC2317  # dispatched indirectly via step().
+_expect_af_select_ignores_pane_verb() (
+    local verb="$1" footer='n new · ? help · q quit'
+    af_ensure_nav() { :; }
+    af_focus_tree() { return 0; }
+    af_send() { :; }
+    sleep() { :; }
+    af_capture() {
+        printf ' ▾ target      │ D %s                                  │\n' "$verb"
+        printf '               │ n new · D %s · ? help · q quit         │\n' "$verb"
+        printf '%s\n' '               │ x hide pane                            │' \
+            '               └────────────────────────────────────────┘' \
+            "$footer" 'notice below the menu' ''
+    }
+    if af_select target >/dev/null 2>&1; then
+        _af_fail "af_select accepted pane text 'D $verb' with a section-header footer"
+        return 1
+    fi
+    # Only the footer changes: the same display-selected row is now actionable.
+    footer="n new · D $verb · ? help · q quit"
+    af_select target || return 1
+    # The footer alone is sufficient; pane text is not required for success.
+    af_capture() { printf ' ▾ target\n%s\n\n' "$footer"; }
+    af_select target
+)
+
 # _expect_af_select_boundary — regression proof for #1759. af_select must
 # evaluate its ready condition AFTER the final downward `j`, not only before it.
 # Drive af_select against stubbed send/capture (no live TUI, no real sleeps) in
@@ -404,9 +432,9 @@ _expect_af_select_boundary() {
         af_send() { [ "${1:-}" = j ] && _AF_BOUNDARY_JCOUNT=$((_AF_BOUNDARY_JCOUNT + 1)); return 0; }
         af_capture() {
             if [ "$_AF_BOUNDARY_JCOUNT" -ge 40 ]; then
-                printf ' ▾ target                       │ menu: D %s\n' "$verb"
+                printf ' ▾ target\nn new · D %s · ? help · q quit\n' "$verb"
             else
-                printf '%s\n' ' ▾ target                       │ menu: n new'
+                printf '%s\n' ' ▾ target' 'n new · ? help · q quit'
             fi
         }
         af_select target || return 1
@@ -444,11 +472,11 @@ _expect_af_select_open_pane() {
         }
         af_capture() {
             if [ "$_AF_OPENPANE_JCOUNT" -lt 5 ]; then
-                printf '%s\n' ' ▸ target                       │ menu: n new'
+                printf '%s\n' ' ▸ target' 'n new · ? help · q quit'
             elif [ "$_AF_OPENPANE_FOCUS" = pane ]; then
-                printf '%s\n' ' ▾ target                       │ ← prev pane · → next pane │ s open pane · x hide pane'
+                printf '%s\n' ' ▾ target' '← prev pane · → next pane · s open pane · x hide pane · ? help · q quit'
             else
-                printf '%s\n' ' ▾ target                       │ menu: n new · D delete session'
+                printf '%s\n' ' ▾ target' 'n new · D delete session · ? help · q quit'
             fi
         }
         af_select target
@@ -924,6 +952,9 @@ step "task frame accepts an earlier bottom corner in the rail" _expect_tasks_fra
 step "task frame accepts earlier rail corners on both edges" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project╰name     '
 
 step "task frame beside a foreign same-row box retains its own geometry" _expect_tasks_frame_beside_foreign_box
+
+step "af_select rejects delete-session text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "delete session"
+step "af_select rejects legacy kill text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "kill"
 
 step "reset sandbox to a clean state"                       af_reset_sandbox
 step "seed a non-codex default before daemon boot"           _seed_config_editor_start_value
