@@ -531,7 +531,7 @@ function tabRuntimeLabel(s: SessionData): string {
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
  *  is shown as a single implicit agent tab so the bar (and index math) never sees
  *  an empty list. */
-export function sessionTabs(s: SessionData): { id?: string; name: string; kind: number; url?: string }[] {
+export function sessionTabs(s: SessionData): NonNullable<SessionData["tabs"]> {
   if (s.tabs && s.tabs.length > 0) {
     return s.tabs;
   }

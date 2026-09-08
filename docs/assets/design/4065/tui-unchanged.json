@@ -105,6 +105,6 @@
     "tasks-dark.svg": "0d01f4268951b22ca9f6d22583f595ba780966984d4a7ea104ebdf361ad0fe58",
     "tasks-light.svg": "830b341c73fc56d5a8be40ddf91032465e6ca74b2b58a5facd3c9d1d118279a8"
   },
-  "verified_master_commit": "3181a936b20c34e58849ff8c5d41478acbbc3cb4",
+  "verified_master_commit": "3da7c27f334aeb32de455c5a8ec3ffa2bd99fa80",
   "verification": "Existing capture hashes rechecked against the merged master tree; no recapture or TUI changes."
 }

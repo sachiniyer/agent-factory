@@ -240,7 +240,7 @@ func removeCompletedHookLog(cmdStr, path string, readErr error) {
 	if readErr != nil {
 		return
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := hooklog.Remove(path); err != nil && !os.IsNotExist(err) {
 		log.WarningLog.Printf("post-worktree hook %q completed but its output log %s could not be removed: %v", cmdStr, path, err)
 	}
 }
