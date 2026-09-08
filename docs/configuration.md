@@ -586,7 +586,7 @@ it per `af sessions create`:
 | Value | Runtime |
 |-------|---------|
 | `local` (default, or unset) | Today's in-process runtime: the agent runs as a tmux session in a git worktree on the machine running the daemon. |
-| `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts (equivalent to the TUI's "new remote session"). |
+| `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts. In the TUI's creation form, press `ctrl+r` to open the backend picker and select `hook`. |
 | `docker` | Run the workspace + agent in a container started from `[docker].image`. |
 | `ssh` | Run the workspace + agent on `[ssh].host` over ssh. |
 
