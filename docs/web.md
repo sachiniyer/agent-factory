@@ -107,17 +107,17 @@ Click **+ New** in the rail. If there are no projects, add one through the proje
 switcher first; creation stays disabled until a project is available.
 
 <figure markdown>
-![New session form with Title, Project, Prompt, Account, and an Edit defaults disclosure](assets/web/new-session.png#only-light)
-![New session form with Title, Project, Prompt, Account, and an Edit defaults disclosure](assets/web/new-session-dark.png#only-dark)
-<figcaption>Describe the work, choose an identity, and expand Edit defaults to change Program or Backend.</figcaption>
+![New session form with Title, Project, Prompt, Account, and a Defaults disclosure](assets/web/new-session.png#only-light)
+![New session form with Title, Project, Prompt, Account, and a Defaults disclosure](assets/web/new-session-dark.png#only-dark)
+<figcaption>Describe the work, choose an identity, and expand Defaults to change Program or Backend.</figcaption>
 </figure>
 
 | Field | What to choose |
 | --- | --- |
 | Title | A session name. Leave it empty to use the suggested name, if one has loaded. |
 | Project | The repository to work in; starts with the selected project. |
-| Program (Edit defaults) | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
-| Backend (Edit defaults) | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
+| Program (Defaults) | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
+| Backend (Defaults) | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
 | Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Use configured default (…)** inherits the named default; **Use agent login (no default)** uses the agent’s own login when none is configured. **Use daemon default** leaves resolution to the daemon. These rows send no account override. |
 | Prompt | Optional initial instructions to send to the agent. |
 
