@@ -142,6 +142,7 @@ export function isKillableSession(s: SessionData): s is KillableSession {
  *  authed — the live session projection plus the current selection. */
 export interface AppState {
   phase: "login" | "app";
+  pendingRestores?: ReadonlySet<string>;
   /** the top-level view: the live sessions rail+terminal, or the tasks (scheduled
    *  automations) pane — both SCOPED to the selected project (redesign PR2). The
    *  appbar view tabs and the [ / ] keys switch it; it selects which body shows. */
@@ -976,6 +977,7 @@ export class AppShell {
   private dragFromIndex: number | null = null;
 
   // Last-applied state, for cheap change detection between updates.
+  private pendingRestores?: ReadonlySet<string>;
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
@@ -1261,6 +1263,8 @@ export class AppShell {
 
   /** Applies the latest state, touching only what changed. */
   update(state: AppState, prioritizeTerminal = false): void {
+    const restoresChanged = this.pendingRestores !== state.pendingRestores;
+    this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
@@ -1392,7 +1396,7 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
       // Mount/bind a routed terminal before spending the first frame on the rail.
       // Further updates coalesce into that first paint; later gestures stay immediate.
       if (!this.railPainted && prioritizeTerminal) {
@@ -1524,7 +1528,7 @@ export class AppShell {
     let restoreChangedFocus: (() => void) | undefined;
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
-      s => JSON.stringify([s, s.id === state.selectedId]),
+      s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -1611,6 +1615,7 @@ export class AppShell {
         }
       });
       this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface);
+      lifecycleBtn.disabled = lifecycleSession.lifecycle_action === "restore" && this.pendingRestores?.has(session.id) === true;
       if (surface === "rail" && selected) {
         this.lifecycleBtn = lifecycleBtn;
         this.lifecycleAction = lifecycleSession.lifecycle_action;
@@ -2790,6 +2795,7 @@ export class AppShell {
       managed.lifecycle_action ?? null,
       managed.can_kill === true,
       managed.is_root === true,
+      this.pendingRestores?.has(managed.id) === true,
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));

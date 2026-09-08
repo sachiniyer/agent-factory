@@ -91,6 +91,7 @@ import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
+import { PendingRestores } from "./pending_restores.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -187,6 +188,7 @@ const store = new Store<AppState>({
 let token: string | null = null;
 let stream: EventStream | null = null;
 const optimisticSessions = new OptimisticSessions();
+const pendingRestores = new PendingRestores(ids => store.set({ pendingRestores: ids }));
 const connectionGate = createLatestRequestGate();
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
@@ -410,6 +412,7 @@ async function connect(candidate: string): Promise<void> {
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  pendingRestores.reset();
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
@@ -458,6 +461,7 @@ async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
+  pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
   closeModal();
@@ -910,6 +914,7 @@ function openConfirm(
   action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession,
   invoker: ModalInvoker = captureModalInvoker(),
 ): void {
+  if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
   const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
@@ -945,6 +950,7 @@ function openConfirm(
     // the projection at the point of mutation even though the watch refreshes
     // the visible dialog as soon as the root identity changes.
     if (refreshRootConsent(latest)) return;
+    if (action === "restore" && pendingRestores.has(target.id)) return;
     const m = modal;
     const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
     if (action !== "restore" && !mutation) return;
@@ -958,7 +964,8 @@ function openConfirm(
         ? killSession(target.id, target.title, tok)
         : action === "archive"
           ? archiveSession(target.id, target.title, tok)
-          : restoreSession(target.id, target.title, tok);
+          : pendingRestores.run(target.id, () => restoreSession(target.id, target.title, tok));
+    if (!run) return;
     void run.then(() => {
       if (mutation) {
         if (!optimisticSessions.succeed(mutation)) return;
