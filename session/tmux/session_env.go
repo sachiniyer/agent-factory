@@ -198,7 +198,7 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 		// tmux < 3.2 REFUSES rather than falling back. A fallback would launch on
 		// the ambient account while every visible signal reported the selected one,
 		// spending someone else's quota (#3051).
-		if !newSessionEnvSupportedForAccounts() {
+		if !SessionEnvSupported() {
 			return "", nil, nil, nil, "", fmt.Errorf(
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
@@ -221,6 +221,14 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 	source := os.Environ()
 	launchEnv := sessionenv.FilterForCommand(source, filterAgent, program, extra)
 	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
+	if !SessionEnvSupported() {
+		// Older tmux cannot replace these with new-session -e. Remove the
+		// daemon's ancestry from a fresh server's environment, and explicitly
+		// unset any stale global values in an existing server's new session.
+		markers := []string{EnvMarkerSession, EnvMarkerGeneration}
+		launchEnv = removeEnvironmentNames(launchEnv, markers)
+		importNames = appendMissingEnvironmentNames(importNames, markers)
+	}
 	var sessionEnv []string
 	if account != "" {
 		// The login pane's browser-free names go through the SAME three steps as
@@ -435,7 +443,7 @@ func tmuxServerAbsent(err error) bool {
 // validation live in sessionenv; this keeps the tmux capability probe shared
 // with the actual launch instead of re-deriving its version rule in session.
 func ValidateAccountLaunchSupport(account string) error {
-	if !newSessionEnvSupportedForAccounts() {
+	if !SessionEnvSupported() {
 		return fmt.Errorf(
 			"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 				"and af refuses rather than starting the session on the ambient account", account)
