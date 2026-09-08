@@ -13,9 +13,9 @@ Sessions (one agent per isolated worktree):
   af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp|opencode|devin]
   af sessions send-prompt <title> <prompt> [--create]  Send a prompt (--create makes the session first if missing)
   af sessions preview <title>                          Snapshot another session's terminal output
-  af sessions watch <title>                            Block until the session goes idle (agent done, ready for review); exits 0 when ready, non-zero on lost/dead/archived or --timeout (default 30m)
+  af sessions watch <title>                            Wait for agent idle (awaiting input, not work completion); exits 0 on idle, non-zero on lost/dead/archived or --timeout (default 30m)
   af sessions attach <title>                           Attach interactively (foreground)
-  af sessions kill <title>                             Kill a session and clean up its worktree
+  af sessions kill <title>                             Delete a session and only af-owned worktrees and branches; user-owned resources stay
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
   af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
   af sessions handoff <title> --to <agent>             Continue a stuck session under a different agent (same worktree/branch)
@@ -40,6 +40,6 @@ Without --target-session each run creates a fresh session; {{line}} in a watch p
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
 
-Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which deletes the worktree. "af sessions whoami" and "af sessions archive --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.
+Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which deletes only af-owned worktrees and branches; user-owned resources stay. "af sessions whoami" and "af sessions archive --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.
 
 Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.
