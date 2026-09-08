@@ -13,14 +13,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
-// #1933: no surface but the CLI could choose a session's backend. The web half
-// landed in #1968 (a picker over the daemon's ListBackends catalog); the TUI was
-// the surface left out — `N` forces the hook backend and nothing else, so a docker
-// or ssh session could not be started from the primary interface at all.
-//
 // These tests drive the REAL key path (handleKeyPress plus the async catalog
 // message), because every interesting failure in this flow lives in the hops: a
 // key swallowed on the way to handleStateNew, a picker opened over a form that
@@ -470,7 +464,7 @@ func TestStartNewInstanceResetsTheBackendField(t *testing.T) {
 	h.errBox.SetSize(120, 1)
 	h.pendingBackend = config.BackendDocker
 
-	model, _ := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 	require.Same(t, h, model)
 	requireNamingFormOpened(t, h)
 	require.Equal(t, stateNew, h.state)
@@ -514,44 +508,6 @@ func TestBackendHintClickOpensTheField(t *testing.T) {
 	_, cmd := h.handleHintClick("ctrl+r")
 	require.NotNil(t, cmd, "clicking the hint must start the catalog fetch")
 	require.Equal(t, tea.KeyCtrlR, msg.Type)
-}
-
-// TestNamingFormBackendAndForceRemoteAgree pins the interaction with `N`, the
-// legacy hook selector. Both can be set on one request; the daemon's precedence is
-// explicit-backend-first (session/instance_factory.go resolveBackendKind), so the
-// field must win over ForceRemote rather than being masked by it.
-func TestNamingFormBackendAndForceRemoteAgree(t *testing.T) {
-	h := newTestHome(t)
-	h.errBox.SetSize(120, 1)
-	got := recordStartRequest(t)
-	stubBackends(t, twoUsableBackends(), nil)
-
-	// `N` is now recorded on the model, not inferred from the naming row's
-	// provisioned runtime (#2599 — the row provisions nothing at all any more), so
-	// this is what startNewInstance(true) leaves behind. The end-to-end wiring from
-	// the keypress to this field is covered by
-	// TestStartNewRemoteThreadsForceRemoteFromTheKeypress; here it is set directly
-	// so the assertion stays about the request, not about how the flag got set.
-	remote, err := session.NewInstance(session.InstanceOptions{
-		Title:   "forced-remote",
-		Path:    t.TempDir(),
-		Program: "claude",
-		Backend: session.BackendLocal,
-	})
-	require.NoError(t, err)
-	h.store.AddInstance(remote)
-	h.namingInstance = remote
-	h.pendingProgram = "claude"
-	h.pendingForceRemote = true
-	h.state = stateNew
-
-	openBackendField(t, h)
-	pickBackend(t, h, "docker")
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-
-	assert.Equal(t, config.BackendDocker, got.Backend, "the picked backend must be sent")
-	assert.True(t, got.ForceRemote,
-		"N's selector is still reported; the daemon resolves the explicit backend first")
 }
 
 // TestBackendChoicesFromDescribesTheDefaultHonestly covers the pure mapping,
