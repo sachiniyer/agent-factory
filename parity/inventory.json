@@ -1829,6 +1829,7 @@
       "af help --help": "meta.discovery",
       "af hook-guard-tmux --help": "meta.internal",
       "af keys --help": "meta.discovery",
+      "af keys --json": "cli.json-envelope",
       "af projects --help": "meta.discovery",
       "af projects --json": "cli.json-envelope",
       "af projects add --help": "meta.discovery",
