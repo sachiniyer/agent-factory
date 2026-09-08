@@ -196,30 +196,25 @@ func TestTUICreatedPostWorktreeHookIsNotRelocated(t *testing.T) {
 	}
 }
 
-// TestScopedHookReapsGrandchildHoldingTheCapturePipe is the #610/#769 contract
+// TestScopedHookReapsGrandchildHoldingTheOutputFile is the #610/#769 contract
 // re-proven with the scope in the middle. systemd-run --scope EXECs rather than
 // forks, so cmd.Process.Pid is still the hook shell and Setpgid still makes it a
 // group leader — but that is a measured property of systemd-run, and this is
 // what fails if a future systemd (or a shim) ever forks instead: the shell exits
-// while a backgrounded grandchild holds the capture pipe, WaitDelay elapses, and
-// the process-group SIGKILL must still reach the grandchild.
-func TestScopedHookReapsGrandchildHoldingTheCapturePipe(t *testing.T) {
+// while a backgrounded grandchild holds the direct output file, and the
+// process-group SIGKILL must still reach the grandchild.
+func TestScopedHookReapsGrandchildHoldingTheOutputFile(t *testing.T) {
 	installScopeShim(t)
 	claimDaemonProcess(t)
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-	// The grandchild inherits stdout/stderr (the capture pipe) and outlives the
-	// shell, which is precisely the state hookWaitDelay bounds.
+	// The grandchild inherits stdout/stderr (the output file) and outlives the
+	// shell. A direct descriptor means that inheritance no longer delays Wait.
 	script := fmt.Sprintf("sleep 30 & printf '%%s' \"$!\" > %q", pidFile)
 
-	start := time.Now()
 	runScopedHooks(t, "7b2a4c60-3333-4000-8000-0f0f0f0f0f0f", []string{script})
-	elapsed := time.Since(start)
 
 	pid := waitForPidFile(t, pidFile, 3*time.Second)
 	if !waitForProcessExit(pid, 5*time.Second) {
 		t.Fatalf("backgrounded grandchild pid %d survived a scoped hook — the process group was not killed", pid)
-	}
-	if elapsed < hookWaitDelay {
-		t.Fatalf("scoped hook returned in %s, before WaitDelay %s could elapse; the grandchild never held the capture pipe and this test proved nothing", elapsed, hookWaitDelay)
 	}
 }
