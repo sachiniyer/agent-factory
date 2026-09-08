@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { stopPolledRoutes } from "./polled-route.js";
 
 // Keep the real daemon fixture, but project an old daemon's raw URL and absent
 // web_proxied field. Creation through today's API would canonicalize the URL.
@@ -32,5 +33,6 @@ for (const host of ["127.1", "0177.0.0.1", "2130706433"]) {
     await expect(pane.locator("iframe")).toHaveCount(0);
     await expect(pane.locator("a")).toHaveCount(0);
     expect(unsafeRequests).toEqual([]);
+    await stopPolledRoutes(page.context());
   });
 }
