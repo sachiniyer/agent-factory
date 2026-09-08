@@ -724,15 +724,15 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
 	}
-	if err := AtomicWriteFile(path, []byte(updated), 0644); err != nil {
-		return nil, err
-	}
 	value := w.canonical
 	if w.structured {
 		value, err = canonicalStructuredTOMLValue(updated, w.key)
 		if err != nil {
-			return nil, fmt.Errorf("internal error: cannot read back %s from %s: %w", w.key, prettyPath, err)
+			return nil, fmt.Errorf("internal error: cannot read back %s from %s (no changes written): %w", w.key, prettyPath, err)
 		}
+	}
+	if err := AtomicWriteFile(path, []byte(updated), 0644); err != nil {
+		return nil, err
 	}
 	return &SetResult{Key: w.key, Value: value, Path: path, RequiresRestart: true}, nil
 }

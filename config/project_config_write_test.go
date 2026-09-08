@@ -249,6 +249,22 @@ func TestSetProjectConfigValueRootAgentReportsMergedProfile(t *testing.T) {
 	assert.JSONEq(t, `{"enabled":false,"program":"next"}`, res.Value)
 }
 
+func TestSetProjectConfigValueRootAgentReadbackFailureDoesNotWrite(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nfuture_policy = nan\n")
+	path, err := ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	_, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no changes written")
+	after, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, before, after)
+}
+
 func TestUnsetProjectConfigAbsentKeyIsNoOp(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 	writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n")

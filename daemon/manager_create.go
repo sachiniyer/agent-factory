@@ -789,7 +789,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
-		if err := m.validateTitleAvailableLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace); err != nil {
+		if err := m.validateTitleAvailableLocked(repo.ID, workspace, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace); err != nil {
 			return nil, "", nil, nil, err
 		}
 	}
