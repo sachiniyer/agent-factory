@@ -76,8 +76,8 @@ running `scripts/container/web-demo-entry.sh`, which:
    the resize reflows their output rather than widening the window under it;
 6. runs `web/selftest/web-demo.spec.ts` under `web/playwright.demo.config.ts`,
    which drives the real web client through six beats — dashboard, the
-   new-session modal, the agent tab streaming, the branch's diff beside its PR
-   link, the Tasks view, the Config view at its Accounts section — twice, once
+   new-session modal, the agent tab streaming, the branch's diff in a process
+   tab, the Tasks view, the Config view at its Accounts section — twice, once
    per theme, recording video and stills, including parallel work, comparison
    review, and unsubmitted cron/watch task forms for the use-case pages;
 7. converts the recording with `ffmpeg` and copies the result out, but only

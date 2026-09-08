@@ -271,7 +271,7 @@ written back.
 
 ## Keymap changes
 
-- Default TUI keys changed to ergonomic lower-case (`a/m/y/e`,
+- Default TUI keys changed to ergonomic lower-case (`a/m/e`,
   `ctrl+u/ctrl+d`); restore any previous binding by pinning it in `[keys]` in
   `~/.agent-factory/config.toml`.
 
