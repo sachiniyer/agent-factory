@@ -100,10 +100,9 @@ func installDirectSessionStarter(t *testing.T) {
 		if inst == nil {
 			var err error
 			inst, err = session.NewInstance(session.InstanceOptions{
-				Title:       req.Title,
-				Path:        req.RepoPath,
-				Program:     req.Program,
-				ForceRemote: req.ForceRemote,
+				Title:   req.Title,
+				Path:    req.RepoPath,
+				Program: req.Program,
 			})
 			if err != nil {
 				return nil, err

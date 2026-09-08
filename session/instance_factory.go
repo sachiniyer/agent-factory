@@ -66,8 +66,8 @@ type InstanceOptions struct {
 	// ForceRemote forces the instance to use the remote hook backend,
 	// even if the repo config would default to local. It is the pre-Phase-4
 	// hook selector, equivalent to Backend == BackendHook, and takes precedence
-	// over a config-declared backend (it is set by the TUI's "new remote
-	// session" action, which means "hook now" regardless of config).
+	// over a config-declared backend. Retained for older wire clients; new
+	// clients and the TUI use Backend, which takes precedence over this flag.
 	ForceRemote bool
 	// Backend, when set, selects the session's runtime explicitly (the
 	// `--backend` create flag, #1592 Phase 4 PR3), overriding the repo's

@@ -441,6 +441,18 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly bool) {
+	// Consume physical input before scheduling a replay: the catalog may open
+	// the picker before that replay runs, turning an early Enter into a choice.
+	if m.state == stateNew && m.backendPickerPending {
+		switch msg.Type {
+		case tea.KeyEnter, tea.KeyTab, tea.KeyShiftTab, tea.KeyCtrlR, tea.KeyCtrlO:
+			return m.showTransientMessage("Loading backends…"), true
+		case tea.KeyEsc:
+			// Let handleStateNew cancel synchronously, before a late catalog
+			// can turn this key into merely closing the backend picker.
+			return nil, false
+		}
+	}
 	if m.keySent {
 		m.keySent = false
 		return nil, false
