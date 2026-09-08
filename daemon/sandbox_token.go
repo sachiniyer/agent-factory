@@ -186,26 +186,8 @@ func errSandboxCallbackNeedsRequireToken() error {
 	)
 }
 
-// mintSandboxCallback returns the credential and daemon URL to inject into a
-// sandbox, or refuses.
-//
-// Order matters twice over. The posture is checked BEFORE a secret is generated,
-// so a refused provision never leaves an unusable credential in the registry. And
-// every address decision reads the listener that is ACTUALLY ACCEPTING rather than
-// cfg.ListenAddr (#3012 review): the two diverge exactly when a live rebind failed,
-// because ApplyConfig stores the new address while bindWebLocked deliberately
-// leaves the old listener serving rather than making the daemon unreachable
-// through the very API an operator would use to fix it. Reading config there would
-// hand every sandbox a URL for an address nothing is bound to — a callback that
-// silently never connects — and would judge the loopback posture against a
-// listener that does not exist. #1856 hit the same divergence for the preview
-// origin; activeWebConfigAddr is the same answer for this one.
-func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (sandboxGrant, error) {
-	return m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), cfg, sessionID)
-}
-
-// mintSandboxCallbackFenced is mintSandboxCallback with the fence sampled by the
-// CALLER, for a caller that reads an input of its own first.
+// mintSandboxCallbackFenced issues a sandbox callback credential with the fence
+// sampled by the CALLER, for a caller that reads an input of its own first.
 //
 // The daemon's live minter reads m.Config() before calling in, and an argument is
 // evaluated before the function it is passed to runs — so sampling the fence in
