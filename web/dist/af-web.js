@@ -10839,6 +10839,64 @@ function removeTaskModal(name, onConfirm, onCancel) {
   return handle;
 }
 
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/delete_tab_modal.ts
+function confirmDeleteTabModal(opts) {
+  const { handle, body, cancelBtn } = modalChrome({
+    title: `Delete tab \u201C${opts.tabName}\u201D from session \u201C${opts.sessionTitle}\u201D?`,
+    confirmLabel: "Delete tab",
+    confirmClass: "af-danger",
+    onCancel: opts.onCancel
+  });
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  asForm(handle.el.firstElementChild, opts.onConfirm);
+  queueMicrotask(() => cancelBtn.focus());
+  return handle;
+}
+
 // src/install.ts
 var DISMISS_KEY = "af-install-dismissed";
 function shouldShowInstall(state) {
@@ -10918,50 +10976,6 @@ var InstallAffordance = class {
       installed: this.installed
     });
   }
-};
-
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3,
-  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
-   *  per-session code-server rooted at the session's worktree, reachable only
-   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
-   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
-   *  lockstep with the Go enum. */
-  VSCode: 4
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4,
-  Replacing: 5,
-  Respawning: 6
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
 };
 
 // src/time.ts
@@ -15995,7 +16009,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, liv
     });
   }
   if (index > 0 && canClose) {
-    const close = h("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
+    const close = h("span", { class: "af-tab-close", title: `Delete tab \u201C${tabDisplayLabel(tab)}\u201D` }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -16118,6 +16132,13 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       );
     }
   }
+}
+
+// src/tab_delete_target.ts
+function captureTabDeleteTarget(target) {
+  const identity = tabIdentity(target);
+  const legacy = tabRealId(target) === "";
+  return (tabs) => tabs.findIndex((tab) => tabIdentity(tab) === identity && (!legacy || tab === target));
 }
 
 // src/index.ts
@@ -16750,6 +16771,28 @@ function closeSessionTab(index) {
   if (!target) {
     return;
   }
+  const resolveTarget = captureTabDeleteTarget(target);
+  const sessionId = sel.id;
+  openModal(confirmDeleteTabModal({
+    sessionTitle: sel.title,
+    tabName: tabDisplayLabel(target),
+    kind: target.kind,
+    onCancel: closeModal,
+    onConfirm: () => {
+      const current = store.get().sessions.find((session) => session.id === sessionId);
+      const at = current ? resolveTarget(sessionTabs(current)) : -1;
+      if (!current || at <= 0 || !canCloseTabs(current)) {
+        modal?.setError("This tab is no longer available to delete.");
+        return;
+      }
+      closeModal();
+      deleteConfirmedSessionTab(current, at, tok);
+    }
+  }));
+}
+function deleteConfirmedSessionTab(sel, index, tok) {
+  const tabs = sessionTabs(sel);
+  const target = tabs[index];
   clearTabError();
   const selId = sel.id ?? "";
   const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);

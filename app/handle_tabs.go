@@ -199,6 +199,44 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(fmt.Errorf("tab cannot be closed"))
 	}
 	tab := tabs[idx]
+	target := captureSessionActionTarget(inst, m.repoID)
+	tabID := tab.ID
+	rosterGeneration := inst.TabRosterGeneration()
+	tabLabel, _ := tree.TabLabelAt(inst, idx)
+	message := fmt.Sprintf("Delete tab %q from session %q?", tabLabel, inst.Title)
+	detail := "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."
+	if tab.Kind == session.TabKindWeb {
+		detail = "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available."
+	}
+	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
+		current := m.resolveSessionActionTarget(target)
+		if current == nil || !current.Capabilities().TabManagement {
+			return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
+		}
+		if current.HasInFlightOp() {
+			return m.handleNotice(fmt.Errorf("Session %q is busy; try again", current.Title))
+		}
+		if tabID == "" && current.TabRosterGeneration() != rosterGeneration {
+			return m.handleNotice(fmt.Errorf("Tab %q changed while the dialog was open; reopen it and try again", tabLabel))
+		}
+		for at, candidate := range current.GetTabs() {
+			// IDs survive reorder/snapshot replacement. Legacy consent additionally
+			// needs the captured generation: name-based reconcile can retain a
+			// pointer even when a different tab now occupies that name.
+			if at > 0 && ((tabID != "" && candidate.ID == tabID) || (tabID == "" && candidate == tab)) {
+				_, cmd := m.deleteConfirmedTab(current, at)
+				return cmd
+			}
+		}
+		return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
+	})
+}
+
+// deleteConfirmedTab applies the existing daemon mutation and pane reconciliation
+// only after the captured tab has been confirmed and resolved in the current roster.
+func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, tea.Cmd) {
+	tabs := inst.GetTabs()
+	tab := tabs[idx]
 	tabName := tab.Name
 	// Capture the slot→identity list before the drop: reconcilePanesForTabs maps
 	// the open panes' bindings across the change by stable tab id (#1088/#1886).
