@@ -530,7 +530,7 @@ function tabRuntimeLabel(s: SessionData): string {
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
  *  is shown as a single implicit agent tab so the bar (and index math) never sees
  *  an empty list. */
-export function sessionTabs(s: SessionData): { id?: string; name: string; kind: number; url?: string }[] {
+export function sessionTabs(s: SessionData): NonNullable<SessionData["tabs"]> {
   if (s.tabs && s.tabs.length > 0) {
     return s.tabs;
   }
@@ -753,11 +753,15 @@ export class AppShell {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement as HTMLElement | null;
+    const pickerOpen = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new")?.getAttribute("aria-expanded") === "true";
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
+    // Reparenting closes the old enclosing disclosure. Reopen through the new
+    // owner and capture its return state before restoring the focused item.
+    if (pickerOpen) this.openNewTabPicker();
     if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
@@ -1849,6 +1853,11 @@ export class AppShell {
         return;
       }
       if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
+      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      // Tab can leave the picker open. Preserve the focused control's native
+      // activation rather than claiming Enter/Space for a nonexistent item.
+      if ((e.key === "Enter" || e.key === " ") && current < 0) return;
       // Own these keys before document's rail handler or xterm can act on them.
       e.preventDefault();
       e.stopPropagation();
@@ -1859,9 +1868,7 @@ export class AppShell {
         else trigger.focus();
         return;
       }
-      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
       if (!items.length) return;
-      const current = items.indexOf(document.activeElement as HTMLButtonElement);
       if (e.key === "Enter" || e.key === " ") {
         items[current]?.click();
         return;

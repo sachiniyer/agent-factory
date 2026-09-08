@@ -119,3 +119,52 @@ test("picker returns to the desktop New tab trigger after phone recomposition", 
   await expect(menu).toBeHidden();
   await expect(trigger).toBeFocused();
 });
+
+
+test("desktop picker stays visible after phone recomposition", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  await page.keyboard.press("Control+]");
+  await page.keyboard.press("t");
+  const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+  await expect(menu).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Terminal", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  const controls = page.getByRole("button", { name: "More app controls", exact: true });
+  await expect(controls).toBeFocused();
+  await expect(controls).toHaveAttribute("aria-expanded", "false");
+});
+
+for (const key of ["Enter", "Space"]) {
+  test(`picker does not consume ${key} after Tab leaves its items`, async ({ page, request }) => {
+    const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+    const session = snapshot.data.instances.find((s: { title: string }) =>
+      s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+    await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+    await expect(page.locator(".af-term-title")).toHaveText(session.title);
+    await page.keyboard.press("Control+]");
+    await page.keyboard.press("t");
+    const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+    await expect(menu).toBeVisible();
+    // A native button immediately after the picker models the next header action
+    // without depending on whether this fixture offers Handoff or clipboard access.
+    await menu.evaluate(el => {
+      const button = document.createElement("button");
+      button.textContent = "Next header action";
+      button.addEventListener("click", () => { button.dataset.activated = "true"; });
+      el.parentElement!.after(button);
+    });
+    await page.keyboard.press("End");
+    await page.keyboard.press("Tab");
+    const next = page.getByRole("button", { name: "Next header action", exact: true });
+    await expect(next).toBeFocused();
+    await page.keyboard.press(key);
+    await expect(next).toHaveAttribute("data-activated", "true");
+  });
+}

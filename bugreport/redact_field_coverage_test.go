@@ -202,6 +202,8 @@ var unplantableInstanceFields = map[string]string{
 	"ArchiveReport.RetainedTrees[].FileType":      "os.FileMode type bits, machine-derived",
 	"ArchiveReport.RetainedTrees[].IdentityKnown": "bool — whether the Lstat identity was captured at all",
 
+	"Tabs[].WebProxied":                  "derived bool — IsLoopbackWebTarget proxy decision, not secret text",
+	"PendingTabs[].WebProxied":           "same derived proxy bool under the staging roster",
 	"Tabs[].Kind":                        "bounded TabKind enum integer; its word is emitted beside it as kind_name (#3631)",
 	"PendingTabs[].Kind":                 "same bounded TabKind enum under the staging roster",
 	"Tabs[].Handoffs[].Automatic":        "bool — whether the handoff was automatic rather than user-initiated",
@@ -415,6 +417,10 @@ func rendersItselfAt(t reflect.Type, flags walkFlags) bool {
 // exported ones are still there.
 type reviewedMarshaler struct {
 	why string
+	// derived names fields whose wire value is recomputed from other exported
+	// fields. Each rule returns the exact expected JSON, or nil for omission;
+	// the ordinary diff still rejects added, changed, and dropped values.
+	derived map[string]func(*testing.T, []byte) json.RawMessage
 	// normalizesEmpty are members the marshaler renders as an EMPTY collection
 	// where the default encoder renders the absent one as null, each mapped to
 	// the EXACT form it renders — "[]" or "{}". Nothing else is permitted to
@@ -470,8 +476,10 @@ var reviewedMarshalerTypes = map[reflect.Type]reviewedMarshaler{
 	},
 	reflect.TypeOf(session.TabData{}): {
 		why: "MarshalJSON (#3631) marshals a `type alias TabData` of the same exported fields, " +
-			"plus kind_name — the TabKind enum word, never user text",
-		extra: map[string]string{"kind_name": `"agent"`},
+			"plus kind_name — the TabKind enum word, never user text; web_proxied is recomputed " +
+			"from Kind/URL as a boolean proxy decision and omitted for non-web tabs",
+		derived: map[string]func(*testing.T, []byte) json.RawMessage{"web_proxied": reviewedWebProxied},
+		extra:   map[string]string{"kind_name": `"agent"`},
 	},
 }
 

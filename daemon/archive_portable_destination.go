@@ -18,7 +18,7 @@ func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest
 	collides := func(existing string) bool {
 		// Existing exact spellings retain the caller's path-based owner
 		// diagnostic. Missing paths still need exact persisted-name claims.
-		return (!destExists || existing != base) && archiveTitlesCollide(existing, base)
+		return (!destExists || existing != base) && archiveDiskNameKey(existing) == archiveDiskNameKey(base)
 	}
 	collision := func(existing string) error {
 		return fmt.Errorf("cannot archive session %q: destination %s collides with existing archive %q (same portable name)", inst.Title, dest, existing)
@@ -31,9 +31,9 @@ func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest
 		return collision(existing)
 	}
 	// Persisted rows still claim their archive name when refresh cannot restore
-	// them or the directory is temporarily missing. Use the recorded path because
-	// archived-title reuse can rename the row without relocating its worktree.
-	disk, err := loadRepoInstanceData(repoID)
+	// them or the directory is temporarily missing. Like create admission, retain
+	// both the recorded location and the title-derived future destination.
+	disk, err := loadArchiveOwnerData(repoID)
 	if err != nil {
 		return fmt.Errorf("cannot archive session %q: cannot read archive owners for destination %s: %w", inst.Title, dest, err)
 	}
@@ -41,8 +41,14 @@ func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest
 		if data.Title == inst.Title || session.RecordedLiveness(data) != session.LiveArchived {
 			continue
 		}
-		existing := archiveClaimName(data)
-		if !collides(existing) {
+		existing := ""
+		for _, name := range archiveRecordClaimNames(data) {
+			if collides(name) {
+				existing = name
+				break
+			}
+		}
+		if existing == "" {
 			continue
 		}
 		owned, err := ownsArchiveDirectory(data)
@@ -59,30 +65,57 @@ func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest
 // archiveDirectoryCollision is shared by archive admission and archived-name
 // reuse. Every existing entry claims its portable key, including orphan trees.
 func archiveDirectoryCollision(dest string, destExists bool) (string, error) {
-	entries, err := sessiongit.BoundedReadDir(filepath.Dir(dest))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("cannot inspect archive directory %s; check that the filesystem is responsive, then retry archive: %w", filepath.Dir(dest), err)
+	names, err := snapshotArchiveDirectory(filepath.Dir(dest))
+	if err != nil {
+		return "", err
 	}
-	base := filepath.Base(dest)
-	for _, entry := range entries {
-		if (!destExists || entry.Name() != base) && archiveTitlesCollide(entry.Name(), base) {
-			return entry.Name(), nil
-		}
-	}
-	return "", nil
+	return names.collision(filepath.Base(dest), destExists), nil
 }
 
-func validateArchiveRelocationDestination(repoID, title string) error {
-	dest, err := archivedWorktreePath(repoID, title)
-	if err != nil {
-		return fmt.Errorf("%w: cannot resolve archive destination: %v", errTitleCheckFatal, err)
+// archiveDirectoryNames snapshots every literal spelling for each portable key.
+// Keeping equivalent spellings allows exact-path owner diagnostics to skip only
+// the exact entry while still refusing a differently spelled neighbour.
+type archiveDirectoryNames map[string][]string
+
+func snapshotArchiveDirectory(parent string) (archiveDirectoryNames, error) {
+	entries, err := sessiongit.BoundedReadDir(parent)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("cannot inspect archive directory %s; check that the filesystem is responsive, then retry archive: %w", parent, err)
 	}
-	existing, err := archiveDirectoryCollision(dest, false)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errTitleCheckFatal, err)
+	names := make(archiveDirectoryNames, len(entries))
+	for _, entry := range entries {
+		key := archiveDiskNameKey(entry.Name())
+		names[key] = append(names[key], entry.Name())
 	}
-	if existing != "" {
-		return fmt.Errorf("destination %s collides with existing archive %q (same portable name)", dest, existing)
+	return names, nil
+}
+
+func (names archiveDirectoryNames) collision(base string, destExists bool) string {
+	for _, name := range names[archiveDiskNameKey(base)] {
+		if !destExists || name != base {
+			return name
+		}
+	}
+	return ""
+}
+
+// archiveRelocationSnapshot resolves and reads the parent once per suffix walk.
+func archiveRelocationSnapshot(repoID string) (archiveDirectoryNames, error) {
+	dest, err := archivedWorktreePath(repoID, "session")
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot resolve archive destination: %v", errTitleCheckFatal, err)
+	}
+	names, err := snapshotArchiveDirectory(filepath.Dir(dest))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errTitleCheckFatal, err)
+	}
+	return names, nil
+}
+
+func (names archiveDirectoryNames) validateArchiveRelocationDestination(title string) error {
+	base := sanitizeArchiveTitle(title)
+	if existing := names.collision(base, false); existing != "" {
+		return fmt.Errorf("destination %s collides with existing archive %q (same portable name)", base, existing)
 	}
 	return nil
 }

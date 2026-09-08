@@ -70,6 +70,13 @@ func diffFixture(t *testing.T, report *marshalerReport, typ reflect.Type, entry 
 	}
 	customMembers := decodeMembers(t, typ.String()+".MarshalJSON", fixture.custom)
 	baselineMembers := decodeMembers(t, "the plain twin of "+typ.String(), fixture.baseline)
+	for name, derive := range entry.derived {
+		if want := derive(t, fixture.baseline); want != nil {
+			baselineMembers[name] = want
+		} else {
+			delete(baselineMembers, name)
+		}
+	}
 	for name, got := range customMembers {
 		want, isField := baselineMembers[name]
 		switch declared, normalizes := entry.normalizesEmpty[name]; {
