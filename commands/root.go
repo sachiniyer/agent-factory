@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/api"
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/app"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/configagent"
@@ -203,21 +204,34 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			"or the rebind from the [keys] table in config.toml (#1026). Fixed bindings —\n" +
 			"structural keys config cannot touch — are listed last. Contextual pane\n" +
 			"actions such as pane_prev/pane_next are included; their default arrow keys\n" +
-			"apply only while a workspace pane has focus.",
+			"apply only while a workspace pane has focus.\n\n" +
+			"Key values use config spellings you can paste into [keys]. With --json,\n" +
+			"bindings are wrapped in {data,error}; keys/default keep those spellings.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			asJSON, err := cmd.Flags().GetBool("json")
+			if err != nil {
+				return err
+			}
 			log.Initialize(false)
-			defer log.Close()
+			if asJSON {
+				defer log.CloseQuiet()
+			} else {
+				defer log.Close()
+			}
 
 			// The keymap is a global-only setting, so LoadConfig (not
 			// ResolveConfig) is deliberate: the output is identical inside
 			// and outside a repository.
 			cfg, err := config.LoadConfig()
 			if err != nil {
-				return err
+				return jsonWrapError(cmd, asJSON, err)
 			}
 			infos, err := keys.EffectiveBindings(cfg.KeymapOverrides())
 			if err != nil {
-				return err
+				return jsonWrapError(cmd, asJSON, err)
+			}
+			if asJSON {
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(infos))
 			}
 
 			// SOURCE only annotates the rows that carry information: fixed
@@ -319,6 +333,7 @@ func init() {
 			"Get it with 'af token show' on the daemon host.")
 
 	rootCmd.AddCommand(debugCmd)
+	keysCmd.Flags().Bool("json", false, "Wrap output in the {data,error} JSON envelope")
 	rootCmd.AddCommand(keysCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(resetCmd)

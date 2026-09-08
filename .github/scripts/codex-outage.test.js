@@ -430,11 +430,13 @@ test('older-head completed summary rows recover outages at every row time', () =
   const failure = comment(2, 'Codex Review: Something went wrong. Unknown error');
   const collect = artifacts => aggregate([{ number: 3953, head: { sha: head }, artifacts }], t(8));
   const summary = summaryArtifact([summaryRow(4)]);
-  const episodes = collect([failure, summary]);
+  const proof = comment(3, "### 💡 Codex Review\n\nDidn't find any major issues.", { commit_id: "b".repeat(40), submitted_at: t(3), id: 3606 });
+  const episodes = collect([failure, summary, proof]);
   assert.equal(episodes[0].end, t(4));
   assert.equal(episodes[0].recovery, summary.html_url);
   // Every row is an event: neither the first row nor the current head is special.
-  const multiple = collect([failure, comment(5, limits[0]), summaryArtifact([summaryRow(7), summaryRow(4)])]);
+  const freshProof = { ...proof, id: 3607, created_at: t(6), submitted_at: t(6) };
+  const multiple = collect([failure, proof, comment(5, limits[0]), freshProof, summaryArtifact([summaryRow(7), summaryRow(4)])]);
   assert.deepEqual(multiple.map(e => [e.start, e.end]), [[t(2), t(4)], [t(5), t(7)]]);
   for (const invalid of [
     summaryArtifact([summaryRow(4, { status: 'Running' })]),
@@ -483,5 +485,90 @@ test('missing and unreadable records retain local cause and local duration', asy
       })[kind];
       assert.ok(notice.startsWith(`Codex ${label} since ${t(3)}, 1.0h ago`), notice);
     }
+  }
+});
+
+test('#4052: a Completed row without a review artifact cannot close an episode', () => {
+  for (const sha of [head, 'b'.repeat(40)]) {
+    const summary = summaryArtifact([summaryRow(3, { commit: sha.slice(0, 7) })]);
+    const episodes = aggregate([{ number: 4051, head: { sha: head }, merged_at: t(4),
+      artifacts: [comment(2, limits[0]), summary] }], t(5));
+    assert.equal(episodes[0].end, null);
+    assert.deepEqual(episodes[0].merged, [4051]);
+  }
+});
+
+test('#4052: superseded rows need matching fresh corroboration and cannot backdate a merge', () => {
+  const old = 'b'.repeat(40);
+  const summary = summaryArtifact([summaryRow(3, { commit: old.slice(0, 7) })]);
+  const review = comment(5, "### 💡 Codex Review\n\nDidn't find any major issues.", { id: 3606, commit_id: old, submitted_at: t(5) });
+  const pull = { number: 4051, head: { sha: head }, created_at: t(0), merged_at: t(4),
+    commitDates: { [old]: t(1) }, artifacts: [comment(2, limits[0]), summary, review] };
+  assert.deepEqual(aggregate([pull], t(6)).map(e => [e.end, e.merged]), [[t(5), [4051]]]);
+  for (const invalid of [
+    { ...review, commit_id: head },
+    { ...review, user: { login: 'someone' } },
+    { ...review, created_at: t(1), submitted_at: t(1) },
+  ]) assert.equal(aggregate([{ ...pull, artifacts: [pull.artifacts[0], summary, invalid] }], t(6))[0].end, null);
+});
+
+test('#4052: live sweep reads commit and paginated push anchors before accepting a row', async () => {
+  const summary = summaryArtifact([summaryRow(4, { commit: head.slice(0, 7) })]);
+  const review = comment(2, "### 💡 Codex Review\n\nDidn't find any major issues.", { id: 3606, commit_id: head, submitted_at: t(2) });
+  let unreadable = false;
+  const calls = [];
+  const writes = [];
+  const api = async (route, options = {}) => {
+    calls.push([route, options]);
+    if (options.method) { writes.push(options.body); return { body: options.body }; }
+    if (route.includes('/issues/3932/comments')) return [];
+    if (route.includes('/pulls?')) return [{ number: 4051, head: { sha: head }, created_at: t(0), updated_at: t(5), merged_at: t(5) }];
+    if (route.includes('/issues/4051/comments')) return [comment(3, limits[0]), summary];
+    if (route.includes('/pulls/4051/reviews')) return [review];
+    if (route.includes('/pulls/4051/comments')) return [];
+    if (route.includes('/commits/')) return { sha: head, commit: { committer: { date: t(1) } } };
+    if (route === 'graphql') {
+      if (unreadable) throw Error('push history unavailable');
+      const first = !options.variables.cursor;
+      return { data: { repository: { pullRequest: { timelineItems: {
+        pageInfo: { hasNextPage: first, endCursor: first ? 'next' : null },
+        nodes: first ? [] : [{ createdAt: t(3), afterCommit: { oid: head } }],
+      } } } } };
+    }
+    throw Error(route);
+  };
+  await sweep(api, 'owner/repo', t(6));
+  const record = readRecord({ body: writes[0], user: { login: 'sachiniyer' } });
+  assert.equal(record.episodes[0].end, null, 'the review predates the force-push');
+  assert.deepEqual(record.episodes[0].merged, [4051]);
+  assert.equal(calls.filter(([route]) => route === 'graphql').length, 2);
+  unreadable = true;
+  await assert.rejects(sweep(api, 'owner/repo', t(6)), /push history unavailable/);
+  assert.equal(writes.length, 1, 'failed reads must preserve the previous record');
+});
+
+test('3954286650: an unrecognised submitted review cannot turn a row into recovery', () => {
+  const response = comment(3, environmentMissing, { id: 3606, commit_id: head, submitted_at: t(3) });
+  const summary = summaryArtifact([summaryRow(4, { commit: head.slice(0, 7) })]);
+  const [episode] = aggregate([{ number: 4053, head: { sha: head }, merged_at: t(5),
+    artifacts: [comment(2, limits[0]), response, summary] }], t(6));
+  assert.equal(episode.end, null);
+  assert.equal(episode.latest.kind, 'unrecognised');
+  assert.equal(episode.latest.body, environmentMissing);
+  assert.deepEqual(episode.merged, [4053]);
+});
+
+test('3954623225: a bare repeat row cannot close an outage using an earlier review', () => {
+  for (const sha of [head, 'b'.repeat(40)]) {
+    const review = comment(1, "### 💡 Codex Review\n\nDidn't find any major issues.", {
+      id: 3606, commit_id: sha, submitted_at: t(1) });
+    const summary = summaryArtifact([summaryRow(3, { commit: sha.slice(0, 7) })]);
+    const collect = artifacts => aggregate([{ number: 4053, head: { sha: head },
+      created_at: t(0), artifacts }], t(5));
+    const limit = comment(2, limits[0], { commit_id: sha });
+    assert.equal(collect([review, limit, summary])[0].end, null);
+    const fresh = { ...review, id: 3954623225, created_at: t(3), submitted_at: t(3) };
+    assert.equal(collect([review, limit, summary, fresh])[0].end, t(3));
+    assert.deepEqual(collect([review, summary]), []);
   }
 });
