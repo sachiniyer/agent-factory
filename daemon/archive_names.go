@@ -22,18 +22,13 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 	if inPlace {
 		return nil
 	}
-	collision := func(existing, claim string) error {
-		if archiveTitlesCollide(claim, title) {
-			return fmt.Errorf("session titled %q already maps to archive directory %q", existing, sanitizeArchiveTitle(title))
-		}
-		return nil
+	collision := func(existing string) error {
+		return fmt.Errorf("session titled %q already maps to archive directory %q", existing, sanitizeArchiveTitle(title))
 	}
 	for key := range m.reservedArchiveTitles {
 		rid, existing := splitDaemonInstanceKey(key)
-		if rid == repoID {
-			if err := collision(existing, existing); err != nil {
-				return err
-			}
+		if rid == repoID && archiveTitlesCollide(existing, title) {
+			return collision(existing)
 		}
 	}
 	for key, inst := range m.instances {
@@ -41,15 +36,15 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		if rid != repoID || inst == nil || inst == ignore || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree || inst.IsExternalWorktree() {
 			continue
 		}
-		if err := collision(inst.Title, archiveClaimName(inst.ToInstanceData())); err != nil {
-			return err
+		if archiveRecordClaimsTitle(inst.ToInstanceData(), title) {
+			return collision(inst.Title)
 		}
 	}
 	for _, data := range disk {
 		if !data.UsesLocalTmux() || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
 			continue
 		}
-		if !archiveTitlesCollide(archiveClaimName(data), title) {
+		if !archiveRecordClaimsTitle(data, title) {
 			continue
 		}
 		owned, err := ownsArchiveDirectory(data)
@@ -57,10 +52,16 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 			return err
 		}
 		if owned {
-			return collision(data.Title, archiveClaimName(data))
+			return collision(data.Title)
 		}
 	}
 	return nil
+}
+
+// archiveRecordClaimsTitle reserves both the current archive location and the
+// future destination after restore, which derives from the session's title.
+func archiveRecordClaimsTitle(data session.InstanceData, title string) bool {
+	return archiveTitlesCollide(data.Title, title) || archiveTitlesCollide(archiveClaimName(data), title)
 }
 
 // archiveClaimName preserves the directory owned by an archived row even when
@@ -179,26 +180,12 @@ func (m *Manager) inspectArchiveDestination(repoID string, inst *session.Instanc
 	if missing {
 		return dest, nil
 	}
-	// Prefer the actual recorded path: archived-name reuse can change a title,
-	// and old records may carry paths that no longer follow today's derivation.
-	m.mu.Lock()
-	for key, other := range m.instances {
-		rid, _ := splitDaemonInstanceKey(key)
-		if rid == repoID && other != nil && other != inst && other.GetWorktreePath() == dest {
-			owner := other.Title
-			m.mu.Unlock()
-			return "", fmt.Errorf("cannot archive session %q: destination %s already exists and belongs to session %q", inst.Title, dest, owner)
-		}
-	}
-	m.mu.Unlock()
-	disk, err := loadRepoInstanceData(repoID)
+	owner, err := m.archiveDestinationOwner(repoID, inst, dest, destInfo)
 	if err != nil {
-		return "", fmt.Errorf("cannot archive session %q: destination %s already exists; cannot read its session owner: %w", inst.Title, dest, err)
+		return "", fmt.Errorf("cannot archive session %q: destination %s already exists; cannot determine its owner: %w", inst.Title, dest, err)
 	}
-	for _, data := range disk {
-		if data.Title != inst.Title && data.Worktree.WorktreePath == dest {
-			return "", fmt.Errorf("cannot archive session %q: destination %s already exists and belongs to session %q", inst.Title, dest, data.Title)
-		}
+	if owner != "" {
+		return "", fmt.Errorf("cannot archive session %q: destination %s already exists and belongs to session %q", inst.Title, dest, owner)
 	}
 	return "", fmt.Errorf("cannot archive session %q: destination %s already exists; no existing session owns it", inst.Title, dest)
 }

@@ -540,6 +540,9 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 			candidate = fmt.Sprintf("%s (archived %d)", base, i)
 		}
 		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData, false)
+		if err == nil && namespace == runtimeNamespaceLocalTmux {
+			err = validateArchiveRelocationDestination(repoID, candidate)
+		}
 		if err == nil {
 			return candidate, nil
 		}
