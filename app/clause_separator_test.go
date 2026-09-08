@@ -46,7 +46,7 @@ func TestPaneHeaderSetsOffItsClausesWithADash(t *testing.T) {
 	require.Same(t, beta, h.store.GetSelectedInstance())
 
 	view := h.View()
-	assert.Contains(t, view, "beta · Agent · Preview")
+	assert.Contains(t, view, "beta · Agent · preview")
 	assert.NotContains(t, view, "original alpha")
 	assert.Equal(t, "alpha · Agent", h.paneWindows[paneA.ID()].PreviewOrigin())
 

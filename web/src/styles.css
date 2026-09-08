@@ -3396,7 +3396,6 @@ button, summary, .af-input { min-height: calc(var(--af-space-4) + var(--af-space
  padding: var(--af-space-2); background: var(--af-surface-raised); color: var(--af-ink);
  border: calc(var(--af-space-1) / 4) solid var(--af-border); border-radius: var(--af-radius-control);
 }
-.af-danger:focus-visible { outline: calc(var(--af-space-1) / 2) solid var(--af-dead); outline-offset: calc(var(--af-space-1) / 2); }
 .af-primary { padding: var(--af-space-2); background: var(--af-accent); color: var(--af-surface); border-radius: var(--af-radius-control); }
 button:disabled, .af-input:disabled { opacity: 1; border-style: dashed; }
 button:hover:not(:disabled), summary:hover { text-decoration: underline; }
