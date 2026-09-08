@@ -72,7 +72,7 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	}
 
 	// Serialize the mutate+persist against this session's archive/kill/restore
-	// teardown, exactly as SetPRInfo (#2437) and the tab verbs do: take the
+	// teardown, exactly as the tab verbs do: take the
 	// per-session op-lock first, re-confirm the tracked session, and refuse an
 	// archived one. With no op-lock (the earlier behavior) this write could
 	// interleave INSIDE ArchiveSession — between its teardown and its persist — and

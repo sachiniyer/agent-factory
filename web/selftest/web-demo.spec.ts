@@ -15,10 +15,10 @@
 // The pass runs twice, once per theme, each in its own browser context:
 //
 //   1. dashboard        the project's sessions in the rail, the selected one's
-//                       agent tab, and its PR badge
+//                       agent tab
 //   2. new-session      the new-session modal, filled in
 //   3. agent-tab        the session that create just made, streaming
-//   4. review           the branch's own diff in a tab, beside the PR link
+//   4. review           the branch's own diff in a tab
 //   5. tasks            the Tasks view
 //   6. config-accounts  the Config view, at the Accounts section
 //
@@ -233,9 +233,6 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     // The stand-in's last line, so the pane is showing finished work rather
     // than a blank terminal that has only just attached.
     await expect(page.locator(".af-term-host")).toContainText("review it like any branch");
-    // The daemon discovered the branch's PR before the recording started
-    // (web-demo-entry.sh waits for the sweep), so the badge is part of beat 1.
-    await expect(page.locator(".af-pr-badge")).toBeVisible();
     await settleTerminal(page);
     await beat(page, 1_200);
     await shot("dashboard");
@@ -294,7 +291,7 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     });
     await beat(page, 1_400);
 
-    // --- 4. review: the branch's diff, beside its PR -----------------------
+    // --- 4. review: the branch's diff in a process tab -----------------------
     await row(page, SESSION_JSON).click();
     await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
     await beat(page, 800);
@@ -309,12 +306,11 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
       timeout: 60_000,
     });
     await expect(page.locator(".af-term-host")).toContainText("git diff --stat", { timeout: 60_000 });
-    await expect(page.locator(".af-pr-badge")).toBeVisible();
     await settleTerminal(page);
     await beat(page, 1_200);
     await shot("review");
 
-    // Comparison: normal git review in a process tab, with the branch PR beside it.
+    // Comparison: normal git review in a process tab.
     await shot("comparison-review");
 
     // --- 5. the Tasks view -------------------------------------------------

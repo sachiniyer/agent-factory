@@ -9,8 +9,8 @@ import (
 
 // maxStderrDetail bounds how much captured stderr reaches an error message.
 //
-// These errors are rendered into single daemon log lines (the PR-info sweep
-// warns once per failing branch), so an unbounded copy of a pathological
+// These errors are rendered into single daemon log lines, so an unbounded
+// copy of a pathological
 // stderr — a paginated API dump, a shell that printed a whole environment —
 // would flood the log and bury the very line it was meant to explain. 1 KiB is
 // far more than any real `gh`/`git` diagnostic and still fits a log line.

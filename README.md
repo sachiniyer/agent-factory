@@ -7,7 +7,7 @@
 <p align="center"><strong>Run a fleet of AI coding agents at once — isolated workspaces, one control plane.</strong></p>
 
 <p align="center">
-  <a href="docs/assets/web/demo.mp4"><img src="docs/assets/web/demo-poster.png" alt="The Agent Factory web client in a browser: a rail of three sessions in one project, the selected agent's terminal beside it showing the work it did in an isolated git worktree, that branch's pull request linked in the pane header, and the Tasks and Config views one tab away"></a>
+  <a href="docs/assets/web/demo.mp4"><img src="docs/assets/web/demo-poster.png" alt="The Agent Factory web client in a browser: a rail of three sessions in one project, the selected agent's terminal beside it showing the work it did in an isolated git worktree, and the Tasks and Config views one tab away"></a>
 </p>
 
 <p align="center">

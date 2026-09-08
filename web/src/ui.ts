@@ -47,7 +47,6 @@ import {
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
-  prBadgeContent,
   rowStatus,
   rowTitle,
 } from "./status.js";
@@ -844,12 +843,6 @@ export class AppShell {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   private handoffBtn: HTMLElement | null = null;
   private handoffVisible = false;
-  // The PR badge link and the signature of what it currently draws (#3285). Same
-  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
-  // session's PR — or its state flips open → merged — WITHOUT a selection change,
-  // so patchMainHead fills it rather than deciding once at build time.
-  private prBadge: HTMLAnchorElement | null = null;
-  private prBadgeSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1967,8 +1960,6 @@ export class AppShell {
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
-    this.prBadge = chrome.pr;
-    this.prBadgeSig = "";
     this.retryBtn = chrome.retry;
     this.retryVisible = isLimitReached(selected);
     chrome.retry.hidden = !this.retryVisible;
@@ -2017,7 +2008,7 @@ export class AppShell {
       [chrome.titleBox, this.header], [chrome.keyboard, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel], [chrome.pr, this.appControls.panel],
+      [chrome.tabs, this.appControls.panel],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -2588,25 +2579,6 @@ export class AppShell {
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
-    }
-
-    // Fill/patch the PR badge (#3285) in place, like Retry/Handoff above and for
-    // the same reason: the daemon's sweep discovers a PR while the session is
-    // already selected, which is no selection change, so renderMain never runs.
-    // The sig covers everything the badge draws, so an unrelated snapshot never
-    // touches the DOM and a state flip (open → merged) patches exactly once.
-    if (this.prBadge) {
-      const badge = prBadgeContent(selected);
-      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
-      if (sig !== this.prBadgeSig) {
-        this.prBadgeSig = sig;
-        if (badge) {
-          this.prBadge.textContent = badge.label;
-          this.prBadge.href = badge.url;
-          this.prBadge.title = badge.tooltip;
-        }
-        this.prBadge.hidden = badge === null;
-      }
     }
   }
 

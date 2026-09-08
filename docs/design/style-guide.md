@@ -117,28 +117,28 @@ Keyboard: navigation</pre></section>
 </div>
 
 <h3>Tabs and review</h3>
-<p>Use surface and body-sized ink labels. Only the active tab gets an accent underline and bold text; PR links use accent. Use space-2 between tabs, no pill radii. TUI selection is a raised row and cursor. Preserve keyboard routes to close, switch and split.</p>
+<p>Use surface and body-sized ink labels. Only the active tab gets an accent underline and bold text. Review branch changes in a process tab beside the agent tab. Use space-2 between tabs, no pill radii. TUI selection is a raised row and cursor. Preserve keyboard routes to close, switch and split.</p>
 
 <div class="sg-pair">
-<section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong><span style="color:var(--af-accent)">PR #128 · Open</span></div><pre>$ git diff --stat
+<section class="sg-theme" data-af-theme="light"><h4>Web · Light</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong></div><pre>$ git diff --stat
 2 files changed</pre></section>
 <figure><a href="../../assets/web/review.png"><img loading="lazy" src="../../assets/web/review.png" alt="Current web review screen in light theme"></a><figcaption>Rules applied · Real web screen · review · light</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="light"><h4>TUI · Light</h4><pre>  1 · Agent
-<span class="sg-selected">› 2 · diff · PR #128</span>
+<span class="sg-selected">› 2 · diff</span>
   2 files changed</pre></section>
 <figure><a href="../../assets/design/tui-c/pane-light.svg"><img loading="lazy" src="../../assets/tui/pane-light.png" alt="App-model driver · pane · light"></a><figcaption>App-model driver · pane Light · Regenerated after P2/P5.</figcaption></figure>
 </div>
 
 <div class="sg-pair">
-<section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong><span style="color:var(--af-accent)">PR #128 · Open</span></div><pre>$ git diff --stat
+<section class="sg-theme" data-af-theme="dark"><h4>Web · Dark</h4><div class="sg-bar"><span>Agent</span><strong class="sg-active">diff</strong></div><pre>$ git diff --stat
 2 files changed</pre></section>
 <figure><a href="../../assets/web/review-dark.png"><img loading="lazy" src="../../assets/web/review-dark.png" alt="Current web review screen in dark theme"></a><figcaption>Rules applied · Real web screen · review · dark</figcaption></figure>
 </div>
 <div class="sg-pair">
 <section class="sg-theme sg-tui" data-af-theme="dark"><h4>TUI · Dark</h4><pre>  1 · Agent
-<span class="sg-selected">› 2 · diff · PR #128</span>
+<span class="sg-selected">› 2 · diff</span>
   2 files changed</pre></section>
 <figure><a href="../../assets/design/tui-c/pane-dark.svg"><img loading="lazy" src="../../assets/tui/pane-dark.png" alt="App-model driver · pane · dark"></a><figcaption>App-model driver · pane Dark · Regenerated after P2/P5.</figcaption></figure>
 </div>

@@ -7262,8 +7262,6 @@ function terminalChrome(opts) {
   const titleBox = h("div", { class: "af-term-head-main" }, title, identity);
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-  pr.hidden = true;
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
   keyboard.hidden = true;
   const actions2 = h("div", { class: "af-term-actions" });
@@ -7283,8 +7281,8 @@ function terminalChrome(opts) {
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, titleBox, identity, tabs, pr, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  return { head, title, titleBox, identity, tabs, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -11207,16 +11205,6 @@ function isLimitReached(s) {
 function canHandoff(s) {
   return s.can_handoff === true;
 }
-function prBadgeContent(s) {
-  const pr = s.pr_info;
-  if (!pr || !pr.number || pr.number <= 0 || !pr.url) {
-    return null;
-  }
-  const state = (pr.state ?? "").toLowerCase();
-  const label = state === "" ? `PR #${pr.number}` : `PR #${pr.number} \xB7 ${state}`;
-  const tooltip = pr.title ? `${pr.title} \u2014 open on GitHub` : `Open PR #${pr.number} on GitHub`;
-  return { label, url: pr.url, tooltip };
-}
 function isRootSession(s) {
   return s.is_root === true;
 }
@@ -14814,12 +14802,6 @@ var AppShell = class {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   handoffBtn = null;
   handoffVisible = false;
-  // The PR badge link and the signature of what it currently draws (#3285). Same
-  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
-  // session's PR — or its state flips open → merged — WITHOUT a selection change,
-  // so patchMainHead fills it rather than deciding once at build time.
-  prBadge = null;
-  prBadgeSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -15579,8 +15561,6 @@ var AppShell = class {
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
-    this.prBadge = chrome.pr;
-    this.prBadgeSig = "";
     this.retryBtn = chrome.retry;
     this.retryVisible = isLimitReached(selected);
     chrome.retry.hidden = !this.retryVisible;
@@ -15617,7 +15597,6 @@ var AppShell = class {
       [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
-      [chrome.pr, this.appControls.panel],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);
@@ -16031,19 +16010,6 @@ var AppShell = class {
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
-    }
-    if (this.prBadge) {
-      const badge = prBadgeContent(selected);
-      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
-      if (sig !== this.prBadgeSig) {
-        this.prBadgeSig = sig;
-        if (badge) {
-          this.prBadge.textContent = badge.label;
-          this.prBadge.href = badge.url;
-          this.prBadge.title = badge.tooltip;
-        }
-        this.prBadge.hidden = badge === null;
-      }
     }
   }
   /** Keeps management reachable when the selected session's rail row is filtered
