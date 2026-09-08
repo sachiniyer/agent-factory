@@ -8,6 +8,30 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## Breaking: branch-associated PR integration removed (upcoming release)
+
+- **Session JSON no longer includes `pr_info`.** This includes session records
+  returned to API consumers and `af sessions list` users, and persisted session
+  records. Existing saved records still load, but their old `pr_info` key is
+  ignored and is not written back. Automation must accept an absent field;
+  it will not receive a null value or a final cached PR state.
+- **`POST /v1/SetPRInfo` and `POST /v1/RefreshPRInfo` are removed.** Calls from
+  older clients and scripts now return **HTTP 404**. Stop calling these routes;
+  retrying will not restore the functionality.
+- **The terminal open/copy PR actions are removed.** In the TUI launched by
+  `af`, `p` no longer opens a PR in the browser and `y` no longer copies its URL.
+  The CLI's `af keys` output no longer advertises those actions. The web PR
+  badge and automatic branch-to-PR discovery are also removed.
+- **Retired key bindings do not block startup.** Existing `[keys].open_pr` and
+  `[keys].copy_pr` entries in `config.toml` are ignored with a one-line warning
+  naming the file and removed action, once per file/action per process. Remove
+  these entries when updating your config. Every other unknown keymap action
+  remains a startup error; see [Key bindings](../configuration.md#key-bindings-keys).
+- **There is no replacement** session field, API endpoint, CLI command, or TUI
+  action for branch-associated PRs. Before upgrading, remove this dependency
+  from your automation or manage PR information outside Agent Factory. Expect
+  the missing `pr_info` field and HTTP 404s, rather than a migration to new names.
+
 ## `af sessions list` now tells you what its numbers mean
 
 - **Three new string fields, and nothing removed.** Every session carries
