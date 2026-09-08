@@ -9,9 +9,9 @@ import (
 )
 
 // The runner keeps HooksDone open while a scope-stop result is inconclusive.
-// This is deliberately bounded: a permanently unavailable user manager leaves
-// the journal for the next daemon generation instead of allowing teardown to
-// mistake an unfinished list for a completed one.
+// The initial deadline only changes the log message. A permanently unavailable
+// user manager must leave the journal pending rather than report completion;
+// cancellation is the only way this wait ends without resuming the suffix.
 var runningHookPrefixesForResume = systemdunit.RunningHookPrefixes
 
 func waitForHookScopeGone(ctx context.Context, prefix string) bool {
@@ -23,6 +23,7 @@ func waitForHookScopeGone(ctx context.Context, prefix string) bool {
 	ticker := time.NewTicker(hookAdoptionPollInterval)
 	defer ticker.Stop()
 	var lastError string
+	deadlineLogged := false
 	for {
 		live, err := runningHookPrefixesForResume(prefix)
 		if err == nil && len(live) == 0 {
@@ -41,8 +42,10 @@ func waitForHookScopeGone(ctx context.Context, prefix string) bool {
 		case <-ctx.Done():
 			return false
 		case <-deadline.C:
-			log.WarningLog.Printf("post-worktree hook scope %s did not become conclusively stopped; leaving journal for adoption", prefix)
-			return false
+			if !deadlineLogged {
+				log.WarningLog.Printf("post-worktree hook scope %s is still waiting to stop; keeping HooksDone open for recovery", prefix)
+				deadlineLogged = true
+			}
 		case <-ticker.C:
 		}
 	}

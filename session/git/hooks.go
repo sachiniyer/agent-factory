@@ -136,7 +136,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 	go func() {
 		defer close(done)
 		finishProgress := true
-		abandonResumable := func() { finishProgress = false }
+		bailResumable := func() { finishProgress = false }
 		if run.progress != nil {
 			defer func() {
 				if finishProgress && !(run.leaveProgressUnfinishedOnCancel && ctx.Err() != nil) {
@@ -159,7 +159,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			if outputErr != nil {
 				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", cmdStr, outputErr)
 				if !run.progress.recordLaunchFailure(index, outputErr) {
-					abandonResumable()
+					bailResumable()
 					return
 				}
 				continue
@@ -197,6 +197,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				_ = outputFile.Close()
 				log.ErrorLog.Printf("post-worktree hook %q failed to start (full output: %s): %v", cmdStr, outputPath, err)
 				if !run.progress.recordLaunchFailure(index, err) {
+					bailResumable()
 					return
 				}
 				continue
@@ -256,7 +257,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 					waitErr = fmt.Errorf("hook launcher exited before claiming entry %d", index)
 				}
 				if scopeStopErr != nil || !run.progress.recordLaunchFailure(index, waitErr) {
-					abandonResumable()
+					bailResumable()
 					_ = outputFile.Close()
 					if scopeStopErr != nil && waitForHookScopeGone(ctx, run.progress.Prefix) {
 						resumed := run

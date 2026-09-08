@@ -3,6 +3,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -88,13 +89,13 @@ func TestHookProgressScopeStopFailureKeepsDoneOpenUntilScopeGone(t *testing.T) {
 		return []string{"af-hook-owner"}, nil
 	}
 	previousTimeout, previousPoll := hookStopTimeout, hookAdoptionPollInterval
-	hookStopTimeout, hookAdoptionPollInterval = time.Second, 10*time.Millisecond
+	hookStopTimeout, hookAdoptionPollInterval = 50*time.Millisecond, 10*time.Millisecond
 	t.Cleanup(func() {
 		stopHookScopeUnits, runningHookPrefixesForResume = originalStop, originalProbe
 		hookStopTimeout, hookAdoptionPollInterval = previousTimeout, previousPoll
 	})
 	done := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	select {
 	case <-done:
 		t.Fatalf("HooksDone closed while the scope was still uncertain (stops=%d probes=%d)", stops.Load(), probes.Load())
@@ -107,5 +108,81 @@ func TestHookProgressScopeStopFailureKeepsDoneOpenUntilScopeGone(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("remaining command did not run: %v", err)
+	}
+}
+
+func TestHookProgressStartFailureMarkerErrorRemainsResumable(t *testing.T) {
+	claimDaemonProcess(t)
+	installScopeShim(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	tree := filepath.Join(t.TempDir(), "missing")
+	marker := filepath.Join(tree, "second")
+	p, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, []string{"true", "echo second >> " + shellQuoteForShim(marker)}, "af-hook-owner", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalWrite := hookProgressWriteFile
+	var failed atomic.Bool
+	hookProgressWriteFile = func(path string, data []byte, mode os.FileMode) error {
+		if filepath.Base(path) == "launch-failed" && !failed.Swap(true) {
+			return errors.New("marker storage unavailable")
+		}
+		return originalWrite(path, data, mode)
+	}
+	t.Cleanup(func() { hookProgressWriteFile = originalWrite })
+	done := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
+	waitForClosed(t, done, 5*time.Second, "start failure runner did not stop")
+	if p.finished() || p.claimed(0) {
+		t.Fatal("start failure terminalized or claimed the resumable entry")
+	}
+	if err := os.Mkdir(tree, 0700); err != nil {
+		t.Fatal(err)
+	}
+	resumed := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
+	waitForClosed(t, resumed, 5*time.Second, "start failure suffix did not finish")
+	if !p.finished() {
+		t.Fatal("start failure resume did not finish")
+	}
+}
+
+func TestHookProgressScopeStopDeadlineCancellationLeavesJournalPending(t *testing.T) {
+	claimDaemonProcess(t)
+	logPath := installScopeShim(t)
+	shimDir := filepath.Dir(logPath)
+	gate := filepath.Join(t.TempDir(), "launcher-used")
+	launcher := "#!/bin/sh\nif [ \"${1:-}\" = \"--help\" ]; then printf '%s\\n' '    --expand-environment=BOOL'; exit 0; fi\nif [ ! -f '" + gate + "' ]; then touch '" + gate + "'; exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do case \"$1\" in --user|--scope|--quiet|--collect|--expand-environment=no|--unit=*|--property=*) shift ;; --) shift; break ;; *) break ;; esac; done\nexec \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "systemd-run"), []byte(launcher), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	tree := t.TempDir()
+	p, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStop, originalProbe := stopHookScopeUnits, runningHookPrefixesForResume
+	stopHookScopeUnits = func(...string) error { return errors.New("manager unavailable") }
+	runningHookPrefixesForResume = func(...string) ([]string, error) { return []string{"af-hook-owner"}, nil }
+	previousTimeout, previousPoll := hookStopTimeout, hookAdoptionPollInterval
+	hookStopTimeout, hookAdoptionPollInterval = 30*time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() {
+		stopHookScopeUnits, runningHookPrefixesForResume = originalStop, originalProbe
+		hookStopTimeout, hookAdoptionPollInterval = previousTimeout, previousPoll
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("deadline reported completion while scope remained uncertain")
+	default:
+	}
+	if p.finished() {
+		t.Fatal("deadline wrote a finished marker")
+	}
+	cancel()
+	waitForClosed(t, done, 5*time.Second, "cancelled deadline wait did not stop")
+	if p.finished() {
+		t.Fatal("cancelled deadline wait terminalized the journal")
 	}
 }
