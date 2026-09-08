@@ -100,6 +100,50 @@ test("Safari commit after compositionend establishes the boundary before trailin
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
+test("canceled composition gives no-keydown ordinary input a zero-length commit boundary", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  textarea.addEventListener("compositionend", () => setTimeout(() => send(textarea.value), 0));
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionend", ""));
+  textarea.value = "x";
+  host.dispatchEvent(insertText("x")); // No keydown after the canceled IME.
+  t.mock.timers.tick(0);
+
+  assert.deepEqual(writes, ["\x18"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("Safari keycode 229 after compositionend belongs to the IME commit", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Alt", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
+  textarea.value = "字";
+  host.dispatchEvent(insertText("字"));
+
+  assert.equal(soft.transform("字", value => modifiers.input(value)), "字");
+  assert.equal(modifiers.state("Alt"), "once");
+  textarea.dispatchEvent(Object.assign(new Event("keyup"), { keyCode: 229 }));
+  assert.equal(soft.transform("x", value => modifiers.input(value)), "\x1bx");
+  assert.equal(modifiers.state("Alt"), "off");
+});
+
 test("old release leaves the new composition owned; reset and disposal clear all ownership", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget(), textarea = new EventTarget();

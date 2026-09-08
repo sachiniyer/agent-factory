@@ -14,11 +14,12 @@ export class TerminalSoftInput {
   private readonly pending: CompositionRange[] = [];
   private keyDownSeen = false;
   private staleKeydown = false;
-  private readonly onKeyDown = (): void => {
+  private readonly onKeyDown = (event: Event): void => {
     this.keyDownSeen = true;
     this.staleKeydown = false;
     const range = this.pending.at(-1);
-    if (range) range.keydownAfterEnd = true;
+    // Xterm treats 229 as IME input, not an ordinary post-composition key.
+    if (range && (event as KeyboardEvent).keyCode !== 229) range.keydownAfterEnd = true;
   };
   private readonly onKeyUp = (): void => { this.keyDownSeen = false; this.staleKeydown = false; };
   private readonly onBlur = (): void => { if (this.keyDownSeen) this.staleKeydown = true; };
@@ -51,6 +52,7 @@ export class TerminalSoftInput {
     // establishes the boundary in onInput instead.
     if (range.start !== undefined && value !== undefined && value.length > range.start)
       range.commitLength = value.length - range.start;
+    else if (!range.text) range.commitLength = 0;
     this.pending.push(range);
     // Bound on the textarea AFTER xterm: its commit timer runs before this
     // release. Pending membership keeps that delayed send owned while Safari

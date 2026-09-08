@@ -26,6 +26,11 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
         }));
       }
       input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: eventData }));
+      if (postCommit) {
+        const keydown = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Unidentified" });
+        Object.defineProperty(keydown, "keyCode", { value: 229 });
+        input.dispatchEvent(keydown);
+      }
       if (postCommit) input.dispatchEvent(new InputEvent("beforeinput", {
         bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
       }));
@@ -34,6 +39,9 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
         input.dispatchEvent(new InputEvent("input", {
           bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
         }));
+        const keyup = new KeyboardEvent("keyup", { bubbles: true, key: "Unidentified" });
+        Object.defineProperty(keyup, "keyCode", { value: 229 });
+        input.dispatchEvent(keyup);
       }
       if (trailing) {
         input.value += trailing;
@@ -51,6 +59,27 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
     await expect(textarea).toBeFocused();
     await page.keyboard.insertText("x");
     await expect.poll(stream).toBe(before + committed + "\x18" + (trailing ? "x" : ""));
+    await expect(ctrl).toHaveAttribute("data-state", "off");
+  }
+
+  // A canceled IME owns no prefix; no-keydown x still consumes Ctrl.
+  {
+    const before = stream();
+    await ctrl.click();
+    await textarea.evaluate(async el => {
+      const input = el as HTMLTextAreaElement;
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" }));
+      input.dispatchEvent(new InputEvent("beforeinput", {
+        bubbles: true, cancelable: true, composed: true, data: "x", inputType: "insertText",
+      }));
+      input.value += "x";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "x", inputType: "insertText",
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    await expect.poll(stream).toBe(before + "\x18");
     await expect(ctrl).toHaveAttribute("data-state", "off");
   }
 
