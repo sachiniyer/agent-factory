@@ -236,6 +236,19 @@ func TestSetProjectConfigValueRootAgentPreservesOmittedEnabled(t *testing.T) {
 	assert.True(t, resolved.RootAgent.Enabled, "the omitted personal field must inherit global enabled=true")
 }
 
+func TestSetProjectConfigValueRootAgentReportsMergedProfile(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nprogram = \"custom\"\n")
+
+	res, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":true,"program":"custom"}`, res.Value)
+
+	res, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":false,"program":"next"}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":false,"program":"next"}`, res.Value)
+}
+
 func TestUnsetProjectConfigAbsentKeyIsNoOp(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 	writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n")

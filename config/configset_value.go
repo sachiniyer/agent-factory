@@ -468,6 +468,25 @@ func setTOMLStructured(content, key, definition string) (string, error) {
 	return setTOMLScalar(cleaned, "", key, strings.TrimSuffix(strings.TrimPrefix(definition, prefix), "\n")), nil
 }
 
+// canonicalStructuredTOMLValue returns the compact JSON form of the value
+// actually stored in a structured TOML definition. This is the read-back form
+// used by config set after a field-wise merge.
+func canonicalStructuredTOMLValue(content, key string) (string, error) {
+	var document map[string]any
+	if err := toml.Unmarshal([]byte(content), &document); err != nil {
+		return "", err
+	}
+	value, ok := document[key]
+	if !ok {
+		return "", fmt.Errorf("stored structured value %s is missing", key)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
 // preserveStructuredMembers retains omitted root_agent profile fields and
 // carries fields this binary does not know
 // from the old target table into its replacement. The loader deliberately
