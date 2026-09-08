@@ -615,18 +615,23 @@ af_select() {
     name_re="$(_af_regex_escape "$name")"
     af_ensure_nav
     af_focus_tree || return 1
-    for i in $(seq 1 30); do af_send k; done
-    sleep "$AF_DRIVER_POLL"
+    # Check the current actionable selection BEFORE sending navigation. Re-selecting
+    # the same row otherwise queues 30 k presses, then can accept the old frame
+    # while those keys are still in flight (#4056), changing selection after return.
     # Scan down from the anchored top tab stop, evaluating the ready condition
     # AFTER every `j` — including the final one. The old loop captured, checked,
     # THEN pressed `j`, so the state produced by the 40th (boundary) `j` was
     # never evaluated: a row that only became actionable on that last step was
-    # missed and af_select reported a false selection failure (#1759). `seq 0 40`
-    # checks the anchored position first (i=0, no `j`), then re-checks after each
+    # missed and af_select reported a false selection failure (#1759). Check the
+    # current position (i=-1), then the anchor (i=0, no `j`), then after each
     # of the 40 downward steps, with a settle poll between the `j` and the
     # capture so the post-`j` frame is the one we inspect.
-    for i in $(seq 0 40); do
-        if [ "$i" -gt 0 ]; then
+    for i in $(seq -1 40); do
+        if [ "$i" -eq 0 ]; then
+            local anchor
+            for ((anchor = 0; anchor < 30; anchor++)); do af_send k; done
+            sleep "$AF_DRIVER_POLL"
+        elif [ "$i" -gt 0 ]; then
             af_send j
             sleep "$AF_DRIVER_POLL"
         fi
