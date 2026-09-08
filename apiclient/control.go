@@ -106,7 +106,7 @@ func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.Handof
 	}
 	requestedAccount := strings.TrimSpace(req.Account)
 	if requestedAccount != "" && resp.ToAccount != requestedAccount {
-		mismatch := fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity", requestedAccount)
+		mismatch := &mutationCommittedError{detail: fmt.Sprintf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity", requestedAccount)}
 		return resp, errors.Join(err, mismatch)
 	}
 	return resp, err

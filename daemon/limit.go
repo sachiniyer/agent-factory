@@ -809,8 +809,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		prompt = "continue"
 	}
 	var serr error
+	readinessSettlementAttempted := false
+	readinessSettled := false
 	if manual {
-		serr = m.deliverManualAccountMission(repoID, instance, prompt)
+		readinessSettlementAttempted, readinessSettled, serr = m.deliverManualAccountMission(repoID, key, instance, prompt)
 	} else {
 		_, serr = instance.SendPromptWithEvidence(prompt, nowFunc)
 	}
@@ -819,12 +821,20 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// delivery fact: remote transport failure means could-not-confirm, not that
 		// the prompt missed. Persist it before this early return so a restart can
 		// still order later pane churn against the attempt (#3162/#3168).
-		evidenceErr := m.persistSettlement(repoID, key, instance)
-		if evidenceErr != nil {
-			m.warn().Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
+		if readinessSettlementAttempted {
+			// deliverManualAccountMission already settled the inert marker. A second
+			// write here could mask that write's failure and erase its retry record.
+			if readinessSettled {
+				settleErr = nil
+			}
 		} else {
-			// The successful evidence checkpoint persisted the whole respawn row too.
-			settleErr = nil
+			evidenceErr := m.persistSettlement(repoID, key, instance)
+			if evidenceErr != nil {
+				m.warn().Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
+			} else {
+				// The successful evidence checkpoint persisted the whole respawn row too.
+				settleErr = nil
+			}
 		}
 		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 		if settleErr != nil {

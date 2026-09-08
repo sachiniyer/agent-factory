@@ -58,3 +58,33 @@ func TestAccountSwapBlindTeardownIdentifiesOnlyAgent(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountSwapUnknownSiblingTeardownIsUnsafe(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	names := []string{"af_unknown_agent", "af_unknown_shell"}
+	inner := nameKeyedExec(map[string]bool{names[0]: true, names[1]: true})
+	executor := cmd_test.MockCmdExec{
+		RunFunc: inner.Run,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(c.String(), "display-message") && strings.Contains(c.String(), names[1]) {
+				return nil, tmux.ErrTmuxTimeout
+			}
+			return inner.Output(c)
+		},
+	}
+	inst := accountSwapTestInstance("claude")
+	repo := initTempGitRepo(t)
+	gw, err := git.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
+	inst.Tabs = []*Tab{
+		newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(names[0], "claude", nil, executor)),
+		{ID: "shell", Name: "shell", Kind: TabKindProcess, Command: "cat", tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(names[1], "cat", nil, executor)},
+	}
+
+	err = inst.StopForAccountSwap()
+	require.ErrorContains(t, err, "cannot confirm credential-bearing tab")
+	require.ErrorIs(t, err, tmux.ErrTmuxTimeout)
+	require.ErrorIs(t, err, ErrAccountSwapAgentTeardownBlind,
+		"every unconfirmed credential-bearing teardown must block automatic recovery")
+}

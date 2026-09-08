@@ -59,7 +59,14 @@ function stubFetch(): Captured {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ data: { ok: true, name: "shell" }, error: null }),
+      json: async () => ({
+        data: {
+          ok: true,
+          name: "shell",
+          to_account: typeof cap.body.account === "string" ? cap.body.account.trim() : undefined,
+        },
+        error: null,
+      }),
     } as unknown as Response;
   };
   return cap;
@@ -572,6 +579,44 @@ test("handoffSession surfaces a successful response's committed settlement warni
   assert.match(err.message, /pending settlement/);
   assert.equal(isMutationCommittedError(err), true);
 });
+
+test("handoffSession accepts the canonical account echoed by the daemon", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: { ok: true, from: "claude", to: "claude", to_account: "personal" },
+      error: null,
+    }),
+  });
+
+  const result = await handoffSession("id", "worker", "claude", "tok", " personal ");
+  assert.equal(result.to_account, "personal");
+});
+
+for (const echoed of ["", "work"]) {
+  test(`handoffSession treats an ${echoed ? "incorrect" : "absent"} account echo as committed`, async () => {
+    stubFetchResponse({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: { ok: true, from: "claude", to: "codex", ...(echoed ? { to_account: echoed } : {}) },
+        error: null,
+      }),
+    });
+
+    const err = await handoffSession("id", "worker", "codex", "tok", "personal").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    assert.ok(err instanceof ApiError);
+    assert.equal(err.code, "mutation_committed");
+    assert.match(err.message, /did not honor the requested account/);
+    assert.match(err.message, /ambient identity/);
+  });
+}
 
 test("restoreSession surfaces a successful response's durable archive warning", async () => {
   stubFetchResponse({

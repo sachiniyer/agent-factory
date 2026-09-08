@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +41,45 @@ func TestHandoffAccountReadinessFailureBecomesInert(t *testing.T) {
 	m.ResumeLimitedSessions()
 	_, afterRespawns, _ := backend.snapshot()
 	require.Equal(t, beforeRespawns, afterRespawns, "an unconfirmed replacement must not be respawned")
+}
+
+func TestHandoffAccountReadinessFailureRetriesInertSettlement(t *testing.T) {
+	m, repo, inst, base := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	backend := &accountReadinessGoneBackend{limitResumeBackend: base}
+	inst.SetBackend(backend)
+	inst.ClearLimitReached()
+	previous := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = previous })
+	fail := true
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		actualStartupUnknown := data.PendingAccountSwap != nil &&
+			data.PendingAccountSwap.OriginalStartupStateUnknown != nil &&
+			*data.PendingAccountSwap.OriginalStartupStateUnknown
+		if fail && data.Title == inst.Title && actualStartupUnknown {
+			return errors.New("startup-unknown disk unavailable")
+		}
+		return nil
+	}
+
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.ErrorIs(t, err, task.ErrAgentReadiness)
+	require.ErrorContains(t, err, "startup-unknown disk unavailable")
+	require.True(t, inst.StartupStateUnknown())
+	require.Contains(t, m.settleOwed, stableSessionKey(repo, inst))
+	beforeRetry := persistedInstanceByTitle(t, repo, inst.Title).RestoreAccountSwapRollbackFence()
+	require.False(t, beforeRetry.StartupStateUnknown)
+
+	fail = false
+	m.FlushOwedSettlements()
+	saved := persistedInstanceByTitle(t, repo, inst.Title).RestoreAccountSwapRollbackFence()
+	require.True(t, saved.StartupStateUnknown)
+	require.False(t, inst.Started())
+	_, beforeRespawns, _ := backend.snapshot()
+	m.ResumeLimitedSessions()
+	_, afterRespawns, _ := backend.snapshot()
+	require.Equal(t, beforeRespawns, afterRespawns,
+		"the restart scheduler must not retry a replacement whose startup state is unknown")
 }
 
 func (b *accountReadinessBackend) Preview(*session.Instance) (string, error) {

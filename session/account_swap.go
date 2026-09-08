@@ -421,7 +421,11 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 			return fmt.Errorf("account swap: cannot stop credential-bearing tab %q for %q: %w", tab.Name, i.Title,
 				errors.Join(ErrAccountSwapAgentTeardownBlind, err))
 		case state == tmux.PaneStateUnknown:
-			return fmt.Errorf("account swap: cannot confirm credential-bearing tab %q stopped for %q: %w", tab.Name, i.Title, err)
+			if errors.Is(err, tmux.ErrSessionStillAlive) {
+				return fmt.Errorf("account swap: failed to stop credential-bearing tab %q for %q: %w", tab.Name, i.Title, err)
+			}
+			return fmt.Errorf("account swap: cannot confirm credential-bearing tab %q stopped for %q: %w", tab.Name, i.Title,
+				errors.Join(ErrAccountSwapAgentTeardownBlind, err))
 		case err != nil:
 			return fmt.Errorf("account swap: failed to stop credential-bearing tab %q for %q: %w", tab.Name, i.Title, err)
 		}

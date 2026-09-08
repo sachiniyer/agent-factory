@@ -105,3 +105,36 @@ func TestHandoffAccountSiblingBlindStopRecordsStartupUnknown(t *testing.T) {
 	m.RestoreLostSessions()
 	require.Zero(t, recovery.recoverCalls())
 }
+
+func TestHandoffAccountSiblingUnknownStopRecordsStartupUnknown(t *testing.T) {
+	m, repo, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.ClearLimitReached()
+	prepareHandoffTargetPreflight(t, inst)
+	const agentName = "af_unknown_sibling_agent"
+	const siblingName = "af_unknown_sibling_tab"
+	inner := tabNameKeyedExec(map[string]bool{agentName: true, siblingName: true})
+	executor := cmd_test.MockCmdExec{
+		RunFunc: inner.Run,
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "display-message") && strings.Contains(cmd.String(), siblingName) {
+				return nil, tmux.ErrTmuxTimeout
+			}
+			return inner.Output(cmd)
+		},
+	}
+	inst.SetBackend(&session.LocalBackend{})
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", tabPtyFactory{t: t, cmdExec: executor}, executor))
+	_, err := inst.AddProcessTab("cat", siblingName)
+	require.NoError(t, err)
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.ErrorIs(t, err, tmux.ErrTmuxTimeout)
+	require.ErrorIs(t, err, session.ErrAccountSwapAgentTeardownBlind)
+	require.True(t, inst.StartupStateUnknown())
+	require.NotEqual(t, session.LiveLost, inst.GetLiveness())
+	recovery := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(recovery)
+	m.RestoreLostSessions()
+	require.Zero(t, recovery.recoverCalls())
+}

@@ -44,6 +44,18 @@ func (legacyCommittedTaskRPC) AddTask(_ AddTaskRequest, _ *AddTaskResponse) erro
 	return errors.New(taskAddCommittedErrorPrefix + " simulated reload failure")
 }
 
+type legacyHandoffRPC struct{}
+
+func (legacyHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	return nil
+}
+
+func (legacyHandoffRPC) HandoffSession(_ HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	*resp = HandoffSessionResponse{OK: true, From: "claude", To: "codex"}
+	return nil
+}
+
 // TestControlClientPreservesMutationCommittedOutcome crosses a real isolated
 // net/rpc socket. net/rpc normally flattens the server error to rpc.ServerError;
 // the client must restore the definite committed outcome without classifying
@@ -116,6 +128,16 @@ func TestControlClientClassifiesLegacyCommittedRPCError(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, isMutationCommitted(err),
 		"an older daemon's committed task failure read as an ordinary one; a retry would duplicate the task: %T: %v", err, err)
+}
+
+func TestControlClientClassifiesIgnoredHandoffAccountAsCommitted(t *testing.T) {
+	serveControlRPC(t, legacyHandoffRPC{})
+
+	resp, err := HandoffSession(HandoffSessionRequest{To: "codex", Account: "personal"})
+	require.Equal(t, "codex", resp.To)
+	require.ErrorContains(t, err, "did not honor")
+	require.True(t, isMutationCommitted(err),
+		"an older daemon already restarted the runtime, so the compatibility mismatch is committed: %T: %v", err, err)
 }
 
 // The control socket is net/rpc with gob encoding, and gob ELIDES zero-valued
