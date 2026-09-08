@@ -18,12 +18,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func legacyArchivePair(t *testing.T) (*Manager, string, []*session.Instance) {
+func legacyArchivePair(t *testing.T, titles ...string) (*Manager, string, []*session.Instance) {
 	t.Helper()
 	m, repoID, repoPath := newStatusTestManager(t)
 	var instances []*session.Instance
 	var disk []session.InstanceData
-	for _, title := range []string{"feature/login", "feature-login"} {
+	if len(titles) == 0 {
+		titles = []string{"feature/login", "feature-login"}
+	}
+	for _, title := range titles {
 		path := filepath.Join(t.TempDir(), "worktree")
 		branch := "af/" + title
 		out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, path).CombinedOutput()

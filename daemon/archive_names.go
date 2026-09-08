@@ -22,9 +22,8 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 	if inPlace {
 		return nil
 	}
-	candidate := archiveTitleKey(title)
 	collision := func(existing string) error {
-		if archiveTitleKey(existing) == candidate {
+		if archiveTitlesCollide(existing, title) {
 			return fmt.Errorf("session titled %q already maps to archive directory %q", existing, sanitizeArchiveTitle(title))
 		}
 		return nil
@@ -50,22 +49,38 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		if !data.UsesLocalTmux() || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
 			continue
 		}
-		if archiveTitleKey(data.Title) != candidate {
+		if !archiveTitlesCollide(data.Title, title) {
 			continue
 		}
-		// Decode the same ownership projections as FromInstanceData before
-		// interpreting ExternalWorktree. ForStorage sets it for af-owned trees
-		// too, to keep older releases from destroying unresolved archives.
-		decoded := data.RestoreArchiveRollbackFence()
-		decoded, err := decoded.RestoreRelocationRecoveryOriginals()
+		owned, err := ownsArchiveDirectory(data)
 		if err != nil {
-			return fmt.Errorf("%w: cannot restore archive ownership for session %q: %v", errTitleCheckFatal, data.Title, err)
+			return err
 		}
-		if !decoded.Worktree.ExternalWorktree {
+		if owned {
 			return collision(data.Title)
 		}
 	}
 	return nil
+}
+
+// archiveTitlesCollide is shared by create admission and archive destination scans.
+func archiveTitlesCollide(a, b string) bool {
+	return archiveTitleKey(a) == archiveTitleKey(b)
+}
+
+// ownsArchiveDirectory decodes the same ownership projections as FromInstanceData.
+// ForStorage sets ExternalWorktree even for af-owned trees to protect unresolved
+// archives from older releases.
+func ownsArchiveDirectory(data session.InstanceData) (bool, error) {
+	if !data.UsesLocalTmux() || data.Status == session.Loading {
+		return false, nil
+	}
+	decoded := data.RestoreArchiveRollbackFence()
+	decoded, err := decoded.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		return false, fmt.Errorf("%w: cannot restore archive ownership for session %q: %v", errTitleCheckFatal, data.Title, err)
+	}
+	return !decoded.Worktree.ExternalWorktree, nil
 }
 
 // archiveTitleKey deliberately uses one portable comparison on every platform,
@@ -133,6 +148,9 @@ func (m *Manager) inspectArchiveDestination(repoID string, inst *session.Instanc
 	destInfo, err := sessiongit.BoundedLstat(dest)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if err := inspectArchivePortableNamespace(repoID, inst, dest); err != nil {
+				return "", err
+			}
 			return dest, nil
 		}
 		return "", fmt.Errorf("cannot archive session %q: cannot inspect destination %s: %w", inst.Title, dest, err)
