@@ -182,3 +182,42 @@ func TestHookProgressRetirementRetriesRemovalError(t *testing.T) {
 		}
 	}
 }
+
+func TestHookProgressRetirementRetriesHalfRetiredJournal(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installScopeShim(t)
+	g := worktreeWithRecordedScope(t, "af-hook-owner")
+	g.SetHookScopeSessionID("owner")
+	p, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "owner"}, nil, "af-hook-owner", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.finish()
+	path, err := hookProgressPath(g.worktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := hookProgressRemove
+	failed := true
+	hookProgressRemove = func(path string, progress *hookProgress) error {
+		if failed {
+			failed = false
+			retired := filepath.Join(filepath.Dir(path), "retired-"+filepath.Base(progress.Directory)+".json")
+			if err := os.Rename(path, retired); err != nil {
+				return err
+			}
+			return errors.New("injected post-rename failure")
+		}
+		return original(path, progress)
+	}
+	t.Cleanup(func() { hookProgressRemove = original })
+	if err := g.retireHookProgress(); err != nil {
+		t.Fatal(err)
+	}
+	waitForClosed(t, g.hooksRetirementDone, 5*time.Second, "half-retired journal retry did not finish")
+	for _, file := range []string{path, p.Directory} {
+		if _, err := os.Stat(file); !os.IsNotExist(err) {
+			t.Fatalf("half-retired retry retained %s: %v", file, err)
+		}
+	}
+}
