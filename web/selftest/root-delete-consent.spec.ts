@@ -67,3 +67,48 @@ for (const isRoot of [true, false]) {
     if (isRoot) await expect(acknowledgment).toBeChecked();
   });
 }
+
+for (const initiallyRoot of [false, true]) {
+  test(`open deletion consent revalidates a Snapshot root change from ${initiallyRoot}`, async ({ page, request }) => {
+    const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+    const original = envelope.data.instances.find((s: { title: string }) => s.title === "probe-a");
+    let target = { ...original, is_root: initiallyRoot };
+    await page.route("**/v1/Snapshot", route => route.fulfill({ json: {
+      ...envelope, data: { ...envelope.data, instances: [target] },
+    } }));
+    let resync!: () => void;
+    await page.routeWebSocket("**/v1/events*", socket => {
+      resync = () => socket.send(JSON.stringify({ type: "session.restored", data: { id: target.id } }));
+    });
+    let calls = 0;
+    await page.route("**/v1/KillSession", route => {
+      calls++;
+      return route.fulfill({ status: 503, json: { error: { message: "Deletion refused", daemon_rejected: true } } });
+    });
+    await page.goto("/");
+    await page.locator("#app[data-af-resync-settled]").waitFor();
+    const row = page.locator(".af-row").first();
+    await row.hover();
+    await row.getByRole("button", { name: /^Actions for / }).click();
+    await row.getByRole("button", { name: /^(Kill|Delete) session/ }).click();
+    const modal = page.locator(".af-modal-card");
+    await expect(modal.getByRole("checkbox")).toHaveCount(initiallyRoot ? 1 : 0);
+    const openedForm = await modal.locator("form").elementHandle();
+    target = { ...target, is_root: !initiallyRoot, title: `${original.title} refreshed` };
+    const snapshot = page.waitForResponse(response => response.url().endsWith("/v1/Snapshot"));
+    resync();
+    await snapshot;
+    await expect(row).toContainText(target.title);
+    await expect(modal.getByRole("checkbox")).toBeVisible();
+    // Even an already-queued submit from the old, now-detached generic form must
+    // consult the latest projection instead of spending the weaker consent.
+    await openedForm!.evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await expect(modal.getByRole("checkbox")).toBeVisible();
+    expect(calls).toBe(0);
+    if (!initiallyRoot) await expect(modal.getByRole("checkbox")).toBeFocused();
+    await modal.getByRole("checkbox").check();
+    await modal.getByRole("button", { name: "Delete session", exact: true }).click();
+    await expect(modal.locator(".af-modal-error")).toContainText("Deletion refused");
+    expect(calls).toBe(1);
+  });
+}

@@ -691,12 +691,15 @@ function selectedSession(): { id: string; title: string } | null {
 }
 
 let restoreModalFocus: (() => void) | null = null;
+let stopModalProjectionWatch: (() => void) | null = null;
 
 /** Closes and clears the open modal, if any. */
 function closeModal(): void {
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
+    stopModalProjectionWatch?.();
+    stopModalProjectionWatch = null;
     modal.close();
     modal = null;
     restoreFocus?.();
@@ -864,19 +867,46 @@ function newSession(): void {
  *  unselected rows (#2223). Restore remains the reverse of archive (#1932). */
 function openConfirm(action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession): void {
   const target = { id: session.id, title: session.title };
-  openModal(
+  const hasRootAcknowledgment = action === "kill" && session.is_root === true;
+  const refreshRootConsent = (latest: SessionData | undefined): boolean => {
+    // Consent may get stronger while this dialog is open, never weaker. Keeping
+    // the existing acknowledgment after root → non-root is harmless.
+    if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
+      openConfirm("kill", { ...session, title: latest.title, is_root: true });
+      return true;
+    }
+    return false;
+  };
+  const mountConfirmation = (m: ModalHandle) => {
+    openModal(m, true);
+    // This also covers retained failed dialogs. The shared close path removes
+    // the watch before restoring focus or mounting another modal.
+    const refresh = () => { refreshRootConsent(store.get().sessions.find(s => s.id === target.id)); };
+    stopModalProjectionWatch = store.subscribe(refresh);
+    refresh();
+  };
+  mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
-      isRoot: session.is_root === true,
+      isRoot: hasRootAcknowledgment,
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
           return;
         }
+        const latest = store.get().sessions.find(s => s.id === target.id);
+        if (action === "kill" && !latest) {
+          modal.setError("This session is no longer available to delete.");
+          return;
+        }
+        // A queued submit can still come from a replaced generic form. Re-read
+        // the projection at the point of mutation even though the watch refreshes
+        // the visible dialog as soon as the root identity changes.
+        if (refreshRootConsent(latest)) return;
         const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, session);
+        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
         if (action !== "restore" && !mutation) return;
         m.setBusy(true);
         if (mutation) {
@@ -911,7 +941,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal) openModal(m, true);
+            if (!modal) mountConfirmation(m);
             else surfaceMutationError(e);
             return;
           }
@@ -933,7 +963,6 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
       },
       onCancel: closeModal,
     }),
-    true,
   );
 }
 

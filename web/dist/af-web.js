@@ -16493,10 +16493,13 @@ function selectedSession2() {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 var restoreModalFocus = null;
+var stopModalProjectionWatch = null;
 function closeModal() {
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
+    stopModalProjectionWatch?.();
+    stopModalProjectionWatch = null;
     modal.close();
     modal = null;
     restoreFocus?.();
@@ -16620,18 +16623,40 @@ function newSession() {
 }
 function openConfirm(action, session) {
   const target = { id: session.id, title: session.title };
-  openModal(
+  const hasRootAcknowledgment = action === "kill" && session.is_root === true;
+  const refreshRootConsent = (latest) => {
+    if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
+      openConfirm("kill", { ...session, title: latest.title, is_root: true });
+      return true;
+    }
+    return false;
+  };
+  const mountConfirmation = (m) => {
+    openModal(m, true);
+    const refresh = () => {
+      refreshRootConsent(store.get().sessions.find((s) => s.id === target.id));
+    };
+    stopModalProjectionWatch = store.subscribe(refresh);
+    refresh();
+  };
+  mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
-      isRoot: session.is_root === true,
+      isRoot: hasRootAcknowledgment,
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {
           return;
         }
+        const latest = store.get().sessions.find((s) => s.id === target.id);
+        if (action === "kill" && !latest) {
+          modal.setError("This session is no longer available to delete.");
+          return;
+        }
+        if (refreshRootConsent(latest)) return;
         const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, session);
+        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
         if (action !== "restore" && !mutation) return;
         m.setBusy(true);
         if (mutation) {
@@ -16657,7 +16682,7 @@ function openConfirm(action, session) {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal) openModal(m, true);
+            if (!modal) mountConfirmation(m);
             else surfaceMutationError(e);
             return;
           }
@@ -16678,8 +16703,7 @@ function openConfirm(action, session) {
         });
       },
       onCancel: closeModal
-    }),
-    true
+    })
   );
 }
 function openDeleteProject(root2, label, sessionCount) {
