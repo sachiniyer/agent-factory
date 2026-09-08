@@ -587,15 +587,15 @@ af_new_instance() {
 # starting cursor position: anchor at the first live tab stop (k is idempotent
 # there), then step down until BOTH conditions hold — <name>'s parent row
 # carries the ▾ selected/expanded arrow AND the menu advertises an
-# instance-scoped verb (`D kill`).
+# instance-scoped verb (`D delete session`, or legacy `D kill`).
 #
 # The two-part success condition is the #1174-item-1 / #1199 fix. The sticky
 # ▾ is a DISPLAY-selection: a SINGLE auto-selected instance renders ▾ while the
 # tree cursor still sits on the `Instances` section header, so GetSelected-
-# Instance() is nil and every cursor-driven verb (o attach, D kill, and
+# Instance() is nil and every cursor-driven verb (o attach, D delete session, and
 # af_attach/af_open_pane which run after af_select) silently no-ops. A ▾-only
 # check returns on iteration 0 in that case — a false positive that can make a
-# play-test wrongly "pass" a nav action that never fired. `D kill` appears in
+# play-test wrongly "pass" a nav action that never fired. `D delete session` appears in
 # the menu ONLY when an instance is actually under the cursor (non-nil
 # GetSelectedInstance()), so requiring it forces `j` past the header/title rows
 # until the cursor truly lands on an actionable tab row.
@@ -622,11 +622,11 @@ af_select() {
         fi
         screen="$(af_capture)"
         printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" || continue
-        if printf '%s\n' "$screen" | grep -qE -- 'D kill'; then
+        if printf '%s\n' "$screen" | grep -qE -- '(^|[[:space:]])D (kill|delete session)([[:space:]]|$)'; then
             return 0
         fi
         # The target is display-selected (▾) but the footer is the pane menu, not
-        # 'D kill': moving the cursor onto an instance that already has an open
+        # 'D delete session': moving the cursor onto an instance that already has an open
         # workspace pane auto-focuses that pane, which replaces the tree footer
         # AND stops the remaining scan keys from driving the tree (#1996). The
         # instance IS selected — the pane could only be focused because of that —
@@ -641,7 +641,7 @@ af_select() {
             fi
         fi
     done
-    _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D kill' in the menu)"
+    _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D delete session' (or legacy 'D kill') in the menu)"
     printf '%s\n' "$screen" >&2
     return 1
 }

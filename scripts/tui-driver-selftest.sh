@@ -275,7 +275,7 @@ _expect_archive_confirm_names_the_restore_key() {
     af_select alpha || return 1
     af_send a
     af_wait_for 'Archive session' 10 'archive confirmation opened' || return 1
-    # The off-ramp names the in-TUI restore key ("Restore later with r."), and
+    # The off-ramp names the in-TUI restore key ("Restore with r."), and
     # carries no `af sessions` shell command (#2479).
     af_assert_screen 'with r' 'archive dialog names the restore key' || return 1
     af_refute_screen 'af sessions' 'archive dialog prescribes no shell command' || return 1
@@ -387,14 +387,15 @@ SCREEN
 # evaluate its ready condition AFTER the final downward `j`, not only before it.
 # Drive af_select against stubbed send/capture (no live TUI, no real sleeps) in
 # a subshell so nothing leaks: a counter tracks `j` presses, and the row is
-# rendered actionable (▾ + `D kill`) ONLY once the count reaches 40 — exactly
-# the loop boundary. The old loop pressed the 40th `j` and exited without a
+# display-selected (▾) throughout, but the instance verb appears ONLY once
+# the count reaches 40 — exactly the loop boundary. The old loop pressed the 40th `j` and exited without a
 # trailing capture, so it never saw the actionable frame and returned non-zero
 # here; the fixed loop checks the post-`j` state and returns 0.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_boundary() {
     (
         _AF_BOUNDARY_JCOUNT=0
+        local verb="${1:-delete session}"
         # Stubs local to this subshell; the sourced af_select resolves them
         # dynamically when it calls them.
         af_ensure_nav() { :; }
@@ -403,23 +404,27 @@ _expect_af_select_boundary() {
         af_send() { [ "${1:-}" = j ] && _AF_BOUNDARY_JCOUNT=$((_AF_BOUNDARY_JCOUNT + 1)); return 0; }
         af_capture() {
             if [ "$_AF_BOUNDARY_JCOUNT" -ge 40 ]; then
-                printf '%s\n' ' ▾ target                       │ menu: D kill'
+                printf ' ▾ target                       │ menu: D %s\n' "$verb"
             else
-                printf '%s\n' ' ▸ target                       │ menu: n new'
+                printf '%s\n' ' ▾ target                       │ menu: n new'
             fi
         }
-        af_select target
+        af_select target || return 1
+        [ "$_AF_BOUNDARY_JCOUNT" -eq 40 ] || {
+            _af_fail "af_select accepted display selection without the instance verb"
+            return 1
+        }
     )
 }
 
 # _expect_af_select_open_pane — regression proof for #1996. Scanning onto an
 # instance that already has an open workspace pane auto-focuses that pane, which
-# replaces the tree footer (removing 'D kill') and stops the scan keys from
+# replaces the tree footer (removing 'D delete session') and stops the scan keys from
 # driving the tree — so af_select used to exhaust its scan and report a false
 # selection failure even though the instance WAS selected. Stubbed (no live TUI):
 # a `j` counter flips the target to display-selected-with-pane-menu at the loop
 # midpoint, and af_focus_tree restores the tree footer. The old af_select never
-# saw 'D kill' and failed; the fixed one detects the pane menu, re-focuses the
+# saw 'D delete session' and failed; the fixed one detects the pane menu, re-focuses the
 # tree, and finalizes.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_open_pane() {
@@ -443,7 +448,7 @@ _expect_af_select_open_pane() {
             elif [ "$_AF_OPENPANE_FOCUS" = pane ]; then
                 printf '%s\n' ' ▾ target                       │ ← prev pane · → next pane │ s open pane · x hide pane'
             else
-                printf '%s\n' ' ▾ target                       │ menu: n new · D kill'
+                printf '%s\n' ' ▾ target                       │ menu: n new · D delete session'
             fi
         }
         af_select target
@@ -799,7 +804,7 @@ _expect_scrolled_rail_reads_as_booted() {
                       │                                        │
     └ 1 ◆ Agent *     │                                        │
                       ╰────────────────────────────────────────╯
-     n new · D kill │ t new tab · w close tab │ ? help · q quit
+     n new · D delete session │ t new tab · w close tab │ ? help · q quit
 SCREEN
         }
         # Premise: the frame really is missing the header, or this is just
@@ -886,6 +891,7 @@ _expect_scrolled_rail_relaunch() {
 # reset killed the sandbox daemon and RequestApplyConfig is non-spawning; the
 # daemon therefore boots from claude, then the editor must transition it to
 # codex for the live ListPrograms readback below to pass.
+# shellcheck disable=SC2317  # dispatched indirectly via step().
 _seed_config_editor_start_value() {
     (cd / && af config set default_program claude >/dev/null) || return 1
     grep -q "default_program = 'claude'" "$AGENT_FACTORY_HOME/config.toml" || {
@@ -910,6 +916,7 @@ step "literal alternation (#4037)" _expect_regex_escape_literal 'a|b' 'a'
 # shellcheck disable=SC2016
 step "literal dollar (#4037)" _expect_regex_escape_literal '$HOME' 'HOME'
 step "literal backslash (#4037)" _expect_regex_escape_literal 'path\title' 'pathtitle'
+# shellcheck disable=SC1003  # the literal intentionally ends with a backslash.
 step "all ERE metacharacters (#4037)" _expect_regex_escape_literal '.[](){}*+?^$|\' 'unrelated'
 
 step "task frame accepts an earlier top corner in the rail" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project-name     '
@@ -940,7 +947,7 @@ step "create instance 'alpha'"                              af_new_instance alph
 # selected. The old af_select returned on iteration 0 (▾ present) and a
 # play-test could wrongly "pass". af_select now lands the cursor on an
 # actionable tab row, so `o attach` MUST actually fire here. If the bug returns,
-# either af_select fails (no 'D kill') or af_attach times out waiting for the
+# either af_select fails (no 'D delete session') or af_attach times out waiting for the
 # chrome to vanish.
 step "select the SOLE instance alpha"                       af_select alpha
 step "assert alpha display-selected (sole instance)"        af_expect_selected alpha
@@ -962,7 +969,8 @@ step "assert beta is selected"                              af_expect_selected b
 # --- #1759 regression: af_select must check AFTER the final scan step ---
 # A row that only becomes actionable on the loop's boundary `j` used to be
 # missed (false selection failure). Deterministic stub proof — no live TUI.
-step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
+step "af_select evaluates the boundary step with delete session (#4054)" _expect_af_select_boundary "delete session"
+step "af_select still accepts the legacy kill verb (#4054)"  _expect_af_select_boundary "kill"
 step "af_select handles a target with an open pane (#1996)"  _expect_af_select_open_pane
 
 # --- #1757/#3995 regressions: task-overlay context and run action ---
