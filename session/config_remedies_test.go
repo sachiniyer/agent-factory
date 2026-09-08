@@ -75,3 +75,17 @@ func TestSandboxConfigErrorResolvedConfigFile(t *testing.T) {
 	assert.Contains(t, err.Error(), filepath.Join(dir, config.TomlConfigFileName))
 	assert.NotContains(t, err.Error(), "~/.agent-factory")
 }
+
+func TestReservedTitleRefusalForResolvedRepo(t *testing.T) {
+	const repo = "/tmp/B's repo"
+	for _, title := range []string{"root", "ro ot"} {
+		err := ReservedTitleRefusalFor(title, repo)
+		require.Error(t, err)
+		quoted := config.ShellQuotePath(repo)
+		assert.Contains(t, err.Error(), "af projects add "+quoted)
+		assert.Contains(t, err.Error(), "af config set --project "+quoted)
+		assert.NotContains(t, err.Error(), "from this repo")
+		assert.EqualError(t, ReservedTitleRefusalFor(title, ""), ReservedTitleRefusal(title).Error())
+	}
+	assert.NoError(t, ReservedTitleRefusalFor("ordinary", repo))
+}

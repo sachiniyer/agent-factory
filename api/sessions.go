@@ -381,7 +381,7 @@ pointing at one).`,
 		// Fail fast on the reserved root-agent title (#1106) before any daemon
 		// round trip, through the daemon's own refusal rather than a copy of its
 		// message: what is reserved is the derived tmux name, not the spelling (#3732).
-		if err := session.ReservedTitleRefusal(createTitle); err != nil {
+		if err := session.ReservedTitleRefusalFor(createTitle, workspace); err != nil {
 			return jsonError(err)
 		}
 

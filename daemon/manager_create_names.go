@@ -139,7 +139,7 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // inline here, so the pre-rename path picks it up automatically — a check added
 // only to this function is exactly how #2415 happened.
 func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool) error {
-	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
+	if err := m.validateTitleShapeLocked(repoPath, title, namespace, allowReserved); err != nil {
 		return err
 	}
 	if err := m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData); err != nil {
@@ -159,7 +159,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 // an archived row never owns a live tmux name, and anything the probe finds is a
 // genuine orphan the rename has no effect on.
 func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance, inPlace bool) error {
-	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
+	if err := m.validateTitleShapeLocked(repoPath, title, namespace, allowReserved); err != nil {
 		return err
 	}
 	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, ignore, inPlace)
@@ -167,7 +167,7 @@ func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program 
 
 // validateTitleShapeLocked rejects titles that are malformed for the selected
 // runtime namespace or reserved, independent of any existing session.
-func (m *Manager) validateTitleShapeLocked(title string, namespace runtimeNameNamespace, allowReserved bool) error {
+func (m *Manager) validateTitleShapeLocked(repoPath, title string, namespace runtimeNameNamespace, allowReserved bool) error {
 	// Whitespace-only titles (e.g. "   ") are non-empty and so slip past a bare
 	// == "" check, creating sessions with effectively blank names (#973). Trim
 	// before the emptiness gate; the TUI naming flow applies the same check.
@@ -206,7 +206,7 @@ func (m *Manager) validateTitleShapeLocked(title string, namespace runtimeNameNa
 	// must therefore see it too (#2415). The record scan still owns the other
 	// axis — a derived-name collision with an existing session, reserved or not.
 	if !allowReserved {
-		if err := session.ReservedTitleRefusal(title); err != nil {
+		if err := session.ReservedTitleRefusalFor(title, repoPath); err != nil {
 			return err
 		}
 	}
