@@ -87,7 +87,7 @@ func (g *GitWorktree) retireHookProgress() {
 		}
 		for index := range p.Commands {
 			receipt := p.receipt(index)
-			if err := os.MkdirAll(receipt, 0700); err != nil {
+			if err := config.MkdirAllUnderAFHome(receipt, 0700); err != nil {
 				return err
 			}
 			exit := filepath.Join(receipt, "exit")
