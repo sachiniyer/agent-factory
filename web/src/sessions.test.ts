@@ -496,7 +496,11 @@ test("#3663 the layout generation is read BEFORE the commit that could move it",
   const body = topLevelFunction(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8"), "guardedTabRebind");
   const afterAwait = body.indexOf("void run()");
   const genRead = body.indexOf("splitView.layoutGeneration()", afterAwait);
-  const commit = body.indexOf("store.set({ sessions", afterAwait);
+  // The authoritative restore ledger commits through applySessions now. Keep
+  // pinning the read before that call, whose synchronous store.set rerenders.
+  const commit = body.indexOf("applySessions(sessions,", afterAwait);
+  const apply = topLevelFunction(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8"), "applySessions");
+  assert.match(apply, /store\.set\(\{ sessions/, "applySessions must remain the roster commit path");
   assert.ok(genRead !== -1 && commit !== -1, "guardedTabRebind must read the generation and commit the roster");
   assert.ok(genRead < commit, "the post-await generation read must precede the roster commit");
 });
