@@ -411,6 +411,26 @@ _expect_af_select_ignores_pane_verb() (
     af_select target
 )
 
+# A delayed renderer can keep returning the selected frame while navigation is
+# queued. Selecting that same actionable row must not enqueue keys that move it
+# away after success (the #4056 pre-relaunch race).
+# shellcheck disable=SC2317
+_expect_af_select_already_selected() (
+    local queued=0
+    af_ensure_nav() { :; }
+    af_focus_tree() { return 0; }
+    sleep() { :; }
+    af_send() { queued=$((queued + 1)); }
+    af_capture() {
+        printf '%s\n' ' ▾ target' 'n new · D delete session · ? help · q quit'
+    }
+    af_select target || return 1
+    if [ "$queued" -ne 0 ]; then
+        _af_fail "af_select accepted the old selected frame with $queued navigation keys still queued"
+        return 1
+    fi
+)
+
 # _expect_af_select_boundary — regression proof for #1759. af_select must
 # evaluate its ready condition AFTER the final downward `j`, not only before it.
 # Drive af_select against stubbed send/capture (no live TUI, no real sleeps) in
@@ -883,7 +903,7 @@ _expect_scrolled_rail_relaunch() {
     af_resize 80 24 || return 1
     # Compact rows can fit the original three-session fixture without scrolling.
     # Grow the fixture until it establishes the premise, with a bounded cap.
-    local last=cycle n
+    local last=cycle n cap
     af_select "$last" || return 1
     for n in $(seq 1 10); do
         if af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
@@ -894,14 +914,22 @@ _expect_scrolled_rail_relaunch() {
         af_select "$last" || return 1
     done
     if af_select "$last"; then
+        printf '\n=== scrolled rail before relaunch: 80x24 (%s) ===\n' "$last"
+        af_capture
         af_relaunch || rc=$?
         if [ "$rc" -eq 0 ]; then
-            if ! af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
-                _af_log "#2148 premise not met: the 80x10 rail did NOT scroll, so this step proves nothing"
+            cap="$(af_capture)"
+            if ! printf '%s\n' "$cap" | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
+                _af_log "#2148 premise not met: the 80x24 rail did NOT scroll, so this step proves nothing"
+                printf '%s\n' "$cap" >&2
                 rc=1
-            elif af_capture | grep -qE -- 'Sessions \('; then
+            elif printf '%s\n' "$cap" | grep -qE -- 'Sessions \('; then
                 _af_log "#2148 premise not met: the header is still visible, so the old gate would have passed too"
+                printf '%s\n' "$cap" >&2
                 rc=1
+            else
+                printf '\n=== scrolled rail after relaunch: 80x24 ===\n'
+                printf '%s\n' "$cap"
             fi
         fi
     else
@@ -953,6 +981,7 @@ step "task frame accepts earlier rail corners on both edges" _expect_tasks_frame
 
 step "task frame beside a foreign same-row box retains its own geometry" _expect_tasks_frame_beside_foreign_box
 
+step "af_select leaves an already actionable selection in place (#4056)" _expect_af_select_already_selected
 step "af_select rejects delete-session text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "delete session"
 step "af_select rejects legacy kill text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "kill"
 
