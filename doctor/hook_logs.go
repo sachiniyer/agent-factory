@@ -130,6 +130,11 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 			}
 			return "", "", nil
 		}
+		// A lookup denied before reaching the leaf means its parent cannot
+		// be traversed, so this prevents hooks from starting, not just scanning.
+		if os.IsPermission(err) {
+			return filepath.Dir(path), "", err
+		}
 		if (!os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP)) || filepath.Dir(path) == path {
 			return "", "", err
 		}

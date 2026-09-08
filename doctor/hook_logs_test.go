@@ -235,15 +235,23 @@ func TestHomeHealthHookLogsUnwritableLeafFails(t *testing.T) {
 			name = "symlink"
 		}
 		t.Run(name, func(t *testing.T) {
-			dir := filepath.Join(t.TempDir(), "logs", "hooks")
+			// Reproduce macOS temporary roots such as /var -> /private/var
+			// on every platform, including the Linux container.
+			base := t.TempDir()
+			alias := filepath.Join(t.TempDir(), "alias")
+			require.NoError(t, os.Symlink(base, alias))
+			dir := filepath.Join(alias, "logs", "hooks")
 			target := dir
 			require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0o700))
 			if symlink {
-				target = t.TempDir()
+				target = filepath.Join(alias, "target")
+				require.NoError(t, os.Mkdir(target, 0o700))
 				require.NoError(t, os.Symlink(target, dir))
 			} else {
 				require.NoError(t, os.Mkdir(dir, 0o700))
 			}
+			resolvedTarget, err := filepath.EvalSymlinks(target)
+			require.NoError(t, err)
 			require.NoError(t, os.Chmod(target, 0o555))
 			t.Cleanup(func() { _ = os.Chmod(target, 0o700) })
 			report := &Report{}
@@ -251,11 +259,32 @@ func TestHomeHealthHookLogsUnwritableLeafFails(t *testing.T) {
 			row := findCheck(t, report, "hook logs")
 			require.Equal(t, StatusFail, row.Status)
 			require.True(t, row.Problem)
-			require.Contains(t, row.Detail, target+" is not writable")
+			require.Contains(t, row.Detail, resolvedTarget+" is not writable")
 			require.Contains(t, row.Detail, "configured hooks cannot start")
-			require.Contains(t, row.Remediation, "chmod u+w "+target)
+			require.Contains(t, row.Remediation, "chmod u+w "+resolvedTarget)
 			require.Equal(t, 1, report.UnresolvedCount())
 			require.Empty(t, report.Incomplete)
 		})
 	}
+}
+
+func TestHomeHealthHookLogsUnsearchableAncestorFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can traverse directories with mode 0600")
+	}
+	home := t.TempDir()
+	ancestor := filepath.Join(home, "logs")
+	require.NoError(t, os.Mkdir(ancestor, 0o700))
+	require.NoError(t, os.Chmod(ancestor, 0o600))
+	t.Cleanup(func() { _ = os.Chmod(ancestor, 0o700) })
+	report := &Report{}
+	checkHookLogs(report, filepath.Join(ancestor, "hooks"))
+	row := findCheck(t, report, "hook logs")
+	require.Equal(t, StatusFail, row.Status)
+	require.True(t, row.Problem)
+	require.Contains(t, row.Detail, ancestor+" is not writable")
+	require.Contains(t, row.Detail, "configured hooks cannot start")
+	require.Contains(t, row.Remediation, "chmod u+x "+ancestor)
+	require.Equal(t, 1, report.UnresolvedCount())
+	require.Empty(t, report.Incomplete)
 }
