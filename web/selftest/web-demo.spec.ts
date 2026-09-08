@@ -842,6 +842,9 @@ test("task completion catalog failure is visible and preserves the seed", async 
 
 for (const scoped of [true, false]) {
   test(scoped ? "account handoff requires a target account across agents" : "ambient handoff survives an unavailable account registry", async ({ page }) => {
+    // This pin exists only in the mocked Snapshot. Real session.updated events
+    // carry the fixture's ambient identity and must not overwrite the test case.
+    await page.routeWebSocket((url) => url.pathname === "/v1/events", () => {});
     await page.route("**/v1/Snapshot", async route => {
       const response = await route.fetch();
       const body = await response.json();
