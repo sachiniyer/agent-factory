@@ -1,9 +1,7 @@
 package git
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -20,6 +17,7 @@ import (
 // index of a command that actually started. Never replay a claimed command:
 // arbitrary provisioning commands need not be idempotent.
 type hookProgress struct {
+	lease       *os.File // Local runner only; never serialized or inherited by children.
 	SessionID   string   `json:"session_id"`
 	Commands    []string `json:"commands"`
 	Passthrough []string `json:"passthrough"`
@@ -63,13 +61,24 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	if err != nil {
 		return nil, err
 	}
+	var lease *os.File
 	published := false
 	defer func() {
 		if !published {
+			if lease != nil {
+				_ = lease.Close()
+			}
 			_ = os.RemoveAll(dir)
 		}
 	}()
+	if run.leaseProgress {
+		lease, err = newHookProgressLease(dir)
+		if err != nil {
+			return nil, err
+		}
+	}
 	p := &hookProgress{
+		lease:     lease,
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir,
 	}
@@ -131,83 +140,12 @@ exit "$status"`, "af-hook-entry", p.receipt(index), command}
 }
 
 func (p *hookProgress) finish() {
+	// Publish terminal evidence before releasing the local runner's lease.
+	if p.lease != nil {
+		defer p.lease.Close()
+	}
+
 	if err := os.WriteFile(filepath.Join(p.Directory, "finished"), nil, 0600); err != nil {
 		log.ErrorLog.Printf("cannot record post-worktree hook completion: %v", err)
 	}
-}
-
-func (g *GitWorktree) adoptHookProgress() bool {
-	if g.IsExternalWorktree() || g.HasUnresolvedRelocation() {
-		return false
-	}
-	p, _, err := g.ownedHookProgress()
-	if err != nil {
-		return false
-	}
-	if g.hooksResumeDisabled {
-		p.finish()
-		return false
-	}
-	if _, err = os.Stat(filepath.Join(p.Directory, "finished")); err == nil {
-		return false
-	}
-	g.SetHookScopeUnitPrefix(p.Prefix)
-	ctx := g.hooksCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	done := make(chan struct{})
-	g.hooksDone = done
-	interval := hookAdoptionPollInterval
-	prefixes := g.hookScopePrefixes()
-	repoPath := g.repoPath
-	branchName := g.branchName
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		var lastProbeError, lastIdentityError string
-		for {
-			if ctx.Err() != nil {
-				p.finish()
-				return
-			}
-			live, probeErr := systemdunit.RunningHookPrefixes(prefixes...)
-			if probeErr != nil {
-				if message := probeErr.Error(); message != lastProbeError {
-					log.WarningLog.Printf("waiting to resume post-worktree hooks for %s: %v", p.Worktree, probeErr)
-					lastProbeError = message
-				}
-			} else if lastProbeError != "" {
-				log.InfoLog.Printf("hook scope probe recovered for %s", p.Worktree)
-				lastProbeError = ""
-			}
-			if probeErr == nil && len(live) == 0 {
-				err := verifyHookResumeWorktree(ctx, repoPath, p.Worktree, branchName)
-				if err == nil {
-					if lastIdentityError != "" {
-						log.InfoLog.Printf("hook worktree verification recovered for %s", p.Worktree)
-					}
-					break
-				}
-				if errors.Is(err, errWorktreeIdentityMismatch) {
-					log.WarningLog.Printf("cannot resume post-worktree hooks for %s: %v; leaving hook journal pending for worktree recovery", p.Worktree, err)
-					return
-				}
-				if message := err.Error(); message != lastIdentityError {
-					log.WarningLog.Printf("waiting to verify post-worktree hooks for %s: %v", p.Worktree, err)
-					lastIdentityError = message
-				}
-			}
-			select {
-			case <-ctx.Done():
-				p.finish()
-				return
-			case <-ticker.C:
-			}
-		}
-		log.InfoLog.Printf("resuming remaining post-worktree hooks for %s", p.Worktree)
-		<-runPostWorktreeHooks(ctx, hookRun{worktreePath: p.Worktree, repoPath: repoPath, passthrough: p.Passthrough, progress: p, onScopeLaunched: g.SetHookScopeUnitPrefix})
-	}()
-	return true
 }

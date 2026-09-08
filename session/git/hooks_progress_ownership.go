@@ -2,6 +2,7 @@ package git
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,21 +16,26 @@ import (
 // It performs no I/O; restore's adoption boundary retires the journal on disk.
 func (g *GitWorktree) SetHookResumeDisabled(disabled bool) { g.hooksResumeDisabled = disabled }
 
+var errInvalidHookProgress = errors.New("invalid hook journal")
+
+// Test seam for a transient storage error during restore.
+var hookProgressReadFile = os.ReadFile
+
 func readHookProgress(path string) (*hookProgress, error) {
-	info, err := os.Lstat(path)
+	info, err := BoundedLstat(path)
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("hook journal is not a regular file")
+		return nil, fmt.Errorf("%w: hook journal is not a regular file", errInvalidHookProgress)
 	}
-	data, err := os.ReadFile(path)
+	data, err := hookProgressReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var p hookProgress
 	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errInvalidHookProgress, err)
 	}
 	p.Directory, err = hookReceiptDirectory(path, p.Directory)
 	if err != nil {
@@ -40,7 +46,7 @@ func readHookProgress(path string) (*hookProgress, error) {
 		return nil, err
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("hook receipt directory is not a directory")
+		return nil, fmt.Errorf("%w: hook receipt directory is not a directory", errInvalidHookProgress)
 	}
 	return &p, nil
 }
@@ -51,7 +57,7 @@ func readHookProgress(path string) (*hookProgress, error) {
 func hookReceiptDirectory(path, recorded string) (string, error) {
 	base := filepath.Base(recorded)
 	if !strings.HasPrefix(base, "entries-") {
-		return "", fmt.Errorf("hook journal has no receipt directory")
+		return "", fmt.Errorf("%w: hook journal has no receipt directory", errInvalidHookProgress)
 	}
 	parent, previousParent := filepath.Dir(path), filepath.Dir(recorded)
 	if parent != previousParent {
@@ -72,17 +78,24 @@ func hookReceiptDirectory(path, recorded string) (string, error) {
 			return "", err
 		}
 		if !currentInfo.IsDir() || !previousInfo.IsDir() || !os.SameFile(currentInfo, previousInfo) {
-			return "", fmt.Errorf("hook receipt directory is outside its journal directory")
+			return "", fmt.Errorf("%w: hook receipt directory is outside its journal directory", errInvalidHookProgress)
 		}
 	}
 	return filepath.Join(parent, base), nil
 }
 
 func (g *GitWorktree) ownedHookProgress() (*hookProgress, string, error) {
-	if g.IsExternalWorktree() || g.hookScopeSessionID == "" {
-		return nil, "", fmt.Errorf("worktree has no hook journal ownership")
+	if g.IsExternalWorktree() {
+		return nil, "", fmt.Errorf("%w: external worktree", errInvalidHookProgress)
 	}
-	path, err := hookProgressPath(g.worktreePath)
+	return readOwnedHookProgress(g.worktreePath, g.hookScopeSessionID)
+}
+
+func readOwnedHookProgress(worktreePath, sessionID string) (*hookProgress, string, error) {
+	if sessionID == "" {
+		return nil, "", fmt.Errorf("%w: worktree has no hook journal ownership", errInvalidHookProgress)
+	}
+	path, err := hookProgressPath(worktreePath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -90,8 +103,8 @@ func (g *GitWorktree) ownedHookProgress() (*hookProgress, string, error) {
 	if err != nil {
 		return nil, path, err
 	}
-	if p.SessionID != g.hookScopeSessionID || p.Worktree != g.worktreePath || p.Prefix != systemdunit.HookScopeUnitPrefix(g.hookScopeSessionID) {
-		return nil, path, fmt.Errorf("hook journal belongs to a different session")
+	if p.SessionID != sessionID || p.Worktree != worktreePath || p.Prefix != systemdunit.HookScopeUnitPrefix(sessionID) {
+		return nil, path, fmt.Errorf("%w: hook journal belongs to a different session", errInvalidHookProgress)
 	}
 	return p, path, nil
 }

@@ -22,10 +22,12 @@ import (
 // byte-for-byte as it was: no scope name is derived, no systemd-run is spawned,
 // and no durable handle is recorded.
 type hookRun struct {
-	progress     *hookProgress
-	repoPath     string
-	worktreePath string
-	passthrough  []string
+	// leaseProgress protects a newly published list until its local runner exits.
+	leaseProgress bool
+	progress      *hookProgress
+	repoPath      string
+	worktreePath  string
+	passthrough   []string
 	// scopeSessionID is the session identity a daemon-owned scope is named
 	// after. Only the daemon's own spawn is relocated (see RunningDaemonProcess
 	// below); this merely says which name to use when it is.
@@ -120,6 +122,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		generation = run.progress.Generation
 	} else if scopePrefix != "" {
 		var progressErr error
+		run.leaseProgress = true
 		run.progress, progressErr = newHookProgress(run, cmds, scopePrefix, generation)
 		if progressErr != nil {
 			log.ErrorLog.Printf("post-worktree hooks not started: persist list: %v", progressErr)

@@ -413,8 +413,9 @@ owners: it keeps
 the newest 20 eligible journals for up to 14 days, with a five-second grace
 period. Unpublished receipt directories are removed on publication failure;
 unreferenced directories left by a crash are pruned after the same grace period.
-Transient registration or occupant-probe failures are retried with duplicate
-warnings suppressed; hooks remain in flight until verification succeeds and the
+Transient journal reads (including receipt-directory and completion-marker
+checks), registration checks, or occupant probes are retried with duplicate
+warnings suppressed; hooks remain in flight until storage and verification recover and the
 remaining list finishes. A conclusive missing or replaced checkout leaves the
 journal pending for normal worktree recovery rather than executing commands in
 its replacement. Unresolved relocation recovery blocks adoption without
@@ -424,7 +425,14 @@ are reclaimed after the grace period once no scope or launcher remains, even
 if a daemon exit interrupted the retry. Unfinished journals left by a create
 that crashed before persisting its session row are also reclaimed when no row
 owns their session ID, their scope and launcher are absent in both batch checks,
-and the journal and receipt activity are older than the grace period. Young
+and the journal and receipt activity are older than the grace period. New
+local runs acquire a file-lock lease before publishing their journal, under the
+publication lock, and hold it until the entire hook runner finishes. Pruning
+never waits for or removes a leased journal, even during a long gap before a
+launch or between entries while the session row is not yet committed. A daemon
+exit releases the lease automatically; scope/launcher checks still protect its
+surviving command. This preserves the create path's existing startup/publication
+and failure-cleanup ordering without a heartbeat or PID-reuse check. Young
 journals, live scopes, and unfinished journals with any stored owner are
 excluded; completed journals with live owners remain protected;
 unreadable session state or scope probes prevent pruning. Scope checks use at

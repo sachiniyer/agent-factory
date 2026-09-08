@@ -161,10 +161,13 @@ func pruneHookProgress(dir string, now time.Time) {
 			if running[candidate.progress.Prefix] {
 				continue
 			}
-			if err := removeHookProgress(candidate.path, candidate.progress); err != nil {
+			reclaimed, err := pruneUnleasedHookProgress(candidate.path, candidate.progress)
+			if err != nil {
 				return err
 			}
-			removed++
+			if reclaimed {
+				removed++
+			}
 		}
 		if removed > 0 {
 			log.InfoLog.Printf("pruned %d inactive orphan hook journals", removed)

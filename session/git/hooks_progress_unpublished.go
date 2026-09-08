@@ -52,7 +52,7 @@ func pruneUnpublishedHookReceipts(dir string, entries []os.DirEntry, now time.Ti
 		if now.Sub(info.ModTime()) < progressGraceAge {
 			continue
 		}
-		if err := os.RemoveAll(path); err != nil {
+		if _, err := withInactiveHookProgressLease(path, func() error { return os.RemoveAll(path) }); err != nil {
 			return err
 		}
 	}
