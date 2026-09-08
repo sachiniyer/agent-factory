@@ -16579,18 +16579,27 @@ function closeConfigAssistant() {
     configAssistant = null;
   }
 }
-function openModal(m, focusCard = false) {
+function captureModalInvoker() {
+  const focused = document.activeElement;
+  const row = focused?.closest(".af-row");
+  return {
+    sessionId: row?.querySelector("[data-session-id]")?.dataset.sessionId,
+    actionLabel: focused?.getAttribute("aria-label") ?? null,
+    header: !row && !!focused?.closest(".af-term-head")
+  };
+}
+function openModal(m, focusCard = false, explicitInvoker) {
   closeModal();
   closeConfigAssistant();
   const focused = document.activeElement;
-  const row = focused?.closest(".af-row");
-  const sessionId = row?.querySelector("[data-session-id]")?.dataset.sessionId;
-  const actionLabel = focused?.getAttribute("aria-label");
-  const header = !row ? focused?.closest(".af-term-head") : null;
+  const invoker = explicitInvoker ?? captureModalInvoker();
+  const { sessionId, actionLabel } = invoker;
+  const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+  const header = invoker.header ? root?.querySelector(".af-term-head") : null;
   if (focusCard || row) {
     restoreModalFocus = () => {
       const canFocus = (el2) => !!el2 && el2.isConnected && el2 !== document.body && !el2.matches(":disabled") && el2.getClientRects().length > 0 && getComputedStyle(el2).visibility === "visible";
-      if (!row && canFocus(focused)) {
+      if (!row && !explicitInvoker && canFocus(focused)) {
         focused.focus({ preventScroll: true });
         return;
       }
@@ -16705,18 +16714,18 @@ function newSession() {
     })
   );
 }
-function openConfirm(action, session) {
+function openConfirm(action, session, invoker = captureModalInvoker()) {
   const target = { id: session.id, title: session.title };
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
     if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
-      openConfirm("kill", { ...session, title: latest.title, is_root: true });
+      openConfirm("kill", { ...session, title: latest.title, is_root: true }, invoker);
       return true;
     }
     return false;
   };
   const mountConfirmation = (m) => {
-    openModal(m, true);
+    openModal(m, true, invoker);
     const refresh = () => {
       refreshRootConsent(store.get().sessions.find((s) => s.id === target.id));
     };

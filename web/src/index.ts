@@ -717,24 +717,41 @@ function closeConfigAssistant(): void {
   }
 }
 
+interface ModalInvoker {
+  sessionId?: string;
+  actionLabel: string | null;
+  header: boolean;
+}
+
+/** Stable return identity survives optimistic removal and retained-dialog remounts. */
+function captureModalInvoker(): ModalInvoker {
+  const focused = document.activeElement as HTMLElement | null;
+  const row = focused?.closest(".af-row");
+  return {
+    sessionId: row?.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId,
+    actionLabel: focused?.getAttribute("aria-label") ?? null,
+    header: !row && !!focused?.closest(".af-term-head"),
+  };
+}
+
 /** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
  *  config-assistant chat) — one overlay at a time, and the assistant is torn down
  *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
-function openModal(m: ModalHandle, focusCard = false): void {
+function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInvoker): void {
   closeModal();
   closeConfigAssistant();
   const focused = document.activeElement as HTMLElement | null;
-  const row = focused?.closest(".af-row");
-  const sessionId = row?.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId;
-  const actionLabel = focused?.getAttribute("aria-label");
-  const header = !row ? focused?.closest(".af-term-head") : null;
+  const invoker = explicitInvoker ?? captureModalInvoker();
+  const { sessionId, actionLabel } = invoker;
+  const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+  const header = invoker.header ? root?.querySelector<HTMLElement>(".af-term-head") : null;
   if (focusCard || row) {
     restoreModalFocus = () => {
       const canFocus = (el: HTMLElement | null | undefined): el is HTMLElement =>
         !!el && el.isConnected && el !== document.body && !el.matches(":disabled") &&
         el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
       // Header actions do not live in the rail; return to their invoking control.
-      if (!row && canFocus(focused)) {
+      if (!row && !explicitInvoker && canFocus(focused)) {
         focused.focus({ preventScroll: true });
         return;
       }
@@ -887,20 +904,23 @@ function newSession(): void {
 /** Opens the kill/archive/restore confirm modal for the rail row that invoked it.
  *  This cannot derive its target from selection now that hover exposes actions on
  *  unselected rows (#2223). Restore remains the reverse of archive (#1932). */
-function openConfirm(action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession): void {
+function openConfirm(
+  action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession,
+  invoker: ModalInvoker = captureModalInvoker(),
+): void {
   const target = { id: session.id, title: session.title };
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest: SessionData | undefined): boolean => {
     // Consent may get stronger while this dialog is open, never weaker. Keeping
     // the existing acknowledgment after root → non-root is harmless.
     if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
-      openConfirm("kill", { ...session, title: latest.title, is_root: true });
+      openConfirm("kill", { ...session, title: latest.title, is_root: true }, invoker);
       return true;
     }
     return false;
   };
   const mountConfirmation = (m: ModalHandle) => {
-    openModal(m, true);
+    openModal(m, true, invoker);
     // This also covers retained failed dialogs. The shared close path removes
     // the watch before restoring focus or mounting another modal.
     const refresh = () => { refreshRootConsent(store.get().sessions.find(s => s.id === target.id)); };

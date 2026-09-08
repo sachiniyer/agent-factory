@@ -65,6 +65,11 @@ for (const isRoot of [true, false]) {
     await expect(modal.locator(".af-modal-error")).toContainText("Deletion refused");
     expect(calls).toBe(1);
     if (isRoot) await expect(acknowledgment).toBeChecked();
+    // Definitive rejection retained the form after optimistic removal rebuilt
+    // the row. Its original invoker must survive that hide/remount cycle.
+    await page.keyboard.press("Escape");
+    await expect(modal).toHaveCount(0);
+    await expect(rowAction).toBeFocused();
   });
 }
 
