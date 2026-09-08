@@ -233,7 +233,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/HandoffSession",
-		Description: "Continue a session under a different agent, in place: swap its agent program, keep its worktree and branch, and deliver a mission brief to the new agent.",
+		Description: "Continue a session in place under a different agent (to), another account for the same agent (account), or both (to and account). Keep its worktree and branch, and deliver a mission brief with the goal and existing work to the replacement conversation. Omit to to keep the current agent.",
 		requestType: reflect.TypeOf(HandoffSessionRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSession) },
 	},

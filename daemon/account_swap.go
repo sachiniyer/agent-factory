@@ -344,9 +344,6 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		brief := instance.BuildMissionBrief(scheduled.agent, scheduled.promptOverride, scheduled.reason)
 		scheduled.headSHA = brief.Work.HeadSHA
 		scheduled.mission = brief.Render()
-		if brief.From == brief.To {
-			scheduled.mission = brief.Goal
-		}
 		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.reason, scheduled.headSHA, scheduled.mission)
 		previousConversation = handoff.From
 	} else {
