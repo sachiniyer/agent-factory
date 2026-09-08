@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -92,6 +93,29 @@ func TestHandoffAccountFinalSettlementFailureIsReportedAndNotRedelivered(t *test
 	m.FlushOwedSettlements()
 	m.ResumeLimitedSessions()
 	require.Nil(t, persistedInstanceByTitle(t, repo, inst.Title).PendingAccountSwap)
+	_, _, prompts := backend.snapshot()
+	require.Len(t, prompts, 1)
+}
+
+func TestControlHandoffAccountSettlementFailureUsesCommittedEnvelope(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.ClearLimitReached()
+	previous := testHookPersistInstanceData
+	defer func() { testHookPersistInstanceData = previous }()
+	fail := true
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if fail && data.Title == inst.Title && data.Account == "personal" && data.PendingAccountSwap == nil {
+			return errors.New("completion disk unavailable")
+		}
+		return nil
+	}
+	var resp HandoffSessionResponse
+	cs := &controlServer{manager: m}
+	require.NoError(t, cs.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"}, &resp))
+	require.True(t, resp.OK)
+	require.Equal(t, apiproto.ErrorCodeMutationCommitted, resp.MutationOutcome.Code)
+	require.Contains(t, resp.MutationOutcome.Warning, "pending settlement")
 	_, _, prompts := backend.snapshot()
 	require.Len(t, prompts, 1)
 }

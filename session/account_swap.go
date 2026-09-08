@@ -156,11 +156,14 @@ func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 	// pane will actually read (see resolveSkillTargetForAccount).
 	launchProgram = injectSystemPrompt(launchProgram, resolveSkillTargetForAccount(i, launchProgram, name))
 	workDir := i.GetWorktreePath()
-	// Automatic resume fixtures and persisted projections may not have a launch
-	// directory. Manual swaps still preflight a changed launch command before
-	// teardown; ordinary cross-agent swaps retain their existing preflight.
-	shouldPreflight := crossAgent || (manual && resolution.command != i.Program)
-	if shouldPreflight && workDir != "" {
+	// Same-agent manual swaps with a worktree always preflight, including an
+	// unchanged command whose binary disappeared after the current process
+	// started. Worktree-less projections cannot launch, so they retain the
+	// storage-only path; cross-agent swaps must still refuse that absence.
+	if crossAgent && workDir == "" {
+		return fmt.Errorf("handoff target %s has no worktree path for launch preflight", agent)
+	}
+	if manual && workDir != "" {
 		if _, err := preflight.CheckCommandAt(launchProgram, workDir); err != nil {
 			return fmt.Errorf("handoff target %s failed launch preflight: %w", agent,
 				preflight.ProgramError(agent, resolvedProgram, err))

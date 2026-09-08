@@ -37,6 +37,7 @@ type HandoffSessionResponse struct {
 	To   string `json:"to"`
 	// HeadSHA is the branch tip at swap time — the attribution boundary.
 	HeadSHA string `json:"head_sha,omitempty"`
+	MutationOutcome
 }
 
 func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
@@ -47,10 +48,11 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 		return err
 	}
 	result, err := s.manager.HandoffSession(req)
-	if err != nil {
+	*resp = result
+	if !resp.record(err) {
 		return err
 	}
-	*resp = result
+	resp.OK = true
 	return nil
 }
 

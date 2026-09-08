@@ -20,6 +20,28 @@ type accountReadinessBackend struct {
 	limited   bool
 }
 
+type accountReadinessGoneBackend struct{ *limitResumeBackend }
+
+func (b *accountReadinessGoneBackend) Preview(*session.Instance) (string, error) {
+	return "", tmux.ErrSessionGone
+}
+
+func TestHandoffAccountReadinessFailureBecomesInert(t *testing.T) {
+	m, repo, inst, base := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	backend := &accountReadinessGoneBackend{limitResumeBackend: base}
+	inst.SetBackend(backend)
+	inst.ClearLimitReached()
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.ErrorIs(t, err, task.ErrAgentReadiness)
+	require.True(t, inst.StartupStateUnknown())
+	require.NotNil(t, persistedInstanceByTitle(t, repo, inst.Title).PendingAccountSwap)
+	_, beforeRespawns, _ := backend.snapshot()
+	m.ResumeLimitedSessions()
+	_, afterRespawns, _ := backend.snapshot()
+	require.Equal(t, beforeRespawns, afterRespawns, "an unconfirmed replacement must not be respawned")
+}
+
 func (b *accountReadinessBackend) Preview(*session.Instance) (string, error) {
 	b.once.Do(func() { close(b.previewed) })
 	<-b.release

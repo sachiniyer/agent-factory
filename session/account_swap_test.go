@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
@@ -166,6 +167,20 @@ func TestValidateAccountSwapPreflightsResolvedScopedLaunch(t *testing.T) {
 	require.Error(t, err, "the scoped command must be validated before any old pane is stopped")
 	require.ErrorContains(t, err, "--model")
 	require.ErrorContains(t, err, "sonnet")
+}
+
+func TestValidateManualAccountSwapPreflightsMissingUnchangedBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()+":/usr/bin:/bin")
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	inst.Account = "ambient"
+	inst.preResolvedProgram = "claude"
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
+	require.ErrorContains(t, err, "launch preflight")
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(), "admission must leave the outgoing runtime untouched")
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
 
 func TestValidateAccountSwapPreflightsCloudAuthenticationMode(t *testing.T) {

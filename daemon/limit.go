@@ -893,9 +893,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// but the respawn's durable state did not. Say both, so a caller cannot read
 		// this as a failed resume, and cannot read a successful resume as meaning
 		// everything is on disk (#2883).
-		return resumePerformed, fmt.Errorf(
+		return resumePerformed, &mutationCommittedError{err: fmt.Errorf(
 			"resumed %q, but the state its respawn rebuilt could not be written to disk: %w",
-			requestedTitle, settleErr)
+			requestedTitle, settleErr)}
 	}
 	return resumePerformed, nil
 }
