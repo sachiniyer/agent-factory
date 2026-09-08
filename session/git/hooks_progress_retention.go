@@ -30,11 +30,14 @@ type keptProgress struct {
 
 func pruneHookProgress(dir string, now time.Time) {
 	_, err := config.TryWithFileLock(filepath.Join(dir, ".progress"), func() error {
-		owners, err := hookProgressOwners()
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return err
 		}
-		entries, err := os.ReadDir(dir)
+		if err := pruneUnpublishedHookReceipts(dir, entries, now); err != nil {
+			return err
+		}
+		owners, err := hookProgressOwners()
 		if err != nil {
 			return err
 		}

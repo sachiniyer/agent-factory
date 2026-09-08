@@ -389,7 +389,9 @@ command list and per-entry start/exit receipts alongside the scope identity and
 owning session ID. Only that managed session may adopt the journal; external
 `--here` worktrees never adopt or stop another session's hooks.
 On restart it leaves the in-flight entry alone, waits until its scope and any
-pending launcher are gone, then resumes the entries that never started, in
+pending launcher are gone, verifies the registered branch and the checkout's
+bidirectional `.git` linkage to the owning repository, then resumes the entries
+that never started, in
 order and each in its own unbound scope with its own hooklog file. Entries
 already started are never replayed, including failed entries (the normal runner
 also continues after failure). The session reports hooks in flight until the
@@ -401,7 +403,11 @@ finished before considering any resume. Safe kill/archive teardown reclaims
 finished journals and receipts after proving all hook writers gone. Creation
 also sweeps completed journals whose owning session no longer exists: it keeps
 the newest 20 eligible journals for up to 14 days, with a five-second grace
-period. Active scopes, unfinished receipts, and still-owned journals are excluded;
+period. Unpublished receipt directories are removed on publication failure;
+unreferenced directories left by a crash are pruned after the same grace period.
+A missing or replaced checkout leaves the journal pending for normal worktree
+recovery rather than executing commands in its replacement.
+Active scopes, unfinished receipts, and still-owned journals are excluded;
 unreadable session state or scope probes prevent pruning. Older runs without a
 progress record or a recorded owning session ID retain survivor observation only.
 

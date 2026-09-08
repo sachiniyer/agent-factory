@@ -33,12 +33,12 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 	release := filepath.Join(dir, "release")
 	order := filepath.Join(dir, "order")
 	gone := filepath.Join(dir, "gone")
-	repo := freshRepoConfig(t, []string{
+	repo, tree := linkedHookWorktree(t)
+	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repo), &config.RepoConfig{PostWorktreeCommands: []string{
 		fmt.Sprintf("echo $$ > %q; while [ ! -f %q ]; do sleep 0.02; done; echo first >> %q; echo first-output", pid, release, order),
 		fmt.Sprintf("echo second >> %q; echo second-output; exit 23", order),
-	})
+	}})
 	home, _ := config.GetConfigDir()
-	tree := t.TempDir()
 	runner := exec.Command(os.Args[0], "-test.run=^TestHookListResumesAfterRestart$")
 	runner.Env = append(os.Environ(), "AF_TEST_LIST_HELPER=1", "AF_TEST_LIST_REPO="+repo, "AF_TEST_LIST_TREE="+tree, "AF_TEST_LIST_HOME="+home)
 	if err := runner.Start(); err != nil {
@@ -59,6 +59,7 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 	g := worktreeWithRecordedScope(t, "af-hook-resume4014")
 	g.SetHookScopeSessionID("resume4014")
 	g.repoPath, g.worktreePath = repo, tree
+	g.branchName = "hook-resume"
 	AdoptRunningHooks([]*GitWorktree{g})
 	requireOpen(t, g.HooksDone(), "survivor must be reported running")
 	if _, err := os.Stat(order); !os.IsNotExist(err) {
@@ -95,6 +96,7 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 	restored := worktreeWithRecordedScope(t, "af-hook-resume4014")
 	restored.SetHookScopeSessionID("resume4014")
 	restored.repoPath, restored.worktreePath = repo, tree
+	restored.branchName = "hook-resume"
 	AdoptRunningHooks([]*GitWorktree{restored})
 	if restored.HooksDone() != nil {
 		waitForClosed(t, restored.HooksDone(), 5*time.Second, "completed run restarted")
@@ -112,6 +114,8 @@ func TestHookListResumeWaitsForReadableManager(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	g := worktreeWithRecordedScope(t, "af-hook-resume4014")
 	g.SetHookScopeSessionID("resume4014")
+	g.repoPath, g.worktreePath = linkedHookWorktree(t)
+	g.branchName = "hook-resume"
 	marker := filepath.Join(t.TempDir(), "ran")
 	progress, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "resume4014"}, []string{"echo ran > " + shellQuoteForShim(marker)}, "af-hook-resume4014", "test")
 	if err != nil {

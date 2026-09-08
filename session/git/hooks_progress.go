@@ -46,10 +46,28 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 		return nil, err
 	}
 	pruneHookProgress(filepath.Dir(path), time.Now())
+	var progress *hookProgress
+	err = config.WithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
+		var publishErr error
+		progress, publishErr = publishHookProgress(run, commands, prefix, generation, path)
+		return publishErr
+	})
+	return progress, err
+}
+
+// The directory and journal are published under the same lock used by pruning,
+// so even a publisher stalled longer than the grace period retains its receipts.
+func publishHookProgress(run hookRun, commands []string, prefix, generation, path string) (*hookProgress, error) {
 	dir, err := os.MkdirTemp(filepath.Dir(path), "entries-")
 	if err != nil {
 		return nil, err
 	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	p := &hookProgress{
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir,
@@ -73,23 +91,18 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	err = config.WithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
-		var previous hookProgress
-		if data, readErr := os.ReadFile(path); readErr == nil {
-			_ = json.Unmarshal(data, &previous)
-		}
-		if err = os.Rename(f.Name(), path); err != nil {
-			return err
-		}
-		if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
-			if _, statErr := os.Stat(filepath.Join(previous.Directory, "finished")); statErr == nil {
-				_ = os.RemoveAll(previous.Directory)
-			}
-		}
-		return nil
-	})
-	if err != nil {
+	var previous hookProgress
+	if data, readErr := os.ReadFile(path); readErr == nil {
+		_ = json.Unmarshal(data, &previous)
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
 		return nil, err
+	}
+	published = true
+	if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
+		if _, statErr := os.Stat(filepath.Join(previous.Directory, "finished")); statErr == nil {
+			_ = os.RemoveAll(previous.Directory)
+		}
 	}
 	return p, nil
 }
@@ -147,6 +160,7 @@ func (g *GitWorktree) adoptHookProgress() bool {
 	interval := hookAdoptionPollInterval
 	prefixes := g.hookScopePrefixes()
 	repoPath := g.repoPath
+	branchName := g.branchName
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(interval)
@@ -169,6 +183,10 @@ func (g *GitWorktree) adoptHookProgress() bool {
 				return
 			case <-ticker.C:
 			}
+		}
+		if err := verifyHookResumeWorktree(ctx, repoPath, p.Worktree, branchName); err != nil {
+			log.WarningLog.Printf("cannot resume post-worktree hooks for %s: %v; leaving hook journal pending for worktree recovery", p.Worktree, err)
+			return
 		}
 		log.InfoLog.Printf("resuming remaining post-worktree hooks for %s", p.Worktree)
 		<-runPostWorktreeHooks(ctx, hookRun{worktreePath: p.Worktree, repoPath: repoPath, passthrough: p.Passthrough, progress: p, onScopeLaunched: g.SetHookScopeUnitPrefix})

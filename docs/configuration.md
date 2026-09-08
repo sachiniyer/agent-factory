@@ -566,7 +566,9 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   log. The original list is saved before launch; configuration edits do not
   change a pending run. Started entries are never replayed, and completed or
   deliberately cancelled lists are not resumed. Only the owning managed session
-  can adopt a saved list; external `--here`, tombstoned, and archived sessions
+  can adopt a saved list, after verifying the registered worktree branch and Git
+  linkage. A missing or replaced checkout leaves the journal pending for normal
+  worktree recovery. External `--here`, tombstoned, and archived sessions
   never resume it. Runs without a progress record or recorded owning session ID
   keep survivor observation only.
 
@@ -574,7 +576,9 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   hook writers have stopped. On creation, completed journals whose sessions no
   longer exist are pruned to the newest 20 and a maximum age of 14 days, excluding
   files modified within five seconds. Active, unfinished, and still-owned
-  journals are preserved. Pruning is skipped when session ownership or scope
+  journals are preserved. Unpublished receipt directories are removed after a
+  failed publication; unreferenced directories left by a crash are pruned after
+  the five-second grace period. Pruning completed journals is skipped when session ownership or scope
   liveness cannot be established.
   A session whose hook is still running reports it as in flight exactly as it
   did on its first run, so the agent's startup budget is not charged for the

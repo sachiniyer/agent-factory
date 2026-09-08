@@ -17,15 +17,26 @@ func TestHookProgressExternalCannotAdoptOrStopOwner(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	owner := worktreeWithRecordedScope(t, "af-hook-owner")
 	owner.SetHookScopeSessionID("owner")
+	owner.repoPath, owner.worktreePath = linkedHookWorktree(t)
+	owner.branchName = "hook-resume"
 	_, err := newHookProgress(hookRun{worktreePath: owner.worktreePath, scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	managerLog := installSurvivorSystemctl(t, "case \"$*\" in *list-units*) echo 'af-hook-owner-test-0.scope loaded active running Hook';; esac\nexit 0\n")
+	release := filepath.Join(t.TempDir(), "release")
+	managerLog := installSurvivorSystemctl(t, "if [ -f "+shellQuoteForShim(release)+" ]; then exit 0; fi\ncase \"$*\" in *list-units*) echo 'af-hook-owner-test-0.scope loaded active running Hook';; esac\nexit 0\n")
 	external := worktreeWithRecordedScope(t, "")
 	external.worktreePath = owner.worktreePath
 	external.externalWorktree = true
 	external.SetHookScopeSessionID("external")
+	// Registered after the fixtures: even a failing assertion joins before
+	// TempDir cleanup can race the watcher's finished-marker write.
+	t.Cleanup(func() {
+		owner.hooksCancel()
+		if owner.HooksDone() != nil {
+			waitForClosed(t, owner.HooksDone(), 5*time.Second, "owner watcher did not stop")
+		}
+	})
 	AdoptRunningHooks([]*GitWorktree{external, owner})
 	if external.HooksDone() != nil {
 		t.Error("external session adopted managed hook progress")
@@ -41,6 +52,10 @@ func TestHookProgressExternalCannotAdoptOrStopOwner(t *testing.T) {
 	if strings.Contains(string(raw), " stop ") {
 		t.Fatalf("external cancellation stopped managed scope: %s", raw)
 	}
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitForClosed(t, owner.HooksDone(), 5*time.Second, "owner watcher did not finish after scope completion")
 }
 
 func TestHookProgressWrongOwnerCannotResume(t *testing.T) {
