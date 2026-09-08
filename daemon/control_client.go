@@ -679,13 +679,14 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 // deliver a mission brief to the incoming agent.
 func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 	var resp HandoffSessionResponse
-	if err := callDaemon("HandoffSession", req, &resp); err != nil {
-		if !isMutationCommitted(err) {
-			return HandoffSessionResponse{}, err
-		}
-		return resp, err
+	err := callDaemon("HandoffSession", req, &resp)
+	if err != nil && !isMutationCommitted(err) {
+		return HandoffSessionResponse{}, err
 	}
-	return resp, nil
+	if req.Account != "" && resp.ToAccount != req.Account {
+		return resp, fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity", req.Account)
+	}
+	return resp, err
 }
 
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.

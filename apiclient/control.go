@@ -98,10 +98,14 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 // actually performed (outgoing agent, incoming agent, attribution boundary).
 func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 	var resp daemon.HandoffSessionResponse
-	if err := c.call("HandoffSession", req, &resp); err != nil {
+	err := c.call("HandoffSession", req, &resp)
+	if err != nil && !IsMutationCommitted(err) {
 		return daemon.HandoffSessionResponse{}, err
 	}
-	return resp, nil
+	if req.Account != "" && resp.ToAccount != req.Account {
+		return resp, fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity", req.Account)
+	}
+	return resp, err
 }
 
 // CreateTab asks the daemon to spawn, persist, and report a new tab. The

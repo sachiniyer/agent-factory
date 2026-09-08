@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,6 +108,29 @@ func TestControlRoundTrips(t *testing.T) {
 		path, err := c.RestoreSession(daemon.RestoreSessionRequest{Title: "alpha"})
 		if path != "/worktrees/alpha" || !IsMutationCommitted(err) {
 			t.Fatalf("RestoreSession = %q, %T %v; want path plus committed report", path, err, err)
+		}
+	})
+
+	t.Run("HandoffSession preserves committed response", func(t *testing.T) {
+		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{
+				OK: true, From: "claude", To: "claude", FromAccount: "work", ToAccount: "personal", HeadSHA: "abc123",
+				MutationOutcome: daemon.MutationOutcome{Code: apiproto.ErrorCodeMutationCommitted, Warning: "pending settlement"},
+			})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
+		if resp.ToAccount != "personal" || !IsMutationCommitted(err) {
+			t.Fatalf("HandoffSession = %+v, %v; want payload plus committed warning", resp, err)
+		}
+	})
+
+	t.Run("HandoffSession refuses an account mismatch", func(t *testing.T) {
+		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "codex"})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
+		if resp.To != "codex" || err == nil || !strings.Contains(err.Error(), "did not honor") {
+			t.Fatalf("HandoffSession = %+v, %v; want payload plus account mismatch", resp, err)
 		}
 	})
 

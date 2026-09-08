@@ -8,6 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type committedHandoffError struct{}
+
+func (committedHandoffError) Error() string           { return "handoff delivered, but settlement is pending" }
+func (committedHandoffError) MutationCommitted() bool { return true }
+
 func TestHandoffOutputOmitsAmbientAccounts(t *testing.T) {
 	for _, tc := range []struct{ name, fromAccount, toAccount string }{
 		{name: "agent-only"},
@@ -44,4 +49,30 @@ func TestHandoffOutputOmitsAmbientAccounts(t *testing.T) {
 			require.Equal(t, expected, payload)
 		})
 	}
+}
+
+func TestHandoffCommittedErrorPrintsSuccessAndWarning(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	oldCall := handoffSessionViaDaemon
+	oldTo, oldBrief, oldAccount := sessionsHandoffTo, sessionsHandoffBrief, sessionsHandoffAccount
+	oldRepo, oldEnvelope := repoFlag, envelopeOutput
+	t.Cleanup(func() {
+		handoffSessionViaDaemon = oldCall
+		sessionsHandoffTo, sessionsHandoffBrief, sessionsHandoffAccount = oldTo, oldBrief, oldAccount
+		repoFlag, envelopeOutput = oldRepo, oldEnvelope
+	})
+	sessionsHandoffTo, sessionsHandoffBrief, sessionsHandoffAccount = "claude", "", "personal"
+	repoFlag, envelopeOutput = "", false
+	handoffSessionViaDaemon = func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
+		return daemon.HandoffSessionResponse{OK: true, From: "claude", To: "claude", FromAccount: "work", ToAccount: "personal", HeadSHA: "abc123"}, committedHandoffError{}
+	}
+	// The message is supplied by the daemon in production; this fixture only
+	// needs the committed classification to exercise the output branch.
+	out := captureStdout(t, func() { require.NoError(t, sessionsHandoffCmd.RunE(sessionsHandoffCmd, []string{"worker"})) })
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &payload))
+	require.Equal(t, true, payload["ok"])
+	require.Equal(t, "claude", payload["from"])
+	require.Equal(t, "personal", payload["to_account"])
+	require.Contains(t, payload, "warning")
 }

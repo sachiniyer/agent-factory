@@ -11,6 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type committedHandoffNoticeError struct{}
+
+func (committedHandoffNoticeError) Error() string {
+	return "handoff delivered, but settlement is pending"
+}
+func (committedHandoffNoticeError) MutationCommitted() bool { return true }
+
 func TestHandoffCompletionReportsAccountPair(t *testing.T) {
 	for _, tc := range []struct{ name, from, to, fromAccount, toAccount, want string }{
 		{"same agent", "claude", "claude", "work", "personal", "'worker' handed from claude (work) to claude (personal)"},
@@ -34,6 +41,19 @@ func TestHandoffCompletionReportsAccountPair(t *testing.T) {
 			require.Equal(t, tc.want, h.errBox.FullError())
 		})
 	}
+}
+
+func TestHandoffCommittedWarningRetainsResolvedIdentity(t *testing.T) {
+	h := newTestHome(t)
+	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
+		return daemon.HandoffSessionResponse{From: "claude", To: "claude", FromAccount: "work", ToAccount: "personal", HeadSHA: "abc123"}, committedHandoffNoticeError{}
+	})
+	defer restore()
+	msg := h.handoffCmd(daemon.HandoffSessionRequest{Title: "worker", To: "claude", Account: "personal"})().(handoffDoneMsg)
+	_, _ = h.handleHandoffDone(msg)
+	require.Contains(t, h.errBox.FullError(), "settlement is pending")
+	require.Contains(t, h.errBox.FullError(), "claude (work)")
+	require.Contains(t, h.errBox.FullError(), "claude (personal)")
 }
 
 func TestHandoffAmbientOffersTargetAccounts(t *testing.T) {

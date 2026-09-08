@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -80,7 +81,10 @@ Examples:
 			Brief:   sessionsHandoffBrief,
 			Account: sessionsHandoffAccount,
 		})
-		if err != nil {
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
@@ -90,6 +94,9 @@ Examples:
 			"from":     resp.From,
 			"to":       resp.To,
 			"head_sha": resp.HeadSHA,
+		}
+		if warning != "" {
+			output["warning"] = warning
 		}
 		if resp.FromAccount != "" {
 			output["from_account"] = resp.FromAccount

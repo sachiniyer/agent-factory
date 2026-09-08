@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -198,6 +199,13 @@ func (m *home) handoffCmd(request daemon.HandoffSessionRequest) tea.Cmd {
 // so there is no local state to reconcile beyond surfacing the outcome.
 func (m *home) handleHandoffDone(msg handoffDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
+		if apiclient.IsMutationCommitted(msg.err) {
+			from := msg.from
+			if from == "" {
+				from = "its previous agent"
+			}
+			return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s, with warning: %v", msg.title, handoffIdentityLabel(from, msg.fromAccount), handoffIdentityLabel(msg.target, msg.toAccount), msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("handoff of '%s' to %s failed: %w", msg.title, msg.target, msg.err))
 	}
 	from := msg.from

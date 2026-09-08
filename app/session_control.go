@@ -251,10 +251,10 @@ var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (daemon
 	var response daemon.HandoffSessionResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		resp, e := c.HandoffSession(req)
+		response = resp
 		if e != nil {
 			return e
 		}
-		response = resp
 		return nil
 	})
 	return response, err
