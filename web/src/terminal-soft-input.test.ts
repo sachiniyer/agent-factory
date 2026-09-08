@@ -352,3 +352,53 @@ test("unmodified soft input remains native so xterm can observe Backspace", () =
   assert.deepEqual(writes, ["\x7f"]);
   soft.dispose();
 });
+
+test("reshaped commit is the first mutation and leaves Ctrl for the next key", t => {
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "old" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "oldᄀ";
+  textarea.dispatchEvent(composition("compositionend", "가"));
+  textarea.value = "old각";
+  host.dispatchEvent(insertText("가"));
+  assert.equal(soft.transform("각", value => modifiers.input(value)), "각");
+  assert.equal(modifiers.state("Ctrl"), "once");
+  assert.equal(soft.transform("x", value => modifiers.input(value)), "\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("repeated commit character then ordinary character consumes Ctrl once", t => {
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "x";
+  textarea.dispatchEvent(composition("compositionend", "x"));
+  host.dispatchEvent(insertText("x"));
+  textarea.value = "xx";
+  host.dispatchEvent(insertText("x"));
+  assert.equal(soft.transform("xx", value => modifiers.input(value)), "x\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("stale keydown recovers composed input without a modifier", () => {
+  const host = new EventTarget();
+  const textarea = new EventTarget();
+  const writes: string[] = [];
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, text => writes.push(text), () => false);
+  textarea.dispatchEvent(new Event("keydown"));
+  textarea.dispatchEvent(new Event("blur"));
+  textarea.dispatchEvent(new Event("focus"));
+  const input = insertText("a", "beforeinput", true);
+  host.dispatchEvent(input);
+  assert.equal(input.defaultPrevented, true);
+  assert.deepEqual(writes, ["a"]);
+  soft.dispose();
+});

@@ -21,11 +21,11 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       if (committed === "ab") input.value += "a"; // append-shaped final commit
       input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: eventData }));
       if (postCommit) input.dispatchEvent(new InputEvent("beforeinput", {
-        bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: true,
+        bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
       }));
       input.value = input.value.substring(0, start) + committed;
       if (postCommit) input.dispatchEvent(new InputEvent("input", {
-        bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: true,
+        bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
       }));
       if (trailing) {
         input.value += trailing;
@@ -36,7 +36,7 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       // Let xterm's compositionend timer finish before checking for duplicates.
       await new Promise(resolve => setTimeout(resolve, 0));
     }, { postCommit, trailing, committed, eventData });
-    await expect.poll(stream).toBe(before + committed + (trailing ? "\x18" : ""));
+    if (!trailing) await expect.poll(stream).toBe(before + committed);
     await expect(ctrl).toHaveAttribute("data-state", trailing ? "off" : "once");
     await expect.poll(stream).toBe(before + committed + (trailing ? "\x18" : ""));
     await expect(ctrl).toHaveAttribute("data-state", trailing ? "off" : "once");

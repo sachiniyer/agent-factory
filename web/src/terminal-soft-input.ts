@@ -2,7 +2,8 @@ interface CompositionRange {
   start?: number;
   text: string;
   frozenText?: string;
-  trailing?: string;
+  commitLength?: number;
+  trailingLength?: number;
   release?: ReturnType<typeof setTimeout>;
 }
 
@@ -10,6 +11,10 @@ interface CompositionRange {
 export class TerminalSoftInput {
   private active: CompositionRange | undefined;
   private readonly pending: CompositionRange[] = [];
+  private staleKeydown = false;
+  private readonly onKeyDown = (): void => { this.staleKeydown = true; };
+  private readonly onKeyUp = (): void => { this.staleKeydown = false; };
+  private readonly onBlur = (): void => { this.staleKeydown = true; };
   private readonly onCompositionStart = (): void => {
     // Xterm retains a finalized range when another composition starts before
     // its delayed send (CompositionHelper.ts:137-163). Freeze that boundary,
@@ -45,18 +50,26 @@ export class TerminalSoftInput {
     if (this.active || this.pending.length) {
       const range = this.pending.at(-1);
       if (range && input.inputType === "insertText" && input.type === "input" &&
-        input.isComposing === false && input.data && input.data !== range.text)
-        range.trailing = (range.trailing ?? "") + input.data;
+        input.isComposing === false && input.data) {
+        if (range.commitLength === undefined) {
+          const value = this.textarea?.value;
+          range.commitLength = value !== undefined && range.start !== undefined
+            ? value.length - range.start : input.data.length;
+        } else {
+          range.trailingLength = (range.trailingLength ?? 0) + input.data.length;
+        }
+      }
       // Preserve beforeinput's native mutation; CompositionHelper owns sending.
       if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
       return;
     }
-    if (this.physicalInput() || input.isComposing || !this.hasArmedModifier() ||
+    if (this.physicalInput() || (!this.staleKeydown && !this.hasArmedModifier()) ||
       input.inputType !== "insertText" || !input.data) return;
     if (input.type === "beforeinput" && !input.cancelable) return;
     input.preventDefault();
     input.stopImmediatePropagation();
     this.send(input.data);
+    this.staleKeydown = false;
   };
 
   constructor(private readonly host: EventTarget, private readonly textarea: (EventTarget & { value?: string }) | null,
@@ -66,6 +79,9 @@ export class TerminalSoftInput {
     textarea?.addEventListener("compositionstart", this.onCompositionStart);
     textarea?.addEventListener("compositionupdate", this.onCompositionUpdate);
     textarea?.addEventListener("compositionend", this.onCompositionEnd);
+    textarea?.addEventListener("keydown", this.onKeyDown, true);
+    textarea?.addEventListener("keyup", this.onKeyUp, true);
+    textarea?.addEventListener("blur", this.onBlur, true);
     host.addEventListener("beforeinput", this.onInput, true);
     host.addEventListener("input", this.onInput, true);
   }
@@ -78,7 +94,8 @@ export class TerminalSoftInput {
       const value = this.textarea?.value;
       const committed = range.frozenText ?? (range.start !== undefined && value !== undefined
         ? value.substring(range.start) : range.text);
-      const boundary = Math.max(0, committed.length - (range.trailing?.length ?? 0));
+      const boundary = Math.min(committed.length,
+        range.commitLength ?? (committed.length - (range.trailingLength ?? 0)));
       // Xterm may send just the old range or include ordinary trailing input.
       // Match the live substring, never a provisional compositionend length.
       let length = 0;
@@ -111,6 +128,9 @@ export class TerminalSoftInput {
     this.textarea?.removeEventListener("compositionstart", this.onCompositionStart);
     this.textarea?.removeEventListener("compositionupdate", this.onCompositionUpdate);
     this.textarea?.removeEventListener("compositionend", this.onCompositionEnd);
+    this.textarea?.removeEventListener("keydown", this.onKeyDown, true);
+    this.textarea?.removeEventListener("keyup", this.onKeyUp, true);
+    this.textarea?.removeEventListener("blur", this.onBlur, true);
     this.host.removeEventListener("beforeinput", this.onInput, true);
     this.host.removeEventListener("input", this.onInput, true);
   }
