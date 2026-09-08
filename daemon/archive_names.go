@@ -146,18 +146,13 @@ func (m *Manager) inspectArchiveDestination(repoID string, inst *session.Instanc
 		return source, nil
 	}
 	destInfo, err := sessiongit.BoundedLstat(dest)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			if err := inspectArchivePortableNamespace(repoID, inst, dest); err != nil {
-				return "", err
-			}
-			return dest, nil
-		}
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
 		return "", fmt.Errorf("cannot archive session %q: cannot inspect destination %s: %w", inst.Title, dest, err)
 	}
 	// Lstat follows parent-directory aliases without accepting a symlink that
 	// occupies the final destination entry. Both probes retain their deadlines.
-	if destInfo.IsDir() {
+	if !missing && destInfo.IsDir() {
 		sourceInfo, statErr := sessiongit.BoundedLstat(source)
 		if statErr == nil && sourceInfo.IsDir() && os.SameFile(destInfo, sourceInfo) {
 			return source, nil
@@ -165,6 +160,15 @@ func (m *Manager) inspectArchiveDestination(repoID string, inst *session.Instanc
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 			return "", fmt.Errorf("cannot archive session %q: cannot inspect source %s: %w", inst.Title, source, statErr)
 		}
+	}
+	// Case-insensitive filesystems may resolve a different portable spelling
+	// during Lstat. Scan after identity retries, regardless of probe outcome,
+	// before falling back to exact-path owner diagnostics.
+	if err := inspectArchivePortableNamespace(repoID, inst, dest, !missing); err != nil {
+		return "", err
+	}
+	if missing {
+		return dest, nil
 	}
 	// Prefer the actual recorded path: archived-name reuse can change a title,
 	// and old records may carry paths that no longer follow today's derivation.

@@ -10,10 +10,15 @@ import (
 )
 
 // inspectArchivePortableNamespace runs only after the destination identity retry
-// check. An absent exact spelling is not sufficient on case-sensitive volumes:
-// earlier legacy archives may have occupied another spelling of the same key.
-func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest string) error {
+// check on every filesystem: Lstat may find an equivalent spelling on a
+// case-insensitive volume or report it absent on a case-sensitive one.
+func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest string, destExists bool) error {
 	base := filepath.Base(dest)
+	collides := func(existing string) bool {
+		// Existing exact spellings retain the caller's path-based owner
+		// diagnostic. Missing paths still need exact persisted-name claims.
+		return (!destExists || existing != base) && archiveTitlesCollide(existing, base)
+	}
 	collision := func(existing string) error {
 		return fmt.Errorf("cannot archive session %q: destination %s collides with existing archive %q (same portable name)", inst.Title, dest, existing)
 	}
@@ -22,7 +27,7 @@ func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest
 		return fmt.Errorf("cannot archive session %q: cannot inspect archive directory %s: %w", inst.Title, filepath.Dir(dest), err)
 	}
 	for _, entry := range entries {
-		if archiveTitlesCollide(entry.Name(), base) {
+		if collides(entry.Name()) {
 			return collision(entry.Name())
 		}
 	}
@@ -41,7 +46,7 @@ func inspectArchivePortableNamespace(repoID string, inst *session.Instance, dest
 		if data.Worktree.WorktreePath != "" {
 			existing = filepath.Base(data.Worktree.WorktreePath)
 		}
-		if !archiveTitlesCollide(existing, base) {
+		if !collides(existing) {
 			continue
 		}
 		owned, err := ownsArchiveDirectory(data)
