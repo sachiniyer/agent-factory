@@ -2168,6 +2168,7 @@ function syncSplit(state: AppState): void {
     tabRealIds,
     archived,
     tabNames,
+    runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.web_proxied) : [],
   );
 }
 
