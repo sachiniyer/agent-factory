@@ -83,15 +83,26 @@ func open(kind Kind, flock func(int, int) error) (*os.File, error) {
 // CloseAndReadTail closes the launcher's descriptor and returns a bounded tail
 // of the file. After confirmed process-group/scope teardown the bytes are the
 // final tail; a caller reporting failed teardown may still use the bounded
-// snapshot while naming the full file for later inspection.
+// snapshot while naming the full file for later inspection. Refreshing mtime
+// before close makes completion the retention clock for kept output; successful
+// callers remove their files afterwards. Inherited descriptors still hold the
+// lock if an unconfirmed teardown leaves a descendant alive.
 func CloseAndReadTail(file *os.File) (string, error) {
 	path := file.Name()
 	tail, readErr := readTail(file)
+	// Update the opened inode, not a potentially replaced pathname. The lock
+	// remains held through this timestamp change, so a quiet completed run
+	// gets the same grace period as fresh output before pruning can see it.
+	stamp := syscall.NsecToTimeval(time.Now().UnixNano())
+	timeErr := syscall.Futimes(int(file.Fd()), []syscall.Timeval{stamp, stamp})
+	if timeErr != nil {
+		timeErr = fmt.Errorf("record hook log completion time for %s: %w", path, timeErr)
+	}
 	closeErr := file.Close()
 	if closeErr != nil {
 		closeErr = fmt.Errorf("close hook log %s: %w", path, closeErr)
 	}
-	return tail, errors.Join(closeErr, readErr)
+	return tail, errors.Join(closeErr, readErr, timeErr)
 }
 
 // readTail reads through the descriptor Open returned, not by reopening its

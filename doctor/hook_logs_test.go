@@ -72,13 +72,40 @@ func TestHomeHealthHookLogsIncludesNestedFilesWithoutFollowingSymlinks(t *testin
 	require.Contains(t, row.Detail, "0 bytes")
 }
 
-func TestHomeHealthHookLogsUnmeasurable(t *testing.T) {
+func TestHomeHealthHookLogsNonDirectoryFails(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(home, "logs"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "logs", "hooks"), nil, 0o600))
 	report := &Report{}
 	checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
 	row := findCheck(t, report, "hook logs")
+	require.Equal(t, StatusFail, row.Status)
+	require.True(t, row.Problem)
+	require.Contains(t, row.Detail, filepath.Join(home, "logs", "hooks"))
+	require.Contains(t, row.Detail, "hooks cannot start")
+	require.Contains(t, row.Remediation, "move or remove")
+	require.Equal(t, 1, report.UnresolvedCount())
+	require.Empty(t, report.Incomplete)
+}
+
+func TestHomeHealthHookLogsUnreadableChildIsIncomplete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a directory with mode 0000")
+	}
+	home := t.TempDir()
+	locked := filepath.Join(home, "logs", "hooks", "unreadable")
+	require.NoError(t, os.MkdirAll(locked, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(locked, "output.log"), []byte("hidden output"), 0o600))
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	report := &Report{}
+	checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
+	row := findCheck(t, report, "hook logs")
 	require.Equal(t, StatusWarn, row.Status)
+	require.False(t, row.Problem, "an aborted scan establishes no unhealthy accumulation")
 	require.Contains(t, row.Detail, "cannot measure")
+	require.Equal(t, []string{"hook logs"}, report.Incomplete)
+	summary := BuildJSONReport(report, false, false).Summary
+	require.Equal(t, []string{"hook logs"}, summary.Incomplete)
+	require.Zero(t, summary.Unresolved)
 }

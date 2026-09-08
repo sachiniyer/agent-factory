@@ -18,7 +18,9 @@ func checkHookLogs(report *Report, dir string) {
 		return
 	}
 	if err == nil && !info.IsDir() {
-		err = fmt.Errorf("not a directory")
+		report.Fail(sectionConfig, "hook logs", dir+" is not a directory; configured hooks cannot start",
+			"move or remove the file so af can create its hook log directory")
+		return
 	}
 	var total int64
 	if err == nil {
@@ -46,6 +48,7 @@ func checkHookLogs(report *Report, dir string) {
 		})
 	}
 	if err != nil {
+		report.markIncomplete("hook logs")
 		report.Warn(sectionConfig, "hook logs", fmt.Sprintf("cannot measure %s: %v", dir, err),
 			"check the hook log directory and its permissions, then rerun `af doctor`", false)
 		return
