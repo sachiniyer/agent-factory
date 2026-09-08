@@ -35,6 +35,7 @@ import {
   type StatusFilter,
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
+import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
   archiveWarningText,
   canHandoff,
@@ -1746,6 +1747,7 @@ export class AppShell {
     const footChildren: HTMLElement[] = [];
 
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.dataset.projectFocus = "add";
     add.setAttribute("title", "Register a git checkout by path as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1758,6 +1760,7 @@ export class AppShell {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
+      del.dataset.projectFocus = "delete";
       const isRegistered = state.registeredProjects.includes(currentSummary.root);
       // Delete-project ARCHIVES the project's regular live sessions (#1735) AND, for
       // a registered project, removes its durable registry record (#2456) so it leaves
@@ -1788,7 +1791,8 @@ export class AppShell {
     }
 
     children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
-    this.projectMenu.replaceChildren(...children);
+    const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
+    replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
 
   /** One project row in the switcher menu: a check on the current project, the name +
@@ -1806,6 +1810,7 @@ export class AppShell {
     );
     const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
     const item = h("button", { type: "button", class: cls }, check, label, meta);
+    item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
     item.addEventListener("click", (e) => {
