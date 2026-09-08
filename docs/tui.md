@@ -89,8 +89,9 @@ matching the 1-9 jump keys; it was removed in #3023):
   its placeholder; open the web client to use the editor).
 - **`1`–`9`** jump straight to a tab by number. **`g`** opens a prompt that jumps
   to any tab by number or name — past the ninth, or to the one called `deploy`.
-- **`w`** closes the focused tab (the agent's own tab can't be closed — kill the
-  session instead).
+- **`w`** asks to delete the focused tab and names its session. Press `y` to
+  confirm or `n`/`Esc` to cancel. The agent tab stays; use Delete session for it.
+  Hiding a pane leaves its tab available; deletion requests runtime cleanup.
 
 Tabs persist across restarts, and each is a real process the daemon tracks.
 (Remote sessions are more limited — see [Remote hooks](remote-hooks.md).)

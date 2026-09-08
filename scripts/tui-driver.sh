@@ -881,17 +881,32 @@ af_new_tab() {
     done
 }
 
-# af_close_tab — close the active (non-agent) tab (`w`). Precondition: a
-# closeable tab is active. Syncs on the tab-child count falling.
+# _af_confirm_tab_delete — accept the existing dialog only once it is visible.
+# The title from app/handle_tabs.go is `Delete tab %q from session %q?`.
+# Match its literal prefix (escaped as ERE), since long names wrap the rest.
+_af_confirm_tab_delete() {
+    local title_re
+    title_re="$(_af_regex_escape 'Delete tab "')"
+    if ! af_wait_for "$title_re" "$AF_DRIVER_TIMEOUT" 'delete-tab confirmation'; then
+        _af_fail 'delete-tab confirmation did not appear; no consent sent'
+        return 1
+    fi
+    af_send y
+}
+
+# af_close_tab — delete the active non-agent tab: w, wait for consent, then y.
+# Precondition: a deletable tab is active. This requests deletion, unlike hiding
+# a pane. Sync on the tab-child count falling only after accepting the dialog.
 af_close_tab() {
     af_ensure_nav
     af_focus_tree || return 1
     local before; before="$(_af_tab_count)"
-    af_send w
+    af_send w || return 1
+    _af_confirm_tab_delete || return 1
     local deadline; deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
     while [ "$(_af_tab_count)" -ge "$before" ]; do
         if [ "$(_af_now)" -ge "$deadline" ]; then
-            _af_fail "tab not closed (still $before)"; return 1
+            _af_fail "confirmed tab deletion did not reduce the count (still $before)"; return 1
         fi
         sleep "$AF_DRIVER_POLL"
     done
