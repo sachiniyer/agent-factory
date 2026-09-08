@@ -24,21 +24,30 @@ func retireHookProgressSnapshot(p *hookProgress, path string) (bool, error) {
 		if current.Directory != p.Directory || current.SessionID != p.SessionID || current.Generation != p.Generation {
 			return nil
 		}
-		return removeHookProgress(path, p)
+		return hookProgressRemove(path, p)
 	})
 }
+
+// Test seam for a transient filesystem failure after the progress lock has
+// been acquired. Production always uses removeHookProgress.
+var hookProgressRemove = removeHookProgress
 
 // Bound the retry lifetime and load: 100ms exponential backoff, capped at 2s,
 // eight attempts. Durable terminal state is also eligible for creation-time GC
 // if the daemon exits or storage remains busy beyond this retry budget.
 func retryHookProgressRetirement(p *hookProgress, path string) {
 	delay := 100 * time.Millisecond
+	var lastError string
 	for attempt := 0; attempt < 8; attempt++ {
 		time.Sleep(delay)
 		acquired, err := retireHookProgressSnapshot(p, path)
 		if err != nil {
-			log.WarningLog.Printf("cannot retry hook progress reclamation for %s: %v", p.Worktree, err)
-			return
+			if message := err.Error(); message != lastError {
+				log.WarningLog.Printf("cannot retry hook progress reclamation for %s: %v; continuing bounded retry", p.Worktree, err)
+				lastError = message
+			}
+			delay = min(2*delay, 2*time.Second)
+			continue
 		}
 		if acquired {
 			return

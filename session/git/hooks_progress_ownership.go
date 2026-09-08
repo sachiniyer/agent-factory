@@ -133,10 +133,12 @@ func (g *GitWorktree) retireHookProgress() error {
 		return fmt.Errorf("cannot terminalize hook journal: %w", err)
 	}
 	acquired, err := retireHookProgressSnapshot(p, path)
-	if err != nil {
-		log.WarningLog.Printf("cannot reclaim hook progress for %s: %v", p.Worktree, err)
-	} else if !acquired {
-		log.WarningLog.Printf("deferring hook progress reclamation for %s: progress lock busy", p.Worktree)
+	if err != nil || !acquired {
+		if err != nil {
+			log.WarningLog.Printf("cannot reclaim hook progress for %s: %v; scheduling bounded retry", p.Worktree, err)
+		} else {
+			log.WarningLog.Printf("deferring hook progress reclamation for %s: progress lock busy", p.Worktree)
+		}
 		// Archive may move g.worktreePath immediately after this returns. Retry
 		// only the immutable journal identity, never mutable worktree fields.
 		done := make(chan struct{})

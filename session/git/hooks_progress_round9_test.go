@@ -144,3 +144,41 @@ func TestHookProgressRetiredActiveOwnerReclaimed(t *testing.T) {
 		})
 	}
 }
+
+func TestHookProgressRetirementRetriesRemovalError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installScopeShim(t)
+	g := worktreeWithRecordedScope(t, "af-hook-owner")
+	g.SetHookScopeSessionID("owner")
+	p, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "owner"}, nil, "af-hook-owner", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.finish()
+	path, err := hookProgressPath(g.worktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := hookProgressRemove
+	failed := true
+	hookProgressRemove = func(path string, progress *hookProgress) error {
+		if failed {
+			failed = false
+			return errors.New("injected removal failure")
+		}
+		return original(path, progress)
+	}
+	t.Cleanup(func() { hookProgressRemove = original })
+	if err := g.retireHookProgress(); err != nil {
+		t.Fatal(err)
+	}
+	if g.hooksRetirementDone == nil {
+		t.Fatal("reclamation failure did not schedule a retry")
+	}
+	waitForClosed(t, g.hooksRetirementDone, 5*time.Second, "reclamation retry did not finish")
+	for _, file := range []string{path, p.Directory} {
+		if _, err := os.Stat(file); !os.IsNotExist(err) {
+			t.Fatalf("retry retained %s: %v", file, err)
+		}
+	}
+}
