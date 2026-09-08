@@ -331,6 +331,16 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	m.pendingAccount = preselect
+	if m.state == stateSelectAccount && m.selectionOverlay != nil {
+		// A registry response can open this picker before the default arrives.
+		// Keep the visible row in sync with what Enter will submit.
+		for i, choice := range m.accountPickerChoices {
+			if choice.value == preselect {
+				m.selectionOverlay.SetSelectedIndex(i)
+				break
+			}
+		}
+	}
 	m.menu.SetNamingAccount(true)
 	return m, nil
 }
