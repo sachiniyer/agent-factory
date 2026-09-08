@@ -696,6 +696,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				if perr := restorePendingLiveness(resetAt); perr != nil {
 					rerr = errors.Join(rerr, perr)
 				}
+				if errors.Is(rerr, session.ErrAccountSwapAgentTeardownBlind) {
+					// The replacement teardown was not observed conclusively. A
+					// detached child may still write this worktree, so preserve the
+					// pending mission but suppress automatic retries until inspection.
+					instance.MarkStartupStateUnknown()
+					if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+						rerr = errors.Join(rerr, perr)
+					}
+				}
 			}
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
@@ -801,7 +810,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	var serr error
 	if manual {
-		serr = m.deliverManualAccountMission(instance, prompt)
+		serr = m.deliverManualAccountMission(repoID, instance, prompt)
 	} else {
 		_, serr = instance.SendPromptWithEvidence(prompt, nowFunc)
 	}
@@ -875,8 +884,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	if persistErr != nil {
 		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 		if manual {
-			return resumePerformed, fmt.Errorf("handed off %q and delivered its mission, but completion has a pending settlement; the daemon retries the disk write, and an unclean exit before it lands could repeat the mission: %w",
-				requestedTitle, errors.Join(settleErr, persistErr))
+			return resumePerformed, &mutationCommittedError{err: fmt.Errorf("handed off %q and delivered its mission, but completion has a pending settlement; the daemon retries the disk write, and an unclean exit before it lands could repeat the mission: %w",
+				requestedTitle, errors.Join(settleErr, persistErr))}
 		}
 	}
 	if settleErr != nil {

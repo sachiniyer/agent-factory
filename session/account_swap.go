@@ -155,11 +155,12 @@ func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 	// being replaced, and the af skill has to land in the root the replacement
 	// pane will actually read (see resolveSkillTargetForAccount).
 	launchProgram = injectSystemPrompt(launchProgram, resolveSkillTargetForAccount(i, launchProgram, name))
-	if crossAgent {
-		workDir := i.GetWorktreePath()
-		if workDir == "" {
-			return fmt.Errorf("handoff target %s has no worktree path for launch preflight", agent)
-		}
+	workDir := i.GetWorktreePath()
+	// Automatic resume fixtures and persisted projections may not have a launch
+	// directory. Manual swaps still preflight a changed launch command before
+	// teardown; ordinary cross-agent swaps retain their existing preflight.
+	shouldPreflight := crossAgent || (manual && resolution.command != i.Program)
+	if shouldPreflight && workDir != "" {
 		if _, err := preflight.CheckCommandAt(launchProgram, workDir); err != nil {
 			return fmt.Errorf("handoff target %s failed launch preflight: %w", agent,
 				preflight.ProgramError(agent, resolvedProgram, err))
