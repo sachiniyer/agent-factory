@@ -170,6 +170,10 @@ reveal the menu on hover or keyboard focus. Each opens a confirmation:
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
+  The daemon-managed root is the exception: deleting it interrupts scheduled and
+  watch-task delivery to the root session until it self-heals (usually about two
+  minutes) or the daemon restarts; other scheduled and watch tasks keep running.
+  Disable it in [configuration](configuration.md#root-agents-always-ensured) to keep it down.
 
 Pending creation rows have no destructive actions. An action belongs to the row
 whose button you clicked, even when a different session is selected.
