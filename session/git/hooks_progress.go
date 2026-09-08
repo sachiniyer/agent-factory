@@ -19,6 +19,7 @@ import (
 // index of a command that actually started. Never replay a claimed command:
 // arbitrary provisioning commands need not be idempotent.
 type hookProgress struct {
+	SessionID   string   `json:"session_id"`
 	Commands    []string `json:"commands"`
 	Passthrough []string `json:"passthrough"`
 	Worktree    string   `json:"worktree"`
@@ -44,12 +45,13 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
+	pruneHookProgress(filepath.Dir(path), time.Now())
 	dir, err := os.MkdirTemp(filepath.Dir(path), "entries-")
 	if err != nil {
 		return nil, err
 	}
 	p := &hookProgress{
-		Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
+		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir,
 	}
 	data, err := json.Marshal(p)
@@ -71,17 +73,23 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	var previous hookProgress
-	if data, readErr := os.ReadFile(path); readErr == nil {
-		_ = json.Unmarshal(data, &previous)
-	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return nil, err
-	}
-	if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
-		if _, statErr := os.Stat(filepath.Join(previous.Directory, "finished")); statErr == nil {
-			_ = os.RemoveAll(previous.Directory)
+	err = config.WithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
+		var previous hookProgress
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			_ = json.Unmarshal(data, &previous)
 		}
+		if err = os.Rename(f.Name(), path); err != nil {
+			return err
+		}
+		if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
+			if _, statErr := os.Stat(filepath.Join(previous.Directory, "finished")); statErr == nil {
+				_ = os.RemoveAll(previous.Directory)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return p, nil
 }
@@ -115,19 +123,15 @@ func (p *hookProgress) finish() {
 }
 
 func (g *GitWorktree) adoptHookProgress() bool {
-	path, err := hookProgressPath(g.worktreePath)
+	if g.IsExternalWorktree() {
+		return false
+	}
+	p, _, err := g.ownedHookProgress()
 	if err != nil {
 		return false
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var p hookProgress
-	if err = json.Unmarshal(data, &p); err != nil || p.Worktree != g.worktreePath || p.Prefix == "" {
-		return false
-	}
-	if filepath.Dir(p.Directory) != filepath.Dir(path) || !strings.HasPrefix(filepath.Base(p.Directory), "entries-") {
+	if g.hooksResumeDisabled {
+		p.finish()
 		return false
 	}
 	if _, err = os.Stat(filepath.Join(p.Directory, "finished")); err == nil {
@@ -167,7 +171,7 @@ func (g *GitWorktree) adoptHookProgress() bool {
 			}
 		}
 		log.InfoLog.Printf("resuming remaining post-worktree hooks for %s", p.Worktree)
-		<-runPostWorktreeHooks(ctx, hookRun{worktreePath: p.Worktree, repoPath: repoPath, passthrough: p.Passthrough, progress: &p, onScopeLaunched: g.SetHookScopeUnitPrefix})
+		<-runPostWorktreeHooks(ctx, hookRun{worktreePath: p.Worktree, repoPath: repoPath, passthrough: p.Passthrough, progress: p, onScopeLaunched: g.SetHookScopeUnitPrefix})
 	}()
 	return true
 }

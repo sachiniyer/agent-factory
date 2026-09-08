@@ -461,6 +461,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// prefix — a legacy record, or one whose hooks never entered a scope —
 			// leaves the sweep disabled, which is the pre-#3650 behaviour.
 			gw.SetHookScopeSessionID(id)
+			gw.SetHookResumeDisabled(data.UserKilled || liveness == LiveArchived)
 			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
 			instance.gitWorktree = gw
 		}

@@ -385,7 +385,9 @@ the scope itself survives a daemon restart or auto-upgrade. With
 [#4010](https://github.com/sachiniyer/agent-factory/issues/4010) fixed by
 [PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012), a hook can also
 keep writing output after its runner exits. The daemon persists the original
-command list and per-entry start/exit receipts alongside the scope identity.
+command list and per-entry start/exit receipts alongside the scope identity and
+owning session ID. Only that managed session may adopt the journal; external
+`--here` worktrees never adopt or stop another session's hooks.
 On restart it leaves the in-flight entry alone, waits until its scope and any
 pending launcher are gone, then resumes the entries that never started, in
 order and each in its own unbound scope with its own hooklog file. Entries
@@ -394,8 +396,14 @@ also continues after failure). The session reports hooks in flight until the
 remaining list finishes. The snapshot preserves the original commands and
 explicit environment pass-through names across configuration edits; environment
 values come from the restarted daemon. Completed or deliberately cancelled
-lists are not resumed. Older runs without a progress record retain survivor
-observation only.
+lists are not resumed. Restore marks tombstoned and archived sessions' journals
+finished before considering any resume. Safe kill/archive teardown reclaims
+finished journals and receipts after proving all hook writers gone. Creation
+also sweeps completed journals whose owning session no longer exists: it keeps
+the newest 20 eligible journals for up to 14 days, with a five-second grace
+period. Active scopes, unfinished receipts, and still-owned journals are excluded;
+unreadable session state or scope probes prevent pruning. Older runs without a
+progress record or a recorded owning session ID retain survivor observation only.
 
 Both repository-controlled `post_worktree_commands` (`session/git/hooks.go`)
 and operator-controlled `on_archive_command` (`daemon/archive_hook.go`) now use

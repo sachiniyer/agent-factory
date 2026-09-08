@@ -127,7 +127,8 @@ type GitWorktree struct {
 	// hookScopeSessionID names the transient scopes a DAEMON-spawned hook run
 	// enters. It is set from the session's stable id at creation and restore;
 	// empty means no scope is ever derived, which is the TUI/CLI path.
-	hookScopeSessionID string
+	hookScopeSessionID  string
+	hooksResumeDisabled bool
 	// hookScopeUnitPrefix is the durable handle: the prefix of every scope unit
 	// this session's hooks have entered. Written by the hook goroutine the first
 	// time a scope is actually created and by the storage restore, read by the

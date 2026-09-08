@@ -159,6 +159,9 @@ var hookStopTimeout = 30 * time.Second
 // modifying the checkout while an unjoined hook may still use it recreates the
 // exact remove/write race this boundary exists to prevent.
 func (g *GitWorktree) cancelAndWaitHooks() error {
+	if g.IsExternalWorktree() {
+		return nil
+	}
 	if g.hooksCancel != nil {
 		g.hooksCancel()
 	}
@@ -173,7 +176,11 @@ func (g *GitWorktree) cancelAndWaitHooks() error {
 				g.worktreePath, hookStopTimeout)
 		}
 	}
-	return g.stopSurvivingHookScopes()
+	if err := g.stopSurvivingHookScopes(); err != nil {
+		return err
+	}
+	g.retireHookProgress()
+	return nil
 }
 
 // hookScopePrefixes names every transient scope this worktree's hooks could
@@ -193,6 +200,9 @@ func (g *GitWorktree) cancelAndWaitHooks() error {
 // a machine without systemd consult a manager that is not there, and the sweep
 // below fails closed — which would wedge cleanup for users who never had a scope.
 func (g *GitWorktree) hookScopePrefixes() []string {
+	if g.IsExternalWorktree() {
+		return nil
+	}
 	var prefixes []string
 	add := func(prefix string) {
 		if prefix == "" {

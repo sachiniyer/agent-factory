@@ -50,7 +50,11 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 	owned := make([][]string, 0, len(worktrees))
 	var all []string
 	for _, g := range worktrees {
-		if g == nil {
+		if g == nil || g.IsExternalWorktree() {
+			continue
+		}
+		if g.hooksResumeDisabled {
+			g.AbandonHookProgress()
 			continue
 		}
 		// A worktree with a live in-process run already reports itself, and

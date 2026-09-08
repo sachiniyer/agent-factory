@@ -57,6 +57,7 @@ func TestHookListResumesAfterRestart(t *testing.T) {
  exit 0
  `, gone))
 	g := worktreeWithRecordedScope(t, "af-hook-resume4014")
+	g.SetHookScopeSessionID("resume4014")
 	g.repoPath, g.worktreePath = repo, tree
 	AdoptRunningHooks([]*GitWorktree{g})
 	requireOpen(t, g.HooksDone(), "survivor must be reported running")
@@ -92,6 +93,7 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 		t.Fatal("resumed entry has no own output log")
 	}
 	restored := worktreeWithRecordedScope(t, "af-hook-resume4014")
+	restored.SetHookScopeSessionID("resume4014")
 	restored.repoPath, restored.worktreePath = repo, tree
 	AdoptRunningHooks([]*GitWorktree{restored})
 	if restored.HooksDone() != nil {
@@ -109,8 +111,9 @@ func TestHookListResumeWaitsForReadableManager(t *testing.T) {
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	g := worktreeWithRecordedScope(t, "af-hook-resume4014")
+	g.SetHookScopeSessionID("resume4014")
 	marker := filepath.Join(t.TempDir(), "ran")
-	progress, err := newHookProgress(hookRun{worktreePath: g.worktreePath}, []string{"echo ran > " + shellQuoteForShim(marker)}, "af-hook-resume4014", "test")
+	progress, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "resume4014"}, []string{"echo ran > " + shellQuoteForShim(marker)}, "af-hook-resume4014", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
