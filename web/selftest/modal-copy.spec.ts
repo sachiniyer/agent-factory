@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { stopPolledRoutes } from "./polled-route.js";
 import { Liveness } from "../src/types.js";
 
 for (const theme of ["light", "dark"] as const) {
@@ -32,6 +33,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: info.outputPath(`delete-${width}-${theme}.png`) });
     }
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    await stopPolledRoutes(page.context());
   });
 }
 

@@ -36,6 +36,7 @@ import { expect, type Browser, type Locator, type Page, test } from "@playwright
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { openAfterInitialResync } from "./initial-resync.js";
+import { stopPolledRoutes } from "./polled-route.js";
 import { assertPhoneKeybar, phoneInputStream } from "./phone-keybar.js";
 import { DEMO_VIEWPORT } from "./demo-viewport.js";
 
@@ -355,6 +356,7 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
     await expect(page.locator(".af-rail-list")).toBeVisible();
     await beat(page, 1_400);
   } finally {
+    await stopPolledRoutes(context);
     await context.close();
   }
 
@@ -615,6 +617,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
     await page.locator(".af-accounts-register:visible").scrollIntoViewIfNeeded();
     await shot("phone-add-account");
   } finally {
+    await stopPolledRoutes(context);
     await context.close();
   }
 }
@@ -671,6 +674,7 @@ async function recordSplits(browser: Browser): Promise<void> {
       await settleTerminal(page);
       await screenshotFor(page, pass.suffix, 4)("split-panes");
     } finally {
+      await stopPolledRoutes(context);
       await context.close();
     }
   }

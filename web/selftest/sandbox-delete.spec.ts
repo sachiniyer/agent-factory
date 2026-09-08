@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { stopPolledRoutes } from "./polled-route.js";
 import { copyFile } from "node:fs/promises";
 
 for (const theme of ["light", "dark"] as const) {
@@ -32,6 +33,7 @@ for (const theme of ["light", "dark"] as const) {
       await copyFile(info.snapshotPath(name), info.outputPath(name));
     }
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    await stopPolledRoutes(page.context());
   });
 }
 
@@ -76,5 +78,6 @@ for (const backend of ["docker", "local"]) {
       await modal.screenshot({ path: info.outputPath(`archived-delete-${backend}-${width}.png`) });
     }
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    await stopPolledRoutes(page.context());
   });
 }
