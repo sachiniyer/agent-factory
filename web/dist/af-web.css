@@ -3107,6 +3107,39 @@ textarea[class] {
   }
 }
 
+/* src/sessions-thesis.css */
+.af-view-sessions :is(.af-appbar .af-ghost, .af-project-switch, .af-nav-toggle, .af-appbar-more, .af-rail-filter, .af-row-actions > .af-term-more-wrap > .af-term-more, .af-term-more, .af-pane-close, .af-copy-link):not(:disabled) {
+  border-color: transparent;
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+}
+.af-keybar-row button:not([aria-pressed=true]) {
+  border-color: transparent;
+}
+.af-view-sessions .af-row {
+  padding: calc(var(--af-space-1) + var(--af-space-2)) var(--af-space-3);
+}
+.af-view-sessions .af-rail-head {
+  padding-inline: var(--af-space-3);
+}
+.af-view-sessions .af-row-selected::before {
+  inset-block: calc(var(--af-space-1) + var(--af-space-2));
+}
+@media (min-width: 769px) {
+  .af-view-sessions .af-appbar {
+    padding-block: var(--af-space-2);
+  }
+  .af-view-sessions .af-brand {
+    font-weight: 400;
+  }
+  .af-main-term .af-term-title {
+    font-size: var(--af-type-title);
+  }
+  .af-main-term .af-term-head {
+    padding-inline: var(--af-space-3);
+  }
+}
+
 /* src/tokens.css */
 [data-af-theme=light] {
   color-scheme: light;
@@ -3129,7 +3162,7 @@ textarea[class] {
   --af-space-3: 16px;
   --af-space-4: 24px;
   --af-type-body: 0.875rem;
-  --af-type-caption: 0.75rem;
+  --af-type-caption: 0.8125rem;
   --af-type-display: 1.5rem;
   --af-type-heading: 1rem;
   --af-type-title: 1.25rem;
@@ -3155,7 +3188,7 @@ textarea[class] {
   --af-space-3: 16px;
   --af-space-4: 24px;
   --af-type-body: 0.875rem;
-  --af-type-caption: 0.75rem;
+  --af-type-caption: 0.8125rem;
   --af-type-display: 1.5rem;
   --af-type-heading: 1rem;
   --af-type-title: 1.25rem;

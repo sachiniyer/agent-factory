@@ -6,6 +6,17 @@ two radii**. The six liveness bindings are fixed semantics, including the empty 
 glyph. The only user-facing theme choice is **Light / Dark / System**. These are internal
 product constants, not user-editable tokens, presets or a custom-palette API.
 
+## Beauty thesis · sessions exemplar
+
+The [beauty thesis](thesis.md) extends this contract after #4065. Chrome captions
+are now 13px. In Sessions, secondary controls use raised fill with transparent
+resting borders; plane boundaries and keyboard focus retain their edges. Desktop
+session identity uses type-title; phone keeps type-heading in its 48px header.
+The TUI uses bold selected identity, a full raised header row and a neutral
+selected-but-unfocused frame. Other component layouts await the sequenced Phase 2
+slices; their inherited caption size changes now. The thesis carries the reviewed
+before/after evidence and the exceptions to the earlier recipes below.
+
 ## Rules applied
 
 Read the rule, then compare its light/dark web and TUI specimens with the current screen.
@@ -95,8 +106,7 @@ and remain lower-contrast than ink on both planes. A matching liveness colour ne
 a per-theme `sharesMuted` rationale in the source; running and archived share it
 intentionally in light only.
 Fonts, 400/600 weight, 1.5 web line height, 44px touch height and a 2px focus ring are
-fixed component rules, not more tokens. Indicators never animate. User-caused web
-disclosures may take at most 120ms; reduced motion and all TUI changes are immediate.
+fixed component rules, not more tokens. Indicators never animate. All disclosures and TUI changes are immediate; no animation is introduced.
 
 ## Capture coverage
 

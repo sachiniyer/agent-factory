@@ -6,6 +6,17 @@ two radii**. The six liveness bindings are fixed semantics, including the empty 
 glyph. The only user-facing theme choice is **Light / Dark / System**. These are internal
 product constants, not user-editable tokens, presets or a custom-palette API.
 
+## Beauty thesis · sessions exemplar
+
+The [beauty thesis](thesis.md) extends this contract after #4065. Chrome captions
+are now 13px. In Sessions, secondary controls use raised fill with transparent
+resting borders; plane boundaries and keyboard focus retain their edges. Desktop
+session identity uses type-title; phone keeps type-heading in its 48px header.
+The TUI uses bold selected identity, a full raised header row and a neutral
+selected-but-unfocused frame. Other component layouts await the sequenced Phase 2
+slices; their inherited caption size changes now. The thesis carries the reviewed
+before/after evidence and the exceptions to the earlier recipes below.
+
 ## Rules applied
 
 Read the rule, then compare its light/dark web and TUI specimens with the current screen.
@@ -375,7 +386,7 @@ or step fails validation: revise a component rule before enlarging this contract
 <table><thead><tr><th>Colour role</th><th>Light</th><th>Dark</th><th>Required use</th></tr></thead><tbody>
 <tr><td>accent</td><td>#2d6271</td><td>#2296f3</td><td>Primary button fill, selected marker, active-tab underline and keyboard-focus outline; never liveness</td></tr>
 <tr><td>archived</td><td>#4c566a</td><td>#d8dee9</td><td>Archived glyph and label only; retained history</td></tr>
-<tr><td>border</td><td>#657084</td><td>#3d3d3d</td><td>Unfocused control and pane outlines only; never a rule around every content row</td></tr>
+<tr><td>border</td><td>#657084</td><td>#3d3d3d</td><td>Plane boundaries and disabled controls; resting session controls use transparent borders, keyboard focus uses accent</td></tr>
 <tr><td>dead</td><td>#883b43</td><td>#e4c8cd</td><td>Dead glyph/label and failed-operation or destructive-confirmation text; never ordinary selection</td></tr>
 <tr><td>ink</td><td>#2e3440</td><td>#cccccc</td><td>All body text, names, headings, field labels and action labels</td></tr>
 <tr><td>ink-muted</td><td>#4c566a</td><td>#9d9d9d</td><td>Secondary metadata only: path, timestamp and shortcut annotation; never body text or field labels</td></tr>
@@ -384,7 +395,7 @@ or step fails validation: revise a component rule before enlarging this contract
 <tr><td>ready</td><td>#405430</td><td>#d5e2cc</td><td>Ready glyph and label only; green never means keyboard focus or generic success</td></tr>
 <tr><td>running</td><td>#4c566a</td><td>#d8dee9</td><td>Running state text only; no indicator, including in-flight operations</td></tr>
 <tr><td>surface</td><td>#f8f9fc</td><td>#1f1f1f</td><td>Every page, rail, header and terminal chrome background; also text on the primary accent button</td></tr>
-<tr><td>surface-raised</td><td>#eceff4</td><td>#2b2b2b</td><td>Dialogs, menus, inputs and selected rows only; never a second page background</td></tr>
+<tr><td>surface-raised</td><td>#eceff4</td><td>#2b2b2b</td><td>Dialogs, menus, controls and selected rows; a functional plane, never a decorative card</td></tr>
 </tbody></table>
 <table><thead><tr><th>Metric</th><th>Web</th><th>TUI</th><th>Required use</th></tr></thead><tbody>
 <tr><td>radius-control</td><td>4px</td><td>0</td><td>Buttons and inputs only; square terminal controls</td></tr>
@@ -394,10 +405,10 @@ or step fails validation: revise a component rule before enlarging this contract
 <tr><td>space-3</td><td>16px</td><td>2</td><td>Panel/dialog inset; two horizontal terminal cells</td></tr>
 <tr><td>space-4</td><td>24px</td><td>1</td><td>Section separation; one vertical blank terminal row</td></tr>
 <tr><td>type-body</td><td>0.875rem</td><td>1</td><td>14px: body, fields, buttons and session/task names; one terminal row</td></tr>
-<tr><td>type-caption</td><td>0.75rem</td><td>1</td><td>12px: secondary metadata only; one terminal row</td></tr>
+<tr><td>type-caption</td><td>0.8125rem</td><td>1</td><td>13px: secondary metadata only; one terminal row</td></tr>
 <tr><td>type-display</td><td>1.5rem</td><td>1</td><td>24px: zero-session or unavailable-screen heading only; one bold terminal row</td></tr>
 <tr><td>type-heading</td><td>1rem</td><td>1</td><td>16px: section and pane headings; one bold terminal row</td></tr>
-<tr><td>type-title</td><td>1.25rem</td><td>1</td><td>20px: dialog title; one bold terminal row</td></tr>
+<tr><td>type-title</td><td>1.25rem</td><td>1</td><td>20px: dialog and focused desktop session title; one bold terminal row</td></tr>
 </tbody></table>
 </details>
 
@@ -411,8 +422,7 @@ and remain lower-contrast than ink on both planes. A matching liveness colour ne
 a per-theme `sharesMuted` rationale in the source; running and archived share it
 intentionally in light only.
 Fonts, 400/600 weight, 1.5 web line height, 44px touch height and a 2px focus ring are
-fixed component rules, not more tokens. Indicators never animate. User-caused web
-disclosures may take at most 120ms; reduced motion and all TUI changes are immediate.
+fixed component rules, not more tokens. Indicators never animate. All disclosures and TUI changes are immediate; no animation is introduced.
 
 ## Capture coverage
 

@@ -358,3 +358,21 @@ shared dev boxes, not a substitute for hermetic tests.
 and pixel-diffs of all demo stills in both themes. See
 [perf-baselines.md](perf-baselines.md) for the synthetic 1,000-session fixture,
 committed numbers, CI margins, and the explicit golden-update command.
+
+## Capturing design stills
+
+Use a new output directory for the pinned app-model design matrix. The testbox
+mounts only that directory writable and forwards the capture environment variable;
+its Go tests, daemon and tmux remain isolated. An existing directory must be writable
+by the image's `dev` user. On a shared box, obey the maintainer's load/container gate
+before starting, and run one suite at a time.
+
+```bash
+AF_TUI_DESIGN_CAPTURE="$PWD/web/test-results/tui-design" \
+  scripts/testbox.sh test ./app -run 'TestDesignDriverScenes|TestDesignThesisScenes' -count=1
+```
+
+Read the SVGs (the thesis fixtures are exactly 80×24; the main matrix is 120×36),
+copy reviewed SVGs into `app/testdata/design/`, then run without capture mode to
+check the goldens: `scripts/testbox.sh test ./ui ./app -count=1`. Capture mode writes
+candidates; it is not a substitute for the comparison run.

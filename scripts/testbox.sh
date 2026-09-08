@@ -534,6 +534,13 @@ build)
 test)
     build_image
     fix_cache_perms
+    # Optional design evidence uses a caller-owned output directory;
+    # only the capture directory is writable, never /src or an AF home.
+    if [ -n "${AF_TUI_DESIGN_CAPTURE:-}" ]; then
+        mkdir -p -m 0777 "$AF_TUI_DESIGN_CAPTURE"
+        TUI_CAPTURE_DIR=$(cd "$AF_TUI_DESIGN_CAPTURE" && pwd)
+        RUN_FLAGS+=(-v "$TUI_CAPTURE_DIR":/captures -e AF_TUI_DESIGN_CAPTURE=/captures)
+    fi
     # The one sanctioned home for a bare full-suite run on a shared box.
     # Not `exec`: the teardown trap has to survive the run (#2133).
     rc=0

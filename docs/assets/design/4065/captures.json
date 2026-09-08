@@ -1,0 +1,45 @@
+{
+  "issue": 4065,
+  "baseline_commit": "1ed491b121931ad09a8c4185179b515e935d5217",
+  "browser_before_run": "1469631-7faebb",
+  "browser_after_run": "2865088-77e8e3",
+  "browser_fixture": "Real container browser and daemon; scripted stand-in agents; clock pinned by visual harness",
+  "browser_viewports": {
+    "desktop": [
+      1440,
+      900
+    ],
+    "phone": [
+      360,
+      812
+    ],
+    "critique_phone": [
+      375,
+      812
+    ]
+  },
+  "tui_fixture": "TestDesignThesisScenes, real app-model Update/View, 80 columns \u00d7 24 rows; no live agent",
+  "tui_clock": "2026-09-06T12:00:00Z",
+  "tui_pngs": "CairoSVG rasterizations of adjacent original SVG captures",
+  "capture_commands": [
+    "scripts/testbox.sh perf",
+    "AF_UPDATE_GOLDENS=1 scripts/testbox.sh perf",
+    "AF_TUI_DESIGN_CAPTURE=<new-output-dir> scripts/testbox.sh test ./app -run 'TestDesignDriverScenes|TestDesignThesisScenes' -count=1"
+  ],
+  "reviewed_changed_goldens": {
+    "browser": 88,
+    "existing_tui": 28,
+    "new_tui": 4
+  },
+  "budgets": "Unchanged; final update run has zero load/snapshot shift and all numeric budgets pass",
+  "source_sha256": {
+    "design/tokens.json": "c542ea86f2acc12bac0cb1b81c49d2f27249cfebfe4b4ec7957cbe3d411d68cb",
+    "design/style-guide.tmpl": "7b0fc758a2025842bebeb672a84873a587174e54f18b3c89899fc43ac211c826",
+    "internal/designtokens/generate.go": "113c806801f8cecab9e75621696674eef95c619c3e499cbb43e4bb7a418efe92",
+    "web/src/sessions-thesis.css": "8fb1231e9fa9b5503b2e864f83e4f1faac54dbcd462f505560595498fece6917",
+    "ui/tabbed_window.go": "607959953ca47b26c5387f577f246250544b80999911e1851f0fcb5fc75dce7c",
+    "ui/theme.go": "ea202e2b05052f600b0d47560722c790a794a666383025bd5d50c391035c2bdb",
+    "ui/tree/render.go": "4aef9c343a801a8322e2b750b70e14924c09c152d80626e26887b236f70ba72b",
+    "app/design_thesis_test.go": "490eddbc8901b543f144d959cd61c7e381e2473f79b743b580a174cf6c65b409"
+  }
+}

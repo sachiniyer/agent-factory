@@ -25,7 +25,7 @@ func TestTabbedWindowFrameStyleUsesPaneBorderThemeSlots(t *testing.T) {
 	assertFrameColor("default", w, c["border"])
 
 	w.SetSidebarSelected(true)
-	assertFrameColor("selected but not focused", w, c["accent"])
+	assertFrameColor("selected but not focused", w, c["border"])
 
 	w.Focus()
 	assertFrameColor("focused nav", w, c["border"])

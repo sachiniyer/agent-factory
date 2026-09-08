@@ -178,6 +178,7 @@ nav:
       - Design notes:
           - Interface design: design/interface-design.md
           - Interface style guide: design/style-guide.md
+          - Beauty thesis: design/thesis.md
           - Web recovery states: design/recovery-stills.md
           - TUI recovery states: design/tui-recovery-stills.md
           - TUI design roles: design/tui-design-a-stills.md

@@ -45,13 +45,11 @@ func CurrentTheme() Theme {
 }
 
 func applyThemeStyles() {
-	windowStyle = lipgloss.NewStyle().
-		BorderForeground(activeTheme.Border).
-		Border(lipgloss.NormalBorder())
+	windowStyle = theme.Styles().Pane
 	blurredWindowStyle = windowStyle.
 		BorderForeground(activeTheme.Border)
 	selectedWindowStyle = windowStyle.
-		BorderForeground(activeTheme.Accent)
+		BorderForeground(activeTheme.Border)
 	interactiveWindowStyle = windowStyle.
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(activeTheme.Accent)
@@ -63,16 +61,10 @@ func applyThemeStyles() {
 	paneHeaderStyle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(activeTheme.Ink)
-	paneHeaderFocusedStyle = lipgloss.NewStyle().
-		Bold(true).
-		Background(activeTheme.SurfaceRaised).
-		Foreground(activeTheme.Ink)
+	paneHeaderFocusedStyle = theme.Styles().PaneHeader
 	paneHeaderDimStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.InkMuted)
-	paneHeaderInteractiveStyle = lipgloss.NewStyle().
-		Bold(true).
-		Background(activeTheme.SurfaceRaised).
-		Foreground(activeTheme.Ink)
+	paneHeaderInteractiveStyle = theme.Styles().PaneHeader
 
 	sectionHeaderStyle = lipgloss.NewStyle().
 		Bold(true).
