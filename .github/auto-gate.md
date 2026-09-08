@@ -173,9 +173,10 @@ enumerating vendor stems is not sufficient (#3985). Classification is now
 structural: a top-level pull-review comment is a finding surface and never
 availability evidence (`pull_request_review_id` set with no `in_reply_to_id`,
 #3989). After also preserving a review body (`CODEX_REVIEW_RE` plus
-`REVIEWED_COMMIT_RE`), a finding-shaped inline reply, and a parseable summary or
-verdict, every other non-empty Codex-authored artifact is reviewer-unavailable
-with kind `unrecognised`. Its first body line is retained as the cause so the
+`REVIEWED_COMMIT_RE`), an automatic-review body (the Codex Review heading with a
+clean result, suggestions, or findings), a finding-shaped inline reply, and a
+parseable summary or verdict, every other non-empty Codex-authored artifact is
+reviewer-unavailable with kind `unrecognised`. Its first body line is retained as the cause so the
 gate summary names what it saw. Silence remains ordinary missing-review state;
 the absence of an artifact is not an unrecognised artifact. All unavailable
 responses use the same strictly-after-`headCurrentSince` timing rule and
