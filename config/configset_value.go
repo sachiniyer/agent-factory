@@ -440,8 +440,9 @@ type byteRange struct {
 // for source ranges: unlike line regexes it sees a multiline array or inline
 // table as one expression, so replacing session_env_passthrough cannot strand
 // half of the old value in the file. Unrelated expressions stay byte-identical.
+// root_agent is a field-wise patch: omitted profile members are retained.
 func setTOMLStructured(content, key, definition string) (string, error) {
-	definition, err := preserveUnknownStructuredMembers(content, key, definition)
+	definition, err := preserveStructuredMembers(content, key, definition)
 	if err != nil {
 		return "", err
 	}
@@ -467,13 +468,14 @@ func setTOMLStructured(content, key, definition string) (string, error) {
 	return setTOMLScalar(cleaned, "", key, strings.TrimSuffix(strings.TrimPrefix(definition, prefix), "\n")), nil
 }
 
-// preserveUnknownStructuredMembers carries fields this binary does not know
+// preserveStructuredMembers retains omitted root_agent profile fields and
+// carries fields this binary does not know
 // from the old target table into its replacement. The loader deliberately
 // ignores such fields for rollback tolerance; dropping them during an edit of a
 // known sibling would make that tolerance destructive. Dynamic map keys remain
-// ordinary user values, so omission still removes them. Only unknown members
-// inside a typed struct (including a struct stored in a map) are retained.
-func preserveUnknownStructuredMembers(content, key, definition string) (string, error) {
+// ordinary user values, so omission still removes them. For other typed structs
+// (including structs stored in maps), only unknown members are retained.
+func preserveStructuredMembers(content, key, definition string) (string, error) {
 	var existingDoc, replacementDoc map[string]any
 	if err := toml.Unmarshal([]byte(content), &existingDoc); err != nil {
 		return "", err
@@ -491,9 +493,27 @@ func preserveUnknownStructuredMembers(content, key, definition string) (string, 
 	if !ok {
 		return definition, nil
 	}
-	merged, changed, err := mergeUnknownStructuredMembers(existing, replacement, field.Type(), key)
-	if err != nil {
-		return "", err
+	var merged any
+	var changed bool
+	if key == "root_agent" {
+		previous, oldOK := existing.(map[string]any)
+		next, newOK := replacement.(map[string]any)
+		if !oldOK || !newOK {
+			return "", fmt.Errorf("root_agent must be a table")
+		}
+		for member, value := range previous {
+			if _, supplied := next[member]; !supplied {
+				next[member] = value
+				changed = true
+			}
+		}
+		merged = next
+	} else {
+		var err error
+		merged, changed, err = mergeUnknownStructuredMembers(existing, replacement, field.Type(), key)
+		if err != nil {
+			return "", err
+		}
 	}
 	if !changed {
 		return definition, nil

@@ -72,7 +72,7 @@ func ReservedTitleRefusal(title string) error {
 	if reserved == "" {
 		return nil
 	}
-	const remedy = `pick another name (to run a root agent on this repo, from this repo run ` +
+	const remedy = `pick another name (on the daemon host, with AF_DAEMON_URL unset and without --daemon-url, from this repo run ` +
 		"`af projects add .`, then enable its personal [root_agent] profile with " +
 		"`af config set --project . root_agent '{\"enabled\":true}'`; restart the daemon to apply)"
 	if IsReservedTitle(title) {
