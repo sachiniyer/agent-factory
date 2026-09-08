@@ -511,3 +511,14 @@ test("restore completion during reconnect queues its resync until app phase", ()
   assert.match(body, /startStream\(candidate\);[\s\S]*?if \(pendingRestoreResync\)[\s\S]*?requestResync\(\)/,
     "connect must consume the queued restore resync after starting the replacement stream");
 });
+
+test("an uncertain restore deadline uses the reconnect-aware resync path", () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8");
+  assert.match(source, /new PendingRestores\([\s\S]*?requestPendingRestoreResync,\n\)/,
+    "the ledger's deadline must request an authoritative Snapshot");
+  const body = topLevelFunction(source, "requestPendingRestoreResync");
+  assert.match(body, /phase === "app"\) requestResync\(\)/,
+    "a connected app must schedule the deadline Snapshot immediately");
+  assert.match(body, /else pendingRestoreResync = true/,
+    "a reconnecting app must retain the deadline Snapshot request until app phase");
+});

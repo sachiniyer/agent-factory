@@ -48,7 +48,6 @@ import {
   startAccountLogin,
   loadToken,
   probeAuthRequired,
-  probeToken,
   removeTask,
   renameTab,
   reorderTab,
@@ -193,6 +192,9 @@ const optimisticSessions = new OptimisticSessions();
 const pendingRestores = new PendingRestores(
   ids => store.set({ pendingRestores: ids }),
   e => isMutationCommittedError(e) || isMutationOutcomeUncertain(e),
+  isMutationCommittedError,
+  Date.now,
+  requestPendingRestoreResync,
 );
 const connectionGate = createLatestRequestGate();
 
@@ -377,10 +379,15 @@ function rerender(): void {
  *  token only when the daemon REJECTED it (shouldForgetToken). */
 async function connect(candidate: string): Promise<void> {
   const attempt = connectionGate.begin();
+  pendingRestores.reset();
+  const restoreSnapshot = pendingRestores.beginSnapshot();
   store.set({ connecting: true, loginError: null, loginCondition: undefined });
   let sessions: SessionData[];
+  let operationLockTimeoutMs: number | undefined;
   try {
-    sessions = await probeToken(candidate);
+    const snapshot = await fetchSessionSnapshot(candidate);
+    sessions = snapshot.sessions;
+    operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     // A rejected credential is forgotten so the next load prompts cleanly instead of
@@ -440,7 +447,7 @@ async function connect(candidate: string): Promise<void> {
     projectsError,
     registeredProjects,
   });
-  applySessions(sessions, { kind: "snapshot", generation: restoreSnapshot }, sessions);
+  applySessions(sessions, { kind: "snapshot", generation: restoreSnapshot, operationLockTimeoutMs }, sessions);
   resolvingRoute = false;
   resolveRoute();
   clearLoginRoute();
@@ -2486,6 +2493,11 @@ function requestResync(): void {
         // Transport failures retain state; the events stream owns reconnection.
       });
   }, 150);
+}
+
+function requestPendingRestoreResync(): void {
+  if (token !== null && store.get().phase === "app") requestResync();
+  else pendingRestoreResync = true;
 }
 
 // --- keyboard navigation ---------------------------------------------------

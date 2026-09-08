@@ -7,6 +7,8 @@ export type RestoreEvidence =
 // own admission deadline before an unchanged row proves no restore is queued.
 export const RESTORE_ADMISSION_MARGIN_MS = 1_000;
 
+type RestoreTimer = ReturnType<typeof globalThis.setTimeout>;
+
 /** Request fences outlive dialogs and remain until a successful restore is visible. */
 export class PendingRestores {
   private readonly tickets = new Map<string, {
@@ -16,16 +18,22 @@ export class PendingRestores {
     uncertainAt: number;
     uncertainSince: number;
     sawBusy: boolean;
+    timer: RestoreTimer | null;
     restoreEligible: RestoreRow["restoreEligible"];
   }>();
   private snapshotGeneration = 0;
   private rows: ReadonlyArray<RestoreRow> | null = null;
+  private operationLockTimeoutMs: number | null = null;
 
   constructor(
     private readonly changed: (ids: ReadonlySet<string>) => void,
     private readonly retainOnError: (error: unknown) => boolean = () => false,
     private readonly committedOnError: (error: unknown) => boolean = () => false,
     private readonly now: () => number = Date.now,
+    private readonly requestReconcile: () => void = () => {},
+    private readonly schedule: (callback: () => void, delayMs: number) => RestoreTimer =
+      (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+    private readonly cancel: (timer: RestoreTimer) => void = timer => globalThis.clearTimeout(timer),
   ) {}
 
   has(id: string): boolean {
@@ -41,6 +49,7 @@ export class PendingRestores {
       uncertainAt: this.snapshotGeneration,
       uncertainSince: 0,
       sawBusy: false,
+      timer: null,
       restoreEligible,
     };
     this.tickets.set(id, ticket);
@@ -62,13 +71,14 @@ export class PendingRestores {
             ticket.uncertainAt = this.snapshotGeneration;
             ticket.uncertainSince = this.now();
             ticket.sawBusy = false;
+            this.armUncertainTimer(id, ticket);
             if (this.committedOnError(error)) {
               ticket.settled = true;
               ticket.succeededAt = this.snapshotGeneration;
             }
             if (this.rows) this.observe(this.rows);
           } else {
-            this.tickets.delete(id);
+            this.release(id, ticket);
             this.changed(new Set(this.tickets.keys()));
           }
         }
@@ -77,8 +87,16 @@ export class PendingRestores {
     })();
   }
 
-  observe(rows: ReadonlyArray<RestoreRow>): void {
+  observe(rows: ReadonlyArray<RestoreRow>, evidence?: RestoreEvidence): void {
     this.rows = rows;
+    if (evidence?.kind === "snapshot") {
+      if (typeof evidence.operationLockTimeoutMs === "number" && evidence.operationLockTimeoutMs >= 0 &&
+        this.operationLockTimeoutMs !== evidence.operationLockTimeoutMs) {
+        this.operationLockTimeoutMs = evidence.operationLockTimeoutMs;
+        for (const ticket of this.tickets.values()) this.cancelTimer(ticket);
+      }
+      for (const [id, ticket] of this.tickets) this.armUncertainTimer(id, ticket);
+    }
     const eligibility = new Map(rows.map(row => [row.id, row.restoreEligible]));
     let changed = false;
     for (const [id, ticket] of this.tickets) {
@@ -104,7 +122,7 @@ export class PendingRestores {
         }
       }
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
-        this.tickets.delete(id);
+        this.release(id, ticket);
         changed = true;
       }
     }
@@ -112,8 +130,34 @@ export class PendingRestores {
   }
 
   reset(): void {
-    this.tickets.clear();
+    // Logical disconnect does not stop the HTTP request or daemon mutation.
+    for (const [id, ticket] of this.tickets) {
+      this.cancelTimer(ticket);
+      if (ticket.settled) this.tickets.delete(id);
+    }
     this.rows = null;
-    this.changed(new Set());
+    // Keep issuance stamps monotonic for requests that survive reconnect.
+    this.changed(new Set(this.tickets.keys()));
+  }
+
+  private armUncertainTimer(id: string, ticket: { uncertain: boolean; uncertainSince: number; timer: RestoreTimer | null }): void {
+    if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
+    const remaining = Math.max(0,
+      ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now());
+    ticket.timer = this.schedule(() => {
+      ticket.timer = null;
+      if (this.tickets.get(id) === ticket && ticket.uncertain) this.requestReconcile();
+    }, remaining);
+  }
+
+  private cancelTimer(ticket: { timer: RestoreTimer | null }): void {
+    if (ticket.timer === null) return;
+    this.cancel(ticket.timer);
+    ticket.timer = null;
+  }
+
+  private release(id: string, ticket: { timer: RestoreTimer | null }): void {
+    this.cancelTimer(ticket);
+    if (this.tickets.get(id) === ticket) this.tickets.delete(id);
   }
 }

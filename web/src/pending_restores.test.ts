@@ -3,6 +3,32 @@ import { test } from "node:test";
 import { ApiError, isMutationCommittedError, isMutationOutcomeUncertain, restoreSession } from "./api.js";
 import { PendingRestores, RESTORE_ADMISSION_MARGIN_MS } from "./pending_restores.js";
 
+function fakeRestoreTimer() {
+  let callback: (() => void) | null = null;
+  let delay = -1;
+  let cancellations = 0;
+  return {
+    schedule(fn: () => void, delayMs: number): ReturnType<typeof globalThis.setTimeout> {
+      callback = fn;
+      delay = delayMs;
+      return 1 as unknown as ReturnType<typeof globalThis.setTimeout>;
+    },
+    cancel(): void {
+      callback = null;
+      cancellations++;
+    },
+    fire(): void {
+      const fn = callback;
+      callback = null;
+      assert.ok(fn, "an uncertain ticket must have an armed reconciliation timer");
+      fn();
+    },
+    delay: () => delay,
+    cancellations: () => cancellations,
+    armed: () => callback !== null,
+  };
+}
+
 test("two Restore clicks send one request without a failure modal; the advanced row releases the fence", async t => {
   let release!: () => void;
   const response = new Promise<void>(resolve => { release = resolve; });
@@ -187,6 +213,63 @@ test("a never-admitted uncertain restore releases after the daemon admission bou
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), false);
+});
+
+test("an early Snapshot schedules reconciliation at the uncertain admission deadline", async () => {
+  let now = 1_000;
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  let reconciliations = 0;
+  let pending!: PendingRestores;
+  pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => now,
+    () => {
+      reconciliations++;
+      pending.observe(rows, {
+        kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+      });
+    },
+    timer.schedule,
+    timer.cancel,
+  );
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  assert.equal(timer.armed(), false, "no daemon admission bound has been observed yet");
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
+  assert.equal(pending.has("session"), true);
+  assert.equal(timer.delay(), 30_000 + RESTORE_ADMISSION_MARGIN_MS);
+
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  timer.fire();
+  assert.equal(reconciliations, 1);
+  assert.equal(pending.has("session"), false);
+});
+
+test("early release and reset cancel an uncertain ticket's reconciliation timer", async () => {
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => 1_000, () => {}, timer.schedule, timer.cancel,
+  );
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  assert.equal(timer.armed(), true);
+  pending.observe([{ id: "session", restoreEligible: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
+  assert.equal(pending.has("session"), false);
+  assert.equal(timer.armed(), false);
+  assert.equal(timer.cancellations(), 1);
+
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  assert.equal(timer.armed(), true);
+  pending.reset();
+  assert.equal(timer.armed(), false);
+  assert.equal(timer.cancellations(), 2);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(timer.armed(), true, "the surviving ticket must rearm from the replacement connection's Snapshot");
+  pending.reset();
+  assert.equal(timer.cancellations(), 3);
 });
 
 test("a delayed still-eligible update cannot settle a successful Lost restore", async () => {
