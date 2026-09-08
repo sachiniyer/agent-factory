@@ -3194,17 +3194,20 @@ textarea[class] {
   font-weight: 600;
   flex-shrink: 0;
 }
-.af-session-state[data-state=ready] {
+.af-session-state[data-state=needs-you] {
   color: var(--af-ready);
 }
-.af-session-state[data-state=lost] {
+.af-session-state[data-state=working] {
+  color: var(--af-running);
+}
+.af-session-state[data-state=waiting-limit] {
+  color: var(--af-limit-reached);
+}
+.af-session-state[data-state=broken] {
   color: var(--af-lost);
 }
-.af-session-state[data-state=dead] {
-  color: var(--af-dead);
-}
-.af-session-state[data-state=limit] {
-  color: var(--af-limit-reached);
+.af-session-state[data-state=archived] {
+  color: var(--af-archived);
 }
 .af-session-owner,
 .af-session-location {

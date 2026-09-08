@@ -14283,9 +14283,13 @@ function editTaskModal(projects, task, callbacks) {
 function sessionIdentity(s) {
   return `${s.current_agent || "Agent not reported"} \xB7 ${s.account || "Default account"}`;
 }
+function sessionOperatorState(s) {
+  return operatorKind(s);
+}
 function patchSessionIdentity(node, s) {
-  const state = h("span", { class: "af-session-state" }, OPERATOR_KIND_LABELS[operatorKind(s)]);
-  state.dataset.state = rowStatus(s).kind ?? "working";
+  const operator = sessionOperatorState(s);
+  const state = h("span", { class: "af-session-state" }, OPERATOR_KIND_LABELS[operator]);
+  state.dataset.state = operator;
   const owner = h("span", { class: "af-session-owner" }, sessionIdentity(s));
   const repo = s.worktree?.repo_path;
   const location2 = [repo?.replace(/\/+$/, "").split("/").pop(), s.branch].filter(Boolean).join(" \xB7 ");

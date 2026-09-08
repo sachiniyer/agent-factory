@@ -27,19 +27,19 @@
     "Temporary capture mount with AF_TUI_DESIGN_CAPTURE; scripts/testbox.sh test ./ui ./app -count=1. Capture helper removed from the final diff with the TUI exemplar."
   ],
   "reviewed_changed_goldens": {
-    "browser": 116,
+    "browser": 118,
     "existing_tui": 0,
     "new_tui": 0
   },
   "budgets": "Numeric performance budgets and visual tolerance unchanged. Desktop header geometry intentionally expands from <64px to <144px for two rows of identity and controls; phone remains 48px.",
   "source_sha256": {
     "design/tokens.json": "b2ff239143d4b23d8d5ad9c15e893e1d0d3b9a6ce3a25dcaed646c57fc1db693",
-    "design/style-guide.tmpl": "38ab6ef414745cb117316bcb99feaab563b710ac3286aa04cd831398e73f75e8",
+    "design/style-guide.tmpl": "ef3de7e30751c263f8b49491d3d0c28b9934af71e7165d87819fd0252a496063",
     "internal/designtokens/generate.go": "b4c4b57515dc3c62b2e62479d826ab2818201ef6bc59400cedd5307244e9942e",
-    "web/src/sessions-thesis.css": "46c118e4fc78687cf45f28586a57513d559d9c0d0a2fe23484d144dc018c82f6",
-    "web/src/session-identity.ts": "bd0e3f04d0bcf71266668b9569baa232a899d7e85d12addecc219eb27b1f7661",
-    "web/src/components.ts": "7250b3f770608435984a5e587c440babf0addf62e28f4ebf3b2f441c0882b28d",
-    "web/src/ui.ts": "3d112b3f93ff84dbb56aefdb4ac80dbd409f9ab29a217c258b2537eacd404c75"
+    "web/src/sessions-thesis.css": "50de2f6b7268fa6b4ed88425072df74209e172e2d2109e1ad2a1ac3db2d96d80",
+    "web/src/session-identity.ts": "07f5736bf5b5affd6ba9a2943fd279dda036d1c8a909463c876109a4fc4bb543",
+    "web/src/components.ts": "158cdfbc292c22648323b15a04e8613cd42ae8f5c8e94384a76ebf40b8f8a394",
+    "web/src/ui.ts": "d027cd0fe0bc9ae990319c1a231f286eb2c90a2fead05231f3fd59070df052a7"
   },
   "revision_before_commit": "0a47c3f080af8aab1343ba58d6fe174535c30876",
   "revision_before_run": "2865088-77e8e3",

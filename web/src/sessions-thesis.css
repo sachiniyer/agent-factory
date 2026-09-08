@@ -57,10 +57,11 @@
 .af-view-sessions .af-operator-state { font-weight: 600; font-size: var(--af-type-caption); }
 .af-session-identity { display: flex; gap: var(--af-space-2); font-size: var(--af-type-caption); color: var(--af-ink-muted); min-width: 0; }
 .af-session-state { font-weight: 600; flex-shrink: 0; }
-.af-session-state[data-state="ready"] { color: var(--af-ready); }
-.af-session-state[data-state="lost"] { color: var(--af-lost); }
-.af-session-state[data-state="dead"] { color: var(--af-dead); }
-.af-session-state[data-state="limit"] { color: var(--af-limit-reached); }
+.af-session-state[data-state="needs-you"] { color: var(--af-ready); }
+.af-session-state[data-state="working"] { color: var(--af-running); }
+.af-session-state[data-state="waiting-limit"] { color: var(--af-limit-reached); }
+.af-session-state[data-state="broken"] { color: var(--af-lost); }
+.af-session-state[data-state="archived"] { color: var(--af-archived); }
 .af-session-owner, .af-session-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (min-width: 769px) {
