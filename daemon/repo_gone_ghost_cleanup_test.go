@@ -293,34 +293,21 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	})
 
 	previousLateDelete := lateGhostDeleteSessionRecord
-	releaseOldFinalizer := make(chan struct{})
-	oldFinalizerStarted := make(chan struct{})
-	oldFinalizerDone := make(chan struct{})
-	oldFinalizerReleased := false
+	releaseFinalizer := make(chan struct{})
 	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, error) {
-		close(oldFinalizerStarted)
-		<-releaseOldFinalizer
-		close(oldFinalizerDone)
+		<-releaseFinalizer
 		return false, nil
 	}
-	t.Cleanup(func() {
-		if !oldFinalizerReleased {
-			close(releaseOldFinalizer)
-		}
-		select {
-		case <-oldFinalizerStarted:
-			select {
-			case <-oldFinalizerDone:
-			case <-time.After(time.Second):
-			}
-		default:
-		}
-		lateGhostDeleteSessionRecord = previousLateDelete
-	})
-
 	previousDeleteTimeout := session.InstanceDeleteLockTimeout
 	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
-	t.Cleanup(func() { session.InstanceDeleteLockTimeout = previousDeleteTimeout })
+	t.Cleanup(func() {
+		close(releaseFinalizer)
+		// KillSession has returned, so its finalizer is registered. Join the
+		// whole worker before restoring any seams it can still read (#4063).
+		manager.lateGhostCleanupWG.Wait()
+		lateGhostDeleteSessionRecord = previousLateDelete
+		session.InstanceDeleteLockTimeout = previousDeleteTimeout
+	})
 
 	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
 	require.ErrorIs(t, err, config.ErrLockTimeout)
@@ -337,8 +324,6 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 
 	releaseLock()
 	releaseLock = nil
-	close(releaseOldFinalizer)
-	oldFinalizerReleased = true
 }
 
 func retainedTreeReport(t *testing.T, retained string) *sessiongit.ArchiveReport {

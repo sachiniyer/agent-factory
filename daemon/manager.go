@@ -371,6 +371,10 @@ type Manager struct {
 	// after restart; this map prevents a second worker in the same daemon process.
 	// Values are stable IDs so title reuse cannot inherit an old fence.
 	ghostCleanupStalls map[string]string
+	// lateGhostCleanupWG joins detached finalizers before tests restore their
+	// seams. Launchers must return before waiting so every Add precedes Wait;
+	// the production kill path never waits for these retrying workers.
+	lateGhostCleanupWG sync.WaitGroup
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
