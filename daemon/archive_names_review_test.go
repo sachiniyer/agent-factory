@@ -54,7 +54,7 @@ func TestArchiveDirectoryBackendScope(t *testing.T) {
 }
 
 func TestArchiveDirectoryPortableComparison(t *testing.T) {
-	for _, pair := range [][2]string{{"Caf\u00e9", "Cafe\u0301"}, {"Feature", "feature"}, {"x/Σz", "x-ςz"}, {"x/Σz", "x-σz"}, {"Feature", "unrelated"}} {
+	for _, pair := range [][2]string{{"Caf\u00e9", "Cafe\u0301"}, {"Feature", "feature"}, {"x/Σz", "x-ςz"}, {"x/Σz", "x-σz"}, {"x/\u017f\u0301z", "x-\u015az"}, {"Feature", "unrelated"}} {
 		for _, source := range []string{"live", "disk", "reserved"} {
 			t.Run(pair[0]+"_"+pair[1]+"_"+source, func(t *testing.T) {
 				m := &Manager{instances: make(map[string]*session.Instance), reservedTitles: make(map[string]struct{}), reservedArchiveTitles: make(map[string]struct{})}
@@ -100,4 +100,11 @@ func TestArchiveDirectoryIgnoresRemoteClaims(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestArchiveTitleKeyNormalizesFoldOutput(t *testing.T) {
+	// Long s plus acute folds to a decomposed s plus acute; capital S with
+	// acute folds to a precomposed small s with acute. Both keys must be NFC.
+	require.Equal(t, archiveTitleKey("x/\u017f\u0301z"), archiveTitleKey("x-\u015az"))
+	require.Equal(t, "x-\u015bz", archiveTitleKey("x/\u017f\u0301z"))
 }

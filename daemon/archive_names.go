@@ -71,7 +71,9 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 // including case-sensitive Linux filesystems. Keep sanitizeArchiveTitle as the
 // on-disk spelling; only namespace admission folds case and Unicode composition.
 func archiveTitleKey(title string) string {
-	return cases.Fold().String(norm.NFC.String(sanitizeArchiveTitle(title)))
+	folded := cases.Fold().String(norm.NFC.String(sanitizeArchiveTitle(title)))
+	// Folding can decompose NFC input, so normalize the result as well.
+	return norm.NFC.String(folded)
 }
 
 // checkArchiveDestination runs before editors, hooks, or tabs are stopped.
