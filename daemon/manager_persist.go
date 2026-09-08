@@ -55,7 +55,7 @@ var testHookPersistInstanceData = func(string, session.InstanceData) error { ret
 // persistInstanceData replaces the on-disk record for data.Title in repoID's
 // instances file with data, under the per-repo file lock, leaving every other
 // record untouched. It is the targeted, clobber-safe persist primitive for
-// in-place mutations of an existing session (CloseTab, SetPRInfo, status/limit
+// in-place mutations of an existing session (CloseTab, status/limit
 // polls, archive) — the single-writer direction of #960 — analogous to
 // appendInstanceData for creates and DeleteInstanceByStableID for kills. It
 // deliberately does NOT use a whole-list SaveInstances, which would re-serialize

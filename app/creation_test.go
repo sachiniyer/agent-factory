@@ -73,20 +73,16 @@ func newTestHome(t *testing.T) *home {
 	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	// Tab mutations and PR-info refresh pokes route through daemon RPCs.
+	// Tab mutations route through daemon RPCs.
 	// Stub the seams with safe defaults so tests that incidentally trigger them
 	// never dial — or spawn — a real daemon. Tests exercising these paths
 	// override the relevant seam. createTab/closeTab default to an error so an
-	// unstubbed mutation fails loudly rather than reaching the daemon; PR refresh
-	// defaults to a no-op because snapshots own the projected badge.
+	// unstubbed mutation fails loudly rather than reaching the daemon.
 	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return daemon.CreateTabResponse{}, fmt.Errorf("createTabThroughDaemon not stubbed in test")
 	}))
 	t.Cleanup(SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
-	}))
-	t.Cleanup(SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error {
-		return nil
 	}))
 	// The snapshot poll also asks the daemon which tasks are actually armed
 	// (#3626). It dials rather than spawns, so an unstubbed call would fail

@@ -305,20 +305,6 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(ReorderTabRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ReorderTab) },
 	},
-	{
-		Method:      http.MethodPost,
-		Path:        "/v1/SetPRInfo",
-		Description: "Compatibility route for older clients to record or clear GitHub PR info. New clients should call RefreshPRInfo with session identity only so discovery and projected fields stay daemon-owned.",
-		requestType: reflect.TypeOf(SetPRInfoRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetPRInfo) },
-	},
-	{
-		Method:      http.MethodPost,
-		Path:        "/v1/RefreshPRInfo",
-		Description: "Ask the daemon to refresh a session's GitHub PR projection. The request carries session identity only; discovery is cancellable and server-side debounced. Returns an error when gh is unavailable in the daemon environment.",
-		requestType: reflect.TypeOf(RefreshPRInfoRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.refreshPRInfo) },
-	},
 
 	// Accounts (#3384). The login verb the CLI, the TUI config tab and the web all
 	// drive rather than each reimplementing an interactive flow (#3385). Not

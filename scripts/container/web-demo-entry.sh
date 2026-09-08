@@ -173,35 +173,6 @@ cp /work/scripts/container/web-demo-agent.sh "$DEMO_AGENT"
 chmod +x "$DEMO_AGENT"
 chmod 0777 "$MARKERS"
 
-# --- a stand-in `gh`, so the PR badge has something to discover -------------
-# The daemon is the sole producer of the pr_info projection and it produces it
-# by running `gh pr list` in the session's repo (session/git/github.go). The
-# sandbox has no GitHub remote and no network, so without a stand-in the demo
-# could never show the badge — one of the few places the web client puts the
-# normal review path in front of you.
-#
-# It answers for ONE branch, so exactly one session carries a badge, which is
-# also the honest picture: you open a PR when the work is ready, not on create.
-# The URL points at an org that does not exist; nothing in the recording is a
-# link to somebody's real pull request.
-cat >/usr/local/bin/gh <<EOF
-#!/bin/sh
-# Stand-in for the GitHub CLI inside the demo sandbox. See web-demo-entry.sh.
-case "\$*" in
-    *"pr list"*"$SESSION_JSON"*)
-        printf '%s\n' '[{"number":128,"title":"Add a json command to todo.sh","url":"https://github.com/agent-factory-demo/todo-cli/pull/128","state":"OPEN"}]'
-        ;;
-    *"pr list"*)
-        printf '%s\n' '[]'
-        ;;
-    *)
-        echo "demo gh stand-in: unsupported command: \$*" >&2
-        exit 1
-        ;;
-esac
-EOF
-chmod +x /usr/local/bin/gh
-
 # --- the review tab's command ----------------------------------------------
 # A process tab that prints the worktree's own diff and then holds the pane
 # open. This is an ordinary AF process tab running an ordinary git command in
@@ -365,8 +336,7 @@ for m in json usage docs; do
     fi
 done
 
-# The review tab, on the session that also carries the PR badge, so one frame
-# shows the whole review path: the branch's diff beside a link to its PR.
+# The review tab shows the branch diff beside the agent terminal.
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_JSON" --command demo-diff --name diff >/dev/null
 
 # --- scheduled tasks --------------------------------------------------------
@@ -383,22 +353,6 @@ echo ">>> seeding scheduled tasks ..."
 "$BIN" tasks add --repo "$MOCK" --name weekly-dependency-sweep \
     --cron "30 $LATER_HOUR * * 1" \
     --prompt "Check the project's dependencies and summarize what is behind." >/dev/null
-
-# --- wait for the PR badge --------------------------------------------------
-# The daemon's PR sweep runs once a minute, so the badge lands on its own — but
-# only once. Waiting for it here rather than in the browser keeps the recording
-# free of a minute of nothing happening.
-echo ">>> waiting for the daemon's PR sweep to discover the stand-in PR ..."
-for _ in $(seq 1 150); do
-    if "$BIN" sessions get "$SESSION_JSON" --repo "$MOCK" 2>/dev/null | grep -q 'pull/128'; then
-        break
-    fi
-    sleep 1
-done
-if ! "$BIN" sessions get "$SESSION_JSON" --repo "$MOCK" 2>/dev/null | grep -q 'pull/128'; then
-    echo "FATAL: no pr_info on $SESSION_JSON; the review beat would show no PR badge" >&2
-    exit 1
-fi
 
 # --- size the seeded panes --------------------------------------------------
 # A tmux pane opens at 80x24 when nothing is attached, and every pane above was

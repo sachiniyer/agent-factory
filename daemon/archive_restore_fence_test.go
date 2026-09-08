@@ -156,7 +156,7 @@ func TestRestoreArchived_KillIsHiddenAcrossTheLocalRelocate(t *testing.T) {
 // IsArchived is `liveness == LiveArchived` ALONE — it does not read the op axis,
 // contrary to the premise this issue was filed on — so it stays true across the
 // relocate and the inert-state gates it guards (tab spawn, tab close/arrange, web
-// tab serve, conversation capture, PR-info refresh) are unaffected. That is
+// tab serve, conversation capture) are unaffected. That is
 // strictly better than the status quo it preserves: those gates stay CLOSED
 // through the mid-move window rather than opening early. No narrowing is owed.
 func TestRestoreArchived_FenceKeepsLivenessArchivedAndReHomesTheRow(t *testing.T) {

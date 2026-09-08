@@ -640,9 +640,6 @@ func TestControlServer_CloseTab_GatedAndValidated(t *testing.T) {
 // socket — exercising the full client → RPC → Manager → persist wire path. It is
 // hermetic: the launch seam is stubbed so a ping race can never fork the real
 // daemon, and the socket lives under the test temp HOME.
-//
-// SetPRInfo used to ride along here; see the note at the end of the body for
-// where its coverage moved.
 func TestRPCClients_CloseTab_RoundTrip(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
@@ -684,10 +681,6 @@ func TestRPCClients_CloseTab_RoundTrip(t *testing.T) {
 	if inst.TabCount() != 1 {
 		t.Fatalf("expected 1 tab after client CloseTab, got %d", inst.TabCount())
 	}
-	// The SetPRInfo net/rpc client wrapper moved onto the HTTP apiclient in #1592
-	// Phase 2 PR3 (the TUI was its only caller), so this round-trip now covers
-	// CloseTab alone. The controlServer.SetPRInfo handler stays covered by
-	// set_prinfo_test.go.
 }
 
 // TestCloseTab_RefusesTheDisplayedLabelButNamesTheTab is the #1986 flip of the

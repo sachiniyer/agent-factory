@@ -17,7 +17,7 @@ import (
 // shape, so a caller swaps `daemon.X(req)` for `client.X(req)` with no other
 // change and gets byte-identical results (the envelope guarantees parity). The
 // TUI is the first full consumer — it now routes create/kill/archive/restore/
-// tab/PR-info/task/poll-pause/limit-resume through here instead of net/rpc, so
+// tab/task/poll-pause/limit-resume through here instead of net/rpc, so
 // the gob control client stays only for CLI/internal callers.
 
 // CreateSession asks the daemon to create, start, and persist a session.
@@ -138,11 +138,6 @@ func (c *Client) CloseTab(req daemon.CloseTabRequest) (string, error) {
 // because the TUI genuinely calls them (app/session_control.go) — would be dead
 // code whose only caller was its own test. Add them the day the TUI grows a
 // rename/reorder surface.
-
-// RefreshPRInfo asks the daemon to discover and project a session's GitHub PR.
-func (c *Client) RefreshPRInfo(req daemon.RefreshPRInfoRequest) error {
-	return c.call("RefreshPRInfo", req, &daemon.RefreshPRInfoResponse{})
-}
 
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort attach coordination; it rides an
