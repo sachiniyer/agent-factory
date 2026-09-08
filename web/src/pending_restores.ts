@@ -5,9 +5,6 @@ export class PendingRestores {
   private readonly tickets = new Map<string, {
     settled: boolean;
     uncertain: boolean;
-    sawBusy: boolean;
-    eligibleSnapshots: number;
-    lastUncertainSnapshot: number;
     succeededAt: number | null;
     uncertainAt: number;
     restoreEligible: RestoreRow["restoreEligible"];
@@ -29,9 +26,6 @@ export class PendingRestores {
     const ticket = {
       settled: false,
       uncertain: false,
-      sawBusy: false,
-      eligibleSnapshots: 0,
-      lastUncertainSnapshot: -1,
       succeededAt: null as number | null,
       uncertainAt: this.snapshotGeneration,
       restoreEligible,
@@ -75,24 +69,16 @@ export class PendingRestores {
     for (const [id, ticket] of this.tickets) {
       const row = rows.find(candidate => candidate.id === id);
       const authoritative = evidence?.kind === "updated" || evidence?.kind === "restored" || evidence?.kind === "snapshot";
-      if (ticket.uncertain && authoritative && row && !row.restoreEligible) {
-        ticket.sawBusy = true;
-      }
-      if (ticket.uncertain && !ticket.sawBusy && evidence?.kind === "snapshot" &&
-        row?.restoreEligible && evidence.generation > ticket.uncertainAt &&
-        evidence.generation !== ticket.lastUncertainSnapshot) {
-        ticket.lastUncertainSnapshot = evidence.generation;
-        ticket.eligibleSnapshots += 1;
-      }
       // A delayed recover-fence update may arrive after HTTP success. Only a
       // Snapshot issued afterward proves completion. Identity-only restored events
       // carry no attempt id and may belong to a previous restore cycle.
       const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" &&
         evidence.generation > ticket.succeededAt;
-      const uncertainCompleted = ticket.uncertain && authoritative &&
-        (!eligibility.has(id) || (row?.restoreEligible === true &&
-          ((ticket.sawBusy && (evidence?.kind !== "snapshot" || evidence.generation > ticket.uncertainAt)) ||
-            (!ticket.sawBusy && ticket.eligibleSnapshots >= 2))));
+      const causalUncertainEvidence = evidence?.kind === "snapshot"
+        ? evidence.generation > ticket.uncertainAt
+        : (evidence?.kind === "updated" || evidence?.kind === "restored") && evidence.id === id;
+      const uncertainCompleted = ticket.uncertain && authoritative && causalUncertainEvidence &&
+        (!eligibility.has(id) || row?.restoreEligible === true);
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
         this.tickets.delete(id);
         changed = true;

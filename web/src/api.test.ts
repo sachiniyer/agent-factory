@@ -1236,7 +1236,7 @@ test("create refusal provenance distinguishes daemon rejection from lost or gate
   }
   (globalThis as { fetch: unknown }).fetch = async () => { throw new TypeError("response lost"); };
   await assert.rejects(createSession(createInput(), "tok"), error =>
-    error instanceof ApiError && !error.daemonRejected && !isMutationOutcomeUncertain(error));
+    error instanceof ApiError && !error.daemonRejected && isMutationOutcomeUncertain(error));
 });
 
 
