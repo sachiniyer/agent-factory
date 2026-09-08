@@ -57,6 +57,10 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 			g.AbandonHookProgress()
 			continue
 		}
+		if g.HasUnresolvedRelocation() {
+			log.WarningLog.Printf("cannot adopt post-worktree hooks for %s: relocation recovery is unresolved; leaving hook journal pending", g.worktreePath)
+			continue
+		}
 		// A worktree with a live in-process run already reports itself, and
 		// overwriting its channel would strand the join cancelAndWaitHooks does.
 		// Restore always arrives here with none, so this is a guard rather than a

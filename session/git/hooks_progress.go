@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -136,7 +137,7 @@ func (p *hookProgress) finish() {
 }
 
 func (g *GitWorktree) adoptHookProgress() bool {
-	if g.IsExternalWorktree() {
+	if g.IsExternalWorktree() || g.HasUnresolvedRelocation() {
 		return false
 	}
 	p, _, err := g.ownedHookProgress()
@@ -165,7 +166,7 @@ func (g *GitWorktree) adoptHookProgress() bool {
 		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		var lastProbeError string
+		var lastProbeError, lastIdentityError string
 		for {
 			if ctx.Err() != nil {
 				p.finish()
@@ -182,7 +183,21 @@ func (g *GitWorktree) adoptHookProgress() bool {
 				lastProbeError = ""
 			}
 			if probeErr == nil && len(live) == 0 {
-				break
+				err := verifyHookResumeWorktree(ctx, repoPath, p.Worktree, branchName)
+				if err == nil {
+					if lastIdentityError != "" {
+						log.InfoLog.Printf("hook worktree verification recovered for %s", p.Worktree)
+					}
+					break
+				}
+				if errors.Is(err, errWorktreeIdentityMismatch) {
+					log.WarningLog.Printf("cannot resume post-worktree hooks for %s: %v; leaving hook journal pending for worktree recovery", p.Worktree, err)
+					return
+				}
+				if message := err.Error(); message != lastIdentityError {
+					log.WarningLog.Printf("waiting to verify post-worktree hooks for %s: %v", p.Worktree, err)
+					lastIdentityError = message
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -190,10 +205,6 @@ func (g *GitWorktree) adoptHookProgress() bool {
 				return
 			case <-ticker.C:
 			}
-		}
-		if err := verifyHookResumeWorktree(ctx, repoPath, p.Worktree, branchName); err != nil {
-			log.WarningLog.Printf("cannot resume post-worktree hooks for %s: %v; leaving hook journal pending for worktree recovery", p.Worktree, err)
-			return
 		}
 		log.InfoLog.Printf("resuming remaining post-worktree hooks for %s", p.Worktree)
 		<-runPostWorktreeHooks(ctx, hookRun{worktreePath: p.Worktree, repoPath: repoPath, passthrough: p.Passthrough, progress: p, onScopeLaunched: g.SetHookScopeUnitPrefix})

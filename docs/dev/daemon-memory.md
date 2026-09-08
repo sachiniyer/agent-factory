@@ -410,13 +410,19 @@ owners: it keeps
 the newest 20 eligible journals for up to 14 days, with a five-second grace
 period. Unpublished receipt directories are removed on publication failure;
 unreferenced directories left by a crash are pruned after the same grace period.
-A missing or replaced checkout leaves the journal pending for normal worktree
-recovery rather than executing commands in its replacement.
+Transient registration or occupant-probe failures are retried with duplicate
+warnings suppressed; hooks remain in flight until verification succeeds and the
+remaining list finishes. A conclusive missing or replaced checkout leaves the
+journal pending for normal worktree recovery rather than executing commands in
+its replacement. Unresolved relocation recovery blocks adoption without
+finishing the journal, even when the recorded occupant still matches.
 Terminal journals with deleted or archived owners and missing exit receipts
 are reclaimed after the grace period once no scope or launcher remains, even
 if a daemon exit interrupted the retry. Active scopes, nonterminal journals,
 and journals with live owners are excluded;
-unreadable session state or scope probes prevent pruning. Older runs without a
+unreadable session state or scope probes prevent pruning. Scope checks use at
+most two batched probes per sweep, including the final deletion check, so a
+manager outage cannot hold the journal lock for one timeout per candidate. Older runs without a
 progress record or a recorded owning session ID retain survivor observation only.
 
 Both repository-controlled `post_worktree_commands` (`session/git/hooks.go`)

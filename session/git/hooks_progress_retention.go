@@ -112,16 +112,36 @@ func pruneHookProgress(dir string, now time.Time) {
 			}
 			return candidates[i].modified.After(candidates[j].modified)
 		})
-		removed, kept := 0, 0
+		var reclaim []keptProgress
+		kept := 0
 		for _, candidate := range candidates {
 			if !candidate.terminalIncomplete && kept < keptProgressLimit && now.Sub(candidate.modified) <= keptProgressAge {
 				kept++
 				continue
 			}
-			// A terminal marker can precede teardown. Even completed-looking receipts
-			// are not sufficient evidence while a scope or delayed launcher survives.
-			live, err := systemdunit.RunningHookPrefixes(candidate.progress.Prefix)
-			if err != nil || len(live) != 0 {
+			reclaim = append(reclaim, candidate)
+		}
+		// Recheck the final deletion set once, not once per journal: each
+		// manager outage must consume a constant number of probe timeouts
+		// while this home-wide publication lock is held.
+		if len(reclaim) == 0 {
+			return nil
+		}
+		prefixes = nil
+		for _, candidate := range reclaim {
+			prefixes = append(prefixes, candidate.progress.Prefix)
+		}
+		live, err := systemdunit.RunningHookPrefixes(prefixes...)
+		if err != nil {
+			return err
+		}
+		running := make(map[string]bool)
+		for _, prefix := range live {
+			running[prefix] = true
+		}
+		removed := 0
+		for _, candidate := range reclaim {
+			if running[candidate.progress.Prefix] {
 				continue
 			}
 			if err := removeHookProgress(candidate.path, candidate.progress); err != nil {
