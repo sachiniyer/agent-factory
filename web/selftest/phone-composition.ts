@@ -20,11 +20,11 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       if (committed === "가나") input.value += "ᄀ"; // shorter provisional value
       if (committed === "ab") input.value += "a"; // append-shaped final commit
       input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: eventData }));
-      if (postCommit) input.dispatchEvent(new InputEvent("beforeinput", {
+      if (postCommit || trailing) input.dispatchEvent(new InputEvent("beforeinput", {
         bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
       }));
       input.value = input.value.substring(0, start) + committed;
-      if (postCommit) input.dispatchEvent(new InputEvent("input", {
+      if (postCommit || trailing) input.dispatchEvent(new InputEvent("input", {
         bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
       }));
       if (trailing) {

@@ -11,10 +11,11 @@ interface CompositionRange {
 export class TerminalSoftInput {
   private active: CompositionRange | undefined;
   private readonly pending: CompositionRange[] = [];
+  private keyDownSeen = false;
   private staleKeydown = false;
-  private readonly onKeyDown = (): void => { this.staleKeydown = true; };
-  private readonly onKeyUp = (): void => { this.staleKeydown = false; };
-  private readonly onBlur = (): void => { this.staleKeydown = true; };
+  private readonly onKeyDown = (): void => { this.keyDownSeen = true; this.staleKeydown = false; };
+  private readonly onKeyUp = (): void => { this.keyDownSeen = false; this.staleKeydown = false; };
+  private readonly onBlur = (): void => { if (this.keyDownSeen) this.staleKeydown = true; };
   private readonly onCompositionStart = (): void => {
     // Xterm retains a finalized range when another composition starts before
     // its delayed send (CompositionHelper.ts:137-163). Freeze that boundary,

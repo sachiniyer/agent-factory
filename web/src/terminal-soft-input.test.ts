@@ -336,12 +336,14 @@ test("unmodified soft input remains native so xterm can observe Backspace", () =
     if ((event as InputEvent).inputType === "deleteContentBackward") writes.push("\x7f");
   });
   const soft = new TerminalSoftInput(host, textarea, () => true, () => false, text => writes.push(text), () => false);
+  textarea.dispatchEvent(new Event("keydown"));
   const typed = insertText("a", "beforeinput");
   host.dispatchEvent(typed);
   assert.equal(typed.defaultPrevented, false);
   textarea.value = "a";
   host.dispatchEvent(insertText("a"));
   assert.equal(textarea.value, "a");
+  textarea.dispatchEvent(new Event("keyup"));
   const backspace = Object.assign(new Event("beforeinput", { cancelable: true }), {
     inputType: "deleteContentBackward", data: null,
   });
@@ -400,5 +402,21 @@ test("stale keydown recovers composed input without a modifier", () => {
   host.dispatchEvent(input);
   assert.equal(input.defaultPrevented, true);
   assert.deepEqual(writes, ["a"]);
+  soft.dispose();
+});
+
+test("a fresh keydown after blur keeps native input ownership", () => {
+  const host = new EventTarget();
+  const textarea = new EventTarget();
+  const writes: string[] = [];
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, text => writes.push(text), () => false);
+  textarea.dispatchEvent(new Event("keydown"));
+  textarea.dispatchEvent(new Event("blur"));
+  textarea.dispatchEvent(new Event("keydown"));
+  const input = insertText("a", "beforeinput", true);
+  host.dispatchEvent(input);
+  assert.equal(input.defaultPrevented, false);
+  assert.deepEqual(writes, []);
+  textarea.dispatchEvent(new Event("keyup"));
   soft.dispose();
 });
