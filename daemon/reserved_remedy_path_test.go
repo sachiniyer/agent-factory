@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -24,26 +25,32 @@ func TestReservedTitleRemedyUsesRepoPath(t *testing.T) {
 }
 
 func TestReservedTitleRemedyUsesLinkedWorktreeForBareRepo(t *testing.T) {
-	base := t.TempDir()
-	source := filepath.Join(base, "source")
-	bare := filepath.Join(base, "repo.git")
-	workspace := filepath.Join(base, "worktree")
+	realBase := t.TempDir()
+	linkParent := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(realBase, linkParent))
+	source := filepath.Join(linkParent, "source")
+	bare := filepath.Join(linkParent, "repo.git")
+	workspace := filepath.Join(linkParent, "worktree")
 	require.NoError(t, exec.Command("git", "init", "-q", "-b", "master", source).Run())
 	require.NoError(t, exec.Command("git", "-C", source, "config", "user.email", "test@example.com").Run())
 	require.NoError(t, exec.Command("git", "-C", source, "config", "user.name", "test").Run())
 	require.NoError(t, exec.Command("git", "-C", source, "commit", "-q", "--allow-empty", "-m", "initial").Run())
 	require.NoError(t, exec.Command("git", "clone", "-q", "--bare", source, bare).Run())
 	require.NoError(t, exec.Command("git", "-C", bare, "worktree", "add", "-q", workspace, "master").Run())
+	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
+	require.NoError(t, err)
+	resolvedBare, err := filepath.EvalSymlinks(bare)
+	require.NoError(t, err)
 
 	m := newTitleAdmissionManager()
-	err := m.validateTitleClaimableLocked("repo", workspace, "root", "claude", runtimeNamespaceLocalTmux, false, nil, nil, false)
+	err = m.validateTitleClaimableLocked("repo", resolvedWorkspace, "root", "claude", runtimeNamespaceLocalTmux, false, nil, nil, false)
 	require.Error(t, err)
-	quoted := config.ShellQuotePath(workspace)
+	quoted := config.ShellQuotePath(resolvedWorkspace)
 	assert.Contains(t, err.Error(), "af projects add "+quoted)
 	assert.Contains(t, err.Error(), "af config set --project "+quoted)
-	assert.NotContains(t, err.Error(), config.ShellQuotePath(bare))
+	assert.NotContains(t, err.Error(), config.ShellQuotePath(resolvedBare))
 
 	resolved, err := exec.Command("git", "-C", workspace, "rev-parse", "--show-toplevel").Output()
 	require.NoError(t, err)
-	assert.Equal(t, workspace+"\n", string(resolved))
+	assert.Equal(t, resolvedWorkspace+"\n", string(resolved))
 }
