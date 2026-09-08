@@ -68,12 +68,12 @@ export class TerminalKeybar {
   private readonly onKeyUp = (): void => { this.physicalInput = false; };
   private readonly onSoftInput = (event: InputEvent): void => {
     if (!this.focused || !this.phone.matches || this.physicalInput || event.isComposing ||
-      event.inputType !== "insertText" || !event.data ||
-      (this.modifiers.state("Ctrl") === "off" && this.modifiers.state("Alt") === "off")) return;
+      event.inputType !== "insertText" || !event.data) return;
     if (event.type === "beforeinput" && !event.cancelable) return;
     // xterm 5 can retain its keydown flag when a shortcut blurs the textarea
-    // before keyup. Native soft-keyboard input then gets dropped. Claim armed
-    // insertText before xterm, but leave physical keypress and IME commits to it.
+    // before keyup. Claim all soft insertText before xterm, including plain text
+    // after a bar key consumes the one-shot. Leave physical keypress and IME
+    // commits to xterm; cancelling beforeinput prevents a duplicate input event.
     event.preventDefault();
     event.stopImmediatePropagation();
     this.input(event.data);

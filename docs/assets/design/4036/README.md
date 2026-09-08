@@ -36,3 +36,35 @@ consume modifiers. The existing terminal-reply preservation test remains intact.
 same browser regression before and after the fix.
 
 No Go TUI design golden changed.
+
+## Refocus regression from the full perf lane
+
+CI run 34174632552's trace shows the first (360px) phone pass completing, then
+`Control+]` at 63594ms and textarea refocus at 63623ms. On the second (390px)
+pass, Ctrl → Up clears Ctrl, but `keyboardInsertText("ls")` at 71080ms emits
+nothing. The `[7m`/`[27m` in the failure message are Playwright's diff highlighting,
+not bytes in the captured input. `phoneInputStream` only records outgoing
+`Op.Input` frames, never PTY output.
+
+Xterm 5 sets `_keyDownSeen` before invoking the custom shortcut handler. The
+shortcut blurs the textarea, so xterm misses keyup and retains that flag. Its
+native `_inputEvent` then discards composed `insertText` events. The keybar's
+existing workaround intercepted only armed input; once the bar consumed the
+modifier, the following plain letters fell through to that stale xterm state.
+
+The fix applies the existing soft-input interception to plain text as well.
+Physical-key and composition guards remain. The focused regression now repeats
+all modifier gestures after `Control+]` and refocus, then verifies physical
+letters are sent once. The shared helper also checks locked Ctrl + Up + soft
+`x` yields `ESC[1;5A` + `0x18` and remains locked. Both the demo and probe use
+these exact input assertions without synthesizing keyup or resetting xterm.
+
+Validation after the refocus fix:
+
+- Full `make perf-container`: [red](perf-red.txt), then [green](perf-green.txt).
+  All five visual tests passed without golden updates; the three-run web/TUI
+  measurements passed every budget.
+- Focused container phone spec: [refocus red](refocus-red.txt), then
+  [refocus green](refocus-green.txt), including the repeat after blur/refocus.
+- `npm test`: 744/744; typecheck and rebuilt `web/dist` passed.
+- gofmt, Go build/vet, fast lint, and file-length lint passed.

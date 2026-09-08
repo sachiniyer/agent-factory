@@ -1,0 +1,40 @@
+Running 1 test using 1 worker
+
+#4036 PTY input: "\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u001b\tz\u001b[1;5A"
+  ✘  1 [chromium] › selftest/phone-keybar.spec.ts:4:1 › #4036 phone keybar applies and consumes modifiers before the next letter (17.9s)
+
+
+  1) [chromium] › selftest/phone-keybar.spec.ts:4:1 › #4036 phone keybar applies and consumes modifiers before the next letter 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: "[1;5Als[1;3Dls[1;5A	z[1;5Als"
+    Received: "[1;5Als[1;3Dls[1;5A	z[1;5A"
+
+    Call Log:
+    - Timeout 15000ms exceeded while waiting on the predicate
+
+       at phone-keybar.ts:112
+
+      110 |     await expect(button).toHaveAttribute("aria-description", "Double tap to lock");
+      111 |     await page.keyboard.insertText("ls");
+    > 112 |     await expect.poll(stream).toBe(before + bytes + "ls");
+          |     ^
+      113 |   }
+      114 |   const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
+      115 |   await ctrl.dblclick({ delay: 80 });
+        at assertPhoneBarModifiers (/work/web/selftest/phone-keybar.ts:112:5)
+        at /work/web/selftest/phone-keybar.spec.ts:22:5
+
+    Error Context: test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [chromium] › selftest/phone-keybar.spec.ts:4:1 › #4036 phone keybar applies and consumes modifiers before the next letter 

@@ -109,6 +109,7 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     await bar.getByRole("button", { name: "Back", exact: true }).click();
     await expect(button).toHaveAttribute("data-state", "off");
     await expect(button).toHaveAttribute("aria-description", "Double tap to lock");
+    await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
     await page.keyboard.insertText("ls");
     await expect.poll(stream).toBe(before + bytes + "ls");
   }
@@ -120,10 +121,13 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
   await bar.getByRole("button", { name: "Back", exact: true }).click();
   await expect.poll(stream).toBe(before + "\x1b[1;5A");
   await expect(ctrl).toHaveAttribute("data-state", "locked");
+  await page.keyboard.insertText("x");
+  await expect.poll(stream).toBe(before + "\x1b[1;5A\x18");
+  await expect(ctrl).toHaveAttribute("data-state", "locked");
   await ctrl.click();
   await bar.getByRole("button", { name: "Alt", exact: true }).click();
   await bar.getByRole("button", { name: "Tab", exact: true }).click();
   await page.keyboard.insertText("z");
-  await expect.poll(stream).toBe(before + "\x1b[1;5A\x1b\tz");
+  await expect.poll(stream).toBe(before + "\x1b[1;5A\x18\x1b\tz");
   await expect(bar.getByRole("button", { name: "Alt", exact: true })).toHaveAttribute("data-state", "off");
 }
