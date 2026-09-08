@@ -207,8 +207,8 @@ type InstanceData struct {
 	// decodes to no note.
 	RootRecreateContext RootRecreateContext `json:"root_recreate_context,omitempty"`
 	Worktree            GitWorktreeData     `json:"worktree"`
-	PRInfo              PRInfoData          `json:"pr_info,omitempty"`
-	BackendType         string              `json:"backend_type,omitempty"`
+	// pr_info was removed; encoding/json ignores the extra key in old records.
+	BackendType string `json:"backend_type,omitempty"`
 	// TabKinds is the daemon's own answer, per tab kind, to "may this session gain
 	// one of these" — Capabilities.RefuseTabKind projected onto the snapshot.
 	//
@@ -611,17 +611,6 @@ type TabCleanupData struct {
 	// must kill, and the token a later spawn must not re-derive. An entry with no
 	// name would be untargetable, so CloseTab never records one.
 	TmuxName string `json:"tmux_name"`
-}
-
-// PRInfoData represents the serializable data of a PRInfo
-type PRInfoData struct {
-	Number int    `json:"number,omitempty"`
-	Title  string `json:"title,omitempty"`
-	URL    string `json:"url,omitempty"`
-	State  string `json:"state,omitempty"`
-	// Branch binds cached state to the exact ref used for the lookup. Legacy
-	// records omit it and are therefore never trusted for destructive decisions.
-	Branch string `json:"branch,omitempty"`
 }
 
 // Storage handles saving and loading instances using the state interface.

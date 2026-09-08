@@ -48,9 +48,7 @@ const (
 
 	KeySearch // Key for searching sessions
 
-	KeyOpenPR // Key for opening PR in browser
-	KeyCopyPR // Key for copying PR URL to clipboard
-	KeyHooks  // Key for editing post-worktree hooks
+	KeyHooks // Key for editing post-worktree hooks
 
 	// KeyConfigEditor opens the global config editor overlay: a form over the
 	// config manifest that writes config.toml through the same path
@@ -66,7 +64,7 @@ const (
 	// KeySwitchProject opens the searchable project-picker overlay to switch the
 	// TUI's active project/repo in place (#1461). ctrl+p rather than P: the
 	// capital keys are deliberately left free so a user can pin the old
-	// ergonomic bindings (copy_pr/archive/hooks) to them via [keys], and a new
+	// ergonomic bindings (archive/hooks) to them via [keys], and a new
 	// default on P would collide with such a pin at startup.
 	KeySwitchProject
 
@@ -274,14 +272,12 @@ var specs = []spec{
 	{name: KeyPanePrev, configKey: "pane_prev", keys: []string{"left"}, desc: "prev pane", contextual: true},
 	{name: KeyPaneNext, configKey: "pane_next", keys: []string{"right"}, desc: "next pane", contextual: true},
 	{name: KeySearch, configKey: "search", keys: []string{"/"}, desc: "search", dispatch: true},
-	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
-	{name: KeyCopyPR, configKey: "copy_pr", keys: []string{"y"}, desc: "copy PR URL", dispatch: true},
 	{name: KeyHooks, configKey: "hooks", keys: []string{"e"}, desc: "worktree hooks", dispatch: true},
 	// "C" for configure. Capital because lower-case c is taken (limit_retry) and
 	// because this is a deliberate, infrequent action rather than a navigation
 	// key. Capital defaults are established practice here (D/E/N/S), and the
 	// "capitals left free" note on KeySwitchProject is specifically about P,
-	// where a legacy copy_pr pin was likely.
+	// where users may have pinned a different action.
 	{name: KeyConfigAgent, configKey: "config_agent", keys: []string{"C"}, desc: "config agent", dispatch: true},
 	{name: KeyConfigEditor, configKey: "config_editor", keys: []string{","}, desc: "config", dispatch: true},
 	{name: KeySwitchProject, configKey: "switch_project", keys: []string{"ctrl+p"}, desc: "switch project", dispatch: true},

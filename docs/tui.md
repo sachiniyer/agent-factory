@@ -101,7 +101,6 @@ For a named long-running command or a web preview with a URL/port, use
 
 ## Working with results
 
-- **`p`** opens the session's pull request; **`y`** copies its URL.
 - **`e`** runs the repo's worktree hooks.
 - **`/`** searches; **`?`** shows the full, live help overlay.
 

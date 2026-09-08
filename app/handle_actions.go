@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
-	"runtime"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -93,12 +91,6 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	// Global config editor (",")
 	case keys.KeyConfigEditor:
 		return m.showConfigEditor()
-
-	// PR actions
-	case keys.KeyOpenPR:
-		return m.handleOpenPR()
-	case keys.KeyCopyPR:
-		return m.handleCopyPR()
 
 	// Scrolling (each pane scrolls its own view, #1088)
 	case keys.KeyShiftUp:
@@ -228,11 +220,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 			if w := killConfirmationWarning(wt); w != "" {
 				warnings = append(warnings, w)
 			}
-			prState := ""
-			if pr := selected.GetPRInfo(); pr != nil && pr.Branch == impact.Branch {
-				prState = pr.State
-			}
-			if line, severe := unmergedCommitWarning(wt, impact.Branch, impact.BaseCommitSHA, prState, impact.DeleteBranch); line != "" {
+			if line, severe := unmergedCommitWarning(wt, impact.Branch, impact.BaseCommitSHA, impact.DeleteBranch); line != "" {
 				if severe {
 					severeLine = line
 				} else {
@@ -891,51 +879,4 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 			return attachOverlayCallbackFn(m, target, label, "", attach)
 		})
 	})
-}
-
-// noPRForSessionErr is the actionable message surfaced when p/P is pressed on a
-// session that has no PR yet, so the key press is never a silent no-op (#1170).
-var noPRForSessionErr = fmt.Errorf("no PR for this session yet — push a branch / open a PR first")
-
-// handleOpenPR opens the PR URL in the browser.
-func (m *home) handleOpenPR() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil {
-		return m, nil
-	}
-	if selected.GetPRInfo() == nil {
-		return m, m.handleNotice(noPRForSessionErr)
-	}
-	url := selected.GetPRInfo().URL
-	var openCmd *exec.Cmd
-	if runtime.GOOS == "darwin" {
-		openCmd = exec.Command("open", url)
-	} else {
-		openCmd = exec.Command("xdg-open", url)
-	}
-	if err := openCmd.Start(); err != nil {
-		return m, m.handleError(fmt.Errorf("failed to open PR: %w", err))
-	}
-	// Reap the opener when it exits so it doesn't linger as a zombie for the
-	// life of the TUI (#816).
-	go func() {
-		_ = openCmd.Wait()
-	}()
-	return m, nil
-}
-
-// handleCopyPR copies the PR URL to the clipboard.
-func (m *home) handleCopyPR() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil {
-		return m, nil
-	}
-	if selected.GetPRInfo() == nil {
-		return m, m.handleNotice(noPRForSessionErr)
-	}
-	url := selected.GetPRInfo().URL
-	if err := copyToClipboard(url); err != nil {
-		return m, m.handleError(fmt.Errorf("%w; PR URL: %s", err, url))
-	}
-	return m, nil
 }

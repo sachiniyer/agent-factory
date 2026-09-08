@@ -1,16 +1,11 @@
 package daemon
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // CreateTab spawns the requested tab kind in the target session's worktree,
@@ -172,7 +167,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// Persist through the targeted per-repo writer (persistInstanceData) — the
 	// clobber-safe single-writer direction of #960 — rather than a whole-list
 	// SaveInstances, which would re-serialize the manager's entire view and was
-	// the dual-writer clobber surface PR 4 retires. Mirrors CloseTab/SetPRInfo.
+	// the dual-writer clobber surface PR 4 retires. Mirrors CloseTab.
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
 		// Roll back the just-spawned tab so a persist failure does not leave a
@@ -364,204 +359,4 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 		}
 	}
 	return false
-}
-
-// SetPRInfo is the compatibility write for clients predating daemon-owned
-// discovery (#3296). First-class clients call RefreshPRInfo and never supply
-// projected fields. A zero-value PRInfo (Number 0) clears the recorded info.
-// The compatibility path mirrors CloseTab's discipline — resolve stable identity first, take
-// the per-session op-lock so a concurrent kill/archive teardown can't replace
-// the session out from under us, re-verify the tracked instance hasn't been
-// swapped for a same-titled recreate, then mutate+persist under the per-repo
-// start lock through the targeted writer (persistInstanceData) — and rolls the
-// in-memory value back on persist failure so memory and disk stay consistent.
-// Without the op-lock and stale-instance check, a SetPRInfo racing a
-// KillSession+CreateSession cycle could write the old instance's data (including
-// its stale stable id) over the new instance's disk record, corrupting the
-// persisted identity (#1723). It also refuses an archived session under that
-// same lock, which the stale-instance check cannot substitute for (#2437 — see
-// the gate below). Admission for this unconditional form is the RPC gate in
-// front of it.
-func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
-	return m.setPRInfoGuarded(context.Background(), req, nil)
-}
-
-// prInfoWriteGuard is the condition set for a DIRECT (non-RPC) producer — the
-// PR-info sweep (#3232). Both conditions are evaluated under the write's own
-// op-lock, not as caller-side preflights, because a preflight leaves the whole
-// fetch-to-write gap open (#3287 review):
-//
-//   - expectGeneration is a compare-and-swap on the instance's PR-info
-//     generation: every recording producer serializes on the same op-lock and
-//     bumps the generation, so a sweep result that raced a newer write is
-//     refused HERE, where the newer write became visible.
-//   - lifecycle admission is checked at the same boundary every admitted RPC
-//     mutation checks it — immediately before the mutation, under the lock —
-//     so a quiesce that began while `gh` ran refuses the record. (A quiesce
-//     landing strictly mid-persist tolerates the in-flight completion, exactly
-//     as it does for any RPC mutation already past its gate; that is the
-//     daemon-wide admission semantic, not a gap unique to this path.)
-type prInfoWriteGuard struct {
-	expectGeneration uint64
-}
-
-// errPRInfoResultRaced reports a guarded PR-info write refused because a newer
-// producer recorded first. An expected outcome for the sweep, not a failure.
-var errPRInfoResultRaced = errors.New("newer PR info landed while this lookup was in flight")
-
-// acquireLockCancellable takes mu, abandoning the wait when ctx ends. A
-// background producer must never block shutdown on a lock a kill/archive/
-// restore can hold for many seconds — runDaemon waits in wg.Wait() ahead of
-// its final persistence, and the stop path escalates after five seconds
-// (#3287 review). Polling TryLock trades mutex fairness for cancellability,
-// which is acceptable exactly here: the sweep is the lowest-priority writer
-// these locks have.
-func acquireLockCancellable(ctx context.Context, mu *sync.Mutex) error {
-	for {
-		if mu.TryLock() {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-}
-
-func (m *Manager) setPRInfoGuarded(ctx context.Context, req SetPRInfoRequest, guard *prInfoWriteGuard) error {
-	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
-	if err != nil {
-		return err
-	}
-	if instance == nil {
-		return fmt.Errorf("failed to restore instance %q", title)
-	}
-
-	// Serialize against an archive/kill/restore teardown for this session and,
-	// after winning the lock, confirm the session we resolved is still the tracked
-	// current one — a kill/recreate can replace it (same title, DIFFERENT stable
-	// id) in the window between identity resolution and this lock. Take the
-	// op-lock before the per-repo start lock, matching kill/archive ordering.
-	// The guarded (background) form waits cancellably: a teardown can hold this
-	// lock for many seconds, and shutdown must not wait behind it.
-	key := daemonInstanceKey(repoID, title)
-	opLock := m.opLockFor(key)
-	if guard != nil {
-		if err := acquireLockCancellable(ctx, opLock); err != nil {
-			return err
-		}
-	} else {
-		opLock.Lock()
-	}
-	defer opLock.Unlock()
-
-	m.mu.Lock()
-	current := m.instances[key]
-	m.mu.Unlock()
-	if current != instance || instance.UserKilled() {
-		return fmt.Errorf("session %q changed state before PR info could be recorded", title)
-	}
-	// Archived sessions are refused here, UNDER the op-lock, for the reason
-	// tabMutationTarget spells out: the two checks above cannot see an archive.
-	// ArchiveSession holds this SAME op-lock, commits LiveArchived under it, and
-	// leaves the same instance tracked (an archived row stays listed and
-	// restorable) — so a SetPRInfo that resolved a live session and then queued
-	// behind an archive arrives with current == instance and UserKilled() false,
-	// passes both, and overwrites the PR info the archive just preserved, then
-	// persists the loss. Archive is inert in BOTH directions (#1809); this was the
-	// last USER-FACING mutation of the instance record missing that gate (#2437).
-	// Not the last one outright: captureAgentConversation mutates and persists the
-	// same record with no op-lock at all, so it can interleave INSIDE an archive
-	// rather than merely queue behind one — a different shape, tracked in #2451.
-	//
-	// The window is not theoretical: the TUI starts `gh pr view` against a target
-	// captured before an archive can begin and sends the result whenever it lands,
-	// so the request routinely outlives the state it was resolved against.
-	//
-	// It deliberately reuses the tab verbs' refusal so a user who archived a
-	// session gets ONE consistent message and remedy no matter which mutation lost
-	// the race. There is no pre-lock fast path: it would key on IsArchived, which
-	// is settled-state only, so an archive actually IN FLIGHT reads as live and
-	// parks on the op-lock either way — a fast path would buy nothing the
-	// post-lock gate does not already do correctly.
-	if instance.IsArchived() {
-		return errTabMutationArchived("record PR info", title)
-	}
-
-	repoStartLock := m.startLockForRepo(repoID)
-	if guard != nil {
-		if err := acquireLockCancellable(ctx, repoStartLock); err != nil {
-			return err
-		}
-	} else {
-		repoStartLock.Lock()
-	}
-	defer repoStartLock.Unlock()
-
-	var info *git.PRInfo
-	if req.PRInfo.Number != 0 {
-		info = &git.PRInfo{
-			Number: req.PRInfo.Number,
-			Title:  req.PRInfo.Title,
-			URL:    req.PRInfo.URL,
-			State:  req.PRInfo.State,
-			// Branch is the #921 provenance — the exact ref the lookup ran for.
-			// Dropping it here (as this rebuild did before #3232) persisted every
-			// record branchless, which both demoted it to never-trusted for
-			// destructive decisions (the storage comment's legacy case) and made
-			// any recorded-vs-fetched comparison see a phantom diff forever.
-			Branch: req.PRInfo.Branch,
-		}
-	}
-
-	// The guarded (direct-producer) conditions, under the same locks that
-	// serialize every recording producer — see prInfoWriteGuard.
-	if guard != nil {
-		if m.lifecycle != nil {
-			if admissionErr := m.lifecycle.mutationAdmissionError(); admissionErr != nil {
-				return admissionErr
-			}
-		}
-		if instance.PRInfoGeneration() != guard.expectGeneration {
-			return errPRInfoResultRaced
-		}
-		// The unchanged-result decision lives HERE, not as a caller preflight:
-		// under this op-lock the instance value is always COMMITTED state — a
-		// racing writer serializes on the same lock and rolls a failed persist
-		// back before releasing it — so an uncommitted in-memory value can
-		// never masquerade as durable and swallow the sweep's result (#3287
-		// review). Writing nothing on equality is what keeps a sweep from
-		// emitting a session.updated per session per pass.
-		if prInfoEqual(instance.GetPRInfo(), info) {
-			return nil
-		}
-	}
-	rollback := instance.BeginPRInfoWrite(info)
-
-	data := instance.ToInstanceData()
-	if err := persistInstanceData(repoID, data); err != nil {
-		// Keep memory consistent with disk on a persist failure — generation
-		// and freshness clock included: a failed write committed nothing, so it
-		// must not fail a concurrent producer's generation CAS or extend the
-		// old value's freshness (#3287 review).
-		instance.RollbackPRInfoWrite(rollback)
-		return fmt.Errorf("failed to persist PR info: %w", err)
-	}
-
-	// Announce the recorded badge (#2769). This is the same class of mutation as
-	// the tab verbs — a durable metadata change one client makes on behalf of every
-	// client — and it was the last one still persisting silently. Only the TUI
-	// window that ran `gh pr view` knew the PR existed; a second window and the web
-	// rail kept rendering no badge (or a stale state, after a merge) until some
-	// unrelated update happened to republish the session.
-	//
-	// Published after the persist so no client can observe a badge that isn't
-	// durable yet, and while the repo start lock is still held so this announcement
-	// cannot be reordered behind a concurrent tab mutation's — session.updated
-	// carries a WHOLE InstanceData and every client re-projects the session
-	// wholesale from it, so the last event landing is the one that wins. Same
-	// discipline and same reasoning as CreateTab's publish.
-	m.publishEvent(agentproto.EventSessionUpdated, data)
-	return nil
 }
