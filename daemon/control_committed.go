@@ -1,23 +1,25 @@
 package daemon
 
 import (
-	"errors"
-
 	"github.com/sachiniyer/agent-factory/apiproto"
 )
 
 // Everything that makes a COMMITTED mutation distinguishable from a clean
-// failure lives here: the marker, its constructor, the API code, and the two
-// halves of the control-socket envelope. One home, so a new write path meets the
-// whole rule rather than a fragment of it (#3036).
+// failure lives here: the daemon's carrier for the marker, its constructor, the
+// API code, and the two halves of the control-socket envelope. One home, so a
+// new write path meets the whole rule rather than a fragment of it (#3036). The
+// marker interface itself is apiproto.MutationCommittedError, shared with the
+// HTTP client so the two transports cannot drift on what committed means.
 
+// isMutationCommitted is apiproto.IsMutationCommitted under this package's name.
+// The marker interface and the rule for matching it have one home; see
+// apiproto/committed.go.
 func isMutationCommitted(err error) bool {
-	type committed interface {
-		MutationCommitted() bool
-	}
-	var outcome committed
-	return errors.As(err, &outcome) && outcome.MutationCommitted()
+	return apiproto.IsMutationCommitted(err)
 }
+
+var _ apiproto.MutationCommittedError = (*mutationCommittedError)(nil)
+
 func (e *mutationCommittedError) Error() string           { return e.err.Error() }
 func (e *mutationCommittedError) Unwrap() error           { return e.err }
 func (e *mutationCommittedError) MutationCommitted() bool { return true }
