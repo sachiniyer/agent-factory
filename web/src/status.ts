@@ -338,25 +338,27 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
 }
 
 /**
- * Builds the row title with the same prefixes the TUI prepends (render.go:304-345),
+ * Builds the row title with the same prefixes the TUI prepends (render.go:400-465),
  * in the same precedence for ordinary status prefixes, with the orthogonal model
  * diagnostic outermost so narrow rows cannot hide it. Archived rows carry NO
- * word prefix (render.go:326-338) — the glyph + dimming say it, and an 11-char
+ * word prefix (render.go:423-434) — the glyph + dimming say it, and an 11-char
  * prefix would eat the title cell.
  */
 export function rowTitle(s: SessionData): string {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  } else if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  } else if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
   if (s.backend_type === "remote") {
     title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
   }
   const recreate = rootRecreateNote(s);
   if (recreate) {

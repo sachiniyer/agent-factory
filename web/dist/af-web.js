@@ -11149,15 +11149,17 @@ function rowTitle(s) {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  } else if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  } else if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
   if (s.backend_type === "remote") {
     title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
   }
   const recreate = rootRecreateNote(s);
   if (recreate) {

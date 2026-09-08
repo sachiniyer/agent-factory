@@ -5,6 +5,7 @@
 // must change with it — the two clients cannot diverge in status semantics (§3).
 
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import type { IconName } from "./icon.js";
@@ -149,10 +150,10 @@ test("liveness absent falls back to the legacy status int", () => {
 test("title prefixes match render.go precedence", () => {
   // [lost] on a Lost row (render.go:315).
   assert.equal(rowTitle(sess({ title: "w", liveness: Liveness.Lost })), "[lost] w");
-  // [deleting] while killing/archiving, and it beats the [lost] marker.
+  // [deleting] while killing/archiving preserves the independent [lost] marker.
   assert.equal(
     rowTitle(sess({ title: "w", liveness: Liveness.Lost, in_flight_op: InFlightOp.Killing })),
-    "[deleting] w",
+    "[deleting] [lost] w",
   );
   assert.equal(rowTitle(sess({ title: "w", in_flight_op: InFlightOp.Archiving })), "[deleting] w");
   // Archived carries NO word prefix (render.go:326-338) — the icon + dimming say it.
@@ -162,10 +163,10 @@ test("title prefixes match render.go precedence", () => {
     "[archive incomplete] w",
     "a recovered incomplete session must remain visibly exceptional in the web rail",
   );
-  // [remote] is outermost.
+  // [remote] is applied first, inside lifecycle prefixes.
   assert.equal(
     rowTitle(sess({ title: "w", liveness: Liveness.Lost, backend_type: "remote" })),
-    "[remote] [lost] w",
+    "[lost] [remote] w",
   );
   assert.equal(
     rowTitle(
@@ -186,10 +187,46 @@ test("title prefixes match render.go precedence", () => {
         model_change: { before: "gpt-5.6-sol max", after: "gpt-5.6-luna low" },
       }),
     ),
-    "[model changed] [remote] [lost] w",
+    "[model changed] [lost] [remote] w",
     "the diagnostic remains outermost when state and backend prefixes coexist",
   );
 });
+
+// The Go renderer reads the same issue fixtures: changing either surface's
+// prefix semantics alone fails its tests.
+const titleFixtures: (Partial<SessionData> & { name: string; expected: string })[] = JSON.parse(
+  readFileSync(new URL("../../ui/tree/testdata/title_prefixes.json", import.meta.url), "utf8"),
+);
+for (const { name, expected, ...state } of titleFixtures) {
+  test(`shared TUI title fixture: ${name}`, () => {
+    assert.equal(rowTitle(sess({ title: "alpha", ...state })), expected);
+  });
+}
+
+// Cross both axes and backend kind: single-axis checks missed #4038.
+// Expected prefix pairs follow ui/tree/render.go's independent prepend order.
+for (const [liveness, titles] of [
+  [Liveness.Ready, ["alpha", "[deleting] alpha", "[deleting] alpha"]],
+  [Liveness.Lost, ["[lost] alpha", "[deleting] [lost] alpha", "[deleting] [lost] alpha"]],
+  [Liveness.LimitReached, ["[limit] alpha", "[limit] [deleting] alpha", "[limit] [deleting] alpha"]],
+] as const) {
+  for (const [index, in_flight_op] of [InFlightOp.None, InFlightOp.Killing, InFlightOp.Archiving].entries()) {
+    for (const backend_type of ["local", "remote"] as const) {
+      test(`render.go title parity: liveness=${liveness}, op=${in_flight_op}, backend=${backend_type}`, () => {
+        const expected = titles[index].replace("alpha", backend_type === "remote" ? "[remote] alpha" : "alpha");
+        assert.equal(rowTitle(sess({ title: "alpha", liveness, in_flight_op, backend_type })), expected);
+        assert.equal(
+          rowTitle(sess({
+            title: "alpha", liveness, in_flight_op, backend_type,
+            root_recreate_context: "fresh", archive_warning: "retained source",
+            model_change: { before: "old", after: "new" },
+          })),
+          `[model changed] [archive incomplete] [fresh context] ${expected}`,
+        );
+      });
+    }
+  }
+}
 
 test("archive warning retains the daemon's source location for the persistent banner", () => {
   const warning = "restore completed with an incomplete archive: complete original tree retained at /retained/source";
