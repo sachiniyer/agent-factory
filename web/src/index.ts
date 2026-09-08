@@ -89,7 +89,7 @@ import {
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
+import { canHandoff, isArchived, operatorKind, rowStatus, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores } from "./pending_restores.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
@@ -189,7 +189,10 @@ let token: string | null = null;
 let connectionGeneration = 0;
 let stream: EventStream | null = null;
 const optimisticSessions = new OptimisticSessions();
-const pendingRestores = new PendingRestores(ids => store.set({ pendingRestores: ids }));
+const pendingRestores = new PendingRestores(
+  ids => store.set({ pendingRestores: ids }),
+  e => isMutationCommittedError(e) || isMutationOutcomeUncertain(e),
+);
 const connectionGate = createLatestRequestGate();
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
@@ -968,7 +971,8 @@ function openConfirm(
         ? killSession(target.id, target.title, tok)
         : action === "archive"
           ? archiveSession(target.id, target.title, tok)
-          : pendingRestores.run(target.id, () => restoreSession(target.id, target.title, tok));
+          : pendingRestores.run(target.id, () => restoreSession(target.id, target.title, tok),
+            rowStatus({ ...session, in_flight_op: 0 }).kind);
     if (!run) return;
     void run.then(() => {
       if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) return;
@@ -2362,7 +2366,10 @@ function applySessions(sessions: SessionData[]): void {
       : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
-  pendingRestores.observe(sessions.map(s => ({ id: s.id, archived: isArchived(s) })));
+  // Compare the lifecycle state, not the transient busy indicator overlaid on it.
+  pendingRestores.observe(sessions.map(s => ({
+    id: s.id, status: rowStatus({ ...s, in_flight_op: 0 }).kind,
+  })));
 }
 
 /** Tab mutations also fetch full snapshots. Fold those through the same ledger

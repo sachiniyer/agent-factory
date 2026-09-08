@@ -63,3 +63,54 @@ for (const outcome of ["refused", "success", "warning", "failed-snapshot"]) {
     }
   });
 }
+
+for (const outcome of ["committed", "uncertain", "lost", "dead"]) {
+  test(`restore fence retains ${outcome} when the follow-up Snapshot fails`, async ({ page, request }) => {
+    const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+    const session = snapshot.data.instances.find((s: { title: string }) =>
+      s.title === (process.env.AF_WEB_SESSION_WEB_SHELVED ?? "probe-shelved"));
+    expect(session?.id).toBeTruthy();
+    session.backend_type = "local";
+    if (outcome === "lost" || outcome === "dead") {
+      session.liveness = outcome === "lost" ? 3 : 4;
+      session.status = outcome === "lost" ? 5 : 4;
+    }
+    await page.routeWebSocket("**/v1/events*", () => {});
+    let failSnapshot = false;
+    let snapshots = 0;
+    await page.route("**/v1/Snapshot", route => {
+      snapshots++;
+      return failSnapshot ? route.abort("connectionfailed") : route.fulfill({ json: { data: { instances: [session] } } });
+    });
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    let restores = 0;
+    await page.route("**/v1/RestoreSession", async route => {
+      restores++;
+      await pending;
+      if (outcome === "uncertain") return route.abort("connectionfailed");
+      await route.fulfill({ json: { data: outcome === "committed" ? { warning: "restore completed with warning" } : {} } });
+    });
+    await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+    await expect(page.locator("#app")).toHaveAttribute("data-af-resync-settled", "");
+    const row = page.locator(".af-row-selected");
+    const actions = row.getByRole("button", { name: `Actions for ${session.title}`, exact: true });
+    const restore = row.getByRole("button", { name: `Restore session “${session.title}”`, exact: true });
+    await actions.click();
+    await restore.click();
+    await expect.poll(() => restores).toBe(1);
+    await page.keyboard.press("Escape");
+    failSnapshot = true;
+    const before = snapshots;
+    release();
+    await expect.poll(() => snapshots).toBeGreaterThan(before);
+    if (outcome === "committed") await expect(page.getByText("Operation completed", { exact: true })).toBeVisible();
+    if (outcome === "uncertain") await expect(page.getByText("Outcome not confirmed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await actions.click();
+    await expect(restore).toBeDisabled();
+    await restore.evaluate((button: HTMLButtonElement) => button.click());
+    expect(restores).toBe(1);
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+}

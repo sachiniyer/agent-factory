@@ -1,19 +1,22 @@
-type RestoreRow = { id?: string; archived: boolean };
+type RestoreRow = { id?: string; status: string | null };
 
 /** Request fences outlive dialogs and remain until a successful restore is visible. */
 export class PendingRestores {
-  private readonly tickets = new Map<string, { settled: boolean }>();
+  private readonly tickets = new Map<string, { settled: boolean; status: RestoreRow["status"] }>();
   private rows: ReadonlyArray<RestoreRow> | null = null;
 
-  constructor(private readonly changed: (ids: ReadonlySet<string>) => void) {}
+  constructor(
+    private readonly changed: (ids: ReadonlySet<string>) => void,
+    private readonly retainOnError: (error: unknown) => boolean = () => false,
+  ) {}
 
   has(id: string): boolean {
     return this.tickets.has(id);
   }
 
-  run<T>(id: string, request: () => Promise<T>): Promise<T> | null {
+  run<T>(id: string, request: () => Promise<T>, status: RestoreRow["status"]): Promise<T> | null {
     if (this.has(id)) return null;
-    const ticket = { settled: false };
+    const ticket = { settled: false, status };
     this.tickets.set(id, ticket);
     this.changed(new Set(this.tickets.keys()));
     return (async () => {
@@ -28,8 +31,13 @@ export class PendingRestores {
       } catch (error) {
         // A response from an old connection cannot release a newer request.
         if (this.tickets.get(id) === ticket) {
-          this.tickets.delete(id);
-          this.changed(new Set(this.tickets.keys()));
+          if (this.retainOnError(error)) {
+            ticket.settled = true;
+            if (this.rows) this.observe(this.rows);
+          } else {
+            this.tickets.delete(id);
+            this.changed(new Set(this.tickets.keys()));
+          }
         }
         throw error;
       }
@@ -38,10 +46,10 @@ export class PendingRestores {
 
   observe(rows: ReadonlyArray<RestoreRow>): void {
     this.rows = rows;
-    const archived = new Set(rows.filter(row => row.archived).map(row => row.id));
+    const statuses = new Map(rows.map(row => [row.id, row.status]));
     let changed = false;
     for (const [id, ticket] of this.tickets) {
-      if (ticket.settled && !archived.has(id)) {
+      if (ticket.settled && (!statuses.has(id) || statuses.get(id) !== ticket.status)) {
         this.tickets.delete(id);
         changed = true;
       }
