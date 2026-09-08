@@ -74,9 +74,8 @@ export class PendingRestores {
       // carry no attempt id and may belong to a previous restore cycle.
       const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" &&
         evidence.generation > ticket.succeededAt;
-      const causalUncertainEvidence = evidence?.kind === "snapshot"
-        ? evidence.generation > ticket.uncertainAt
-        : (evidence?.kind === "updated" || evidence?.kind === "restored") && evidence.id === id;
+      const causalUncertainEvidence = evidence?.kind === "snapshot" &&
+        evidence.generation > ticket.uncertainAt;
       const uncertainCompleted = ticket.uncertain && authoritative && causalUncertainEvidence &&
         (!eligibility.has(id) || row?.restoreEligible === true);
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {

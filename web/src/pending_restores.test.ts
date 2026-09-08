@@ -137,7 +137,7 @@ test("Dead to Lost normalization does not settle an uncertain restore", async ()
   assert.equal(pending.has("session"), true);
   pending.observe([{ id: "session", restoreEligible: false }], { kind: "updated", id: "session" });
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", restoreEligible: true }], { kind: "updated", id: "session" });
+  pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
   assert.equal(pending.has("session"), false);
 });
 
@@ -246,5 +246,9 @@ test("a delayed restored event from attempt A cannot complete uncertain attempt 
   pending.observe(rows, { kind: "restored", id: "session" });
   reject(new ApiError(0, "lost B reply"));
   await assert.rejects(next!);
+  // An identity-only event has no attempt marker and may belong to attempt A.
+  pending.observe(rows, { kind: "restored", id: "session" });
   assert.equal(pending.has("session"), true);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), false);
 });
