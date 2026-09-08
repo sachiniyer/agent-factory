@@ -39,8 +39,9 @@ func BoundedLstat(path string) (os.FileInfo, error) {
 	flight := &boundedLstatFlight{done: make(chan struct{})}
 	boundedLstatFlights.byPath[path] = flight
 	boundedLstatFlights.Unlock()
+	lstat := boundedLstatPath
 	go func() {
-		flight.info, flight.err = boundedLstatPath(path)
+		flight.info, flight.err = lstat(path)
 		boundedLstatFlights.Lock()
 		if boundedLstatFlights.byPath[path] == flight {
 			delete(boundedLstatFlights.byPath, path)

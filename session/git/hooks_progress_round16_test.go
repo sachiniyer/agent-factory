@@ -217,6 +217,19 @@ func TestHookProgressPruneBoundsReceiptMetadata(t *testing.T) {
 	relocationIdentityTimeout = 60 * time.Millisecond
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			boundedLstatFlights.Lock()
+			flight := boundedLstatFlights.byPath[blockedPath]
+			boundedLstatFlights.Unlock()
+			if flight == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("blocked metadata flight did not drain")
+			}
+			time.Sleep(time.Millisecond)
+		}
 		boundedLstatPath = originalLstat
 		relocationIdentityTimeout = previousTimeout
 	})
