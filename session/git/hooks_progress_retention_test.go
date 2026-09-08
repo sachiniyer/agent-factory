@@ -13,7 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-func TestHookProgressCreationPrunesOnlyCompletedOrphans(t *testing.T) {
+func TestHookProgressCreationPrunesInactiveOrphans(t *testing.T) {
 	claimDaemonProcess(t)
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -39,8 +39,11 @@ func TestHookProgressCreationPrunesOnlyCompletedOrphans(t *testing.T) {
 		if err := os.Chtimes(path, at, at); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chtimes(p.Directory, at, at); err != nil {
+			t.Fatal(err)
+		}
 		if finished {
-			for _, file := range []string{filepath.Join(p.Directory, "finished"), filepath.Join(p.receipt(0), "exit")} {
+			for _, file := range []string{p.receipt(0), filepath.Join(p.Directory, "finished"), filepath.Join(p.receipt(0), "exit")} {
 				if err := os.Chtimes(file, at, at); err != nil {
 					t.Fatal(err)
 				}
@@ -52,7 +55,7 @@ func TestHookProgressCreationPrunesOnlyCompletedOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	owned := create("owned", true, 30*24*time.Hour)
-	inFlight := create("active", false, 30*24*time.Hour)
+	uncommitted := create("uncommitted", false, 30*24*time.Hour)
 	installSurvivorSystemctl(t, "case \"$*\" in *list-units*) echo 'af-hook-scope-test-0.scope loaded active running Hook';; esac\nexit 0\n")
 	scopeLive := create("scope", true, 30*24*time.Hour)
 	incomplete := create("incomplete", false, 30*24*time.Hour)
@@ -61,6 +64,9 @@ func TestHookProgressCreationPrunesOnlyCompletedOrphans(t *testing.T) {
 	}
 	old := time.Now().Add(-time.Minute)
 	if err := os.Chtimes(filepath.Join(incomplete.dir, "finished"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(incomplete.dir, old, old); err != nil {
 		t.Fatal(err)
 	}
 	recent := create("recent", true, 0)
@@ -83,7 +89,7 @@ func TestHookProgressCreationPrunesOnlyCompletedOrphans(t *testing.T) {
 		}
 	}
 	exists(owned, true)
-	exists(inFlight, true)
+	exists(uncommitted, false)
 	exists(scopeLive, true)
 	exists(incomplete, false)
 	exists(recent, true)

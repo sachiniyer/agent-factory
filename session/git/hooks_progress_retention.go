@@ -14,8 +14,8 @@ import (
 )
 
 // Match #4045's hooklog retention policy. Journals are multi-file state rather
-// than output descriptors: finished receipts, absent ownership and an empty
-// scope/launcher probe replace the output file's inherited descriptor lock.
+// than output descriptors: absent or terminal ownership, old receipt activity,
+// and an empty scope/launcher probe replace the inherited descriptor lock.
 const (
 	keptProgressLimit = 20
 	keptProgressAge   = 14 * 24 * time.Hour
@@ -23,10 +23,10 @@ const (
 )
 
 type keptProgress struct {
-	path               string
-	progress           *hookProgress
-	modified           time.Time
-	terminalIncomplete bool
+	path       string
+	progress   *hookProgress
+	modified   time.Time
+	incomplete bool
 }
 
 func pruneHookProgress(dir string, now time.Time) {
@@ -54,14 +54,24 @@ func pruneHookProgress(dir string, now time.Time) {
 			if os.IsNotExist(err) && strings.HasPrefix(entry.Name(), "retired-entries-") {
 				data, readErr := os.ReadFile(path)
 				var retired hookProgress
-				if readErr == nil && json.Unmarshal(data, &retired) == nil && retired.Directory == filepath.Join(dir, strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "retired-"), ".json")) {
-					if _, statErr := os.Lstat(retired.Directory); os.IsNotExist(statErr) {
-						_ = os.Remove(path)
+				if readErr == nil && json.Unmarshal(data, &retired) == nil {
+					receipt, receiptErr := hookReceiptDirectory(path, retired.Directory)
+					if receiptErr == nil && receipt == filepath.Join(dir, strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "retired-"), ".json")) {
+						if _, statErr := os.Lstat(receipt); os.IsNotExist(statErr) {
+							_ = os.Remove(path)
+						}
 					}
 				}
 				continue
 			}
-			if err != nil || p.SessionID == "" || owners[p.SessionID] || !p.finished() {
+			if err != nil || p.SessionID == "" || p.Prefix != systemdunit.HookScopeUnitPrefix(p.SessionID) {
+				continue
+			}
+			activeOwner, hasOwner := owners[p.SessionID]
+			// Unfinished journals can belong to sessions lost before their first
+			// row was committed. Only an absent row makes those eligible; a
+			// present archived/tombstoned row still requires terminal evidence.
+			if activeOwner || (hasOwner && !p.finished()) {
 				continue
 			}
 			info, err := entry.Info()
@@ -69,12 +79,19 @@ func pruneHookProgress(dir string, now time.Time) {
 				return err
 			}
 			modified := info.ModTime()
-			files := []string{filepath.Join(p.Directory, "finished")}
+			files := []string{p.Directory, filepath.Join(p.Directory, "finished")}
 			for index := range p.Commands {
-				files = append(files, filepath.Join(p.receipt(index), "exit"))
+				files = append(files, p.receipt(index), filepath.Join(p.receipt(index), "exit"))
 			}
 			for _, path := range files {
-				if info, err := os.Stat(path); err == nil && info.ModTime().After(modified) {
+				info, err := os.Lstat(path)
+				if os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				if info.ModTime().After(modified) {
 					modified = info.ModTime()
 				}
 			}
@@ -115,7 +132,7 @@ func pruneHookProgress(dir string, now time.Time) {
 		var reclaim []keptProgress
 		kept := 0
 		for _, candidate := range candidates {
-			if !candidate.terminalIncomplete && kept < keptProgressLimit && now.Sub(candidate.modified) <= keptProgressAge {
+			if !candidate.incomplete && kept < keptProgressLimit && now.Sub(candidate.modified) <= keptProgressAge {
 				kept++
 				continue
 			}
@@ -150,12 +167,12 @@ func pruneHookProgress(dir string, now time.Time) {
 			removed++
 		}
 		if removed > 0 {
-			log.InfoLog.Printf("pruned %d terminal orphan hook journals", removed)
+			log.InfoLog.Printf("pruned %d inactive orphan hook journals", removed)
 		}
 		return nil
 	})
 	if err != nil {
-		log.WarningLog.Printf("cannot prune terminal hook journals: %v", err)
+		log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
 	}
 }
 

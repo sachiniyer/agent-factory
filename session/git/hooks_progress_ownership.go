@@ -31,10 +31,11 @@ func readHookProgress(path string) (*hookProgress, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, err
 	}
-	if filepath.Dir(p.Directory) != filepath.Dir(path) || !strings.HasPrefix(filepath.Base(p.Directory), "entries-") {
-		return nil, fmt.Errorf("hook receipt directory is outside its journal directory")
+	p.Directory, err = hookReceiptDirectory(path, p.Directory)
+	if err != nil {
+		return nil, err
 	}
-	info, err = os.Lstat(p.Directory)
+	info, err = BoundedLstat(p.Directory)
 	if err != nil {
 		return nil, err
 	}
@@ -42,6 +43,39 @@ func readHookProgress(path string) (*hookProgress, error) {
 		return nil, fmt.Errorf("hook receipt directory is not a directory")
 	}
 	return &p, nil
+}
+
+// A journal may have been written through another spelling of this AF home.
+// Verify the parents identify the same directory, then operate only through
+// the current journal parent. A foreign same-basename directory is not enough.
+func hookReceiptDirectory(path, recorded string) (string, error) {
+	base := filepath.Base(recorded)
+	if !strings.HasPrefix(base, "entries-") {
+		return "", fmt.Errorf("hook journal has no receipt directory")
+	}
+	parent, previousParent := filepath.Dir(path), filepath.Dir(recorded)
+	if parent != previousParent {
+		current, err := boundedResolveForCompare(parent)
+		if err != nil {
+			return "", err
+		}
+		previous, err := boundedResolveForCompare(previousParent)
+		if err != nil {
+			return "", err
+		}
+		currentInfo, err := BoundedLstat(current)
+		if err != nil {
+			return "", err
+		}
+		previousInfo, err := BoundedLstat(previous)
+		if err != nil {
+			return "", err
+		}
+		if !currentInfo.IsDir() || !previousInfo.IsDir() || !os.SameFile(currentInfo, previousInfo) {
+			return "", fmt.Errorf("hook receipt directory is outside its journal directory")
+		}
+	}
+	return filepath.Join(parent, base), nil
 }
 
 func (g *GitWorktree) ownedHookProgress() (*hookProgress, string, error) {

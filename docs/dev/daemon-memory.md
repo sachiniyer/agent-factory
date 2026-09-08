@@ -386,7 +386,10 @@ the scope itself survives a daemon restart or auto-upgrade. With
 [PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012), a hook can also
 keep writing output after its runner exits. The daemon persists the original
 command list and per-entry start/exit receipts alongside the scope identity and
-owning session ID. Only that managed session may adopt the journal; external
+owning session ID. Receipt paths recorded through another spelling of the same
+AF home are accepted after bounded parent-directory identity checks and rebased
+under the current journal directory; foreign parents and symlinked receipt
+directories are refused. Only that managed session may adopt the journal; external
 `--here` worktrees never adopt or stop another session's hooks.
 On restart it leaves the in-flight entry alone, waits until its scope and any
 pending launcher are gone, verifies the registered branch and the checkout's
@@ -418,8 +421,12 @@ its replacement. Unresolved relocation recovery blocks adoption without
 finishing the journal, even when the recorded occupant still matches.
 Terminal journals with deleted or archived owners and missing exit receipts
 are reclaimed after the grace period once no scope or launcher remains, even
-if a daemon exit interrupted the retry. Active scopes, nonterminal journals,
-and journals with live owners are excluded;
+if a daemon exit interrupted the retry. Unfinished journals left by a create
+that crashed before persisting its session row are also reclaimed when no row
+owns their session ID, their scope and launcher are absent in both batch checks,
+and the journal and receipt activity are older than the grace period. Young
+journals, live scopes, and unfinished journals with any stored owner are
+excluded; completed journals with live owners remain protected;
 unreadable session state or scope probes prevent pruning. Scope checks use at
 most two batched probes per sweep, including the final deletion check, so a
 manager outage cannot hold the journal lock for one timeout per candidate. Older runs without a
