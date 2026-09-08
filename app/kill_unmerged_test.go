@@ -20,7 +20,7 @@ import (
 // with `git branch -D`, permanently destroying committed-but-unmerged work,
 // while the confirmation only ever warned about a DIRTY worktree. A clean
 // worktree carrying an unmerged, unpushed commit — the normal state after an
-// agent commits — was killed behind a bare "[!] Kill session 'x'?" with no
+// agent commits — was killed behind a bare "Delete session 'x'?" with no
 // data-loss warning at all.
 //
 // These drive the real confirmation path (handleKill -> the confirmation
@@ -230,7 +230,10 @@ func TestHandleKill_ExternalWorktreeSkipsWorktreeLossWarnings(t *testing.T) {
 	_, hm := armKill(t, inst)
 
 	rendered := flatten(hm.confirmationOverlay.Render())
-	assert.Contains(t, rendered, "Kill session 'external'?")
+	assert.Contains(t, rendered, "Delete session 'external'?")
+	assert.Contains(t, rendered, "Your checkout and branch are kept.")
+	assert.NotContains(t, rendered, "are lost")
+	assert.NotContains(t, rendered, "Archive")
 	assert.NotContains(t, rendered, "will be lost")
 	assert.NotContains(t, rendered, "Detached HEAD")
 	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey)
@@ -273,8 +276,8 @@ func TestHandleKill_NoUniqueCommits_KeepsBareConfirmation(t *testing.T) {
 	_, hm := armKill(t, inst)
 
 	rendered := flatten(hm.confirmationOverlay.Render())
-	assert.Contains(t, rendered, "Kill session 'empty'?")
-	assert.NotContains(t, rendered, "commit", "a level branch must not warn about commits")
+	assert.Contains(t, rendered, "Delete session 'empty'?")
+	assert.NotContains(t, rendered, "not pushed anywhere", "a level branch must not receive the dynamic unique-commit warning")
 	assert.NotContains(t, rendered, "Could not verify")
 	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey,
 		"a session with nothing to lose must keep the ordinary 'y' confirm")

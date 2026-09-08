@@ -98,7 +98,7 @@ func TestHandleArchive_ConfirmationUsesEffectiveRestoreKey(t *testing.T) {
 			require.Equal(t, stateConfirm, h.state)
 			require.NotNil(t, h.confirmationOverlay)
 			rendered := strings.Join(strings.Fields(h.confirmationOverlay.Render()), " ")
-			require.Contains(t, rendered, "Restore later")
+			require.Contains(t, rendered, "Restore with")
 			require.Contains(t, rendered, tc.wantKey)
 			require.NotContains(t, rendered, tc.notKey)
 		})

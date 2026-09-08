@@ -549,7 +549,7 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 				} else if c.accounts.unavailable != "" {
 					lines = append(lines, strings.Split(c.renderAccountsUnavailable(), "\n")...)
 				} else if c.accounts.empty {
-					lines = append(lines, strings.Split(DialogRecoveryContent("No accounts", "", "Select a register row and press enter to add one.", false, c.width), "\n")...)
+					lines = append(lines, strings.Split(DialogRecoveryContent("No accounts", "", "Select register · enter to add an account.", false, c.width), "\n")...)
 				} else {
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(accountsHeadingNote, configHintStyle), "\n"), "\n")...)
 				}

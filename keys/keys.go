@@ -224,7 +224,7 @@ var specs = []spec{
 	{name: KeyAttach, configKey: "attach", keys: []string{"o"}, desc: "attach", dispatch: true},
 	{name: KeyExitInteractive, keys: []string{"ctrl+]"}, desc: "nav mode"},
 	{name: KeyNew, configKey: "new", keys: []string{"n"}, desc: "new", dispatch: true},
-	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "kill", dispatch: true},
+	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "delete session", dispatch: true},
 	{name: KeyArchive, configKey: "archive", keys: []string{"a"}, desc: "archive", dispatch: true},
 	{name: KeyRestore, configKey: "restore", keys: []string{"r"}, desc: "restore", dispatch: true},
 	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry limit", dispatch: true},
