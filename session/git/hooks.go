@@ -36,6 +36,9 @@ type hookRun struct {
 	// actually enters a scope, so the session can persist the durable handle a
 	// later daemon generation needs to find a survivor.
 	onScopeLaunched func(prefix string)
+	// onProgressPublished lets the daemon create path retain the runner lease
+	// until its owner row is durably committed or the create aborts.
+	onProgressPublished func(*hookProgress)
 	// A recovery runner must leave its journal pending if cancellation interrupts
 	// the suffix; adoption can then retry it after the scope is gone.
 	leaveProgressUnfinishedOnCancel bool
@@ -131,6 +134,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			log.ErrorLog.Printf("post-worktree hooks not started: persist list: %v", progressErr)
 			close(done)
 			return done
+		}
+		if run.onProgressPublished != nil {
+			run.onProgressPublished(run.progress)
 		}
 	}
 	go func() {

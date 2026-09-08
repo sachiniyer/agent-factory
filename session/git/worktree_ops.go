@@ -318,11 +318,12 @@ func (g *GitWorktree) startHooks() {
 // takes exactly the path it took before #3650.
 func (g *GitWorktree) runHooks() <-chan struct{} {
 	return runPostWorktreeHooks(g.hooksCtx, hookRun{
-		repoPath:        g.repoPath,
-		worktreePath:    g.worktreePath,
-		passthrough:     g.hookEnvPassthrough,
-		scopeSessionID:  g.hookScopeSessionID,
-		onScopeLaunched: g.SetHookScopeUnitPrefix,
+		repoPath:            g.repoPath,
+		worktreePath:        g.worktreePath,
+		passthrough:         g.hookEnvPassthrough,
+		scopeSessionID:      g.hookScopeSessionID,
+		onScopeLaunched:     g.SetHookScopeUnitPrefix,
+		onProgressPublished: g.retainHookProgressForCreate,
 	})
 }
 

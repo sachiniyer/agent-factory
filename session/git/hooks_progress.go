@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -19,7 +20,9 @@ import (
 // index of a command that actually started. Never replay a claimed command:
 // arbitrary provisioning commands need not be idempotent.
 type hookProgress struct {
+	leaseMu     *sync.Mutex
 	lease       *os.File // Local runner only; never serialized or inherited by children.
+	leaseHolds  int
 	SessionID   string   `json:"session_id"`
 	Commands    []string `json:"commands"`
 	Passthrough []string `json:"passthrough"`
@@ -97,6 +100,10 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir,
 	}
+	if lease != nil {
+		p.leaseMu = &sync.Mutex{}
+		p.leaseHolds = 1
+	}
 	data, err := json.Marshal(p)
 	if err != nil {
 		return nil, err
@@ -163,13 +170,43 @@ func (p *hookProgress) finish() {
 }
 
 func (p *hookProgress) releaseLease() {
+	if p.leaseMu == nil {
+		if p.lease != nil {
+			_ = p.lease.Close()
+			p.lease = nil
+		}
+		p.leaseHolds = 0
+		return
+	}
+	p.leaseMu.Lock()
+	defer p.leaseMu.Unlock()
+	if p.leaseHolds > 1 {
+		p.leaseHolds--
+		return
+	}
 	if p.lease != nil {
 		_ = p.lease.Close()
 		p.lease = nil
 	}
+	p.leaseHolds = 0
+}
+
+func (p *hookProgress) retainLease() bool {
+	if p.leaseMu == nil {
+		return false
+	}
+	p.leaseMu.Lock()
+	defer p.leaseMu.Unlock()
+	if p.lease == nil || p.leaseHolds == 0 {
+		return false
+	}
+	p.leaseHolds++
+	return true
 }
 
 // Callers that authorize teardown must observe failure to persist cancellation.
 func (p *hookProgress) markFinished() error {
-	return os.WriteFile(filepath.Join(p.Directory, "finished"), nil, 0600)
+	return hookProgressMarkFinished(filepath.Join(p.Directory, "finished"), nil, 0600)
 }
+
+var hookProgressMarkFinished = os.WriteFile

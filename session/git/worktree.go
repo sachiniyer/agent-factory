@@ -129,6 +129,8 @@ type GitWorktree struct {
 	// empty means no scope is ever derived, which is the TUI/CLI path.
 	hookScopeSessionID  string
 	hooksResumeDisabled bool
+	hookCreatePending   bool
+	hookCreateProgress  *hookProgress
 	// hookScopeUnitPrefix is the durable handle: the prefix of every scope unit
 	// this session's hooks have entered. Written by the hook goroutine the first
 	// time a scope is actually created and by the storage restore, read by the
@@ -146,7 +148,8 @@ type GitWorktree struct {
 	// until the first hook run is launched (e.g. external worktrees that skip
 	// hooks entirely), which HooksDone reports as "no hooks in flight".
 	hooksDone <-chan struct{}
-	// Lifecycle-owned join handle for bounded deferred journal reclamation.
+	// Lifecycle-owned join handle for bounded deferred journal terminalization
+	// or reclamation.
 	hooksRetirementDone <-chan struct{}
 }
 
