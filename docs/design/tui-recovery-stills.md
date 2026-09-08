@@ -49,22 +49,10 @@ An async create failure while another form is open preserves that newer form and
 retains the failed draft for the next create in its original project. Background
 snapshot failures retain loaded sessions and retry automatically.
 
-To verify, run `scripts/testbox.sh test ./app -run 'TestRecovery' -count=1` and
-`scripts/testbox.sh scenario scripts/tui-3915-scenario.sh`.
-
-To recapture, run the following from the writable source copy **inside** an
-isolated [testbox sandbox](../dev/container-testing.md):
-
-```sh
-AF_TUI_RECOVERY_CAPTURE=/tmp/recovery-stills \
-go test ./app -run 'TestRecoveryDriverScenes' -count=1
-```
-
-Capture mode writes both `<scene>-<theme>.svg` and `<scene>-<theme>.ansi` to
-that directory and skips golden comparisons. Copy the directory out before the
-sandbox exits. Inspect every SVG and ANSI diff, then replace both halves in
-`app/testdata/recovery` and the gallery's `docs/assets/recovery/tui-model-driver`
-together. The test rejects a stale or missing gallery copy in either format.
-Keep the `.gitattributes` ANSI whitespace rule: terminal cell padding
-and trailing viewport rows are part of the asserted frame. Verify again without
-`AF_TUI_RECOVERY_CAPTURE` so the test checks the committed pairs.
+To verify, run `scripts/testbox.sh test ./app -run TestRecovery` and
+`scripts/testbox.sh scenario scripts/tui-3915-scenario.sh`. To recapture, set
+`AF_TUI_RECOVERY_CAPTURE` to an output directory **inside** the testbox and run
+the recovery tests; inspect the SVGs before replacing the goldens under
+`app/testdata/recovery`. The gallery embedded above is **generated** from those
+goldens by `scripts/gen-docs.sh` and gated for drift in CI, so run that script
+and commit its output rather than copying the SVGs across by hand.
