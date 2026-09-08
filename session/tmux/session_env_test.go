@@ -374,3 +374,23 @@ func TestStartSurfacesUnexpectedEnvironmentImportFailure(t *testing.T) {
 		t.Fatal("Start launched a pane after it could not determine the existing server environment policy")
 	}
 }
+
+func TestLegacyLaunchClearsInheritedSessionMarkers(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+	forceSessionEnvExecutable(t, "/opt/af")
+	t.Setenv(EnvMarkerSession, "af_parent")
+	t.Setenv(EnvMarkerGeneration, "parent-generation")
+	child := NewTmuxSession("child", "claude")
+	_, environ, imports, err := child.launchEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{EnvMarkerSession, EnvMarkerGeneration} {
+		if launchEnvironmentHasName(environ, name) {
+			t.Errorf("child inherited %s", name)
+		}
+		if !slices.Contains(imports, name) {
+			t.Errorf("must unset stale server %s through update-environment", name)
+		}
+	}
+}

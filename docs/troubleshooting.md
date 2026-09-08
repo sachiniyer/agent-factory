@@ -35,6 +35,15 @@ that accumulate silently rather than failing loudly:
 - remote-hook setup for the current repo, and pinned host-key directories under
   `hook-hosts/` that no session owns.
 
+`af doctor` exits 1 when unresolved actionable issues remain **or** any check
+stopped before finishing, and 0 when neither is present. An incomplete-only run
+previously exited 0; it now fails a plain-exit-code health probe without an
+opt-in flag. The human summary still names unfinished checks after `INCOMPLETE`.
+With `af doctor --json`, inspect `data.summary`: `unresolved > 0` means actionable
+issues remain; exit status 1 with `unresolved == 0` means checks did not finish.
+`summary.incomplete` names those checks and can be non-empty in either exit-1
+case. It is omitted when empty. Advisory warnings alone still allow exit 0.
+
 Two flags are worth knowing:
 
 - **`--verbose`** shows per-process findings instead of collapsed summaries.

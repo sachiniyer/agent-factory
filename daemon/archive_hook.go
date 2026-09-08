@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hooklog"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
@@ -21,45 +22,12 @@ import (
 // synchronous lifecycle operation, but real dependency-tree sweeps can take
 // minutes on a large worktree, so this is intentionally generous.
 //
-// A var (not a const) only so tests can shorten it — the deadline's interaction
-// with WaitDelay cleanup is exactly what #3407 got wrong, and it is not testable
-// on a 30-minute clock. Production never reassigns it.
+// A var (not a const) only so tests can exercise a genuinely running timeout
+// without waiting on the 30-minute production clock. Production never
+// reassigns it.
 var onArchiveHookTimeout = 30 * time.Minute
 
 const onArchiveHookWaitDelay = 2 * time.Second
-
-// A hook is operator-authored and may be arbitrarily noisy. Keep only the tail:
-// the end normally contains the actionable failure while a hard ceiling prevents
-// a 30-minute hook from growing the daemon heap without bound.
-const onArchiveHookOutputLimit = 64 * 1024
-
-type archiveHookOutputTail struct {
-	data      []byte
-	truncated bool
-}
-
-func (w *archiveHookOutputTail) Write(p []byte) (int, error) {
-	written := len(p)
-	if len(p) >= onArchiveHookOutputLimit {
-		w.data = append(w.data[:0], p[len(p)-onArchiveHookOutputLimit:]...)
-		w.truncated = true
-		return written, nil
-	}
-	if overflow := len(w.data) + len(p) - onArchiveHookOutputLimit; overflow > 0 {
-		copy(w.data, w.data[overflow:])
-		w.data = w.data[:len(w.data)-overflow]
-		w.truncated = true
-	}
-	w.data = append(w.data, p...)
-	return written, nil
-}
-
-func (w *archiveHookOutputTail) String() string {
-	if !w.truncated {
-		return string(w.data)
-	}
-	return fmt.Sprintf("[output truncated to last %d bytes]\n%s", onArchiveHookOutputLimit, w.data)
-}
 
 type onArchiveHookContext struct {
 	sessionID   string
@@ -129,13 +97,20 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	ctx, cancel := context.WithTimeout(context.Background(), onArchiveHookTimeout)
 	defer cancel()
 
-	var output archiveHookOutputTail
+	outputFile, err := hooklog.Open(hooklog.OnArchive)
+	if err != nil {
+		return fmt.Errorf("create daemon-independent on-archive hook output log: %w", err)
+	}
+	outputPath := outputFile.Name()
 	// Same lifetime class as post_worktree_commands, same shape (#3650): a
 	// daemon-spawned operator hook enters its own transient scope with no
 	// dependency edge to the daemon unit, so a dependency sweep is charged to its
 	// own cgroup instead of the daemon's and is not killed by a restart or an
-	// auto-upgrade. The scope shares the session's af-hook-<id> prefix, so the
-	// worktree sweep that runs before a rebuild or removal names it too.
+	// auto-upgrade. stdout and stderr are the *os.File above, so os/exec installs
+	// the descriptor in the child directly instead of keeping a capture-pipe
+	// reader in the daemon that can disappear underneath a surviving hook
+	// (#4010). The scope shares the session's af-hook-<id> prefix, so the worktree
+	// sweep that runs before a rebuild or removal names it too.
 	scopeUnit := systemdunit.HookScopeUnit(scopePrefix, systemdunit.NewHookScopeGeneration(), 0)
 	program, argv := systemdunit.UnboundScopeArgv(scopeUnit, "sh", "-c", command)
 	cmd := exec.CommandContext(ctx, program, argv...)
@@ -148,9 +123,12 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		"AF_WORKTREE_PATH="+hookCtx.worktree,
 		"AF_ARCHIVE_PATH="+hookCtx.archivePath,
 	)
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	cmd.Stdout = outputFile
+	cmd.Stderr = outputFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The file descriptors above need no pipe drain. Keep a post-cancellation
+	// bound for the immediate process itself in case a platform fails to deliver
+	// the group kill below as expected.
 	cmd.WaitDelay = onArchiveHookWaitDelay
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -169,9 +147,9 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	if cmd.Process != nil {
 		// A hook may background a descendant and exit. Kill the process group on
 		// every path so no cleanup process survives the archive operation with a
-		// cwd or inherited pipe in the worktree. systemd-run --scope execs rather
-		// than forks, so cmd.Process.Pid is still the hook shell and this signals
-		// exactly the group it always did.
+		// cwd or inherited output descriptor in the worktree. systemd-run --scope
+		// execs rather than forks, so cmd.Process.Pid is still the hook shell and
+		// this signals exactly the group it always did.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	// The scope is the wider net over the same tree: a descendant that left the
@@ -187,30 +165,24 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	// own outcome below, which is only a report.
 	if scopeUnit != "" {
 		if stopErr := systemdunit.StopScopeUnits(scopeUnit); stopErr != nil {
+			outputTail, outputReadErr := hooklog.CloseAndReadTail(outputFile)
 			log.WarningLog.Printf("on-archive hook scope %s did not stop: %v", scopeUnit, stopErr)
 			return fmt.Errorf(
-				"%w: the on-archive hook's scope %s could not be stopped, so a descendant may still be writing into the worktree: %w",
-				session.ErrHookTeardownUnconfirmed, scopeUnit, stopErr)
+				"%w: the on-archive hook's scope %s could not be stopped, so a descendant may still be writing into the worktree%s: %w",
+				session.ErrHookTeardownUnconfirmed, scopeUnit,
+				archiveHookReport(outputPath, outputTail, outputReadErr), stopErr)
 		}
 	}
+	outputTail, outputReadErr := hooklog.CloseAndReadTail(outputFile)
+	if outputReadErr != nil {
+		log.WarningLog.Printf("on-archive hook output tail could not be read from %s: %v", outputPath, outputReadErr)
+	}
+	outputReport := archiveHookReport(outputPath, outputTail, outputReadErr)
 	// What the hook ITSELF did outranks what the clock says (#3407). Both checks
 	// below used to run in the opposite order, so a deadline that fired anywhere in
 	// this window reported a timeout for a hook that had already finished — and an
 	// archive hook is a committed operation whose outcome an operator reads out of
 	// this one message.
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// The shell itself succeeded — a non-zero exit surfaces as an *exec.ExitError,
-		// never as this — and WaitDelay only found an inherited process still holding
-		// the capture pipe, which the process-group kill above reaped. Match the
-		// existing post-worktree hook contract.
-		//
-		// This is checked BEFORE ctx.Err() because both are routinely true together:
-		// a hook that exits in milliseconds after backgrounding a child keeps Run
-		// blocked on that child's pipe for the full WaitDelay, and any deadline
-		// shorter than that elapses inside the wait. The hook had already succeeded;
-		// only the cleanup crossed the line.
-		return nil
-	}
 	// A deadline that fires while the hook is still RUNNING is a timeout. One that
 	// fires after the hook reached its own exit is not — the hook ran, and its exit
 	// status is the outcome to report, straggler or no straggler. ProcessState is
@@ -221,12 +193,28 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	// "timed out after 1s" — a failure the operator cannot act on, standing in for a
 	// specific exit status and its output, which they can.
 	if ctx.Err() != nil && (cmd.ProcessState == nil || !cmd.ProcessState.Exited()) {
-		return fmt.Errorf("timed out after %s%s", onArchiveHookTimeout, archiveHookOutput(output.String()))
+		return fmt.Errorf("timed out after %s%s", onArchiveHookTimeout, outputReport)
 	}
 	if err != nil {
-		return fmt.Errorf("%w%s", err, archiveHookOutput(output.String()))
+		return fmt.Errorf("%w%s", err, outputReport)
+	}
+	if outputReadErr == nil {
+		if removeErr := os.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.WarningLog.Printf("on-archive hook completed but its output log %s could not be removed: %v", outputPath, removeErr)
+		}
 	}
 	return nil
+}
+
+func archiveHookReport(path, output string, readErr error) string {
+	report := fmt.Sprintf(" (full output: %s)", path)
+	if suffix := archiveHookOutput(output); suffix != "" {
+		report += suffix
+	}
+	if readErr != nil {
+		report += fmt.Sprintf("; output tail unavailable: %v", readErr)
+	}
+	return report
 }
 
 func archiveHookOutput(output string) string {
