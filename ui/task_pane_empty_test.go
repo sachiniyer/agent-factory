@@ -281,10 +281,16 @@ func TestTaskPaneUnavailableSanitizesControlBytes(t *testing.T) {
 		if editing {
 			pane.EnterEditSelected()
 		}
-		pane.SetUnavailable(errors.New("bad\x1b[31mpath\r"))
+		pane.SetUnavailable(errors.New("bad\x1b[31mpath\r\b\a\f\v\x7f\u0085"))
 		rendered := pane.String()
 		require.Contains(t, rendered, "badpath")
 		require.NotContains(t, rendered, "\x1b", "error controls must not reach either renderer")
 		require.NotContains(t, rendered, "\r")
+		for _, b := range []byte(rendered) {
+			require.False(t, b < 0x20 && b != '\n' && b != '\t', "control byte %#x survived", b)
+		}
+		for _, r := range rendered {
+			require.False(t, r >= 0x7f && r <= 0x9f, "control rune U+%04X survived", r)
+		}
 	}
 }

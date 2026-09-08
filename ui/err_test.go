@@ -249,3 +249,36 @@ func TestErrBoxJoinsMultiLineErrorsWithSeparator(t *testing.T) {
 		t.Errorf("the // joiner must be gone, got %q", line)
 	}
 }
+
+func TestSanitizeErrorControls(t *testing.T) {
+	for _, tc := range []struct{ name, raw, want string }{
+		{"backspace", "bad\bpath", "badpath"},
+		{"bell", "bad\apath", "badpath"},
+		{"form feed", "bad\fpath", "badpath"},
+		{"vertical tab", "bad\vpath", "badpath"},
+		{"delete", "bad\x7fpath", "badpath"},
+		{"UTF-8 NEL", "bad\u0085path", "badpath"},
+		{"newline", "first\nsecond", "first · second"},
+		{"tab", "first\tsecond", "first\tsecond"},
+		{"mixed", "\x1b[31mbad\b\a\f\v\x7f\u0085path\r\nnext\titem\x1b[0m", "badpath · next\titem"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeError(tc.raw); got != tc.want {
+				t.Errorf("sanitizeError(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+			box := NewErrBox()
+			box.SetError(errors.New(tc.raw))
+			if got := box.FullError(); got != tc.want {
+				t.Errorf("FullError() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	for r := rune(0); r <= 0x9f; r++ {
+		if r >= 0x20 && r < 0x7f || r == '\n' || r == '\t' {
+			continue
+		}
+		if got := sanitizeError("safe" + string(r)); got != "safe" {
+			t.Errorf("control U+%04X survives sanitizing: %q", r, got)
+		}
+	}
+}
