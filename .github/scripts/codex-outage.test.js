@@ -435,7 +435,8 @@ test('older-head completed summary rows recover outages at every row time', () =
   assert.equal(episodes[0].end, t(4));
   assert.equal(episodes[0].recovery, summary.html_url);
   // Every row is an event: neither the first row nor the current head is special.
-  const multiple = collect([failure, proof, comment(5, limits[0]), summaryArtifact([summaryRow(7), summaryRow(4)])]);
+  const freshProof = { ...proof, id: 3607, created_at: t(6), submitted_at: t(6) };
+  const multiple = collect([failure, proof, comment(5, limits[0]), freshProof, summaryArtifact([summaryRow(7), summaryRow(4)])]);
   assert.deepEqual(multiple.map(e => [e.start, e.end]), [[t(2), t(4)], [t(5), t(7)]]);
   for (const invalid of [
     summaryArtifact([summaryRow(4, { status: 'Running' })]),
@@ -555,4 +556,19 @@ test('3954286650: an unrecognised submitted review cannot turn a row into recove
   assert.equal(episode.latest.kind, 'unrecognised');
   assert.equal(episode.latest.body, environmentMissing);
   assert.deepEqual(episode.merged, [4053]);
+});
+
+test('3954623225: a bare repeat row cannot close an outage using an earlier review', () => {
+  for (const sha of [head, 'b'.repeat(40)]) {
+    const review = comment(1, "### 💡 Codex Review\n\nDidn't find any major issues.", {
+      id: 3606, commit_id: sha, submitted_at: t(1) });
+    const summary = summaryArtifact([summaryRow(3, { commit: sha.slice(0, 7) })]);
+    const collect = artifacts => aggregate([{ number: 4053, head: { sha: head },
+      created_at: t(0), artifacts }], t(5));
+    const limit = comment(2, limits[0], { commit_id: sha });
+    assert.equal(collect([review, limit, summary])[0].end, null);
+    const fresh = { ...review, id: 3954623225, created_at: t(3), submitted_at: t(3) };
+    assert.equal(collect([review, limit, summary, fresh])[0].end, t(3));
+    assert.deepEqual(collect([review, summary]), []);
+  }
 });

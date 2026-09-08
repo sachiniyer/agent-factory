@@ -4792,12 +4792,27 @@ function summaryCorroboration(artifacts, commit, since) {
 }
 
 // Shared by verdict parsing, availability ordering and outage reconstruction.
-// The callback lets history apply the push anchor for each superseded commit.
+// The callback supplies each commit's push anchor. Unavailable responses then
+// advance that same floor for this attempt, so an earlier review cannot certify
+// a bare completion posted after a failed retry on an unchanged head.
 function corroboratedCodexSummaryRows(artifact, artifacts = [], since = 0, headSha = null) {
   if (artifact.user?.login !== CODEX_REVIEWER) return [];
   return completedCodexSummaryRows(artifact).flatMap(row => {
-    const floor = typeof since === "function" ? since(row.commit, row.time) : since;
-    const proof = summaryCorroboration(artifacts, headSha || row.commit, floor);
+    let floor = typeof since === "function" ? since(row.commit, row.time) : since;
+    if (floor == null || !Number.isFinite(floor)) return [];
+    const commit = String(headSha || row.commit).toLowerCase();
+    for (const response of artifacts) {
+      if (response.user?.login !== CODEX_REVIEWER ||
+          !classifyCodexUnavailableArtifact(response)) continue;
+      const responseCommit = String(response.commit_id || "").toLowerCase();
+      // Issue comments have no commit_id; their time binds them to this window.
+      // A review/reply that explicitly names another commit cannot reset it.
+      if (responseCommit && !(responseCommit.startsWith(commit) || commit.startsWith(responseCommit))) continue;
+      // An edit must not move an unavailable event past the row and hide it.
+      const at = parseTimestamp(response.submitted_at || response.created_at);
+      if (at != null && at <= row.time) floor = Math.max(floor, at);
+    }
+    const proof = summaryCorroboration(artifacts, commit, floor);
     if (!proof || row.time <= floor) return [];
     return [{ ...row, time: Math.max(row.time, proof.time), corroboration: proof.description }];
   });

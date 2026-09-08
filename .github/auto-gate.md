@@ -209,6 +209,14 @@ submitted bodies do not count. Every reviewer-unavailable classification,
 including `unrecognised` (such as the environment-missing response), is rejected
 as corroboration and retains its outage meaning. Replies do not corroborate a
 review, and body links alone do not corroborate one.
+For each row, the existing push floor is advanced to the latest preceding
+unavailable Codex response for that commit. The corroborating artifact must be
+strictly newer than this combined floor: an earlier successful review cannot
+certify a later bare Completed row after a failed retry on the same head.
+Unavailable issue comments bind by time; reviews and replies naming another
+commit do not reset the floor. Response creation/submission times are used so
+later edits cannot hide an earlier failed attempt.
+
 This preserves #3606: an automatic review with real artifacts counts even when
 it omits the prose footer. The gate summary identifies the corroborating review,
 prose verdict, or inline comment count. A bare row instead reports “Codex has not

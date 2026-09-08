@@ -3392,11 +3392,10 @@ button:disabled,
 /* Shared control and overlay recipes, completing the chrome migration. */
 button, input, select, textarea, summary { font-family: var(--af-font-ui); font-size: var(--af-type-body); line-height: 1.5; }
 button, summary, .af-input { min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
-.af-ghost, .af-danger, .af-input {
+.af-ghost, .af-input {
  padding: var(--af-space-2); background: var(--af-surface-raised); color: var(--af-ink);
  border: calc(var(--af-space-1) / 4) solid var(--af-border); border-radius: var(--af-radius-control);
 }
-.af-danger:hover:not(:disabled) { color: var(--af-ink); }
 .af-primary { padding: var(--af-space-2); background: var(--af-accent); color: var(--af-surface); border-radius: var(--af-radius-control); }
 button:disabled, .af-input:disabled { opacity: 1; border-style: dashed; }
 button:hover:not(:disabled), summary:hover { text-decoration: underline; }

@@ -3677,9 +3677,9 @@ test("transient failure notices do not diagnose a usage limit", async () => {
   }
 });
 
-test("completed summary rows for older heads supersede outages by row time", async () => {
+test("repeat summary rows for older heads cannot reuse proof from before an outage", async () => {
   for (const [rowTime, status, expected] of [
-    ["2026-07-09T01:25:00Z", "✅ **Completed**", false],
+    ["2026-07-09T01:25:00Z", "✅ **Completed**", true],
     ["2026-07-09T01:15:00Z", "✅ **Completed**", true],
     ["2026-07-09T01:25:00Z", "🔄 **Running**", true],
     [null, "✅ **Completed**", true],
@@ -10516,4 +10516,51 @@ test('3954286650: a genuine automatic clean review still corroborates completion
 test('3954286650: an empty submitted review cannot corroborate completion', () => {
   const review = { ...automaticReview(), body: '' };
   assert.equal(__test.parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA, [review]), null);
+});
+
+test('3954623225: a repeated completion needs proof after the latest unavailable response', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:30:00Z' });
+  const oldReview = automaticReview(HEAD_SHA, '2026-07-09T01:10:00Z');
+  const limit = codexRateLimit('2026-07-09T01:20:00Z');
+  const since = Date.parse('2026-07-09T01:00:00Z');
+  const parse = artifacts => __test.parseVerdictArtifact(summary, HEAD_SHA, artifacts, since);
+  assert.equal(parse([oldReview, limit]), null);
+  const newReview = { ...automaticReview(HEAD_SHA, '2026-07-09T01:29:00Z'), id: 3954623225 };
+  assert.equal(parse([oldReview, limit, newReview]).corroboration, 'review 3954623225');
+  assert.equal(parse([oldReview]).corroboration, 'review 3606');
+});
+
+test('3954623225: the latest unavailable event advances the existing per-row floor', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:40:00Z' });
+  const proof = automaticReview(HEAD_SHA, '2026-07-09T01:25:00Z');
+  const earlier = codexRateLimit('2026-07-09T01:20:00Z');
+  const since = (commit, at) => {
+    assert.equal(commit, HEAD_SHA.slice(0, 7));
+    assert.equal(at, Date.parse('2026-07-09T01:40:00Z'));
+    return Date.parse('2026-07-09T01:00:00Z');
+  };
+  for (const body of [CODEX_LIMIT_ACCOUNT, CODEX_TRANSIENT_FAILURE, CODEX_ENVIRONMENT_MISSING]) {
+    const latest = codexRateLimit('2026-07-09T01:30:00Z', body);
+    for (const artifacts of [[proof, earlier, latest], [latest, earlier, proof]]) {
+      assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, artifacts, since), []);
+    }
+    const edited = { ...latest, updated_at: '2026-07-09T01:50:00Z' };
+    assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, [proof, edited], since), []);
+    const inlineReply = { ...edited, commit_id: HEAD_SHA, pull_request_review_id: 123, in_reply_to_id: 456 };
+    assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, [proof, inlineReply], since), []);
+  }
+});
+
+test('3954623225: later, other-head and non-Codex responses do not reset a row', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:20:00Z' });
+  const proof = automaticReview(HEAD_SHA, '2026-07-09T01:10:00Z');
+  for (const response of [
+    codexRateLimit('2026-07-09T01:30:00Z'),
+    { ...codexRateLimit('2026-07-09T01:15:00Z'), commit_id: OTHER_SHA },
+    { ...codexRateLimit('2026-07-09T01:15:00Z'), user: { login: 'someone' } },
+  ]) {
+    const verdict = __test.parseVerdictArtifact(summary, HEAD_SHA, [proof, response]);
+    assert.equal(verdict.corroboration, 'review 3606');
+    assert.equal(verdict.time, Date.parse('2026-07-09T01:20:00Z'));
+  }
 });
