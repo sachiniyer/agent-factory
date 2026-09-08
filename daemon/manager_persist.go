@@ -755,7 +755,9 @@ func deleteLateGhostSessionRecord(
 // The row remains the retry handle on any error; only a successful delete plus
 // the normal editor fence may remove it.
 func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string, lateResult <-chan error) {
+	m.lateGhostCleanupWG.Add(1)
 	go func() {
+		defer m.lateGhostCleanupWG.Done()
 		if err := <-lateResult; err != nil {
 			m.clearGhostCleanupStall(key, stableID)
 			m.warn().Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
