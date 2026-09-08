@@ -572,3 +572,19 @@ test('3954623225: a bare repeat row cannot close an outage using an earlier revi
     assert.deepEqual(collect([review, summary]), []);
   }
 });
+
+test('#4078: merges after recovery belong to the latest qualifying notice episode', () => {
+  const recovery = { number: 90, head: { sha: head }, artifacts: [verdict(3), verdict(6), verdict(9)] };
+  const late = { number: 4051, head: { sha: head }, merged_at: t(10), artifacts: [comment(2, limits[0])] };
+  const repeated = { number: 4031, head: { sha: head }, merged_at: t(10),
+    artifacts: [comment(8, limits[0]), comment(2, limits[0]), comment(5, limits[0]), comment(11, limits[0])] };
+  const inside = { number: 3, head: { sha: head }, merged_at: t(5), artifacts: [comment(5, limits[0])] };
+  const covered = { number: 4, head: { sha: head }, merged_at: t(10), artifacts: [comment(2, limits[0]), verdict(1)] };
+  const pulls = [recovery, late, repeated, inside, covered];
+  const episodes = aggregate(pulls, t(12));
+  assert.deepEqual(episodes.map(e => [e.start, e.end, e.merged]), [
+    [t(2), t(3), [4051]], [t(5), t(6), [3]], [t(8), t(9), [4031]], [t(11), null, []],
+  ]);
+  assert.deepEqual(episodes.flatMap(e => e.merged).sort((a, b) => a - b), [3, 4031, 4051]);
+  assert.deepEqual(aggregate(pulls.reverse(), t(12)), episodes);
+});

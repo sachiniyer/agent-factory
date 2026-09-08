@@ -71,23 +71,33 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       active.latest = { time: event.time, url: event.url, body: event.body, kind: event.kind };
     }
   }
-  for (const episode of episodes) {
-    episode.merged = [...new Set(pulls.filter((pull) => {
-      const merged = time(pull.merged_at);
-      if (!(merged >= time(episode.start) && merged < time(episode.end || now))) return false;
-      const artifacts = pull.artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER);
-      // #3932's reconstruction: an observed limit before merge and no verdict
-      // covering the merged head at that time. Late reviews cannot erase a merge.
+  for (const pull of pulls) {
+    const merged = time(pull.merged_at);
+    if (!Number.isFinite(merged) || merged > time(now)) continue;
+    const artifacts = pull.artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER);
+    // Attribute once, to the episode holding the latest qualifying notice.
+    // Recovery can precede the merge; notices after the merge cannot move it.
+    let attributed;
+    let latest = -Infinity;
+    for (const episode of episodes) {
       const episodeEnd = time(episode.end || now);
-      return artifacts.some(a => {
+      for (const a of artifacts) {
         const at = time(a.created_at || a.submitted_at || a.updated_at);
-        return evidence.isCodexUsageLimitArtifact(a) && at >= time(episode.start) && at <= episodeEnd && at <= merged;
-      }) &&
-        !artifacts.some(a => {
-          const verdict = evidence.parseVerdictArtifact(a, pull.head.sha, artifacts, summaryCommitSince(pull, pull.head.sha, merged));
-          return verdict && verdict.time <= merged;
-        });
-    }).map(p => p.number))].sort((a, b) => a - b);
+        if (evidence.isCodexUsageLimitArtifact(a) && at >= time(episode.start) && at <= episodeEnd && at <= merged && at >= latest) {
+          attributed = episode;
+          latest = at;
+        }
+      }
+    }
+    // #3932's reconstruction: an observed limit before merge and no verdict
+    // covering the merged head at that time. Late reviews cannot erase a merge.
+    if (attributed && !artifacts.some(a => {
+      const verdict = evidence.parseVerdictArtifact(a, pull.head.sha, artifacts, summaryCommitSince(pull, pull.head.sha, merged));
+      return verdict && verdict.time <= merged;
+    })) attributed.merged.push(pull.number);
+  }
+  for (const episode of episodes) {
+    episode.merged = [...new Set(episode.merged)].sort((a, b) => a - b);
   }
   return episodes;
 }

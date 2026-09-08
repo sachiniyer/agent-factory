@@ -421,7 +421,9 @@ classification; those artifacts are finding surfaces, while replies retain the
 finding-shaped body guard. It reconstructs degraded merges using #3932's method:
 a reviewer-unavailable response whose artifact timestamp falls inside the
 episode and before merge, plus no real verdict covering the actual merged head
-before merge. This is historical coverage accounting, not a second
+before merge. Each degraded merge is attributed once, to the episode holding
+the latest qualifying notice at or before that merge, even when the merge lands
+after recovery. This is historical coverage accounting, not a second
 implementation of the merge gate; the count is labelled with its method in the
 record. An unrecognised artifact before the episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
