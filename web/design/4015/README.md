@@ -36,3 +36,6 @@ Before/after examples (before links use the base-commit goldens):
 | Accounts | [Before](https://raw.githubusercontent.com/sachiniyer/agent-factory/e4e67cb294b70e215067e7410c4dbf3035f08b02/web/selftest/goldens/config-accounts-dark.png) | [After](../../selftest/goldens/config-accounts-dark.png) |
 
 Review correction: deletion explicitly warns about losing uncommitted changes and unpushed commits and offers Archive. Zero-live project removal names retained archives/tasks and when the project remains in the switcher. Read the four updated goldens: both kill-confirmation dialogs grow to fit the warning; both kill-failed error crops grow from 126 to 127 pixels due to centering, with error text unchanged. Unrelated demo capture drift was not rebaselined.
+
+
+Accuracy-round visual review: recaptured the container demo and read the account restriction states. The inherited registration-only choice keeps Create disabled with the same explanation; the logged-out choice keeps its credential notice; the logged-in choice allows Create. The no-default label is “Use agent login (no default)” so it fits the phone field. Add project names the absolute-path requirement. Updated goldens are limited to new-session, create-compact, create-defaults, phone-create and add-project in both themes; unrelated capture drift is retained locally, not rebaselined.

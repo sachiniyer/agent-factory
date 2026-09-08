@@ -217,7 +217,7 @@ for (const operation of ["archive", "kill"] as const) {
     };
     pending.release();
     const notice = page.locator(".af-toast .af-recovery-notice");
-    await expect(notice).toContainText(`The ${operation} outcome could not be confirmed`);
+    await expect(notice).toContainText(`The ${operation === "kill" ? "Delete session" : operation} outcome could not be confirmed`);
     await expect(notice).toContainText("Outcome not confirmed");
     await expect(notice).toContainText("Check the session before acting.");
     await expect(notice).not.toContainText("Operation failed");

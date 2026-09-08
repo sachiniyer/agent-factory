@@ -7896,7 +7896,7 @@ function accountChoices(accounts, agent) {
   const choices = [
     {
       value: AMBIENT_ACCOUNT,
-      label: accountDefaultFor(accounts, agent) ? `Use configured default (${accountDefaultFor(accounts, agent)})` : "Use configured default",
+      label: accountDefaultFor(accounts, agent) ? `Use configured default (${accountDefaultFor(accounts, agent)})` : "Use agent login (no default)",
       agent,
       blocked: "",
       note: "",
@@ -7954,6 +7954,11 @@ function accountChoices(accounts, agent) {
       projectDefault: true
     });
   }
+  const inherited = choices.find((choice) => choice.projectDefault);
+  if (inherited) {
+    choices[0].blocked = inherited.blocked;
+    choices[0].note = inherited.note;
+  }
   return choices;
 }
 function accountDefaultFor(accounts, agent) {
@@ -7983,9 +7988,9 @@ function accountSkewMessage(requested, created) {
     return "";
   }
   if (got === "") {
-    return `Session "${created.title}" was created but the daemon did not apply account "${want}" \u2014 it is running on the ambient identity. The running daemon predates account support; upgrade it, then kill this session and create it again.`;
+    return `Session "${created.title}" was created but the daemon did not apply account "${want}" \u2014 it is running on the ambient identity. The running daemon predates account support; upgrade it, then choose Delete session and create it again.`;
   }
-  return `Session "${created.title}" was created but the daemon applied account "${got}", not the "${want}" that was picked \u2014 it is running as an identity you did not choose. Kill this session and create it again.`;
+  return `Session "${created.title}" was created but the daemon applied account "${got}", not the "${want}" that was picked \u2014 it is running as an identity you did not choose. Choose Delete session and create it again.`;
 }
 
 // src/stream_endpoint.ts
@@ -10805,7 +10810,7 @@ function addProjectModal(callbacks) {
     h(
       "p",
       { class: "af-modal-hint" },
-      "Enter a repo path on the daemon host (~ works)."
+      "Enter an absolute repo path on the daemon host (~ works)."
     )
   );
   pathInput.addEventListener("input", () => handle.setError(null));
@@ -16586,7 +16591,7 @@ function openConfirm(action, session) {
             applySessions(optimisticSessions.project());
             requestResync();
             if (outcome !== "reverted") {
-              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
+              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
               return;
             }
             m.setBusy(false);
@@ -16604,7 +16609,7 @@ function openConfirm(action, session) {
           if (isMutationOutcomeUncertain(e)) {
             if (modal === m) closeModal();
             requestResync();
-            surfaceMutationError(new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
             return;
           }
           m.setBusy(false);

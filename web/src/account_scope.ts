@@ -128,7 +128,7 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string)
       value: AMBIENT_ACCOUNT,
       label: accountDefaultFor(accounts, agent)
         ? `Use configured default (${accountDefaultFor(accounts, agent)})`
-        : "Use configured default",
+        : "Use agent login (no default)",
       agent,
       blocked: "",
       note: "",
@@ -199,6 +199,11 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string)
         + `host, so this create will be refused. Register it from the Config view, or pick another account.`,
       projectDefault: true,
     });
+  }
+  const inherited = choices.find((choice) => choice.projectDefault);
+  if (inherited) {
+    choices[0].blocked = inherited.blocked;
+    choices[0].note = inherited.note;
   }
   return choices;
 }
@@ -273,9 +278,9 @@ export function accountSkewMessage(requested: string, created: SessionData): str
   // there would send the user to fix the wrong thing.
   if (got === "") {
     return `Session "${created.title}" was created but the daemon did not apply account "${want}" — it is running `
-      + `on the ambient identity. The running daemon predates account support; upgrade it, then kill this session `
+      + `on the ambient identity. The running daemon predates account support; upgrade it, then choose Delete session `
       + `and create it again.`;
   }
   return `Session "${created.title}" was created but the daemon applied account "${got}", not the "${want}" that `
-    + `was picked — it is running as an identity you did not choose. Kill this session and create it again.`;
+    + `was picked — it is running as an identity you did not choose. Choose Delete session and create it again.`;
 }

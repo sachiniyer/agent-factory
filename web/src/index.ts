@@ -875,7 +875,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
             requestResync();
             if (outcome !== "reverted") {
               surfaceMutationError(outcome === "uncertain"
-                ? new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`)
+                ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
                 : e, outcome);
               return;
             }
@@ -894,7 +894,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
           if (isMutationOutcomeUncertain(e)) {
             if (modal === m) closeModal();
             requestResync();
-            surfaceMutationError(new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
             return;
           }
           m.setBusy(false);

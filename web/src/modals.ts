@@ -678,7 +678,7 @@ export function addProjectModal(callbacks: {
     h(
       "p",
       { class: "af-modal-hint" },
-      "Enter a repo path on the daemon host (~ works).",
+      "Enter an absolute repo path on the daemon host (~ works).",
     ),
   );
 

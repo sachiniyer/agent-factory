@@ -5414,7 +5414,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // Only web-signed-in holds the artifact claude's login would leave.
     await expect(accountSelect.locator("option")).toHaveText(
       [
-        "Use configured default",
+        "Use agent login (no default)",
         "design-review-account — not logged in",
         "web-registered — not logged in",
         "web-signed-in",
@@ -5434,7 +5434,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // same spelling is a different identity. codex has no registered accounts here,
     // so the honest list is the ambient row alone.
     await programSelect.selectOption("codex");
-    await expect(accountSelect.locator("option")).toHaveText(["Use configured default"]);
+    await expect(accountSelect.locator("option")).toHaveText(["Use agent login (no default)"]);
     await expect(accountSelect).toHaveValue("");
     await expect(accountHint).toHaveText("");
 
