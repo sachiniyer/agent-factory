@@ -282,7 +282,7 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 		rejected = append(rejected, m[1])
 	}
 	if len(rejected) > 0 && len(rejected) == len(candidates) {
-		log.WarningLog.Printf("Claude usage-limit banner %q: cannot load timezone candidates %q; falling back to daemon zone %q", strings.SplitN(content, "\n", 2)[0], rejected, loc.String())
+		warnClaudeTimezoneOnce(content, rejected, loc)
 	}
 
 	hour, minute, ok := parseClockTime(reset)

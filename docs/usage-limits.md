@@ -279,7 +279,9 @@ Claude reset times honor a parenthesized timezone accepted by Go's
 `(Japan)` and slash names such as `(America/New_York)` or `(Etc/GMT+5)`.
 When several parenthesized groups appear, the first loadable zone wins. If none
 loads, one warning names the banner and all rejected candidates, and parsing
-falls back to the daemon's timezone. A banner without a zone also uses the
+falls back to the daemon's timezone. Repeated warnings are suppressed by a
+process-local cache of the last 64 distinct banner-and-candidate keys; an
+evicted banner can warn again. A banner without a zone also uses the
 daemon's timezone. The sidebar displays the resulting instant in your local
 timezone; auto-resume uses that same instant plus its grace buffer.
 

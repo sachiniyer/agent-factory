@@ -12,6 +12,7 @@ import (
 )
 
 func TestClaudeResetParenTimezone(t *testing.T) {
+	resetTimezoneWarningsForTest(t)
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		t.Fatal(err)
