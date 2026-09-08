@@ -534,6 +534,14 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 	// here is judged via TitlesCollide -> BranchForTitle even though no branch is
 	// created for the rename, so the same injectivity is required.
 	base = git.BoundTitleForDisambiguation(base)
+	var archiveNames archiveDirectoryNames
+	if namespace == runtimeNamespaceLocalTmux {
+		var err error
+		archiveNames, err = archiveRelocationSnapshot(repoID)
+		if err != nil {
+			return "", err
+		}
+	}
 	for i := 1; i <= 10000; i++ {
 		candidate := fmt.Sprintf("%s (archived)", base)
 		if i > 1 {
@@ -541,7 +549,7 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 		}
 		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData, false)
 		if err == nil && namespace == runtimeNamespaceLocalTmux {
-			err = validateArchiveRelocationDestination(repoID, candidate)
+			err = archiveNames.validateArchiveRelocationDestination(candidate)
 		}
 		if err == nil {
 			return candidate, nil

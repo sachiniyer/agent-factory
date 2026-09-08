@@ -581,6 +581,10 @@ type TabData struct {
 	// every other kind. Surfaced in the snapshot so the web UI can iframe it and
 	// so `af sessions get` shows the target.
 	URL string `json:"url,omitempty"`
+	// WebProxied is derived at JSON encoding with IsLoopbackWebTarget, the
+	// daemon proxy's predicate. A pointer preserves explicit false for web tabs;
+	// non-web tabs omit it. Stored/input values never override the derivation.
+	WebProxied *bool `json:"web_proxied,omitempty"`
 	// Conversation is the provider-specific conversation id for this tab, when
 	// the underlying agent exposes a durable resume id. Omitted for legacy rows
 	// and providers where af can only resume "latest".

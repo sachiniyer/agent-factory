@@ -218,6 +218,8 @@ export interface TabData {
    *  loopback URL is rendered through the same-origin daemon proxy, an external
    *  URL directly. Mirrors session.TabData.URL (session/storage.go). */
   url?: string;
+  /** Daemon proxy decision; absent only on older daemon records. */
+  web_proxied?: boolean;
 }
 
 /** The subset of session.GitWorktreeData (session/storage.go) the web reads: the
