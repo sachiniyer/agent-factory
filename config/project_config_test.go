@@ -188,6 +188,34 @@ func TestResolveProjectSelectorByLinkedWorktreeIdentity(t *testing.T) {
 	require.Contains(t, err.Error(), "is not a registered project")
 }
 
+func TestResolveProjectSelectorRejectsCopiedCheckoutMarker(t *testing.T) {
+	_, original, project := registeredTestProject(t)
+	_, err := SetProjectConfigValue(project.ID, "default_program", "codex")
+	require.NoError(t, err)
+	personalPath, err := ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	before, err := os.ReadFile(personalPath)
+	require.NoError(t, err)
+
+	copyRoot := filepath.Join(t.TempDir(), "copy")
+	require.NoError(t, exec.Command("cp", "-R", original, copyRoot).Run())
+
+	_, err = ResolveProjectSelector(copyRoot)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checkout marker "+project.CheckoutID+" appears at both")
+	require.Contains(t, err.Error(), "move or remove one copy; af will not choose between them")
+
+	_, err = SetProjectConfigValue(copyRoot, "root_agent", `{"enabled":true}`)
+	require.Error(t, err)
+	after, readErr := os.ReadFile(personalPath)
+	require.NoError(t, readErr)
+	require.Equal(t, before, after)
+
+	exact, err := ResolveProjectSelector(original)
+	require.NoError(t, err)
+	require.Equal(t, project.ID, exact.ID)
+}
+
 func TestResolveProjectSelectorUnknownID(t *testing.T) {
 	registeredTestProject(t)
 	_, err := ResolveProjectSelector("prj_ffffffffffffffffffffffffffffffff")
