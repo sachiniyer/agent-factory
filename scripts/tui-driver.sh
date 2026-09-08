@@ -378,13 +378,23 @@ af_resize() {
     AF_DRIVER_ROWS="$rows"
 }
 
+# _af_menu_row — isolate the unframed navigation status-bar menu. Tree and
+# pane menus end with the same help/quit signature. Reject pane-border rows
+# even if their output contains a complete copied menu. Keep the final match:
+# the status bar is below the workspace, but notices can follow its menu.
+_af_menu_row() {
+    awk -v borders="$_AF_PANE_BORDER_FS" '
+        $0 !~ borders && /(^|[[:space:]])[?] help · q quit[[:space:]]*$/ { row = $0 }
+        END { if (row != "") print row }'
+}
+
 # af_focus_tree — put ring focus on the instances tree (the state whose menu
 # advertises `n new`). Checks BEFORE pressing, so it never Tabs off the tree
 # when already there. Assumes nav mode (call af_ensure_nav first).
 af_focus_tree() {
     local _
     for _ in $(seq 1 8); do
-        if af_capture | grep -qE -- 'n new'; then
+        if af_capture | _af_menu_row | grep -qE -- 'n new'; then
             return 0
         fi
         af_send Tab
@@ -587,46 +597,52 @@ af_new_instance() {
 # starting cursor position: anchor at the first live tab stop (k is idempotent
 # there), then step down until BOTH conditions hold — <name>'s parent row
 # carries the ▾ selected/expanded arrow AND the menu advertises an
-# instance-scoped verb (`D kill`).
+# instance-scoped verb (`D delete session`, or legacy `D kill`).
 #
 # The two-part success condition is the #1174-item-1 / #1199 fix. The sticky
 # ▾ is a DISPLAY-selection: a SINGLE auto-selected instance renders ▾ while the
 # tree cursor still sits on the `Instances` section header, so GetSelected-
-# Instance() is nil and every cursor-driven verb (o attach, D kill, and
+# Instance() is nil and every cursor-driven verb (o attach, D delete session, and
 # af_attach/af_open_pane which run after af_select) silently no-ops. A ▾-only
 # check returns on iteration 0 in that case — a false positive that can make a
-# play-test wrongly "pass" a nav action that never fired. `D kill` appears in
+# play-test wrongly "pass" a nav action that never fired. `D delete session` appears in
 # the menu ONLY when an instance is actually under the cursor (non-nil
 # GetSelectedInstance()), so requiring it forces `j` past the header/title rows
 # until the cursor truly lands on an actionable tab row.
 af_select() {
-    local name="$1" i screen name_re
+    local name="$1" i screen menu name_re
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
     name_re="$(_af_regex_escape "$name")"
     af_ensure_nav
     af_focus_tree || return 1
-    for i in $(seq 1 30); do af_send k; done
-    sleep "$AF_DRIVER_POLL"
+    # Check the current actionable selection BEFORE sending navigation. Re-selecting
+    # the same row otherwise queues 30 k presses, then can accept the old frame
+    # while those keys are still in flight (#4056), changing selection after return.
     # Scan down from the anchored top tab stop, evaluating the ready condition
     # AFTER every `j` — including the final one. The old loop captured, checked,
     # THEN pressed `j`, so the state produced by the 40th (boundary) `j` was
     # never evaluated: a row that only became actionable on that last step was
-    # missed and af_select reported a false selection failure (#1759). `seq 0 40`
-    # checks the anchored position first (i=0, no `j`), then re-checks after each
+    # missed and af_select reported a false selection failure (#1759). Check the
+    # current position (i=-1), then the anchor (i=0, no `j`), then after each
     # of the 40 downward steps, with a settle poll between the `j` and the
     # capture so the post-`j` frame is the one we inspect.
-    for i in $(seq 0 40); do
-        if [ "$i" -gt 0 ]; then
+    for i in $(seq -1 40); do
+        if [ "$i" -eq 0 ]; then
+            local anchor
+            for ((anchor = 0; anchor < 30; anchor++)); do af_send k; done
+            sleep "$AF_DRIVER_POLL"
+        elif [ "$i" -gt 0 ]; then
             af_send j
             sleep "$AF_DRIVER_POLL"
         fi
         screen="$(af_capture)"
         printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" || continue
-        if printf '%s\n' "$screen" | grep -qE -- 'D kill'; then
+        menu="$(printf '%s\n' "$screen" | _af_menu_row)"
+        if printf '%s\n' "$menu" | grep -qE -- '(^|[[:space:]])D (kill|delete session)([[:space:]]|$)'; then
             return 0
         fi
         # The target is display-selected (▾) but the footer is the pane menu, not
-        # 'D kill': moving the cursor onto an instance that already has an open
+        # 'D delete session': moving the cursor onto an instance that already has an open
         # workspace pane auto-focuses that pane, which replaces the tree footer
         # AND stops the remaining scan keys from driving the tree (#1996). The
         # instance IS selected — the pane could only be focused because of that —
@@ -634,14 +650,14 @@ af_select() {
         # the boundary and reporting a false selection failure. This is NOT the
         # #1759 sticky-header false positive: that shows the tree menu ('n new'),
         # never the pane menu.
-        if printf '%s\n' "$screen" | grep -qE -- 'hide pane'; then
+        if printf '%s\n' "$menu" | grep -qE -- 'hide pane'; then
             af_focus_tree || return 1
             if af_capture | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)"; then
                 return 0
             fi
         fi
     done
-    _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D kill' in the menu)"
+    _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D delete session' (or legacy 'D kill') in the status-bar menu)"
     printf '%s\n' "$screen" >&2
     return 1
 }
