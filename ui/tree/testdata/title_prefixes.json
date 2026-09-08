@@ -1,0 +1,23 @@
+[
+  {
+    "name": "remote + lost",
+    "liveness": 3,
+    "in_flight_op": 0,
+    "backend_type": "remote",
+    "expected": "[lost] [remote] alpha"
+  },
+  {
+    "name": "lost + killing",
+    "liveness": 3,
+    "in_flight_op": 2,
+    "backend_type": "local",
+    "expected": "[deleting] [lost] alpha"
+  },
+  {
+    "name": "limit + archiving",
+    "liveness": 6,
+    "in_flight_op": 3,
+    "backend_type": "local",
+    "expected": "[limit] [deleting] alpha"
+  }
+]
