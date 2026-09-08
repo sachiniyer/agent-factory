@@ -79,7 +79,7 @@ import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
-import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
+import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
   clampActiveTab,
   pickSelection,
@@ -115,6 +115,7 @@ import {
   renderLogin,
   sessionTabs,
   canManageTabs,
+  isOffBoxWorkspace,
   canMutateTabRoster,
   canCreateTabKind,
   canCloseTabs,
@@ -842,6 +843,10 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
     confirmModal({
       action,
       sessionTitle: target.title,
+      archived: isArchived(session),
+      offBox: isOffBoxWorkspace(session),
+      externalWorktree: session.worktree?.external_worktree === true,
+      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -878,7 +883,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
             requestResync();
             if (outcome !== "reverted") {
               surfaceMutationError(outcome === "uncertain"
-                ? new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`)
+                ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
                 : e, outcome);
               return;
             }
@@ -897,7 +902,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
           if (isMutationOutcomeUncertain(e)) {
             if (modal === m) closeModal();
             requestResync();
-            surfaceMutationError(new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
             return;
           }
           m.setBusy(false);
@@ -913,11 +918,11 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
  *  archives the repo's regular live sessions, tears down in-place ones, and
  *  removes any durable project registration via DeleteProject; the lifecycle
  *  events + projects.changed resync the rail and drop the project from the view. */
-function openDeleteProject(root: string, label: string, sessionCount: number): void {
+function openDeleteProject(root: string, label: string): void {
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      sessionCount,
+      ...projectDeletionBreakdown(store.get().sessions, root),
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

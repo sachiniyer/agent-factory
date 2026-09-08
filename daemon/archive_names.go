@@ -61,7 +61,18 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 // archiveRecordClaimsTitle reserves both the current archive location and the
 // future destination after restore, which derives from the session's title.
 func archiveRecordClaimsTitle(data session.InstanceData, title string) bool {
-	return archiveTitlesCollide(data.Title, title) || archiveTitlesCollide(archiveClaimName(data), title)
+	key := archiveTitleKey(title)
+	for _, name := range archiveRecordClaimNames(data) {
+		if archiveDiskNameKey(name) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// archiveRecordClaimNames returns literal destination spellings for both claims.
+func archiveRecordClaimNames(data session.InstanceData) [2]string {
+	return [2]string{archiveClaimName(data), sanitizeArchiveTitle(data.Title)}
 }
 
 // archiveClaimName preserves the directory owned by an archived row even when
@@ -73,7 +84,7 @@ func archiveClaimName(data session.InstanceData) string {
 	return sanitizeArchiveTitle(data.Title)
 }
 
-// archiveTitlesCollide is shared by create admission and archive destination scans.
+// archiveTitlesCollide compares session titles in the portable archive namespace.
 func archiveTitlesCollide(a, b string) bool {
 	return archiveTitleKey(a) == archiveTitleKey(b)
 }
@@ -97,7 +108,13 @@ func ownsArchiveDirectory(data session.InstanceData) (bool, error) {
 // including case-sensitive Linux filesystems. Keep sanitizeArchiveTitle as the
 // on-disk spelling; only namespace admission folds case and Unicode composition.
 func archiveTitleKey(title string) string {
-	folded := cases.Fold().String(norm.NFC.String(sanitizeArchiveTitle(title)))
+	return archiveDiskNameKey(sanitizeArchiveTitle(title))
+}
+
+// archiveDiskNameKey compares literal disk spellings without changing punctuation.
+// Sanitization belongs only to the title-to-disk direction.
+func archiveDiskNameKey(name string) string {
+	folded := cases.Fold().String(norm.NFC.String(name))
 	// Folding can decompose NFC input, so normalize the result as well.
 	return norm.NFC.String(folded)
 }
@@ -105,7 +122,7 @@ func archiveTitleKey(title string) string {
 // archiveDestinationKey uses the same portable directory comparison as create
 // admission. Legacy sessions can still have case/normalization-equivalent names.
 func archiveDestinationKey(repoID, dest string) string {
-	return daemonInstanceKey(repoID, filepath.Join(filepath.Dir(dest), archiveTitleKey(filepath.Base(dest))))
+	return daemonInstanceKey(repoID, filepath.Join(filepath.Dir(dest), archiveDiskNameKey(filepath.Base(dest))))
 }
 
 // releaseArchiveDestination cannot release a different instance's reservation.

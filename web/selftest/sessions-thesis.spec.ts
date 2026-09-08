@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 for (const colorScheme of ["light", "dark"] as const) {
-  test(`#4065: expressive session identity and quiet controls · ${colorScheme}`, async ({ page }) => {
+  test(`#4065: expressive session identity and legible controls · ${colorScheme}`, async ({ page }) => {
     await page.emulateMedia({ colorScheme });
     // No input reaches an agent; the shell still mounts the real terminal.
     await page.routeWebSocket(url => url.pathname.endsWith("/stream"), () => {});
@@ -12,7 +12,8 @@ for (const colorScheme of ["light", "dark"] as const) {
     const filter = page.getByRole("button", { name: "Filter sessions", exact: true });
     await expect(page.locator(".af-session-identity")).toContainText("Default account");
     await expect(page.locator(".af-row-identity").first()).toBeVisible();
-    await expect(filter).toHaveCSS("border-top-color", "rgba(0, 0, 0, 0)");
+    // #4033 restores shared button affordances; retain the identity and focus contracts.
+    await expect(filter).toHaveCSS("font-weight", "600");
     await expect(page.locator(".af-term-title")).toHaveCSS("font-size", "28px");
     await expect(page.locator(".af-row-branch").first()).toHaveCSS("font-size", "13px");
     await page.keyboard.press("Control+]");
@@ -24,7 +25,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
     await expect(page.locator(".af-term-title")).toHaveCSS("font-size", "16px");
     const toggle = page.locator(".af-nav-toggle");
-    await expect(toggle).toHaveCSS("border-top-color", "rgba(0, 0, 0, 0)");
+    await expect(toggle).toHaveCSS("font-weight", "600");
     const box = await toggle.boundingBox();
     expect(box!.width).toBeGreaterThanOrEqual(44);
     expect(box!.height).toBeGreaterThanOrEqual(44);

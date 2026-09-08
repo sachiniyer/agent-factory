@@ -3005,7 +3005,10 @@ textarea[class] {
   }
   .af-keybar-row button {
     position: relative;
-    flex: 1;
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     padding: var(--af-space-1);
@@ -3105,6 +3108,25 @@ textarea[class] {
   .af-session-first .af-split:not(:has(.af-pane-focused)) {
     display: none;
   }
+}
+:is(.af-app, .af-modal-card, .af-recovery) button[class]:not(.af-danger):not([aria-pressed=true]):not([aria-selected=true]) {
+  border-color: var(--af-border);
+  font-weight: 600;
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:hover:not(:disabled):not(.af-danger) {
+  border-color: var(--af-accent);
+  text-decoration: none;
+}
+:is(.af-app, .af-modal-card, .af-recovery) :is(.af-primary, .af-ghost, .af-danger, .af-recovery-action) {
+  padding-inline: var(--af-space-3);
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:focus-visible {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+  outline-offset: calc(var(--af-space-1) / 2);
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:disabled:not(.af-danger) {
+  color: var(--af-ink-muted);
+  border-style: dashed;
 }
 
 /* src/sessions-thesis.css */

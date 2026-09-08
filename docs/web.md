@@ -84,7 +84,7 @@ size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
 Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
-keys and Back. Tap Ctrl or Alt then type a character; double tap to lock (shown
+keys and More keys. Tap Ctrl or Alt then type a character; double tap to lock (shown
 by ▸ and an outline), then tap again to release. Keys retain terminal focus and
 the terminal resizes above the soft keyboard. With that keyboard closed, the
 terminal occupies at least 85% of the visual viewport at the verified phone widths.
@@ -107,18 +107,18 @@ Click **+ New** in the rail. If there are no projects, add one through the proje
 switcher first; creation stays disabled until a project is available.
 
 <figure markdown>
-![New session form with Title, Project, Prompt, Account, and an Edit defaults disclosure](assets/web/new-session.png#only-light)
-![New session form with Title, Project, Prompt, Account, and an Edit defaults disclosure](assets/web/new-session-dark.png#only-dark)
-<figcaption>Describe the work, choose an identity, and expand Edit defaults to change Program or Backend.</figcaption>
+![New session form with Title, Project, Prompt, Account, and a Defaults disclosure](assets/web/new-session.png#only-light)
+![New session form with Title, Project, Prompt, Account, and a Defaults disclosure](assets/web/new-session-dark.png#only-dark)
+<figcaption>Describe the work, choose an identity, and expand Defaults to change Program or Backend.</figcaption>
 </figure>
 
 | Field | What to choose |
 | --- | --- |
 | Title | A session name. Leave it empty to use the suggested name, if one has loaded. |
 | Project | The repository to work in; starts with the selected project. |
-| Program (Edit defaults) | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
-| Backend (Edit defaults) | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
-| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Ambient identity** sends no account; the daemon still applies configured defaults. |
+| Program (Defaults) | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
+| Backend (Defaults) | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
+| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Use configured default (…)** inherits the named default; **Use agent login (no default)** uses the agent’s own login when none is configured. **Use daemon default** leaves resolution to the daemon. These rows send no account override. |
 | Prompt | Optional initial instructions to send to the agent. |
 
 An account without a credential is labelled but still selectable. A
@@ -151,14 +151,14 @@ without attaching. `Enter` attaches the selected session. The pane's accent bord
 marks the pane you are driving. See the [keyboard reference](#keyboard-reference)
 for tab and view navigation.
 
-The pane header's **Retry** appears for a session waiting on a usage limit and
+The pane header's **Retry limit** appears for a session waiting on a usage limit and
 requests another attempt. Open the pane header’s **Actions** menu (shown as **…**
 on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
 session can offer both; see [usage limits](usage-limits.md).
 
-Open a rail row’s **…** menu for **Archive** and **Kill**. Other actionable rows
+Open a rail row’s **…** menu for **Archive** and **Delete session**. Other actionable rows
 reveal the menu on hover or keyboard focus. Each opens a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
@@ -168,7 +168,7 @@ reveal the menu on hover or keyboard focus. Each opens a confirmation:
   worktree back and respawns the agent. For a remote session, it provisions a
   fresh sandbox from the pushed branch and relaunches the agent; the old
   sandbox's conversation does not return. Reveal **Archived** in the filter first.
-- **Kill** permanently tears down the session and removes its record. It removes
+- **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
 

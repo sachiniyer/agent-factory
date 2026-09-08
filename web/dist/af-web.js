@@ -6274,12 +6274,12 @@ function scopeRecovery(element) {
 }
 function renderMutationOutcome(notice) {
   if (notice.kind === "uncertain") {
-    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before taking further action.", false);
+    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before acting.", false);
   }
   if (notice.kind === "confirmed") {
-    return mutationNotice("Operation completed", notice.detail, "Review the details before taking further action.", false);
+    return mutationNotice("Operation completed", notice.detail, "Review the result before acting.", false);
   }
-  return mutationNotice("Operation failed", notice.detail, "Review the details, then try again.");
+  return mutationNotice("Operation failed", notice.detail, "Check the error, then retry.");
 }
 function appendMutationOutcome(previous, next) {
   return {
@@ -7268,10 +7268,10 @@ function terminalChrome(opts) {
   keyboard.hidden = true;
   const actions2 = h("div", { class: "af-term-actions" });
   actions2.hidden = true;
-  const retry = action("Retry", "", opts.retry);
-  retry.title = "Resume this session from its usage-limit wall";
+  const retry = action("Retry limit", "", opts.retry);
+  retry.title = "Retry after the usage limit";
   const handoff = action("Handoff", "", opts.handoff);
-  handoff.title = "Continue this session under a different agent";
+  handoff.title = "Continue with another agent";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
   copy.title = "Copy link";
   copy.setAttribute("aria-label", "Copy link");
@@ -7280,7 +7280,7 @@ function terminalChrome(opts) {
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
-  const closePane = action("Close pane", "af-phone-pane-close", () => opts.closePane?.());
+  const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
@@ -7290,8 +7290,8 @@ function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
   const label = h("span", { class: "af-pane-label" });
   const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
-  const close = h("button", { type: "button", class: "af-pane-close", title: "Close pane" }, icon("x"));
-  close.setAttribute("aria-label", "Close pane");
+  const close = h("button", { type: "button", class: "af-pane-close", title: "Hide pane" }, icon("x"));
+  close.setAttribute("aria-label", "Hide pane");
   close.addEventListener("click", (event) => {
     event.stopPropagation();
     onClose();
@@ -7356,7 +7356,7 @@ function modalChrome(opts) {
     },
     setError(msg) {
       if (msg) {
-        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
       } else {
         errorLine.textContent = "";
@@ -7374,7 +7374,7 @@ function field(label, control) {
 }
 function defaultsDisclosure() {
   const summaryText = h("span", { class: "af-defaults-summary" });
-  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Edit defaults \xB7"), " ", summaryText);
+  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Defaults \xB7"), " ", summaryText);
   const body = h("div", { class: "af-defaults-body" });
   const el2 = h("details", { class: "af-defaults" }, summary, body);
   const setSummary = (fragments) => {
@@ -7388,7 +7388,7 @@ function emptyAccountsState() {
   return { entries: [], agents: [], error: "", status: null, loaded: false };
 }
 var ACCOUNT_INPUT_ATTR = "data-account-input";
-var ACCOUNTS_NOTE = "Agent identities, not config keys. af runs the agent's own login flow against a directory and never reads, stores or forwards the credential. Signing in is a device code \xB7 the pane prints a URL, you finish it in your own browser.";
+var ACCOUNTS_NOTE = "Sign in with the agent\u2019s login flow. Follow the URL in the pane.";
 function renderAccountsSection(state, actions2, registration = { open: false, agent: "" }) {
   const section = h("section", { class: "af-accounts" });
   section.setAttribute("aria-label", "Accounts");
@@ -7414,7 +7414,7 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
       h(
         "p",
         { class: "af-accounts-empty" },
-        "This daemon reports no agents that support accounts."
+        "No agents support accounts."
       )
     );
     return section;
@@ -7489,7 +7489,7 @@ function renderAccountRow(entry, status, actions2) {
       h(
         "div",
         { class: "af-accounts-notice" },
-        `A session cannot be scoped to a ${entry.agent} account yet \u2014 registering and logging in work.`
+        `${entry.agent} accounts support login only; sessions cannot use them yet.`
       )
     );
   }
@@ -7779,7 +7779,7 @@ var ConfigPane = class {
       h(
         "p",
         { class: "af-config-empty" },
-        "No settings are available \u2014 use Configure with assistant or check the daemon connection."
+        "No settings available. Try Configure with assistant."
       )
     ];
     this.el.replaceChildren(
@@ -7893,18 +7893,28 @@ function accountAgentSupported(accounts, agent) {
   }
   return accounts.agents.includes(agent);
 }
-function accountChoices(accounts, agent) {
+function accountChoices(accounts, agent, failed = false) {
+  if (accounts === null) {
+    return [{
+      value: AMBIENT_ACCOUNT,
+      agent,
+      projectDefault: false,
+      label: failed ? "Accounts unavailable" : "Loading accounts\u2026",
+      blocked: failed ? "" : "Wait for the account policy to load.",
+      note: failed ? "Accounts could not be loaded. The daemon default, if any, applies." : ""
+    }];
+  }
   const choices = [
     {
       value: AMBIENT_ACCOUNT,
-      label: "Ambient identity (the agent's own login)",
+      label: agent === "" ? "Use daemon default" : accountDefaultFor(accounts, agent) ? `Use configured default (${accountDefaultFor(accounts, agent)})` : "Use agent login (no default)",
       agent,
       blocked: "",
-      note: "",
+      note: agent === "" ? "The daemon default, if any, applies." : "",
       projectDefault: false
     }
   ];
-  if (accounts === null || agent === "") {
+  if (agent === "" || !accountAgentSupported(accounts, agent)) {
     return choices;
   }
   const fallback = accountDefaultFor(accounts, agent);
@@ -7955,6 +7965,11 @@ function accountChoices(accounts, agent) {
       projectDefault: true
     });
   }
+  const inherited = choices.find((choice) => choice.projectDefault);
+  if (inherited) {
+    choices[0].blocked = inherited.blocked;
+    choices[0].note = inherited.note;
+  }
   return choices;
 }
 function accountDefaultFor(accounts, agent) {
@@ -7984,9 +7999,9 @@ function accountSkewMessage(requested, created) {
     return "";
   }
   if (got === "") {
-    return `Session "${created.title}" was created but the daemon did not apply account "${want}" \u2014 it is running on the ambient identity. The running daemon predates account support; upgrade it, then kill this session and create it again.`;
+    return `Session "${created.title}" was created but the daemon did not apply account "${want}" \u2014 it is running on the ambient identity. The running daemon predates account support; upgrade it, then choose Delete session and create it again.`;
   }
-  return `Session "${created.title}" was created but the daemon applied account "${got}", not the "${want}" that was picked \u2014 it is running as an identity you did not choose. Kill this session and create it again.`;
+  return `Session "${created.title}" was created but the daemon applied account "${got}", not the "${want}" that was picked \u2014 it is running as an identity you did not choose. Choose Delete session and create it again.`;
 }
 
 // src/stream_endpoint.ts
@@ -8080,7 +8095,7 @@ function keybarPointerDown(event, act) {
   event.preventDefault();
   act();
 }
-var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["Back", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
 var TerminalKeybar = class {
   constructor(host, input, refit, applicationCursor) {
     this.host = host;
@@ -8102,7 +8117,7 @@ var TerminalKeybar = class {
         button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
         const act = () => {
           if (!this.focused || !this.phone.matches) return;
-          if (key === "Arrows" || key === "Back") this.arrows = key === "Arrows";
+          if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           else this.input(keyBytes(key, false, false, this.applicationCursor()));
           this.paint();
@@ -9931,7 +9946,7 @@ function loginTerminalStatusCopy(status, login) {
     case "open":
       return login.reused ? "Joined the running login" : "Live";
     case "exited":
-      return "The login flow ended \u2014 close this to see the account's state";
+      return "Login ended \xB7 close to check the account";
     default:
       return "Reconnecting\u2026";
   }
@@ -9948,11 +9963,11 @@ function spawnFailureCopy(e) {
   if (e instanceof ApiError && e.status === 503) {
     return {
       status: "Unavailable",
-      error: e.message !== "" ? e.message : "The daemon reported the config assistant unavailable. Close and try again."
+      error: e.message !== "" ? e.message : "Assistant unavailable. Close and retry."
     };
   }
   if (e instanceof ApiError && e.status === 0) {
-    return { status: "Offline", error: "Could not reach the daemon. Close and try again." };
+    return { status: "Offline", error: "Daemon unreachable. Close and retry." };
   }
   return {
     status: "Failed to start",
@@ -9963,7 +9978,7 @@ function openConfigAssistant(opts) {
   const { token: token2, mountHost, onClosed } = opts;
   let closed = false;
   let term = null;
-  const status = h("span", { class: "af-assistant-status" }, "Starting the assistant\u2026");
+  const status = h("span", { class: "af-assistant-status" }, "Starting\u2026");
   status.setAttribute("role", "status");
   const closeBtn = h("button", { type: "button", class: "af-ghost af-assistant-close" }, "\xD7");
   closeBtn.setAttribute("aria-label", "Close the config assistant");
@@ -10173,6 +10188,33 @@ var EventStream = class {
   }
 };
 
+// src/account_selection.ts
+var AccountSelection = class {
+  picked = false;
+  agent = "";
+  value = AMBIENT_ACCOUNT;
+  pick(value) {
+    this.picked = true;
+    this.value = value;
+  }
+  render(accounts, agent, failed = false) {
+    if (accounts === null || !agent && this.namedChoicePending) return AMBIENT_ACCOUNT;
+    const rows = accountChoices(accounts, agent, failed);
+    const changedAgent = agent !== this.agent;
+    this.agent = agent;
+    if (this.picked && (changedAgent || !rows.some((row) => row.value === this.value))) {
+      this.picked = false;
+      this.value = AMBIENT_ACCOUNT;
+      return AMBIENT_ACCOUNT;
+    }
+    const value = this.picked ? this.value : accountDefaultFor(accounts, agent);
+    return rows.some((row) => row.value === value) ? value : AMBIENT_ACCOUNT;
+  }
+  get namedChoicePending() {
+    return this.picked && this.value !== AMBIENT_ACCOUNT;
+  }
+};
+
 // src/backends.ts
 var REPO_DEFAULT = "";
 function backendChoices(catalog) {
@@ -10237,7 +10279,7 @@ function truncationNote(listing) {
   if (!listing.truncated) {
     return "";
   }
-  return `Showing the first ${listing.entries.length} directories \u2014 type the path below to reach one that is not listed.`;
+  return `First ${listing.entries.length} directories \xB7 enter a path for more.`;
 }
 var LAST_DIR_KEY = "af.addproject.dir";
 function loadLastBrowsedDir() {
@@ -10483,10 +10525,11 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
   accountHint.setAttribute("role", "status");
   let accounts = null;
+  let accountsFailed = false;
   let programCatalog = null;
   let accountRows = accountChoices(null, "");
-  let accountAgent = "";
-  let accountPicked = false;
+  const accountSelection = new AccountSelection();
+  let programsPending = false;
   let busy = false;
   const defaults = defaultsDisclosure();
   const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
@@ -10494,8 +10537,11 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
-    const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace("Ambient identity (the agent's own login)", "ambient");
-    const accountNeedsChoice = !!accountHint.textContent || accountPicked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent);
+    if (accountSelection.namedChoicePending && !programsPending && (accountsFailed || programCatalog === null)) {
+      accountHint.textContent = "Cannot verify the selected account. Reopen this form to try again.";
+    }
+    const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace(/^Use configured default \((.*)\)$/, "$1 (default)");
+    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog));
     defaults.setSummary([
       `Program: ${choiceLabel(programSelect)}`,
       `Backend: ${choiceLabel(backendSelect)}`,
@@ -10510,7 +10556,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     }
     accountSlot.hidden = !accountNeedsChoice;
     if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
-    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value);
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value) || (accounts === null || programsPending || !accountAgentFor(programSelect.value, programCatalog)) && accountSelection.namedChoicePending;
   };
   const chromeSetBusy = handle.setBusy.bind(handle);
   handle.setBusy = (b) => {
@@ -10530,27 +10576,18 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   backendSelect.addEventListener("change", syncSubmitState);
   const renderAccounts = () => {
     const agent = accountAgentFor(programSelect.value, programCatalog);
-    const previous = accountSelect.value;
-    const sameAgent = agent === accountAgent;
-    accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
-    accountAgent = agent;
+    const knownAccounts = programsPending ? null : accounts;
+    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
+    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
     }
-    if (!sameAgent) {
-      accountPicked = false;
-    }
-    if (accountPicked && accountRows.some((c) => c.value === previous)) {
-      accountSelect.value = previous;
-    } else {
-      const preselect = accountDefaultFor(accounts, agent);
-      accountSelect.value = accountRows.some((c) => c.value === preselect) ? preselect : AMBIENT_ACCOUNT;
-    }
+    accountSelect.value = selected;
     syncSubmitState();
   };
   accountSelect.addEventListener("change", () => {
-    accountPicked = true;
+    accountSelection.pick(accountSelect.value);
     syncSubmitState();
   });
   programSelect.addEventListener("change", renderAccounts);
@@ -10566,10 +10603,15 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let loadSeq = 0;
   const loadCatalogsFor = (repoPath) => {
     const seq = ++loadSeq;
+    accounts = null;
+    programsPending = true;
+    accountsFailed = false;
+    renderAccounts();
     void callbacks.loadPrograms(repoPath).then((catalog) => {
       if (seq !== loadSeq) {
         return;
       }
+      programsPending = false;
       programCatalog = catalog;
       programs = programChoices(catalog);
       renderPrograms();
@@ -10577,6 +10619,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       if (seq !== loadSeq) {
         return;
       }
+      programsPending = false;
       programCatalog = null;
       programs = programChoices(null);
       renderPrograms();
@@ -10592,6 +10635,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
         return;
       }
       accounts = null;
+      accountsFailed = true;
       renderAccounts();
     });
     if (repoPath === "") {
@@ -10656,7 +10700,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
       // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
-      // `account` entirely and the session runs on the agent's own login (#3844).
+      // `account` entirely and the daemon applies its default, if any (#3844).
       account: accountSelect.value
     });
   });
@@ -10685,7 +10729,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     h(
       "p",
       { class: "af-modal-text" },
-      "The new agent starts fresh with a summary of the work so far. Same worktree and branch \u2014 nothing is discarded."
+      "Start a new agent with a summary. Keep the worktree and branch."
     )
   );
   void callbacks.loadPrograms().then((catalog) => {
@@ -10711,25 +10755,40 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   queueMicrotask(() => agentSelect.focus());
   return handle;
 }
+function deletionConfirmationBody(opts) {
+  if (opts.archived && opts.offBox) {
+    return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
+  }
+  if (opts.archived && !opts.externalWorktree) {
+    return opts.branchCreatedByUs ? "Permanently deletes the session, archived worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Restore instead to keep the session." : "Permanently deletes the session and archived worktree. Your branch and its commits stay. Uncommitted changes are lost. Restore instead to keep the session.";
+  }
+  if (opts.offBox) {
+    return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
+  }
+  if (opts.externalWorktree) {
+    return "Permanently deletes the session record and runtime. Your checkout and branch stay.";
+  }
+  return opts.branchCreatedByUs ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them." : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.";
+}
 function confirmModal(opts) {
   const copy = {
     kill: {
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-danger",
-      body: "This permanently destroys the session and prunes its branch. This can't be undone."
+      body: deletionConfirmationBody(opts)
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
       confirmLabel: "Archive",
       confirmClass: "af-primary",
-      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later."
+      body: "Local: move the worktree to the archive. Sandboxes: publish work, then remove the sandbox. Restore anytime."
     },
     restore: {
       title: `Restore ${opts.sessionTitle}?`,
       confirmLabel: "Restore",
       confirmClass: "af-primary",
-      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail."
+      body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain."
     }
   }[opts.action];
   const { handle, body } = modalChrome({
@@ -10754,7 +10813,16 @@ function confirmDeleteProjectModal(opts) {
     confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
-  const message = opts.sessionCount === 0 ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched \u2014 you can add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`;
+  let message = opts.sessionCount === 0 ? "No live sessions to archive. Remove the project; the repo stays and you can add it again." : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  if (opts.inPlaceCount > 0) {
+    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
+    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
+  }
   body.append(h("p", { class: "af-modal-text" }, message));
   const card = handle.el.firstElementChild;
   asForm(card, () => {
@@ -10793,7 +10861,7 @@ function addProjectModal(callbacks) {
       h(
         "div",
         { class: "af-modal-field" },
-        h("span", { class: "af-modal-label" }, "Browse the daemon host"),
+        h("span", { class: "af-modal-label" }, "Browse host"),
         picker.el
       )
     );
@@ -10803,7 +10871,7 @@ function addProjectModal(callbacks) {
     h(
       "p",
       { class: "af-modal-hint" },
-      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into."
+      "Enter an absolute repo path on the daemon host (~ works)."
     )
   );
   pathInput.addEventListener("input", () => handle.setError(null));
@@ -10811,7 +10879,7 @@ function addProjectModal(callbacks) {
   asForm(card, () => {
     const path = pathInput.value.trim();
     if (path === "") {
-      handle.setError("Enter a repository path, or pick one above.");
+      handle.setError("Enter or choose a repo path.");
       return;
     }
     handle.setError(null);
@@ -10835,7 +10903,7 @@ function projectLabel(root2) {
 }
 function removeTaskModal(name, onConfirm, onCancel) {
   const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
-  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "This deletes the task and stops future runs. Existing sessions are kept."));
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
   asForm(handle.el.firstElementChild, onConfirm);
   return handle;
 }
@@ -11464,6 +11532,11 @@ function persistProjectChoice(root2) {
     localStorage.setItem(PROJECT_KEY, root2);
   } catch {
   }
+}
+function projectDeletionBreakdown(sessions, root2) {
+  const live = sessions.filter((s) => s.worktree?.repo_path === root2 && !isArchived(s));
+  const inPlaceCount = live.filter((s) => s.worktree?.external_worktree === true).length;
+  return { sessionCount: live.length - inPlaceCount, inPlaceCount };
 }
 
 // src/sessions.ts
@@ -13463,7 +13536,7 @@ function buildTask(input) {
   };
 }
 function onCompleteUnavailableReason(targetSession) {
-  return targetSession.trim() ? "Not applicable \u2014 the target session is meant to be reused." : null;
+  return targetSession.trim() ? "Target session will be reused." : null;
 }
 function triggerSummary(t) {
   if (t.watch_cmd && t.watch_cmd.trim() !== "") {
@@ -13933,10 +14006,10 @@ var SchedulePicker = class {
    *  the picker-level constraints that would otherwise generate a nonsense cron. */
   validate() {
     if (this.type === "custom" && this.rawInput.value.trim() === "") {
-      return "A cron expression is required for a cron task.";
+      return "Enter a cron expression.";
     }
     if (this.type === "weekly" && this.weekdaysOn.size === 0) {
-      return "Select at least one day of the week.";
+      return "Select at least one day.";
     }
     return null;
   }
@@ -13982,7 +14055,7 @@ function taskFormModal(opts) {
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
   if (opts.projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet \u2014 add one from the project switcher first");
+    const opt = h("option", { value: "" }, "Add a project first.");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
@@ -14055,7 +14128,7 @@ function taskFormModal(opts) {
     onCompleteSelect.disabled = false;
     renderOnCompleteHint();
   }).catch(() => {
-    onCompleteHint.textContent = "Could not load choices; the current value is kept.";
+    onCompleteHint.textContent = "Choices unavailable \xB7 current value kept.";
   });
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
@@ -14121,7 +14194,7 @@ function taskFormModal(opts) {
     const watchCmd = watchInput.value.trim();
     const prompt = promptArea.value.trim();
     if (name === "" || projectSelect.value === "") {
-      handle.setError("A name and a project are required.");
+      handle.setError("Enter a name and choose a project.");
       return;
     }
     const scheduleErr = trigger === "cron" ? picker.validate() : null;
@@ -14131,11 +14204,11 @@ function taskFormModal(opts) {
     }
     const cron2 = trigger === "cron" ? picker.cron() : "";
     if (trigger === "cron" && prompt === "") {
-      handle.setError("A prompt is required for a cron task.");
+      handle.setError("Enter a prompt.");
       return;
     }
     if (trigger === "watch" && watchCmd === "") {
-      handle.setError("A watch command is required for a watch task.");
+      handle.setError("Enter a watch command.");
       return;
     }
     handle.setError(null);
@@ -14278,13 +14351,16 @@ function isActionableSession(s) {
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
-var TAB_PINNED_NOTICE = "The agent tab stays first \xB7 drag it onto a pane to split instead";
+var TAB_PINNED_NOTICE = "Agent tab stays first \xB7 drag to a pane to split";
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function isOffBoxWorkspace(s) {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
 function allowedTabKinds(s) {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
     return s.tab_kinds;
   }
-  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  const legacyAllowed = !isOffBoxWorkspace(s);
   return LEGACY_TAB_KINDS.map((kind) => ({
     kind,
     allowed: legacyAllowed,
@@ -14390,7 +14466,7 @@ function loginView(state, actions2) {
     const screen = recoveryScreen({
       condition: "Cannot reach the daemon",
       failed: true,
-      detail: state.loginError ?? "Check the daemon and its listener address, then retry.",
+      detail: state.loginError ?? "Check the daemon address, then retry.",
       action: state.connecting ? "Connecting\u2026" : "Retry",
       run: () => actions2.retryConnection?.()
     });
@@ -14435,14 +14511,14 @@ function loginView(state, actions2) {
     h(
       "p",
       { class: "af-subtitle" },
-      "Paste the daemon bearer token to connect. Get it from ",
+      "Paste the daemon token from ",
       h("code", {}, "af token show"),
       " on the host."
     ),
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you disconnect."),
     form
   ];
   if (state.loginError) {
@@ -14473,7 +14549,7 @@ function noAuthLoginView(state, actions2) {
     h(
       "p",
       { class: "af-subtitle" },
-      "This daemon does not require a token for your connection."
+      "No token needed."
     ),
     form
   ];
@@ -15116,9 +15192,9 @@ var AppShell = class {
       const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        "Kill"
+        "Delete session"
       );
-      const killLabel = `Kill session \u201C${killSession2.title}\u201D`;
+      const killLabel = `Delete session \u201C${killSession2.title}\u201D`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
       killBtn.addEventListener("click", (e) => {
@@ -15187,7 +15263,7 @@ var AppShell = class {
       return h(
         "li",
         { class: "af-rail-empty-project" },
-        `No sessions match the filter \u2014 ${hiddenCount(scoped, state.statusFilter)} hidden `,
+        `No matches \xB7 ${hiddenCount(scoped, state.statusFilter)} hidden `,
         reset
       );
     }
@@ -15277,13 +15353,13 @@ var AppShell = class {
       } else {
         del.setAttribute(
           "title",
-          currentSummary.liveCount > 0 ? `Delete project ${currentSummary.name} (archives its sessions, restorable)` : `Delete project ${currentSummary.name} (removes the empty project)`
+          `Delete project ${currentSummary.name} (review session consequences)`
         );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
           this.appControls.close();
-          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+          this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
       footChildren.push(del);
@@ -15330,7 +15406,7 @@ var AppShell = class {
     const wrap = h("div", { class: "af-tab-new-wrap" });
     const trigger = h(
       "button",
-      { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
+      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
       icon("plus", "af-tab-new-plus"),
       h("span", {}, "New tab"),
       icon("chevron-down", "af-tab-new-caret")
@@ -16640,6 +16716,10 @@ function openConfirm(action, session) {
     confirmModal({
       action,
       sessionTitle: target.title,
+      archived: isArchived(session),
+      offBox: isOffBoxWorkspace(session),
+      externalWorktree: session.worktree?.external_worktree === true,
+      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {
@@ -16667,7 +16747,7 @@ function openConfirm(action, session) {
             applySessions(optimisticSessions.project());
             requestResync();
             if (outcome !== "reverted") {
-              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
+              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
               return;
             }
             m.setBusy(false);
@@ -16685,7 +16765,7 @@ function openConfirm(action, session) {
           if (isMutationOutcomeUncertain(e)) {
             if (modal === m) closeModal();
             requestResync();
-            surfaceMutationError(new Error(`The ${action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
             return;
           }
           m.setBusy(false);
@@ -16696,11 +16776,11 @@ function openConfirm(action, session) {
     })
   );
 }
-function openDeleteProject(root2, label, sessionCount) {
+function openDeleteProject(root2, label) {
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      sessionCount,
+      ...projectDeletionBreakdown(store.get().sessions, root2),
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {
