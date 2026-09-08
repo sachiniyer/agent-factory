@@ -134,6 +134,29 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
+	t.Run("HandoffSession compares the canonical account", func(t *testing.T) {
+		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "claude", ToAccount: "personal"})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: " personal "})
+		if err != nil || resp.ToAccount != "personal" {
+			t.Fatalf("HandoffSession = %+v, %v; want canonical account success", resp, err)
+		}
+	})
+
+	t.Run("HandoffSession preserves committed warning with account mismatch", func(t *testing.T) {
+		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{
+				OK: true, From: "claude", To: "claude",
+				MutationOutcome: daemon.MutationOutcome{Code: apiproto.ErrorCodeMutationCommitted, Warning: "pending settlement"},
+			})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
+		if resp.To != "claude" || !IsMutationCommitted(err) || !strings.Contains(err.Error(), "pending settlement") || !strings.Contains(err.Error(), "did not honor") {
+			t.Fatalf("HandoffSession = %+v, %v; want payload plus both committed and mismatch errors", resp, err)
+		}
+	})
+
 	// Both names come back, and they DIFFER: the resolved tab name and the tmux
 	// session it was spawned under are independent namespaces post-#1957, so a
 	// client that dropped the second and re-derived it from the first would bind

@@ -205,6 +205,15 @@ func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 				return fmt.Errorf("cannot switch session %q to account %q because tab %q has no proven account-scoped shell replacement: %w", i.Title, name, tab.Name, err)
 			}
 		}
+		// A healthy manual handoff must prove every replacement command before
+		// stopping any pane. Automatic recovery retains its existing retryable
+		// behavior; only the manual path risks tearing down a healthy runtime.
+		if manual && workDir != "" {
+			if _, err := preflight.CheckCommandAt(replacementProgram, workDir); err != nil {
+				return fmt.Errorf("cannot switch session %q to account %q because tab %q failed launch preflight: %w", i.Title, name, tab.Name,
+					preflight.ProgramError(replacementProgram, replacementProgram, err))
+			}
+		}
 		if args := tmux.ConversationSelectorArgs(replacementProgram); len(args) > 0 {
 			return fmt.Errorf("cannot switch session %q to account %q because tab %q pins an existing conversation with arguments %s; an account swap restarts that tab under a separate conversation store", i.Title, name, tab.Name, strings.Join(args, " "))
 		}

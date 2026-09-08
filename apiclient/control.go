@@ -2,7 +2,9 @@ package apiclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -102,8 +104,10 @@ func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.Handof
 	if err != nil && !IsMutationCommitted(err) {
 		return daemon.HandoffSessionResponse{}, err
 	}
-	if req.Account != "" && resp.ToAccount != req.Account {
-		return resp, fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity", req.Account)
+	requestedAccount := strings.TrimSpace(req.Account)
+	if requestedAccount != "" && resp.ToAccount != requestedAccount {
+		mismatch := fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity", requestedAccount)
+		return resp, errors.Join(err, mismatch)
 	}
 	return resp, err
 }

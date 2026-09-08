@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -180,6 +181,48 @@ func TestValidateManualAccountSwapPreflightsMissingUnchangedBinary(t *testing.T)
 	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
 	require.ErrorContains(t, err, "launch preflight")
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(), "admission must leave the outgoing runtime untouched")
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
+}
+
+func TestValidateManualAccountSwapPreflightsMissingSiblingBinary(t *testing.T) {
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramClaude), []byte("#!/bin/sh\nexit 0\n"), 0700))
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, tmux.ProgramClaude)
+	inst.liveness = LiveRunning
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	missing := filepath.Join(t.TempDir(), "missing-worker")
+	inst.Tabs = append(inst.Tabs, &Tab{
+		ID: "worker", Name: "worker", Kind: TabKindProcess, Command: missing,
+		tmux: tmux.NewTmuxSession("worker", missing),
+	})
+
+	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
+	require.ErrorContains(t, err, `tab "worker"`)
+	require.ErrorContains(t, err, "launch preflight")
+	require.ErrorContains(t, err, "not installed or not on PATH")
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
+}
+
+func TestValidateManualAccountSwapAcceptsHealthySiblingBinary(t *testing.T) {
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramClaude), []byte("#!/bin/sh\nexit 0\n"), 0700))
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, tmux.ProgramClaude)
+	inst.liveness = LiveRunning
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	inst.Tabs = append(inst.Tabs, &Tab{
+		ID: "worker", Name: "worker", Kind: TabKindProcess, Command: "/usr/bin/true",
+		tmux: tmux.NewTmuxSession("worker", "/usr/bin/true"),
+	})
+
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
 
