@@ -55,11 +55,10 @@ To verify, run `scripts/testbox.sh test ./app -run 'TestRecovery' -count=1` and
 the recovery tests. Capture mode writes both `<scene>-<theme>.svg` and
 `<scene>-<theme>.ansi` and skips golden comparisons. Inspect every SVG and ANSI
 diff before replacing both halves together under `app/testdata/recovery`.
-The gallery embedded above is **generated** from those
+Both the SVG and ANSI gallery copies are **generated** from those
 goldens by `scripts/gen-docs.sh` and gated for drift in CI, so run that script
-and commit its output rather than copying the SVGs across by hand.
-Keep the gallery ANSI copies synchronized with the asserted frames too; the test
-rejects a stale or missing gallery copy in either format. Keep the `.gitattributes`
-ANSI whitespace rule: cell padding and trailing viewport rows are part of the
-asserted frame. Verify again without `AF_TUI_RECOVERY_CAPTURE` so the test checks
-the committed pairs.
+and commit its output rather than copying either format across by hand.
+The test rejects a stale or missing gallery copy in either format. Keep the
+`.gitattributes` ANSI whitespace rule: cell padding and trailing viewport rows are
+part of the asserted frame. Verify again without `AF_TUI_RECOVERY_CAPTURE` so the
+test checks the committed pairs.
