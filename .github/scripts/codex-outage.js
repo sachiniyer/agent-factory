@@ -26,9 +26,9 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
       const body = artifact.body || '';
       const verdict = evidence.parseReviewedCommit(body);
       const unavailable = evidence.classifyCodexUnavailableArtifact(artifact);
-      // Every completed row is a recovery, including superseded commits.
-      // Head matching remains necessary only for the merge accounting below.
-      const responses = evidence.completedCodexSummaryRows(artifact).map(row => ({
+      // A completion claim needs a real artifact, including for superseded commits.
+      const responses = evidence.corroboratedCodexSummaryRows(artifact, pull.artifacts,
+        (commit, at) => summaryCommitSince(pull, commit, at)).map(row => ({
         time: new Date(row.time).toISOString(), verdict: true,
       }));
       if (verdict || unavailable) responses.push({
@@ -84,12 +84,48 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE) {
         return evidence.isCodexUsageLimitArtifact(a) && at >= time(episode.start) && at <= episodeEnd && at <= merged;
       }) &&
         !artifacts.some(a => {
-          const verdict = evidence.parseVerdictArtifact(a, pull.head.sha);
+          const verdict = evidence.parseVerdictArtifact(a, pull.head.sha, artifacts, summaryCommitSince(pull, pull.head.sha, merged));
           return verdict && verdict.time <= merged;
         });
     }).map(p => p.number))].sort((a, b) => a - b);
   }
   return episodes;
+}
+
+// Reconstruct the anchor as of the row/merge, so a later rewind cannot erase
+// a genuine historical recovery. Unknown dates from the live sweep abort it.
+function summaryCommitSince(pull, commit, at) {
+  const dates = Object.entries(pull.commitDates || {}).filter(([sha]) => sha.startsWith(commit));
+  const pushes = (pull.headForcePushes || []).filter(push =>
+    push.afterCommit?.oid?.startsWith(commit) && time(push.createdAt) <= at);
+  const markers = pull.artifacts.filter(a => a.user?.login === 'sachiniyer' &&
+    time(a.created_at) <= at &&
+    new RegExp(`^Head SHA: ${commit}[0-9a-f]*\\s*$`, 'm').test(a.body || ''));
+  return Math.max(time(pull.created_at) || 0, ...dates.map(([, date]) => time(date) || 0),
+    ...pushes.map(push => time(push.createdAt)), ...markers.map(a => time(a.created_at) || 0));
+}
+
+async function readForcePushes(api, repo, number) {
+  const [owner, name] = repo.split('/');
+  const pushes = [];
+  let cursor;
+  do {
+    const response = await api('graphql', { query: `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        timelineItems(first: 100, after: $cursor, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {
+          pageInfo { hasNextPage endCursor }
+          nodes { ... on HeadRefForcePushedEvent { createdAt afterCommit { oid } } }
+        }
+      } }
+    }`, variables: { owner, name, number, ...(cursor ? { cursor } : {}) } });
+    const timeline = response.data?.repository?.pullRequest?.timelineItems;
+    if (!timeline || response.errors) throw new Error(`Unreadable force-push history: PR #${number}`);
+    pushes.push(...timeline.nodes);
+    cursor = timeline.pageInfo.hasNextPage ? timeline.pageInfo.endCursor : null;
+    if (timeline.pageInfo.hasNextPage && !cursor) throw new Error('Missing force-push cursor');
+  } while (cursor);
+  if (pushes.some(push => !Number.isFinite(time(push.createdAt)))) throw new Error('Unreadable force-push date');
+  return pushes;
 }
 
 function render(episodes, now) {
@@ -184,7 +220,20 @@ async function sweep(api, repo, now = new Date().toISOString()) {
       for (const endpoint of [`pulls/${pull.number}/comments`, `issues/${pull.number}/comments`, `pulls/${pull.number}/reviews`]) {
         artifacts.push(...await api(`${root}/${endpoint}?per_page=100`));
       }
-      pulls.push({ ...pull, artifacts });
+      const evidence = require('./auto-gate.js').codexEvidence;
+      const rows = artifacts.flatMap(a => evidence.completedCodexSummaryRows(a));
+      const commitDates = {};
+      const commits = new Set(artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER)
+        .map(a => a.commit_id || evidence.parseReviewedCommit(a.body || ""))
+        .filter(sha => /^[0-9a-f]{7,40}$/i.test(sha || "") &&
+          rows.some(row => sha.startsWith(row.commit) || row.commit.startsWith(sha))));
+      for (const sha of commits) {
+        const commit = await api(`${root}/commits/${sha}`, { singlePage: true });
+        commitDates[commit.sha || sha] = commit.commit?.committer?.date;
+        if (!Number.isFinite(time(commitDates[commit.sha || sha]))) throw new Error(`Unreadable commit date: ${sha}`);
+      }
+      const headForcePushes = commits.size ? await readForcePushes(api, repo, pull.number) : [];
+      pulls.push({ ...pull, artifacts, commitDates, headForcePushes });
     }
     if (batch.length < 100 || time(batch.at(-1).updated_at) < time(since)) break;
   }
@@ -203,6 +252,11 @@ if (require.main === module) {
     if (options.method && process.argv.includes('--dry-run')) {
       console.log(options.body);
       return null;
+    }
+    if (options.query) {
+      const args = ['api', 'graphql', '-f', `query=${options.query}`];
+      for (const [key, value] of Object.entries(options.variables)) args.push('-F', `${key}=${value}`);
+      return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
     }
     const args = ['api', route];
     if (options.method) args.push('--method', options.method, '--input', '-');
