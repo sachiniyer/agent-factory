@@ -7340,6 +7340,20 @@ function modalChrome(opts) {
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", opts.title);
   card.tabIndex = -1;
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const controls = [...card.querySelectorAll(
+      "button, input, select, textarea, a[href], summary, [tabindex]"
+    )].filter((control) => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length > 0);
+    const first = controls[0], last = controls.at(-1);
+    if (!first) {
+      event.preventDefault();
+      card.focus();
+    } else if (!card.contains(document.activeElement) || document.activeElement === card || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  });
   card.addEventListener("click", (e) => e.stopPropagation());
   const backdrop = h("div", { class: "af-modal-backdrop" }, card);
   backdrop.addEventListener("click", () => opts.onCancel());
@@ -10795,11 +10809,35 @@ function confirmModal(opts) {
     onCancel: opts.onCancel
   });
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
+  let acknowledgment;
+  if (opts.action === "kill" && opts.isRoot) {
+    body.append(h(
+      "p",
+      { class: "af-modal-text af-modal-danger" },
+      `\u201C${opts.sessionTitle}\u201D is the daemon-managed root agent. Deleting it stops scheduled and watch-task delivery to it until it self-heals (usually about two minutes) or you restart the daemon.`
+    ));
+    acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
+    body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
+  }
   const card = handle.el.firstElementChild;
   asForm(card, () => {
+    if (acknowledgment && !acknowledgment.checked) {
+      handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
+      return;
+    }
     handle.setError(null);
     opts.onConfirm();
   });
+  if (acknowledgment) {
+    const checkbox = acknowledgment;
+    const focusAcknowledgment = () => {
+      if (card.isConnected) (checkbox.disabled ? card : checkbox).focus({ preventScroll: true });
+    };
+    card.addEventListener("focus", () => {
+      if (!checkbox.disabled) focusAcknowledgment();
+    });
+    queueMicrotask(focusAcknowledgment);
+  }
   return handle;
 }
 function confirmDeleteProjectModal(opts) {
@@ -16071,7 +16109,8 @@ var AppShell = class {
       managed.id,
       managed.title,
       managed.lifecycle_action ?? null,
-      managed.can_kill === true
+      managed.can_kill === true,
+      managed.is_root === true
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));
@@ -16616,10 +16655,17 @@ function selectedSession2() {
   const s = sessions.find((x) => x.id === selectedId);
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
+var restoreModalFocus = null;
+var stopModalProjectionWatch = null;
 function closeModal() {
   if (modal) {
+    const restoreFocus = restoreModalFocus;
+    restoreModalFocus = null;
+    stopModalProjectionWatch?.();
+    stopModalProjectionWatch = null;
     modal.close();
     modal = null;
+    restoreFocus?.();
   }
 }
 function closeConfigAssistant() {
@@ -16628,11 +16674,61 @@ function closeConfigAssistant() {
     configAssistant = null;
   }
 }
-function openModal(m) {
+function captureModalInvoker() {
+  const focused = document.activeElement;
+  const row = focused?.closest(".af-row");
+  return {
+    sessionId: row?.querySelector("[data-session-id]")?.dataset.sessionId,
+    actionLabel: focused?.getAttribute("aria-label") ?? null,
+    header: !row && !!focused?.closest(".af-term-head")
+  };
+}
+function openModal(m, focusCard = false, explicitInvoker) {
   closeModal();
   closeConfigAssistant();
+  const focused = document.activeElement;
+  const invoker = explicitInvoker ?? captureModalInvoker();
+  const { sessionId, actionLabel } = invoker;
+  const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+  const header = invoker.header ? root?.querySelector(".af-term-head") : null;
+  if (focusCard || row) {
+    restoreModalFocus = () => {
+      const canFocus = (el2) => !!el2 && el2.isConnected && el2 !== document.body && !el2.matches(":disabled") && el2.getClientRects().length > 0 && getComputedStyle(el2).visibility === "visible";
+      if (!row && !explicitInvoker && canFocus(focused)) {
+        focused.focus({ preventScroll: true });
+        return;
+      }
+      if (!row && header?.isConnected) {
+        const action2 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target2 = canFocus(action2) ? action2 : header.querySelector(".af-term-more");
+        if (canFocus(target2)) {
+          target2.focus({ preventScroll: true });
+          return;
+        }
+      }
+      const toggle = root?.querySelector(".af-nav-toggle");
+      if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+        focusRail();
+        toggle.focus({ preventScroll: true });
+        return;
+      }
+      focusRail();
+      const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+      const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+      const target = canFocus(action) ? action : menu?.querySelector("button");
+      if (canFocus(target)) target.focus({ preventScroll: true });
+      else {
+        const rail = root?.querySelector(".af-rail");
+        if (canFocus(rail)) {
+          rail.tabIndex = -1;
+          rail.focus({ preventScroll: true });
+        }
+      }
+    };
+  }
   modal = m;
   modalHost.replaceChildren(m.el);
+  if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
 }
 function doOpenConfigAssistant() {
   const tok = token;
@@ -16713,12 +16809,29 @@ function newSession() {
     })
   );
 }
-function openConfirm(action, session) {
+function openConfirm(action, session, invoker = captureModalInvoker()) {
   const target = { id: session.id, title: session.title };
-  openModal(
+  const hasRootAcknowledgment = action === "kill" && session.is_root === true;
+  const refreshRootConsent = (latest) => {
+    if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
+      openConfirm("kill", { ...session, title: latest.title, is_root: true }, invoker);
+      return true;
+    }
+    return false;
+  };
+  const mountConfirmation = (m) => {
+    openModal(m, true, invoker);
+    const refresh = () => {
+      refreshRootConsent(store.get().sessions.find((s) => s.id === target.id));
+    };
+    stopModalProjectionWatch = store.subscribe(refresh);
+    refresh();
+  };
+  mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
+      isRoot: hasRootAcknowledgment,
       archived: isArchived(session),
       offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
@@ -16728,8 +16841,14 @@ function openConfirm(action, session) {
         if (tok === null || !modal) {
           return;
         }
+        const latest = store.get().sessions.find((s) => s.id === target.id);
+        if (action === "kill" && !latest) {
+          modal.setError("This session is no longer available to delete.");
+          return;
+        }
+        if (refreshRootConsent(latest)) return;
         const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, session);
+        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
         if (action !== "restore" && !mutation) return;
         m.setBusy(true);
         if (mutation) {
@@ -16755,7 +16874,7 @@ function openConfirm(action, session) {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal) openModal(m);
+            if (!modal) mountConfirmation(m);
             else surfaceMutationError(e);
             return;
           }
