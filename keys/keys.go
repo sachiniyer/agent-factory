@@ -37,7 +37,7 @@ const (
 	// fifteen, where counting to the right digit is not the problem.
 	KeyJumpTabPrompt
 
-	KeyNewRemote // Key for creating a new remote instance
+	KeyNewRemote // Compatibility binding: open creation at the backend field
 	KeyHelp      // Key for showing help screen
 
 	// Diff keybindings
@@ -245,7 +245,7 @@ var specs = []spec{
 	{name: KeyHelp, configKey: "help", keys: []string{"?"}, desc: "help", dispatch: true},
 	{name: KeyQuit, configKey: "quit", keys: []string{"q"}, desc: "quit", dispatch: true},
 	{name: KeyErrorDetails, configKey: "error_details", keys: []string{"E"}, desc: "details", dispatch: true},
-	{name: KeyNewRemote, configKey: "new_remote", keys: []string{"N"}, desc: "new remote", dispatch: true},
+	{name: KeyNewRemote, configKey: "new_remote", desc: "creation form, backend field (compatibility)", dispatch: true},
 	{name: KeyTab, keys: []string{"tab"}, desc: "focus", dispatch: true},
 	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
 	{name: KeyNewTab, configKey: "new_tab", keys: []string{"t"}, desc: "new tab", dispatch: true},
@@ -382,6 +382,11 @@ func init() {
 // at runtime.
 func ValidateOverrides(overrides map[string][]string) error {
 	_, _, err := buildMaps(overrides)
+	if err != nil {
+		if _, configured := overrides["new_remote"]; configured {
+			return fmt.Errorf("%w; new_remote is a compatibility binding: it opens the creation form with the backend field focused; it no longer forces remote creation", err)
+		}
+	}
 	return err
 }
 

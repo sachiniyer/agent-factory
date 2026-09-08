@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
@@ -73,7 +72,7 @@ func TestStartNewInstanceNeverProvisionsTheRepoBackend(t *testing.T) {
 			seen := recordPlaceholderProvision(t)
 			h.repoRoot = repoDeclaringBackend(t, repoBackend)
 
-			model, _ := h.startNewInstance(false)
+			model, _ := h.startNewInstance()
 
 			require.Same(t, h, model)
 			requireNamingFormOpened(t, h, "pressing n must open the form, not report an error")
@@ -91,85 +90,6 @@ func TestStartNewInstanceNeverProvisionsTheRepoBackend(t *testing.T) {
 	}
 }
 
-// TestStartNewRemoteThreadsForceRemoteFromTheKeypress is the other half of the
-// same change, and the reason pinning the placeholder local is safe. `N`'s
-// selector used to be recoverable from the placeholder's capabilities BECAUSE it
-// had been provisioned as a hook runtime. Now that it is not, the flag has to
-// survive as a fact about the keypress — or a remote create would be silently
-// downgraded to a local one, which is the failure mode that makes #2599 look
-// fixed while breaking what it was fixing.
-//
-// This drives the REAL startNewInstance, not a hand-set field, so the whole chain
-// from keypress to request is covered: nothing here would notice if
-// m.pendingForceRemote were only ever set by tests.
-func TestStartNewRemoteThreadsForceRemoteFromTheKeypress(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	h.errBox.SetSize(200, 1)
-	got := recordStartRequest(t)
-	seen := recordPlaceholderProvision(t)
-
-	repo, err := config.CurrentRepo()
-	require.NoError(t, err)
-	writeLegacyRepoConfig(t, repo.ID, &config.RepoConfig{
-		RemoteHooks: &config.RemoteHooks{
-			LaunchCmd: "/bin/echo",
-			DeleteCmd: "/bin/echo",
-		},
-	})
-	h.repoRoot = repoDir
-
-	model, _ := h.startNewInstance(true)
-	require.Same(t, h, model)
-	requireNamingFormOpened(t, h, "N in a hook-configured repo must open the form")
-	require.Equal(t, stateNew, h.state)
-
-	// The placeholder is inert even for N: launch_cmd must not run while the user
-	// is still choosing a name.
-	require.Len(t, *seen, 1)
-	assert.Equal(t, session.BackendLocal, (*seen)[0].Backend)
-	assert.False(t, (*seen)[0].ForceRemote,
-		"N must not provision the hook runtime at naming time")
-	require.True(t, h.pendingForceRemote, "the keypress itself must record the selector")
-
-	typeRunes(t, h, "remote-one")
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-
-	require.Equal(t, stateDefault, h.state, "the create must submit")
-	assert.True(t, got.ForceRemote,
-		"a create started with N must still reach the daemon as a remote create")
-	assert.Equal(t, "remote-one", got.Title)
-}
-
-// TestNamingCancelClearsTheRemoteSelector mirrors #1933's leak guard for the new
-// piece of naming state: a cancelled `N` must not make the NEXT `n` remote.
-func TestNamingCancelClearsTheRemoteSelector(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		key  tea.KeyMsg
-	}{
-		{name: "esc", key: tea.KeyMsg{Type: tea.KeyEsc}},
-		{name: "ctrl+c", key: tea.KeyMsg{Type: tea.KeyCtrlC}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newTestHome(t)
-			h.errBox.SetSize(200, 1)
-			recordPlaceholderProvision(t)
-			h.repoRoot = repoDeclaringBackend(t, "")
-			startNaming(t, h, "")
-			h.pendingForceRemote = true
-
-			_, _ = h.handleStateNew(tc.key)
-
-			assert.Equal(t, stateDefault, h.state)
-			assert.False(t, h.pendingForceRemote,
-				"a cancelled remote create must not leak its selector into the next one")
-		})
-	}
-}
-
 // TestNamingPlaceholderIgnoresAnUnreadableRepoConfig keeps the pin honest at the
 // edge that used to hard-fail. A repo whose `backend` key names nothing
 // resolvable made session.NewInstance return that error, so `n` was refused
@@ -182,7 +102,7 @@ func TestNamingPlaceholderIgnoresAnUnreadableRepoConfig(t *testing.T) {
 	recordPlaceholderProvision(t)
 	h.repoRoot = repoDeclaringBackend(t, "moonbase")
 
-	model, _ := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 
 	require.Same(t, h, model)
 	requireNamingFormOpened(t, h, "an unresolvable repo backend must not refuse the keypress")
@@ -203,7 +123,7 @@ func TestNamingPlaceholderDoesNotReachDockerRuntime(t *testing.T) {
 	// No docker.image: exactly the config from the issue's repro.
 	h.repoRoot = repoRoot
 
-	model, _ := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 
 	require.Same(t, h, model)
 	requireNamingFormOpened(t, h, "the docker runtime must never be asked to provision a naming row")
@@ -241,7 +161,7 @@ func TestNamingPlaceholderSkipsAResolvableDockerRepo(t *testing.T) {
 	writeRepoDockerImage(t, repoRoot, "alpine:3.20")
 	h.repoRoot = repoRoot
 
-	model, _ := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 
 	require.Same(t, h, model)
 	requireNamingFormOpened(t, h)

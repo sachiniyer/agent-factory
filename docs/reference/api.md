@@ -10,6 +10,8 @@ Ordinary daemon HTTP errors include optional boolean `error.daemon_rejected: tru
 
 Session snapshot `tabs[]` records include `web_proxied` for web tabs: `true` means use the daemon proxy, `false` means the daemon will not proxy the target. Before direct navigation, clients must also check browser URL canonicalization: a target that still resolves to loopback must be blocked, not opened on the viewer’s machine. It is derived by `session.IsLoopbackWebTarget`, the same predicate the proxy checks; clients should use this decision rather than classify the URL themselves. Non-web tabs omit it, and clients of older daemons may fall back when it is absent.
 
+`CreateSession.force_remote` remains accepted for compatibility with older clients. It selects the hook backend when `backend` is empty; an explicit `backend` takes precedence. New clients should use `backend` (for example, `"hook"`), as the TUI creation form does.
+
 ## Endpoints
 
 Request fields are the JSON keys of each route's request body; a `—` means the route takes no body (or an empty `{}`).

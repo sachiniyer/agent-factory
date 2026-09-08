@@ -564,7 +564,7 @@ func TestSwitchProjectRescopesSidebar(t *testing.T) {
 	assert.Contains(t, h.sidebar.String(), filepath.Base(repoBRoot), "sidebar title should name the active project")
 
 	// A new session created after the switch targets the new project's root.
-	h.startNewInstance(false)
+	h.startNewInstance()
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, repoBRoot, h.namingInstance.Path, "new sessions must target the switched-to project root")
 }
@@ -738,7 +738,7 @@ func TestSwitchProjectFailedSnapshotLeavesProjectIntact(t *testing.T) {
 
 	// The user-visible payoff: a session created after the failed switch still
 	// targets the project the sidebar is showing.
-	h.startNewInstance(false)
+	h.startNewInstance()
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, repoARoot, h.namingInstance.Path, "new sessions must still target the current project after a failed switch")
 }

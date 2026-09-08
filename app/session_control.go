@@ -107,17 +107,13 @@ type sessionStartRequest struct {
 	Prompt    string
 	// Backend is the runtime picked in the naming form's backend field (#1933),
 	// or "" to let the repo's `backend` config key decide — the same defaulting
-	// `af sessions create` applies when --backend is absent. It takes precedence
-	// over ForceRemote in the daemon (session/instance_factory.go
-	// resolveBackendKind), which is why the TUI can offer the whole catalog
-	// through one field while `N` keeps its hook-only shortcut.
+	// `af sessions create` applies when --backend is absent.
 	Backend string
 	// Account is the credential account picked in the naming form's account field
 	// (#3844), or "" for the ambient identity — the same default `af sessions
 	// create` applies with no --account. It is a directory name in the DAEMON's
 	// account registry and never carries credential material.
-	Account     string
-	ForceRemote bool
+	Account string
 }
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
@@ -125,14 +121,13 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
 		data, e = c.CreateSession(daemon.CreateSessionRequest{
-			Title:       req.Title,
-			TitleBase:   req.TitleBase,
-			RepoPath:    req.RepoPath,
-			Program:     req.Program,
-			Prompt:      req.Prompt,
-			Backend:     req.Backend,
-			Account:     req.Account,
-			ForceRemote: req.ForceRemote,
+			Title:     req.Title,
+			TitleBase: req.TitleBase,
+			RepoPath:  req.RepoPath,
+			Program:   req.Program,
+			Prompt:    req.Prompt,
+			Backend:   req.Backend,
+			Account:   req.Account,
 		})
 		return e
 	})
