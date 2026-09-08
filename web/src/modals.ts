@@ -536,7 +536,7 @@ export function confirmModal(
     kill: {
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
-      confirmClass: "af-primary",
+      confirmClass: "af-danger",
       body: opts.externalWorktree
         ? "Permanently deletes the session record and runtime. Your checkout and branch stay."
         : "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them.",

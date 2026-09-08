@@ -174,3 +174,28 @@ Read every regenerated golden listed below (90 design stills and 18 recovery sti
 | tokenless-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
 | unavailable-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
 | unavailable.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+
+### Merge of #4026: destructive confirmations
+
+Merged master `1281215a604e1845e8544b2a848fa6a56eaf1933` and rebuilt dist with
+`npm ci --prefer-offline && npm run build`. The deletion action now keeps
+master's `af-danger` treatment. Shared neutral border, hover and disabled-color
+rules exclude danger buttons; shared spacing and the accent focus ring remain.
+The ownership-dependent deletion disclosure and “Delete session” label are kept.
+
+Read the container captures individually:
+
+| Capture | Review |
+| --- | --- |
+| `kill-confirmation.png` | Delete session changes from a filled primary action to a danger outline/text; Cancel remains neutral; the full loss warning fits. |
+| `kill-confirmation-dark.png` | Same change in the dark palette; the warning and distinct action outline remain readable. |
+| `kill-failed-light.png` | Recaptured recovery crop matches the existing golden; the refused-operation message and retry instruction are unchanged. |
+| `kill-failed-dark.png` | Recaptured recovery crop matches the existing golden in the dark palette. |
+| `docs/assets/4017/item18/after-light.png` | Refreshed full confirmation evidence retains the ownership warning, danger action, and visible accent keyboard-focus ring. |
+| `docs/assets/4017/item18/after-dark.png` | Refreshed dark confirmation evidence retains the same warning and distinct focus ring. |
+| `docs/assets/recovery/web-kill-failed-light.png` | Refreshed full recovery evidence shows the loss warning, retained failure details, and danger retry action together. |
+| `docs/assets/recovery/web-kill-failed-dark.png` | Refreshed dark recovery evidence shows the same complete disclosure and retry action. |
+
+The 320px light/dark keybars and phone keyboard/create captures were also read;
+the Arrows control fits within the viewport. Unrelated fixture capture drift was
+not copied into the committed goldens.

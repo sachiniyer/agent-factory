@@ -3392,11 +3392,10 @@ button:disabled,
 /* Shared control and overlay recipes, completing the chrome migration. */
 button, input, select, textarea, summary { font-family: var(--af-font-ui); font-size: var(--af-type-body); line-height: 1.5; }
 button, summary, .af-input { min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
-.af-ghost, .af-danger, .af-input {
+.af-ghost, .af-input {
  padding: var(--af-space-2); background: var(--af-surface-raised); color: var(--af-ink);
  border: calc(var(--af-space-1) / 4) solid var(--af-border); border-radius: var(--af-radius-control);
 }
-.af-danger:hover:not(:disabled) { color: var(--af-ink); }
 .af-primary { padding: var(--af-space-2); background: var(--af-accent); color: var(--af-surface); border-radius: var(--af-radius-control); }
 button:disabled, .af-input:disabled { opacity: 1; border-style: dashed; }
 button:hover:not(:disabled), summary:hover { text-decoration: underline; }
@@ -3580,11 +3579,11 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 
 /* Shared action treatment: visible edges in both palettes, quiet hover, and
  * balanced label padding. Navigation keeps its existing geometry and selection. */
-:is(.af-app, .af-modal-card, .af-recovery) button[class]:not([aria-pressed="true"]):not([aria-selected="true"]) {
+:is(.af-app, .af-modal-card, .af-recovery) button[class]:not(.af-danger):not([aria-pressed="true"]):not([aria-selected="true"]) {
   border-color: var(--af-border);
   font-weight: 600;
 }
-:is(.af-app, .af-modal-card, .af-recovery) button:hover:not(:disabled) {
+:is(.af-app, .af-modal-card, .af-recovery) button:hover:not(:disabled):not(.af-danger) {
   border-color: var(--af-accent);
   text-decoration: none;
 }
@@ -3595,7 +3594,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
   outline-offset: calc(var(--af-space-1) / 2);
 }
-:is(.af-app, .af-modal-card, .af-recovery) button:disabled {
+:is(.af-app, .af-modal-card, .af-recovery) button:disabled:not(.af-danger) {
   color: var(--af-ink-muted);
   border-style: dashed;
 }
