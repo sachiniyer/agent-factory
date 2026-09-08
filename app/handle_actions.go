@@ -56,10 +56,10 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 
 	// Instance creation
 	case keys.KeyNewRemote:
-		return m.startNewInstance(true)
+		return m.startNewInstanceAtBackend()
 
 	case keys.KeyNew:
-		return m.startNewInstance(false)
+		return m.startNewInstance()
 
 	case keys.KeyTaskList:
 		// Open the task manager overlay (task creation lives on its `n` key —

@@ -29,7 +29,6 @@ func (m *home) restoreFailedCreate() bool {
 	m.namingInstance = instance
 	m.pendingProgram, m.pendingPrompt = req.Program, failed.rawPrompt
 	m.pendingBackend, m.pendingAccount = req.Backend, req.Account
-	m.pendingForceRemote = req.ForceRemote
 	m.pendingAccountChosen = true
 	m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
 	m.menu.SetNamingBackend(m.pendingBackend != "")
