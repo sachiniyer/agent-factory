@@ -14525,7 +14525,7 @@ var AppShell = class {
       ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
-    ]);
+    ], this.phone);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect2.addEventListener("click", () => {
       this.appControls.close();

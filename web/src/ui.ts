@@ -980,9 +980,12 @@ export class AppShell {
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
+    // Share one MediaQueryList so app-controls closes its old layout before
+    // syncPhone reparents and reopens the picker. Separate lists can dispatch
+    // in creation order and close the disclosure after syncPhone reopened it.
     this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
-    ]);
+    ], this.phone);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect.addEventListener("click", () => {
       this.appControls.close();
