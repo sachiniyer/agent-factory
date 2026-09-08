@@ -80,7 +80,9 @@ func (g *GitWorktree) retireHookProgress() {
 	if err != nil {
 		return
 	}
-	err = config.WithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
+	// Teardown holds lifecycle locks. A busy publisher must not make a user's
+	// kill/archive wait; leave the journal for the next retirement or prune pass.
+	acquired, err := config.TryWithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
 		current, _, readErr := g.ownedHookProgress()
 		if readErr != nil || current.Directory != p.Directory {
 			return readErr
@@ -107,6 +109,8 @@ func (g *GitWorktree) retireHookProgress() {
 	})
 	if err != nil {
 		log.WarningLog.Printf("cannot reclaim hook progress for %s: %v", g.worktreePath, err)
+	} else if !acquired {
+		log.WarningLog.Printf("deferring hook progress reclamation for %s: progress lock busy", g.worktreePath)
 	}
 }
 

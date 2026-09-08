@@ -165,17 +165,24 @@ func (g *GitWorktree) adoptHookProgress() bool {
 		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		var lastProbeError string
 		for {
 			if ctx.Err() != nil {
 				p.finish()
 				return
 			}
 			live, probeErr := systemdunit.RunningHookPrefixes(prefixes...)
+			if probeErr != nil {
+				if message := probeErr.Error(); message != lastProbeError {
+					log.WarningLog.Printf("waiting to resume post-worktree hooks for %s: %v", p.Worktree, probeErr)
+					lastProbeError = message
+				}
+			} else if lastProbeError != "" {
+				log.InfoLog.Printf("hook scope probe recovered for %s", p.Worktree)
+				lastProbeError = ""
+			}
 			if probeErr == nil && len(live) == 0 {
 				break
-			}
-			if probeErr != nil {
-				log.WarningLog.Printf("waiting to resume post-worktree hooks for %s: %v", p.Worktree, probeErr)
 			}
 			select {
 			case <-ctx.Done():
