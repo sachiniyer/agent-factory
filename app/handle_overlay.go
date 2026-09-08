@@ -87,6 +87,11 @@ func (m *home) handleStateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// so its handler can run.
 		if pending := m.pendingConfirmMsg; pending != nil {
 			m.pendingConfirmMsg = nil
+			if cmd, ok := pending.(tea.Cmd); ok {
+				// Schedule follow-up work (including notice timers), never run it
+				// inside the key/mouse handler that accepted the confirmation.
+				return m, cmd
+			}
 			return m, func() tea.Msg { return pending }
 		}
 		return m, nil
