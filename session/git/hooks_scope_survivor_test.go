@@ -196,19 +196,17 @@ exit 0
 	}
 }
 
-// hookStopTimeout fails CLOSED, so it has to outlast everything a normally
-// progressing teardown spends or it refuses rebuilds that were about to succeed.
-// Two serial costs sit under it and they ADD; the arithmetic is easy to break by
-// changing either one, so assert it rather than re-derive it (#3650 review).
-func TestHookStopTimeoutOutlastsWaitDelayPlusScopeShutdown(t *testing.T) {
+// hookStopTimeout fails CLOSED, so it has to outlast a normally progressing
+// scope shutdown or it refuses rebuilds that were about to succeed. Hook output
+// now uses direct files, so no inherited capture pipe adds a WaitDelay (#4010).
+func TestHookStopTimeoutOutlastsScopeShutdown(t *testing.T) {
 	scopeStop, err := time.ParseDuration(systemdunit.HookScopeStopTimeout)
 	if err != nil {
 		t.Fatalf("HookScopeStopTimeout %q is not a duration: %v", systemdunit.HookScopeStopTimeout, err)
 	}
-	floor := hookWaitDelay + scopeStop
-	if hookStopTimeout <= floor {
-		t.Fatalf("hookStopTimeout %s must exceed hookWaitDelay %s + scope shutdown %s = %s; below that sum, a hook with a SIGTERM-ignoring descendant makes the rebuild REFUSE instead of waiting out a teardown that was progressing",
-			hookStopTimeout, hookWaitDelay, scopeStop, floor)
+	if hookStopTimeout <= scopeStop {
+		t.Fatalf("hookStopTimeout %s must exceed scope shutdown %s; below that bound, a hook with a SIGTERM-ignoring descendant makes the rebuild REFUSE instead of waiting out a teardown that was progressing",
+			hookStopTimeout, scopeStop)
 	}
 }
 
