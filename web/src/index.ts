@@ -186,6 +186,7 @@ const store = new Store<AppState>({
 // `token === null`, never `!token`, or a tokenless client's create/kill/archive/
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
+let connectionGeneration = 0;
 let stream: EventStream | null = null;
 const optimisticSessions = new OptimisticSessions();
 const pendingRestores = new PendingRestores(ids => store.set({ pendingRestores: ids }));
@@ -412,6 +413,7 @@ async function connect(candidate: string): Promise<void> {
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  connectionGeneration++;
   pendingRestores.reset();
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
@@ -461,6 +463,7 @@ async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
+  connectionGeneration++;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -952,6 +955,7 @@ function openConfirm(
     if (refreshRootConsent(latest)) return;
     if (action === "restore" && pendingRestores.has(target.id)) return;
     const m = modal;
+    const requestGeneration = connectionGeneration;
     const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
     if (action !== "restore" && !mutation) return;
     m.setBusy(true);
@@ -967,6 +971,7 @@ function openConfirm(
           : pendingRestores.run(target.id, () => restoreSession(target.id, target.title, tok));
     if (!run) return;
     void run.then(() => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) return;
       if (mutation) {
         if (!optimisticSessions.succeed(mutation)) return;
         applySessions(optimisticSessions.project());
@@ -976,6 +981,7 @@ function openConfirm(
         if (immediateRestore) requestResync();
       }
     }).catch((e) => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) return;
       if (mutation) {
         const outcome = isMutationCommittedError(e)
           ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
@@ -2356,6 +2362,7 @@ function applySessions(sessions: SessionData[]): void {
       : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
+  pendingRestores.observe(sessions.map(s => ({ id: s.id, archived: isArchived(s) })));
 }
 
 /** Tab mutations also fetch full snapshots. Fold those through the same ledger
