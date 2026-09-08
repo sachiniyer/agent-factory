@@ -568,9 +568,7 @@ export class AttachTerminal {
     this.term.loadAddon(this.fit);
     this.term.open(container);
     this.keybar = new TerminalKeybar(container, data => this.term.input(data, true),
-      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode,
-      // Bar keys have already applied and consumed sticky modifiers at source.
-      data => this.sendInput(data));
+      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");

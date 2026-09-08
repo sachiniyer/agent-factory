@@ -100,3 +100,14 @@ test("locked Ctrl survives an arrow and combined modifiers use CSI in both curso
     }
   }
 });
+
+test("resolved bar keys pass through xterm transform without applying locked modifiers twice", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0); state.tap("Ctrl", 100);
+  state.tap("Alt", 0); state.tap("Alt", 100);
+  for (const [key, bytes] of [["↑", "\x1b[1;7A"], ["Tab", "\x1b\t"], ["Esc", "\x1b\x1b"], ["^C", "\x1b\x03"]]) {
+    assert.equal(state.input(state.key(key)), bytes);
+    assert.equal(state.state("Ctrl"), "locked");
+    assert.equal(state.state("Alt"), "locked");
+  }
+});

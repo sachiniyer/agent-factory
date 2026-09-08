@@ -82,8 +82,7 @@ export class TerminalKeybar {
   private readonly originalMaxHeight: string;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
-    private readonly refit: () => void, private readonly applicationCursor: () => boolean,
-    private readonly sendKey: (data: string) => void) {
+    private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
     this.originalMaxHeight = host.style.maxHeight;
     this.bar.className = "af-terminal-keybar";
     this.bar.setAttribute("role", "group");
@@ -101,7 +100,9 @@ export class TerminalKeybar {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else this.sendKey(this.modifiers.key(key, this.applicationCursor()));
+          // Resolve and consume at source, then enter xterm's user-input path.
+          // transform() preserves these control/escape bytes without reapplying.
+          else this.input(this.modifiers.key(key, this.applicationCursor()));
           this.paint();
         };
         button.addEventListener("pointerdown", event => keybarPointerDown(event, act));

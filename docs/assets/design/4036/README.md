@@ -68,3 +68,42 @@ Validation after the refocus fix:
   [refocus green](refocus-green.txt), including the repeat after blur/refocus.
 - `npm test`: 744/744; typecheck and rebuilt `web/dist` passed.
 - gofmt, Go build/vet, fast lint, and file-length lint passed.
+
+## Full-suite isolation and xterm user-input effects
+
+The next full-suite run exposed a second interaction: the standalone phone spec
+had been writing to shared `probe-a`. Its fake agent is `cat`; later Enter
+submits the pending cursor sequences, which cat echoes as terminal commands.
+Those commands overwrite `AF_SELFTEST_READY` with the phone test's `ls`/`xy`
+letters. The #2337 scrollback assertion then fails, leaving its own history
+behind for the shell/split/scroll/service-worker tests that follow. The local
+full suite reproduced this cascade from head `61948022`.
+
+The phone spec now creates and kills its own session in `try/finally`. This
+retains the real daemon/PTY assertions without mutating shared fixture output.
+The separate demo helper continues to use the demo's scripted terminal.
+
+Codex thread 3952881077 also identified the direct PTY sink's missing xterm
+side effects. Bar keys now resolve and consume sticky modifiers, then invoke
+the same `term.input(data, true)` callback as soft input. The existing transform
+preserves those complete escape/control byte strings, so locked modifiers are
+not applied twice. There is no direct keybar-to-PTY callback anymore.
+
+The new browser probe builds scrollback, selects text, then taps Ctrl+Up. It
+checks exactly `ESC[1;5A`, cleared selection, and return to the newest line.
+[Before the sink fix](input-effects-red.txt), the right bytes were sent but two
+selection rectangles remained. The screenshots show the same probe before and
+after the sink fix:
+
+| Before | After |
+| --- | --- |
+| ![Selection and history remain after Ctrl+Up](before-input-effects.png) | ![Selection clears and the prompt returns](after-input-effects.png) |
+
+Final validation: the full container suite went from
+[13 failures / 182 passes](full-selftest-red.txt) on `61948022` to
+[195 passes](full-selftest-green.txt), including every reported failing case
+and the xterm selection/scrollback regression. The local red also caught the
+related #2347 mobile-geometry case, which passes in green.
+[Full perf/visual validation](final-perf-green.txt) passes all five visual tests
+and all web/TUI budgets. Unit tests pass 745/745; typecheck, bundle build,
+strict MkDocs, and Go/lint gates pass. No golden or budget was updated.
