@@ -15252,6 +15252,11 @@ var AppShell = class {
       if (!this.newTabDisclosureReturn.has(trigger)) {
         const wasHidden = this.appControls.panel.hidden;
         this.newTabDisclosureReturn.set(trigger, () => {
+          if (!this.appControls.panel.contains(slot)) {
+            this.terminalChrome?.menu.open();
+            trigger.focus();
+            return;
+          }
           if (wasHidden) this.appControls.close(true);
           else this.appControls.trigger.focus();
         });
@@ -15306,7 +15311,7 @@ var AppShell = class {
       this.newTabDisclosureReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
       scrollParent?.removeEventListener("scroll", positionMenu);
       scrollParent = null;
       window.removeEventListener("resize", positionMenu);
@@ -15317,14 +15322,29 @@ var AppShell = class {
       }
     };
     const onKeyDown = (e) => {
-      if (e.key !== "Escape") {
+      if (!wrap.isConnected) {
+        close();
         return;
       }
+      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
+      e.preventDefault();
       e.stopPropagation();
-      const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
-      close();
-      if (returnToDisclosure) returnToDisclosure();
-      else trigger.focus();
+      if (e.key === "Escape") {
+        const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
+        close();
+        if (returnToDisclosure) returnToDisclosure();
+        else trigger.focus();
+        return;
+      }
+      const items = Array.from(menu.querySelectorAll('[role="menuitem"]:not(:disabled)'));
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement);
+      if (e.key === "Enter" || e.key === " ") {
+        items[current]?.click();
+        return;
+      }
+      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : e.key === "ArrowDown" ? (current + 1) % items.length : current <= 0 ? items.length - 1 : current - 1;
+      items[next].focus();
     };
     const open = () => {
       menu.hidden = false;
@@ -15334,7 +15354,7 @@ var AppShell = class {
       scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
       window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
-      document.addEventListener("keydown", onKeyDown, true);
+      window.addEventListener("keydown", onKeyDown, true);
     };
     const item = (label, kind) => {
       const b = h("button", { type: "button", class: "af-tab-menu-item" }, label);

@@ -56,3 +56,66 @@ for (const width of [1280, 390]) {
     await expect(page.locator(".af-toast")).toContainText("picker test refusal");
   });
 }
+
+for (const width of [1280, 390]) {
+  test(`picker owns navigation and activation keys at ${width}px`, async ({ page, request }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+    const session = snapshot.data.instances.find((s: { title: string }) =>
+      s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+    const creates: { id: string; kind?: string; shell?: boolean }[] = [];
+    await page.route("**/v1/CreateTab", route => {
+      creates.push(route.request().postDataJSON());
+      return route.fulfill({ json: { data: null, error: { message: "picker test refusal", daemon_rejected: true } } });
+    });
+    await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+    await expect(page.locator(".af-term-title")).toHaveText(session.title);
+    await page.keyboard.press("Control+]");
+    const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+    const terminal = menu.getByRole("menuitem", { name: "Terminal", exact: true });
+    const code = menu.getByRole("menuitem", { name: "VS Code", exact: true });
+    await page.keyboard.press("t");
+    await expect(terminal).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(code).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => creates.map(c => c.kind)).toEqual(["vscode"]);
+    await expect(page.locator(".af-term-title")).toHaveText(session.title);
+    expect(page.url()).toContain(encodeURIComponent(session.id));
+    await page.keyboard.press("Control+]");
+    await page.keyboard.press("t");
+    for (const [key, target] of [
+      ["ArrowUp", code], ["ArrowDown", terminal], ["End", code],
+      ["Home", terminal], ["ArrowDown", code], ["ArrowUp", terminal],
+    ] as const) {
+      await page.keyboard.press(key);
+      await expect(target).toBeFocused();
+      await expect(page.locator(".af-term-title")).toHaveText(session.title);
+    }
+    await page.keyboard.press("Space");
+    // The existing shell API uses shell: true and omits kind.
+    await expect.poll(() => creates.map(c => c.kind)).toEqual(["vscode", undefined]);
+    expect(creates.map(c => c.id)).toEqual([session.id, session.id]);
+    expect(creates[1].shell).toBe(true);
+    await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  });
+}
+
+test("picker returns to the desktop New tab trigger after phone recomposition", async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  await page.keyboard.press("Control+]");
+  await page.keyboard.press("t");
+  const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+  await expect(menu).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true, includeHidden: true });
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(trigger).toBeFocused();
+});

@@ -1766,6 +1766,12 @@ export class AppShell {
       if (!this.newTabDisclosureReturn.has(trigger)) {
         const wasHidden = this.appControls.panel.hidden;
         this.newTabDisclosureReturn.set(trigger, () => {
+          // Recomposition can move the slot home and close its desktop disclosure.
+          if (!this.appControls.panel.contains(slot)) {
+            this.terminalChrome?.menu.open();
+            trigger.focus();
+            return;
+          }
           if (wasHidden) this.appControls.close(true);
           else this.appControls.trigger.focus(); // the phone's New tab button is hidden
         });
@@ -1824,7 +1830,7 @@ export class AppShell {
       this.newTabDisclosureReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
       scrollParent?.removeEventListener("scroll", positionMenu);
       scrollParent = null;
       window.removeEventListener("resize", positionMenu);
@@ -1838,17 +1844,32 @@ export class AppShell {
       }
     };
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") {
+      if (!wrap.isConnected) {
+        close();
         return;
       }
-      // Swallow it: an open menu owns Escape, so closing it must NOT also let the ESC
-      // reach the agent (a bare Escape now forwards to the PTY as the agent's
-      // interrupt, #2517 — an open menu is the exception).
+      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
+      // Own these keys before document's rail handler or xterm can act on them.
+      e.preventDefault();
       e.stopPropagation();
-      const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
-      close();
-      if (returnToDisclosure) returnToDisclosure();
-      else trigger.focus();
+      if (e.key === "Escape") {
+        const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
+        close();
+        if (returnToDisclosure) returnToDisclosure();
+        else trigger.focus();
+        return;
+      }
+      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (e.key === "Enter" || e.key === " ") {
+        items[current]?.click();
+        return;
+      }
+      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
+        : e.key === "ArrowDown" ? (current + 1) % items.length
+        : current <= 0 ? items.length - 1 : current - 1;
+      items[next].focus();
     };
     const open = (): void => {
       menu.hidden = false;
@@ -1858,15 +1879,9 @@ export class AppShell {
       scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
       window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
-      // CAPTURE phase, deliberately, so this runs BEFORE xterm's textarea handler:
-      // when the menu is open, Escape must close it here and this listener's own
-      // stopPropagation must keep the ESC from also reaching the agent (#2517: a bare
-      // Escape now forwards to the PTY as the agent's interrupt — an open menu is the
-      // exception that still owns it). It sits beside the app's own capture-phase
-      // document handler (index.ts onKeydown), which no longer stopPropagations
-      // Escape; same-node capture listeners both fire, so this one does the closing
-      // and the stopping.
-      document.addEventListener("keydown", onKeyDown, true);
+      // Window capture precedes the app's document capture listener, so menu
+      // navigation cannot also navigate sessions or send input to the agent.
+      window.addEventListener("keydown", onKeyDown, true);
     };
 
     const item = (label: string, kind: NewTabKind): HTMLElement => {
