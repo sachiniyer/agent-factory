@@ -213,7 +213,7 @@ func TestConfirmationOverlay_Instruction_AdvertisesEnterOnlyWhenAccepted(t *test
 	def := NewConfirmationOverlay("[!] Kill session 'alpha'?")
 	def.SetWidth(50)
 	def.SetMaxSize(80, 24)
-	assert.Contains(t, overlayProse(def.Render()), "y/enter to confirm",
+	assert.Contains(t, overlayProse(def.Render()), "y/enter confirm",
 		"an ordinary dialog must advertise enter as a confirm alias")
 
 	esc := NewConfirmationOverlay("[!] Kill session 'root'?")
@@ -221,7 +221,7 @@ func TestConfirmationOverlay_Instruction_AdvertisesEnterOnlyWhenAccepted(t *test
 	esc.SetWidth(50)
 	esc.SetMaxSize(80, 24)
 	rendered := overlayProse(esc.Render())
-	assert.Contains(t, rendered, "k to confirm",
+	assert.Contains(t, rendered, "k confirm",
 		"an escalated dialog still names its distinct key")
 	assert.NotContains(t, rendered, "enter",
 		"an escalated dialog must not offer enter")
