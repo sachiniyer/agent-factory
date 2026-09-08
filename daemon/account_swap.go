@@ -110,7 +110,7 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	manual, mission := instance.PendingManualAccountSwap()
 	agent := instance.CurrentAgentName()
 	if manual {
-		agent = instance.AgentProgram()
+		agent = sessionenv.AgentForCommand(instance.AgentProgram())
 	}
 	if !pending || (!currentAuto && !manual) || strings.TrimSpace(to) == "" || current != to {
 		return nil
@@ -343,6 +343,13 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		}
 		_ = instance.RestoreAccountSelectionUnderResumeFence(
 			scheduled.previousAccount, scheduled.previousAuto, scheduled.previousConversation)
+		if scheduled.manual && !instance.LimitReached() {
+			// Teardown already succeeded, and the prepared launch belongs to the
+			// rejected target identity. Hand the restored old identity to ordinary
+			// Lost recovery, with a settlement obligation if disk is still down.
+			_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+			err = errors.Join(err, m.persistSettlement(repoID, key, instance))
+		}
 		return false, err
 	}
 	return false, nil

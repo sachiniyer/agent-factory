@@ -115,9 +115,10 @@ func (m *Manager) ResumeLimitedSessions() {
 			live[stableSessionKey(repoID, inst)] = struct{}{}
 		}
 	}
-	// Drop retry state for sessions that are gone, or that have stayed OUT of
-	// LimitReached past their backoff window (a resume that stuck — the episode
-	// is over). State is deliberately KEPT for a row that is momentarily
+	// Drop retry state for sessions that are gone, or that have stayed outside
+	// resume eligibility past their backoff window (the episode is over). A
+	// healthy pending manual swap still owns an unfinished recovery episode.
+	// State is deliberately KEPT for a row that is momentarily
 	// non-limit within its backoff window: that window is the gap between
 	// resumeFromLimit clearing the limit and the next poll re-detecting the
 	// banner, and keeping the state there is what throttles an immediate
@@ -135,7 +136,7 @@ func (m *Manager) ResumeLimitedSessions() {
 		if st == nil {
 			continue
 		}
-		if inst.GetLiveness() != session.LiveLimitReached && !now.Before(st.nextAttempt) {
+		if !accountSwapResumeEligible(inst) && !now.Before(st.nextAttempt) {
 			delete(m.limitResumeStates, stateKey)
 		}
 	}

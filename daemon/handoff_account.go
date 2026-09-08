@@ -10,7 +10,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// Tests pause a request before it acquires the target lock to exercise agent drift.
+var testHookHandoffAccountBeforeTargetLock = func() {}
+
 func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.Instance, repoID string) (HandoffSessionResponse, error) {
+	key := daemonInstanceKey(repoID, instance.Title)
+	testHookHandoffAccountBeforeTargetLock()
+	unlock := m.lockTarget(repoID, instance.Title)
+	defer unlock()
+	op := m.opLockFor(key)
+	if !op.TryLock() {
+		return HandoffSessionResponse{}, fmt.Errorf("session %q is busy with another operation", instance.Title)
+	}
+	defer op.Unlock()
+	// An account-only request follows the agent selected by the preceding
+	// operation, including a handoff that finished while we waited for the lock.
 	target := strings.TrimSpace(req.To)
 	if target == "" {
 		target = instance.CurrentAgentName()
@@ -21,14 +35,6 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	if !instance.Capabilities().Handoff {
 		return HandoffSessionResponse{}, session.ErrHandoffUnsupported
 	}
-	key := daemonInstanceKey(repoID, instance.Title)
-	unlock := m.lockTarget(repoID, instance.Title)
-	defer unlock()
-	op := m.opLockFor(key)
-	if !op.TryLock() {
-		return HandoffSessionResponse{}, fmt.Errorf("session %q is busy with another operation", instance.Title)
-	}
-	defer op.Unlock()
 	from, _ := instance.AccountSelection()
 	if from == strings.TrimSpace(req.Account) && target == instance.CurrentAgentName() {
 		return HandoffSessionResponse{}, fmt.Errorf("session %q already uses %s account %q", instance.Title, target, from)

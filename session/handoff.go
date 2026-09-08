@@ -301,11 +301,14 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 		Automatic: automatic,
 	}
 	swap := HandoffSwap{AgentHandoff: entry, previousProgram: i.Program}
+	sameAgent := i.currentAgentNameLocked() == target
 
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.touchLocked()
 	i.Tabs[0].Conversation = AgentConversationData{}
-	if i.Program != target {
+	// Account-only handoffs retain the exact configured command for subsequent
+	// restarts; the detected agent enum is only the ledger's identity.
+	if !sameAgent && i.Program != target {
 		i.Program = target
 		i.touchLocked()
 	}
