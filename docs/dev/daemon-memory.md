@@ -392,11 +392,11 @@ under the current journal directory; foreign parents and symlinked receipt
 directories are refused. Only that managed session may adopt the journal; external
 `--here` worktrees never adopt or stop another session's hooks.
 On restart it leaves the in-flight entry alone, waits until its scope and any
-pending launcher are gone, verifies the registered branch and the checkout's
+pending launcher are gone, verifies registration and the checkout's
 bidirectional `.git` linkage to the owning repository, then resumes the entries
-that never started, in
-order and each in its own unbound scope with its own hooklog file. Entries
-already started are never replayed, including failed entries (the normal runner
+that never started, in order and each in its own unbound scope with its own
+hooklog file. A branch change or detached HEAD in that verified worktree is
+logged and allowed, since a hook may have changed it. Entries already started are never replayed, including failed entries (the normal runner
 also continues after failure). A launch failure is recorded as a terminal claim
 before advancing, so it cannot become a pending hole on restart. If that claim
 cannot be persisted, the runner stops before launching any later entry. The session reports hooks in flight until the
@@ -405,14 +405,21 @@ explicit environment pass-through names across configuration edits; environment
 values come from the restarted daemon. Completed or deliberately cancelled
 lists are not resumed. Restore marks tombstoned and archived sessions' journals
 finished before considering any resume. Safe kill/archive teardown reclaims
-finished journals and receipts after proving all hook writers gone. A busy
-journal lock schedules eight background retries with exponential backoff
+finished journals and receipts after proving all hook writers gone. Cancellation
+during a transient journal read keeps the watcher pending until it can record
+`finished` or prove the journal absent/invalid. The teardown join remains bounded;
+read or terminal-marker failures refuse checkout mutation until storage recovers.
+A busy journal lock schedules eight background retries with exponential backoff
 (100 ms to 2 s), using the original journal identity even if archive moves the
 worktree. Creation also sweeps completed journals with deleted or archived
 owners: it keeps
 the newest 20 eligible journals for up to 14 days, with a five-second grace
 period. Unpublished receipt directories are removed on publication failure;
 unreferenced directories left by a crash are pruned after the same grace period.
+An undecodable journal conservatively protects unreferenced receipts for that
+pass, with one warning per daemon process; independently valid old journals
+continue to be pruned. The bad journal is left in place so a later pass cannot
+forget its unknown references.
 Transient journal reads (including receipt-directory and completion-marker
 checks), registration checks, or occupant probes are retried with duplicate
 warnings suppressed; hooks remain in flight until storage and verification recover and the

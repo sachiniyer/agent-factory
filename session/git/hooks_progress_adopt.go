@@ -49,6 +49,11 @@ func (g *GitWorktree) adoptHookProgress() bool {
 			}
 		}
 		defer close(done)
+		defer func() {
+			if ctx.Err() != nil {
+				waitForCancelledHookProgress(ticker.C, worktreePath, sessionID)
+			}
+		}()
 		// Cancellation while storage was inconclusive.
 		if err != nil {
 			return
@@ -56,7 +61,6 @@ func (g *GitWorktree) adoptHookProgress() bool {
 		var lastProbeError, lastIdentityError string
 		for {
 			if ctx.Err() != nil {
-				p.finish()
 				return
 			}
 			live, probeErr := systemdunit.RunningHookPrefixes(prefixes...)
@@ -88,7 +92,6 @@ func (g *GitWorktree) adoptHookProgress() bool {
 			}
 			select {
 			case <-ctx.Done():
-				p.finish()
 				return
 			case <-ticker.C:
 			}

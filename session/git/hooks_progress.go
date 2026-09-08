@@ -145,7 +145,12 @@ func (p *hookProgress) finish() {
 		defer p.lease.Close()
 	}
 
-	if err := os.WriteFile(filepath.Join(p.Directory, "finished"), nil, 0600); err != nil {
+	if err := p.markFinished(); err != nil {
 		log.ErrorLog.Printf("cannot record post-worktree hook completion: %v", err)
 	}
+}
+
+// Callers that authorize teardown must observe failure to persist cancellation.
+func (p *hookProgress) markFinished() error {
+	return os.WriteFile(filepath.Join(p.Directory, "finished"), nil, 0600)
 }

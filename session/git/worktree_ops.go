@@ -179,8 +179,7 @@ func (g *GitWorktree) cancelAndWaitHooks() error {
 	if err := g.stopSurvivingHookScopes(); err != nil {
 		return err
 	}
-	g.retireHookProgress()
-	return nil
+	return g.retireHookProgress()
 }
 
 // hookScopePrefixes names every transient scope this worktree's hooks could

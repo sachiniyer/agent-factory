@@ -19,7 +19,7 @@ func (g *GitWorktree) SetHookResumeDisabled(disabled bool) { g.hooksResumeDisabl
 var errInvalidHookProgress = errors.New("invalid hook journal")
 
 // Test seam for a transient storage error during restore.
-var hookProgressReadFile = os.ReadFile
+var hookProgressReadFile = BoundedReadFile
 
 func readHookProgress(path string) (*hookProgress, error) {
 	info, err := BoundedLstat(path)
@@ -121,12 +121,17 @@ func (g *GitWorktree) AbandonHookProgress() {
 // retireHookProgress is called only AFTER cancellation, join and scope teardown
 // have proved all writers gone. Mark terminal before attempting the lock so
 // interrupted or deferred reclamation remains eligible for the orphan sweep.
-func (g *GitWorktree) retireHookProgress() {
+func (g *GitWorktree) retireHookProgress() error {
 	p, path, err := g.ownedHookProgress()
-	if err != nil {
-		return
+	if noResumableHookProgress(err) {
+		return nil
 	}
-	p.finish()
+	if err != nil {
+		return fmt.Errorf("cannot retire unreadable hook journal: %w", err)
+	}
+	if err := p.markFinished(); err != nil {
+		return fmt.Errorf("cannot terminalize hook journal: %w", err)
+	}
 	acquired, err := retireHookProgressSnapshot(p, path)
 	if err != nil {
 		log.WarningLog.Printf("cannot reclaim hook progress for %s: %v", p.Worktree, err)
@@ -141,6 +146,7 @@ func (g *GitWorktree) retireHookProgress() {
 			retryHookProgressRetirement(p, path)
 		}()
 	}
+	return nil
 }
 
 func (p *hookProgress) finished() bool {

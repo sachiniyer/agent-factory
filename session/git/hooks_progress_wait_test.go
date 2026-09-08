@@ -39,7 +39,8 @@ func TestHookProgressRetireDoesNotWaitForPublisher(t *testing.T) {
 		t.Fatalf("publisher lock failed: %v", err)
 	}
 	done := make(chan struct{})
-	go func() { g.retireHookProgress(); close(done) }()
+	var retirementErr error
+	go func() { retirementErr = g.retireHookProgress(); close(done) }()
 	// Release and join even on the expected pre-fix failure, before TempDir cleanup.
 	released := false
 	t.Cleanup(func() {
@@ -54,6 +55,9 @@ func TestHookProgressRetireDoesNotWaitForPublisher(t *testing.T) {
 	})
 	select {
 	case <-done:
+		if retirementErr != nil {
+			t.Fatal(retirementErr)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("retirement waited for the publisher lock")
 	}
