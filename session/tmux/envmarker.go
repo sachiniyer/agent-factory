@@ -67,11 +67,7 @@ func SetNewSessionEnvSupportForTest(supported bool) func() {
 // passing it there would fail session creation outright, which is far worse
 // than a missing diagnostic marker.
 func sessionEnvFlags(sanitizedName, generation string) []string {
-	supported := tmuxSupportsNewSessionEnv
-	if newSessionEnvSupportedOverride != nil {
-		supported = func() bool { return *newSessionEnvSupportedOverride }
-	}
-	if !supported() {
+	if !SessionEnvSupported() {
 		return nil
 	}
 	flags := []string{
@@ -259,13 +255,10 @@ func afHomeDir() (string, error) {
 	return filepath.Join(home, ".agent-factory"), nil
 }
 
-// newSessionEnvSupportedForAccounts reports the same tmux capability probe that
-// gates the ancestry markers, reused as the account gate.
-//
-// Reused rather than re-derived so the two cannot disagree about what tmux is
-// running, and honouring the same test override so account tests are not forced
-// to run against a real tmux binary.
-func newSessionEnvSupportedForAccounts() bool {
+// SessionEnvSupported reports whether af can stamp session identity through
+// new-session -e. Identity consumers must not trust inherited markers when the
+// launch path cannot replace them. Shares the cached probe and test override.
+func SessionEnvSupported() bool {
 	if newSessionEnvSupportedOverride != nil {
 		return *newSessionEnvSupportedOverride
 	}
