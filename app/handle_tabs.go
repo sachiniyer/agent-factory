@@ -216,10 +216,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 			// must still be the same object; a reused name is never consent.
 			if at > 0 && ((tabID != "" && candidate.ID == tabID) || (tabID == "" && candidate == tab)) {
 				_, cmd := m.deleteConfirmedTab(current, at)
-				if cmd != nil {
-					return cmd()
-				}
-				return nil
+				return cmd
 			}
 		}
 		return nil

@@ -16132,6 +16132,13 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
   }
 }
 
+// src/tab_delete_target.ts
+function captureTabDeleteTarget(target) {
+  const identity = tabIdentity(target);
+  const legacy = tabRealId(target) === "";
+  return (tabs) => tabs.findIndex((tab) => tabIdentity(tab) === identity && (!legacy || tab === target));
+}
+
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
 registerServiceWorker();
@@ -16762,7 +16769,7 @@ function closeSessionTab(index) {
   if (!target) {
     return;
   }
-  const identity = tabIdentity(target);
+  const resolveTarget = captureTabDeleteTarget(target);
   const sessionId = sel.id;
   openModal(confirmDeleteTabModal({
     sessionTitle: sel.title,
@@ -16771,7 +16778,7 @@ function closeSessionTab(index) {
     onCancel: closeModal,
     onConfirm: () => {
       const current = store.get().sessions.find((session) => session.id === sessionId);
-      const at = current ? sessionTabs(current).findIndex((tab) => tabIdentity(tab) === identity) : -1;
+      const at = current ? resolveTarget(sessionTabs(current)) : -1;
       if (!current || at <= 0 || !canCloseTabs(current)) {
         modal?.setError("This tab is no longer available to delete.");
         return;
