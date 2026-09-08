@@ -2501,9 +2501,15 @@ function onKeydown(e: KeyboardEvent): void {
     case "switchTab":
       switchTab(action.index);
       break;
-    case "newTab":
-      shell?.openNewTabPicker();
+    case "newTab": {
+      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      shell?.openNewTabPicker(() => {
+        focusRail();
+        if (navigationTarget?.isConnected) navigationTarget.focus({ preventScroll: true });
+        else (document.activeElement as HTMLElement | null)?.blur();
+      });
       break;
+    }
     case "closeTab":
       closeSessionTab(store.get().activeTab);
       break;

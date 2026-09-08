@@ -853,6 +853,8 @@ export class AppShell {
   private tabBar: HTMLElement | null = null;
   // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
   private readonly newTabDisclosureReturn = new WeakMap<HTMLElement, () => void>();
+  // Keyboard opens return to navigation; pointer opens retain disclosure focus.
+  private readonly newTabShortcutReturn = new WeakMap<HTMLElement, () => void>();
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -1760,7 +1762,7 @@ export class AppShell {
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */
-  openNewTabPicker(): void {
+  openNewTabPicker(shortcutReturn?: () => void): void {
     const slot = this.terminalChrome?.newTabSlot;
     const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
     if (!trigger || !slot) return;
@@ -1781,6 +1783,8 @@ export class AppShell {
         });
       }
       this.appControls.open();
+    } else if (shortcutReturn) {
+      this.newTabShortcutReturn.set(trigger, shortcutReturn);
     }
     this.terminalChrome?.menu.open();
     if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
@@ -1833,6 +1837,7 @@ export class AppShell {
     const close = (): void => {
       menu.hidden = true;
       this.newTabDisclosureReturn.delete(trigger);
+      this.newTabShortcutReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       window.removeEventListener("keydown", onKeyDown, true);
@@ -1873,8 +1878,10 @@ export class AppShell {
       e.stopPropagation();
       if (e.key === "Escape") {
         const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
+        const returnToShortcut = this.newTabShortcutReturn.get(trigger);
         close();
         if (returnToDisclosure) returnToDisclosure();
+        else if (returnToShortcut) returnToShortcut();
         else trigger.focus();
         return;
       }

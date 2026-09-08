@@ -46,8 +46,7 @@ for (const width of [1280, 390]) {
       await expect(controls).toBeFocused();
     }
     if (width > 768) {
-      await expect(trigger).toBeFocused();
-      await trigger.click();
+      await page.keyboard.press("t");
     }
     expect(creates).toBe(0);
     await expect(menu).toBeVisible();
@@ -115,6 +114,32 @@ test("picker returns to the desktop New tab trigger after phone recomposition", 
   await expect(menu).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 844 });
   await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
+test("desktop shortcut cancel restores navigation while click cancel returns to the trigger", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  await page.keyboard.press("Control+]");
+  const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+  const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true });
+
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await trigger.click();
+  await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
   await expect(trigger).toBeFocused();

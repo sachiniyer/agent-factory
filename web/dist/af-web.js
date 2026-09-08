@@ -14833,6 +14833,8 @@ var AppShell = class {
   tabBar = null;
   // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
   newTabDisclosureReturn = /* @__PURE__ */ new WeakMap();
+  // Keyboard opens return to navigation; pointer opens retain disclosure focus.
+  newTabShortcutReturn = /* @__PURE__ */ new WeakMap();
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -15402,7 +15404,7 @@ var AppShell = class {
     return item;
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
-  openNewTabPicker() {
+  openNewTabPicker(shortcutReturn) {
     const slot = this.terminalChrome?.newTabSlot;
     const trigger = slot?.querySelector(".af-tab-new");
     if (!trigger || !slot) return;
@@ -15420,6 +15422,8 @@ var AppShell = class {
         });
       }
       this.appControls.open();
+    } else if (shortcutReturn) {
+      this.newTabShortcutReturn.set(trigger, shortcutReturn);
     }
     this.terminalChrome?.menu.open();
     if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
@@ -15468,6 +15472,7 @@ var AppShell = class {
     const close = () => {
       menu.hidden = true;
       this.newTabDisclosureReturn.delete(trigger);
+      this.newTabShortcutReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       window.removeEventListener("keydown", onKeyDown, true);
@@ -15499,8 +15504,10 @@ var AppShell = class {
       e.stopPropagation();
       if (e.key === "Escape") {
         const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
+        const returnToShortcut = this.newTabShortcutReturn.get(trigger);
         close();
         if (returnToDisclosure) returnToDisclosure();
+        else if (returnToShortcut) returnToShortcut();
         else trigger.focus();
         return;
       }
@@ -17754,9 +17761,15 @@ function onKeydown(e) {
     case "switchTab":
       switchTab(action.index);
       break;
-    case "newTab":
-      shell?.openNewTabPicker();
+    case "newTab": {
+      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      shell?.openNewTabPicker(() => {
+        focusRail();
+        if (navigationTarget?.isConnected) navigationTarget.focus({ preventScroll: true });
+        else document.activeElement?.blur();
+      });
       break;
+    }
     case "closeTab":
       closeSessionTab(store.get().activeTab);
       break;
