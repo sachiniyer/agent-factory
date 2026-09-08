@@ -46,6 +46,112 @@ step() {
     fi
 }
 
+# Every ERE metacharacter must stay literal in session/title assertions (#4037).
+# shellcheck disable=SC2317
+_expect_regex_escape_literal() {
+    local literal="$1" decoy="$2" pattern
+    pattern="$(_af_regex_escape "$literal")"
+    if ! printf '▾ %s\n' "$literal" | grep -qE "^▾ ${pattern}$"; then
+        _af_log "escaped pattern '$pattern' did not match literal '$literal'"
+        return 1
+    fi
+    if printf '▾ %s\n' "$decoy" | grep -qE "^▾ ${pattern}$"; then
+        _af_log "escaped pattern '$pattern' wrongly matched '$decoy'"
+        return 1
+    fi
+}
+
+# A rail title can contain a corner glyph before the actual matched border.
+# Keep top and bottom prefixes independent so either edge can regress (#4048).
+# shellcheck disable=SC2317
+_expect_tasks_frame_after_rail_corner() {
+    if ! printf '%s%s\n' \
+        "$1" '╭────────────────────────────────╮' \
+        '                   ' '│ n new · esc back               │' \
+        "$2" '╰────────────────────────────────╯' | _af_tasks_overlay_visible; then
+        _af_log 'task dialog rejected because a rail corner precedes its matched border'
+        return 1
+    fi
+}
+
+# Same-row candidates must retain their own footer and bottom geometry (#4006).
+# shellcheck disable=SC2317
+_expect_tasks_frame_beside_foreign_box() {
+    local side_by_side
+    side_by_side=$'╭───╮ ╭────────────────────╮\n│   │ │ Tasks              │\n│   │ │ n new · esc back   │\n╰───╯ ╰────────────────────╯'
+    if ! printf '%s\n' "$side_by_side" | _af_tasks_overlay_visible; then
+        _af_fail 'a complete foreign box left of the same-row task frame hid it'
+        return 1
+    fi
+    # The left box cannot close the right candidate before its own bottom.
+    local missing_task_bottom
+    missing_task_bottom=$'╭───╮ ╭────────────────────╮\n│   │ │ n new · esc back   │\n╰───╯ │                    │'
+    if printf '%s\n' "$missing_task_bottom" | _af_tasks_overlay_visible; then
+        _af_fail 'a foreign bottom closed an incomplete task-frame candidate'
+        return 1
+    fi
+}
+
+# Exercise the public create/select/assert path, not just the escape helper.
+# shellcheck disable=SC2317
+_expect_literal_instance_title() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    af_resize 80 24 || return 1
+    af_new_instance 'a+b' || return 1
+    af_select 'a+b' || return 1
+    af_expect_selected 'a+b' || return 1
+    printf '\n=== literal a+b created, ready, and selected: 80x24 ===\n'
+    af_capture
+    af_resize "$saved_cols" "$saved_rows" || return 1
+}
+
+# Both lists are empty: the workspace and task recovery share their action copy.
+# Inject one captured pre-overlay frame to make the stale-frame race deterministic,
+# then exercise the real dialog and prove closing it sends exactly one Escape.
+# shellcheck disable=SC2317
+_expect_empty_tasks_over_empty_workspace() (
+    local probe escape_count=0 rc=0
+    probe="$(mktemp -d)"
+    trap 'rm -rf "$probe"' EXIT
+    af_assert_screen 'Sessions \(0\)' 'session list is empty' || return 1
+    af_assert_screen 'No sessions yet' 'first-run workspace is visible' || return 1
+    af_capture >"$probe/workspace"
+    af_capture() {
+        if [ -f "$probe/stale" ]; then
+            rm "$probe/stale"
+            cat "$probe/workspace"
+        else
+            touch "$probe/fresh"
+            tmux capture-pane -p -t "$AF_DRIVER_SESSION" 2>/dev/null
+        fi
+    }
+    af_send() {
+        [ "$1" != m ] || touch "$probe/stale"
+        if [ "$1" = Escape ]; then
+            escape_count=$((escape_count + 1))
+        fi
+        tmux send-keys -t "$AF_DRIVER_SESSION" "$@"
+    }
+    af_open_tasks || return 1
+    if [ ! -f "$probe/fresh" ]; then
+        _af_log 'empty tasks: open accepted the stale workspace frame'
+        rc=1
+    fi
+    af_wait_for 'No tasks' 10 'empty task dialog really painted' || return 1
+    printf '\n=== empty tasks over empty workspace: before close ===\n'
+    af_capture
+    af_close_tasks || rc=1
+    if [ "$escape_count" -ne 1 ]; then
+        _af_log "empty tasks: close sent $escape_count Escapes, expected exactly one"
+        rc=1
+    fi
+    af_wait_gone 'No tasks' 3 'empty task dialog closed' || return 1
+    af_assert_screen 'No sessions yet' 'plain workspace remains after one Escape' || return 1
+    printf '\n=== empty tasks over empty workspace: after close ===\n'
+    af_capture
+    return "$rc"
+)
+
 # _expect_resize_rejected — the NEGATIVE check for af_resize (Greptile, #1201):
 # a resize tmux cannot honor must FAIL LOUDLY, never masquerade as success (or a
 # tiny-size gate would keep running at the wrong size). We point af_resize at a
@@ -729,11 +835,9 @@ SCREEN
     )
 }
 
-# _expect_scrolled_rail_relaunch — the LIVE half of #2148. The original 80x24
-# frame is pinned by the synthetic proof above; the denser current rail fits its
-# three sessions there, so the live half uses the supported 80x10 floor to make
-# the same session tree deterministically scroll. The header is gone, and the
-# boot gate has to read the frame as booted anyway.
+# _expect_scrolled_rail_relaunch — the LIVE half of #2148. At 80x24, seed
+# enough sessions for the current row density and select the last: the rail scrolls,
+# the header is gone, and the boot gate has to read the frame as booted anyway.
 # af_relaunch shares af_boot's gate, so this drives the real thing end to end.
 #
 # The premise is asserted AFTER the relaunch rather than assumed: if the rail
@@ -743,7 +847,20 @@ SCREEN
 _expect_scrolled_rail_relaunch() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS" rc=0
 
-    if af_select cycle && af_resize 80 10; then
+    af_resize 80 24 || return 1
+    # Compact rows can fit the original three-session fixture without scrolling.
+    # Grow the fixture until it establishes the premise, with a bounded cap.
+    local last=cycle n
+    af_select "$last" || return 1
+    for n in $(seq 1 10); do
+        if af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
+            break
+        fi
+        last="scroll-$n"
+        af_new_instance "$last" || return 1
+        af_select "$last" || return 1
+    done
+    if af_select "$last"; then
         af_relaunch || rc=$?
         if [ "$rc" -eq 0 ]; then
             if ! af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
@@ -786,12 +903,28 @@ SELFTEST_BASE_ROWS="$AF_DRIVER_ROWS"
 
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
+step "literal plus (#4037)" _expect_regex_escape_literal 'a+b' 'ab'
+step "literal dot (#4037)" _expect_regex_escape_literal 'x.y' 'xay'
+step "literal brackets (#4037)" _expect_regex_escape_literal '[tag]' 't'
+step "literal alternation (#4037)" _expect_regex_escape_literal 'a|b' 'a'
+# shellcheck disable=SC2016
+step "literal dollar (#4037)" _expect_regex_escape_literal '$HOME' 'HOME'
+step "literal backslash (#4037)" _expect_regex_escape_literal 'path\title' 'pathtitle'
+step "all ERE metacharacters (#4037)" _expect_regex_escape_literal '.[](){}*+?^$|\' 'unrelated'
+
+step "task frame accepts an earlier top corner in the rail" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project-name     '
+step "task frame accepts an earlier bottom corner in the rail" _expect_tasks_frame_after_rail_corner '  project-name     ' '  project╰name     '
+step "task frame accepts earlier rail corners on both edges" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project╰name     '
+
+step "task frame beside a foreign same-row box retains its own geometry" _expect_tasks_frame_beside_foreign_box
+
 step "reset sandbox to a clean state"                       af_reset_sandbox
 step "seed a non-codex default before daemon boot"           _seed_config_editor_start_value
 # af_boot routes launch geometry through af_resize, which verifies the window
 # actually took the requested size — so a green boot is also positive proof
 # af_resize works (#1174 item 2 / #1201).
 step "boot af at ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}"        af_boot
+step "empty task dialog over empty workspace opens and closes once" _expect_empty_tasks_over_empty_workspace
 step "af_resize fails loudly on an impossible resize"       _expect_resize_rejected
 # --- #2148 regression: the boot gate must survive a scrolled rail ---
 # The `Sessions (N)` header is the rail's first windowed ROW, not chrome, so a
@@ -971,6 +1104,17 @@ _expect_task_overlay_marker_context() {
         _af_fail 'a windowed edit dialog without its title did not satisfy the pinned-footer marker'
         return 1
     fi
+}
+
+# #4048 explicitly tests list-to-editor entry. A populated #4006 reopen can
+# already be editing, so establish list mode before that Enter step.
+# shellcheck disable=SC2317
+_open_tasks_list_for_selftest() {
+    af_open_tasks || return 1
+    if ! af_capture | _af_tasks_list_visible; then
+        af_send Escape
+    fi
+    af_wait_for "$_AF_TASKS_LIST_TITLE" 10 'task list'
 }
 
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
@@ -1171,6 +1315,11 @@ step "reopen tasks — pinned footer recognized (#1757/#3995)" af_open_tasks
 step "edit marker survives its scrolled-away title"         _expect_task_edit_title_scrolled
 step "reveal and assert the task run action"                _expect_task_run_action
 step "close the tasks overlay"                              af_close_tasks
+step "reopen tasks list"                                    _open_tasks_list_for_selftest
+step "open the selected task editor"                        af_send Enter
+step "task editor run action recognized (#1757)"             af_wait_for "$_AF_TASKS_RUN_HINT" 10
+step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+step "close the explicitly opened task editor"              af_close_tasks
 step "resize to the documented 40x10 floor"                 af_resize 40 10
 step "open the populated task at 40x10"                     af_open_tasks
 step "close the compact task overlay"                       af_close_tasks
@@ -1269,9 +1418,9 @@ step "cycle: open the active tab as a pane"                 af_open_pane
 step "cycle: pane number-jumps land and STAY (#1885)"       _expect_cycle_jumps_land
 step "cycle: w closes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
 
-# --- #2148 live: relaunch at 80x24 with three sessions and the lowest selected.
-# Runs last because it needs a third instance ('cycle') to make the rail scroll,
-# and because it relaunches the TUI.
+# --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
+# Runs last because it adds sessions and relaunches the TUI.
+step "literal a+b creates, reaches ready, and is selectable" _expect_literal_instance_title
 step "relaunch boots with the rail scrolled past the header (#2148)" _expect_scrolled_rail_relaunch
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"

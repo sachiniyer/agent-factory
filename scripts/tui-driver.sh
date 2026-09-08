@@ -112,7 +112,7 @@ _af_resolve_bin() {
 
 # _af_regex_escape <s> — escape ERE metacharacters so a literal can be waited
 # on with af_wait_for.
-_af_regex_escape() { printf '%s' "$1" | sed -E 's/[.[\({*+?^$|)}\]\\]/\\&/g'; }
+_af_regex_escape() { printf '%s' "$1" | sed 's/[][\.^$*+?(){}|\\]/\\&/g'; }
 
 # ----------------------------------------------------------------------------
 # Anti-flake core — wait on the screen, never on the clock.
@@ -569,8 +569,9 @@ af_boot() {
 # (its row shows the ● ready dot). Cheap-instance config makes `bash` the
 # program, so ready arrives in seconds.
 af_new_instance() {
-    local name="$1"
+    local name="$1" name_re
     [ -n "$name" ] || { _af_fail "af_new_instance: name required"; return 1; }
+    name_re="$(_af_regex_escape "$name")"
     af_ensure_nav
     af_focus_tree || return 1
     af_send n
@@ -578,7 +579,7 @@ af_new_instance() {
     af_wait_gone '[Ss]ession [Nn]ame:' 1 'old name prompt label' || return 1
     af_send_literal "$name"
     af_send Enter
-    af_wait_for "${name}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
+    af_wait_for "${name_re}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
 }
 
 # af_select <name> — put the tree cursor on one of <name>'s TAB rows (so it is
@@ -662,16 +663,16 @@ af_open_pane() {
 # Solve), and each pane's frame puts its ` <title> · <tab> ` header on the
 # first line inside the frame — so all visible pane headers share one screen
 # row, immediately below the workspace box's top border. Anchoring on that
-# border (the first `┌`/`╭` on screen — the sidebar has no left border, so the
+# border (the first `╭`, `┌`, or `╔` — the sidebar has no left border, so the
 # workspace box owns the first one) and taking the NEXT line yields the whole
 # visible-pane identity set in one string. Current workspace panes use a square
 # `┌`; older captures used the rounded `╭`, so the driver accepts both.
 #
-# The corners are matched with alternation, not a bracket expression: the
-# sandbox runs a C/POSIX locale where a bracket expression would match only the
-# first byte of either 3-byte glyph (cf. _af_tab_count's `(├|└)` note).
+# Corners are matched as literal alternatives, not a bracket expression: the sandbox runs a
+# C/POSIX locale where a bracket expression would match only the first byte of
+# the 3-byte glyph (cf. _af_tab_count's `(├|└)` alternation note).
 _af_pane_header_row() {
-    af_capture | awk '/(╭|┌)/ { if ((getline line) > 0) print line; exit }'
+    af_capture | awk '/╭|┌|╔/ { if ((getline line) > 0) print line; exit }'
 }
 
 # af_hide_pane — hide the focused pane back to the background (nothing is
@@ -1026,7 +1027,10 @@ _af_tasks_dialog_has() {
 }
 
 _af_tasks_overlay_visible() {
-    _af_tasks_dialog_has "$_AF_TASKS_FOOTER"
+    # Before #4006 lands, the empty recovery has no pinned task footer.
+    # Accept its task-specific title only inside the same complete rounded
+    # frame; the first-run workspace shares the action sentence, not this title.
+    _af_tasks_dialog_has "$_AF_TASKS_FOOTER|│[[:space:]]+No tasks[[:space:]]+│"
 }
 
 _af_tasks_list_visible() {
