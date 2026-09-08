@@ -389,13 +389,13 @@ func TestValidateOverridesLeavesGlobalsUntouched(t *testing.T) {
 }
 
 func TestNormalizeKeySpec(t *testing.T) {
-	valid := []string{"q", "Q", "?", "/", "[", "å", "ctrl+a", "alt+x", "shift+up", "shift+ctrl+up", "ctrl+shift+up", "f5", "space", "pgup", "ctrl+enter"}
+	valid := []string{"q", "Q", "?", "/", "[", "å", "ctrl+a", "alt+x", "shift+up", "shift+ctrl+up", "ctrl+shift+up", "f5", "space", "pgup"}
 	for _, s := range valid {
 		if _, ok := normalizeKeySpec(s); !ok {
 			t.Fatalf("normalizeKeySpec(%q) = _, false, want _, true", s)
 		}
 	}
-	invalid := []string{"", " ", "space bar", "qq", "ctrl+", "ctrl+alt+", "ctrl+ctrl+a", "control+a", "\t"}
+	invalid := []string{"", " ", "space bar", "qq", "ctrl+", "ctrl+alt+", "ctrl+ctrl+a", "control+a", "ctrl+enter", "\t"}
 	for _, s := range invalid {
 		if _, ok := normalizeKeySpec(s); ok {
 			t.Fatalf("normalizeKeySpec(%q) = _, true, want _, false", s)
@@ -476,5 +476,85 @@ func TestRebindableActionsSortedAndComplete(t *testing.T) {
 		if forbidden[a] {
 			t.Fatalf("action %q must not be rebindable", a)
 		}
+	}
+}
+
+// Audit every named key against real Bubble Tea v1 Key.String values. Alt is
+// a flag; Ctrl/Shift are separate KeyTypes, and unsupported combinations must
+// fail at config validation instead of installing unreachable bindings (#4040).
+func TestNamedKeySpecsMatchBubbleTea(t *testing.T) {
+	wire := make(map[string]bool)
+	for kind := tea.KeyF20; kind <= tea.KeyType(127); kind++ {
+		for _, alt := range []bool{false, true} {
+			if value := (tea.Key{Type: kind, Alt: alt}).String(); value != "" {
+				wire[value] = true
+			}
+		}
+	}
+	for name := range namedKeys {
+		for _, modifier := range []string{"", "alt+", "ctrl+", "shift+", "alt+ctrl+", "alt+shift+", "ctrl+shift+", "alt+ctrl+shift+"} {
+			spec := modifier + name
+			t.Run(spec, func(t *testing.T) {
+				want := spec
+				if name == "space" {
+					base := " "
+					if strings.Contains(modifier, "ctrl+") {
+						base = "@"
+					}
+					want = modifier + base
+				}
+				got, ok := normalizeKeySpec(spec)
+				if ok != wire[want] || (ok && got != want) {
+					t.Errorf("normalizeKeySpec(%q) = (%q, %v); Bubble Tea sends (%q, %v)", spec, got, ok, want, wire[want])
+				}
+				if !wire[want] && ValidateOverrides(map[string][]string{"new": {spec}}) == nil {
+					t.Error("unsupported named key was accepted by config validation")
+				}
+			})
+		}
+	}
+}
+
+func TestAltSpaceDispatchAndHelp(t *testing.T) {
+	resetAfter(t)
+	if err := ApplyOverrides(map[string][]string{"new": {"alt+space"}}); err != nil {
+		t.Fatal(err)
+	}
+	msg := tea.KeyMsg{Type: tea.KeySpace, Alt: true}
+	if got, ok := GlobalKeyStringsMap[msg.String()]; !ok || got != KeyNew {
+		t.Fatalf("Alt+Space %q dispatched to %v, present=%v", msg.String(), got, ok)
+	}
+	if got := GlobalKeyBindings[KeyNew].Help().Key; got != "alt+space" {
+		t.Fatalf("help = %q, want alt+space", got)
+	}
+}
+
+func TestEffectiveKeysShareSpaceDisplayWithHelp(t *testing.T) {
+	for _, spelling := range []string{"space", "ctrl+space", "alt+space", "alt+ctrl+space"} {
+		t.Run(spelling, func(t *testing.T) {
+			resetAfter(t)
+			overrides := map[string][]string{"new": {spelling}}
+			if err := ApplyOverrides(overrides); err != nil {
+				t.Fatal(err)
+			}
+			infos, err := EffectiveBindings(overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, info := range infos {
+				if info.Action != "new" {
+					continue
+				}
+				label := GlobalKeyBindings[KeyNew].Help().Key
+				if len(info.Keys) != 1 || info.Keys[0] != spelling || label != spelling {
+					t.Errorf("CLI keys=%q, help/menu=%q, want %q", info.Keys, label, spelling)
+				}
+				if err := ValidateOverrides(map[string][]string{"new": info.Keys}); err != nil {
+					t.Errorf("displayed keys cannot round trip: %v", err)
+				}
+				return
+			}
+			t.Fatal("new action missing")
+		})
 	}
 }

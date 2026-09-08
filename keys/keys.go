@@ -325,18 +325,20 @@ var reservedKeys = map[string]string{
 	"9":         "1-9 jump to tabs",
 }
 
-// keyDisplayNames maps key strings to their compact help-column glyphs.
-// Anything absent renders as itself.
-var keyDisplayNames = map[string]string{
-	"up":         "↑",
-	"down":       "↓",
-	"left":       "←",
-	"right":      "→",
-	"enter":      "↵",
-	"shift+up":   "⇧↑",
-	"shift+down": "⇧↓",
-	" ":          "space",
-	"ctrl+@":     "ctrl+space",
+// keyDisplayNames is the single runtime-to-display vocabulary. CLI/JSON use
+// pasteable config spellings; help/menu can use compact glyphs for named keys.
+var keyDisplayNames = map[string]struct{ config, compact string }{
+	"up":         {"up", "↑"},
+	"down":       {"down", "↓"},
+	"left":       {"left", "←"},
+	"right":      {"right", "→"},
+	"enter":      {"enter", "↵"},
+	"shift+up":   {"shift+up", "⇧↑"},
+	"shift+down": {"shift+down", "⇧↓"},
+	" ":          {"space", "space"},
+	"ctrl+@":     {"ctrl+space", "ctrl+space"},
+	"alt+ ":      {"alt+space", "alt+space"},
+	"alt+ctrl+@": {"alt+ctrl+space", "alt+ctrl+space"},
 }
 
 // namedKeys are the non-rune key names bubbletea produces (tea.KeyMsg.String()
@@ -402,15 +404,15 @@ func ApplyOverrides(overrides map[string][]string) error {
 type BindingInfo struct {
 	// Action is the [keys] table name; "" for fixed bindings config cannot
 	// touch.
-	Action string
+	Action string `json:"action"`
 	// Desc is the help-column description.
-	Desc string
-	// Keys are the effective key strings (defaults or the override).
-	Keys []string
-	// Default are the built-in key strings.
-	Default []string
+	Desc string `json:"description"`
+	// Keys are effective config spellings, not Bubble Tea runtime strings.
+	Keys []string `json:"keys"`
+	// Default are the built-in bindings in config spelling.
+	Default []string `json:"default"`
 	// Rebound reports whether an override replaced the default.
-	Rebound bool
+	Rebound bool `json:"rebound"`
 }
 
 // EffectiveBindings returns every action's effective binding with the given
@@ -429,10 +431,10 @@ func EffectiveBindings(overrides map[string][]string) ([]BindingInfo, error) {
 	}
 	var rebindable, fixed []BindingInfo
 	for _, sp := range specs {
-		info := BindingInfo{Action: sp.configKey, Desc: sp.desc, Keys: sp.keys, Default: sp.keys}
+		info := BindingInfo{Action: sp.configKey, Desc: sp.desc, Keys: displayKeys(sp.keys, false), Default: displayKeys(sp.keys, false)}
 		if sp.configKey != "" {
 			if o, ok := normalizedOverrides[sp.configKey]; ok {
-				info.Keys = o
+				info.Keys = displayKeys(o, false)
 				info.Rebound = true
 			}
 			rebindable = append(rebindable, info)
@@ -649,18 +651,25 @@ func normalizeOverrides(overrides map[string][]string, byConfigKey map[string]sp
 	return normalized, nil
 }
 
-// helpLabelFor renders a key list for the help/menu column: each key mapped
-// through keyDisplayNames and joined with "/" (e.g. ["up","k"] → "↑/k").
-func helpLabelFor(keyList []string) string {
+// displayKeys renders runtime keys as config spellings, or compact help labels.
+// It always allocates a new list so introspection cannot mutate dispatch keys.
+func displayKeys(keyList []string, compact bool) []string {
 	parts := make([]string, len(keyList))
 	for i, k := range keyList {
+		parts[i] = k
 		if display, ok := keyDisplayNames[k]; ok {
-			parts[i] = display
-		} else {
-			parts[i] = k
+			parts[i] = display.config
+			if compact {
+				parts[i] = display.compact
+			}
 		}
 	}
-	return strings.Join(parts, "/")
+	return parts
+}
+
+// helpLabelFor supplies both the help overlay and menu hints.
+func helpLabelFor(keyList []string) string {
+	return strings.Join(displayKeys(keyList, true), "/")
 }
 
 func normalizeKeySpec(s string) (string, bool) {
@@ -690,11 +699,17 @@ func normalizeKeySpec(s string) (string, bool) {
 			shift = true
 			rest = rest[len("shift+"):]
 		default:
+			// Bubble Tea represents Ctrl/Shift on named keys as distinct
+			// KeyTypes, not arbitrary modifier flags. Reject combinations it
+			// cannot emit; Alt can prefix every supported KeyType.
+			if namedKeys[rest] && !namedKeyModifiersSupported(rest, ctrl, shift) {
+				return "", false
+			}
 			if rest == "space" {
 				if ctrl {
 					rest = "@"
-				} else if !alt && !shift {
-					return " ", true
+				} else {
+					rest = " "
 				}
 			}
 			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
@@ -716,5 +731,23 @@ func normalizeKeySpec(s string) (string, bool) {
 		if rest == "" {
 			return "", false
 		}
+	}
+}
+
+// Mirrors the modified KeyTypes in Bubble Tea v1's key.go. The table test
+// checks every namedKeys entry and modifier combination against Key.String.
+func namedKeyModifiersSupported(name string, ctrl, shift bool) bool {
+	if !ctrl && !shift {
+		return true
+	}
+	switch name {
+	case "up", "down", "left", "right", "home", "end":
+		return true
+	case "pgup", "pgdown", "space":
+		return !shift
+	case "tab":
+		return !ctrl
+	default:
+		return false
 	}
 }
