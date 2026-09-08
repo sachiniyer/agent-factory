@@ -53,7 +53,7 @@ func TestClassifyWatch(t *testing.T) {
 		want    watchOutcome
 		wantSub string // substring the reason must contain (terminal cases)
 	}{
-		{"ready", ready(), watchReady, "ready for review"},
+		{"ready", ready(), watchReady, "awaiting input"},
 		{"running", running(), watchPending, ""},
 		{"limit-reached", &session.InstanceData{Liveness: session.LiveLimitReached}, watchPending, ""},
 		{"lost", &session.InstanceData{Liveness: session.LiveLost}, watchTerminal, "lost"},
@@ -64,7 +64,7 @@ func TestClassifyWatch(t *testing.T) {
 		{"archiving-op", &session.InstanceData{Liveness: session.LiveReady, InFlightOp: session.OpArchiving}, watchPending, ""},
 		{"creating-op", &session.InstanceData{Liveness: session.LivenessUnset, InFlightOp: session.OpCreating}, watchPending, ""},
 		// Pre-#1195 record: no liveness axis, classify from the legacy Status.
-		{"legacy-ready", &session.InstanceData{Liveness: session.LivenessUnset, Status: session.Ready}, watchReady, "ready for review"},
+		{"legacy-ready", &session.InstanceData{Liveness: session.LivenessUnset, Status: session.Ready}, watchReady, "awaiting input"},
 		{"legacy-running", &session.InstanceData{Liveness: session.LivenessUnset, Status: session.Running}, watchPending, ""},
 		{"legacy-lost", &session.InstanceData{Liveness: session.LivenessUnset, Status: session.Lost}, watchTerminal, "lost"},
 	}

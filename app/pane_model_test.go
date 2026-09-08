@@ -165,7 +165,7 @@ func TestPane_OpenHideFlow(t *testing.T) {
 	pressKey(t, h, "x")
 	require.Zero(t, h.store.NumOpenPanes())
 	assert.Equal(t, layout.RegionTree, h.ring.Active())
-	assert.Contains(t, h.View(), "No panes open", "the empty workspace advertises the open verb")
+	assert.Contains(t, h.View(), "No panes ·", "the empty workspace advertises the open verb")
 }
 
 // TestPane_OpenAlreadyOpenFocuses: s on a tab that is already open as a pane
@@ -207,7 +207,7 @@ func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
 	require.Same(t, alpha, paneA.Instance(), "selection must not retarget explicit panes")
 
 	view := h.View()
-	assert.Contains(t, view, "beta · Agent · Preview",
+	assert.Contains(t, view, "beta · Agent · preview",
 		"preview header must reconcile transient target vs original pane")
 	assert.NotContains(t, view, "alpha · Agent — selected: beta · Agent",
 		"selected divergence is hidden while preview owns the render binding")
@@ -236,7 +236,7 @@ func TestPanePreviewPaintsLastCaptureWhileRefreshing(t *testing.T) {
 	_ = h.selectionChanged()
 
 	view := h.View()
-	assert.Contains(t, view, "beta · Agent · Preview")
+	assert.Contains(t, view, "beta · Agent · preview")
 	assert.Contains(t, view, "ALPHA_PREVIEW_CONTENT",
 		"retargeting must paint the last capture instead of blanking while beta loads")
 	assert.NotContains(t, view, "Loading preview…")
@@ -277,7 +277,7 @@ func TestPanePreviewSlowCaptureFallsBackAfterGrace(t *testing.T) {
 	assert.Nil(t, followup)
 
 	view := h.View()
-	assert.Contains(t, view, "beta · Agent · Preview")
+	assert.Contains(t, view, "beta · Agent · preview")
 	assert.Contains(t, view, "Loading preview…",
 		"a capture that does not arrive must stop showing another session's pane")
 	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT")
@@ -386,7 +386,7 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 
 	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, betaSeq)())
 	view := h.View()
-	assert.Contains(t, view, "gamma · Agent · Preview")
+	assert.Contains(t, view, "gamma · Agent · preview")
 	assert.Contains(t, view, "ALPHA_PREVIEW_CONTENT",
 		"a late capture for beta must leave the last painted frame in place")
 	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT",
@@ -394,7 +394,7 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 
 	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, gamma, 0, gammaSeq)())
 	view = h.View()
-	assert.Contains(t, view, "gamma · Agent · Preview")
+	assert.Contains(t, view, "gamma · Agent · preview")
 	assert.Contains(t, view, "GAMMA_PREVIEW_CONTENT")
 	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT")
 	assert.Same(t, alpha, paneA.Instance(), "latest-wins preview must still be transient")
@@ -434,7 +434,7 @@ func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
 
 	view := h.View()
 	assert.Contains(t, view, "alpha · › Terminal")
-	assert.NotContains(t, view, "beta · Agent · Preview")
+	assert.NotContains(t, view, "beta · Agent · preview")
 	assert.NotContains(t, view, "alpha · Agent",
 		"reset must not pair the committed alpha instance with the preview agent tab")
 }
@@ -459,7 +459,7 @@ func TestPanePreviewTabRowCommitsSameInstanceTerminal(t *testing.T) {
 	assert.Same(t, alpha, h.panePreviewTxn.target.instance)
 	assert.Equal(t, 1, h.panePreviewTxn.target.tab)
 	assert.Equal(t, 0, paneA.Tab(), "preview remains transient until commit")
-	assert.Contains(t, h.View(), "alpha · › Terminal · Preview")
+	assert.Contains(t, h.View(), "alpha · › Terminal · preview")
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 
@@ -524,8 +524,8 @@ func TestPanePreviewInstanceRowUsesSelectedTerminalTab(t *testing.T) {
 	assert.Same(t, beta, h.panePreviewTxn.target.instance)
 	assert.Equal(t, 1, h.panePreviewTxn.target.tab,
 		"preview target must match the selected/action (instance, tab), not default to Agent")
-	assert.Contains(t, h.View(), "beta · › Terminal · Preview")
-	assert.NotContains(t, h.View(), "beta · Agent · Preview")
+	assert.Contains(t, h.View(), "beta · › Terminal · preview")
+	assert.NotContains(t, h.View(), "beta · Agent · preview")
 }
 
 func TestPanePreviewEnterCommitsReplace(t *testing.T) {
@@ -631,7 +631,7 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	require.Same(t, beta, h.store.GetSelectedInstance())
 	require.Equal(t, layout.RegionTree, h.ring.Active(), "tree navigation owns focus during preview")
 	require.NotNil(t, h.panePreviewTxn)
-	require.Contains(t, h.View(), "beta · › Terminal · Preview")
+	require.Contains(t, h.View(), "beta · › Terminal · preview")
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
 	require.NotNil(t, cmd)

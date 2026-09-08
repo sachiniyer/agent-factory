@@ -304,7 +304,7 @@ func (s *TaskPane) renderEditMode() string {
 	// The prompt's role depends on the trigger: cron tasks require it, watch
 	// tasks default each event to the raw emitted line.
 	if s.editTriggerIsWatch {
-		s.editPrompt.Placeholder = "(optional) {{line}} expands to the event line"
+		s.editPrompt.Placeholder = "Optional · {{line}} inserts the event"
 	} else {
 		s.editPrompt.Placeholder = "Enter task prompt…"
 	}
@@ -436,17 +436,17 @@ func (s *TaskPane) renderEditMode() string {
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
 			hint = "tab fields · enter · esc cancel · " + quitHint
 		}
-		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
+		b.WriteString(ActionHint(fitLine(hint, s.width)))
 	} else if unavailable {
 		b.WriteString(s.unavailableEditNotice())
 		b.WriteString("\n")
-		b.WriteString(hintStyle.Render(fitLine("tab fields · typing · esc back", s.width)))
+		b.WriteString(ActionHint(fitLine("tab fields · typing · esc back", s.width)))
 	} else {
 		hint := "tab/shift+tab fields · enter save"
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
 			hint = "tab fields · enter save"
 		}
-		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
+		b.WriteString(ActionHint(fitLine(hint, s.width)))
 		b.WriteString("\n")
 		// Three tiers, not two (#3630). The old ladder jumped straight from the
 		// full 51-cell row to a 39-cell one, and of everything it dropped it
@@ -477,7 +477,7 @@ func (s *TaskPane) renderEditMode() string {
 				break
 			}
 		}
-		b.WriteString(hintStyle.Render(fitLine(actions, s.width)))
+		b.WriteString(ActionHint(fitLine(actions, s.width)))
 	}
 
 	return fitBlockToSize(s.clampFormToHeight(b.String(), focusStart, focusEnd), s.width, 0, 0)
@@ -584,7 +584,7 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 	t := CurrentTheme()
 	hintStyle := DialogHintStyle()
 	if !s.onCompleteApplies() {
-		return hintStyle.Render(s.wrapOnCompleteText("n/a — a target session is not this task's to reap"))
+		return hintStyle.Render(s.wrapOnCompleteText("Target session is kept."))
 	}
 
 	focused := s.focusIndex == taskFocusOnComplete

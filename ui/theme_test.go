@@ -17,10 +17,12 @@ func TestAccentColorValue(t *testing.T) {
 
 // Headings and actionable shortcuts use ink; focus does not add a palette.
 func TestChromeCopyUsesInk(t *testing.T) {
+	if actionGroupStyle.GetForeground() != CurrentTheme().Accent || !keyStyle.GetBold() {
+		t.Fatal("footer actions need the shared accent and bold keys")
+	}
 	for name, got := range map[string]lipgloss.TerminalColor{
 		"rail title":        mainTitle.GetForeground(),
 		"automations title": automationsTitleStyle.GetForeground(),
-		"menu action":       actionGroupStyle.GetForeground(),
 	} {
 		if got != CurrentTheme().Ink {
 			t.Errorf("%s uses %v, want ink", name, got)
