@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -73,49 +72,37 @@ func (g *GitWorktree) AbandonHookProgress() {
 }
 
 // retireHookProgress is called only AFTER cancellation, join and scope teardown
-// have proved all writers gone. Complete interrupted/unstarted receipts before
-// deleting so an interrupted cleanup remains eligible for the orphan sweep.
+// have proved all writers gone. Mark terminal before attempting the lock so
+// interrupted or deferred reclamation remains eligible for the orphan sweep.
 func (g *GitWorktree) retireHookProgress() {
 	p, path, err := g.ownedHookProgress()
 	if err != nil {
 		return
 	}
-	// Teardown holds lifecycle locks. A busy publisher must not make a user's
-	// kill/archive wait; leave the journal for the next retirement or prune pass.
-	acquired, err := config.TryWithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
-		current, _, readErr := g.ownedHookProgress()
-		if readErr != nil || current.Directory != p.Directory {
-			return readErr
-		}
-		for index := range p.Commands {
-			receipt := p.receipt(index)
-			if err := config.MkdirAllUnderAFHome(receipt, 0700); err != nil {
-				return err
-			}
-			exit := filepath.Join(receipt, "exit")
-			if _, err := os.Stat(exit); os.IsNotExist(err) {
-				if err := os.WriteFile(exit, []byte("cancelled\n"), 0600); err != nil {
-					return err
-				}
-			} else if err != nil {
-				return err
-			}
-		}
-		p.finish()
-		if !p.completed() {
-			return fmt.Errorf("hook journal completion could not be confirmed")
-		}
-		return removeHookProgress(path, p)
-	})
+	p.finish()
+	acquired, err := retireHookProgressSnapshot(p, path)
 	if err != nil {
-		log.WarningLog.Printf("cannot reclaim hook progress for %s: %v", g.worktreePath, err)
+		log.WarningLog.Printf("cannot reclaim hook progress for %s: %v", p.Worktree, err)
 	} else if !acquired {
-		log.WarningLog.Printf("deferring hook progress reclamation for %s: progress lock busy", g.worktreePath)
+		log.WarningLog.Printf("deferring hook progress reclamation for %s: progress lock busy", p.Worktree)
+		// Archive may move g.worktreePath immediately after this returns. Retry
+		// only the immutable journal identity, never mutable worktree fields.
+		done := make(chan struct{})
+		g.hooksRetirementDone = done
+		go func() {
+			defer close(done)
+			retryHookProgressRetirement(p, path)
+		}()
 	}
 }
 
+func (p *hookProgress) finished() bool {
+	info, err := os.Lstat(filepath.Join(p.Directory, "finished"))
+	return err == nil && info.Mode().IsRegular()
+}
+
 func (p *hookProgress) completed() bool {
-	if info, err := os.Lstat(filepath.Join(p.Directory, "finished")); err != nil || !info.Mode().IsRegular() {
+	if !p.finished() {
 		return false
 	}
 	for index := range p.Commands {

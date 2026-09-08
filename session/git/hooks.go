@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -145,6 +146,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			outputFile, outputErr := hooklog.Open(hooklog.PostWorktree)
 			if outputErr != nil {
 				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", cmdStr, outputErr)
+				if !run.progress.recordLaunchFailure(index, outputErr) {
+					return
+				}
 				continue
 			}
 			outputPath := outputFile.Name()
@@ -179,6 +183,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			if err := cmd.Start(); err != nil {
 				_ = outputFile.Close()
 				log.ErrorLog.Printf("post-worktree hook %q failed to start (full output: %s): %v", cmdStr, outputPath, err)
+				if !run.progress.recordLaunchFailure(index, err) {
+					return
+				}
 				continue
 			}
 			// Record the durable handle as soon as one scope exists, not when the
@@ -229,6 +236,15 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				if err := systemdunit.StopScopeUnits(scopeUnit); err != nil {
 					scopeStopErr = err
 					log.WarningLog.Printf("post-worktree hook scope %s did not stop (full output: %s): %v", scopeUnit, outputPath, err)
+				}
+			}
+			if run.progress != nil && !run.progress.claimed(index) {
+				if waitErr == nil {
+					waitErr = fmt.Errorf("hook launcher exited before claiming entry %d", index)
+				}
+				if scopeStopErr != nil || !run.progress.recordLaunchFailure(index, waitErr) {
+					_ = outputFile.Close()
+					return
 				}
 			}
 			outputTail, outputReadErr := hooklog.CloseAndReadTail(outputFile)

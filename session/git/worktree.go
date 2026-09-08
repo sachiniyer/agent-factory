@@ -146,6 +146,8 @@ type GitWorktree struct {
 	// until the first hook run is launched (e.g. external worktrees that skip
 	// hooks entirely), which HooksDone reports as "no hooks in flight".
 	hooksDone <-chan struct{}
+	// Lifecycle-owned join handle for bounded deferred journal reclamation.
+	hooksRetirementDone <-chan struct{}
 }
 
 // RelocationRecovery is the durable, non-authoritative second handle retained

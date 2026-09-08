@@ -394,20 +394,28 @@ bidirectional `.git` linkage to the owning repository, then resumes the entries
 that never started, in
 order and each in its own unbound scope with its own hooklog file. Entries
 already started are never replayed, including failed entries (the normal runner
-also continues after failure). The session reports hooks in flight until the
+also continues after failure). A launch failure is recorded as a terminal claim
+before advancing, so it cannot become a pending hole on restart. If that claim
+cannot be persisted, the runner stops before launching any later entry. The session reports hooks in flight until the
 remaining list finishes. The snapshot preserves the original commands and
 explicit environment pass-through names across configuration edits; environment
 values come from the restarted daemon. Completed or deliberately cancelled
 lists are not resumed. Restore marks tombstoned and archived sessions' journals
 finished before considering any resume. Safe kill/archive teardown reclaims
-finished journals and receipts after proving all hook writers gone. Creation
-also sweeps completed journals whose owning session no longer exists: it keeps
+finished journals and receipts after proving all hook writers gone. A busy
+journal lock schedules eight background retries with exponential backoff
+(100 ms to 2 s), using the original journal identity even if archive moves the
+worktree. Creation also sweeps completed journals with deleted or archived
+owners: it keeps
 the newest 20 eligible journals for up to 14 days, with a five-second grace
 period. Unpublished receipt directories are removed on publication failure;
 unreferenced directories left by a crash are pruned after the same grace period.
 A missing or replaced checkout leaves the journal pending for normal worktree
 recovery rather than executing commands in its replacement.
-Active scopes, unfinished receipts, and still-owned journals are excluded;
+Terminal journals with deleted or archived owners and missing exit receipts
+are reclaimed after the grace period once no scope or launcher remains, even
+if a daemon exit interrupted the retry. Active scopes, nonterminal journals,
+and journals with live owners are excluded;
 unreadable session state or scope probes prevent pruning. Older runs without a
 progress record or a recorded owning session ID retain survivor observation only.
 

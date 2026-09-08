@@ -48,6 +48,9 @@ func TestHookProgressRetireDoesNotWaitForPublisher(t *testing.T) {
 			<-lockDone
 		}
 		<-done
+		if g.hooksRetirementDone != nil {
+			<-g.hooksRetirementDone
+		}
 	})
 	select {
 	case <-done:
@@ -67,7 +70,18 @@ func TestHookProgressRetireDoesNotWaitForPublisher(t *testing.T) {
 	if lockErr != nil {
 		t.Fatal(lockErr)
 	}
-	g.retireHookProgress()
+	// Archive changes this field after teardown; the retry must retain the old journal path.
+	g.worktreePath = filepath.Join(t.TempDir(), "archived")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if g.hooksRetirementDone != nil {
+		waitForClosed(t, g.hooksRetirementDone, 3*time.Second, "retirement retry did not finish")
+	}
 	for _, file := range []string{path, p.Directory} {
 		if _, err := os.Stat(file); !os.IsNotExist(err) {
 			t.Errorf("later retirement left %s: %v", file, err)

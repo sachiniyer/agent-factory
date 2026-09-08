@@ -23,9 +23,10 @@ const (
 )
 
 type keptProgress struct {
-	path     string
-	progress *hookProgress
-	modified time.Time
+	path               string
+	progress           *hookProgress
+	modified           time.Time
+	terminalIncomplete bool
 }
 
 func pruneHookProgress(dir string, now time.Time) {
@@ -60,7 +61,7 @@ func pruneHookProgress(dir string, now time.Time) {
 				}
 				continue
 			}
-			if err != nil || p.SessionID == "" || owners[p.SessionID] || !p.completed() {
+			if err != nil || p.SessionID == "" || owners[p.SessionID] || !p.finished() {
 				continue
 			}
 			info, err := entry.Info()
@@ -80,7 +81,7 @@ func pruneHookProgress(dir string, now time.Time) {
 			if now.Sub(modified) < progressGraceAge {
 				continue
 			}
-			candidates = append(candidates, keptProgress{path, p, modified})
+			candidates = append(candidates, keptProgress{path, p, modified, !p.completed()})
 		}
 		// Exclude active scopes from the quota as well as deletion. One fleet
 		// probe also protects terminal-marked journals whose teardown is pending.
@@ -111,9 +112,10 @@ func pruneHookProgress(dir string, now time.Time) {
 			}
 			return candidates[i].modified.After(candidates[j].modified)
 		})
-		removed := 0
-		for i, candidate := range candidates {
-			if i < keptProgressLimit && now.Sub(candidate.modified) <= keptProgressAge {
+		removed, kept := 0, 0
+		for _, candidate := range candidates {
+			if !candidate.terminalIncomplete && kept < keptProgressLimit && now.Sub(candidate.modified) <= keptProgressAge {
+				kept++
 				continue
 			}
 			// A terminal marker can precede teardown. Even completed-looking receipts
@@ -128,12 +130,12 @@ func pruneHookProgress(dir string, now time.Time) {
 			removed++
 		}
 		if removed > 0 {
-			log.InfoLog.Printf("pruned %d completed orphan hook journals", removed)
+			log.InfoLog.Printf("pruned %d terminal orphan hook journals", removed)
 		}
 		return nil
 	})
 	if err != nil {
-		log.WarningLog.Printf("cannot prune completed hook journals: %v", err)
+		log.WarningLog.Printf("cannot prune terminal hook journals: %v", err)
 	}
 }
 
@@ -148,13 +150,19 @@ func hookProgressOwners() (map[string]bool, error) {
 	owners := make(map[string]bool)
 	for _, data := range repos {
 		var rows []struct {
-			ID string `json:"id"`
+			ID         string `json:"id"`
+			Liveness   int    `json:"liveness"`
+			Status     int    `json:"status"`
+			UserKilled bool   `json:"user_killed"`
 		}
 		if err := json.Unmarshal(data, &rows); err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
-			owners[row.ID] = true
+			// Append-only persisted enums: session.LiveArchived=5 and
+			// legacy session.Archived=6. The git package cannot import session.
+			archived := row.Liveness == 5 || (row.Liveness == 0 && row.Status == 6)
+			owners[row.ID] = owners[row.ID] || (!archived && !row.UserKilled)
 		}
 	}
 	return owners, nil

@@ -59,6 +59,10 @@ func TestHookProgressCreationPrunesOnlyCompletedOrphans(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(incomplete.dir, "finished"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(filepath.Join(incomplete.dir, "finished"), old, old); err != nil {
+		t.Fatal(err)
+	}
 	recent := create("recent", true, 0)
 	expired := create("expired", true, 15*24*time.Hour)
 	var kept []journal
@@ -81,7 +85,7 @@ func TestHookProgressCreationPrunesOnlyCompletedOrphans(t *testing.T) {
 	exists(owned, true)
 	exists(inFlight, true)
 	exists(scopeLive, true)
-	exists(incomplete, true)
+	exists(incomplete, false)
 	exists(recent, true)
 	exists(expired, false)
 	for i, j := range kept {
