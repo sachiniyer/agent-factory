@@ -8,6 +8,8 @@ For the transport, socket path, authentication model, response envelope, and sta
 
 Ordinary daemon HTTP errors include optional boolean `error.daemon_rejected: true`. An unmarked `5xx` or unfamiliar error envelope leaves a mutation's outcome uncertain; check its state before retrying. Only boolean `true` counts; the web client also treats `502`/`504` as uncertain even with a marker. The existing `error.code: "mutation_committed"` takes precedence over that boolean and means the mutation must not be retried. See the [response envelope contract](../http-api.md#response-envelope) for details.
 
+`CreateSession.force_remote` remains accepted for compatibility with older clients. It selects the hook backend when `backend` is empty; an explicit `backend` takes precedence. New clients should use `backend` (for example, `"hook"`), as the TUI creation form does.
+
 ## Endpoints
 
 Request fields are the JSON keys of each route's request body; a `—` means the route takes no body (or an empty `{}`).

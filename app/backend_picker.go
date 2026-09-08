@@ -15,12 +15,8 @@ import (
 
 // The naming form's backend field (#1933).
 //
-// The daemon has always accepted a backend on create (CreateSessionRequest.Backend,
-// the CLI's `--backend`), and #1968 gave the web a picker over the daemon's
-// ListBackends catalog. The TUI was the surface left out: `N` reaches the hook
-// backend and nothing else, so a docker or ssh session could not be created from
-// the primary interface at all — a user had to edit the repo's checked-in `backend`
-// key, which is all-or-nothing per repo, or drop to the CLI.
+// The creation form selects from the daemon's ListBackends catalog.
+// Configured legacy new_remote bindings open this same field (#4017).
 //
 // Two rules this file exists to hold, both borrowed from its web twin
 // (web/src/backends.ts), because a second implementation of either is how the two
@@ -178,6 +174,7 @@ func (m *home) handleBackendCatalog(msg backendCatalogMsg) (tea.Model, tea.Cmd) 
 	if m.state != stateNew || m.namingInstance == nil || m.namingInstance != msg.naming {
 		return m, nil
 	}
+	m.backendPickerPending = false
 	if msg.err != nil {
 		// Lead with what failed and what it blocks; the daemon's own error text
 		// follows. The naming form stays open — the field is optional, so a catalog
@@ -281,4 +278,16 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.pendingBackend = choice.value
 	m.menu.SetNamingBackend(m.pendingBackend != repoDefaultBackend)
 	return m, nil
+}
+
+// startNewInstanceAtBackend preserves configured new_remote keys through the
+// creation form's backend field, including restored failed-create drafts.
+func (m *home) startNewInstanceAtBackend() (tea.Model, tea.Cmd) {
+	_, cmd := m.startNewInstance()
+	if m.state != stateNew {
+		return m, cmd
+	}
+	m.backendPickerPending = true
+	_, backendCmd := m.openBackendPicker()
+	return m, tea.Batch(cmd, backendCmd)
 }
