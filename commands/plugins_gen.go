@@ -75,6 +75,7 @@ var pluginReleaseDigests = []string{
 	"3b2dcc3fde22b1d9c63f9c00110f810531b04b70e7d4ff302d7ac82b586e16ea", // 3.10 — require HTTPS for directly framed off-box web tabs (#3062)
 	"828a01a7b3f3e3e14bdbe4dc864067040c4f260251d029dad422e65f5ce24e7e", // 3.11 — advertise bounded daemon-side session listing (#3362)
 	"264d561342f5d009e7ce52826ced4c640ee55227e1a43367e96c2a681ef7192b", // 3.12 — idle awaits input; deletion respects resource ownership (#4057)
+	"e25deafc97b6ced4c97d6b6d4c1c3396bc06c58e69b2bc06c3fc123602bf114c", // 3.13 — deletion labels and work-loss disclosure (#4033)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

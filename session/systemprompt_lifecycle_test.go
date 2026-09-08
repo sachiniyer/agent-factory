@@ -15,7 +15,7 @@ func TestAfUsageReferenceLifecycleCopy(t *testing.T) {
 			for _, want := range []string{
 				"agent idle (awaiting input, not work completion)",
 				"exits 0 on idle, non-zero on lost/dead/archived or --timeout (default 30m)",
-				"only af-owned worktrees and branches; user-owned resources stay",
+				"Delete a session; work in af-owned workspaces can be lost",
 			} {
 				if !strings.Contains(reference, want) {
 					t.Errorf("lifecycle guidance missing %q", want)

@@ -113,7 +113,9 @@ While naming a new instance the form owns the keyboard and its keys are fixed:
 `Tab` opens the program picker, `Shift-Tab` opens the initial-prompt field
 (#1936), `Ctrl-R` opens the backend field (#1933), `Enter` submits,
 `Esc`/`Ctrl-C` cancel the create. Inside the prompt field `Enter` is a newline —
-`Tab`/`Esc` close it keeping the text, `Ctrl-C` cancels the whole create.
+`Tab`/`Esc` save the prompt edit and return to naming. `Ctrl-C` discards only
+the current prompt edit and returns to the naming form with the previously saved
+prompt and all other pending values intact. `Ctrl-C` from naming cancels the create.
 
 `Enter`, `Tab`, `Shift-Tab`, `Esc`, `Ctrl-]`, and `1`–`9` are **reserved** and
 cannot be rebound (`[keys]` config). `Ctrl-W` is the configurable detach key
@@ -399,7 +401,7 @@ af_boot                                       # 112 cols or wider
 af_ensure_nav; af_focus_tree
 af_send n; af_wait_for 'account'              # the field is advertised
 af_send C-o; af_wait_for 'Select claude account'   # the title names the AGENT
-af_wait_for 'Ambient identity'                # first row is the pre-#3844 default
+af_wait_for "Use the agent's own login"       # no configured default in this fixture
 af_send Escape; af_wait_for 'submit name'     # esc backs out of the field only
 af_send C-o; af_send Down; af_send Enter      # pick a registered account
 af_wait_for 'account ✓'                       # hint confirms a scoped create

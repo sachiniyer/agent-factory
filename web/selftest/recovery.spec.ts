@@ -156,7 +156,7 @@ for (const theme of ["light", "dark"] as const) {
           const row = page.locator(".af-row").first();
           await row.hover();
           await row.getByRole("button", { name: /^Actions for / }).click();
-          await row.getByRole("button", { name: new RegExp(`^${operation === "kill" ? "Kill" : "Archive"} session`) }).click();
+          await row.getByRole("button", { name: new RegExp(`^${operation === "kill" ? "Delete" : "Archive"} session`) }).click();
           await page.locator(".af-modal-card button[type=submit]").click();
           await expect(page.locator(".af-modal-error")).toBeVisible();
         }

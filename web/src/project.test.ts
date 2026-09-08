@@ -12,6 +12,7 @@ import {
   pickerProjects,
   projectMeta,
   projectName,
+  projectDeletionBreakdown,
   projectSummaries,
   reconcileProject,
   scopeToProject,
@@ -249,4 +250,16 @@ test("defaultProject: with only registered roots (no sessions, no tasks), opens 
     "/repos/live",
     "the most-recently-active live session's repo is still the preferred default",
   );
+});
+
+test("project deletion counts only this root's non-archived regular and external sessions", () => {
+  const sessions = [
+    sess("regular", { worktree: { repo_path: "/a" } }),
+    sess("here", { worktree: { repo_path: "/a", external_worktree: true } }),
+    sess("legacy-external", { worktree: { repo_path: "/a", external_worktree: true } }),
+    sess("archived", { liveness: Liveness.Archived, worktree: { repo_path: "/a", external_worktree: true } }),
+    sess("other", { worktree: { repo_path: "/b", external_worktree: true } }),
+  ];
+  assert.deepEqual(projectDeletionBreakdown(sessions, "/a"), { sessionCount: 1, inPlaceCount: 2 });
+  assert.deepEqual(projectDeletionBreakdown(sessions, "/empty"), { sessionCount: 0, inPlaceCount: 0 });
 });
