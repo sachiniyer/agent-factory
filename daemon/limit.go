@@ -833,6 +833,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.
 	instance.ClearLimitReached()
+	if manual {
+		// Successful delivery starts work even if the outgoing agent was idle.
+		// Keep original liveness only on the failure paths above.
+		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
+	}
 	// Lower the fence HERE, before the completion payload is built (#3004 review).
 	// Every destructive phase is behind us, and the projection published below carries
 	// the op axis: on the live-stall arm nothing else lowers it — there is no Respawn

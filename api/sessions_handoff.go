@@ -84,15 +84,20 @@ Examples:
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]any{
-			"ok":           true,
-			"title":        title,
-			"from":         resp.From,
-			"to":           resp.To,
-			"head_sha":     resp.HeadSHA,
-			"from_account": resp.FromAccount,
-			"to_account":   resp.ToAccount,
-		})
+		output := map[string]any{
+			"ok":       true,
+			"title":    title,
+			"from":     resp.From,
+			"to":       resp.To,
+			"head_sha": resp.HeadSHA,
+		}
+		if resp.FromAccount != "" {
+			output["from_account"] = resp.FromAccount
+		}
+		if resp.ToAccount != "" {
+			output["to_account"] = resp.ToAccount
+		}
+		return jsonOut(output)
 	},
 }
 
