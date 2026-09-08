@@ -19,16 +19,15 @@ import (
 
 var sessionsKillCmd = &cobra.Command{
 	Use:   "kill <title>",
-	Short: "Permanently destroy a session and prune its worktree branch",
-	Long: `Permanently destroy a session: tear down tmux, remove the worktree,
-delete the stored session record, and prune the session branch when Agent
-Factory owns it.
+	Short: "Permanently delete a session and af-owned resources",
+	Long: `Permanently delete the session record and stop its terminals. Remove only
+worktrees and branches owned by af; user-owned resources stay.
 
 For normal "done with this session" cleanup, prefer:
   af sessions archive <title>
 
-Kill always destroys the session, including any uncommitted or unmerged work on
-its branch — there is no undo. To keep a session restorable instead, archive it.
+Deletion is permanent. Uncommitted or unmerged work in af-owned resources may
+be lost. Archive instead to keep the session restorable.
 --force is accepted but has no effect (kept for backward compatibility).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -58,8 +57,8 @@ its branch — there is no undo. To keep a session restorable instead, archive i
 var sessionsArchiveCmd = &cobra.Command{
 	Use:   "archive [title]",
 	Short: "Finish with a session by archiving it for later restore",
-	Long: `Archive is the default way to finish with a session: tear down its tmux
-and move its git worktree out to the global archive directory
+	Long: `Archive keeps a session restorable. Locally, stop its terminals
+and move its owned git worktree to the global archive directory
 (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/), preserving the branch and any
 uncommitted changes. The session is not deleted — it becomes a quiescent
 "archived" row that survives restarts and can be brought back later with
@@ -75,9 +74,9 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Not available for remote or in-place (--here) sessions: archive relocates the
-worktree, which those don't own. The relocated worktree path is printed on
-success.`,
+Sandboxes publish work before removal; restore recreates them from the published
+branch. In-place (--here) sessions cannot be archived because af does not own
+their worktree. Local archives print the relocated worktree path on success.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

@@ -354,21 +354,12 @@ func refusalNotices(short int) []string {
 }
 
 func (c *ConfirmationOverlay) instruction(compact bool) string {
-	bold := lipgloss.NewStyle().Bold(true).Render
-	t := ui.CurrentTheme()
-	primary := lipgloss.NewStyle().Bold(true).Foreground(t.Surface).Background(t.Accent).Render
-	if compact {
-		return primary(c.ConfirmKey) + " confirm · " +
-			bold(c.CancelKey) + "/" + bold("esc") + " cancel"
+	confirm := c.ConfirmKey
+	if !compact && c.enterConfirms() {
+		confirm += "/enter"
 	}
-	confirmKeys := primary(c.ConfirmKey)
-	if c.enterConfirms() {
-		// "/enter" mirrors the compact "n/esc" idiom and keeps the full hint on one
-		// line at the confirmation's fixed width, so its click zone survives (#2405).
-		confirmKeys += "/" + primary("enter")
-	}
-	return "Press " + confirmKeys + " to confirm, " +
-		bold(c.CancelKey) + " or " + bold("esc") + " to cancel"
+	return ui.ActionStyle(true).Render(confirm+" confirm") + " · " +
+		ui.ActionStyle(false).Render(c.CancelKey+"/esc cancel")
 }
 
 // windowOverlayBody keeps the leading lines and surrenders the tail, replacing

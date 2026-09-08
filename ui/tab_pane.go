@@ -489,7 +489,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	p.dropStaleView(instance, 0)
 	switch {
 	case instance == nil:
-		p.setFallbackState("No sessions yet — press n to create one.")
+		p.setFallbackState("No sessions · n to create one.")
 		p.mu.Unlock()
 		return nil
 	case instance.IsCreating():
@@ -576,7 +576,7 @@ func webTabPlaceholder(url string) string {
 // code-server on a 0600 unix socket, reachable only through the daemon's proxy
 // (#1873), so the only meaningful pointer is the web UI itself.
 func vscodeTabPlaceholder() string {
-	return "VS Code tab — view in the web UI\n\nThe editor opens this session's worktree. A terminal can't render it."
+	return "Open this VS Code tab in the web UI."
 }
 
 // tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot
@@ -638,9 +638,9 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	// Otherwise keep the "not available" fallback and name the config knob.
 	if caps := instance.Capabilities(); caps.Workspace == session.WorkspaceRemote {
 		if caps.TerminalTab {
-			p.setFallbackState("Press Enter to open a terminal on the remote machine.")
+			p.setFallbackState("Enter to open a remote terminal.")
 		} else {
-			p.setFallbackState("Terminal tab not available for remote sessions.\nConfigure remote_hooks.terminal_cmd to enable it.\nUse the Agent tab to see session output.")
+			p.setFallbackState("Set remote_hooks.terminal_cmd for a remote terminal.\nUse the Agent tab for output.")
 		}
 		p.mu.Unlock()
 		return nil
