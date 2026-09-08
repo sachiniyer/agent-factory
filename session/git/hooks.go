@@ -132,8 +132,13 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 	}
 	go func() {
 		defer close(done)
+		finishProgress := true
 		if run.progress != nil {
-			defer run.progress.finish()
+			defer func() {
+				if finishProgress {
+					run.progress.finish()
+				}
+			}()
 		}
 		scopeRecorded := false
 		for index, cmdStr := range cmds {
@@ -236,7 +241,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			// an already-collected scope is a no-op.
 			var scopeStopErr error
 			if scopeUnit != "" {
-				if err := systemdunit.StopScopeUnits(scopeUnit); err != nil {
+				if err := stopHookScopeUnits(scopeUnit); err != nil {
 					scopeStopErr = err
 					log.WarningLog.Printf("post-worktree hook scope %s did not stop (full output: %s): %v", scopeUnit, outputPath, err)
 				}
@@ -246,6 +251,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 					waitErr = fmt.Errorf("hook launcher exited before claiming entry %d", index)
 				}
 				if scopeStopErr != nil || !run.progress.recordLaunchFailure(index, waitErr) {
+					finishProgress = false
 					_ = outputFile.Close()
 					return
 				}
@@ -274,6 +280,8 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 	}()
 	return done
 }
+
+var stopHookScopeUnits = systemdunit.StopScopeUnits
 
 // Successful and deliberately cancelled hooks historically retained no output.
 // Keep that contract (and avoid an unbounded success-log collection), while a
