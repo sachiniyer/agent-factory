@@ -8,14 +8,15 @@ product constants, not user-editable tokens, presets or a custom-palette API.
 
 ## Beauty thesis · sessions exemplar
 
-The [beauty thesis](thesis.md) extends this contract after #4065. Chrome captions
-are now 13px. In Sessions, secondary controls use raised fill with transparent
-resting borders; plane boundaries and keyboard focus retain their edges. Desktop
-session identity uses type-title; phone keeps type-heading in its 48px header.
-The TUI uses bold selected identity, a full raised header row and a neutral
-selected-but-unfocused frame. Other component layouts await the sequenced Phase 2
-slices; their inherited caption size changes now. The thesis carries the reviewed
-before/after evidence and the exceptions to the earlier recipes below.
+The [beauty thesis](thesis.md) takes the accepted TUI as the in-house benchmark
+for expression with few means. Its exemplar changes only web Sessions: 28px
+focused desktop identity, a 20px fleet heading, 16px row names and 13px metadata.
+Agent/account and state are visible; repo/branch belong beside the focused work.
+Raised navigation/identity chrome separates the base terminal surface using the
+two existing fills. Semantic state colours carry attention alongside one accent.
+Phone keeps its 48px session-first header and 44px keybar. No animation is added.
+Shared CSS size changes do not change terminal cells or generated TUI paint.
+Other web component recipes await the sequenced Phase 2 slices.
 
 ## Rules applied
 

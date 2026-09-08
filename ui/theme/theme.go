@@ -92,7 +92,7 @@ func States() []State {
 
 // Styles prescribes component treatments. Only Light/Dark/System will be user choices;
 // these internal roles are not a palette customization API.
-type StyleSet struct{ Body, Muted, Title, Selected, Pane, PaneHeader, Focus, Dialog, Error lipgloss.Style }
+type StyleSet struct{ Body, Muted, Title, Selected, Focus, Dialog, Error lipgloss.Style }
 
 func Styles() StyleSet {
 	c, m := Colors(), Metrics()
@@ -104,14 +104,12 @@ func Styles() StyleSet {
 	}
 	body := lipgloss.NewStyle().Foreground(c["ink"]).Background(c["surface"])
 	return StyleSet{
-		Body:       body,
-		Muted:      body.Foreground(c["ink-muted"]),
-		Title:      body.Bold(true),
-		Selected:   body.Background(c["surface-raised"]).Bold(true),
-		Pane:       body.Border(lipgloss.NormalBorder()).BorderForeground(c["border"]),
-		PaneHeader: body.Background(c["surface-raised"]).Bold(true),
-		Focus:      body.Border(lipgloss.NormalBorder()).BorderForeground(c["accent"]),
-		Dialog:     body.Background(c["surface-raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(0, m["space-3"]),
-		Error:      body.Foreground(c["dead"]),
+		Body:     body,
+		Muted:    body.Foreground(c["ink-muted"]),
+		Title:    body.Bold(true),
+		Selected: body.Background(c["surface-raised"]).Bold(true),
+		Focus:    body.Border(lipgloss.NormalBorder()).BorderForeground(c["accent"]),
+		Dialog:   body.Background(c["surface-raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(0, m["space-3"]),
+		Error:    body.Foreground(c["dead"]),
 	}
 }

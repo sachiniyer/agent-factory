@@ -8,14 +8,15 @@ product constants, not user-editable tokens, presets or a custom-palette API.
 
 ## Beauty thesis · sessions exemplar
 
-The [beauty thesis](thesis.md) extends this contract after #4065. Chrome captions
-are now 13px. In Sessions, secondary controls use raised fill with transparent
-resting borders; plane boundaries and keyboard focus retain their edges. Desktop
-session identity uses type-title; phone keeps type-heading in its 48px header.
-The TUI uses bold selected identity, a full raised header row and a neutral
-selected-but-unfocused frame. Other component layouts await the sequenced Phase 2
-slices; their inherited caption size changes now. The thesis carries the reviewed
-before/after evidence and the exceptions to the earlier recipes below.
+The [beauty thesis](thesis.md) takes the accepted TUI as the in-house benchmark
+for expression with few means. Its exemplar changes only web Sessions: 28px
+focused desktop identity, a 20px fleet heading, 16px row names and 13px metadata.
+Agent/account and state are visible; repo/branch belong beside the focused work.
+Raised navigation/identity chrome separates the base terminal surface using the
+two existing fills. Semantic state colours carry attention alongside one accent.
+Phone keeps its 48px session-first header and 44px keybar. No animation is added.
+Shared CSS size changes do not change terminal cells or generated TUI paint.
+Other web component recipes await the sequenced Phase 2 slices.
 
 ## Rules applied
 
@@ -394,8 +395,8 @@ or step fails validation: revise a component rule before enlarging this contract
 <tr><td>lost</td><td>#705014</td><td>#ebcb8b</td><td>Lost glyph and label only; do not infer an error from a slow connection</td></tr>
 <tr><td>ready</td><td>#405430</td><td>#d5e2cc</td><td>Ready glyph and label only; green never means keyboard focus or generic success</td></tr>
 <tr><td>running</td><td>#4c566a</td><td>#d8dee9</td><td>Running state text only; no indicator, including in-flight operations</td></tr>
-<tr><td>surface</td><td>#f8f9fc</td><td>#1f1f1f</td><td>Every page, rail, header and terminal chrome background; also text on the primary accent button</td></tr>
-<tr><td>surface-raised</td><td>#eceff4</td><td>#2b2b2b</td><td>Dialogs, menus, controls and selected rows; a functional plane, never a decorative card</td></tr>
+<tr><td>surface</td><td>#f8f9fc</td><td>#1f1f1f</td><td>Working surface and terminal canvas; text on the primary accent button. Web Sessions chrome uses surface-raised; TUI paint is unchanged.</td></tr>
+<tr><td>surface-raised</td><td>#eceff4</td><td>#2b2b2b</td><td>Web navigation and focused-session identity plane, dialogs, menus and controls. Depth comes from the two existing surfaces, never a new hue.</td></tr>
 </tbody></table>
 <table><thead><tr><th>Metric</th><th>Web</th><th>TUI</th><th>Required use</th></tr></thead><tbody>
 <tr><td>radius-control</td><td>4px</td><td>0</td><td>Buttons and inputs only; square terminal controls</td></tr>
@@ -406,9 +407,9 @@ or step fails validation: revise a component rule before enlarging this contract
 <tr><td>space-4</td><td>24px</td><td>1</td><td>Section separation; one vertical blank terminal row</td></tr>
 <tr><td>type-body</td><td>0.875rem</td><td>1</td><td>14px: body, fields, buttons and session/task names; one terminal row</td></tr>
 <tr><td>type-caption</td><td>0.8125rem</td><td>1</td><td>13px: secondary metadata only; one terminal row</td></tr>
-<tr><td>type-display</td><td>1.5rem</td><td>1</td><td>24px: zero-session or unavailable-screen heading only; one bold terminal row</td></tr>
+<tr><td>type-display</td><td>1.75rem</td><td>1</td><td>28px: focused web session identity and empty-screen heading; terminal row unchanged</td></tr>
 <tr><td>type-heading</td><td>1rem</td><td>1</td><td>16px: section and pane headings; one bold terminal row</td></tr>
-<tr><td>type-title</td><td>1.25rem</td><td>1</td><td>20px: dialog and focused desktop session title; one bold terminal row</td></tr>
+<tr><td>type-title</td><td>1.25rem</td><td>1</td><td>20px: web fleet heading and dialog title; one bold terminal row</td></tr>
 </tbody></table>
 </details>
 

@@ -7258,7 +7258,8 @@ function terminalChrome(opts) {
   };
   const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
   title.setAttribute("aria-label", opts.title);
-  const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
+  const identity = h("div", { class: "af-session-identity" });
+  const titleBox = h("div", { class: "af-term-head-main" }, title, identity);
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
   const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
@@ -7283,7 +7284,7 @@ function terminalChrome(opts) {
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, pr, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, titleBox, identity, tabs, pr, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -14118,6 +14119,21 @@ function editTaskModal(projects, task, callbacks) {
   });
 }
 
+// src/session-identity.ts
+function sessionIdentity(s) {
+  return `${s.current_agent || "Agent not reported"} \xB7 ${s.account || "Default account"}`;
+}
+function patchSessionIdentity(node, s) {
+  const state = h("span", { class: "af-session-state" }, OPERATOR_KIND_LABELS[operatorKind(s)]);
+  state.dataset.state = rowStatus(s).kind ?? "working";
+  const owner = h("span", { class: "af-session-owner" }, sessionIdentity(s));
+  const repo = s.worktree?.repo_path;
+  const location2 = [repo?.replace(/\/+$/, "").split("/").pop(), s.branch].filter(Boolean).join(" \xB7 ");
+  const work = h("span", { class: "af-session-location", title: [repo, s.branch].filter(Boolean).join(" \xB7 ") }, location2);
+  node.replaceChildren(state, owner, work);
+  node.title = [state.textContent, owner.textContent, work.title].filter(Boolean).join(" \xB7 ");
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -15458,7 +15474,7 @@ var AppShell = class {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
     this.sessionFirst = sessionFirstComposition([
-      [chrome.title, this.header],
+      [chrome.titleBox, this.header],
       [chrome.keyboard, this.header],
       [this.viewNav, this.appControls.panel],
       [this.projectSwitchWrap, this.appControls.panel],
@@ -15846,6 +15862,7 @@ var AppShell = class {
     this.headTitle.title = selected.title;
     this.headTitle.setAttribute("aria-label", selected.title);
     if (this.terminalChrome) {
+      patchSessionIdentity(this.terminalChrome.identity, selected);
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
@@ -16041,25 +16058,24 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const managed = actionable || killable;
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
-  const branchParts = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
-  ];
+  const branchParts = [];
+  if (s.branch) {
+    branchParts.push(h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch));
+  }
   if (selected && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
-      idle.dataset.paneChurnAt = s.last_pane_churn_at;
-    }
+    if (s.last_pane_churn_at) idle.dataset.paneChurnAt = s.last_pane_churn_at;
     branchParts.push(idle);
   }
-  if (s.branch) {
-    branchParts.push(
-      " \xB7 ",
-      h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
-    );
-  }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h("div", { class: "af-row-main" }, title, branch);
+  const identity = h(
+    "div",
+    { class: "af-row-identity", title: sessionIdentity(s) },
+    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
+    h("span", { class: "af-row-owner" }, sessionIdentity(s))
+  );
+  const main = h("div", { class: "af-row-main" }, title, identity, branch);
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = previous ?? h("li", { class: cls });
   row.className = cls;
@@ -16106,7 +16122,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    idle.textContent = detail ?? "";
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";

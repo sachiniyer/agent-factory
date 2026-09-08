@@ -1792,10 +1792,9 @@ test("#2458: no live indicator by the project selector, no live/branch meta by t
   await expect(page.locator(".af-appbar")).not.toContainText("Connecting…");
   await expect(page.locator(".af-term-head")).not.toContainText("Live");
 
-  // The branch went with it: "Live · master" was one unit, and the head now carries
-  // the session title and its separator before the tab labels.
-  const head = await page.locator(".af-term-head-main").textContent();
-  expect(head?.trim()).toBe(`${SESSION_A} ·`);
+  // #4065 restores useful work identity, without restoring transport-status chrome.
+  await expect(page.locator(".af-term-title")).toHaveText(SESSION_A);
+  await expect(page.locator(".af-session-identity")).toContainText("Default account");
 });
 
 // The phone path is checked separately because the indicator was not merely
@@ -8209,7 +8208,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
             await expect(p.locator(".af-main.af-main-term")).toBeVisible();
 
             if (width <= 768) {
-              const titleNode = p.locator(".af-appbar > .af-term-title");
+              const titleNode = p.locator(".af-appbar .af-term-title");
               await expect(titleNode).toHaveText(title);
               await expect(titleNode).toHaveAttribute("title", title);
               await expect(titleNode).toHaveAttribute("aria-label", title);
@@ -8304,7 +8303,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
             });
             expect(layout.barParent).toContain("af-term-head");
             expect(layout.hostPrevious).toContain("af-term-head");
-            expect(layout.head.height, "phone separates title and tabs; desktop keeps one row").toBeLessThan(width <= 768 ? 170 : 64);
+            expect(layout.head.height, "identity and controls use two bounded desktop rows (#4065)").toBeLessThan(width <= 768 ? 170 : 144);
             expect(layout.bar.top).toBeGreaterThanOrEqual(layout.head.top);
             expect(layout.bar.bottom).toBeLessThanOrEqual(layout.head.bottom);
             expect(layout.host.top).toBeGreaterThanOrEqual(layout.head.bottom - 1);
@@ -8315,7 +8314,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               expect(layout.titleTextOverflow).toBe("ellipsis");
               expect(layout.host.top, "navigation and pane controls leave room for output").toBeLessThan(300);
             } else {
-              expect(Math.abs(layout.titleBox.centerY - layout.bar.centerY), "desktop title and tabs share a baseline row").toBeLessThanOrEqual(1);
+              expect(layout.bar.top, "desktop tabs sit below the session identity (#4065)").toBeGreaterThanOrEqual(layout.titleBox.bottom);
               expect(layout.titleBox.width, "the desktop title keeps a useful allocation").toBeGreaterThanOrEqual(120);
               expect(layout.titleClientWidth, "the readable desktop title never collapses to a token").toBeGreaterThanOrEqual(88);
               expect(layout.titleScrollWidth, "the long desktop title really needs truncation").toBeGreaterThan(layout.titleClientWidth);

@@ -10,14 +10,15 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
-	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-var windowStyle = theme.Styles().Pane
+var windowStyle = lipgloss.NewStyle().
+	BorderForeground(activeTheme.Border).
+	Border(lipgloss.NormalBorder())
 
 // blurredWindowStyle is the neutral pane frame for ordinary panes.
 var blurredWindowStyle = windowStyle.
@@ -26,11 +27,11 @@ var blurredWindowStyle = windowStyle.
 // selectedWindowStyle marks the pane that matches the current sidebar
 // highlight, while the focus ring is elsewhere.
 var selectedWindowStyle = windowStyle.
-	BorderForeground(activeTheme.Border)
+	BorderForeground(activeTheme.Accent)
 
 // interactiveWindowStyle marks the pane that owns the keyboard in
-// interactive mode: an accent border and the explicit keyboard label identify
-// input ownership; the label also works when colours are unavailable.
+// interactive mode (#1089, RFC §2.3): an accent DOUBLE border still signals
+// "keystrokes go INTO this terminal" even when colors are unavailable.
 var interactiveWindowStyle = windowStyle.
 	Border(lipgloss.NormalBorder()).
 	BorderForeground(activeTheme.Accent)
@@ -624,7 +625,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	}
 	// Ellipsize before styling: ClampToRect's hard cut would render a narrow
 	// pane's header as `alpha · Termina` with no mark of the cut (#1098).
-	header := style.Width(width).Render(fitLine(text, width))
+	header := style.Render(fitLine(text, width))
 	return layout.ClampToRect(header, layout.Rect{W: width, H: paneHeaderRows})
 }
 

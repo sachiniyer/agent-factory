@@ -196,7 +196,6 @@ func ApplyTheme(t Theme) {
 		Padding(0, 1, 1, 1).
 		Foreground(t.ForegroundMuted)
 	selectedTitleStyle = lipgloss.NewStyle().
-		Bold(true).
 		Padding(1, 1, 0, 1).
 		Background(t.SelectionBackground).
 		Foreground(t.SelectionForeground)
