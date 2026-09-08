@@ -177,3 +177,23 @@ func TestHomeHealthHookLogsAbsentUnderWorkingSymlinkPasses(t *testing.T) {
 	require.Zero(t, report.UnresolvedCount())
 	require.Empty(t, report.Incomplete)
 }
+
+func TestHomeHealthHookLogsSymlinkLoopFails(t *testing.T) {
+	for _, relative := range []string{"logs/hooks", "logs"} {
+		t.Run(relative, func(t *testing.T) {
+			home := t.TempDir()
+			link := filepath.Join(home, relative)
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+			require.NoError(t, os.Symlink(filepath.Base(link), link))
+			report := &Report{}
+			checkHookLogs(report, filepath.Join(home, "logs", "hooks"))
+			row := findCheck(t, report, "hook logs")
+			require.Equal(t, StatusFail, row.Status)
+			require.True(t, row.Problem)
+			require.Contains(t, row.Detail, link+" is a symlink loop")
+			require.Contains(t, row.Detail, "hooks cannot start")
+			require.Contains(t, row.Remediation, "fix or remove the link")
+			require.Empty(t, report.Incomplete)
+		})
+	}
+}

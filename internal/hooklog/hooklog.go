@@ -105,6 +105,12 @@ func closeAndReadTail(file *os.File, futimes func(int, []syscall.Timeval) error)
 	stamp := syscall.NsecToTimeval(time.Now().UnixNano())
 	timeErr := futimes(int(file.Fd()), []syscall.Timeval{stamp, stamp})
 	if timeErr != nil {
+		// Creation supplies a completion clock even when timestamp setters fail.
+		if logKind(filepath.Base(path)) != "" {
+			if markerErr := writeCompletionMarker(path); markerErr != nil {
+				timeErr = errors.Join(timeErr, markerErr)
+			}
+		}
 		dir := filepath.Dir(path)
 		if _, warned := completionTimeWarnings.LoadOrStore(dir, struct{}{}); !warned {
 			log.WarningLog.Printf("hook log completion timestamp in %s could not be refreshed: %v", dir, timeErr)

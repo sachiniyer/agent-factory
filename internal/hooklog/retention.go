@@ -28,7 +28,7 @@ func prune(dir, opened string, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	byKind := make(map[Kind][]os.FileInfo)
+	byKind := make(map[Kind][]keptLog)
 	for _, entry := range entries {
 		name := entry.Name()
 		if filepath.Join(dir, name) == opened || !entry.Type().IsRegular() {
@@ -48,21 +48,25 @@ func prune(dir, opened string, now time.Time) (int, error) {
 		if err != nil {
 			continue
 		}
+		completed, err := retentionTime(filepath.Join(dir, name), info)
 		_ = file.Close()
-		byKind[kind] = append(byKind[kind], info)
+		if err != nil || now.Sub(completed) < logGraceAge {
+			continue
+		}
+		byKind[kind] = append(byKind[kind], keptLog{FileInfo: info, completed: completed})
 	}
 	var pruneErr error
 	pruned := 0
 	for _, kind := range []Kind{PostWorktree, OnArchive} {
 		logs := byKind[kind]
 		sort.Slice(logs, func(i, j int) bool {
-			if logs[i].ModTime().Equal(logs[j].ModTime()) {
+			if logs[i].completed.Equal(logs[j].completed) {
 				return logs[i].Name() < logs[j].Name()
 			}
-			return logs[i].ModTime().After(logs[j].ModTime())
+			return logs[i].completed.After(logs[j].completed)
 		})
 		for i, info := range logs {
-			if i < keptLogLimit && now.Sub(info.ModTime()) <= keptLogAge {
+			if i < keptLogLimit && now.Sub(info.completed) <= keptLogAge {
 				continue
 			}
 			removed, err := removeKeptLog(filepath.Join(dir, info.Name()), info, now)

@@ -21,7 +21,7 @@ func lockKeptLog(path string) (*os.File, error) {
 	return file, nil
 }
 
-func removeKeptLog(path string, scanned os.FileInfo, now time.Time) (bool, error) {
+func removeKeptLog(path string, scanned keptLog, now time.Time) (bool, error) {
 	file, err := lockKeptLog(path)
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.ELOOP) {
@@ -36,16 +36,23 @@ func removeKeptLog(path string, scanned os.FileInfo, now time.Time) (bool, error
 	if err != nil {
 		return false, err
 	}
-	if !current.Mode().IsRegular() || !os.SameFile(scanned, current) ||
+	if !current.Mode().IsRegular() || !os.SameFile(scanned.FileInfo, current) ||
 		!scanned.ModTime().Equal(current.ModTime()) || scanned.Size() != current.Size() ||
 		now.Sub(current.ModTime()) < logGraceAge {
+		return false, nil
+	}
+	completed, err := retentionTime(path, current)
+	if err != nil {
+		return false, err
+	}
+	if !completed.Equal(scanned.completed) || now.Sub(completed) < logGraceAge {
 		return false, nil
 	}
 	linked, err := os.Lstat(path)
 	if err != nil || !os.SameFile(current, linked) {
 		return false, nil
 	}
-	if err := os.Remove(path); err != nil {
+	if err := Remove(path); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}

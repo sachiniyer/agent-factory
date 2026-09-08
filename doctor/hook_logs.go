@@ -15,11 +15,15 @@ const hookLogsWarnBytes int64 = 100 * 1024 * 1024
 
 func checkHookLogs(report *Report, dir string) {
 	blocking, target, err := hookLogBlockingPath(dir)
-	if err == nil && blocking != "" {
+	if blocking != "" && (err == nil || errors.Is(err, syscall.ELOOP)) {
 		detail := blocking + " is not a directory; configured hooks cannot start"
 		remedy := "move or remove the file so af can create its hook log directory"
 		if target != "" {
 			detail = blocking + " is a dangling symlink to " + target + "; configured hooks cannot start"
+			remedy = "fix or remove the link so af can create its hook log directory"
+		}
+		if errors.Is(err, syscall.ELOOP) {
+			detail = blocking + " is a symlink loop; configured hooks cannot start"
 			remedy = "fix or remove the link so af can create its hook log directory"
 		}
 		report.Fail(sectionConfig, "hook logs", detail, remedy)
@@ -89,6 +93,9 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 		if err == nil {
 			if info.Mode()&os.ModeSymlink != 0 {
 				info, err = os.Stat(path)
+				if errors.Is(err, syscall.ELOOP) {
+					return path, "", err
+				}
 				if os.IsNotExist(err) {
 					target, readErr := os.Readlink(path)
 					return path, target, readErr
@@ -105,7 +112,7 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 			}
 			return "", "", nil
 		}
-		if (!os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR)) || filepath.Dir(path) == path {
+		if (!os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP)) || filepath.Dir(path) == path {
 			return "", "", err
 		}
 	}
