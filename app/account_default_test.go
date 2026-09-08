@@ -115,7 +115,7 @@ func TestProjectDefaultNeverOverridesADeliberateAmbientPick(t *testing.T) {
 	inst := startNaming(t, h, "ambient-on-purpose")
 
 	openAccountField(t, h)
-	pickAccount(t, h, "Ambient identity (the agent's own login)")
+	pickAccount(t, h, "Use configured default (work)")
 	require.Equal(t, ambientAccount, h.pendingAccount)
 
 	deliverAccountDefault(t, h, inst, "claude")
