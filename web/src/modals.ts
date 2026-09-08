@@ -458,18 +458,20 @@ export function handoffModal(
 
   let accounts: AccountsResponse = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
+  let accountsFailed = false;
+  const requiresAccount = (agent: string): boolean => agent === currentAgent || !!callbacks.currentAccount;
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const refreshAccounts = (): void => {
     const agent = agentSelect.value;
     const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
     accountSelect.replaceChildren();
-    if (agent !== currentAgent) accountSelect.append(h("option", { value: "" }, "Current account selection"));
+    if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
     const fallback = accounts.defaults?.[agent];
     if (fallback && choices.some((choice) => choice.value === fallback)) accountSelect.value = fallback;
     accountSelect.disabled = choices.length === 0;
-    confirmBtn.disabled = !accountsLoaded || !agent || (agent === currentAgent && !accountSelect.value);
+    confirmBtn.disabled = !accountsLoaded || !agent || (requiresAccount(agent) && !accountSelect.value);
   };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
@@ -498,7 +500,7 @@ export function handoffModal(
     .loadPrograms()
     .then((catalog) => {
       const choices = handoffAgentChoices(catalog, currentAgent);
-      if (callbacks.loadAccounts && currentAgent) choices.unshift({value: currentAgent, label: currentAgent + " (another account)"});
+      if (callbacks.loadAccounts && currentAgent && !accountsFailed) choices.unshift({value: currentAgent, label: currentAgent + " (another account)"});
       renderChoices(choices);
       refreshAccounts();
       if (choices.length === 0) {
@@ -517,7 +519,20 @@ export function handoffModal(
   if (callbacks.loadAccounts) {
     void callbacks.loadAccounts().then((result) => {
       accounts = result; accountsLoaded = true; refreshAccounts();
-    }).catch(() => { confirmBtn.disabled = true; handle.setError("Could not load accounts. Try again."); });
+    }).catch(() => {
+      accountsLoaded = true;
+      accountsFailed = true;
+      const selected = agentSelect.value;
+      const choices = Array.from(agentSelect.options)
+        .filter(option => option.value !== currentAgent)
+        .map(option => ({ value: option.value, label: option.label }));
+      renderChoices(choices);
+      if (choices.some(choice => choice.value === selected)) agentSelect.value = selected;
+      refreshAccounts();
+      handle.setError(callbacks.currentAccount
+        ? "Could not load accounts. Try again to choose a registered target account."
+        : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+    });
   }
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
@@ -527,7 +542,7 @@ export function handoffModal(
       return;
     }
     handle.setError(null);
-    if (!accountsLoaded || (target === currentAgent && !accountSelect.value)) {
+    if (!accountsLoaded || (requiresAccount(target) && !accountSelect.value)) {
       handle.setError("Pick another registered account."); return;
     }
     callbacks.onSubmit(target, accountSelect.value);
