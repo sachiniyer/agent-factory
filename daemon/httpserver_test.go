@@ -100,6 +100,8 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	var resp SnapshotResponse
 	dataInto(t, env, &resp)
 	require.Empty(t, resp.Instances)
+	require.Equal(t, opLockTimeout.Milliseconds(), resp.OperationLockTimeoutMS,
+		"the browser must receive the daemon's live admission bound")
 }
 
 // The fixed browser palettes retired the last consumer of this renderer RPC.

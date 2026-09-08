@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ApiError, isMutationOutcomeUncertain, restoreSession } from "./api.js";
-import { PendingRestores } from "./pending_restores.js";
+import { ApiError, isMutationCommittedError, isMutationOutcomeUncertain, restoreSession } from "./api.js";
+import { PendingRestores, RESTORE_ADMISSION_MARGIN_MS } from "./pending_restores.js";
 
 test("two Restore clicks send one request without a failure modal; the advanced row releases the fence", async t => {
   let release!: () => void;
@@ -107,9 +107,13 @@ for (const [name, error] of [
     assert.equal(pending.has("session"), true);
     pending.observe([{ id: "session", restoreEligible: true }]);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", restoreEligible: false }], { kind: "updated", id: "session" });
+    pending.observe([{ id: "session", restoreEligible: false }], {
+      kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+    });
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
+    pending.observe([{ id: "session", restoreEligible: true }], {
+      kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+    });
     assert.equal(pending.has("session"), false);
   });
 }
@@ -135,27 +139,53 @@ test("Dead to Lost normalization does not settle an uncertain restore", async ()
   reject(new ApiError(0, "connection lost"));
   await assert.rejects(request!, /connection lost/);
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", restoreEligible: false }], { kind: "updated", id: "session" });
+  pending.observe([{ id: "session", restoreEligible: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
+  pending.observe([{ id: "session", restoreEligible: true }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("session"), false);
 });
 
-test("an uncertain restore releases on the first causal eligible Snapshot", async () => {
-  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+test("a queued uncertain restore ignores an eligible Snapshot until busy then restorable", async () => {
+  let now = 1_000;
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => now);
   await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
   pending.reset();
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
+  pending.observe([{ id: "session", restoreEligible: true }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  assert.equal(pending.has("session"), true, "the daemon may still be queued on its operation lock");
+  pending.observe([{ id: "session", restoreEligible: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  now += 1;
+  pending.observe([{ id: "session", restoreEligible: true }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("session"), false);
 });
 
-test("an uncertain restore with no busy projection releases after one eligible Snapshot", async () => {
-  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+test("a never-admitted uncertain restore releases after the daemon admission bound", async () => {
+  let now = 1_000;
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => now);
+  const stale = pending.beginSnapshot();
   await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
   pending.reset();
   const rows = [{ id: "session", restoreEligible: true }];
-  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  assert.equal(pending.has("session"), true);
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  pending.observe(rows, { kind: "snapshot", generation: stale, operationLockTimeoutMs: 30_000 });
+  assert.equal(pending.has("session"), true, "elapsed time cannot make a pre-uncertainty Snapshot causal");
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("session"), false);
 });
 
@@ -175,14 +205,22 @@ test("a delayed still-eligible update cannot settle a successful Lost restore", 
   assert.equal(pending.has("session"), false);
 });
 
-test("a post-response Snapshot releases successful and uncertain restores", async () => {
-  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+test("a post-response Snapshot releases success; uncertainty waits out admission", async () => {
+  let now = 1_000;
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => now);
   const rows = ["success", "uncertain"].map(id => ({ id, restoreEligible: true }));
   pending.observe(rows, { kind: "snapshot", generation: 0 });
   await pending.run("success", async () => {}, true);
   await assert.rejects(pending.run("uncertain", async () => { throw new ApiError(0, "lost reply"); }, true)!);
-  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("success"), false);
+  assert.equal(pending.has("uncertain"), true);
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("uncertain"), false);
 });
 
@@ -237,7 +275,8 @@ for (const beforeResponse of [false, true]) {
 
 
 test("a delayed restored event from attempt A cannot complete uncertain attempt B", async () => {
-  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  let now = 1_000;
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => now);
   const rows = [{ id: "session", restoreEligible: true }];
   await pending.run("session", async () => {}, true);
   pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
@@ -249,6 +288,13 @@ test("a delayed restored event from attempt A cannot complete uncertain attempt 
   // An identity-only event has no attempt marker and may belong to attempt A.
   pending.observe(rows, { kind: "restored", id: "session" });
   assert.equal(pending.has("session"), true);
-  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  assert.equal(pending.has("session"), true);
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("session"), false);
 });

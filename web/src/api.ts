@@ -285,9 +285,21 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
  * (never null — an empty daemon yields []); throws ApiError on transport/auth
  * failure so callers share one error path.
  */
-export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+export interface SessionSnapshot {
+  sessions: SessionData[];
+  operationLockTimeoutMs?: number;
+}
+
+export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
   const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
-  return resp.instances ?? [];
+  return {
+    sessions: resp.instances ?? [],
+    operationLockTimeoutMs: resp.operation_lock_timeout_ms,
+  };
+}
+
+export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+  return (await fetchSessionSnapshot(token)).sessions;
 }
 
 /**

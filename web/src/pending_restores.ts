@@ -1,4 +1,11 @@
 type RestoreRow = { id?: string; restoreEligible: boolean };
+export type RestoreEvidence =
+  | { kind: "snapshot"; generation: number; operationLockTimeoutMs?: number }
+  | { kind: "updated" | "restored"; id: string };
+
+// Network delivery and handler scheduling get a small margin after the daemon's
+// own admission deadline before an unchanged row proves no restore is queued.
+export const RESTORE_ADMISSION_MARGIN_MS = 1_000;
 
 /** Request fences outlive dialogs and remain until a successful restore is visible. */
 export class PendingRestores {
@@ -7,6 +14,8 @@ export class PendingRestores {
     uncertain: boolean;
     succeededAt: number | null;
     uncertainAt: number;
+    uncertainSince: number;
+    sawBusy: boolean;
     restoreEligible: RestoreRow["restoreEligible"];
   }>();
   private snapshotGeneration = 0;
@@ -15,6 +24,8 @@ export class PendingRestores {
   constructor(
     private readonly changed: (ids: ReadonlySet<string>) => void,
     private readonly retainOnError: (error: unknown) => boolean = () => false,
+    private readonly committedOnError: (error: unknown) => boolean = () => false,
+    private readonly now: () => number = Date.now,
   ) {}
 
   has(id: string): boolean {
@@ -28,6 +39,8 @@ export class PendingRestores {
       uncertain: false,
       succeededAt: null as number | null,
       uncertainAt: this.snapshotGeneration,
+      uncertainSince: 0,
+      sawBusy: false,
       restoreEligible,
     };
     this.tickets.set(id, ticket);
@@ -47,6 +60,8 @@ export class PendingRestores {
           if (this.retainOnError(error)) {
             ticket.uncertain = true;
             ticket.uncertainAt = this.snapshotGeneration;
+            ticket.uncertainSince = this.now();
+            ticket.sawBusy = false;
             if (this.committedOnError(error)) {
               ticket.settled = true;
               ticket.succeededAt = this.snapshotGeneration;
@@ -74,10 +89,20 @@ export class PendingRestores {
       // carry no attempt id and may belong to a previous restore cycle.
       const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" &&
         evidence.generation > ticket.succeededAt;
-      const causalUncertainEvidence = evidence?.kind === "snapshot" &&
+      const causalUncertainSnapshot = evidence?.kind === "snapshot" &&
         evidence.generation > ticket.uncertainAt;
-      const uncertainCompleted = ticket.uncertain && authoritative && causalUncertainEvidence &&
-        (!eligibility.has(id) || row?.restoreEligible === true);
+      let uncertainCompleted = false;
+      if (ticket.uncertain && authoritative && causalUncertainSnapshot) {
+        if (!eligibility.has(id)) {
+          uncertainCompleted = true;
+        } else if (!row?.restoreEligible) {
+          ticket.sawBusy = true;
+        } else {
+          const timeout = evidence.operationLockTimeoutMs;
+          uncertainCompleted = ticket.sawBusy || (typeof timeout === "number" && timeout >= 0 &&
+            this.now() - ticket.uncertainSince >= timeout + RESTORE_ADMISSION_MARGIN_MS);
+        }
+      }
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
         this.tickets.delete(id);
         changed = true;

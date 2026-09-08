@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -54,7 +55,7 @@ import (
 // behavior, not a bug. Exceeding this means the holder is wedged, not busy.
 //
 // A var so tests can shorten it; production never reassigns.
-var opLockTimeout = 30 * time.Second
+var opLockTimeout = apiproto.OperationLockTimeout
 
 // opLockPollInterval is how often lockWithin re-attempts a contended op lock.
 var opLockPollInterval = 5 * time.Millisecond

@@ -29,7 +29,7 @@ import {
   deleteProject,
   registerProject,
   errorText,
-  fetchSnapshot,
+  fetchSessionSnapshot,
   killSession,
   getConfig,
   isMutationCommittedError,
@@ -1196,8 +1196,9 @@ function guardedTabRebind(
   // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
   const gen = splitView.layoutGeneration();
   void run()
-    .then((sessions) => {
-      if (sessions === null) return;
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      const { sessions, authoritative, generation, operationLockTimeoutMs } = snapshot;
       const targetIdx = resolve(sessions);
       // Read the generation BEFORE committing the roster. The guard asks whether the
       // USER formed a newer intent during the await, and this commit's own rerender is
@@ -1211,7 +1212,7 @@ function guardedTabRebind(
       // holds. selectedId is read AFTER the set so it reflects any session switch the
       // user made during the await (pickSelection keeps their newer choice) — the one
       // input that deliberately does read the committed state.
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+      applySessions(sessions, { kind: "snapshot", generation, operationLockTimeoutMs }, authoritative);
       // Whether the session this gesture was aimed at survived the round trip. A
       // session killed by another client mid-flight ALSO moves the selection
       // (pickSelection lands elsewhere) and ALSO takes the target with it, so without
@@ -1454,9 +1455,12 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
   // which is the documented fallback for a roster that has no ids to key on (#1929).
   void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok)
     .then(() => fetchProjectedSnapshot(tok))
-    .then((sessions) => {
-      if (sessions === null) return;
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      applySessions(snapshot.sessions, {
+        kind: "snapshot", generation: snapshot.generation,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+      }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -1496,9 +1500,12 @@ function reorderSessionTab(from: number, to: number): void {
   // whole point (#1929). See renameSessionTab for why tabRealId and not tabIdentity.
   void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok)
     .then(() => fetchProjectedSnapshot(tok))
-    .then((sessions) => {
-      if (sessions === null) return;
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      applySessions(snapshot.sessions, {
+        kind: "snapshot", generation: snapshot.generation,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+      }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -2392,10 +2399,28 @@ function applySessions(sessions: SessionData[]): void {
 
 /** Tab mutations also fetch full snapshots. Fold those through the same ledger
  * so their next event cannot restore the pre-tab roster or erase local feedback. */
-async function fetchProjectedSnapshot(tok: string): Promise<SessionData[] | null> {
+interface AcceptedSessionSnapshot {
+  sessions: SessionData[];
+  authoritative: SessionData[];
+  generation: number;
+  operationLockTimeoutMs?: number;
+}
+async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnapshot | null> {
   if (token !== tok) return null;
   try {
-    return await optimisticSessions.refresh(() => fetchSnapshot(tok));
+    let generation = 0;
+    let authoritative: SessionData[] = [];
+    let operationLockTimeoutMs: number | undefined;
+    const sessions = await optimisticSessions.refresh(async () => {
+      // refresh may retry after an intervening event. Carry the issuance stamp
+      // and raw rows from the accepted attempt together to the commit site.
+      generation = pendingRestores.beginSnapshot();
+      const snapshot = await fetchSessionSnapshot(tok);
+      authoritative = snapshot.sessions;
+      operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+      return authoritative;
+    });
+    return sessions === null ? null : { sessions, authoritative, generation, operationLockTimeoutMs };
   } catch (error) {
     // The gesture cannot safely rebind without its post-mutation roster. Keep
     // ordinary background reconciliation alive after its bounded retries fail.
@@ -2424,8 +2449,10 @@ function requestResync(): void {
     }
     const eventGeneration = sessionEventGeneration;
     const mutationFence = optimisticSessions.snapshotFence();
-    void fetchSnapshot(tok)
-      .then((sessions) => {
+    const restoreSnapshot = pendingRestores.beginSnapshot();
+    void fetchSessionSnapshot(tok)
+      .then((snapshot) => {
+        const sessions = snapshot.sessions;
         // A stop/reconnect or a newer resync owns the result now.
         if (requestGeneration !== resyncRequestGeneration || token !== tok) {
           return;
@@ -2442,7 +2469,10 @@ function requestResync(): void {
           requestResync();
           return;
         }
-        applySessions(optimisticSessions.project());
+        applySessions(optimisticSessions.project(), {
+          kind: "snapshot", generation: restoreSnapshot,
+          operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+        }, sessions);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
         // only after the winning response reaches the store, giving black-box clients

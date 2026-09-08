@@ -15,6 +15,7 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  fetchSessionSnapshot,
   fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
@@ -74,6 +75,21 @@ function stubFetch(): Captured {
 
 afterEach(() => {
   delete (globalThis as { fetch?: unknown }).fetch;
+});
+
+test("Snapshot carries the daemon's lifecycle admission bound with its rows", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: { instances: [{ id: "session" }], operation_lock_timeout_ms: 30_000 },
+      error: null,
+    }),
+  }) as unknown as Response;
+  const snapshot = await fetchSessionSnapshot("tok");
+  assert.equal(snapshot.sessions[0]?.id, "session");
+  assert.equal(snapshot.operationLockTimeoutMs, 30_000);
 });
 
 // The backend-on-create contract (#1933). The daemon already accepted `backend`;

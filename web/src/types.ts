@@ -265,6 +265,8 @@ export interface WorktreeData {
 export interface SnapshotResponse {
 	instances: SessionData[] | null;
 	delivery_alarms?: unknown[];
+	/** Daemon lifecycle-operation admission bound, projected from its live value. */
+	operation_lock_timeout_ms?: number;
 }
 
 /** One lifecycle choice served by the daemon, including its consequence. */
