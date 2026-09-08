@@ -5297,7 +5297,7 @@ test("#2218: slow create closes immediately, shows daemon state, then opens atta
   await clickRailAction(page, created, "Kill session");
   const killModal = page.locator(".af-modal-card");
   await expect(killModal).toBeVisible();
-  await killModal.locator("button.af-primary").click();
+  await killModal.getByRole("button", { name: "Delete session", exact: true }).click();
   await expect(row(page, created)).toHaveCount(0, { timeout: 30_000 });
 });
 
@@ -5502,7 +5502,7 @@ test.describe("create → kill (one session, two flows)", () => {
 
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
-    await modal.locator("button.af-primary").click();
+    await modal.getByRole("button", { name: "Delete session", exact: true }).click();
 
     // The killed row disappears from the rail (the killed event removes it).
     await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });
@@ -5878,7 +5878,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     await expect(modal).toBeHidden();
     await p.getByRole("button", { name: "Session actions", exact: true }).click();
     await headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true }).click();
-    await expect(modal).toContainText(`Kill ${title}?`);
+    await expect(modal).toContainText(`Delete session ${title}?`);
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   } finally {
     await ctx.close();
@@ -10956,7 +10956,7 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await openDrawer();
   await clickRailAction(p, SESSION_A, "Kill session");
   await expectDrawerClosed();
-  await expect(modal).toContainText(`Kill ${SESSION_A}?`);
+  await expect(modal).toContainText(`Delete session ${SESSION_A}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(modal).toBeHidden();
   expect(lifecyclePosts, "cancelling Kill must not post a lifecycle mutation").toEqual([]);
