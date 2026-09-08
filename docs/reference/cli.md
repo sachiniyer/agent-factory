@@ -1348,9 +1348,18 @@ structural keys config cannot touch — are listed last. Contextual pane
 actions such as pane_prev/pane_next are included; their default arrow keys
 apply only while a workspace pane has focus.
 
+Key values use config spellings you can paste into [keys]. With --json,
+bindings are wrapped in {data,error}; keys/default keep those spellings.
+
 ```
-af keys
+af keys [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Wrap output in the {data,error} JSON envelope |
 
 **Global flags**
 
