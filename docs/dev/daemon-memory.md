@@ -409,9 +409,16 @@ finished journals and receipts after proving all hook writers gone. Cancellation
 during a transient journal read keeps the watcher pending until it can record
 `finished` or prove the journal absent/invalid. The teardown join remains bounded;
 read or terminal-marker failures refuse checkout mutation until storage recovers.
-A busy journal lock schedules eight background retries with exponential backoff
+Publication and standalone pruning use the existing two-second identity-probe
+budget to acquire the journal lock. Startup pruning and publication share one
+acquisition; a timeout reports that another process holds the journal lock and
+the hooks could not start. A busy teardown journal lock schedules eight
+background retries with exponential backoff
 (100 ms to 2 s), using the original journal identity even if archive moves the
-worktree. Creation also sweeps completed journals with deleted or archived
+worktree. If retirement was interrupted after renaming the journal, the next
+sweep reclaims that non-resumable artifact even while its owner remains active,
+after the grace, lease, and batched liveness checks. Retired artifacts do not
+consume the completed-history quota. Creation also sweeps completed journals with deleted or archived
 owners: it keeps
 the newest 20 eligible journals for up to 14 days, with a five-second grace
 period. Unpublished receipt directories are removed on publication failure;

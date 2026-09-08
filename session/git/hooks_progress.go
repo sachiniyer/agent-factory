@@ -2,6 +2,8 @@ package git
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,14 +46,27 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
-	pruneHookProgress(filepath.Dir(path), time.Now())
 	var progress *hookProgress
-	err = config.WithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
+	err = withHookProgressLock(filepath.Dir(path), func() error {
+		// Share one acquisition budget for GC and publication; a contended home
+		// must not pay the timeout twice before reporting that hooks could not start.
+		if err := pruneHookProgressLocked(filepath.Dir(path), time.Now()); err != nil {
+			log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
+		}
 		var publishErr error
 		progress, publishErr = publishHookProgress(run, commands, prefix, generation, path)
 		return publishErr
 	})
+	if errors.Is(err, config.ErrLockTimeout) {
+		return nil, fmt.Errorf("hook journal lock held by another process; hooks could not start; retry once the holder releases it: %w", err)
+	}
 	return progress, err
+}
+
+// Publication and standalone pruning share the existing identity-probe budget.
+// Teardown remains nonblocking through TryWithFileLock in the retirement path.
+func withHookProgressLock(dir string, fn func() error) error {
+	return config.WithFileLockTimeout(filepath.Join(dir, ".progress"), relocationIdentityTimeout, fn)
 }
 
 // The directory and journal are published under the same lock used by pruning,

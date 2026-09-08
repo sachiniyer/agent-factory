@@ -564,7 +564,9 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   It waits for the survivor to finish, then resumes the remaining
   `post_worktree_commands` entries in order, each in its own scope and output
   log. The original list is saved before launch; configuration edits do not
-  change a pending run. Started entries are never replayed, and completed or
+  change a pending run. Publication waits at most two seconds to acquire the
+  journal lock; on timeout it reports that another process holds the lock and
+  the hooks could not start. Started entries are never replayed, and completed or
   deliberately cancelled lists are not resumed. Only the owning managed session
   can adopt a saved list, after verifying worktree registration and Git linkage.
   A hook may switch branches or detach HEAD within that verified worktree without
@@ -574,7 +576,10 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   keep survivor observation only.
 
   Safe kill/archive teardown removes finished journals and their receipts after
-  hook writers have stopped. If cancellation encounters an unreadable journal,
+  hook writers have stopped. Interrupted retirements are reclaimed after grace
+  and lease/liveness checks even while their owning session stays active.
+  Standalone pruning uses the same bounded journal-lock acquisition as publication.
+  If cancellation encounters an unreadable journal,
   it keeps retrying terminalization; teardown refuses to modify the checkout
   until the journal is terminal or provably absent/invalid. On creation, completed
   journals whose sessions no longer exist are pruned to the newest 20 and a maximum age of 14 days, excluding
