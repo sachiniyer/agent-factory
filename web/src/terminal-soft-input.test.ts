@@ -390,7 +390,7 @@ test("repeated commit character then ordinary character consumes Ctrl once", t =
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
-test("stale keydown recovers composed input without a modifier", () => {
+test("stale keydown recovers every composed input until a key lifecycle resumes", () => {
   const host = new EventTarget();
   const textarea = new EventTarget();
   const writes: string[] = [];
@@ -398,10 +398,18 @@ test("stale keydown recovers composed input without a modifier", () => {
   textarea.dispatchEvent(new Event("keydown"));
   textarea.dispatchEvent(new Event("blur"));
   textarea.dispatchEvent(new Event("focus"));
-  const input = insertText("a", "beforeinput", true);
-  host.dispatchEvent(input);
-  assert.equal(input.defaultPrevented, true);
-  assert.deepEqual(writes, ["a"]);
+  for (const letter of ["a", "b", "c"]) {
+    const input = insertText(letter, "beforeinput", true);
+    host.dispatchEvent(input);
+    assert.equal(input.defaultPrevented, true);
+  }
+  assert.deepEqual(writes, ["a", "b", "c"]);
+  textarea.dispatchEvent(new Event("keydown"));
+  textarea.dispatchEvent(new Event("keyup"));
+  const native = insertText("d", "beforeinput", true);
+  host.dispatchEvent(native);
+  assert.equal(native.defaultPrevented, false);
+  assert.deepEqual(writes, ["a", "b", "c"]);
   soft.dispose();
 });
 
@@ -418,5 +426,54 @@ test("a fresh keydown after blur keeps native input ownership", () => {
   assert.equal(input.defaultPrevented, false);
   assert.deepEqual(writes, []);
   textarea.dispatchEvent(new Event("keyup"));
+  soft.dispose();
+});
+
+test("keydown after compositionend marks first ordinary input as trailing", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.dispatchEvent(new Event("keydown"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x"));
+  assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("commit mutation before keydown freezes boundary before ordinary input", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  host.dispatchEvent(insertText("字"));
+  textarea.dispatchEvent(new Event("keydown"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x"));
+  assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("armed modifier intercepts ordinary input without stale keydown", () => {
+  const host = new EventTarget();
+  const textarea = new EventTarget();
+  const writes: string[] = [];
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, text => writes.push(text), () => true);
+  const input = insertText("a", "beforeinput");
+  host.dispatchEvent(input);
+  assert.equal(input.defaultPrevented, true);
+  assert.deepEqual(writes, ["a"]);
   soft.dispose();
 });

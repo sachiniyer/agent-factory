@@ -4,6 +4,7 @@ interface CompositionRange {
   frozenText?: string;
   commitLength?: number;
   trailingLength?: number;
+  keydownAfterEnd?: boolean;
   release?: ReturnType<typeof setTimeout>;
 }
 
@@ -13,7 +14,12 @@ export class TerminalSoftInput {
   private readonly pending: CompositionRange[] = [];
   private keyDownSeen = false;
   private staleKeydown = false;
-  private readonly onKeyDown = (): void => { this.keyDownSeen = true; this.staleKeydown = false; };
+  private readonly onKeyDown = (): void => {
+    this.keyDownSeen = true;
+    this.staleKeydown = false;
+    const range = this.pending.at(-1);
+    if (range) range.keydownAfterEnd = true;
+  };
   private readonly onKeyUp = (): void => { this.keyDownSeen = false; this.staleKeydown = false; };
   private readonly onBlur = (): void => { if (this.keyDownSeen) this.staleKeydown = true; };
   private readonly onCompositionStart = (): void => {
@@ -52,7 +58,9 @@ export class TerminalSoftInput {
       const range = this.pending.at(-1);
       if (range && input.inputType === "insertText" && input.type === "input" &&
         input.isComposing === false && input.data) {
-        if (range.commitLength === undefined) {
+        if (range.keydownAfterEnd) {
+          range.trailingLength = (range.trailingLength ?? 0) + input.data.length;
+        } else if (range.commitLength === undefined) {
           const value = this.textarea?.value;
           range.commitLength = value !== undefined && range.start !== undefined
             ? value.length - range.start : input.data.length;
@@ -70,7 +78,6 @@ export class TerminalSoftInput {
     input.preventDefault();
     input.stopImmediatePropagation();
     this.send(input.data);
-    this.staleKeydown = false;
   };
 
   constructor(private readonly host: EventTarget, private readonly textarea: (EventTarget & { value?: string }) | null,
