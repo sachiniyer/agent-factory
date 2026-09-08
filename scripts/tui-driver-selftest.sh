@@ -46,6 +46,58 @@ step() {
     fi
 }
 
+# #4017/#4054: the model of tab deletion must require dialog consent. Keep the
+# real wait/count helpers; replace only terminal I/O and focus setup.
+# shellcheck disable=SC2317
+_expect_tab_delete_consent() {
+    local AF_DRIVER_TIMEOUT=1 AF_DRIVER_POLL=0.02
+    (
+        local tabs=3 dialog=0 confirms=0 show_dialog=1 output
+        af_ensure_nav() { :; }
+        af_focus_tree() { :; }
+        _af_tab_count() { printf '%s\n' "$tabs"; }
+        af_capture() {
+            if [ "$dialog" -eq 1 ]; then
+                printf '%s\n' 'Delete tab "shell" from session "stub"?' '[y] Yes · [n] No'
+            else
+                printf '%s\n' 'Sessions · no deletion dialog'
+            fi
+        }
+        af_send() {
+            case "$1" in
+                w) dialog="$show_dialog" ;;
+                n) dialog=0 ;;
+                y)
+                    confirms=$((confirms + 1))
+                    [ "$dialog" -eq 1 ] || { _af_fail 'confirmed before the dialog appeared'; return 1; }
+                    tabs=$((tabs - 1)); dialog=0 ;;
+            esac
+        }
+        af_send w
+        if [ "$tabs" -ne 3 ] || [ "$dialog" -ne 1 ]; then
+            _af_fail 'bare w must open consent without reducing the tab count'; return 1
+        fi
+        af_send n
+        af_close_tab || return 1
+        if [ "$tabs" -ne 2 ] || [ "$confirms" -ne 1 ]; then
+            _af_fail 'af_close_tab must confirm once before the tab count drops'; return 1
+        fi
+        show_dialog=0
+        output="$(mktemp)"
+        trap 'rm -f "$output"' EXIT
+        if af_close_tab >"$output" 2>&1; then
+            _af_fail 'missing deletion dialog must fail'; return 1
+        fi
+        if [ "$confirms" -ne 1 ] || [ "$tabs" -ne 2 ]; then
+            _af_fail 'missing dialog must never send consent or delete a tab'; return 1
+        fi
+        grep -q 'delete-tab confirmation did not appear' "$output" || {
+            cat "$output" >&2
+            _af_fail 'missing dialog must name the failed confirmation guard'; return 1
+        }
+    )
+}
+
 # Every ERE metacharacter must stay literal in session/title assertions (#4037).
 # shellcheck disable=SC2317
 _expect_regex_escape_literal() {
@@ -740,8 +792,8 @@ _expect_cycle_jumps_land() {
 
 # _expect_cycle_w_closes_viewed — the #1884 destructive divergence: the tree's
 # active tab is shell-2 (last created), but the FOCUSED pane is jumped to shell.
-# w must close the tab the user is VIEWING (shell), leaving shell-2 — not the
-# tree's active tab. Verified by content: after w, tab 2 is now shell-2 (its
+# Confirmed w must delete the tab the user is VIEWING (shell), leaving shell-2 — not the
+# tree's active tab. Verified by content: after w then y, tab 2 is now shell-2 (its
 # marker), and shell's marker is gone. The old bug closed shell-2 and left shell
 # here, which the refute would catch.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
@@ -752,7 +804,9 @@ _expect_cycle_w_closes_viewed() {
     af_wait_for 'AF_CYCLE_T2' 10 'pane viewing shell (tab 2) before close' || return 1
 
     local before; before="$(_af_tab_count)"
-    af_send w                             # closes the FOCUSED pane's tab (#1884)
+    # Keep pane focus: af_close_tab would focus the tree and change this target.
+    af_send w || return 1                  # asks about the VIEWED tab (#1884)
+    _af_confirm_tab_delete || return 1
     local deadline; deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
     while [ "$(_af_tab_count)" -ge "$before" ]; do
         if [ "$(_af_now)" -ge "$deadline" ]; then
@@ -762,12 +816,12 @@ _expect_cycle_w_closes_viewed() {
     done
 
     # Reopen a pane and land on tab 2: it must now be shell-2 (its marker), proof
-    # that w closed the VIEWED shell tab and left shell-2 alive.
+    # that confirmed w deleted the VIEWED shell tab and left shell-2 alive.
     af_ensure_nav
     af_focus_tree || return 1
     af_open_pane || return 1
     af_send 2
-    af_wait_for 'AF_CYCLE_T3' 10 'surviving tab 2 is shell-2 — w closed the VIEWED tab (#1884)' || return 1
+    af_wait_for 'AF_CYCLE_T3' 10 'surviving tab 2 is shell-2 — confirmed w deleted the VIEWED tab (#1884)' || return 1
     af_refute_screen 'AF_CYCLE_T2' 'the viewed shell tab was closed, so its marker is gone' || return 1
 }
 
@@ -852,7 +906,7 @@ _expect_scrolled_rail_reads_as_booted() {
                       │                                        │
     └ 1 ◆ Agent *     │                                        │
                       ╰────────────────────────────────────────╯
-     n new · D delete session │ t new tab · w close tab │ ? help · q quit
+     n new · D delete session │ t new tab · w del tab │ ? help · q quit
 SCREEN
         }
         # Premise: the frame really is missing the header, or this is just
@@ -965,6 +1019,7 @@ SELFTEST_BASE_ROWS="$AF_DRIVER_ROWS"
 
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
+step "tab deletion requires confirmation (#4017/#4054)" _expect_tab_delete_consent
 step "literal plus (#4037)" _expect_regex_escape_literal 'a+b' 'ab'
 step "literal dot (#4037)" _expect_regex_escape_literal 'x.y' 'xay'
 step "literal brackets (#4037)" _expect_regex_escape_literal '[tag]' 't'
@@ -1476,7 +1531,7 @@ step "assert selection survived the batched tap"            af_expect_selected b
 step "hide a pane while another remains, then the last (#1822)" _expect_multipane_hide
 step "af_hide_pane fails loudly with no pane focused (#1822)"  _expect_hide_pane_rejects_tree_focus
 
-# --- #1884/#1885 multi-tab pane cycling: number jumps land + w closes the viewed tab ---
+# --- #1884/#1885 multi-tab pane cycling: number jumps land + confirmed w deletes the viewed tab ---
 # Runs last: it creates its own 'cycle' instance and ends with a pane open.
 step "cycle: create a multi-tab instance"                   af_new_instance cycle
 step "cycle: select it"                                     af_select cycle
@@ -1484,7 +1539,7 @@ step "cycle: add a shell tab (t)"                           af_new_tab
 step "cycle: add a shell-2 tab (t)"                         af_new_tab
 step "cycle: open the active tab as a pane"                 af_open_pane
 step "cycle: pane number-jumps land and STAY (#1885)"       _expect_cycle_jumps_land
-step "cycle: w closes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
+step "cycle: confirmed w deletes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
 
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.
