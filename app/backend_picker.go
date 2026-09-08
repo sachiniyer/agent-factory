@@ -174,6 +174,7 @@ func (m *home) handleBackendCatalog(msg backendCatalogMsg) (tea.Model, tea.Cmd) 
 	if m.state != stateNew || m.namingInstance == nil || m.namingInstance != msg.naming {
 		return m, nil
 	}
+	m.backendPickerPending = false
 	if msg.err != nil {
 		// Lead with what failed and what it blocks; the daemon's own error text
 		// follows. The naming form stays open — the field is optional, so a catalog
@@ -286,6 +287,7 @@ func (m *home) startNewInstanceAtBackend() (tea.Model, tea.Cmd) {
 	if m.state != stateNew {
 		return m, cmd
 	}
+	m.backendPickerPending = true
 	_, backendCmd := m.openBackendPicker()
 	return m, tea.Batch(cmd, backendCmd)
 }

@@ -36,6 +36,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.backendPickerPending = false
 		m.pendingAccount = ""
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -47,6 +48,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	instance := m.namingInstance
 	if instance == nil {
 		return m, nil
+	}
+	if m.backendPickerPending {
+		// Keep the requested picker reachable while its catalog is in flight.
+		// Switching fields would make the catalog's state guard discard it.
+		switch msg.Type {
+		case tea.KeyEnter, tea.KeyTab, tea.KeyShiftTab, tea.KeyCtrlR, tea.KeyCtrlO:
+			return m, m.handleNotice(errors.New("Loading backends…"))
+		}
 	}
 	switch msg.Type {
 	case tea.KeyEnter:
@@ -172,6 +181,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// on the loop, clear it with the rest of the naming state.
 		backend := m.pendingBackend
 		m.pendingBackend = ""
+		m.backendPickerPending = false
 		// And for the ctrl+o account field (#3844), on the loop for the same reason.
 		account := m.pendingAccount
 		m.pendingAccount = ""
@@ -303,6 +313,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.backendPickerPending = false
 		m.pendingAccount = ""
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -319,6 +330,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // startNewInstance creates a new instance and enters stateNew for naming.
 func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
+	m.backendPickerPending = false
 	if m.restoreFailedCreate() {
 		return m, m.selectionChanged()
 	}

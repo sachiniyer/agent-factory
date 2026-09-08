@@ -405,6 +405,9 @@ type home struct {
 	// so an untouched field keeps today's behavior byte-identical. Reset by
 	// startNewInstance so a cancelled create cannot leak a backend into the next.
 	pendingBackend string
+	// backendPickerPending prevents submitting or switching fields before the
+	// configured new_remote binding has delivered its promised backend picker.
+	backendPickerPending bool
 	// pendingAccount tracks the credential account picked during naming (#3844).
 	// "" means "the ambient identity", which is what CreateSessionRequest.Account
 	// omits on — the same default `af sessions create` gets with no --account, so
