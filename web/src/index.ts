@@ -187,6 +187,7 @@ const store = new Store<AppState>({
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let connectionGeneration = 0;
+let pendingRestoreResync = false;
 let stream: EventStream | null = null;
 const optimisticSessions = new OptimisticSessions();
 const pendingRestores = new PendingRestores(
@@ -439,6 +440,11 @@ async function connect(candidate: string): Promise<void> {
     projectsError,
     registeredProjects,
   });
+  applySessions(sessions, { kind: "snapshot", generation: restoreSnapshot }, sessions);
+  if (pendingRestoreResync) {
+    pendingRestoreResync = false;
+    requestResync();
+  }
   resolvingRoute = false;
   resolveRoute();
   clearLoginRoute();
@@ -975,7 +981,13 @@ function openConfirm(
             isActionableSession(session) && session.lifecycle_action === "restore");
     if (!run) return;
     void run.then(() => {
-      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) return;
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        // The request survived reconnect; refresh the current connection without
+        // publishing the old connection's modal or error into it.
+        if (token !== null && store.get().phase === "app") requestResync();
+        else pendingRestoreResync = true;
+        return;
+      }
       if (mutation) {
         if (!optimisticSessions.succeed(mutation)) return;
         applySessions(optimisticSessions.project());
@@ -985,7 +997,13 @@ function openConfirm(
         if (immediateRestore) requestResync();
       }
     }).catch((e) => {
-      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) return;
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        // The request survived reconnect; refresh the current connection without
+        // publishing the old connection's modal or error into it.
+        if (token !== null && store.get().phase === "app") requestResync();
+        else pendingRestoreResync = true;
+        return;
+      }
       if (mutation) {
         const outcome = isMutationCommittedError(e)
           ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")

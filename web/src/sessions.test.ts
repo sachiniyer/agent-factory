@@ -504,3 +504,10 @@ test("#3663 the layout generation is read BEFORE the commit that could move it",
   assert.ok(genRead !== -1 && commit !== -1, "guardedTabRebind must read the generation and commit the roster");
   assert.ok(genRead < commit, "the post-await generation read must precede the roster commit");
 });
+
+test("restore completion during reconnect queues its resync until app phase", () => {
+  const body = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8");
+  assert.match(body, /else pendingRestoreResync = true/, "stale restore completion must survive the login phase");
+  assert.match(body, /if \(pendingRestoreResync\)[\s\S]*?requestResync\(\)/,
+    "connect must consume the queued restore resync after committing app state");
+});

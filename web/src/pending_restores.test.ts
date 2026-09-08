@@ -33,7 +33,7 @@ test("two Restore clicks send one request without a failure modal; the advanced 
   assert.equal(click(), null);
   pending.observe([{ id: "session", restoreEligible: true }]);
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", restoreEligible: false }]);
+  pending.observe([{ id: "session", restoreEligible: false }], { kind: "updated", id: "session" });
   assert.equal(pending.has("session"), false);
   assert.equal(visiblePending.size, 0);
   await click();
@@ -107,7 +107,9 @@ for (const [name, error] of [
     assert.equal(pending.has("session"), true);
     pending.observe([{ id: "session", restoreEligible: true }]);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", restoreEligible: false }]);
+    pending.observe([{ id: "session", restoreEligible: false }], { kind: "updated", id: "session" });
+    assert.equal(pending.has("session"), true);
+    pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
     assert.equal(pending.has("session"), false);
   });
 }
@@ -133,6 +135,21 @@ test("Dead to Lost normalization does not settle an uncertain restore", async ()
   reject(new ApiError(0, "connection lost"));
   await assert.rejects(request!, /connection lost/);
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", restoreEligible: false }]);
+  pending.observe([{ id: "session", restoreEligible: false }], { kind: "updated", id: "session" });
+  assert.equal(pending.has("session"), true);
+  pending.observe([{ id: "session", restoreEligible: true }], { kind: "updated", id: "session" });
+  assert.equal(pending.has("session"), false);
+});
+
+test("an uncertain restore stays fenced across reset until busy becomes restorable", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  pending.reset();
+  assert.equal(pending.has("session"), true);
+  pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), true);
+  pending.observe([{ id: "session", restoreEligible: false }], { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), true);
+  pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
   assert.equal(pending.has("session"), false);
 });
