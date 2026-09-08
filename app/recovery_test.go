@@ -167,6 +167,17 @@ func TestRecoveryDriverScenes(t *testing.T) {
 				data, err := os.ReadFile(golden)
 				require.NoError(t, err)
 				require.Equal(t, string(data), svg, "app view changed: inspect and recapture the recovery still")
+				data, err = os.ReadFile(strings.TrimSuffix(golden, ".svg") + ".ansi")
+				require.NoError(t, err)
+				require.Equal(t, string(data), frame, "app ANSI view changed: inspect and recapture the recovery still")
+				for _, ext := range []string{".svg", ".ansi"} {
+					name := scene + "-" + theme + ext
+					data, err := os.ReadFile(filepath.Join(sourceDir, "testdata", "recovery", name))
+					require.NoError(t, err)
+					gallery, err := os.ReadFile(filepath.Join(sourceDir, "..", "docs", "assets", "recovery", "tui-model-driver", name))
+					require.NoError(t, err)
+					require.Equal(t, string(data), string(gallery), "gallery %s differs from the asserted recovery golden: update both copies", name)
+				}
 			})
 		}
 	}
