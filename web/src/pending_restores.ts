@@ -6,6 +6,8 @@ export class PendingRestores {
     settled: boolean;
     uncertain: boolean;
     sawBusy: boolean;
+    eligibleSnapshots: number;
+    lastUncertainSnapshot: number;
     succeededAt: number | null;
     uncertainAt: number;
     restoreEligible: RestoreRow["restoreEligible"];
@@ -28,6 +30,8 @@ export class PendingRestores {
       settled: false,
       uncertain: false,
       sawBusy: false,
+      eligibleSnapshots: 0,
+      lastUncertainSnapshot: -1,
       succeededAt: null as number | null,
       uncertainAt: this.snapshotGeneration,
       restoreEligible,
@@ -74,14 +78,21 @@ export class PendingRestores {
       if (ticket.uncertain && authoritative && row && !row.restoreEligible) {
         ticket.sawBusy = true;
       }
+      if (ticket.uncertain && !ticket.sawBusy && evidence?.kind === "snapshot" &&
+        row?.restoreEligible && evidence.generation > ticket.uncertainAt &&
+        evidence.generation !== ticket.lastUncertainSnapshot) {
+        ticket.lastUncertainSnapshot = evidence.generation;
+        ticket.eligibleSnapshots += 1;
+      }
       // A delayed recover-fence update may arrive after HTTP success. Only a
       // Snapshot issued afterward proves completion. Identity-only restored events
       // carry no attempt id and may belong to a previous restore cycle.
       const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" &&
         evidence.generation > ticket.succeededAt;
       const uncertainCompleted = ticket.uncertain && authoritative &&
-        (!eligibility.has(id) || (ticket.sawBusy && row?.restoreEligible === true &&
-          (evidence?.kind !== "snapshot" || evidence.generation > ticket.uncertainAt)));
+        (!eligibility.has(id) || (row?.restoreEligible === true &&
+          ((ticket.sawBusy && (evidence?.kind !== "snapshot" || evidence.generation > ticket.uncertainAt)) ||
+            (!ticket.sawBusy && ticket.eligibleSnapshots >= 2))));
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
         this.tickets.delete(id);
         changed = true;

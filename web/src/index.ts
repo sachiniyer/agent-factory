@@ -441,14 +441,14 @@ async function connect(candidate: string): Promise<void> {
     registeredProjects,
   });
   applySessions(sessions, { kind: "snapshot", generation: restoreSnapshot }, sessions);
-  if (pendingRestoreResync) {
-    pendingRestoreResync = false;
-    requestResync();
-  }
   resolvingRoute = false;
   resolveRoute();
   clearLoginRoute();
   startStream(candidate);
+  if (pendingRestoreResync) {
+    pendingRestoreResync = false;
+    requestResync();
+  }
 }
 
 /** Fetches the daemon's registered-project roots for the #2456 union, degrading to

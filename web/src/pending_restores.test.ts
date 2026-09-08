@@ -52,7 +52,14 @@ test("definitive restore refusal releases only its session fence", async () => {
   await other;
 });
 
-test("reset prevents an old response from clearing a newer restore", async () => {
+test("a never-sent transport rejection releases immediately", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  const neverSent = new ApiError(0, "offline", "", false, false);
+  await assert.rejects(pending.run("session", async () => { throw neverSent; }, true)!, /offline/);
+  assert.equal(pending.has("session"), false);
+});
+
+test("reset preserves an in-flight restore until a post-response Snapshot", async () => {
   const pending = new PendingRestores(() => {});
   let releaseOld!: () => void;
   let releaseNew!: () => void;
@@ -152,4 +159,105 @@ test("an uncertain restore stays fenced across reset until busy becomes restorab
   assert.equal(pending.has("session"), true);
   pending.observe([{ id: "session", restoreEligible: true }], { kind: "snapshot", generation: pending.beginSnapshot() });
   assert.equal(pending.has("session"), false);
+});
+
+test("an uncertain restore with no busy projection releases after two eligible Snapshots", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  pending.reset();
+  const rows = [{ id: "session", restoreEligible: true }];
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), true);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), false);
+});
+
+test("a delayed still-eligible update cannot settle a successful Lost restore", async () => {
+  const pending = new PendingRestores(() => {});
+  const lost = [{ id: "session", restoreEligible: true }];
+  pending.observe(lost, { kind: "snapshot", generation: 0 });
+  await pending.run("session", async () => {}, true);
+  pending.observe(lost); // Repainting the pre-response cache is not fresh evidence.
+  pending.observe(lost, { kind: "snapshot", generation: 0 }); // Reusing its stamp is not a new observation either.
+  assert.equal(pending.has("session"), true);
+  pending.observe(lost, { kind: "updated", id: "another-session" });
+  assert.equal(pending.has("session"), true);
+  pending.observe(lost, { kind: "updated", id: "session" });
+  assert.equal(pending.has("session"), true);
+  pending.observe(lost, { kind: "snapshot", generation: pending.beginSnapshot() }); // A fenced follow-up Snapshot can settle it.
+  assert.equal(pending.has("session"), false);
+});
+
+test("a post-response Snapshot releases a successful restore, but not an uncertain one", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  const rows = ["success", "uncertain"].map(id => ({ id, restoreEligible: true }));
+  pending.observe(rows, { kind: "snapshot", generation: 0 });
+  await pending.run("success", async () => {}, true);
+  await assert.rejects(pending.run("uncertain", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("success"), false);
+  assert.equal(pending.has("uncertain"), true);
+});
+
+test("a committed warning also settles on a fresh restorable projection", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, isMutationCommittedError);
+  const rows = [{ id: "session", restoreEligible: true }];
+  pending.observe(rows, { kind: "snapshot", generation: 0 });
+  await assert.rejects(pending.run("session", async () => {
+    throw new ApiError(200, "completed with warning", "mutation_committed");
+  }, true)!);
+  pending.observe(rows);
+  assert.equal(pending.has("session"), true);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), false);
+});
+
+
+test("a Snapshot issued before success cannot settle even when delivered afterward", async () => {
+  const pending = new PendingRestores(() => {});
+  const rows = [{ id: "session", restoreEligible: true }];
+  let release!: () => void;
+  const request = pending.run("session", () => new Promise<void>(resolve => { release = resolve; }), true);
+  const stale = pending.beginSnapshot();
+  release();
+  await request;
+  pending.observe(rows, { kind: "snapshot", generation: stale });
+  assert.equal(pending.has("session"), true);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), false);
+});
+
+for (const beforeResponse of [false, true]) {
+  test(`identity-only restored event waits for a causal Snapshot (before response=${beforeResponse})`, async () => {
+    const pending = new PendingRestores(() => {});
+    const rows = [{ id: "session", restoreEligible: true }];
+    let release!: () => void;
+    const request = pending.run("session", () => new Promise<void>(resolve => { release = resolve; }), true);
+    if (!beforeResponse) { release(); await request; }
+    pending.observe(rows, { kind: "restored", id: "other-session" });
+    assert.equal(pending.has("session"), true);
+    pending.observe(rows, { kind: "restored", id: "session" });
+    if (beforeResponse) {
+      assert.equal(pending.has("session"), true);
+      release();
+      await request;
+    }
+    assert.equal(pending.has("session"), true);
+    pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+    assert.equal(pending.has("session"), false);
+  });
+}
+
+
+test("a delayed restored event from attempt A cannot complete uncertain attempt B", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  const rows = [{ id: "session", restoreEligible: true }];
+  await pending.run("session", async () => {}, true);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  let reject!: (error: unknown) => void;
+  const next = pending.run("session", () => new Promise<void>((_, fail) => { reject = fail; }), true);
+  pending.observe(rows, { kind: "restored", id: "session" });
+  reject(new ApiError(0, "lost B reply"));
+  await assert.rejects(next!);
+  assert.equal(pending.has("session"), true);
 });

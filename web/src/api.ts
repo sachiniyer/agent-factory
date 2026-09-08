@@ -207,14 +207,17 @@ export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Whether a status-0 transport failure may have reached the daemon. */
+  readonly transportUncertain: boolean;
   /** A positively marked daemon refusal, excluding committed outcomes. */
   readonly daemonRejected: boolean;
-  constructor(status: number, message: string, code = "", daemonRejected = false) {
+  constructor(status: number, message: string, code = "", daemonRejected = false, transportUncertain = true) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.daemonRejected = daemonRejected;
+    this.transportUncertain = transportUncertain;
   }
 }
 
@@ -225,7 +228,8 @@ export function isMutationCommittedError(e: unknown): e is ApiError {
 
 /** Only a definitive daemon refusal permits an immediate mutation retry. */
 export function isMutationOutcomeUncertain(e: unknown): boolean {
-  return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
+  return isMutationCommittedError(e) || !(e instanceof ApiError) ||
+    (e.status === 0 ? e.transportUncertain : !e.daemonRejected);
 }
 
 /**
@@ -252,7 +256,10 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
   } catch (e) {
     // A TypeError from fetch is a transport failure (daemon down, wrong host).
     // Surface it as status 0 with an actionable message.
-    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
+    // fetch rejected before producing a Response. Treat this as a safe,
+    // never-sent failure; callers retain only failures that may have reached
+    // the daemon (timeouts, resets after send, or gateway responses).
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`, "", false, false);
   }
 
   // Parse the envelope regardless of status so a structured error message wins
