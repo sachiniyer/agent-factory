@@ -39,10 +39,12 @@ go run ./scripts/gen-design
 # checks against the code. Regenerating the goldens themselves is still
 # `AF_TUI_RECOVERY_CAPTURE` inside the testbox (docs/design/tui-recovery-stills.md).
 #
-# The .ansi twins beside them are deliberately NOT copied: they are asserted by
+# Remove obsolete SVGs so renamed or deleted goldens cannot linger in the gallery.
+# The .ansi twins beside them are deliberately untouched: they are asserted by
 # nothing and are stale in their own right (#4067 decides whether they are
 # asserted or dropped). Copying them would publish that staleness.
 recovery_gallery="docs/assets/recovery/tui-model-driver"
+rm -f "$recovery_gallery"/*.svg
 for golden in app/testdata/recovery/*.svg; do
 	cp "$golden" "$recovery_gallery/$(basename "$golden")"
 done
