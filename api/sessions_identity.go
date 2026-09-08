@@ -45,10 +45,12 @@ var currentTmuxName = func() (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("could not determine tmux session name")
 	}
-	// AF_SESSION is stamped into agent environments at pane creation. It is
-	// primary when present, but stale/nested environments must fail closed.
-	// Older tmux versions cannot stamp it, so the explicit pane is the fallback.
-	if identity != "" {
+	// The legacy launch path cannot stamp AF_SESSION or AF_SESSION_GEN, and
+	// both can be inherited together (even into the session environment via
+	// update-environment). A matching generation alone cannot prove stamping.
+	// Ignore such markers, including those in panes created by older af builds.
+	// Where stamping is supported, a conflicting identity remains an error.
+	if identity != "" && tmux.SessionEnvSupported() {
 		if identity != name {
 			return "", fmt.Errorf("AF_SESSION %q does not match tmux pane session %q", identity, name)
 		}

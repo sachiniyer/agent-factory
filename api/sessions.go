@@ -735,8 +735,9 @@ var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
 	Long: "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.\n\n" +
-		"Requires TMUX and TMUX_PANE. Uses the inherited AF_SESSION identity when available, " +
-		"cross-checked against that pane on the inherited tmux socket. Missing context or an identity mismatch is an error.\n\n" +
+		"Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. " +
+		"When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; " +
+		"otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.\n\n" +
 		"Identity is not scoped: you are the session you are, in whatever project it " +
 		"belongs to. --repo therefore acts as an assertion — it checks that the " +
 		"resolved session really is in that project, and errors if it is not.",

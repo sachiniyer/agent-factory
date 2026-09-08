@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +26,8 @@ func fakeIdentityTmux(t *testing.T) string {
 	t.Setenv("TMUX", "/tmp/identity-socket,123,0")
 	t.Setenv("TMUX_PANE", "%42")
 	t.Setenv("AF_SESSION", "")
+	t.Setenv("AF_SESSION_GEN", "parent-generation")
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 	return calls
 }
 
@@ -32,10 +35,12 @@ func TestCurrentTmuxName(t *testing.T) {
 	for _, tc := range []struct {
 		name, tmux, pane, marker, answer, exit, wantErr string
 		noCall                                          bool
+		legacy                                          bool
 	}{
 		{name: "outside", pane: "%42", answer: "af_other", wantErr: "not running inside a tmux session", noCall: true},
 		{name: "outside with stale marker", marker: "af_other", answer: "af_other", wantErr: "not running inside a tmux session", noCall: true},
 		{name: "target pane", tmux: "/tmp/custom,socket,123,0", pane: "%42", answer: "af_other"},
+		{name: "inherited stale marker", tmux: "/tmp/identity-socket,123,0", pane: "%42", marker: "af_parent", answer: "af_other", legacy: true},
 		{name: "matching marker", tmux: "/tmp/identity-socket,123,0", pane: "%42", marker: "af_other", answer: "af_other"},
 		{name: "mismatched marker", tmux: "/tmp/identity-socket,123,0", pane: "%42", marker: "af_me", answer: "af_other", wantErr: "AF_SESSION"},
 		{name: "missing pane", tmux: "/tmp/identity-socket,123,0", answer: "af_other", wantErr: "TMUX_PANE", noCall: true},
@@ -47,6 +52,9 @@ func TestCurrentTmuxName(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := fakeIdentityTmux(t)
+			if tc.legacy {
+				t.Cleanup(tmux.SetNewSessionEnvSupportForTest(false))
+			}
 			t.Setenv("TMUX", tc.tmux)
 			if tc.tmux == "" {
 				require.NoError(t, os.Unsetenv("TMUX"))
