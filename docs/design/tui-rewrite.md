@@ -173,7 +173,7 @@ The root model shrinks to: dispatch messages → store, route input → focused 
 
 **Two modes** (Sachin-confirmed, 2026-07-03):
 
-- **Nav mode (default).** The host owns the keyboard. `Tab`/`Shift-Tab` cycles the focus ring `tree → pane 1 → … → pane N → automations`; `1-9` jumps tabs of the selected instance; j/k moves the tree; all existing stateDefault actions (`app/handle_actions.go:18-142`) work and are selection-relative: kill, PR open/copy, new/close tab, scroll.
+- **Nav mode (default).** The host owns the keyboard. `Tab`/`Shift-Tab` cycles the focus ring `tree → pane 1 → … → pane N → automations`; `1-9` jumps tabs of the selected instance; j/k moves the tree; all existing stateDefault actions (`app/handle_actions.go:18-142`) work and are selection-relative: kill, new/close tab, scroll.
 - **Interactive mode.** `Enter` on a focused pane (or on a tree row, opening the pane first if needed) enters the pane. From then on **all keystrokes — including `Tab` — forward down the pane's PTY** to the agent/shell. There is **no full-screen takeover**: the pane keeps its rect and the instances rail stays visible the whole time. `Ctrl-]` pops back to nav mode.
 
 **Why `Tab` cannot be a global host key**: shells, vim, and every agent CLI need `Tab` (completion). That is exactly why focus-switching lives in nav mode only and interactive mode forwards `Tab` to the agent. The **only** host-reserved key while interactive is `Ctrl-]` (already the attach detach-key default, `DetachKeyByte`), plus at most one prefix chord — final call in #1026/#1027.
@@ -310,7 +310,7 @@ The tree renders more rows (instances × tabs) than the flat list. Mitigation: t
 
 ### 5.4 Keeping the TUI usable through the cutover
 
-Every phase ships a complete, keyboard-operable TUI. The flow matrix verified manually (dev-install on the dev box) before merging each visible-change PR: create (local+remote), name-collision, enter/exit interactive mode (agent tab, shell tab, remote; `Ctrl-]` returns to nav), **Tab-completion forwards inside an interactive pane**, a full-screen program (vim or htop) driven inside a pane, open/hide/close panes across the N-pane ring, tab create/close/jump, kill, search, task create/edit/run-now from the rail, hooks edit, PR open/copy, daemon restart mid-session, cold start with daemon warm-up, external `tmux attach` to a pane's session (shrink behavior), 80×24 terminal. This matrix becomes a checklist in each PR description.
+Every phase ships a complete, keyboard-operable TUI. The flow matrix verified manually (dev-install on the dev box) before merging each visible-change PR: create (local+remote), name-collision, enter/exit interactive mode (agent tab, shell tab, remote; `Ctrl-]` returns to nav), **Tab-completion forwards inside an interactive pane**, a full-screen program (vim or htop) driven inside a pane, open/hide/close panes across the N-pane ring, tab create/close/jump, kill, search, task create/edit/run-now from the rail, hooks edit, daemon restart mid-session, cold start with daemon warm-up, external `tmux attach` to a pane's session (shrink behavior), 80×24 terminal. This matrix becomes a checklist in each PR description.
 
 ### 5.5 Terminal-size edge cases
 
