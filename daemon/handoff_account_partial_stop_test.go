@@ -48,4 +48,9 @@ func TestHandoffAccountPartialStopRecordsLostRecovery(t *testing.T) {
 	require.Equal(t, session.LiveLost, persistedInstanceByTitle(t, repo, inst.Title).Liveness)
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 	require.Empty(t, inst.Account)
+	require.False(t, inst.StartupStateUnknown())
+	recovery := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(recovery)
+	m.RestoreLostSessions()
+	require.Equal(t, 1, recovery.recoverCalls(), "confirmed agent stop still permits ordinary recovery")
 }

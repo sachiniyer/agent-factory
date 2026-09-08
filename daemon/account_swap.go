@@ -315,6 +315,15 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	*scheduled = *admitted
 
 	if err := m.prepareRuntimeForAccountSwap(key, instance); err != nil {
+		if errors.Is(err, session.ErrAccountSwapAgentTeardownBlind) {
+			// An absent binding does not prove the old writer stopped. Reuse the
+			// inert runtime state so neither status refresh nor Lost recovery can
+			// launch another agent into this worktree.
+			instance.MarkStartupStateUnknown()
+			refusal := fmt.Errorf("account handoff for %q refused; automatic recovery disabled: inspect worktree %q and vanished agent pane %q for a detached child still writing before explicitly removing or replacing the session: %w",
+				requestedTitle, instance.GetWorktreePath(), instance.TabTmuxName(0), err)
+			return false, errors.Join(refusal, m.persistSettlement(repoID, key, instance))
+		}
 		if scheduled.manual && !instance.LimitReached() {
 			probe := probeLiveness(instance, instance.AgentServer())
 			if probe == probeAbsent || probe == probeAnsweredDead {

@@ -399,6 +399,10 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 			continue
 		}
 		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
+		if idx == 0 && blind {
+			return fmt.Errorf("account swap: cannot stop agent tab %q for %q: %w",
+				tab.Name, i.Title, errors.Join(ErrAccountSwapAgentTeardownBlind, err))
+		}
 		switch {
 		case state == tmux.PaneStateKnown && blind:
 			return fmt.Errorf("account swap: cannot stop credential-bearing tab %q for %q: it vanished without its pane being observed; a detached child may still be writing the worktree", tab.Name, i.Title)
