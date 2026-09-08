@@ -171,7 +171,7 @@ func TestTaskPaneOnCompleteIsInapplicableWithATargetSession(t *testing.T) {
 
 	out := tp.String()
 	assert.Contains(t, out, "On done:", "the row stays on screen so the refusal is visible")
-	assert.Contains(t, out, "not this task's to reap",
+	assert.Contains(t, out, "Target session is kept.",
 		"…and says WHY, rather than rendering a dead picker")
 	for _, verb := range []string{task.OnCompleteArchive, task.OnCompleteKill} {
 		assert.NotContains(t, out, verb,
@@ -279,7 +279,7 @@ func TestTaskPaneOnCompleteExplanationFitsNarrowModal(t *testing.T) {
 		{task.OnCompleteKeep, "", "leaves the run's session in place"},
 		{task.OnCompleteArchive, "", "archives the run's session — restorable"},
 		{task.OnCompleteKill, "", "deletes the run's session and its branch — permanent"},
-		{"", "pending", "n/a — a target session is not this task's to reap"},
+		{"", "pending", "Target session is kept."},
 	} {
 		t.Run(tc.verb+tc.target, func(t *testing.T) {
 			tp := editTaskWithOnComplete(t, tc.verb, tc.target)

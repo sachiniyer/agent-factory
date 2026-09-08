@@ -209,7 +209,7 @@ func TestProjectPickerRenderShowsCountsAndNavHint(t *testing.T) {
 		t.Fatalf("render should show the add-project affordance; got:\n%s", out)
 	}
 	// The footer advertises rail-style navigation, not search.
-	if !strings.Contains(out, "navigate") || !strings.Contains(out, "switch") {
+	if !strings.Contains(out, "select") || !strings.Contains(out, "switch") {
 		t.Fatalf("render should show the j/k navigate hint; got:\n%s", out)
 	}
 }
@@ -229,12 +229,12 @@ func (p *ProjectPickerOverlay) selectedProjectForTest() (Project, bool) {
 func TestProjectPickerDegradedNotice(t *testing.T) {
 	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha"}}, "")
 	p.SetMaxSize(60, 20)
-	if out := p.Render(); strings.Contains(out, "registry unreadable") {
+	if out := p.Render(); strings.Contains(out, "Cannot read registry") {
 		t.Fatalf("a healthy picker must not warn, got:\n%s", out)
 	}
 	p.SetDegraded(true)
 	out := p.Render()
-	if !strings.Contains(out, "registry unreadable") {
+	if !strings.Contains(out, "Cannot read registry") {
 		t.Fatalf("a degraded picker must warn that the list may be incomplete, got:\n%s", out)
 	}
 }

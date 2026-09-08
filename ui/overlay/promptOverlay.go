@@ -56,7 +56,7 @@ func NewPromptOverlay(title, value string) *PromptOverlay {
 	ta := textarea.New()
 	ta.ShowLineNumbers = false
 	ta.Prompt = ""
-	ta.Placeholder = "Sent to the agent as soon as it is ready…"
+	ta.Placeholder = "Prompt for the agent…"
 	// No cap: the daemon delivers this verbatim to the agent, and an initial
 	// prompt is legitimately a paragraph or a pasted spec.
 	ta.CharLimit = 0
@@ -118,7 +118,6 @@ func (p *PromptOverlay) SetMaxSize(width, height int) {
 func (p *PromptOverlay) Render() string {
 	t := ui.CurrentTheme()
 	titleStyle := ui.DialogTitleStyle()
-	hintStyle := ui.DialogHintStyle()
 	// Themed styles are resolved per render, like every sibling overlay, so a
 	// theme change lands without rebuilding the overlay.
 	placeholder := lipgloss.NewStyle().Foreground(t.InkMuted)
@@ -153,7 +152,7 @@ func (p *PromptOverlay) Render() string {
 	if layout.Cells(hint) > textRect.W {
 		hint = "tab done · ctrl+c cancel"
 	}
-	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
+	lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), textRect.W))
 
 	style = style.Width(fit.W)
 	if fit.H > 0 && len(lines) >= textRect.H {

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -190,9 +189,11 @@ func TestHandleEnter_RemoteLostRowConfirmsBeforeReprovision(t *testing.T) {
 			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no restore starts before the user confirms")
 			require.False(t, called, "the restore RPC must not fire before confirmation")
 
-			rendered := strings.Join(strings.Fields(h.confirmationOverlay.Render()), " ")
-			require.Contains(t, rendered, "never pushed", "the confirmation names the unpushed-work risk")
-			require.Contains(t, rendered, "can't be reached", "the confirmation names the unknown-connectivity case")
+			rendered := flatten(h.confirmationOverlay.Render())
+			require.Contains(t, rendered, "dead agent's sandbox is pushed first")
+			require.Contains(t, rendered, "last pushed state")
+			require.Contains(t, rendered, "never-pushed changes are lost")
+			require.Contains(t, rendered, "reachability", "the confirmation names the unknown-connectivity case")
 			require.Contains(t, rendered, "refuses", "the confirmation says unknown connectivity blocks replacement")
 			require.NotContains(t, rendered, "can't be reached, restore provisions",
 				"the confirmation must not promise replacement from mere unreachability")
