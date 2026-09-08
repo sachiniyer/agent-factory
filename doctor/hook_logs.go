@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Hook output is bounded by retained run count and age, not by bytes per run.
@@ -15,6 +17,11 @@ const hookLogsWarnBytes int64 = 100 * 1024 * 1024
 
 func checkHookLogs(report *Report, dir string) {
 	blocking, target, err := hookLogBlockingPath(dir)
+	if blocking != "" && (os.IsPermission(err) || errors.Is(err, syscall.EROFS)) {
+		report.Fail(sectionConfig, "hook logs", blocking+" is not writable; af cannot create "+dir+" so configured hooks cannot start",
+			"restore write and search access (chmod u+w "+blocking+"; chmod u+x "+blocking+") or fix directory ownership")
+		return
+	}
 	if blocking != "" && (err == nil || errors.Is(err, syscall.ELOOP)) {
 		detail := blocking + " is not a directory; configured hooks cannot start"
 		remedy := "move or remove the file so af can create its hook log directory"
@@ -109,6 +116,13 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 			}
 			if !info.IsDir() {
 				return path, "", nil
+			}
+			// Only a missing destination needs creation in its nearest existing
+			// ancestor. Access asks the kernel, honoring ACLs and root privileges.
+			if path != dir {
+				if err := unix.Access(path, unix.W_OK|unix.X_OK); err != nil {
+					return path, "", err
+				}
 			}
 			return "", "", nil
 		}

@@ -107,7 +107,7 @@ func closeAndReadTail(file *os.File, futimes func(int, []syscall.Timeval) error)
 	if timeErr != nil {
 		// Creation supplies a completion clock even when timestamp setters fail.
 		if logKind(filepath.Base(path)) != "" {
-			if markerErr := writeCompletionMarker(path); markerErr != nil {
+			if markerErr := writeCompletionMarker(file); markerErr != nil {
 				timeErr = errors.Join(timeErr, markerErr)
 			}
 		}

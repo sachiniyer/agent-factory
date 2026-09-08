@@ -109,3 +109,39 @@ func TestCompletionTimestampFailureProtectsKeptLog(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletionTimestampFailureDoesNotMarkReplacement(t *testing.T) {
+	for _, replacement := range []string{"regular", "symlink", "absent"} {
+		t.Run(replacement, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			file, err := Open(PostWorktree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			if _, err := file.WriteString("original output"); err != nil {
+				t.Fatal(err)
+			}
+			path := file.Name()
+			if err := os.Rename(path, path+".moved"); err != nil {
+				t.Fatal(err)
+			}
+			switch replacement {
+			case "regular":
+				err = os.WriteFile(path, []byte("replacement"), 0o600)
+			case "symlink":
+				err = os.Symlink(path+".moved", path)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			tail, err := closeAndReadTail(file, func(int, []syscall.Timeval) error { return syscall.EOPNOTSUPP })
+			if err != nil || tail != "original output" {
+				t.Fatalf("tail=%q, error=%v", tail, err)
+			}
+			if _, err := os.Lstat(path + ".done"); !os.IsNotExist(err) {
+				t.Fatalf("replacement received completion marker: %v", err)
+			}
+		})
+	}
+}

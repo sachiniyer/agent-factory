@@ -13,7 +13,22 @@ type keptLog struct {
 
 // A new private marker gets its timestamp from creation, without futimes.
 // O_EXCL prevents following an unexpected link or overwriting an existing file.
-func writeCompletionMarker(path string) error {
+func writeCompletionMarker(file *os.File) error {
+	path := file.Name()
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	linked, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	// Never give replacement output this run's completion time, including
+	// a symlink back to the opened inode: retention only owns regular paths.
+	if !linked.Mode().IsRegular() || !os.SameFile(opened, linked) {
+		return nil
+	}
+
 	marker, err := os.OpenFile(path+".done", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err

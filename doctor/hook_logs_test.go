@@ -197,3 +197,30 @@ func TestHomeHealthHookLogsSymlinkLoopFails(t *testing.T) {
 		})
 	}
 }
+
+func TestHomeHealthHookLogsUnwritableAncestorFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can create directories under mode 0555")
+	}
+	for _, relative := range []string{"logs", "."} {
+		t.Run(relative, func(t *testing.T) {
+			home := t.TempDir()
+			ancestor := filepath.Join(home, relative)
+			require.NoError(t, os.MkdirAll(ancestor, 0o700))
+			require.NoError(t, os.Chmod(ancestor, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(ancestor, 0o700) })
+			dir := filepath.Join(home, "logs", "hooks")
+			report := &Report{}
+			checkHookLogs(report, dir)
+			row := findCheck(t, report, "hook logs")
+			require.Equal(t, StatusFail, row.Status)
+			require.True(t, row.Problem)
+			require.Contains(t, row.Detail, ancestor+" is not writable; af cannot create "+dir)
+			require.Contains(t, row.Detail, "configured hooks cannot start")
+			require.Contains(t, row.Remediation, "chmod u+w")
+			require.Contains(t, row.Remediation, ancestor)
+			require.Empty(t, report.Incomplete)
+			require.Equal(t, 1, report.UnresolvedCount())
+		})
+	}
+}
