@@ -8,6 +8,7 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
     [false, "", "字", "字", "字"], [false, "x", "字", "字", "字"],
     [true, "", "字", "字", "字"], [true, "x", "字", "字", "字"],
     [true, "x", "字", "字", null],
+    [true, "x", "字", "", null],
     [true, "", "각", "가", "가"], [true, "x", "각", "가", "가"],
     [true, "x", "가나", "ᄀ", "ᄀ"], [true, "x", "ab", "b", "b"],
   ] as const) {

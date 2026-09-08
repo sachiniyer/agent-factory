@@ -99,11 +99,12 @@ after the sink fix:
 | --- | --- |
 | ![Selection and history remain after Ctrl+Up](before-input-effects.png) | ![Selection clears and the prompt returns](after-input-effects.png) |
 
-Final validation: the full container suite went from
-[13 failures / 182 passes](full-selftest-red.txt) on `61948022` to
-[195 passes](full-selftest-green.txt), including every reported failing case
-and the xterm selection/scrollback regression. The local red also caught the
-related #2347 mobile-geometry case, which passes in green.
+At that stage, the full container suite went from
+[13 failures / 182 passes](full-selftest-red.txt) on `61948022` to 195 passes,
+including every reported failing case and the xterm selection/scrollback
+regression. The current final-revision transcript supersedes that historical
+count below. The local red also caught the related #2347 mobile-geometry case,
+which passes in green.
 [Full perf/visual validation](final-perf-green.txt) passes all five visual tests
 and all web/TUI budgets. Unit tests pass 745/745; typecheck, bundle build,
 strict MkDocs, and Go/lint gates pass. No golden or budget was updated.
@@ -122,20 +123,25 @@ is preserved; the separate input handler cannot duplicate the commit. Composed
 text bypasses sticky modifiers, leaving Ctrl armed for the next ordinary key.
 
 The browser probe exercises commits both with and without post-composition
-`insertText`, including a null-data commit whose textarea has already mutated.
+`insertText`, including null-data and empty-payload commits whose textareas
+mutate after the composition lifecycle.
 It asserts outgoing PTY input is exactly `字`, Ctrl remains armed, and the
 following soft `x` sends exactly `0x18` and clears Ctrl. Ctrl + soft Enter also
 sends CR, consumes the one-shot, and leaves the following `a` unmodified. The
 Safari-order boundary follows xterm in treating Shift, Ctrl, Alt, and keycode
 229 as continued IME input. The textarea-diff 229 Backspace sends DEL, consumes
 the armed one-shot as genuine user input, and leaves its following `a` plain.
-The probe retains the keybar selection/scrollback and blur/refocus coverage.
+Stale recovery also covers a null-data `beforeinput` whose paired `input` owns
+the character. A connected hardware Ctrl+Up is encoded as `ESC[1;5A`, consumes
+the one-shot, and leaves the following `a` plain. The probe retains the keybar
+selection/scrollback and blur/refocus coverage.
 
 [Unit red](composition-unit-red.txt) shows the duplicate write before the fix;
 [unit green](composition-unit-green.txt) records the original lifecycle proof.
-Final validation has 876 passing web unit tests and the refreshed full container
+Final validation has 879 passing web unit tests and the refreshed full container
 web selftest passes [238/238](full-selftest-green.txt), including the null-data
-IME probe, soft-control consumption, stale-input deletion, keybar effects, and
+and empty-payload IME probes, split stale-input recovery, hardware-arrow
+modifiers, soft-control consumption, stale-input deletion, keybar effects, and
 the previously reported terminal READY marker cases. Typecheck, regenerated
 bundle, Go build/vet, fast lint, and file-length checks pass.
 

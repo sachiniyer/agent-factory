@@ -39,9 +39,16 @@ export class StickyModifiers {
     return result;
   }
   input(text: string, source: "terminal" | "user" = "terminal"): string {
-    // xterm emits complete escape sequences, control keys and terminal replies.
-    // User controls consume one-shots at source, but parser replies must leave
-    // them armed; neither path may rewrite the tail of a control-led payload.
+    // Xterm encodes hardware arrows before onData. Only decode exact user-arrow
+    // sequences: parser replies on the terminal path must remain byte-for-byte
+    // and keybar arrows have already been encoded and consumed at their source.
+    const arrow = source === "user" ? /^\x1b(\[|O)([ABCD])$/.exec(text) : null;
+    if (arrow) {
+      const keys: Record<string, string> = { A: "↑", B: "↓", C: "→", D: "←" };
+      return this.key(keys[arrow[2]], arrow[1] === "O");
+    }
+    // Other user controls consume one-shots without rewriting their payload;
+    // control-leading terminal replies remain exempt.
     if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) {
       if (text && source === "user") this.consumeOnce();
       return text;

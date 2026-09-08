@@ -142,6 +142,27 @@ test("canceled composition gives no-keydown ordinary input a zero-length commit 
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
+test("empty Safari composition payload defers to its final textarea mutation", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionupdate", ""));
+  textarea.dispatchEvent(composition("compositionend", ""));
+  textarea.value = "字";
+  host.dispatchEvent(insertText(null));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x"));
+
+  assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 test("Safari keycode 229 after compositionend belongs to the IME commit", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
@@ -555,6 +576,25 @@ test("stale keydown recovery preserves textarea contents for a later 229 Backspa
   t.mock.timers.tick(0);
   assert.equal(textarea.value, "a");
   assert.deepEqual(writes, ["a", "b", "\x7f"]);
+  soft.dispose();
+});
+
+test("stale recovery falls back to input data when beforeinput data is null", () => {
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const writes: string[] = [];
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, text => writes.push(text), () => false);
+  textarea.dispatchEvent(new Event("keydown"));
+  textarea.dispatchEvent(new Event("blur"));
+
+  const before = insertText(null, "beforeinput", true);
+  host.dispatchEvent(before);
+  assert.equal(before.defaultPrevented, false);
+  textarea.value = "a";
+  host.dispatchEvent(insertText("a", "input", true));
+
+  assert.equal(textarea.value, "a");
+  assert.deepEqual(writes, ["a"]);
   soft.dispose();
 });
 

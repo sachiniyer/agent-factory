@@ -101,7 +101,7 @@ export async function assertPhoneStaleRecovery(page: Page, stream: () => string)
     input.focus();
     for (const letter of ["a", "b"]) {
       const beforeInput = new InputEvent("beforeinput", {
-        bubbles: true, cancelable: true, composed: true, data: letter,
+        bubbles: true, cancelable: true, composed: true, data: letter === "a" ? null : letter,
         inputType: "insertText", isComposing: true,
       });
       if (input.dispatchEvent(beforeInput)) input.value += letter;
@@ -145,6 +145,13 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
   await expect(ctrl).toHaveAttribute("data-state", "off");
   await page.keyboard.insertText("a");
   await expect.poll(stream).toBe(before + "\ra");
+  before = stream();
+  await ctrl.click();
+  await page.keyboard.press("ArrowUp");
+  await expect.poll(stream).toBe(before + "\x1b[1;5A");
+  await expect(ctrl).toHaveAttribute("data-state", "off");
+  await page.keyboard.insertText("a");
+  await expect.poll(stream).toBe(before + "\x1b[1;5Aa");
   // Navigation between rows is not a keypress and must retain the one-shot.
   for (const [modifier, arrow, bytes] of [
     ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],

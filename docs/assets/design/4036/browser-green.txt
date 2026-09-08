@@ -2,8 +2,8 @@ AF_PLAYWRIGHT_ARGS='-g keybar' scripts/testbox.sh web-selftest (final-revision e
 
 Running 2 tests using 1 worker
 
-#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018x\u0018字文\u0018ab\u007fa\ra\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz\ra\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tzxy"
-  ✓  1 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (15.2s)
-  ✓  2 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (827ms)
+#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018x\u0018字文\u0018ab\u007fa\ra\u001b[1;5Aa\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz\ra\u001b[1;5Aa\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tzxy"
+  ✓  1 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (16.4s)
+  ✓  2 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (830ms)
 
-  2 passed (26.9s)
+  2 passed (28.8s)

@@ -57,6 +57,19 @@ test("soft control input consumes a one-shot while terminal replies do not", () 
   assert.equal(state.input("a"), "\x01");
 });
 
+test("hardware arrow input applies and consumes sticky modifiers", () => {
+  for (const [modifier, arrow, bytes] of [
+    ["Ctrl", "\x1b[A", "\x1b[1;5A"],
+    ["Alt", "\x1bOD", "\x1b[1;3D"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(modifier, 0);
+    assert.equal(state.input(arrow, "user"), bytes);
+    assert.equal(state.state(modifier), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
 test("pointerdown prevents focus transfer before acting", () => {
   let prevented = false;
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));

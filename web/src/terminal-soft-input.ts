@@ -1,6 +1,7 @@
 interface CompositionRange {
   start?: number;
   text: string;
+  sawUpdate?: boolean;
   frozenText?: string;
   commitLength?: number;
   trailingLength?: number;
@@ -14,15 +15,21 @@ export class TerminalSoftInput {
   private readonly pending: CompositionRange[] = [];
   private keyDownSeen = false;
   private staleKeydown = false;
+  private staleBeforeInputSent = false;
   private readonly onKeyDown = (event: Event): void => {
     this.keyDownSeen = true;
     this.staleKeydown = false;
+    this.staleBeforeInputSent = false;
     const range = this.pending.at(-1);
     const keyCode = (event as KeyboardEvent).keyCode;
     // Xterm keeps IME ownership for its composition key and modifier keys.
     if (range && ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
   };
-  private readonly onKeyUp = (): void => { this.keyDownSeen = false; this.staleKeydown = false; };
+  private readonly onKeyUp = (): void => {
+    this.keyDownSeen = false;
+    this.staleKeydown = false;
+    this.staleBeforeInputSent = false;
+  };
   private readonly onBlur = (): void => { if (this.keyDownSeen) this.staleKeydown = true; };
   private readonly onCompositionStart = (): void => {
     // Xterm retains a finalized range when another composition starts before
@@ -38,12 +45,16 @@ export class TerminalSoftInput {
   };
   private readonly onCompositionUpdate = (event: Event): void => {
     const data = (event as CompositionEvent).data;
-    if (this.active && typeof data === "string") this.active.text = data;
+    if (this.active) {
+      this.active.sawUpdate = true;
+      if (typeof data === "string") this.active.text = data;
+    }
   };
   private readonly onCompositionEnd = (event: Event): void => {
     this.active ??= { text: "" };
-    this.onCompositionUpdate(event);
     const range = this.active;
+    const data = (event as CompositionEvent).data;
+    if (typeof data === "string") range.text = data;
     this.active = undefined;
     const value = this.textarea?.value;
     // Chrome mutates the textarea and emits its composing insertText before
@@ -53,7 +64,9 @@ export class TerminalSoftInput {
     // establishes the boundary in onInput instead.
     if (range.start !== undefined && value !== undefined && value.length > range.start)
       range.commitLength = value.length - range.start;
-    else if (!range.text) range.commitLength = 0;
+    // A composition with no update lifecycle was canceled. An update with an
+    // empty payload can still precede Safari's nonempty final textarea mutation.
+    else if (!range.text && !range.sawUpdate) range.commitLength = 0;
     this.pending.push(range);
     // Bound on the textarea AFTER xterm: its commit timer runs before this
     // release. Pending membership keeps that delayed send owned while Safari
@@ -89,15 +102,26 @@ export class TerminalSoftInput {
       if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
       return;
     }
-    if (this.physicalInput() || input.inputType !== "insertText" || !input.data) return;
+    if (this.physicalInput() || input.inputType !== "insertText") return;
     if (this.staleKeydown) {
       // Xterm drops the composed input while its keydown flag is stale. Send
       // beforeinput ourselves, but preserve the native textarea mutation so a
-      // later 229 Backspace can diff it; intercept input to avoid sending twice.
-      input.stopImmediatePropagation();
-      if (input.type === "beforeinput") this.send(input.data);
+      // later 229 Backspace can diff it. Some IMEs expose data only on input,
+      // so remember whether its paired beforeinput was already forwarded.
+      if (input.type === "beforeinput") {
+        this.staleBeforeInputSent = false;
+        if (!input.data) return;
+        input.stopImmediatePropagation();
+        this.staleBeforeInputSent = true;
+        this.send(input.data);
+      } else if (input.type === "input") {
+        input.stopImmediatePropagation();
+        if (input.data && !this.staleBeforeInputSent) this.send(input.data);
+        this.staleBeforeInputSent = false;
+      }
       return;
     }
+    if (!input.data) return;
     if (!this.hasArmedModifier()) return;
     // Armed input differs: xterm would send the unmodified character, so cancel
     // the native event before sending the transformed bytes ourselves.
