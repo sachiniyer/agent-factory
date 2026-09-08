@@ -196,8 +196,9 @@ a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
 to split that pane, or onto its center to replace the displayed tab.
 
 There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
-`t` creates a shell tab, `w` asks to delete the active deletable tab, and `1`–`9` select a
-tab without attaching. Clicking a tab selects and attaches it.
+`t` opens the **New tab** picker, where **Terminal** and **VS Code** appear when
+supported. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
+without attaching. Clicking a tab selects and attaches it.
 
 When a backend cannot create local tabs, the bar explains the restriction.
 Archived sessions must be restored before creating tabs. Agents can also create
@@ -346,7 +347,7 @@ through to the agent unless a modal or menu handles them.
 | `ctrl+]` | Detach the terminal and return to navigation |
 | `Escape` | Close an open modal or menu; otherwise pass through to an attached agent |
 | `1`–`9` | Select a tab in navigation mode |
-| `t` | Create a shell tab when supported |
+| `t` | Open the New tab picker for the supported tab types |
 | `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
 | `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
