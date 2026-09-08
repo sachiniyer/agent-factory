@@ -588,3 +588,19 @@ test('#4078: merges after recovery belong to the latest qualifying notice episod
   assert.deepEqual(episodes.flatMap(e => e.merged).sort((a, b) => a - b), [3, 4031, 4051]);
   assert.deepEqual(aggregate(pulls.reverse(), t(12)), episodes);
 });
+
+test('#4078: a merge after the freeze boundary is attributed once to its retained episode', async () => {
+  const frozen = aggregate([{ number: 1, head: { sha: head },
+    artifacts: [comment(2, limits[0]), verdict(3, 'b'.repeat(40))] }], t(4))[0];
+  const now = tomorrow(8);
+  const pulls = [{ number: 1, updated_at: tomorrow(7), merged_at: tomorrow(6), head: { sha: head } }];
+  const artifactsByRoute = { '/issues/1/comments': [comment(2, limits[0]), verdict(3, 'b'.repeat(40))] };
+  const first = await runRecordedSweep({ episodes: [frozen], pulls, artifactsByRoute, now });
+  assert.deepEqual(first.episodes, [{ ...frozen, merged: [1] }]);
+  const repeat = await runRecordedSweep({ episodes: first.episodes, pulls, artifactsByRoute, now });
+  assert.deepEqual(repeat.episodes, first.episodes);
+  const newer = await runRecordedSweep({ episodes: first.episodes, pulls,
+    artifactsByRoute: { '/issues/1/comments': [...artifactsByRoute['/issues/1/comments'],
+      comment(4, limits[0], { created_at: tomorrow(4) })] }, now });
+  assert.deepEqual(newer.episodes.map(e => [e.start, e.merged]), [[t(2), []], [tomorrow(4), [1]]]);
+});
