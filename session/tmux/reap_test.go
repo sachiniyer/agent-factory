@@ -42,7 +42,11 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 	pidFile := filepath.Join(dir, "escapee.pid")
 	// nohup makes the sleeper ignore the SIGHUP that `tmux kill-session`
 	// delivers, so without reaping it would outlive the session forever.
-	script := "nohup sleep 300 >/dev/null 2>&1 & " + recordPIDShell("$!", pidFile) + "; exec sleep 300"
+	// Publish readiness from inside nohup, after SIGHUP protection is installed.
+	// The parent's $! only proves a fork: Close could otherwise kill the child
+	// before nohup starts, leaving a dead escapee but no reap report (#4068).
+	readySleep := recordPIDShell("$$", pidFile) + "; exec sleep 300"
+	script := shellsuggest.Command("nohup", "sh", "-c", readySleep) + " >/dev/null 2>&1 & exec sleep 300"
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
 	testguard.KeepTmuxServerOnEmpty(t)
