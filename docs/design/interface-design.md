@@ -120,7 +120,7 @@ these contracts rather than receiving separate palettes.
 | Rail | `ui.ts`, `filter.ts`, `project.ts`: session row, selected row, archived group, filter, project switcher, phone drawer | `sidebar_render.go`, `tree/`: section, session, child tab, selected and archived rows | Stable identity; name before detail; one state treatment; full name available. |
 | Header | AppShell view navigation, project context, connection, install/theme/disconnect tools | Rail header, project context, workspace title | Active view and project always recoverable; secondary tools disclosed on narrow screens. |
 | Terminal chrome | `split.ts`, `ui.ts`, `terminal.ts`: ordinary, selected, keyboard-owned pane, split divider | `tabbed_window.go`, `workspace.go`: ordinary, focused, interactive and preview | One title line and one focus contract; preserve PTY colours, geometry and input ownership. |
-| Tabs and review | Agent, shell, editor/web tab, active tab, close, add, rename, split and PR link | Child tab tree, tab jump and pane header | Selected tab visible without colour; keyboard route to every tab; preserve tab-specific capabilities. |
+| Tabs and review | Agent, shell, editor/web tab, active tab, close, add, rename and split | Child tab tree, tab jump and pane header | Selected tab visible without colour; keyboard route to every tab; preserve tab-specific capabilities. |
 | Dialogs and overlays | `modals.ts`, Tasks forms, directory picker, config assistant and account login | `ui/overlay/`, `app/handle_overlay.go`: create, prompt, search, pickers, confirmation, help | Title, fields, inline error, one primary action; busy copy static; preserve input and return focus. Destructive confirmation names the target and consequence. |
 | Tasks | `tasks.ts`: enabled, disabled, error, selected, create/edit, trigger | `task_pane.go`, `task_pane_edit.go`, `automations.go` | Name and next run first; no run-now action for a watch; failure remains visible without selection. |
 | Config and accounts | `ui.ts`, `config.ts`, accounts and assistant/login overlays | `config_pane.go`, `config_pane_accounts.go` and assistant | Key, purpose, value and feedback stay together. Accounts are identities, not precedence-chain keys. Preserve remote daemon identity. |
@@ -177,9 +177,9 @@ continue to transfer keyboard ownership; Escape still reaches the attached agent
 ### Tabs and review
 
 Use body-sized ink labels on surface, space-2 between tabs and no pill radius.
-The active tab is bold with an accent underline. The PR link uses accent beside
-the review context. In the TUI, the selected child tab uses the rail's raised
-row and cursor recipe. No duplicate active-tab colour. Close, rename, tab jump
+The active tab is bold with an accent underline. Review branch changes in a
+process tab beside the agent tab. In the TUI, the selected child tab uses the
+rail's raised row and cursor recipe. No duplicate active-tab colour. Close, rename, tab jump
 and split keep their capability-aware keyboard routes.
 
 ### Dialogs and overlays
@@ -398,7 +398,7 @@ P1 and the cold-reader walkthrough must check that disclosure remains discoverab
 | Persistent row-level destructive buttons | Tasks repeats Remove beside every row; session archive/kill icons occupy the selected row. Destructive emphasis interrupts ordinary selection. | Selected-item actions menu, keyboard shortcuts and target-specific confirmation; no lifecycle operation removed. |
 | Equal-weight default fields in create | Program/backend/account inherit defaults but receive three full input rows in the still. Prompt is the actual new work. | Compact explicit default summary with edit disclosure; account ambiguity and non-default choices always visible. |
 | Permanent registration field for each agent | Config still shows empty registration inputs across the lower screen before the user chooses to register anything. | One Add account action opens agent/name fields; existing account list and login controls remain. |
-| Redundant single-tab and rare-action chrome | Agent/New tab/Handoff sit beside title for a one-tab session; output is the primary reading task. | One compact tab/title row with an actions disclosure. Tab creation, handoff and split remain keyboard and pointer reachable. PR context stays visible in review. |
+| Redundant single-tab and rare-action chrome | Agent/New tab/Handoff sit beside title for a one-tab session; output is the primary reading task. | One compact tab/title row with an actions disclosure. Tab creation, handoff and split remain keyboard and pointer reachable. The selected process tab stays visible during review. |
 | Decorative count pills and repeated heavy rules | Counts are useful but their capsules and page-width rules give context the weight of controls. | Plain counts beside section labels; borders reserved for controls, focus and needed separation. |
 
 ### TUI cuts

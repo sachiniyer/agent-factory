@@ -19,8 +19,8 @@ where you want the center of gravity to live: your terminal, a desktop app, a
 team board, a hosted cloud agent, or a manual shell setup.
 
 <figure markdown>
-![Web client showing a branch’s git diff in a process tab beside its PR link](assets/web/comparison-review.png#only-light)
-![Web client showing a branch’s git diff in a process tab beside its PR link, dark theme](assets/web/comparison-review-dark.png#only-dark)
+![Web client showing a branch’s git diff in a process tab beside the Agent tab](assets/web/comparison-review.png#only-light)
+![Web client showing a branch’s git diff in a process tab beside the Agent tab, dark theme](assets/web/comparison-review-dark.png#only-dark)
 <figcaption>Agent Factory’s web client keeps sessions visible while you review a
 branch with ordinary git commands. The diff shown here is terminal output in a
 process tab.</figcaption>
