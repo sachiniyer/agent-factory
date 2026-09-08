@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
@@ -352,6 +353,8 @@ func committedFromLegacyRPCError(err error) error {
 }
 
 type rpcMutationCommittedError struct{ err error }
+
+var _ apiproto.MutationCommittedError = (*rpcMutationCommittedError)(nil)
 
 func (e *rpcMutationCommittedError) Error() string           { return e.err.Error() }
 func (e *rpcMutationCommittedError) Unwrap() error           { return e.err }

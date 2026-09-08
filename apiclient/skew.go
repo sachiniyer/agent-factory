@@ -75,18 +75,16 @@ type mutationCommittedError struct {
 	detail string
 }
 
+var _ apiproto.MutationCommittedError = (*mutationCommittedError)(nil)
+
 func (e *mutationCommittedError) Error() string           { return e.detail }
 func (e *mutationCommittedError) MutationCommitted() bool { return true }
 
-// IsMutationCommitted distinguishes a rejected mutation from a durable one
-// whose post-commit work failed. The latter still surfaces as an error, but a
-// caller must advance its persistence baseline instead of retrying the write.
+// IsMutationCommitted is apiproto.IsMutationCommitted under this package's name,
+// so client callers classify an outcome without importing the wire package. The
+// rule itself has one home; see apiproto/committed.go.
 func IsMutationCommitted(err error) bool {
-	type committed interface {
-		MutationCommitted() bool
-	}
-	var outcome committed
-	return errors.As(err, &outcome) && outcome.MutationCommitted()
+	return apiproto.IsMutationCommitted(err)
 }
 
 // RouteNotServedError reports that the daemon answered 404 for a /v1 route this
