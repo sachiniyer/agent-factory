@@ -21,7 +21,7 @@ type newTabChoice struct {
 
 var newTabChoices = []newTabChoice{
 	{label: "Terminal", kind: session.TabKindShell},
-	{label: "VS Code", kind: session.TabKindVSCode},
+	{label: "VS Code (web UI)", kind: session.TabKindVSCode},
 }
 
 // showNewTabPicker opens the TUI's existing enum-selection overlay for `t`.

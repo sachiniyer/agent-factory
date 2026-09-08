@@ -163,7 +163,7 @@ func (m *home) View() string {
 
 	if m.snapshotUnavailable && m.state == stateDefault {
 		return ui.RecoveryScreen(layout.Rect{W: m.termWidth, H: m.termHeight},
-			"Cannot reach the daemon", "The last loaded sessions are retained. af retries automatically.",
+			"Cannot reach the daemon", "Previous sessions are retained · retrying automatically.",
 			"Check the daemon connection.", true)
 	}
 

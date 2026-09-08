@@ -167,7 +167,7 @@ func TestMenuArchiveRestoreHintByRowState(t *testing.T) {
 			inst.SetStatusForTest(tc.status)
 			m := NewMenu()
 			m.SetInstance(inst)
-			m.SetSize(120, 1)
+			m.SetSize(160, 1)
 
 			out := m.String()
 			if !strings.Contains(out, tc.want) {
@@ -515,11 +515,11 @@ func TestMenuMiddleDotFitsAtEightyColumns(t *testing.T) {
 func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(readyUIInstance())
-	m.SetSize(100, 1)
+	m.SetSize(110, 1)
 
 	out := m.String()
 	for _, want := range []string{
-		"D kill",
+		"D delete session",
 		"t new tab",
 		"w del tab",
 		"1-9/g go",
@@ -543,12 +543,12 @@ func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
 func TestMenuSelftestWidthKeepsSelectedRowAndTabPaneHints(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(readyUIInstance())
-	m.SetSize(100, 1)
+	m.SetSize(110, 1)
 
 	out := m.String()
 	for _, want := range []string{
 		"n new",
-		"D kill",
+		"D delete session",
 		"t new tab",
 		"w del tab",
 		"1-9/g go",

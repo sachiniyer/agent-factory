@@ -323,8 +323,13 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if msg.String() == "D" && !sp.IsEditing() && !sp.IsCreating() {
 		if selected, ok := sp.SelectedTask(); ok {
-			m.confirmActionWithDetail("Delete task "+selected.Name+"? Future runs will stop.", "Sessions already created by this task remain available.", nil)
-			m.confirmationOverlay.OnConfirm = func() { sp.DeleteTask(selected.ID); m.state = stateTasks }
+			m.confirmActionWithDetail("Delete task "+selected.Name+"? Future runs will stop.", "Keep existing sessions.", nil)
+			m.confirmationOverlay.OnConfirm = func() {
+				// DeleteTask rechecks availability: a failed async refresh while
+				// confirming returns to the retained recovery notice unchanged.
+				sp.DeleteTask(selected.ID)
+				m.state = stateTasks
+			}
 			m.confirmationOverlay.OnCancel = func() { m.state = stateTasks }
 		}
 		return m, nil

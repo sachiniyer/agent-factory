@@ -130,11 +130,17 @@ func sanitizeError(raw string) string {
 	// so width math and the final truncate operate on plain text only — a
 	// bespoke regex repeatedly missed variants (#525 → #552 → #565).
 	clean := xansi.Strip(raw)
-	// xansi.Strip handles ANSI escapes but leaves bare \r untouched. Hook
-	// scripts commonly emit \r from progress indicators on stderr (see #668);
-	// a \r reaching the terminal moves the cursor back to column 0, overwriting
-	// lipgloss.Place's padding and corrupting the box.
-	return strings.ReplaceAll(clean, "\r", "")
+	// Strip escape sequences first so OSC terminators still delimit payloads.
+	// Then remove bare C0, DEL, and UTF-8 C1 controls that can move the cursor
+	// or trigger terminal effects. Tabs remain text; newlines become the same
+	// separator used by the status bar so recovery details occupy one line.
+	clean = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\n' && r != '\t' || r >= 0x7f && r <= 0x9f {
+			return -1
+		}
+		return r
+	}, clean)
+	return strings.ReplaceAll(clean, "\n", " · ")
 }
 
 func truncateStatusText(text string, width int) string {
