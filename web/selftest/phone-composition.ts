@@ -4,15 +4,17 @@ import { expect, type Page } from "@playwright/test";
 export async function assertPhoneComposition(page: Page, stream: () => string): Promise<void> {
   const textarea = page.locator(".af-pane-host .xterm-helper-textarea").first();
   const ctrl = page.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Ctrl", exact: true });
-  for (const [postCommit, trailing, committed, eventData] of [
-    [false, "", "字", "字"], [false, "x", "字", "字"], [true, "", "字", "字"], [true, "x", "字", "字"],
-    [true, "", "각", "가"], [true, "x", "각", "가"],
-    [true, "x", "가나", "ᄀ"], [true, "x", "ab", "b"],
+  for (const [postCommit, trailing, committed, eventData, inputData] of [
+    [false, "", "字", "字", "字"], [false, "x", "字", "字", "字"],
+    [true, "", "字", "字", "字"], [true, "x", "字", "字", "字"],
+    [true, "x", "字", "字", null],
+    [true, "", "각", "가", "가"], [true, "x", "각", "가", "가"],
+    [true, "x", "가나", "ᄀ", "ᄀ"], [true, "x", "ab", "b", "b"],
   ] as const) {
     const before = stream();
     await ctrl.click();
     await expect(ctrl).toHaveAttribute("data-state", "once");
-    await textarea.evaluate(async (el, { postCommit, trailing, committed, eventData }) => {
+    await textarea.evaluate(async (el, { postCommit, trailing, committed, eventData, inputData }) => {
       const input = el as HTMLTextAreaElement;
       const start = input.value.length;
       input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
@@ -32,12 +34,12 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
         input.dispatchEvent(keydown);
       }
       if (postCommit) input.dispatchEvent(new InputEvent("beforeinput", {
-        bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
+        bubbles: true, composed: true, data: inputData, inputType: "insertText", isComposing: false,
       }));
       if (postCommit) {
         input.value = input.value.substring(0, start) + committed;
         input.dispatchEvent(new InputEvent("input", {
-          bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
+          bubbles: true, composed: true, data: inputData, inputType: "insertText", isComposing: false,
         }));
         const keyup = new KeyboardEvent("keyup", { bubbles: true, key: "Unidentified" });
         Object.defineProperty(keyup, "keyCode", { value: 229 });
@@ -51,7 +53,7 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       }
       // Let xterm's compositionend timer finish before checking for duplicates.
       await new Promise(resolve => setTimeout(resolve, 0));
-    }, { postCommit, trailing, committed, eventData });
+    }, { postCommit, trailing, committed, eventData, inputData });
     if (!trailing) await expect.poll(stream).toBe(before + committed);
     await expect(ctrl).toHaveAttribute("data-state", trailing ? "off" : "once");
     await expect.poll(stream).toBe(before + committed + (trailing ? "\x18" : ""));

@@ -44,6 +44,19 @@ test("escape sequences and control bytes do not consume a character modifier", (
   assert.equal(state.input("c"), "\x03");
 });
 
+test("soft control input consumes a one-shot while terminal replies do not", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0);
+  assert.equal(state.input("\r", "user"), "\r");
+  assert.equal(state.state("Ctrl"), "off");
+  assert.equal(state.input("a"), "a");
+
+  state.tap("Ctrl", 1000);
+  assert.equal(state.input("\x1b[?1;2c", "terminal"), "\x1b[?1;2c");
+  assert.equal(state.state("Ctrl"), "once");
+  assert.equal(state.input("a"), "\x01");
+});
+
 test("pointerdown prevents focus transfer before acting", () => {
   let prevented = false;
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));

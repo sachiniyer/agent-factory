@@ -1,3 +1,5 @@
+import { TerminalSoftInput } from "./terminal-soft-input.js";
+
 /** Phone terminal controls and xterm-compatible key encodings. */
 export function keyBytes(key: string, ctrl = false, alt = false, applicationCursor = false): string {
   const arrows: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
@@ -33,14 +35,21 @@ export class StickyModifiers {
   }
   key(key: string, applicationCursor = false): string {
     const result = keyBytes(key, this.values.Ctrl !== "off", this.values.Alt !== "off", applicationCursor);
-    for (const modifier of ["Ctrl", "Alt"] as const) if (this.values[modifier] === "once") this.values[modifier] = "off";
+    this.consumeOnce();
     return result;
   }
-  input(text: string): string {
+  input(text: string, source: "terminal" | "user" = "terminal"): string {
     // xterm emits complete escape sequences, control keys and terminal replies.
-    // Those are not the next soft-keyboard character; never rewrite their tails.
-    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
+    // User controls consume one-shots at source, but parser replies must leave
+    // them armed; neither path may rewrite the tail of a control-led payload.
+    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) {
+      if (text && source === "user") this.consumeOnce();
+      return text;
+    }
     return Array.from(text, char => this.key(char)).join("");
+  }
+  private consumeOnce(): void {
+    for (const modifier of ["Ctrl", "Alt"] as const) if (this.values[modifier] === "once") this.values[modifier] = "off";
   }
 }
 
@@ -66,20 +75,10 @@ export class TerminalKeybar {
     this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
   };
   private readonly onKeyUp = (): void => { this.physicalInput = false; };
-  private readonly onSoftInput = (event: InputEvent): void => {
-    if (!this.focused || !this.phone.matches || this.physicalInput || event.isComposing ||
-      event.inputType !== "insertText" || !event.data) return;
-    if (event.type === "beforeinput" && !event.cancelable) return;
-    // xterm 5 can retain its keydown flag when a shortcut blurs the textarea
-    // before keyup. Claim all soft insertText before xterm, including plain text
-    // after a bar key consumes the one-shot. Leave physical keypress and IME
-    // commits to xterm; cancelling beforeinput prevents a duplicate input event.
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    this.input(event.data);
-  };
+  private readonly softInput: TerminalSoftInput;
   private readonly buttons = new Map<Modifier, HTMLButtonElement>();
   private readonly originalMaxHeight: string;
+  private userInput = false;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
     private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
@@ -102,7 +101,7 @@ export class TerminalKeybar {
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           // Resolve and consume at source, then enter xterm's user-input path.
           // transform() preserves these control/escape bytes without reapplying.
-          else this.input(this.modifiers.key(key, this.applicationCursor()));
+          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()));
           this.paint();
         };
         button.addEventListener("pointerdown", event => keybarPointerDown(event, act));
@@ -124,21 +123,33 @@ export class TerminalKeybar {
     host.addEventListener("keydown", this.onKeyDown, true);
     host.addEventListener("keyup", this.onKeyUp, true);
     this.softInput = new TerminalSoftInput(host, host.querySelector(".xterm-helper-textarea"),
-      () => this.focused && this.phone.matches, () => this.physicalInput, this.input,
+      () => this.focused && this.phone.matches, () => this.physicalInput, data => this.sendUserInput(data),
       () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off");
     this.paint();
   }
 
   setFocused(focused: boolean): void {
     this.focused = focused;
-    if (!focused) { this.modifiers.reset(); this.physicalInput = false; this.arrows = false; }
+    if (!focused) { this.modifiers.reset(); this.softInput.reset(); this.physicalInput = false; this.arrows = false; }
     this.paint();
     this.layout();
   }
   transform(text: string): string {
-    const output = this.focused && this.phone.matches ? this.modifiers.input(text) : text;
+    const source = this.userInput ? "user" : "terminal";
+    this.userInput = false;
+    const output = this.softInput.transform(text, value =>
+      this.focused && this.phone.matches ? this.modifiers.input(value, source) : value);
     this.paint();
     return output;
+  }
+  /** Mark xterm's next synchronous onData emission as genuine user input. */
+  markUserInput(): void {
+    this.userInput = true;
+    queueMicrotask(() => { this.userInput = false; });
+  }
+  private sendUserInput(data: string): void {
+    this.markUserInput();
+    this.input(data);
   }
   private paint(): void {
     this.rows.forEach((row, index) => { row.hidden = index !== (this.arrows ? 1 : 0); });
@@ -170,8 +181,7 @@ export class TerminalKeybar {
   dispose(): void {
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
-    this.host.removeEventListener("beforeinput", this.onSoftInput as EventListener, true);
-    this.host.removeEventListener("input", this.onSoftInput as EventListener, true);
+    this.softInput.dispose();
     this.observer.disconnect();
     this.phone.removeEventListener("change", this.layout);
     this.viewport?.removeEventListener("resize", this.layout);

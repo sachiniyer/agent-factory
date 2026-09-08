@@ -66,15 +66,22 @@ export class TerminalSoftInput {
     if (this.active || this.pending.length) {
       const range = this.pending.at(-1);
       if (range && input.inputType === "insertText" && input.type === "input" &&
-        input.isComposing === false && input.data) {
+        input.isComposing === false) {
+        const value = this.textarea?.value;
+        const mutationLength = value !== undefined && range.start !== undefined && value.length > range.start
+          ? value.length - range.start : undefined;
         if (range.keydownAfterEnd) {
-          range.trailingLength = (range.trailingLength ?? 0) + input.data.length;
+          range.trailingLength = mutationLength !== undefined
+            ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0))
+            : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         } else if (range.commitLength === undefined) {
-          const value = this.textarea?.value;
-          range.commitLength = value !== undefined && range.start !== undefined
-            ? value.length - range.start : input.data.length;
+          // The textarea mutation is the commit boundary. InputEvent.data is
+          // nullable on real IMEs and is only a fallback when no value is exposed.
+          range.commitLength = mutationLength ?? input.data?.length;
         } else {
-          range.trailingLength = (range.trailingLength ?? 0) + input.data.length;
+          range.trailingLength = mutationLength !== undefined
+            ? Math.max(range.trailingLength ?? 0, mutationLength - range.commitLength)
+            : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         }
       }
       // Preserve beforeinput's native mutation; CompositionHelper owns sending.

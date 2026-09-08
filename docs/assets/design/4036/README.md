@@ -14,7 +14,7 @@ agent; the displayed byte echo is not a real-agent interaction.
 Reproduce the browser assertions and screenshots with:
 
 ```sh
-AF_PLAYWRIGHT_ARGS='phone-keybar.spec.ts' scripts/testbox.sh web-selftest
+AF_PLAYWRIGHT_ARGS='-g keybar' scripts/testbox.sh web-selftest
 ```
 
 The browser observes actual outgoing binary Op.Input frames via the existing
@@ -107,3 +107,36 @@ related #2347 mobile-geometry case, which passes in green.
 [Full perf/visual validation](final-perf-green.txt) passes all five visual tests
 and all web/TUI budgets. Unit tests pass 745/745; typecheck, bundle build,
 strict MkDocs, and Go/lint gates pass. No golden or budget was updated.
+## Post-composition soft input
+
+Codex thread 3955185264 identified a phone IME commit arriving as `insertText`
+after `compositionend`, with `isComposing` already false. The soft-input
+interceptor sent it immediately, then xterm's CompositionHelper sent it again
+from its `setTimeout(0)` callback. The new regression reproduced two writes
+of `字` where one was expected.
+
+The keybar now tracks composition on xterm's helper textarea. Its release timer
+is registered after xterm's commit timer, keeping the composition owned by
+xterm through the post-composition input event. The textarea's native mutation
+is preserved; the separate input handler cannot duplicate the commit. Composed
+text bypasses sticky modifiers, leaving Ctrl armed for the next ordinary key.
+
+The browser probe exercises commits both with and without post-composition
+`insertText`, including a null-data commit whose textarea has already mutated.
+It asserts outgoing PTY input is exactly `字`, Ctrl remains armed, and the
+following soft `x` sends exactly `0x18` and clears Ctrl. Ctrl + soft Enter also
+sends CR, consumes the one-shot, and leaves the following `a` unmodified. The
+probe retains the existing stale-input deletion, keybar selection/scrollback,
+and blur/refocus coverage.
+
+[Unit red](composition-unit-red.txt) shows the duplicate write before the fix;
+[unit green](composition-unit-green.txt) records the original lifecycle proof.
+Final validation has 873 passing web unit tests and the refreshed full container
+web selftest passes [238/238](full-selftest-green.txt), including the null-data
+IME probe, soft-control consumption, stale-input deletion, keybar effects, and
+the previously reported terminal READY marker cases. Typecheck, regenerated
+bundle, Go build/vet, fast lint, and file-length checks pass.
+
+The full `make perf-container` also passes: all five visual tests (including
+`web chrome · both themes`), three web measurements, and all web/TUI budgets.
+No visual golden or performance budget was changed.

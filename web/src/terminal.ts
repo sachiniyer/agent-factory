@@ -614,6 +614,7 @@ export class AttachTerminal {
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
     // (regular chars and key escape sequences alike); UTF-8 encode it so a typed
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
+    this.term.onKey(() => this.keybar.markUserInput());
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key

@@ -122,11 +122,19 @@ export async function assertPhoneStaleRecovery(page: Page, stream: () => string)
 /** The focused regression also runs with the ordinary selftest cat fixture. */
 export async function assertPhoneBarModifiers(page: Page, stream: () => string): Promise<void> {
   const bar = page.locator(".af-terminal-keybar:visible");
+  const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
+  let before = stream();
+  await ctrl.click();
+  await page.keyboard.press("Enter");
+  await expect.poll(stream).toBe(before + "\r");
+  await expect(ctrl).toHaveAttribute("data-state", "off");
+  await page.keyboard.insertText("a");
+  await expect.poll(stream).toBe(before + "\ra");
   // Navigation between rows is not a keypress and must retain the one-shot.
   for (const [modifier, arrow, bytes] of [
     ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],
   ]) {
-    const before = stream();
+    before = stream();
     const button = bar.getByRole("button", { name: modifier, exact: true });
     await button.click();
     await expect(button).toHaveAttribute("data-state", "once");
@@ -139,9 +147,8 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     await page.keyboard.type("ls");
     await expect.poll(stream).toBe(before + bytes + "ls");
   }
-  const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
   await ctrl.dblclick({ delay: 80 });
-  const before = stream();
+  before = stream();
   await bar.getByRole("button", { name: "Arrows", exact: true }).click();
   await bar.getByRole("button", { name: "↑", exact: true }).click();
   await bar.getByRole("button", { name: "Back", exact: true }).click();

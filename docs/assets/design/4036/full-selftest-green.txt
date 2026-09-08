@@ -1,17 +1,13 @@
-scripts/testbox.sh web-selftest (excerpt; all tests ran)
+scripts/testbox.sh web-selftest (final-revision excerpt; all tests ran)
 
-  ✓   14 [chromium] › selftest/phone-keybar.spec.ts:5:1 › #4036 phone keybar applies and consumes modifiers before the next letter (11.8s)
-  ✓   73 [chromium] › selftest/web-driver.spec.ts:2446:1 › #2337: agent Shift+Enter preserves xterm input effects while shell keeps CR @real-fixture (10.2s)
-  ✓   84 [chromium] › selftest/web-driver.spec.ts:3455:1 › tabs: create a shell tab, switch to it, see its distinct output, close it (#1592 PR7) @real-fixture (1.8s)
-  ✓   85 [chromium] › selftest/web-driver.spec.ts:3601:3 › split panes (SESSION_A roster) › split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back @real-fixture (1.8s)
-  ✓   86 [chromium] › selftest/web-driver.spec.ts:3651:3 › split panes (SESSION_A roster) › split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up) @real-fixture (2.0s)
-  ✓   88 [chromium] › selftest/web-driver.spec.ts:3754:3 › split panes (SESSION_A roster) › split panes (feat): an out-of-range dropped tab is ignored — no broken pane @real-fixture (457ms)
-  ✓   89 [chromium] › selftest/web-driver.spec.ts:3770:3 › split panes (SESSION_A roster) › split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro) @real-fixture (1.6s)
-  ✓   90 [chromium] › selftest/web-driver.spec.ts:3803:1 › split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT tab beside it @real-fixture (2.2s)
-  ✓   91 [chromium] › selftest/web-driver.spec.ts:3865:1 › split panes (#1901): dragging the only tab of a ONE-tab session is an inert no-op @real-fixture (472ms)
-  ✓  139 [chromium] › selftest/web-driver.spec.ts:6938:1 › #2347: the mobile agent terminal also reclaims peer-owned geometry @real-fixture (11.0s)
-  ✓  142 [chromium] › selftest/web-driver.spec.ts:7243:1 › #1815: a tab created out-of-band must not rewind the scrolled terminal @real-fixture (2.1s)
-  ✓  143 [chromium] › selftest/web-driver.spec.ts:7343:1 › #1815: a resize must not re-arm the rewind on the next out-of-band resync @real-fixture (3.3s)
-  ✓  146 [chromium] › selftest/web-driver.spec.ts:7607:1 › #1815 review: a pane focused mid-close keeps its own tab @real-fixture (1.3s)
-  ✓  155 [chromium] › selftest/web-driver.spec.ts:8018:1 › a live PTY stream and the events WS survive the service worker controlling the page @real-fixture (917ms)
-  195 passed (6.4m)
+Running 238 tests using 1 worker
+
+#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018x\u0018字文\u0018ab\u007f\ra\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz"
+  ✓   33 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (13.8s)
+  ✓  106 [chromium] › selftest/web-driver.spec.ts:2369:1 › #2337: agent Shift+Enter preserves xterm input effects while shell keeps CR @real-fixture (9.2s)
+  ✓  172 [chromium] › selftest/web-driver.spec.ts:6876:1 › #2347: the mobile agent terminal also reclaims peer-owned geometry @real-fixture (10.0s)
+  ✓  188 [chromium] › selftest/web-driver.spec.ts:7959:1 › a live PTY stream and the events WS survive the service worker controlling the page @real-fixture (919ms)
+  ✓  231 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (764ms)
+  ✓  238 [chromium] › selftest/webtab-legacy.spec.ts:7:3 › web tab blocks legacy shorthand 2130706433 without navigation (720ms)
+
+  238 passed (6.7m)

@@ -7,7 +7,7 @@ function composition(type: string, data: string): Event {
   return Object.assign(new Event(type), { data });
 }
 
-function insertText(data: string, type = "input", isComposing = false): Event {
+function insertText(data: string | null, type = "input", isComposing = false): Event {
   return Object.assign(new Event(type, { cancelable: true }), { data, inputType: "insertText", isComposing });
 }
 
@@ -95,6 +95,26 @@ test("Safari commit after compositionend establishes the boundary before trailin
   host.dispatchEvent(insertText("字"));
   textarea.value += "x";
   host.dispatchEvent(insertText("x")); // Trailing even without keydown.
+
+  assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("null-data Safari commit freezes the mutated textarea boundary", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字";
+  host.dispatchEvent(insertText(null));
+  textarea.value += "x";
+  host.dispatchEvent(insertText("x")); // No keydown between either mutation.
 
   assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
   assert.equal(modifiers.state("Ctrl"), "off");
