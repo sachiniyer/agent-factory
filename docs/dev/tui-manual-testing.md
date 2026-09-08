@@ -75,20 +75,21 @@ text-greppable selection signal the driver asserts on:
 ```
 
 On a cold boot the cursor sits on the **section header** (no instance selected
-— menu shows the plain `n new · N new remote` set); the first `j` moves the
-cursor down onto the first instance. `af_select` is robust to any starting
-position: it anchors at the top (`k` is idempotent there), then steps down
-with `j` until the target row shows `▾` **and** the tree cursor is actually on
-it.
+— menu shows the plain `n new · / search · ? help · q quit` set); the first
+`j` moves the cursor down onto the first instance. `af_select` is robust to
+any starting position: it anchors at the top (`k` is idempotent there), then
+steps down with `j` until the target row shows `▾` **and** the tree cursor is
+actually on it.
 
 > **Display-selected ≠ cursor-on-row (#1174 / #1199).** The sticky `▾` is only
 > a *display* signal. A **single** auto-selected instance renders `▾` while the
 > cursor still sits on the section header — there `GetSelectedInstance()` is
 > `nil`, so `o`/`D`/attach silently no-op even though the row *looks* selected
 > (a false pass waiting to happen). `af_select` therefore also requires the
-> menu to advertise a **row-scoped verb (`D kill`)** — present only when a real
-> instance is under the cursor — and keeps pressing `j` past the header until
-> it appears. `af_attach`/`af_open_pane` inherit the fix because scenarios call
+> menu to advertise a **row-scoped verb (`D delete session`, or the legacy
+> `D kill` the driver still accepts)** — present only when a real instance is
+> under the cursor — and keeps pressing `j` past the header until it appears.
+> `af_attach`/`af_open_pane` inherit the fix because scenarios call
 > `af_select` first.
 
 ### Which key goes where (defaults, from `keys/keys.go`)
