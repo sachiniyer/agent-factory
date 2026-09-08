@@ -271,6 +271,10 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 					if scopeStopErr != nil && waitForHookScopeGone(ctx, run.progress.Prefix) {
 						resumed := run
 						resumed.leaveProgressUnfinishedOnCancel = true
+						// The nested runner owns its own lease reference. Without this
+						// retain, its release and ours can consume the create path's
+						// pre-commit hold while the owner row is still absent.
+						run.progress.retainLease()
 						<-runPostWorktreeHooks(ctx, resumed)
 					}
 					return

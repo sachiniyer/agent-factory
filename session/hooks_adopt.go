@@ -28,8 +28,7 @@ func AdoptRunningHookRuns(instances []*Instance) {
 		instance.mu.RUnlock()
 		if gw != nil && !gw.IsExternalWorktree() {
 			if terminal {
-				gw.AbandonHookProgress()
-				continue
+				gw.SetHookResumeDisabled(true)
 			}
 			worktrees = append(worktrees, gw)
 		}

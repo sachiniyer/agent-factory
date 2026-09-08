@@ -50,14 +50,14 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 		return nil, err
 	}
 	var progress *hookProgress
-	err = withHookProgressLock(filepath.Dir(path), func() error {
+	err = withHookProgressLock(filepath.Dir(path), func(dir string, identity os.FileInfo) error {
 		// Share one acquisition budget for GC and publication; a contended home
 		// must not pay the timeout twice before reporting that hooks could not start.
-		if err := pruneHookProgressLocked(filepath.Dir(path), time.Now()); err != nil {
+		if err := pruneHookProgressLocked(dir, time.Now()); err != nil {
 			log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
 		}
 		var publishErr error
-		progress, publishErr = publishHookProgress(run, commands, prefix, generation, path)
+		progress, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity)
 		return publishErr
 	})
 	if errors.Is(err, config.ErrLockTimeout) {
@@ -68,13 +68,29 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 
 // Publication and standalone pruning share the existing identity-probe budget.
 // Teardown remains nonblocking through TryWithFileLock in the retirement path.
-func withHookProgressLock(dir string, fn func() error) error {
-	return config.WithFileLockTimeout(filepath.Join(dir, ".progress"), relocationIdentityTimeout, fn)
+func withHookProgressLock(dir string, fn func(string, os.FileInfo) error) error {
+	pinned, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("resolve hook journal directory: %w", err)
+	}
+	identity, err := BoundedLstat(pinned)
+	if err != nil {
+		return fmt.Errorf("identify hook journal directory: %w", err)
+	}
+	if !identity.IsDir() {
+		return fmt.Errorf("hook journal path is not a directory: %s", pinned)
+	}
+	return config.WithFileLockTimeout(filepath.Join(pinned, ".progress"), relocationIdentityTimeout, func() error {
+		hookProgressLockAcquired()
+		return fn(pinned, identity)
+	})
 }
+
+var hookProgressLockAcquired = func() {}
 
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
-func publishHookProgress(run hookRun, commands []string, prefix, generation, path string) (*hookProgress, error) {
+func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo) (*hookProgress, error) {
 	dir, err := os.MkdirTemp(filepath.Dir(path), "entries-")
 	if err != nil {
 		return nil, err
@@ -126,6 +142,13 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	var previous hookProgress
 	if data, readErr := os.ReadFile(path); readErr == nil {
 		_ = json.Unmarshal(data, &previous)
+	}
+	currentParent, err := BoundedLstat(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	if !currentParent.IsDir() || !os.SameFile(parentIdentity, currentParent) {
+		return nil, fmt.Errorf("hook journal directory changed while publication lock was held")
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
 		return nil, err

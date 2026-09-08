@@ -125,6 +125,30 @@ func (g *GitWorktree) AbandonHookProgress() {
 	}
 }
 
+// Restore publishes terminal worktrees only after this asynchronous obligation
+// is installed. The shared batch owns the bounded read; marker persistence and
+// any retry continue without multiplying daemon startup by the row count.
+func (g *GitWorktree) installHookProgressAbandonment(worktreePath, sessionID string, p *hookProgress, readErr error) {
+	g.hooksResumeDisabled = true
+	if noResumableHookProgress(readErr) {
+		return
+	}
+	done := make(chan struct{})
+	g.hooksRetirementDone = done
+	go func() {
+		defer close(done)
+		if readErr == nil {
+			if err := p.markFinished(); err == nil {
+				return
+			} else {
+				readErr = err
+			}
+		}
+		log.WarningLog.Printf("cannot abandon hook progress for %s: %v; scheduling bounded retry", worktreePath, readErr)
+		retryHookProgressAbandonment(worktreePath, sessionID)
+	}()
+}
+
 // retireHookProgress is called only AFTER cancellation, join and scope teardown
 // have proved all writers gone. Mark terminal before attempting the lock so
 // interrupted or deferred reclamation remains eligible for the orphan sweep.

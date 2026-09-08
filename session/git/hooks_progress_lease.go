@@ -51,7 +51,7 @@ func withInactiveHookProgressLease(dir string, remove func() error) (bool, error
 	if err != nil {
 		return false, err
 	}
-	linked, err := os.Lstat(leasePath)
+	linked, err := BoundedLstat(leasePath)
 	if err != nil {
 		return false, err
 	}

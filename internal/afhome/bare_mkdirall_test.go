@@ -128,9 +128,6 @@ var auditedMkdir = map[string]struct {
 	sites  int
 	reason string
 }{
-	"session/git/hooks_progress_failure.go:hookProgress.recordLaunchFailure": {1,
-		"Atomically claims one numbered receipt under an already-published entries directory. " +
-			"Mkdir must fail if that parent disappeared; it never creates ancestors or resurrects the AF home."},
 	"config/inrepo.go:inRepoConfigWriteTarget": {1,
 		"Creates the config directory inside a repo; its parent must exist or Mkdir returns ENOENT."},
 	"internal/agentaccount/agentaccount.go:Register": {1,

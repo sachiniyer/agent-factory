@@ -13,9 +13,15 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// Match #4045's hooklog retention policy. Journals are multi-file state rather
-// than output descriptors: absent or terminal ownership, old receipt activity,
-// and an empty scope/launcher probe replace the inherited descriptor lock.
+// Hook progress retention has four cooperating authorities. A live owner row
+// protects every resumable journal; an archived or tombstoned row is terminal
+// and therefore permits eventual reclamation. A runner or pending create holds
+// runner.lock across gaps where no scope is visible, and every nested runner
+// owns exactly one lease hold. Retirement first removes the resumable journal
+// name, then deletes receipts; a retired name can never be adopted and is safe
+// to finish reclaiming after the shared liveness probes and lease check. Unknown
+// ownership, metadata, or manager liveness leaves all affected state in place.
+// The age and count limits otherwise match #4045's hooklog retention policy.
 const (
 	keptProgressLimit = 20
 	keptProgressAge   = 14 * 24 * time.Hour
@@ -31,7 +37,7 @@ type keptProgress struct {
 }
 
 func pruneHookProgress(dir string, now time.Time) {
-	err := withHookProgressLock(dir, func() error { return pruneHookProgressLocked(dir, now) })
+	err := withHookProgressLock(dir, func(pinned string, _ os.FileInfo) error { return pruneHookProgressLocked(pinned, now) })
 	if err != nil {
 		log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
 	}
@@ -43,14 +49,12 @@ func pruneHookProgressLocked(dir string, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	if err := pruneUnpublishedHookReceipts(dir, entries, now); err != nil {
-		return err
-	}
 	owners, err := hookProgressOwners()
 	if err != nil {
 		return err
 	}
 	var candidates []keptProgress
+	var staleRetired []string
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || (!strings.HasPrefix(entry.Name(), "progress-") && !strings.HasPrefix(entry.Name(), "retired-entries-")) || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -60,59 +64,64 @@ func pruneHookProgressLocked(dir string, now time.Time) error {
 		// Removal may have finished the receipt directory before the process
 		// exited. The retired name cannot be adopted, so finish that deletion.
 		if os.IsNotExist(err) && strings.HasPrefix(entry.Name(), "retired-entries-") {
-			data, readErr := os.ReadFile(path)
+			data, readErr := BoundedReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
 			var retired hookProgress
-			if readErr == nil && json.Unmarshal(data, &retired) == nil {
+			if json.Unmarshal(data, &retired) == nil {
 				receipt, receiptErr := hookReceiptDirectory(path, retired.Directory)
+				if receiptErr != nil && !noResumableHookProgress(receiptErr) {
+					return receiptErr
+				}
 				if receiptErr == nil && receipt == filepath.Join(dir, strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "retired-"), ".json")) {
-					if _, statErr := os.Lstat(receipt); os.IsNotExist(statErr) {
-						_ = os.Remove(path)
+					if _, statErr := BoundedLstat(receipt); os.IsNotExist(statErr) {
+						staleRetired = append(staleRetired, path)
+					} else if statErr != nil {
+						return statErr
 					}
 				}
 			}
 			continue
 		}
-		if err != nil || p.SessionID == "" || p.Prefix != systemdunit.HookScopeUnitPrefix(p.SessionID) {
+		if err != nil {
+			// Corrupt and temporarily unreadable journals keep their receipts
+			// conservatively, but do not prevent independent valid journals from
+			// reaching the bounded metadata scan below.
+			continue
+		}
+		if p.SessionID == "" || p.Prefix != systemdunit.HookScopeUnitPrefix(p.SessionID) {
 			continue
 		}
 		retired := strings.HasPrefix(entry.Name(), "retired-entries-")
 		if retired && entry.Name() != "retired-"+filepath.Base(p.Directory)+".json" {
 			continue // A retired artifact must name its own receipt directory.
 		}
-		activeOwner, hasOwner := owners[p.SessionID]
-		// Unfinished journals can belong to sessions lost before their first
-		// row was committed. Only an absent row makes those eligible; a
-		// present archived/tombstoned row still requires terminal evidence.
-		// Retirement has already removed the resumable name. An active owner
-		// (including its replacement run) cannot keep this old artifact alive.
-		if !retired && (activeOwner || (hasOwner && !p.finished())) {
+		activeOwner := owners[p.SessionID]
+		// Active rows remain resumable. Archived and tombstoned rows are
+		// terminal ownership evidence, so their unfinished journals join the
+		// same grace/liveness/lease reclamation path as ownerless journals.
+		if !retired && activeOwner {
 			continue
 		}
-		info, err := entry.Info()
+		modified, incomplete, err := hookProgressActivity(path, p)
 		if err != nil {
 			return err
-		}
-		modified := info.ModTime()
-		files := []string{p.Directory, filepath.Join(p.Directory, "finished")}
-		for index := range p.Commands {
-			files = append(files, p.receipt(index), filepath.Join(p.receipt(index), "exit"))
-		}
-		for _, path := range files {
-			info, err := os.Lstat(path)
-			if os.IsNotExist(err) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			if info.ModTime().After(modified) {
-				modified = info.ModTime()
-			}
 		}
 		if now.Sub(modified) < progressGraceAge {
 			continue
 		}
-		candidates = append(candidates, keptProgress{path: path, progress: p, modified: modified, incomplete: !p.completed(), retired: retired})
+		candidates = append(candidates, keptProgress{path: path, progress: p, modified: modified, incomplete: incomplete, retired: retired})
+	}
+	// Receipt discovery can also need metadata. Do it before deleting any
+	// journal so an inconclusive filesystem answer aborts this pass intact.
+	if err := pruneUnpublishedHookReceipts(dir, entries, now); err != nil {
+		return err
+	}
+	for _, path := range staleRetired {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	// Exclude active scopes from the quota as well as deletion. One fleet
 	// probe also protects terminal-marked journals whose teardown is pending.
@@ -187,6 +196,49 @@ func pruneHookProgressLocked(dir string, now time.Time) error {
 		log.InfoLog.Printf("pruned %d inactive hook journals", removed)
 	}
 	return nil
+}
+
+func hookProgressActivity(path string, p *hookProgress) (time.Time, bool, error) {
+	info, err := BoundedLstat(path)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	modified, complete := info.ModTime(), true
+	files := []struct {
+		path     string
+		required bool
+	}{{path: p.Directory}, {path: filepath.Join(p.Directory, "finished"), required: true}}
+	for index := range p.Commands {
+		files = append(files,
+			struct {
+				path     string
+				required bool
+			}{path: p.receipt(index)},
+			struct {
+				path     string
+				required bool
+			}{path: filepath.Join(p.receipt(index), "exit"), required: true},
+		)
+	}
+	for _, file := range files {
+		info, err := BoundedLstat(file.path)
+		if os.IsNotExist(err) {
+			if file.required {
+				complete = false
+			}
+			continue
+		}
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		if file.required && !info.Mode().IsRegular() {
+			complete = false
+		}
+		if info.ModTime().After(modified) {
+			modified = info.ModTime()
+		}
+	}
+	return modified, !complete, nil
 }
 
 func hookProgressOwners() (map[string]bool, error) {

@@ -5,39 +5,58 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-var hookProgressWriteFile = os.WriteFile
+var (
+	hookProgressWriteFile = config.AtomicWriteFile
+	hookProgressRemoveAll = os.RemoveAll
+)
 
 // Preserve continue-on-error semantics without leaving a pending hole before
-// later commands. mkdir is the same atomic claim used by the scoped shell: a
-// competing/late launcher cannot execute a command after this terminal claim.
-// If storage cannot record the claim, stop before executing any later entry.
+// later commands. An exclusive rename publishes both durable markers as one
+// claim; temporary directories never count as claimed. If storage cannot
+// publish the claim, stop before executing any later entry.
 func (p *hookProgress) recordLaunchFailure(index int, cause error) bool {
 	if p == nil {
 		return true
 	}
 	receipt := p.receipt(index)
-	if err := os.Mkdir(receipt, 0700); err != nil {
-		if os.IsExist(err) {
-			return true
-		}
+	temporary, err := os.MkdirTemp(p.Directory, ".launch-failed-")
+	if err != nil {
 		log.ErrorLog.Printf("cannot claim failed post-worktree hook entry %d: %v", index, err)
 		return false
 	}
 	published := false
 	defer func() {
 		if !published {
-			_ = os.RemoveAll(receipt)
+			_ = hookProgressRemoveAll(temporary)
 		}
 	}()
-	for name, value := range map[string]string{"launch-failed": fmt.Sprintln(cause), "exit": "125\n"} {
-		if err := hookProgressWriteFile(filepath.Join(receipt, name), []byte(value), 0600); err != nil {
+	markers := []struct{ name, value string }{
+		{name: "launch-failed", value: fmt.Sprintln(cause)},
+		{name: "exit", value: "125\n"},
+	}
+	for _, marker := range markers {
+		if err := hookProgressWriteFile(filepath.Join(temporary, marker.name), []byte(marker.value), 0600); err != nil {
 			log.ErrorLog.Printf("cannot record failed post-worktree hook entry %d: %v", index, err)
 			return false
 		}
 	}
+	if err := renameHookProgressNoReplace(temporary, receipt); err != nil {
+		if _, claimErr := os.Stat(receipt); claimErr == nil {
+			return true
+		}
+		log.ErrorLog.Printf("cannot publish failed post-worktree hook entry %d: %v", index, err)
+		return false
+	}
 	published = true
+	if parent, err := os.Open(p.Directory); err == nil {
+		if syncErr := parent.Sync(); syncErr != nil {
+			log.WarningLog.Printf("cannot sync failed post-worktree hook entry %d: %v", index, syncErr)
+		}
+		_ = parent.Close()
+	}
 	return true
 }

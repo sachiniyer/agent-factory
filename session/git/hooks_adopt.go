@@ -47,12 +47,13 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 		return
 	}
 	eligible := make([]*GitWorktree, 0, len(worktrees))
+	terminal := make([]*GitWorktree, 0, len(worktrees))
 	for _, g := range worktrees {
 		if g == nil || g.IsExternalWorktree() {
 			continue
 		}
 		if g.hooksResumeDisabled {
-			g.AbandonHookProgress()
+			terminal = append(terminal, g)
 			continue
 		}
 		if g.HasUnresolvedRelocation() {
@@ -65,7 +66,7 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 			eligible = append(eligible, g)
 		}
 	}
-	progressAdopted := adoptHookProgressBatch(eligible)
+	progressAdopted := reconcileHookProgressBatch(eligible, terminal)
 	candidates := make([]*GitWorktree, 0, len(eligible))
 	owned := make([][]string, 0, len(worktrees))
 	var all []string

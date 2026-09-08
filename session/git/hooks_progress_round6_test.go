@@ -54,9 +54,9 @@ func TestHookProgressUncommittedOrphanPruning(t *testing.T) {
 			pruneHookProgress(filepath.Dir(path), time.Now())
 			for _, file := range []string{path, p.Directory} {
 				_, err := os.Stat(file)
-				if kind == "old" {
+				if kind == "old" || kind == "archived" {
 					if !os.IsNotExist(err) {
-						t.Errorf("old ownerless unfinished journal retained: %s", file)
+						t.Errorf("terminal unfinished journal retained: %s", file)
 					}
 				} else if err != nil {
 					t.Errorf("protected %s journal removed: %s: %v", kind, file, err)

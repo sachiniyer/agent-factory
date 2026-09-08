@@ -11,6 +11,9 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
+// Test seam for a metadata syscall that stalls beneath the bounded worker.
+var boundedLstatPath = os.Lstat
+
 // BoundedLstat runs os.Lstat through the shared identity-probe deadline (#3278
 // review). The destruction path's absence checks run while the caller holds
 // the session operation lock, so a stalled FUSE/NFS mount must surface as a
@@ -37,7 +40,7 @@ func BoundedLstat(path string) (os.FileInfo, error) {
 	boundedLstatFlights.byPath[path] = flight
 	boundedLstatFlights.Unlock()
 	go func() {
-		flight.info, flight.err = os.Lstat(path)
+		flight.info, flight.err = boundedLstatPath(path)
 		boundedLstatFlights.Lock()
 		if boundedLstatFlights.byPath[path] == flight {
 			delete(boundedLstatFlights.byPath, path)

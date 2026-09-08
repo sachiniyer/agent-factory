@@ -23,6 +23,7 @@ var hookReceiptReferenceWarning sync.Once
 func pruneUnpublishedHookReceipts(dir string, entries []os.DirEntry, now time.Time) error {
 	referenced := make(map[string]bool)
 	ambiguous := false
+	var abandoned []string
 	for _, entry := range entries {
 		name := entry.Name()
 		if (!strings.HasPrefix(name, "progress-") && !strings.HasPrefix(name, "retired-entries-")) || !strings.HasSuffix(name, ".json") {
@@ -51,13 +52,16 @@ func pruneUnpublishedHookReceipts(dir string, entries []os.DirEntry, now time.Ti
 		if referenced[entry.Name()] {
 			continue
 		}
-		info, err := entry.Info()
+		info, err := BoundedLstat(path)
 		if err != nil {
 			return err
 		}
 		if now.Sub(info.ModTime()) < progressGraceAge {
 			continue
 		}
+		abandoned = append(abandoned, path)
+	}
+	for _, path := range abandoned {
 		if _, err := withInactiveHookProgressLease(path, func() error { return os.RemoveAll(path) }); err != nil {
 			return err
 		}

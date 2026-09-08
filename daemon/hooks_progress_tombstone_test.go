@@ -78,8 +78,15 @@ func TestHookProgressTombstoneRestoreNeverResumes(t *testing.T) {
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Error("terminal session resumed repository commands")
 			}
-			if _, err := os.Stat(filepath.Join(dir, "finished")); err != nil {
-				t.Error("terminal journal was not durably finished", err)
+			finished := filepath.Join(dir, "finished")
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(finished); err == nil {
+					break
+				} else if time.Now().After(deadline) {
+					t.Fatal("terminal journal was not durably finished", err)
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
 			gw, err := gitworktree.NewGitWorktreeFromStorage(repoPath, tree, "tombstone", "", "", false, false)
 			if err != nil {

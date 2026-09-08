@@ -17,11 +17,13 @@ func retireHookProgressSnapshot(p *hookProgress, path string) (bool, error) {
 		current, err := readHookProgress(path)
 		if os.IsNotExist(err) {
 			retired := filepath.Join(filepath.Dir(path), "retired-"+filepath.Base(p.Directory)+".json")
-			if _, statErr := os.Lstat(retired); statErr == nil {
+			if _, statErr := BoundedLstat(retired); statErr == nil {
 				// A prior attempt may have renamed the resumable journal before
 				// failing to remove its receipts. Continue the same retirement
 				// against the non-resumable name.
 				return hookProgressRemove(retired, p)
+			} else if !os.IsNotExist(statErr) {
+				return statErr
 			}
 			return nil
 		}
