@@ -1,0 +1,24 @@
+
+ Agent Factory
+ ▼ Sessions (0)
+
+
+
+
+
+
+                                        No project registered
+
+                       Run af projects register <path> to register a checkout.
+
+
+
+
+
+
+
+
+
+
+               n new · N new remote · / search · ? help · q quit
+
