@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 const systemdHookScopeTestEnv = "AF_SYSTEMD_LIFECYCLE_TEST"
@@ -229,60 +231,132 @@ func waitForRealHookScope(t *testing.T, prefix string, timeout time.Duration) {
 func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	requireSystemdUserManager(t)
 	claimDaemonMarker(t)
+	if os.Getenv("AF_TEST_REAL_SCOPE_HELPER") == "1" {
+		t.Setenv("AGENT_FACTORY_HOME", os.Getenv("AF_TEST_REAL_SCOPE_HOME"))
+		previous := &GitWorktree{
+			repoPath:     os.Getenv("AF_TEST_REAL_SCOPE_REPO"),
+			worktreePath: os.Getenv("AF_TEST_REAL_SCOPE_TREE"),
+			hooksCtx:     context.Background(),
+		}
+		previous.SetHookScopeSessionID(os.Getenv("AF_TEST_REAL_SCOPE_SESSION"))
+		<-previous.runHooks()
+		return
+	}
+	// Include the watcher's log-once diagnostic in CI failures, not just the
+	// generic readiness timeout. Restore the logger after the watcher is joined.
+	warningWriter := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(os.Stderr)
+	t.Cleanup(func() { log.WarningLog.SetOutput(warningWriter) })
 
-	const sessionID = "3682real-0000-4000-8000-abcdefabcdef"
+	sessionID := "3682real-" + systemdunit.NewHookScopeGeneration()
 	prefix := systemdunit.HookScopeUnitPrefix(sessionID)
 	if prefix == "" {
 		t.Fatal("no scope prefix derives from the session id; this test would prove nothing")
 	}
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath, worktreePath := linkedHookWorktree(t)
 	gate := filepath.Join(t.TempDir(), "release")
-	repoPath := freshRepoConfig(t, []string{fmt.Sprintf("while [ ! -f %q ]; do sleep 0.2; done", gate)})
+	pidFile := filepath.Join(t.TempDir(), "hook.pid")
+	order := filepath.Join(t.TempDir(), "order")
+	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repoPath), &config.RepoConfig{PostWorktreeCommands: []string{
+		fmt.Sprintf("printf '%%s' \"$$\" > %q; while [ ! -f %q ]; do sleep 0.2; done; printf 'first\\n' >> %q", pidFile, gate, order),
+		fmt.Sprintf("printf 'second\\n' >> %q", order),
+	}})
 
-	// The PREVIOUS daemon's run: the real hook path, in a real unbound scope.
-	previous := &GitWorktree{repoPath: repoPath, worktreePath: t.TempDir()}
-	previous.SetHookScopeSessionID(sessionID)
-	ctx, cancel := context.WithCancel(context.Background())
-	previous.hooksCtx = ctx
-	previous.hooksCancel = cancel
-	previous.hooksDone = previous.runHooks()
+	// A disposable process is the previous daemon. Killing only that process
+	// prevents it from finishing the journal or launching entry 2; entry 1 must
+	// survive in its real unbound scope and only the adopter can run the suffix.
+	previous := exec.Command(os.Args[0], "-test.run=^TestRestoreAdoptsAHookRunStillLiveInItsRealScope$", "-test.v")
+	previous.Env = append(os.Environ(),
+		"AF_TEST_REAL_SCOPE_HELPER=1", "AF_TEST_REAL_SCOPE_HOME="+home,
+		"AF_TEST_REAL_SCOPE_REPO="+repoPath, "AF_TEST_REAL_SCOPE_TREE="+worktreePath,
+		"AF_TEST_REAL_SCOPE_SESSION="+sessionID)
+	previous.Stdout, previous.Stderr = os.Stdout, os.Stderr
+	if err := previous.Start(); err != nil {
+		t.Fatal(err)
+	}
+	previousReaped := false
 	t.Cleanup(func() {
+		if !previousReaped {
+			_ = previous.Process.Kill()
+			_ = previous.Wait()
+		}
 		_ = os.WriteFile(gate, nil, 0o600)
-		cancel()
-		select {
-		case <-previous.hooksDone:
-		case <-time.After(30 * time.Second):
+		// This prefix is unique to this invocation. Include delayed launchers
+		// so even a startup failure cannot leak a scope past fixture cleanup.
+		if err := systemdunit.StopHookScopes(prefix); err != nil {
+			t.Errorf("stop test scopes: %v", err)
 		}
 	})
+	waitForPidFile(t, pidFile, 30*time.Second)
+	waitForRealHookScope(t, prefix, 30*time.Second)
+	if err := previous.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = previous.Wait()
+	previousReaped = true
 	waitForRealHookScope(t, prefix, 30*time.Second)
 
-	// The SUCCESSOR daemon: a worktree rebuilt from the persisted record, whose
-	// only handle on that run is the recorded prefix. Nothing else survives a
-	// restart — hooksCancel, cmd.Wait and the pgid all died with the daemon.
-	restored, err := NewGitWorktreeFromStorage(repoPath, previous.worktreePath, "adopted", "af/adopted", "", false, false)
+	restored, err := NewGitWorktreeFromStorage(repoPath, worktreePath, "adopted", "hook-resume", "", false, false)
 	if err != nil {
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
 	}
+	restored.hooksCtx, restored.hooksCancel = context.WithCancel(context.Background())
 	restored.SetHookScopeSessionID(sessionID)
 	restored.SetHookScopeUnitPrefix(prefix)
-
+	progress, _, err := restored.ownedHookProgress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Join before the earlier cleanup stops this invocation's scopes and
+	// before TempDir removes any paths the watcher may still write.
+	t.Cleanup(func() {
+		_ = os.WriteFile(gate, nil, 0o600)
+		restored.hooksCancel()
+		if restored.HooksDone() != nil {
+			waitForClosed(t, restored.HooksDone(), 30*time.Second, "adoption watcher did not stop")
+		}
+	})
+	if !progress.claimed(0) || progress.claimed(1) || progress.finished() {
+		t.Fatal("previous daemon did not leave entry 1 in flight and entry 2 pending")
+	}
+	if err := verifyHookResumeWorktree(context.Background(), repoPath, worktreePath, "hook-resume"); err != nil {
+		t.Fatalf("fixture is not a verifiable linked worktree: %v", err)
+	}
 	AdoptRunningHooks([]*GitWorktree{restored})
-
 	adopted := restored.HooksDone()
 	if adopted == nil {
-		t.Fatalf("the restored session reports no hook in flight while a real %s-*.scope is active in the user manager (#3682)", prefix)
+		t.Fatalf("restored session reports no hook in flight while a real %s-*.scope is active", prefix)
 	}
 	select {
 	case <-adopted:
-		t.Fatalf("the restored session reported its hooks finished while a real %s-*.scope is still active", prefix)
+		t.Fatal("restored session reported hooks finished while its real scope is active")
 	default:
 	}
-
+	if _, err := os.Stat(order); !os.IsNotExist(err) {
+		t.Fatal("an entry finished before entry 1 was released")
+	}
 	if err := os.WriteFile(gate, nil, 0o600); err != nil {
 		t.Fatalf("release the hook: %v", err)
 	}
 	select {
 	case <-adopted:
 	case <-time.After(90 * time.Second):
-		t.Fatal("the adopted run never reported finishing after the real hook exited and its scope was collected")
+		t.Fatal("adopted run never finished after its survivor exited and remaining commands resumed")
 	}
+	raw, err := os.ReadFile(order)
+	if err != nil || string(raw) != "first\nsecond\n" {
+		t.Fatalf("resumed command order = %q, err=%v; want first then second exactly once", raw, err)
+	}
+	if !progress.completed() {
+		t.Fatal("resumed list has no finished marker or exit receipts")
+	}
+	for index := range progress.Commands {
+		exit, err := os.ReadFile(filepath.Join(progress.receipt(index), "exit"))
+		if err != nil || strings.TrimSpace(string(exit)) != "0" {
+			t.Errorf("entry %d exit receipt = %q, err=%v", index, exit, err)
+		}
+	}
+	t.Log("real scope survived previous daemon exit; adopter ran entry 2 exactly once after entry 1; both receipts and finished marker recorded")
 }
