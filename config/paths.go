@@ -44,3 +44,13 @@ func ShellQuotePath(path string) string {
 	}
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
+
+// GlobalConfigFileForDisplay names the canonical global TOML file in remedies,
+// honoring AGENT_FACTORY_HOME and abbreviating the user's home directory.
+func GlobalConfigFileForDisplay() string {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return "the global config file"
+	}
+	return prettyHomePath(filepath.Join(dir, TomlConfigFileName))
+}

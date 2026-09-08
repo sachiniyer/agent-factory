@@ -794,8 +794,8 @@ func TestCreateSessionRejectsReservedRootTitle(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected reserved title %q to be rejected", title)
 		}
-		if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), "root_agents") {
-			t.Fatalf("rejection for %q must name the reservation and the root_agents opt-in, got: %v", title, err)
+		if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), "[root_agent]") {
+			t.Fatalf("rejection for %q must name the reservation and the [root_agent] profile, got: %v", title, err)
 		}
 	}
 }

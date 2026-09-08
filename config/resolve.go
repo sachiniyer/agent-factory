@@ -66,6 +66,10 @@ type ResolvedConfig struct {
 	// equivalent lexical spelling through RebaseProjectPathsForDisplay.
 	ProjectRoot string `json:"-" toml:"-"`
 
+	// InRepoConfigFile is the repo-relative filename selected by the loader.
+	// It stays empty when no in-repo file was loaded.
+	InRepoConfigFile string `json:"-" toml:"-"`
+
 	// Resolution is produced by the same manifest-driven pass that populated
 	// the effective fields above. Renderers consume it directly; they never
 	// reconstruct precedence from the finished Config.
@@ -238,6 +242,10 @@ func resolveConfigRootsWithOptions(
 		metadata: legacy.source,
 		schemas:  []any{legacy},
 	})
+	inRepoConfigFile := ""
+	if inRepo != nil {
+		inRepoConfigFile = filepath.Join(InRepoConfigDirName, filepath.Base(inRepo.source.path))
+	}
 	if inRepo == nil {
 		inRepo = &InRepoConfig{source: sourceMetadata{
 			path:   InRepoTomlConfigPath(workspaceRoot),
@@ -266,6 +274,8 @@ func resolveConfigRootsWithOptions(
 	if err != nil {
 		return nil, err
 	}
+
+	res.InRepoConfigFile = inRepoConfigFile
 
 	// Rewrite relative hook command paths to absolute against workspaceRoot
 	// (#834). This is the single chokepoint for the rewrite: every exec of a

@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // RootSessionTitle is the reserved title of the always-ensured root agent
 // (#1106): an in-place session the daemon creates at the repo root for repos
-// opted in via the root_agents config key, and re-creates when it dies.
+// opted in via the [root_agent] project profile, and re-creates when it dies.
 const RootSessionTitle = "root"
 
 // IsReservedTitle reports whether a session title IS the root agent's — the
@@ -72,7 +73,7 @@ func ReservedTitleRefusal(title string) error {
 	if reserved == "" {
 		return nil
 	}
-	const remedy = "pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)"
+	remedy := fmt.Sprintf("pick another name (to run a root agent on this repo, configure the [root_agent] project profile in %s)", config.GlobalConfigFileForDisplay())
 	if IsReservedTitle(title) {
 		return fmt.Errorf("session title %q is reserved for the daemon-managed root agent; %s", title, remedy)
 	}
