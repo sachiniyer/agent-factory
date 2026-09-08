@@ -14649,10 +14649,6 @@ var AppShell = class {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   handoffBtn = null;
   handoffVisible = false;
-  // The PR badge link and the signature of what it currently draws (#3285). Same
-  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
-  // session's PR — or its state flips open → merged — WITHOUT a selection change,
-  // so patchMainHead fills it rather than deciding once at build time.
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
