@@ -119,15 +119,15 @@ func TestMenuLimitBlockedRowFitsNarrowWidths(t *testing.T) {
 	// limitRowFloor is where BOTH limit actions still fit alongside the four hints
 	// that are never dropped. It is arithmetic, not taste:
 	//
-	//   n new(5) + D kill(6) + c retry limit(13) + F hand off(10)
-	//     + ? help(6) + q quit(6) + six separators(3 each) = 61
+	//   n new(5) + D delete session(16) + c retry limit(13) + F hand off(10)
+	//     + ? help(6) + q quit(6) + six separators(3 each) = 71
 	//
 	// Below it something in that set must go, and #1083 already settled which:
 	// help and quit are the escape hatches, so the limit actions shed instead.
 	// Pinned so a copy change that widens either fragment fails HERE, naming the
 	// row it broke, rather than silently raising the width at which a stuck user
 	// can see their way out.
-	const limitRowFloor = 61
+	const limitRowFloor = 71
 
 	m.SetSize(limitRowFloor, 1)
 	atFloor := m.String()
