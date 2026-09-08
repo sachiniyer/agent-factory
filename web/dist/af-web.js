@@ -11764,20 +11764,51 @@ function iframeIsProxied(spec) {
   if (spec.kind === TabKind.VSCode) {
     return true;
   }
-  return spec.target !== "" && isLoopbackWebUrl(spec.target);
+  return spec.web_proxied ?? (spec.target !== "" && isLoopbackWebUrl(spec.target));
+}
+function iframeRoute(spec) {
+  if (iframeIsProxied(spec)) return "proxied";
+  if (spec.target === "") return "direct";
+  try {
+    return isLoopbackHost(new URL(spec.target).hostname) ? "blocked" : "direct";
+  } catch {
+    return "blocked";
+  }
+}
+function blockedWebTargetMessage(target) {
+  const authority = target.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i)?.[1] ?? "";
+  const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+  const host = hostPort.startsWith("[") ? hostPort.slice(0, hostPort.indexOf("]") + 1) : hostPort.split(":")[0];
+  return `Cannot open web target ${host || "(invalid URL)"} safely: the daemon cannot proxy it, and opening it directly could reach your own machine. Recreate the tab with a canonical workspace URL.`;
 }
 function iframeIdentity(spec) {
   return spec.kind === TabKind.VSCode ? " vscode" : spec.target;
 }
 function isLoopbackWebUrl(raw) {
   try {
-    let host = new URL(raw).hostname.toLowerCase();
-    host = host.replace(/^\[|\]$/g, "");
-    host = host.replace(/\.$/, "");
-    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+    new URL(raw);
+    const authority = raw.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i)?.[1];
+    if (authority === void 0) return false;
+    const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+    const host = hostPort.startsWith("[") ? hostPort.slice(1, hostPort.indexOf("]")) : hostPort.split(":")[0];
+    return isLoopbackHost(host);
   } catch {
     return false;
   }
+}
+function isLoopbackHost(raw) {
+  const host = raw.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.includes(":")) {
+    try {
+      const ip = new URL(`http://[${host}]/`).hostname;
+      return ip === "[::1]" || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(ip);
+    } catch {
+      return false;
+    }
+  }
+  const parts = host.split(".");
+  return parts.length === 4 && parts[0] === "127" && parts.every((part) => /^(0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
 }
 function targetPathOf(target) {
   try {
@@ -11819,8 +11850,7 @@ function canUsePreviewOrigin(loc) {
   if (loc.protocol !== "http:") {
     return false;
   }
-  const host = loc.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-  return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+  return isLoopbackHost(loc.hostname);
 }
 function previewOriginSrc(origin, target) {
   const base = `${origin.replace(/\/$/, "")}/${targetPathOf(target)}`;
@@ -11975,6 +12005,7 @@ var SplitView = class {
   // terminal tab. Parallel to the tab list, refreshed on every setSession, so
   // reconcile can mount an iframe for a web leaf without extra plumbing.
   tabTargets = [];
+  tabWebProxied = [];
   // The kind of each tab, parallel to tabIds — kept because the tab identity is now
   // the opaque stable id (#1738), which no longer encodes the kind the way the old
   // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
@@ -12040,15 +12071,17 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = [], archived = false, tabNames = []) {
+  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = [], archived = false, tabNames = [], tabWebProxied = []) {
     this.token = token2;
     const prevIds = this.tabIds;
     const prevKinds = this.tabKinds;
     const prevTargets = this.tabTargets;
+    const prevWebProxied = this.tabWebProxied;
     const prevNames = this.tabNames;
     this.tabIds = tabIds;
     this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
+    this.tabWebProxied = tabWebProxied;
     this.tabKinds = tabKinds;
     this.tabNames = tabNames;
     const archivedChanged = archived !== this.archived;
@@ -12070,7 +12103,8 @@ var SplitView = class {
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
       const renamed = !sameTabs(prevNames, tabNames);
-      if (before !== this.tree || rebound || archivedChanged || renamed) {
+      const proxyChanged = tabWebProxied.some((value, idx) => value !== prevWebProxied[idx]) || prevWebProxied.length !== tabWebProxied.length;
+      if (before !== this.tree || rebound || archivedChanged || renamed || proxyChanged) {
         this.reconcile();
         this.report();
       }
@@ -12326,7 +12360,7 @@ var SplitView = class {
       const moved = pane.tab !== leaf.tab;
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
       if (spec !== null) {
-        if (pane.term || pane.webUrl !== iframeIdentity(spec) || staleAddress || pane.webArchived !== this.archived) {
+        if (pane.term || pane.webUrl !== iframeIdentity(spec) || pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) || staleAddress || pane.webArchived !== this.archived) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -12414,7 +12448,7 @@ var SplitView = class {
     }
     const kind = this.tabKinds[idx];
     if (kind === TabKind.Web) {
-      return { kind: TabKind.Web, target: this.tabTargets[idx] ?? "" };
+      return { kind: TabKind.Web, target: this.tabTargets[idx] ?? "", web_proxied: this.tabWebProxied[idx] };
     }
     if (kind === TabKind.VSCode) {
       return { kind: TabKind.VSCode, target: "" };
@@ -12435,9 +12469,20 @@ var SplitView = class {
     pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
     const proxied = realId !== "" && iframeIsProxied(spec);
+    pane.iframeProxied = proxied;
     const src = this.archived ? "" : proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     const wrap = el("div", "af-webpane");
+    if (iframeRoute(spec) === "blocked") {
+      const refusal = el("div", "af-webpane-fallback af-webpane-dead");
+      const message = el("div", "af-webpane-fallback-msg");
+      message.textContent = blockedWebTargetMessage(target);
+      refusal.append(message);
+      wrap.append(refusal);
+      pane.host.replaceChildren(wrap);
+      pane.webDispose = null;
+      return;
+    }
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
     reload.type = "button";
@@ -17301,7 +17346,8 @@ function syncSplit(state) {
     tabKinds,
     tabRealIds,
     archived,
-    tabNames
+    tabNames,
+    runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.web_proxied) : []
   );
 }
 function disposeSplit() {
