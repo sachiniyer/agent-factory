@@ -98,7 +98,7 @@ it.
 | `n` | new instance | | `s` | open selected tab as pane |
 | `Enter` | interact (enter pane) | | `x` | hide focused pane |
 | `o` | attach full-screen | | `t` | new tab |
-| `Ctrl-]` | exit interactive → nav | | `w` | close tab |
+| `Ctrl-]` | exit interactive → nav | | `w` | delete tab (asks first; `y` confirms) |
 | `Tab` | cycle focus ring | | `1`–`9` | jump to tab |
 | `j`/`k`,`↓`/`↑` | move tree cursor | | `m` | tasks overlay |
 | `←`/`→` | switch focused pane | | `[`/`]` | previous/next section |
@@ -187,7 +187,7 @@ compose across `docker exec` invocations.
 | `af_send_line <text> [t]` | text,`Enter` | the WHOLE line echoed on the attached screen. **Fails closed** (#2147): it clears and re-pastes up to `AF_DRIVER_SEND_LINE_ATTEMPTS` times, and if the line still never lands complete it returns non-zero having sent **no** `Enter` — a submitted partial leaves an unbalanced quote and drops the shell into `>` |
 | `af_detach [raw_seq]` | `Ctrl-W` (once) | TUI chrome back **and** the attach client is reaped (guards #1157) |
 | `af_new_tab` | `t` | tab-child count rises |
-| `af_close_tab` | `w` | tab-child count falls |
+| `af_close_tab` | `w` → wait for “Delete tab” → `y` | dialog must appear before consent; then tab-child count falls |
 | `af_open_tasks` / `af_close_tasks` | `m` / `Esc` | rounded dialog frame containing the task manager's pinned footer appears / gone |
 | `af_click <x> <y>` / `af_click_instance <name>` | SGR mouse | injects a left click at a cell / on an instance row |
 | `af_scroll <up\|down> [x] [y]` | SGR wheel | injects a wheel event |
@@ -399,7 +399,7 @@ af_boot                                       # 112 cols or wider
 af_ensure_nav; af_focus_tree
 af_send n; af_wait_for 'account'              # the field is advertised
 af_send C-o; af_wait_for 'Select claude account'   # the title names the AGENT
-af_wait_for 'Ambient identity'                # first row is the pre-#3844 default
+af_wait_for "Use the agent's own login"       # no configured default in this fixture
 af_send Escape; af_wait_for 'submit name'     # esc backs out of the field only
 af_send C-o; af_send Down; af_send Enter      # pick a registered account
 af_wait_for 'account ✓'                       # hint confirms a scoped create
@@ -537,8 +537,8 @@ af_new_instance a; af_new_instance b; af_new_instance c   # (cap: 3)
 af_select a; af_expect_selected a
 af_select c; af_expect_selected c
 af_select b; af_expect_selected b
-# after closing/killing, selection must not silently drift:
-af_open_pane; af_close_tab; af_expect_selected b
+# after confirmed tab deletion, selection must not silently drift:
+af_new_tab; af_open_pane; af_close_tab; af_expect_selected b
 ```
 
 ### Pane / interactive changes (the #1088, #1089 class)
@@ -567,7 +567,9 @@ af_expect_selected a                  # selection survives the round trip
 ```bash
 af_select a
 af_new_tab; af_new_tab                # add two shell tabs
-af_close_tab
+af_close_tab                          # waits for Delete tab, sends y, then waits for removal
+# Manual equivalent: w opens consent; y accepts, n/Esc cancels.
+# Hiding a pane is reversible and does not delete its tab.
 ```
 
 ### Config / keymap changes (the #1030 class)

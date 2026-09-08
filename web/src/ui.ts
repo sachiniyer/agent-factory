@@ -2825,7 +2825,7 @@ function tabButton(
   }
   // The agent tab (index 0) is unclosable — killing the session tears it down.
   if (index > 0 && canClose) {
-    const close = h("span", { class: "af-tab-close", title: "Delete tab" }, icon("x"));
+    const close = h("span", { class: "af-tab-close", title: `Delete tab “${tabDisplayLabel(tab)}”` }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();

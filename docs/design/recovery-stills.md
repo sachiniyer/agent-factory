@@ -16,7 +16,7 @@ to reproduce the captures; every image is also attached to the test report.
 | Login expired | ![Light Login expired](../assets/recovery/web-login-expired-light.png) | ![Dark Login expired](../assets/recovery/web-login-expired-dark.png) |
 | Create failed | ![Light Create failed](../assets/recovery/web-create-failed-light.png) | ![Dark Create failed](../assets/recovery/web-create-failed-dark.png) |
 | Archive failed | ![Light Archive failed](../assets/recovery/web-archive-failed-light.png) | ![Dark Archive failed](../assets/recovery/web-archive-failed-dark.png) |
-| Kill failed | ![Light Kill failed](../assets/recovery/web-kill-failed-light.png) | ![Dark Kill failed](../assets/recovery/web-kill-failed-dark.png) |
+| Delete session failed | ![Light Delete session failed](../assets/recovery/web-kill-failed-light.png) | ![Dark Delete session failed](../assets/recovery/web-kill-failed-dark.png) |
 | Task save failed | ![Light Task save failed](../assets/recovery/web-task-save-failed-light.png) | ![Dark Task save failed](../assets/recovery/web-task-save-failed-dark.png) |
 | Connecting… | ![Light Connecting…](../assets/recovery/web-connecting-light.png) | ![Dark Connecting…](../assets/recovery/web-connecting-dark.png) |
 | Sign in | ![Light Sign in](../assets/recovery/web-sign-in-light.png) | ![Dark Sign in](../assets/recovery/web-sign-in-dark.png) |

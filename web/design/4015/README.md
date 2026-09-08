@@ -288,3 +288,38 @@ five tests without regenerating existing goldens, and the three-run 1,000-sessio
 performance budget passed. Gofmt/build/vet/fast lint/file-length checks and strict
 MkDocs also passed. All container starts observed the shared-box load gate and
 suites ran one at a time.
+
+## Round six · account reloads, archived deletion and copy audit
+
+Merged `origin/master` at `3181a936b20c34e58849ff8c5d41478acbbc3cb4`, including #4030. Resolved `web/src/ui.ts` with master’s named Delete tab tooltip and confirmation flow, keeping the polish. Took master’s `web/dist/af-web.js` and `web/dist/sw.js` provisionally, then rebuilt both from source. This revision preserves a deliberate account choice independently of temporary loading rows. Both account and program catalogs must settle before checking whether that identity is still offered. A changed agent or removed identity clears the deliberate choice; an unavailable policy keeps a named choice blocked rather than silently creating under a different identity. A unit test captures the real `createSession` request body, and a browser test switches projects and verifies `CreateSession.account`.
+
+Deletion now receives `isArchived(session)` as well as workspace ownership. Archived sandboxes have already published their branch and lost their runtime; their copy offers Restore. Archived local worktrees still use the ownership flag: archive itself keeps the branch, but subsequent `GitWorktree.cleanup` still calls `branch -D` when `branchCreatedByUs` is true (`session/git/worktree_ops.go:769`). It would be incorrect to promise every archived local branch survives deletion. The two local archived variants retain that distinction. No daemon fields or request shapes changed.
+
+### Copy table additions
+
+| Surface | Before | After |
+| --- | --- | --- |
+| Archived sandbox deletion | Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first. | Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again. |
+| Archived local, af-created branch | Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them. | Permanently deletes the session, archived worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Restore instead to keep the session. |
+| Archived local, pre-existing branch | Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them. | Permanently deletes the session and archived worktree. Your branch and its commits stay. Uncommitted changes are lost. Restore instead to keep the session. |
+| Unverifiable explicit account | Accounts could not be loaded. The daemon default, if any, applies. | Cannot verify the selected account. Reopen this form to try again. |
+| Session-action guide labels | Kill | Delete session |
+| Web selftest guide | The kill confirm removes the session's row. | The Delete session confirmation removes the session's row. |
+| Usage-limit guide labels | Retry | Retry limit |
+| Web account guide | Ambient identity | Use configured default (…), Use agent login (no default), or Use daemon default; these rows send no override |
+| Recovery caption and alt text | Kill failed | Delete session failed |
+| TUI manual-test wait | Ambient identity | Use the agent's own login |
+| Generated skill: deletion guidance | Delete a session and only af-owned worktrees and branches; user-owned resources stay | Delete a session; work in af-owned workspaces can be lost |
+| Generated skill: agent tab guidance | kill the session instead | delete the session instead |
+| Generated skill: cleanup consequence | deletes only af-owned worktrees and branches; user-owned resources stay | permanently removes af-owned workspaces; uncommitted changes and unpushed commits there can be lost |
+
+### COPY RULE audit hits
+
+Searched `docs/`, `session/systemprompt.go` (`afUsageBody`), generated `plugins/**/SKILL.md`, and `scripts/tui-driver*.sh` for the renamed labels, including Kill/Kill session, Close pane, Ambient identity, usage-limit Retry, keybar Back, empty project, destroys the session, VS Code and the idle/watch wording.
+
+- Fixed `docs/web.md:121,154,161,171`, `docs/usage-limits.md:310`, `docs/concepts.md:23`, `docs/sessions.md:49`, `docs/dev/web-selftest.md:103`, `docs/design/recovery-stills.md:19`, and `docs/dev/tui-manual-testing.md:402`.
+- Corrected `session/systemprompt.go:95,106,128`; regenerated Claude, Codex, Amp and Gemini skills. The generator requires an append-only content digest: added release 3.13 and committed generated plugin/marketplace versions. Reviewed the generated diffs: only these three guidance replacements and version metadata changed. `cli.md`, `api.md` and the generated design guide did not drift.
+- Retained `docs/web.md:236` Keep/Archive/Kill: these are the separate task On done catalog choices. Retained `docs/web.md:391` Retry: this is the dev-server connection retry. CLI `kill`, `KillSession` routes, process-killing prose and CLI deprecation text remain command/mechanism names. Historical `docs/assets/design/tui-{a,b,c}` captures and recorded source excerpts remain historical evidence, not current instructions.
+- `scripts/tui-driver.sh:560` “Kill ONLY our own named session” and `scripts/tui-driver-selftest.sh:1427` “Back in the TUI” are narrative safety/navigation comments, not stale label assertions. No renamed-label assertion remained in these drivers. VS Code in the skill describes the CLI-created editor, not the renamed TUI picker row. The current generated design source/guide already say Hide pane and More keys.
+
+Visual review: no existing golden was regenerated. Re-read all four live-sandbox goldens (360/1440, light/dark): their loss warning and button bounds remain unchanged. Read all four new archived screenshots from the container report: sandbox copy uses three lines at 360 and two at 1440; local preserved-branch copy uses four and three lines respectively. Cancel and Delete session remain fully visible with clear spacing. These captures are test-report artifacts; no duplicate PNG evidence was added to git.

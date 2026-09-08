@@ -40,6 +40,24 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	worktreePath := gw.GetWorktreePath()
 
 	changed := false
+	identityChanged := false
+	legacySnapshot := false
+	for _, td := range target {
+		if td.Kind != TabKindAgent && td.ID == "" {
+			legacySnapshot = true
+			break
+		}
+	}
+	defer func() {
+		// Even byte-identical legacy rows cannot distinguish an unchanged tab
+		// from delete+recreate with the same name/runtime address. Keep the
+		// existing pointer/pane reconciliation, but invalidate destructive consent.
+		if changed || identityChanged || legacySnapshot {
+			i.mu.Lock()
+			i.tabRosterGeneration++
+			i.mu.Unlock()
+		}
+	}()
 
 	// The reconcile keys on the STABLE TAB ID (#1738), not the name
 	// (#1886/#1905). Names are reused on close+recreate, so a name-keyed reconcile
@@ -99,6 +117,7 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 			agentRow := idx == 0 && t.Kind == TabKindAgent && td.Kind == TabKindAgent
 			if t.ID == "" || agentRow {
 				i.replaceTabFieldLocked(idx, func(c *Tab) { c.ID = td.ID })
+				identityChanged = true
 			}
 		}
 	}
@@ -296,4 +315,14 @@ func (i *Instance) dropTabWhere(pred func(*Tab) bool, label string) bool {
 		}
 	}
 	return true
+}
+
+// TabRosterGeneration identifies the instance's current authoritative roster
+// observation. Stable-ID no-op snapshots preserve it; every accepted snapshot
+// with an ID-less non-agent row advances it because continuity is unknowable.
+// This does not change ReconcileTabsFromData's pane-facing changed result.
+func (i *Instance) TabRosterGeneration() uint64 {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.tabRosterGeneration
 }

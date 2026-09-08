@@ -118,7 +118,7 @@ switcher first; creation stays disabled until a project is available.
 | Project | The repository to work in; starts with the selected project. |
 | Program (Edit defaults) | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
 | Backend (Edit defaults) | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
-| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Ambient identity** sends no account; the daemon still applies configured defaults. |
+| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Use configured default (…)** inherits the named default; **Use agent login (no default)** uses the agent’s own login when none is configured. **Use daemon default** leaves resolution to the daemon. These rows send no account override. |
 | Prompt | Optional initial instructions to send to the agent. |
 
 An account without a credential is labelled but still selectable. A
@@ -151,14 +151,14 @@ without attaching. `Enter` attaches the selected session. The pane's accent bord
 marks the pane you are driving. See the [keyboard reference](#keyboard-reference)
 for tab and view navigation.
 
-The pane header's **Retry** appears for a session waiting on a usage limit and
+The pane header's **Retry limit** appears for a session waiting on a usage limit and
 requests another attempt. Open the pane header’s **Actions** menu (shown as **…**
 on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
 session can offer both; see [usage limits](usage-limits.md).
 
-Open a rail row’s **…** menu for **Archive** and **Kill**. Other actionable rows
+Open a rail row’s **…** menu for **Archive** and **Delete session**. Other actionable rows
 reveal the menu on hover or keyboard focus. Each opens a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
@@ -168,7 +168,7 @@ reveal the menu on hover or keyboard focus. Each opens a confirmation:
   worktree back and respawns the agent. For a remote session, it provisions a
   fresh sandbox from the pushed branch and relaunches the agent; the old
   sandbox's conversation does not return. Reveal **Archived** in the filter first.
-- **Kill** permanently tears down the session and removes its record. It removes
+- **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
 
@@ -191,12 +191,14 @@ Tabs run in the session's worktree. Click **Agent** to return to the agent, or t
 
 **Actions → + New tab** also offers **VS Code**, which opens an editor for the worktree;
 see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a
-closable tab closes it; the Agent tab cannot be closed independently. Double-click
+deletable tab opens a confirmation naming the tab and session; the Agent tab
+cannot be deleted independently. Confirm with **Delete tab** or choose Cancel.
+Hiding a pane leaves the tab available; deletion requests runtime cleanup. Double-click
 a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
 to split that pane, or onto its center to replace the displayed tab.
 
 There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
-`t` creates a shell tab, `w` closes the active closable tab, and `1`–`9` select a
+`t` creates a shell tab, `w` asks to delete the active deletable tab, and `1`–`9` select a
 tab without attaching. Clicking a tab selects and attaches it.
 
 When a backend cannot create local tabs, the bar explains the restriction.
@@ -347,7 +349,7 @@ through to the agent unless a modal or menu handles them.
 | `Escape` | Close an open modal or menu; otherwise pass through to an attached agent |
 | `1`–`9` | Select a tab in navigation mode |
 | `t` | Create a shell tab when supported |
-| `w` | Close the active tab when closable; never the Agent tab |
+| `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
 | `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
 | `Alt+w` | Close the focused pane in Sessions |

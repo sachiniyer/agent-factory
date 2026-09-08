@@ -234,6 +234,7 @@ func TestTreeNav_TabCreateCloseFromTabRow(t *testing.T) {
 	// w: must close exactly the cursor's tab — the fresh one — and land left.
 	newTabName := inst.GetTabs()[2].Name
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 	require.Equal(t, []string{newTabName}, closedNames,
 		"w from a tab row must close the cursor's tab, never a stale index")
 	require.Equal(t, 2, inst.TabCount())

@@ -8,7 +8,7 @@ test("lifecycle confirmation copy fits a 160-character reading budget", () => {
   const source = readFileSync(new URL("./modals.ts", import.meta.url), "utf8");
   const lifecycle = source.slice(source.indexOf("const copy = {"), source.indexOf("}[opts.action]"));
   const localBodies = [[true, true], [false, true], [false, false]].map(([externalWorktree, branchCreatedByUs]) =>
-    deletionConfirmationBody({ offBox: false, externalWorktree, branchCreatedByUs }));
+    deletionConfirmationBody({ archived: false, offBox: false, externalWorktree, branchCreatedByUs }));
   const bodies = localBodies.concat([...lifecycle.matchAll(/body:([\s\S]*?)(?=\n    },)/g)]
     .flatMap(match => [...match[1].matchAll(/"([^"]+)"/g)].map(literal => literal[1])));
   assert.equal(bodies.length, 5);

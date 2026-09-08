@@ -10187,6 +10187,33 @@ var EventStream = class {
   }
 };
 
+// src/account_selection.ts
+var AccountSelection = class {
+  picked = false;
+  agent = "";
+  value = AMBIENT_ACCOUNT;
+  pick(value) {
+    this.picked = true;
+    this.value = value;
+  }
+  render(accounts, agent, failed = false) {
+    if (accounts === null || !agent && this.namedChoicePending) return AMBIENT_ACCOUNT;
+    const rows = accountChoices(accounts, agent, failed);
+    const changedAgent = agent !== this.agent;
+    this.agent = agent;
+    if (this.picked && (changedAgent || !rows.some((row) => row.value === this.value))) {
+      this.picked = false;
+      this.value = AMBIENT_ACCOUNT;
+      return AMBIENT_ACCOUNT;
+    }
+    const value = this.picked ? this.value : accountDefaultFor(accounts, agent);
+    return rows.some((row) => row.value === value) ? value : AMBIENT_ACCOUNT;
+  }
+  get namedChoicePending() {
+    return this.picked && this.value !== AMBIENT_ACCOUNT;
+  }
+};
+
 // src/backends.ts
 var REPO_DEFAULT = "";
 function backendChoices(catalog) {
@@ -10500,8 +10527,8 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let accountsFailed = false;
   let programCatalog = null;
   let accountRows = accountChoices(null, "");
-  let accountAgent = "";
-  let accountPicked = false;
+  const accountSelection = new AccountSelection();
+  let programsPending = false;
   let busy = false;
   const defaults = defaultsDisclosure();
   const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
@@ -10509,8 +10536,11 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    if (accountSelection.namedChoicePending && !programsPending && (accountsFailed || programCatalog === null)) {
+      accountHint.textContent = "Cannot verify the selected account. Reopen this form to try again.";
+    }
     const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace(/^Use configured default \((.*)\)$/, "$1 (default)");
-    const accountNeedsChoice = !!accountHint.textContent || accountPicked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent);
+    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog));
     defaults.setSummary([
       `Program: ${choiceLabel(programSelect)}`,
       `Backend: ${choiceLabel(backendSelect)}`,
@@ -10525,7 +10555,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     }
     accountSlot.hidden = !accountNeedsChoice;
     if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
-    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value);
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value) || (accounts === null || programsPending || !accountAgentFor(programSelect.value, programCatalog)) && accountSelection.namedChoicePending;
   };
   const chromeSetBusy = handle.setBusy.bind(handle);
   handle.setBusy = (b) => {
@@ -10545,27 +10575,18 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   backendSelect.addEventListener("change", syncSubmitState);
   const renderAccounts = () => {
     const agent = accountAgentFor(programSelect.value, programCatalog);
-    const previous = accountSelect.value;
-    const sameAgent = agent === accountAgent;
-    accountRows = accountChoices(accounts, agent, accountsFailed);
-    accountAgent = agent;
+    const knownAccounts = programsPending ? null : accounts;
+    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
+    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
     }
-    if (!sameAgent) {
-      accountPicked = false;
-    }
-    if (accountPicked && accountRows.some((c) => c.value === previous)) {
-      accountSelect.value = previous;
-    } else {
-      const preselect = accountDefaultFor(accounts, agent);
-      accountSelect.value = accountRows.some((c) => c.value === preselect) ? preselect : AMBIENT_ACCOUNT;
-    }
+    accountSelect.value = selected;
     syncSubmitState();
   };
   accountSelect.addEventListener("change", () => {
-    accountPicked = true;
+    accountSelection.pick(accountSelect.value);
     syncSubmitState();
   });
   programSelect.addEventListener("change", renderAccounts);
@@ -10582,12 +10603,14 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const loadCatalogsFor = (repoPath) => {
     const seq = ++loadSeq;
     accounts = null;
+    programsPending = true;
     accountsFailed = false;
     renderAccounts();
     void callbacks.loadPrograms(repoPath).then((catalog) => {
       if (seq !== loadSeq) {
         return;
       }
+      programsPending = false;
       programCatalog = catalog;
       programs = programChoices(catalog);
       renderPrograms();
@@ -10595,6 +10618,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       if (seq !== loadSeq) {
         return;
       }
+      programsPending = false;
       programCatalog = null;
       programs = programChoices(null);
       renderPrograms();
@@ -10675,7 +10699,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
       // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
-      // `account` entirely and the session runs on the agent's own login (#3844).
+      // `account` entirely and the daemon applies its default, if any (#3844).
       account: accountSelect.value
     });
   });
@@ -10731,6 +10755,12 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   return handle;
 }
 function deletionConfirmationBody(opts) {
+  if (opts.archived && opts.offBox) {
+    return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
+  }
+  if (opts.archived && !opts.externalWorktree) {
+    return opts.branchCreatedByUs ? "Permanently deletes the session, archived worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Restore instead to keep the session." : "Permanently deletes the session and archived worktree. Your branch and its commits stay. Uncommitted changes are lost. Restore instead to keep the session.";
+  }
   if (opts.offBox) {
     return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
   }
@@ -10877,6 +10907,64 @@ function removeTaskModal(name, onConfirm, onCancel) {
   return handle;
 }
 
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/delete_tab_modal.ts
+function confirmDeleteTabModal(opts) {
+  const { handle, body, cancelBtn } = modalChrome({
+    title: `Delete tab \u201C${opts.tabName}\u201D from session \u201C${opts.sessionTitle}\u201D?`,
+    confirmLabel: "Delete tab",
+    confirmClass: "af-danger",
+    onCancel: opts.onCancel
+  });
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  asForm(handle.el.firstElementChild, opts.onConfirm);
+  queueMicrotask(() => cancelBtn.focus());
+  return handle;
+}
+
 // src/install.ts
 var DISMISS_KEY = "af-install-dismissed";
 function shouldShowInstall(state) {
@@ -10956,50 +11044,6 @@ var InstallAffordance = class {
       installed: this.installed
     });
   }
-};
-
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3,
-  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
-   *  per-session code-server rooted at the session's worktree, reachable only
-   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
-   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
-   *  lockstep with the Go enum. */
-  VSCode: 4
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4,
-  Replacing: 5,
-  Respawning: 6
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
 };
 
 // src/time.ts
@@ -16041,7 +16085,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, liv
     });
   }
   if (index > 0 && canClose) {
-    const close = h("span", { class: "af-tab-close", title: "Delete tab" }, icon("x"));
+    const close = h("span", { class: "af-tab-close", title: `Delete tab \u201C${tabDisplayLabel(tab)}\u201D` }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -16164,6 +16208,13 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       );
     }
   }
+}
+
+// src/tab_delete_target.ts
+function captureTabDeleteTarget(target) {
+  const identity = tabIdentity(target);
+  const legacy = tabRealId(target) === "";
+  return (tabs) => tabs.findIndex((tab) => tabIdentity(tab) === identity && (!legacy || tab === target));
 }
 
 // src/index.ts
@@ -16604,6 +16655,7 @@ function openConfirm(action, session) {
     confirmModal({
       action,
       sessionTitle: target.title,
+      archived: isArchived(session),
       offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
       branchCreatedByUs: session.worktree?.branch_created_by_us === true,
@@ -16799,6 +16851,28 @@ function closeSessionTab(index) {
   if (!target) {
     return;
   }
+  const resolveTarget = captureTabDeleteTarget(target);
+  const sessionId = sel.id;
+  openModal(confirmDeleteTabModal({
+    sessionTitle: sel.title,
+    tabName: tabDisplayLabel(target),
+    kind: target.kind,
+    onCancel: closeModal,
+    onConfirm: () => {
+      const current = store.get().sessions.find((session) => session.id === sessionId);
+      const at = current ? resolveTarget(sessionTabs(current)) : -1;
+      if (!current || at <= 0 || !canCloseTabs(current)) {
+        modal?.setError("This tab is no longer available to delete.");
+        return;
+      }
+      closeModal();
+      deleteConfirmedSessionTab(current, at, tok);
+    }
+  }));
+}
+function deleteConfirmedSessionTab(sel, index, tok) {
+  const tabs = sessionTabs(sel);
+  const target = tabs[index];
   clearTabError();
   const selId = sel.id ?? "";
   const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);
