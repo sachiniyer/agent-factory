@@ -15,6 +15,7 @@ const ACTIONS_APP_ID = 15368;
 const CHECK_GENERATION_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_SCRIPT = path.join(__dirname, "auto-gate.js");
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
+const AUTO_GATE_AGGREGATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate-aggregate.yml");
 const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
 const AUTO_GATE_DOC = path.join(__dirname, "..", "auto-gate.md");
 
@@ -404,8 +405,105 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
-test("Auto Gate can be recovered manually by PR number", () => {
+test("Auto Gate dedupes evaluation jobs only after ungrouped invalidation", async () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  assert.doesNotMatch(workflow, /^concurrency:/m,
+    "workflow concurrency must not delay or discard invalidation");
+  const jobs = Object.fromEntries([...workflow.matchAll(
+    /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
+  )].map((match) => [match[1], match[2]]));
+  assert.doesNotMatch(jobs["auto-gate"], /^    (?:concurrency|needs|if):/m);
+  assert.match(jobs["auto-gate"], /autoGate\.resolveAggregateHeads\(\{ context, targets \}\)/);
+  assert.match(jobs["auto-gate"], /payload\.before/);
+  assert.doesNotMatch(jobs["invalidate-gate"], /^    concurrency:/m);
+  assert.match(jobs["invalidate-gate"], /^    needs: auto-gate$/m);
+  assert.match(jobs["invalidate-gate"], /always\(\)/);
+  assert.match(jobs["apply-gate"], /^    needs: \[auto-gate, invalidate-gate\]$/m);
+  assert.match(jobs["apply-gate"], /fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\)/);
+  assert.match(jobs["apply-gate"], /uses: \.\/\.github\/workflows\/auto-gate-aggregate.yml/);
+  assert.match(jobs["apply-gate"], /head_sha: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
+  assert.match(jobs["apply-gate"], /targets_json: \$\{\{ needs\.auto-gate\.outputs\.targets \|\| '\[\]' \}\}/);
+  assert.match(jobs["apply-gate"], /read_failure: \$\{\{ matrix\.aggregate\.read_failure \|\| '' \}\}/);
+  const aggregate = fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
+  assert.doesNotMatch(aggregate, /^concurrency:/m);
+  assert.match(aggregate, /^  workflow_call:/m);
+  assert.match(aggregate, /group: auto-gate-aggregate-\$\{\{ inputs\.head_sha \}\}\n      cancel-in-progress: false/);
+  assert.match(aggregate, /HEAD_SHA: \$\{\{ inputs\.head_sha \}\}/);
+  assert.match(aggregate, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
+  const concurrency = jobs["apply-gate"].match(
+    /^    concurrency:\n      group: auto-gate-target-\$\{\{ (.+) \}\}-head-\$\{\{ matrix\.aggregate\.head_sha \}\}\n      cancel-in-progress: false$/m,
+  );
+  assert.ok(concurrency, "evaluation job needs target/head concurrency after invalidation");
+  const fields = concurrency[1].split(" || ");
+  assert.deepEqual(fields, [
+    "github.event.issue.number",
+    "github.event.pull_request.number",
+    "inputs.pr_number",
+    "github.event.workflow_run.head_sha",
+    "github.event.check_suite.head_sha",
+    "github.event.sha",
+    "github.run_id",
+  ]);
+  // Evaluate the actual expression's property/OR subset, including Actions'
+  // empty value for missing properties, rather than duplicating its key logic.
+  const group = (event, inputs = {}, runId = 100, headSha = HEAD_SHA) => {
+    const context = { github: { event, run_id: runId }, inputs };
+    const target = fields.map((field) => field.split(".").reduce(
+      (value, key) => value?.[key], context,
+    )).find((value) => value);
+    return `auto-gate-target-${target}-head-${headSha}`;
+  };
+  const cases = {
+    check_suite: [{ check_suite: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    issue_comment: [{ issue: { number: 4060 }, comment: { body: "[gate-ack]" } }, {}, 4060],
+    pull_request_review: [{ pull_request: { number: 4060 } }, {}, 4060],
+    pull_request_review_comment: [{ pull_request: { number: 4060 } }, {}, 4060],
+    pull_request_target: [{ pull_request: { number: 4060 } }, {}, 4060],
+    status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
+    workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
+  };
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.deepEqual(
+    [...triggers.matchAll(/^  (\w+):/gm)].map((match) => match[1]).sort(),
+    Object.keys(cases).sort(),
+    "every subscribed trigger needs a target-key fixture",
+  );
+  for (const [name, [event, inputs, target]] of Object.entries(cases)) {
+    assert.equal(group(event, inputs), `auto-gate-target-${target}-head-${HEAD_SHA}`, name);
+    assert.equal(group(event, inputs, 200), group(event, inputs), `${name} must ignore run ID`);
+  }
+  assert.equal(group({}, { pr_number: "4060" }), `auto-gate-target-4060-head-${HEAD_SHA}`);
+  assert.equal(group({}), `auto-gate-target-100-head-${HEAD_SHA}`);
+  assert.equal(group({}, {}, 200), `auto-gate-target-200-head-${HEAD_SHA}`);
+  assert.notEqual(group({ issue: { number: 4061 } }), group({ issue: { number: 4060 } }));
+  assert.notEqual(group({ sha: OTHER_SHA }), group({ sha: HEAD_SHA }));
+  // Synchronize's previous head survives a later same-PR comment: it has
+  // already been resolved/invalidated, and its matrix child has a distinct key.
+  const sync = { before: OTHER_SHA, pull_request: { number: 4060, head: { sha: HEAD_SHA } } };
+  const heads = autoGate.resolveAggregateHeads({ context: { payload: sync } });
+  assert.deepEqual(heads, [HEAD_SHA, OTHER_SHA]);
+  const invalidation = await runInvalidateGateStep({
+    aggregateHeads: heads.map((head_sha) => ({ head_sha })),
+    invalidateResults: {
+      [HEAD_SHA]: [{ writeState: "created" }],
+      [OTHER_SHA]: [{ writeState: "created" }],
+    },
+  });
+  assert.equal(invalidation.error, null);
+  assert.deepEqual(invalidation.attempts, [HEAD_SHA, OTHER_SHA]);
+  const invalidated = JSON.parse(invalidation.outputs.invalidated_heads);
+  assert.deepEqual(invalidated.map((head) => head.head_sha), heads);
+  const syncGroups = invalidated.map(({ head_sha }) => group(sync, {}, 100, head_sha));
+  assert.equal(syncGroups[0], group(cases.issue_comment[0]));
+  assert.notEqual(syncGroups[1], group(cases.issue_comment[0]));
+  assert.match(triggers, /issue_comment:\n    types: \[created, edited, deleted\]/);
+  assert.doesNotMatch(workflow, /github\.event\.comment\.(?:body|user)/);
+});
+
+test("Auto Gate can be recovered manually by PR number", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8") +
+    fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
   const helper = fs.readFileSync(path.join(__dirname, "auto-gate.js"), "utf8");
 
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
@@ -421,7 +519,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /concurrency:\s+group: auto-gate-aggregate-\$\{\{ matrix\.aggregate\.head_sha \}\}\s+cancel-in-progress: false/,
+    /concurrency:\s+group: auto-gate-aggregate-\$\{\{ inputs\.head_sha \}\}\s+cancel-in-progress: false/,
   );
   assert.match(workflow, /strategy:\s+fail-fast: false\s+matrix:\s+aggregate:/);
   assert.match(
@@ -441,8 +539,8 @@ test("Auto Gate can be recovered manually by PR number", () => {
     /apply-gate:[\s\S]*?needs\.invalidate-gate\.outputs\.invalidated_heads != ''[\s\S]*?matrix:\s+aggregate: \$\{\{ fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\) \}\}/,
   );
   assert.doesNotMatch(workflow, /needs\.invalidate-gate\.result == 'success'/);
-  assert.match(workflow, /HEAD_SHA: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
-  assert.match(workflow, /TARGETS_JSON: \$\{\{ needs\.auto-gate\.outputs\.targets \}\}/);
+  assert.match(workflow, /HEAD_SHA: \$\{\{ inputs\.head_sha \}\}/);
+  assert.match(workflow, /TARGETS_JSON: \$\{\{ inputs\.targets_json \}\}/);
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
   assert.match(workflow, /prNumber: explicitPrNumber/);
   assert.match(
@@ -468,7 +566,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
     /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha,\s+payload\.after,[\s\S]*?payload\.before,[\s\S]*?filter\(\(value\) => \/\^\[0-9a-f\]\{40\}\$\/\.test\(value\)\)\)\];/,
   );
   assert.doesNotMatch(workflow, /knownEventHeads =[\s\S]{0,500}\.sort\(\)/);
-  assert.match(workflow, /READ_FAILURE: \$\{\{ matrix\.aggregate\.read_failure \|\| '' \}\}/);
+  assert.match(workflow, /READ_FAILURE: \$\{\{ inputs\.read_failure \}\}/);
   assert.match(workflow, /readFailureReason: process\.env\.READ_FAILURE/);
   assert.match(
     workflow,
@@ -7656,7 +7754,7 @@ test("an unknown owned generation concedes nothing", async () => {
 test("the apply-gate step delegates refusal classification to the helper", () => {
   // The shapes are auditable in one place only if the workflow has no second
   // copy of them. Nothing in the step may name a refusal shape of its own.
-  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const workflow = fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
 
   assert.match(workflow, /await autoGate\.resolveMergeRefusal\(\{/);
   assert.match(workflow, /if \(concession\) \{\s+concede\(concession\.message, error, concession\.reason\);/);
@@ -8823,13 +8921,13 @@ async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
 // concession is wired up in that script, so a test that does not run it proves
 // nothing about whether a conceded refusal actually stops reddening the run.
 function applyGateScript() {
-  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const workflow = fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
   const step = workflow.match(
     // The `|$` alternative matters: this is the last step of the last job, so
     // the block ends at end-of-file rather than at the next low-indent line.
     /- name: Evaluate, report, and merge the serialized head[\s\S]*?script: \|\n([\s\S]*?)(?=\n {0,10}\S|$)/,
   );
-  assert.ok(step, "the apply-gate step script is missing from auto-gate.yml");
+  assert.ok(step, "the apply-gate step script is missing from auto-gate-aggregate.yml");
   const indent = step[1].match(/^( +)\S/m);
   assert.ok(indent, "the apply-gate step script is empty");
   const body = step[1]
