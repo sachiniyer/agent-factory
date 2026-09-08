@@ -165,7 +165,10 @@ test("picker closes before keyboard activation of a sibling action", async ({ pa
       document.body.append(dialog);
       dialog.focus();
     });
-    el.parentElement!.append(sibling);
+    // The real Handoff action is a sibling of the picker container, not a child
+    // of the picker wrap. Keep the fixture's focus geometry the same so focusout
+    // exercises the product's outside-focus path.
+    el.parentElement!.parentElement!.append(sibling);
   });
   await page.keyboard.press("End");
   await page.keyboard.press("Tab");
@@ -175,7 +178,7 @@ test("picker closes before keyboard activation of a sibling action", async ({ pa
   await page.keyboard.press("Enter");
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog")).toBeHidden();
 });
 
 for (const key of ["Enter", "Space"]) {
