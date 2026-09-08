@@ -294,3 +294,11 @@ export function persistProjectChoice(root: string): void {
     // no-op: persistence is best-effort
   }
 }
+
+/** Match DeleteProject's non-archived targets and IsExternalWorktree decision.
+ * The daemon projects the resolved flag, including legacy external worktrees. */
+export function projectDeletionBreakdown(sessions: SessionData[], root: string): { sessionCount: number; inPlaceCount: number } {
+  const live = sessions.filter(s => s.worktree?.repo_path === root && !isArchived(s));
+  const inPlaceCount = live.filter(s => s.worktree?.external_worktree === true).length;
+  return { sessionCount: live.length - inPlaceCount, inPlaceCount };
+}

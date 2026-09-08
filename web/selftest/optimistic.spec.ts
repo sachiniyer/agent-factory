@@ -49,7 +49,7 @@ for (const operation of ["create", "archive", "kill"] as const) {
       title = await row.locator(".af-row-title").innerText();
       await row.hover();
       await row.getByRole("button", { name: /^Actions for / }).click();
-      await row.getByRole("button", { name: new RegExp(`^${operation === "kill" ? "Kill" : "Archive"} session`) }).click();
+      await row.getByRole("button", { name: new RegExp(`^${operation === "kill" ? "Delete" : "Archive"} session`) }).click();
     }
     await page.locator(".af-modal-card button[type=submit]").click();
     await requested;
