@@ -205,6 +205,7 @@ func TestCloseTab_ActsOnFocusedPaneTab(t *testing.T) {
 	closerCalls := recordCloseTab(t, h)
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, []string{"shell-3"}, *closerCalls,
 		"w must close the FOCUSED pane's tab (shell-3), not the tree's active tab (shell)")
@@ -226,6 +227,7 @@ func TestCloseTab_FocusedAgentPaneRefuses(t *testing.T) {
 	closerCalls := recordCloseTab(t, h)
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Empty(t, *closerCalls, "no tab may be closed — the focused pane is the agent tab")
 	h.errBox.SetSize(200, 1)
@@ -245,6 +247,7 @@ func TestCloseTab_TreeFocusUnchanged(t *testing.T) {
 	closerCalls := recordCloseTab(t, h)
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, []string{"shell-2"}, *closerCalls,
 		"with tree focus, w closes the tree's active tab, as before")
@@ -407,6 +410,7 @@ func TestCloseTab_PaneFocusedClosePreservesTreeTab(t *testing.T) {
 
 	recordCloseTab(t, h)
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, 3, alpha.TabCount(), "the pane's tab (shell-3) was closed")
 	assert.Equal(t, 1, h.store.ActiveTab(),
@@ -429,6 +433,7 @@ func TestCloseTab_ClosingBelowTreeTabShiftsIt(t *testing.T) {
 
 	recordCloseTab(t, h)
 	_, _ = h.handleCloseTab() // closes shell (slot 1), below the tree's tab
+	confirmTabDeletionForTest(h)
 
 	assert.Equal(t, 2, h.store.ActiveTab(), "the tree's tab shifted down one slot with the close")
 	assert.Equal(t, "shell-3", alpha.GetTabs()[h.store.ActiveTab()].Name,
@@ -445,6 +450,7 @@ func TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor(t *testing.T) {
 
 	recordCloseTab(t, h)
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	assert.Equal(t, 1, h.store.ActiveTab(), "closing the tree's own tab lands on the left neighbour")
 }
@@ -640,6 +646,7 @@ func TestCloseTab_IDLessTreeTabTracksByOrdinal(t *testing.T) {
 
 	recordCloseTab(t, h)
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	// shell (slot 1) died, so the tree's shell-3 shifted 3 → 2. It must FOLLOW its
 	// own tab, not land on a neighbour of the pane's closed tab.
@@ -736,6 +743,7 @@ func TestCloseTab_PreviewingPaneClosesTheVisibleTab(t *testing.T) {
 
 	closerCalls := recordCloseTab(t, h)
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	assert.Equal(t, []string{"shell-3"}, *closerCalls,
 		"w must close the tab the pane is VISIBLY showing (the preview target shell-3), never the hidden committed tab")
@@ -787,6 +795,7 @@ func TestCloseTab_StickySelectionShiftsActiveTab(t *testing.T) {
 
 	recordCloseTab(t, h)
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, 3, alpha.TabCount(), "precondition: the pane's tab (shell) was closed")
 	// shell (slot 1) died, so the sticky selection's active tab shifted 3 → 2. The
@@ -829,6 +838,7 @@ func TestCloseTab_ArchivedRowCursorDoesNotRetarget(t *testing.T) {
 	h.focusRegion(layout.RegionTree)
 	closerCalls := recordCloseTab(t, h)
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	assert.NotContains(t, *closerCalls, "old-shell-2",
 		"w must never close a tab on the archived session the cursor happens to rest on — ActiveTab is not its index")

@@ -47,6 +47,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 	restoreClose := SetTabCloserForTest(func(daemon.CloseTabRequest) error { return nil })
 	defer restoreClose()
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, 2, inst.TabCount())
 	require.Equal(t, 1, h.store.NumOpenPanes(), "the killed tab's pane leaves the workspace")

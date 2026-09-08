@@ -272,6 +272,9 @@ type Instance struct {
 	// tmux-backed tab. Later PRs add shell/process tabs, lifecycle, and per-tab
 	// persistence.
 	Tabs []*Tab
+	// tabRosterGeneration fences consent across authoritative roster reconciliations.
+	// Guarded by mu; client-local, never persisted or sent over the wire.
+	tabRosterGeneration uint64
 	// gitWorktree is the git worktree for the instance.
 	gitWorktree *git.GitWorktree
 

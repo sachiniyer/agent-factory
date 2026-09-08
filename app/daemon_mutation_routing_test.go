@@ -62,6 +62,7 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	require.NotEmpty(t, createdTab.ID)
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, daemon.CloseTabRequest{
 		ID: inst.ID, Title: inst.Title, RepoID: h.repoID,
@@ -98,6 +99,7 @@ func TestHandleCloseTabImmediatelyUsesCreateResponseID(t *testing.T) {
 	require.Equal(t, createdID, inst.GetTabs()[1].ID,
 		"the local projection must carry the response ID before any snapshot")
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.Equal(t, createdID, resolvedID)
 	require.NotEqual(t, replacementID, resolvedID,
@@ -143,6 +145,7 @@ func TestHandleCloseTab_DoesNotTargetReusedTabName(t *testing.T) {
 	defer restore()
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 	require.Equal(t, target.ID, killedID,
 		"the close must resolve the stable tab that was visible when the user acted")
 	require.NotEqual(t, replacementID, killedID,
@@ -166,6 +169,7 @@ func TestHandleCloseTab_AgentTabSkipsDaemon(t *testing.T) {
 	defer restore()
 
 	_, _ = h.handleCloseTab()
+	confirmTabDeletionForTest(h)
 
 	require.False(t, called, "the agent tab must not round-trip to the daemon")
 	require.Equal(t, 2, inst.TabCount(), "the agent tab must never be closed")

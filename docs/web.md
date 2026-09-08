@@ -189,12 +189,14 @@ Tabs run in the session's worktree. Click **Agent** to return to the agent.
 
 **Actions → + New tab** also offers **VS Code**, which opens an editor for the worktree;
 see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a
-closable tab closes it; the Agent tab cannot be closed independently. Double-click
+deletable tab opens a confirmation naming the tab and session; the Agent tab
+cannot be deleted independently. Confirm with **Delete tab** or choose Cancel.
+Hiding a pane leaves the tab available; deletion requests runtime cleanup. Double-click
 a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
 to split that pane, or onto its center to replace the displayed tab.
 
 There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
-`t` creates a shell tab, `w` closes the active closable tab, and `1`–`9` select a
+`t` creates a shell tab, `w` asks to delete the active deletable tab, and `1`–`9` select a
 tab without attaching. Clicking a tab selects and attaches it.
 
 When a backend cannot create local tabs, the bar explains the restriction.
@@ -345,7 +347,7 @@ through to the agent unless a modal or menu handles them.
 | `Escape` | Close an open modal or menu; otherwise pass through to an attached agent |
 | `1`–`9` | Select a tab in navigation mode |
 | `t` | Create a shell tab when supported |
-| `w` | Close the active tab when closable; never the Agent tab |
+| `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
 | `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
 | `Alt+w` | Close the focused pane in Sessions |
