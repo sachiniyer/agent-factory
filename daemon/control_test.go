@@ -355,7 +355,7 @@ func TestValidateTitleAvailableLockedRejectsWhitespace(t *testing.T) {
 
 	for _, title := range []string{"", " ", "   ", "\t", "\n  \t"} {
 		manager.mu.Lock()
-		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", runtimeNamespaceLocalTmux, false, nil)
+		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", runtimeNamespaceLocalTmux, false, nil, false)
 		manager.mu.Unlock()
 		if err == nil {
 			t.Fatalf("expected whitespace-only title %q to be rejected", title)
@@ -379,7 +379,7 @@ func TestValidateTitleAvailableLockedRejectsControlCharacters(t *testing.T) {
 
 	for _, title := range []string{"alpha\nbeta", "alpha\rbeta", "alpha\tbeta", "alpha\x1bbeta"} {
 		manager.mu.Lock()
-		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", runtimeNamespaceLocalTmux, false, nil)
+		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", runtimeNamespaceLocalTmux, false, nil, false)
 		manager.mu.Unlock()
 		if err == nil {
 			t.Fatalf("expected title containing controls %q to be rejected", title)
@@ -414,7 +414,7 @@ func TestNextAvailableTitleRejectsMalformedBaseBeforeSuffixing(t *testing.T) {
 			manager.mu.Lock()
 			got, err := manager.nextAvailableTitleLocked(
 				"repo-id", "/tmp/repo", tc.base, "claude", runtimeNamespaceLocalTmux, nil,
-			)
+				false)
 			manager.mu.Unlock()
 
 			if err == nil {
