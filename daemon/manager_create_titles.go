@@ -232,12 +232,12 @@ func archivedWorktreeHoldsBranch(archived *session.Instance, holder string) bool
 //     It is the claim the rename is about to release, so counting it would refuse
 //     a reuse that would have succeeded — turning a data-integrity fix into a
 //     feature regression.
-func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool) error {
+func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
 	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
 	if err != nil || archived == nil {
 		return err
 	}
-	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived, inPlace)
+	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived, inPlace, remedyPath...)
 }
 
 // reuseArchivedRenamePersist is the durable title rewrite the archived-name-reuse

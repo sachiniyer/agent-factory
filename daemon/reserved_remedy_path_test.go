@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +44,7 @@ func TestReservedTitleRemedyUsesLinkedWorktreeForBareRepo(t *testing.T) {
 	require.NoError(t, err)
 
 	m := newTitleAdmissionManager()
-	err = m.validateTitleClaimableLocked("repo", resolvedWorkspace, "root", "claude", runtimeNamespaceLocalTmux, false, nil, nil, false)
+	err = m.validateTitleClaimableLocked("repo", resolvedWorkspace, "root", "claude", runtimeNamespaceLocalTmux, false, nil, nil, false, resolvedWorkspace)
 	require.Error(t, err)
 	quoted := config.ShellQuotePath(resolvedWorkspace)
 	assert.Contains(t, err.Error(), "af projects add "+quoted)
@@ -53,4 +54,15 @@ func TestReservedTitleRemedyUsesLinkedWorktreeForBareRepo(t *testing.T) {
 	resolved, err := exec.Command("git", "-C", workspace, "rev-parse", "--show-toplevel").Output()
 	require.NoError(t, err)
 	assert.Equal(t, resolvedWorkspace+"\n", string(resolved))
+}
+
+func TestTitleAdmissionUsesIdentityRootForLinkedWorktreeNamespace(t *testing.T) {
+	m := newTitleAdmissionManager()
+	identityRoot := filepath.Join(t.TempDir(), "repo.git")
+	workspace := filepath.Join(t.TempDir(), "worktree")
+	m.reservedTmuxNames[daemonInstanceKey("repo", tmux.SanitizedNameForRepo("a b", identityRoot))] = "a b"
+
+	err := m.validateTitleAvailableLocked("repo", identityRoot, "ab", "claude", runtimeNamespaceLocalTmux, false, nil, false, workspace)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "a b")
 }

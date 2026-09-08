@@ -782,14 +782,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// durable record, leaving exactly the state this function promises never to
 		// produce. Asking the record-independent half first turns those into
 		// side-effect-free refusals.
-		if err := m.refuseUnclaimableTitleReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace); err != nil {
+		if err := m.refuseUnclaimableTitleReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace, workspace); err != nil {
 			return nil, "", nil, nil, err
 		}
 		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, &diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
-		if err := m.validateTitleAvailableLocked(repo.ID, workspace, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace); err != nil {
+		if err := m.validateTitleAvailableLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace, workspace); err != nil {
 			return nil, "", nil, nil, err
 		}
 	}

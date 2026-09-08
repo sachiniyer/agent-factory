@@ -138,8 +138,12 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // anything (#2415). Any new check belongs in one of the two halves rather than
 // inline here, so the pre-rename path picks it up automatically — a check added
 // only to this function is exactly how #2415 happened.
-func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool) error {
-	if err := m.validateTitleShapeLocked(repoPath, title, namespace, allowReserved); err != nil {
+func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
+	refusalPath := repoPath
+	if len(remedyPath) > 0 {
+		refusalPath = remedyPath[0]
+	}
+	if err := m.validateTitleShapeLocked(refusalPath, title, namespace, allowReserved); err != nil {
 		return err
 	}
 	if err := m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData); err != nil {
@@ -158,8 +162,12 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 // It is not excluded from the tmux probe: archiving kills the session's pane, so
 // an archived row never owns a live tmux name, and anything the probe finds is a
 // genuine orphan the rename has no effect on.
-func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance, inPlace bool) error {
-	if err := m.validateTitleShapeLocked(repoPath, title, namespace, allowReserved); err != nil {
+func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance, inPlace bool, remedyPath ...string) error {
+	refusalPath := repoPath
+	if len(remedyPath) > 0 {
+		refusalPath = remedyPath[0]
+	}
+	if err := m.validateTitleShapeLocked(refusalPath, title, namespace, allowReserved); err != nil {
 		return err
 	}
 	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, ignore, inPlace)
