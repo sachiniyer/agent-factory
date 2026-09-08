@@ -33,7 +33,7 @@ func newSandboxCredentials(m *Manager, sessionID string) *sandboxCredentials {
 // already held.
 //
 // m.Config() is read HERE, per call, never captured. The refusals inside
-// mintSandboxCallback then evaluate the posture that is live at the moment a
+// mintSandboxCallbackFenced then evaluate the posture that is live at the moment a
 // sandbox is actually being provisioned, which is the only posture that matters.
 func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 	if c == nil || c.manager == nil {
