@@ -529,6 +529,8 @@ export async function resumeFromLimit(id: string, title: string, token: string):
 export interface HandoffResult {
   from: string;
   to: string;
+  warning?: string;
+  code?: string;
 }
 
 /** Continues a session under a different agent, in place (#2013) — the web half of
@@ -548,7 +550,11 @@ export interface HandoffResult {
  *  A failed handoff (not found, busy, unsupported backend, same agent) comes back
  *  as an envelope error and throws ApiError, so callers share one error path. */
 export async function handoffSession(id: string, title: string, to: string, token: string, account = ""): Promise<HandoffResult> {
-  return af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to, account }, token);
+  const result = await af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to, account }, token);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  return result;
 }
 
 /** The daemon's DeleteProject response: how many sessions it archived vs tore

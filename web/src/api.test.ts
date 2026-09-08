@@ -543,6 +543,36 @@ test("archiveSession surfaces a successful response's committed hook warning", a
   assert.equal(isMutationCommittedError(err), true);
 });
 
+test("handoffSession surfaces a successful response's committed settlement warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        from: "claude",
+        to: "claude",
+        from_account: "work",
+        to_account: "personal",
+        head_sha: "abc123",
+        warning: "handoff delivered, but completion has a pending settlement",
+        code: "mutation_committed",
+      },
+      error: null,
+    }),
+  });
+  const err = await handoffSession("id", "worker", "claude", "tok", "personal").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /pending settlement/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
 test("restoreSession surfaces a successful response's durable archive warning", async () => {
   stubFetchResponse({
     ok: true,
