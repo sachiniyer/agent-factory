@@ -12,9 +12,9 @@ import (
 // the field a script should branch on. It means doctor established a specific
 // unhealthy condition that must be corrected before the run is healthy. Doctor
 // deliberately emits advisory WARNs and UNKNOWN observations with useful
-// inspection guidance while leaving the exit code 0. Conversely, a proven
+// inspection guidance without increasing the unresolved count. Conversely, a proven
 // condition can be actionable even when its exact remedy is manual. Actionable
-// is derived from the same rule as the exit code, so the two cannot disagree.
+// is derived from the same rule as the unresolved count.
 type JSONCheck struct {
 	Name    string `json:"name"`
 	Section string `json:"section"`
@@ -29,8 +29,8 @@ type JSONCheck struct {
 	Actionable bool `json:"actionable"`
 }
 
-// JSONSummary counts the run by status. Unresolved is the count that drives the
-// exit code, so a script can branch on it without re-deriving the rules.
+// JSONSummary counts the run by status. The command exits 1 when Unresolved is
+// positive or Incomplete is non-empty.
 //
 // Unresolved counts underlying ACTIONABLE ISSUES, which is not always the
 // number of actionable rows: without --verbose, many process findings collapse
@@ -47,10 +47,10 @@ type JSONSummary struct {
 	// the field a probe needs to tell "doctor found nothing" from "doctor did
 	// not finish looking" (#3466). Unresolved cannot carry that: a truncated
 	// sweep legitimately establishes no unhealthy condition, so it reports 0
-	// and the run exits clean while having assessed only part of the machine.
+	// but the run still exits 1 because this list is non-empty.
 	//
-	// Empty on a complete run. A script that treats unresolved==0 as healthy
-	// should require this to be empty too.
+	// Empty on a complete run. Exit 0 requires both Unresolved == 0 and an
+	// empty Incomplete list.
 	Incomplete []string `json:"incomplete,omitempty"`
 }
 

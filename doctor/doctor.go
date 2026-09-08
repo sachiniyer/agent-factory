@@ -121,9 +121,9 @@ type Report struct {
 	// Deliberately NOT part of UnresolvedCount: "I did not finish looking" is
 	// an unknown, not a proven unhealthy condition, and this package keeps
 	// those axes apart everywhere else (see the Finding.Actionable contract).
-	// Flipping the exit code here would also break every CI probe on a box
-	// whose only sin is a large temp dir. Scripts that need to distinguish
-	// "clean" from "did not look" branch on summary.incomplete in --json.
+	// The command exits 1 for either unresolved issues or incomplete checks.
+	// Scripts distinguish those cases through summary.unresolved and
+	// summary.incomplete in --json.
 	Incomplete []string
 }
 
