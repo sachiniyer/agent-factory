@@ -22,11 +22,17 @@ for (const theme of ["light", "dark"] as const) {
           const x = luminance(a), y = luminance(b);
           return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
         };
-        return { edge: contrast(css.borderColor, css.backgroundColor),
+        const probe = document.createElement("span");
+        probe.style.color = "var(--af-border)";
+        button.append(probe);
+        const border = getComputedStyle(probe).color;
+        probe.remove();
+        return { borderMatchesToken: css.borderColor === border, weight: css.fontWeight,
           label: contrast(css.color, css.backgroundColor), height: button.getBoundingClientRect().height,
           padding: parseFloat(css.paddingInlineStart) };
       });
-      expect(style.edge).toBeGreaterThanOrEqual(3);
+      expect(style.borderMatchesToken).toBe(true);
+      expect(style.weight).toBe("600");
       expect(style.label).toBeGreaterThanOrEqual(4.5);
       expect(style.height).toBeGreaterThanOrEqual(44);
       expect(style.padding).toBeGreaterThanOrEqual(16);

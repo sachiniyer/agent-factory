@@ -51,3 +51,126 @@ Project/keybar review round: project removal now derives its regular/in-place br
 | Back (keybar documentation, three locations) | More keys |
 
 Golden review: added only `phone-session-320.png` and `phone-session-320-dark.png`. Both show the focused session with all six keybar labels fully visible, 44px targets, a 48px header and a 44px keybar. Read all 24 differing captures. The four existing keyboard/modifier stills differ only by 1–3 pixels at the top-left header corner, not in the keybar; those and other unrelated capture drift are not rebaselined.
+
+
+Ownership and button-contract review: deletion now reads the session's `external_worktree` flag. External sessions delete their record/runtime while keeping the checkout and branch; they are not offered Archive. Af-owned sessions keep the loss warning. The design template and generated guide now say “Hide pane”. Shared resting action outlines use `--af-border` and labels use weight 600, with the accent hover retained; the token contract is unchanged.
+
+| Before | After |
+| --- | --- |
+| Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them. (external sessions too) | Permanently deletes the session record and runtime. Your checkout and branch stay. (external sessions only; af-owned copy unchanged) |
+| Close pane (style-guide template, generated guide, original phone evidence README) | Hide pane |
+
+The constructor/string inventories above record the original base, not the current implementation. The shared button correction is in CSS, not individual call sites. The browser regression checks the prescribed resting border token and weight in both themes and across desktop/phone widths; the earlier blanket 3:1 dark-outline assertion was stricter than the normative contract's 1.5:1 dark-outline requirement and is replaced by the token check.
+
+Read every regenerated golden listed below (90 design stills and 18 recovery stills). The lighter dark-mode borders are the specified border token; heavier labels retain action emphasis. The six existing 360/390/430px after-phone captures were also read and refreshed with the same styling; before captures are retained.
+
+| Golden | Reviewed change |
+| --- | --- |
+| account-error-dark.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| account-error.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| add-account-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| add-account.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| add-project-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| add-project.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| agent-tab-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| agent-tab.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| assistant-error-dark.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| assistant-error.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| comparison-review-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| comparison-review.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| config-accounts-dark.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| config-accounts.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| config-dirty-dark.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| config-dirty.png | Settings/account actions use border-token edges and 600 labels; notices and fields remain intact; scrolled views keep actions reachable. |
+| create-compact-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| create-compact.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| create-defaults-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| create-defaults.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| dashboard-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| dashboard.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| edit-task-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| edit-task.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| event-intake-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| event-intake.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| kill-confirmation-dark.png | Cancel/Delete session buttons use border-token edges and 600 labels; this af-owned fixture retains the work-loss/Archive warning. |
+| kill-confirmation.png | Cancel/Delete session buttons use border-token edges and 600 labels; this af-owned fixture retains the work-loss/Archive warning. |
+| login-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| login-expired-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| login-expired-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| login.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| new-session-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| new-session.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| no-accounts-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-accounts-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-daemon-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-daemon-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-project-registered-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-project-registered-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-sessions-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-sessions-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-tasks-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| no-tasks-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| notice-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| notice-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| parallel-work-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| parallel-work.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| phone-add-account-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-add-account.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-config-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-config.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-controls-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-controls.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-create-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-create.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-drawer-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-drawer.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-filter-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-filter.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-project-menu-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-project-menu.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-session-320-dark.png | Header/keybar buttons use border-token edges and 600 labels; all six controls fit at 320px. |
+| phone-session-320.png | Header/keybar buttons use border-token edges and 600 labels; all six controls fit at 320px. |
+| phone-session-actions-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-session-actions.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-session-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-session-first-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-session-first.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-session.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-tab-types-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-tab-types.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-tasks-dark.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-tasks.png | Phone navigation/actions use border-token edges and 600 labels; controls and menus remain inside the viewport. |
+| phone-terminal-keyboard-dark.png | Header/keybar buttons use border-token edges and 600 labels; locked Ctrl retains its accent marker and outline where shown. |
+| phone-terminal-keyboard.png | Header/keybar buttons use border-token edges and 600 labels; locked Ctrl retains its accent marker and outline where shown. |
+| phone-terminal-modifier-locked-dark.png | Header/keybar buttons use border-token edges and 600 labels; locked Ctrl retains its accent marker and outline where shown. |
+| phone-terminal-modifier-locked.png | Header/keybar buttons use border-token edges and 600 labels; locked Ctrl retains its accent marker and outline where shown. |
+| project-menu-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| project-menu.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| remove-task-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| remove-task.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| review-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| review.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| scheduled-triage-dark.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| scheduled-triage.png | Form/dialog action buttons use border-token edges and 600 labels; authored copy, values and scrollable-field affordances remain intact. |
+| session-actions-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| session-actions.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| session-filter-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| session-filter.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| session-lifecycle-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| session-lifecycle.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| sign-in-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| sign-in-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| split-panes-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| split-panes.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| tab-types-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| tab-types.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| task-actions-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| task-actions.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| tasks-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| tasks.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| terminal-keyboard-dark.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| terminal-keyboard.png | Appbar, pane, rail or task actions use border-token edges and 600 labels; content and selected-state affordances remain intact. |
+| tokenless-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| tokenless-light.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| unavailable-dark.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |
+| unavailable.png | Recovery/Connect action uses the border token and 600 label; condition and next-action copy remain readable. |

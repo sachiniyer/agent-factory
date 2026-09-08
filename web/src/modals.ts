@@ -525,7 +525,7 @@ export function handoffModal(
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; externalWorktree: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -537,7 +537,9 @@ export function confirmModal(
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-primary",
-      body: "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them.",
+      body: opts.externalWorktree
+        ? "Permanently deletes the session record and runtime. Your checkout and branch stay."
+        : "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them.",
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,

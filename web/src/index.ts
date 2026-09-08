@@ -839,6 +839,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
     confirmModal({
       action,
       sessionTitle: target.title,
+      externalWorktree: session.worktree?.external_worktree === true,
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

@@ -11290,3 +11290,39 @@ test("320px focused keybar keeps its last button inside the viewport", async ({ 
     await ctx.close();
   }
 });
+
+for (const external of [true, false]) {
+  test(`session deletion ownership disclosure: external=${external}`, async ({ browser }) => {
+    const ctx = await browser.newContext();
+    try {
+      const p = await ctx.newPage();
+      await p.routeWebSocket(url => url.pathname === "/v1/events", () => {});
+      await p.route("**/v1/Snapshot", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const session of body.data.instances) {
+          if (session.worktree) session.worktree.external_worktree = external;
+        }
+        await route.fulfill({ json: body });
+      });
+      await openTokenless(p);
+      const target = row(p, SESSION_A);
+      await target.hover();
+      await target.getByRole("button", { name: /^Actions for / }).click();
+      await target.getByRole("button", { name: /^Delete session / }).click();
+      const modal = p.getByRole("dialog");
+      if (external) {
+        await expect(modal).toContainText("session record and runtime");
+        await expect(modal).toContainText("checkout and branch stay");
+        await expect(modal).not.toContainText("Archive");
+        await expect(modal).not.toContainText("are lost");
+      } else {
+        await expect(modal).toContainText("Uncommitted changes and unpushed commits are lost.");
+        await expect(modal).toContainText("Archive to keep them.");
+      }
+      await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    } finally {
+      await ctx.close();
+    }
+  });
+}

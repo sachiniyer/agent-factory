@@ -3581,8 +3581,8 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 /* Shared action treatment: visible edges in both palettes, quiet hover, and
  * balanced label padding. Navigation keeps its existing geometry and selection. */
 :is(.af-app, .af-modal-card, .af-recovery) button[class]:not([aria-pressed="true"]):not([aria-selected="true"]) {
-  border-color: var(--af-ink-muted);
-  font-weight: 500;
+  border-color: var(--af-border);
+  font-weight: 600;
 }
 :is(.af-app, .af-modal-card, .af-recovery) button:hover:not(:disabled) {
   border-color: var(--af-accent);

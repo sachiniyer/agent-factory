@@ -6,17 +6,21 @@ import { test } from "node:test";
 test("lifecycle confirmation copy fits a 160-character reading budget", () => {
   const source = readFileSync(new URL("./modals.ts", import.meta.url), "utf8");
   const lifecycle = source.slice(source.indexOf("const copy = {"), source.indexOf("}[opts.action]"));
-  const bodies = [...lifecycle.matchAll(/body: "([^"]+)"/g)].map(match => match[1]);
-  assert.equal(bodies.length, 3);
+  const bodies = [...lifecycle.matchAll(/body:([\s\S]*?)(?=\n    },)/g)]
+    .flatMap(match => [...match[1].matchAll(/"([^"]+)"/g)].map(literal => literal[1]));
+  assert.equal(bodies.length, 4);
   for (const body of bodies) assert.ok([...body].length <= 160, `${[...body].length} characters: ${body}`);
-  assert.match(bodies[0], /permanent|undo/i);
-  assert.match(bodies[0], /Uncommitted changes and unpushed commits.*lost/);
-  assert.match(bodies[0], /Archive.*keep/);
-  assert.doesNotMatch(bodies[0], /User-owned work stays/);
-  assert.doesNotMatch(bodies[0], /prune/);
-  assert.match(bodies[1], /publish/);
-  assert.match(bodies[2], /push.*replacement.*refuses/);
-  assert.match(bodies[1], /restor/i);
+  const [external, owned, archive, restore] = bodies;
+  assert.match(external, /session record and runtime/);
+  assert.match(external, /checkout and branch stay/);
+  assert.doesNotMatch(external, /Archive|are lost/);
+  assert.match(owned, /permanent|undo/i);
+  assert.match(owned, /Uncommitted changes and unpushed commits.*lost/);
+  assert.match(owned, /Archive.*keep/);
+  assert.doesNotMatch(owned, /User-owned work stays|prune/);
+  assert.match(archive, /publish/);
+  assert.match(restore, /push.*replacement.*refuses/);
+  assert.match(archive, /restor/i);
 });
 
 test("zero live sessions does not imply an empty project", () => {

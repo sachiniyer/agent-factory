@@ -338,7 +338,7 @@ ownership label and one … disclosure. Preserve the full title in title and ari
 text. The disclosure holds project choices, Sessions · Tasks · Config, install,
 Light · Dark · System, Disconnect, pane actions and the session tab switcher.
 Project choices and new-tab types are inline inside it, without nested disclosures.
-For a split session, show the focused pane and keep Close pane in the menu; restore
+For a split session, show the focused pane and keep Hide pane in the menu; restore
 the split when returning to desktop.
 Escape closes the disclosure and returns focus to its trigger. The drawer, Tasks,
 Config and nonterminal content retain their existing phone layouts.

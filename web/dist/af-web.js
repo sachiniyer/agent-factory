@@ -10721,7 +10721,7 @@ function confirmModal(opts) {
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-primary",
-      body: "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
+      body: opts.externalWorktree ? "Permanently deletes the session record and runtime. Your checkout and branch stay." : "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
@@ -16575,6 +16575,7 @@ function openConfirm(action, session) {
     confirmModal({
       action,
       sessionTitle: target.title,
+      externalWorktree: session.worktree?.external_worktree === true,
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {

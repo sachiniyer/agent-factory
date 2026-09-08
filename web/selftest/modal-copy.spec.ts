@@ -4,6 +4,16 @@ import { Liveness } from "../src/types.js";
 for (const theme of ["light", "dark"] as const) {
   test(`session deletion warns about work loss in ${theme}`, async ({ page }, info) => {
     await page.emulateMedia({ colorScheme: theme });
+    // Pin this visual fixture to an af-owned worktree; external copy has separate coverage.
+    await page.route("**/v1/Snapshot", async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      for (const session of body.data.instances) {
+        if (session.worktree) session.worktree.external_worktree = false;
+      }
+      await route.fulfill({ json: body });
+    });
+    await page.routeWebSocket("**/v1/events*", () => {});
     await page.goto("/");
     const row = page.locator(".af-row").first();
     await row.hover();
