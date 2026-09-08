@@ -755,7 +755,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// A derived title_base keeps auto-suffixing around every existing session,
 		// archived rows included — the archived-name-reuse rename is reserved for an
 		// EXPLICIT title the caller asked for by name (below).
-		title, err = m.nextAvailableTitleLocked(repo.ID, identityRoot, base, req.Program, nameNamespace, diskData)
+		title, err = m.nextAvailableTitleLocked(repo.ID, identityRoot, base, req.Program, nameNamespace, diskData, req.InPlace)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
@@ -782,14 +782,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// durable record, leaving exactly the state this function promises never to
 		// produce. Asking the record-independent half first turns those into
 		// side-effect-free refusals.
-		if err := m.refuseUnclaimableTitleReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData); err != nil {
+		if err := m.refuseUnclaimableTitleReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace); err != nil {
 			return nil, "", nil, nil, err
 		}
 		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, &diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
-		if err := m.validateTitleAvailableLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData); err != nil {
+		if err := m.validateTitleAvailableLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace); err != nil {
 			return nil, "", nil, nil, err
 		}
 	}
@@ -816,6 +816,12 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// returns the release() only on success); m.mu has been held unbroken since
 	// admitTaskRunLocked, so the count is exactly what admission saw.
 	m.reservedTitles[key] = struct{}{}
+	if nameNamespace == runtimeNamespaceLocalTmux && !req.InPlace {
+		if m.reservedArchiveTitles == nil {
+			m.reservedArchiveTitles = make(map[string]struct{})
+		}
+		m.reservedArchiveTitles[key] = struct{}{}
+	}
 	if tmuxReservationKey != "" {
 		if m.reservedTmuxNames == nil {
 			m.reservedTmuxNames = make(map[string]string)
@@ -830,6 +836,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		delete(m.reservedTitles, key)
+		delete(m.reservedArchiveTitles, key)
 		if tmuxReservationKey != "" {
 			delete(m.reservedTmuxNames, tmuxReservationKey)
 		}
