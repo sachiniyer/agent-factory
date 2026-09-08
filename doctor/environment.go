@@ -90,6 +90,7 @@ func checkHomeHealth(ctx *scanContext, report *Report) {
 	for _, subdir := range []string{"instances", "repos"} {
 		checkStorageDir(report, filepath.Join(home, subdir), subdir)
 	}
+	checkHookLogs(report, filepath.Join(home, "logs", "hooks"))
 }
 
 func checkStorageDir(report *Report, path, name string) {
