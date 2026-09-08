@@ -41,5 +41,6 @@
     "ui/theme.go": "ea202e2b05052f600b0d47560722c790a794a666383025bd5d50c391035c2bdb",
     "ui/tree/render.go": "4aef9c343a801a8322e2b750b70e14924c09c152d80626e26887b236f70ba72b",
     "app/design_thesis_test.go": "490eddbc8901b543f144d959cd61c7e381e2473f79b743b580a174cf6c65b409"
-  }
+  },
+  "integration_note": "Integrated origin/master 451dea19 after opening the PR; recaptured all TUI stills in the container for #4025 footer shortcut removal. The four 80x24 exemplar captures are byte-identical. Historical before captures remain at baseline_commit."
 }
