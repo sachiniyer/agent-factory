@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenCreatesPrivateLogUnderAFHome(t *testing.T) {
@@ -74,6 +75,10 @@ func TestCloseAndReadTailUsesOpenedFileNotReplacedPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("replacement path output"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	old := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 
 	tail, err := CloseAndReadTail(file)
 	if err != nil {
@@ -81,6 +86,13 @@ func TestCloseAndReadTailUsesOpenedFileNotReplacedPath(t *testing.T) {
 	}
 	if tail != "original hook output" {
 		t.Fatalf("tail = %q, want bytes from the descriptor handed to the hook", tail)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(old) {
+		t.Fatalf("completion touched replacement path: mtime = %s, want %s", info.ModTime(), old)
 	}
 }
 
