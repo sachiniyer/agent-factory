@@ -575,8 +575,8 @@ func TestAccountChoiceItemMarksBothStates(t *testing.T) {
 			"work — registration only"},
 		{"both", accountChoice{value: "work", label: "work", registrationOnly: true},
 			"work — registration only · not logged in"},
-		{"ambient", accountChoice{value: ambientAccount, label: "Ambient identity (the agent's own login)"},
-			"Ambient identity (the agent's own login)"},
+		{"ambient", accountChoice{value: ambientAccount, label: "Use configured default"},
+			"Use configured default"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.choice.item())

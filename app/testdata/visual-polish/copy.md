@@ -15,7 +15,6 @@
 | ui/tab_pane.go | Terminal tab not available for remote sessions. ⏎ Configure remote_hooks.terminal_cmd to enable it. ⏎ Use the Agent tab to see session output. | 138 | Set remote_hooks.terminal_cmd for a remote terminal. ⏎ Use the Agent tab for output. | 82 |
 | ui/tabbed_window.go |  %s · %s · Preview  | 19 |  %s · %s · preview  | 19 |
 | ui/tabbed_window.go |  · Keyboard  | 12 |  · keyboard  | 12 |
-| ui/tabbed_window.go |  %s · %s — selected: %s  | 24 |  %s · %s · selected: %s  | 24 |
 | ui/tabbed_window.go |  No session selected  | 21 |  Select a session  | 18 |
 | ui/hooks_pane.go | enter to focus and edit hooks | 29 | enter edit hooks | 16 |
 | ui/task_pane.go | watch tasks run on their watch command's output, not on manual trigger | 70 | Watch tasks run on output, not manually. | 40 |

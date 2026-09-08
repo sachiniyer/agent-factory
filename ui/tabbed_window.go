@@ -600,7 +600,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
 		if w.selectionHint != "" {
-			text = fmt.Sprintf(" %s · %s · selected: %s ", inst.Title, label, w.selectionHint)
+			text = fmt.Sprintf(" %s · %s — selected: %s ", inst.Title, label, w.selectionHint)
 		}
 	} else {
 		text = " Select a session "

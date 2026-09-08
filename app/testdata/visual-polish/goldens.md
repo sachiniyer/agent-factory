@@ -96,3 +96,15 @@ Shared changes restore accent/bold footer actions without adding cells. Modal ba
 | tasks-light.svg | Accent/bold footer actions. Complete footer action labels shaded; form fields and overflow retained. |
 
 P1 review recapture: confirmation light/dark warns about work loss; help and preview-help light/dark wrap the revised deletion description onto one extra line. All six changed SVGs were read; footer/scroll hints remain visible.
+
+
+Full-suite follow-up: restored `— selected:` to preserve the CLAUDE.md clause convention. Updated lowercase preview/account-picker assertions and made the menu highlight assertion recognize underline after bold. The unfiltered app run also exposed 12 stale recovery SVGs; recaptured them in the container and read every changed still. All 90 design captures remain byte-identical after restoring the dash.
+
+| Recovery stills (both themes) | What changed |
+| --- | --- |
+| `no-daemon` | Shorter saved-sessions/retrying disclosure; reconnect instruction stays visible. |
+| `zero-accounts` | Shorter register/Enter instruction; both provider registration rows remain visible. |
+| `remote-accounts` | Agent login-flow/URL explanation replaces the long identity paragraph; remote login limitation and registration row remain visible. |
+| `no-project` | Shared accent/bold footer actions; registration instruction unchanged. |
+| `projects-unavailable` | Shared accent/bold footer actions; registry failure and recovery instruction unchanged. |
+| `zero-sessions` | Shared accent/bold footer actions; create-session instruction unchanged. |
