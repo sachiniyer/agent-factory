@@ -1528,11 +1528,11 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
   await expect(p.locator(".af-dot-working")).toHaveCount(0);
 
-  // Retry remains the conditional pane-header escape from a usage-limit wall
+  // Retry limit remains the conditional pane-header escape from a usage-limit wall
   // (#1934): selecting the synthetic limit row reveals it, while selecting an
   // ordinary waiting row withdraws it. The rail move must not displace this path.
   await row(p, "probe-limit").click();
-  const retry = p.locator(".af-term-head button", { hasText: "Retry" });
+  const retry = p.locator(".af-term-head").getByRole("button", { name: "Retry limit", exact: true });
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
   const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");
@@ -5975,7 +5975,7 @@ test("add + delete a registered empty project (#2456): appears while another is 
   await del.click();
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
-  await expect(delModal).toContainText("empty project");
+  await expect(delModal).toContainText("No live sessions to archive.");
   await delModal.locator("button.af-primary").click();
   await expect(delModal).toBeHidden();
 
