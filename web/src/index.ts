@@ -127,7 +127,7 @@ import {
   type NewTabKind,
 } from "./ui.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
-import type { AccountsResponse, SessionData, TaskData, WireEvent } from "./types.js";
+import { InFlightOp, type AccountsResponse, type SessionData, type TaskData, type WireEvent } from "./types.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -193,7 +193,7 @@ const pendingRestores = new PendingRestores(
   ids => store.set({ pendingRestores: ids }),
   e => isMutationCommittedError(e) || isMutationOutcomeUncertain(e),
   isMutationCommittedError,
-  Date.now,
+  () => globalThis.performance.now(),
   requestPendingRestoreResync,
 );
 const connectionGate = createLatestRequestGate();
@@ -2398,10 +2398,11 @@ function applySessions(sessions: SessionData[]): void {
       : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
-  // Dead-to-Lost normalization still offers Restore: only loss of that action settles it.
-  pendingRestores.observe(sessions.map(s => ({
+  // Evidence distinguishes causal completion from delayed updates/cache repaints.
+  if (evidence) pendingRestores.observe(authoritative.map(s => ({
     id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
-  })));
+    restoreInFlight: s.in_flight_op === InFlightOp.Restoring,
+  })), evidence);
 }
 
 /** Tab mutations also fetch full snapshots. Fold those through the same ledger

@@ -1,4 +1,4 @@
-type RestoreRow = { id?: string; restoreEligible: boolean };
+type RestoreRow = { id?: string; restoreEligible: boolean; restoreInFlight?: boolean };
 export type RestoreEvidence =
   | { kind: "snapshot"; generation: number; operationLockTimeoutMs?: number }
   | { kind: "updated" | "restored"; id: string };
@@ -34,7 +34,8 @@ export class PendingRestores {
     private readonly changed: (ids: ReadonlySet<string>) => void,
     private readonly retainOnError: (error: unknown) => boolean = () => false,
     private readonly committedOnError: (error: unknown) => boolean = () => false,
-    private readonly now: () => number = Date.now,
+    // Match the daemon's monotonic operation-lock deadline across machine sleep.
+    private readonly now: () => number = () => globalThis.performance.now(),
     private readonly requestReconcile: () => void = () => {},
     private readonly schedule: (callback: () => void, delayMs: number) => RestoreTimer =
       (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
@@ -132,8 +133,10 @@ export class PendingRestores {
       if (ticket.uncertain && authoritative && causalUncertainSnapshot) {
         if (!eligibility.has(id)) {
           uncertainCompleted = true;
-        } else if (!row?.restoreEligible) {
+        } else if (row?.restoreInFlight) {
           ticket.sawBusy = true;
+        } else if (!row?.restoreEligible) {
+          uncertainCompleted = true;
         } else {
           // A reconnect can hold these captured rows behind slower task/project
           // loads. Processing time cannot turn a pre-deadline Snapshot into proof.

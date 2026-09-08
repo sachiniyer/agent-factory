@@ -514,8 +514,9 @@ test("restore completion during reconnect queues its resync until app phase", ()
 
 test("an uncertain restore deadline uses the reconnect-aware resync path", () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8");
-  assert.match(source, /new PendingRestores\([\s\S]*?requestPendingRestoreResync,\n\)/,
-    "the ledger's deadline must request an authoritative Snapshot");
+  assert.match(source,
+    /new PendingRestores\([\s\S]*?\(\) => globalThis\.performance\.now\(\),\n  requestPendingRestoreResync,\n\)/,
+    "the ledger must share a monotonic clock with the daemon deadline and request an authoritative Snapshot");
   const body = topLevelFunction(source, "requestPendingRestoreResync");
   assert.match(body, /phase === "app"\) requestResync\(\)/,
     "a connected app must schedule the deadline Snapshot immediately");
