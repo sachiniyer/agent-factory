@@ -47,7 +47,7 @@ func (m *Manager) archiveDestinationOwner(repoID string, inst *session.Instance,
 			return owner.title, nil
 		}
 	}
-	disk, err := loadRepoInstanceData(repoID)
+	disk, err := loadArchiveOwnerData(repoID)
 	if err != nil {
 		return "", err
 	}
