@@ -14671,6 +14671,8 @@ var AppShell = class {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   tabBar = null;
+  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
+  newTabDisclosureReturn = /* @__PURE__ */ new WeakMap();
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -15243,7 +15245,17 @@ var AppShell = class {
   openNewTabPicker() {
     const slot = this.terminalChrome?.newTabSlot;
     const trigger = slot?.querySelector(".af-tab-new");
-    if (!trigger) return;
+    if (!trigger || !slot) return;
+    if (this.appControls.panel.contains(slot)) {
+      if (!this.newTabDisclosureReturn.has(trigger)) {
+        const wasHidden = this.appControls.panel.hidden;
+        this.newTabDisclosureReturn.set(trigger, () => {
+          if (wasHidden) this.appControls.close(true);
+          else this.appControls.trigger.focus();
+        });
+      }
+      this.appControls.open();
+    }
     this.terminalChrome?.menu.open();
     if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
     slot?.querySelector('[role="menuitem"]')?.focus();
@@ -15289,6 +15301,7 @@ var AppShell = class {
     };
     const close = () => {
       menu.hidden = true;
+      this.newTabDisclosureReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onKeyDown, true);
@@ -15306,8 +15319,10 @@ var AppShell = class {
         return;
       }
       e.stopPropagation();
+      const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
       close();
-      trigger.focus();
+      if (returnToDisclosure) returnToDisclosure();
+      else trigger.focus();
     };
     const open = () => {
       menu.hidden = false;

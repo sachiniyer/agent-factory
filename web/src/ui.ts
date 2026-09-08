@@ -848,6 +848,8 @@ export class AppShell {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
+  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
+  private readonly newTabDisclosureReturn = new WeakMap<HTMLElement, () => void>();
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -1757,7 +1759,19 @@ export class AppShell {
   openNewTabPicker(): void {
     const slot = this.terminalChrome?.newTabSlot;
     const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
-    if (!trigger) return;
+    if (!trigger || !slot) return;
+    // Phone composition moves these controls into the app-controls disclosure.
+    // Ask the DOM owner, rather than guessing from viewport width.
+    if (this.appControls.panel.contains(slot)) {
+      if (!this.newTabDisclosureReturn.has(trigger)) {
+        const wasHidden = this.appControls.panel.hidden;
+        this.newTabDisclosureReturn.set(trigger, () => {
+          if (wasHidden) this.appControls.close(true);
+          else this.appControls.trigger.focus(); // the phone's New tab button is hidden
+        });
+      }
+      this.appControls.open();
+    }
     this.terminalChrome?.menu.open();
     if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
     slot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
@@ -1807,6 +1821,7 @@ export class AppShell {
     };
     const close = (): void => {
       menu.hidden = true;
+      this.newTabDisclosureReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onKeyDown, true);
@@ -1830,8 +1845,10 @@ export class AppShell {
       // reach the agent (a bare Escape now forwards to the PTY as the agent's
       // interrupt, #2517 — an open menu is the exception).
       e.stopPropagation();
+      const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
       close();
-      trigger.focus();
+      if (returnToDisclosure) returnToDisclosure();
+      else trigger.focus();
     };
     const open = (): void => {
       menu.hidden = false;
