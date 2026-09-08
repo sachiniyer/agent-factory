@@ -155,7 +155,7 @@ func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
 // Turning require_token OFF must not leave sandbox callback credentials behind
 // (#2999, #3012 review).
 //
-// mintSandboxCallback refuses to ISSUE one while require_token is false, because a
+// mintSandboxCallbackFenced refuses to ISSUE one while require_token is false, because a
 // scoped credential against a listener that authenticates nobody enforces nothing.
 // That check runs once, at provision time, and auth keys apply live with no rebind
 // — so without this, relaxing the key silently converts every already-issued
