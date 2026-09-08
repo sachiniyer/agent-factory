@@ -97,6 +97,27 @@ func TestHandoffAccountOmittedAgentResolvesUnderLock(t *testing.T) {
 	require.Equal(t, "personal", inst.Account)
 }
 
+func TestHandoffAccountRefusesLifecycleClaimUnderLock(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	key := daemonInstanceKey(repo, inst.Title)
+	previous := testHookHandoffAccountBeforeTargetLock
+	defer func() { testHookHandoffAccountBeforeTargetLock = previous }()
+	testHookHandoffAccountBeforeTargetLock = func() {
+		m.mu.Lock()
+		m.killsInFlight[key] = struct{}{}
+		m.mu.Unlock()
+	}
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.ErrorContains(t, err, "being killed/archived")
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
+	require.Equal(t, "work", inst.Account)
+}
+
 func TestHandoffAccountHealthyPendingSwapRetainsResumeBackoff(t *testing.T) {
 	advance := withFrozenClock(t)
 	m, repo, inst, _ := newAutoResumeManager(t, "", true, "continue", nowFunc().Add(time.Hour))

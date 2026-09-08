@@ -23,6 +23,20 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		return HandoffSessionResponse{}, fmt.Errorf("session %q is busy with another operation", instance.Title)
 	}
 	defer op.Unlock()
+	// Re-read the slot while both lifecycle locks are held. A kill or archive
+	// may have claimed the key while this request waited for the target lock,
+	// and the caller's pointer may have been replaced or removed in the meantime.
+	m.mu.Lock()
+	current := m.instances[key]
+	_, killing := m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing {
+		return HandoffSessionResponse{}, fmt.Errorf("session %q is being killed/archived", instance.Title)
+	}
+	if current != instance {
+		return HandoffSessionResponse{}, fmt.Errorf("session %q was replaced or removed", instance.Title)
+	}
+	instance = current
 	// An account-only request follows the agent selected by the preceding
 	// operation, including a handoff that finished while we waited for the lock.
 	target := strings.TrimSpace(req.To)
