@@ -683,6 +683,7 @@ All data (sessions, tasks) is scoped to the current git repository — the TUI s
 | `~/.agent-factory/instances/<repoID>/instances.json` | Persisted sessions, per repo. |
 | `~/.agent-factory/tasks.json` | Tasks (see [tasks.md](tasks.md)). |
 | `~/.agent-factory/logs/task-<id>.log` | Per-task watch-script logs. Rotated with the same `log_max_size_mb`/`log_max_backups` policy as the application log (`task-<id>.log.1`, `.2`). |
+| `~/.agent-factory/logs/hooks/{post-worktree,on-archive}-<run>.log` | Complete stdout/stderr retained for a failed or daemon-interrupted operator hook command, in a private per-run file the hook can keep writing across a daemon restart. Failure messages include the exact path and a tail capped at 64 KiB; normally completed logs are removed. |
 | `~/.agent-factory/tmux-server.log` | Linux tmux server stdout/stderr and wrapper exit evidence. The daemon starts the shared server in a dedicated user scope and rotates this file with the same policy as the application log. |
 | `~/.config/agent-factory/agent-factory.log` | Application log (`os.UserConfigDir` on other platforms). Rotated once it exceeds `log_max_size_mb` (default 50 MB); the most recent `log_max_backups` rotations (default 2) are kept as `agent-factory.log.1`, `.2`. |
 

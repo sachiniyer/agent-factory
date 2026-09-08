@@ -77,23 +77,25 @@ they never establish that a frame completed.
 
 ## Recorded baseline and budgets
 
-The original P1 recording was measured on 2026-09-05; its bundle, layout-shift
-and TUI entries remain unchanged. The three web latency baselines were tightened
-on 2026-09-06 for #3914 using the six after samples detailed below. Measurements
+The original P1 recording was measured on 2026-09-05; its layout-shift and TUI
+entries remain unchanged. The three web latency baselines were tightened on
+2026-09-06 for #3914 using the six after samples detailed below. Bundle baselines
+were refreshed on 2026-09-07 for #4050 using three container samples. Measurements
 use Linux amd64, Node/Chromium from the pinned Playwright 1.56.1 Noble image,
 Go 1.25.0 and a 4GiB container memory limit. The original warm end-to-end run took
 about three minutes.
 
 The committed `scripts/perf/baselines.json` is the budget source. The table below
 reports arithmetic mean, range and population standard deviation: six samples
-for first terminal, echo and initial rail; the original three for every other
-metric. Each CI run uploads individual samples, summary JSON/table and any
-Playwright traces/diff images under the `perf-baselines` artifact.
+for first terminal, echo and initial rail; three refreshed samples for bundle
+bytes; the original three for layout shift and TUI metrics. Each CI run uploads
+individual samples, summary JSON/table and any Playwright traces/diff images
+under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 878059.000 | 878059.000–878059.000 | 0.000 | 921961.950 |
-| gzip_bytes | 196682.000 | 196682.000–196682.000 | 0.000 | 206516.100 |
+| raw_bytes | 921868.000 | 921868.000–921868.000 | 0.000 | 967961.400 |
+| gzip_bytes | 205077.000 | 205077.000–205077.000 | 0.000 | 215330.850 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -108,8 +110,8 @@ payload increase. Timing margin is 100% of the baseline, with a 50ms absolute
 floor, to tolerate shared-runner scheduling and sub-frame observation noise.
 Layout-shift margin is an absolute 0.01 (multiplying a zero baseline would allow
 no noise). These are regression budgets, not latency SLOs. P3 tightened only the first-terminal,
-echo and initial-rail baselines while preserving this margin policy; bundle, layout
-shift and TUI entries remain unchanged. CI compares the
+echo and initial-rail baselines while preserving this margin policy; #4050 refreshed
+only the bundle entries under the same 5% policy. CI compares the
 three-run mean and fails on missing, negative or non-finite samples, missing
 budgets, or a mean above its budget. It never learns a new baseline in CI.
 
@@ -118,6 +120,23 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#4050)
+
+Recorded with `AF_PERF_RECORD=1 make perf-container` on master commit
+`db96729dcaed03285539fcc648c731f845da2bea`, artifact run `1135158-048d87`.
+The two bundle rows above come from that run's `metrics.md`; all three samples
+were identical. The generated `baselines.json` was copied, then all non-bundle
+entries were restored from the committed baseline. Every recorded timing and
+layout-shift mean passed its existing budget, so none needed to move.
+
+Raw bytes grew from the original 878,059 to 921,868; gzip bytes grew from
+196,682 to 205,077. P3's committed bundle already contained 906,946 raw bytes
+while retaining the original bundle baseline. Subsequent merged changes added
+14,922 raw bytes: mutation provenance (#3962), task completion controls (#3961),
+appearance settings (#3966), phone header/keybar/session layout (#3968, #3980,
+#3984), theme/token updates (#3972, #3979), and tab labels (#4011). The old raw
+budget left only 93.95 bytes of headroom on the measured master commit.
 
 ### P3 recording provenance (#3914)
 
