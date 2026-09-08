@@ -521,7 +521,7 @@ func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
 	for _, want := range []string{
 		"D kill",
 		"t new tab",
-		"w close tab",
+		"w del tab",
 		"1-9/g go",
 		"s open pane",
 		"tab focus",
@@ -550,7 +550,7 @@ func TestMenuSelftestWidthKeepsSelectedRowAndTabPaneHints(t *testing.T) {
 		"n new",
 		"D kill",
 		"t new tab",
-		"w close tab",
+		"w del tab",
 		"1-9/g go",
 		"s open pane",
 		"tab focus",

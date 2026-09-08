@@ -377,7 +377,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			// reference in source rather than exposing it in the help overlay.
 			{helpKey(keys.KeyJumpTabPrompt), "Jump to ANY tab by number or name — there is no tab limit"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
-			{helpKey(keys.KeyCloseTab), "Delete the current tab after confirmation (except the agent tab)"},
+			{helpKey(keys.KeyCloseTab), "Delete tab (asks first; agent tab excluded)"},
 			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll the current tab preview (navigation mode only)"},
 		}},
 		{title: "Full-screen scrolling:", rows: []helpRow{

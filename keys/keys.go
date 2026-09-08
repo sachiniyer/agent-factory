@@ -249,7 +249,7 @@ var specs = []spec{
 	{name: KeyTab, keys: []string{"tab"}, desc: "focus", dispatch: true},
 	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
 	{name: KeyNewTab, configKey: "new_tab", keys: []string{"t"}, desc: "new tab", dispatch: true},
-	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "delete tab", dispatch: true},
+	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "del tab", dispatch: true},
 	// The chip names BOTH gestures — "1-9/g go" — rather than gaining a second chip
 	// (#3021). The old "1-9" read as "there are nine tabs", and the footer is exactly
 	// where that impression was formed; naming g beside the digits says the digits are
