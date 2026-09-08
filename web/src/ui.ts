@@ -2605,6 +2605,7 @@ export class AppShell {
       managed.title,
       managed.lifecycle_action ?? null,
       managed.can_kill === true,
+      managed.is_root === true,
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));
