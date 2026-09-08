@@ -429,6 +429,17 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			return p, nil
 		}
 	}
+	checkoutID, markerExists, err := readCheckoutID(binding.checkoutMarkerPath)
+	if err != nil {
+		return Project{}, err
+	}
+	if markerExists {
+		for _, p := range projects {
+			if sameProjectIdentity(checkoutID, binding.relativeRoot, p.CheckoutID, p.RelativeRoot) {
+				return p, nil
+			}
+		}
+	}
 	return Project{}, fmt.Errorf("%s is not a registered project — run `af projects register %s` first, then set per-project config",
 		binding.root, selector)
 }

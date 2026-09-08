@@ -158,7 +158,7 @@ func RegisterProject(path string) (Project, error) {
 			}
 		}
 		for _, record := range records {
-			if record.CheckoutID == checkoutID && record.RelativeRoot == binding.relativeRoot {
+			if sameProjectIdentity(checkoutID, binding.relativeRoot, record.CheckoutID, record.RelativeRoot) {
 				if !sameProjectPath(record.Root, binding.root) {
 					oldRootHasMarker, err := projectRootHasCheckoutID(record.Root, checkoutID)
 					if err != nil {
@@ -235,6 +235,13 @@ func RegisterProject(path string) (Project, error) {
 		return Project{}, fmt.Errorf("register project: %w", err)
 	}
 	return registered, nil
+}
+
+// sameProjectIdentity is the registry's canonical checkout identity predicate.
+// A checkout marker plus its relative root identifies one project even when a
+// bare repository exposes several linked worktree paths.
+func sameProjectIdentity(leftCheckoutID, leftRelativeRoot, rightCheckoutID, rightRelativeRoot string) bool {
+	return leftCheckoutID != "" && leftCheckoutID == rightCheckoutID && leftRelativeRoot == rightRelativeRoot
 }
 
 // RebindProject moves an existing stable project identity to path. It refuses

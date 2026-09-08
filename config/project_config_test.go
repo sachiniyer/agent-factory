@@ -150,6 +150,44 @@ func TestResolveProjectSelectorByPathAndSubdir(t *testing.T) {
 	assert.Equal(t, project.ID, fromSub.ID)
 }
 
+func TestResolveProjectSelectorByLinkedWorktreeIdentity(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--quiet", "--allow-empty", "-m", "initial")
+	bare := filepath.Join(base, "backing.git")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	firstRoot := filepath.Join(base, "first-worktree")
+	secondRoot := filepath.Join(base, "second-worktree")
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", firstRoot)
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", secondRoot)
+
+	first, err := RegisterProject(firstRoot)
+	require.NoError(t, err)
+	second, err := RegisterProject(secondRoot)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, second.ID)
+
+	resolved, err := ResolveProjectSelector(secondRoot)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, resolved.ID)
+
+	personal, err := SetProjectConfigValue(secondRoot, "root_agent", `{"enabled":true}`)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, filepath.Base(filepath.Dir(personal.Path)))
+	config, err := LoadProjectConfig(first.ID)
+	require.NoError(t, err)
+	require.NotNil(t, config)
+	require.True(t, config.RootAgentLayer().Value.Enabled)
+
+	unrelated := initProjectRegistryRepo(t, filepath.Join(base, "unrelated"))
+	_, err = ResolveProjectSelector(unrelated)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "is not a registered project")
+}
+
 func TestResolveProjectSelectorUnknownID(t *testing.T) {
 	registeredTestProject(t)
 	_, err := ResolveProjectSelector("prj_ffffffffffffffffffffffffffffffff")
