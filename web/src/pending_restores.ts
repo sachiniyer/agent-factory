@@ -6,6 +6,9 @@ export type RestoreEvidence =
 // Network delivery and handler scheduling get a small margin after the daemon's
 // own admission deadline before an unchanged row proves no restore is queued.
 export const RESTORE_ADMISSION_MARGIN_MS = 1_000;
+export const RESTORE_RECONCILE_RETRY_MIN_MS = 2_000;
+const RESTORE_RECONCILE_RETRY_MAX_MS = 10_000;
+const SNAPSHOT_ISSUANCE_HISTORY = 128;
 
 type RestoreTimer = ReturnType<typeof globalThis.setTimeout>;
 
@@ -19,9 +22,11 @@ export class PendingRestores {
     uncertainSince: number;
     sawBusy: boolean;
     timer: RestoreTimer | null;
+    retryDelayMs: number;
     restoreEligible: RestoreRow["restoreEligible"];
   }>();
   private snapshotGeneration = 0;
+  private readonly snapshotIssuedAt = new Map<number, number>();
   private rows: ReadonlyArray<RestoreRow> | null = null;
   private operationLockTimeoutMs: number | null = null;
 
@@ -50,6 +55,7 @@ export class PendingRestores {
       uncertainSince: 0,
       sawBusy: false,
       timer: null,
+      retryDelayMs: RESTORE_RECONCILE_RETRY_MIN_MS,
       restoreEligible,
     };
     this.tickets.set(id, ticket);
@@ -71,6 +77,7 @@ export class PendingRestores {
             ticket.uncertainAt = this.snapshotGeneration;
             ticket.uncertainSince = this.now();
             ticket.sawBusy = false;
+            ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
             this.armUncertainTimer(id, ticket);
             if (this.committedOnError(error)) {
               ticket.settled = true;
@@ -85,6 +92,17 @@ export class PendingRestores {
         throw error;
       }
     })();
+  }
+
+  /** Stamp issuance, not arrival: a pre-success Snapshot cannot prove completion. */
+  beginSnapshot(): number {
+    const generation = ++this.snapshotGeneration;
+    this.snapshotIssuedAt.set(generation, this.now());
+    if (this.snapshotIssuedAt.size > SNAPSHOT_ISSUANCE_HISTORY) {
+      const oldest = this.snapshotIssuedAt.keys().next().value;
+      if (typeof oldest === "number") this.snapshotIssuedAt.delete(oldest);
+    }
+    return generation;
   }
 
   observe(rows: ReadonlyArray<RestoreRow>, evidence?: RestoreEvidence): void {
@@ -109,6 +127,7 @@ export class PendingRestores {
         evidence.generation > ticket.succeededAt;
       const causalUncertainSnapshot = evidence?.kind === "snapshot" &&
         evidence.generation > ticket.uncertainAt;
+      const issuedAt = evidence?.kind === "snapshot" ? this.snapshotIssuedAt.get(evidence.generation) : undefined;
       let uncertainCompleted = false;
       if (ticket.uncertain && authoritative && causalUncertainSnapshot) {
         if (!eligibility.has(id)) {
@@ -116,9 +135,11 @@ export class PendingRestores {
         } else if (!row?.restoreEligible) {
           ticket.sawBusy = true;
         } else {
-          const timeout = evidence.operationLockTimeoutMs;
-          uncertainCompleted = ticket.sawBusy || (typeof timeout === "number" && timeout >= 0 &&
-            this.now() - ticket.uncertainSince >= timeout + RESTORE_ADMISSION_MARGIN_MS);
+          // A reconnect can hold these captured rows behind slower task/project
+          // loads. Processing time cannot turn a pre-deadline Snapshot into proof.
+          const deadline = this.operationLockTimeoutMs === null ? null :
+            ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
+          uncertainCompleted = ticket.sawBusy || (deadline !== null && issuedAt !== undefined && issuedAt > deadline);
         }
       }
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
@@ -133,6 +154,7 @@ export class PendingRestores {
     // Logical disconnect does not stop the HTTP request or daemon mutation.
     for (const [id, ticket] of this.tickets) {
       this.cancelTimer(ticket);
+      ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
       if (ticket.settled) this.tickets.delete(id);
     }
     this.rows = null;
@@ -140,14 +162,32 @@ export class PendingRestores {
     this.changed(new Set(this.tickets.keys()));
   }
 
-  private armUncertainTimer(id: string, ticket: { uncertain: boolean; uncertainSince: number; timer: RestoreTimer | null }): void {
+  private armUncertainTimer(id: string, ticket: {
+    uncertain: boolean; uncertainSince: number; timer: RestoreTimer | null; retryDelayMs: number;
+  }): void {
     if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
     const remaining = Math.max(0,
       ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now());
     ticket.timer = this.schedule(() => {
       ticket.timer = null;
-      if (this.tickets.get(id) === ticket && ticket.uncertain) this.requestReconcile();
+      if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
+      this.requestReconcile();
+      if (this.tickets.get(id) === ticket && ticket.uncertain) this.armRetryTimer(id, ticket);
     }, remaining);
+  }
+
+  private armRetryTimer(id: string, ticket: {
+    uncertain: boolean; timer: RestoreTimer | null; retryDelayMs: number;
+  }): void {
+    if (ticket.timer !== null) return;
+    const delay = ticket.retryDelayMs;
+    ticket.retryDelayMs = Math.min(ticket.retryDelayMs * 2, RESTORE_RECONCILE_RETRY_MAX_MS);
+    ticket.timer = this.schedule(() => {
+      ticket.timer = null;
+      if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
+      this.requestReconcile();
+      if (this.tickets.get(id) === ticket && ticket.uncertain) this.armRetryTimer(id, ticket);
+    }, delay);
   }
 
   private cancelTimer(ticket: { timer: RestoreTimer | null }): void {

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ApiError, isMutationCommittedError, isMutationOutcomeUncertain, restoreSession } from "./api.js";
-import { PendingRestores, RESTORE_ADMISSION_MARGIN_MS } from "./pending_restores.js";
+import {
+  PendingRestores,
+  RESTORE_ADMISSION_MARGIN_MS,
+  RESTORE_RECONCILE_RETRY_MIN_MS,
+} from "./pending_restores.js";
 
 function fakeRestoreTimer() {
   let callback: (() => void) | null = null;
@@ -206,9 +210,31 @@ test("a never-admitted uncertain restore releases after the daemon admission bou
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), true);
-  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
   pending.observe(rows, { kind: "snapshot", generation: stale, operationLockTimeoutMs: 30_000 });
   assert.equal(pending.has("session"), true, "elapsed time cannot make a pre-uncertainty Snapshot causal");
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  assert.equal(pending.has("session"), false);
+});
+
+test("deadline expiry uses Snapshot issuance time rather than delayed application time", async () => {
+  let now = 1_000;
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => now, () => {}, timer.schedule, timer.cancel,
+  );
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS - 1;
+  const issuedBeforeDeadline = pending.beginSnapshot();
+  now += 5_000; // Slow task/project loading delays the commit of the captured rows.
+  pending.observe(rows, { kind: "snapshot", generation: issuedBeforeDeadline, operationLockTimeoutMs: 30_000 });
+  assert.equal(pending.has("session"), true, "late processing cannot make an early Snapshot causal");
+
   pending.observe(rows, {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
@@ -238,10 +264,45 @@ test("an early Snapshot schedules reconciliation at the uncertain admission dead
   assert.equal(pending.has("session"), true);
   assert.equal(timer.delay(), 30_000 + RESTORE_ADMISSION_MARGIN_MS);
 
-  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
   timer.fire();
   assert.equal(reconciliations, 1);
   assert.equal(pending.has("session"), false);
+});
+
+test("a failed deadline resync retries until an accepted Snapshot releases the ticket", async () => {
+  let now = 1_000;
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  let reconciliations = 0;
+  let pending!: PendingRestores;
+  pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => now,
+    () => {
+      reconciliations++;
+      if (reconciliations === 1) return; // The best-effort REST resync failed.
+      pending.observe(rows, {
+        kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+      });
+    },
+    timer.schedule,
+    timer.cancel,
+  );
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  timer.fire();
+  assert.equal(reconciliations, 1);
+  assert.equal(pending.has("session"), true);
+  assert.equal(timer.armed(), true);
+  assert.equal(timer.delay(), RESTORE_RECONCILE_RETRY_MIN_MS);
+
+  now += RESTORE_RECONCILE_RETRY_MIN_MS;
+  timer.fire();
+  assert.equal(reconciliations, 2);
+  assert.equal(pending.has("session"), false);
+  assert.equal(timer.armed(), false, "release must leave no reconciliation retry behind");
 });
 
 test("early release and reset cancel an uncertain ticket's reconciliation timer", async () => {
@@ -300,7 +361,7 @@ test("a post-response Snapshot releases success; uncertainty waits out admission
   });
   assert.equal(pending.has("success"), false);
   assert.equal(pending.has("uncertain"), true);
-  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
   pending.observe(rows, {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
@@ -375,7 +436,7 @@ test("a delayed restored event from attempt A cannot complete uncertain attempt 
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), true);
-  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS;
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
   pending.observe(rows, {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
