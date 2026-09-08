@@ -109,3 +109,38 @@ func TestHomeHealthHookLogsUnreadableChildIsIncomplete(t *testing.T) {
 	require.Equal(t, []string{"hook logs"}, summary.Incomplete)
 	require.Zero(t, summary.Unresolved)
 }
+
+func TestHomeHealthHookLogsSymlinkedRoot(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "logs", "hooks")
+	target := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Dir(dir), 0o700))
+	require.NoError(t, os.Symlink(target, dir))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "output.log"), []byte("output"), 0o600))
+	// Inner symlinks remain excluded even when the root itself is a link.
+	require.NoError(t, os.Symlink(filepath.Join(target, "output.log"), filepath.Join(target, "link.log")))
+	report := &Report{}
+	checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
+	row := findCheck(t, report, "hook logs")
+	require.Equal(t, StatusPass, row.Status)
+	require.Contains(t, row.Detail, dir)
+	require.Contains(t, row.Detail, "6 bytes")
+	require.Zero(t, report.UnresolvedCount())
+	require.Empty(t, report.Incomplete)
+}
+
+func TestHomeHealthHookLogsNonDirectoryAncestorFails(t *testing.T) {
+	home := t.TempDir()
+	ancestor := filepath.Join(home, "logs")
+	require.NoError(t, os.WriteFile(ancestor, nil, 0o600))
+	report := &Report{}
+	checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
+	row := findCheck(t, report, "hook logs")
+	require.Equal(t, StatusFail, row.Status)
+	require.True(t, row.Problem)
+	require.Contains(t, row.Detail, ancestor+" is not a directory")
+	require.Contains(t, row.Detail, "hooks cannot start")
+	require.Contains(t, row.Remediation, "move or remove")
+	require.Equal(t, 1, report.UnresolvedCount())
+	require.Empty(t, report.Incomplete)
+}

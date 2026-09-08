@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +19,10 @@ import (
 // TailLimit is the most hook output retained in an error message. The complete
 // output remains in the per-run log file named alongside that error.
 const TailLimit = 64 * 1024
+
+// Filesystem timestamp limitations should not flood the application log on
+// every successful hook. Warn once per output directory in this process.
+var completionTimeWarnings sync.Map
 
 // Kind identifies the hook runner that owns a log. It is deliberately closed:
 // Kind becomes part of a filename under the AF home and must never admit path
@@ -83,26 +88,33 @@ func open(kind Kind, flock func(int, int) error) (*os.File, error) {
 // CloseAndReadTail closes the launcher's descriptor and returns a bounded tail
 // of the file. After confirmed process-group/scope teardown the bytes are the
 // final tail; a caller reporting failed teardown may still use the bounded
-// snapshot while naming the full file for later inspection. Refreshing mtime
+// snapshot while naming the full file for later inspection. Best-effort mtime refresh
 // before close makes completion the retention clock for kept output; successful
 // callers remove their files afterwards. Inherited descriptors still hold the
 // lock if an unconfirmed teardown leaves a descendant alive.
 func CloseAndReadTail(file *os.File) (string, error) {
+	return closeAndReadTail(file, syscall.Futimes)
+}
+
+func closeAndReadTail(file *os.File, futimes func(int, []syscall.Timeval) error) (string, error) {
 	path := file.Name()
 	tail, readErr := readTail(file)
 	// Update the opened inode, not a potentially replaced pathname. The lock
 	// remains held through this timestamp change, so a quiet completed run
 	// gets the same grace period as fresh output before pruning can see it.
 	stamp := syscall.NsecToTimeval(time.Now().UnixNano())
-	timeErr := syscall.Futimes(int(file.Fd()), []syscall.Timeval{stamp, stamp})
+	timeErr := futimes(int(file.Fd()), []syscall.Timeval{stamp, stamp})
 	if timeErr != nil {
-		timeErr = fmt.Errorf("record hook log completion time for %s: %w", path, timeErr)
+		dir := filepath.Dir(path)
+		if _, warned := completionTimeWarnings.LoadOrStore(dir, struct{}{}); !warned {
+			log.WarningLog.Printf("hook log completion timestamp in %s could not be refreshed: %v", dir, timeErr)
+		}
 	}
 	closeErr := file.Close()
 	if closeErr != nil {
 		closeErr = fmt.Errorf("close hook log %s: %w", path, closeErr)
 	}
-	return tail, errors.Join(closeErr, readErr, timeErr)
+	return tail, errors.Join(closeErr, readErr)
 }
 
 // readTail reads through the descriptor Open returned, not by reopening its
