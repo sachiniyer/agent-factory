@@ -538,7 +538,7 @@ export function deletionConfirmationBody(opts: DeletionWorkspace): string {
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -575,12 +575,35 @@ export function confirmModal(
 
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
 
+  let acknowledgment: HTMLInputElement | undefined;
+  if (opts.action === "kill" && opts.isRoot) {
+    body.append(h("p", { class: "af-modal-text af-modal-danger" },
+      `“${opts.sessionTitle}” is the daemon-managed root agent. Deleting it stops scheduled and watch-task delivery to it until it self-heals (usually about two minutes) or you restart the daemon.`));
+    acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
+    body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
+  }
+
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
+    if (acknowledgment && !acknowledgment.checked) {
+      handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
+      return;
+    }
     handle.setError(null);
     opts.onConfirm();
   });
 
+  if (acknowledgment) {
+    const checkbox = acknowledgment;
+    const focusAcknowledgment = () => {
+      if (card.isConnected) (checkbox.disabled ? card : checkbox).focus({ preventScroll: true });
+    };
+    // The shared mount hook focuses the card, including a retained failed modal.
+    // Root consent starts at its required field; disabled fields fall back to the
+    // card's existing tabindex=-1. Initial construction can precede mounting.
+    card.addEventListener("focus", () => { if (!checkbox.disabled) focusAcknowledgment(); });
+    queueMicrotask(focusAcknowledgment);
+  }
   return handle;
 }
 
