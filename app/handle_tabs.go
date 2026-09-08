@@ -201,6 +201,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	tab := tabs[idx]
 	target := captureSessionActionTarget(inst, m.repoID)
 	tabID := tab.ID
+	rosterGeneration := inst.TabRosterGeneration()
 	tabLabel, _ := tree.TabLabelAt(inst, idx)
 	message := fmt.Sprintf("Delete tab %q from session %q?", tabLabel, inst.Title)
 	detail := "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."
@@ -215,9 +216,13 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		if current.HasInFlightOp() {
 			return m.handleNotice(fmt.Errorf("Session %q is busy; try again", current.Title))
 		}
+		if tabID == "" && current.TabRosterGeneration() != rosterGeneration {
+			return m.handleNotice(fmt.Errorf("Tab %q changed while the dialog was open; reopen it and try again", tabLabel))
+		}
 		for at, candidate := range current.GetTabs() {
-			// IDs survive reorder/snapshot replacement. An ID-less legacy tab
-			// must still be the same object; a reused name is never consent.
+			// IDs survive reorder/snapshot replacement. Legacy consent additionally
+			// needs the captured generation: name-based reconcile can retain a
+			// pointer even when a different tab now occupies that name.
 			if at > 0 && ((tabID != "" && candidate.ID == tabID) || (tabID == "" && candidate == tab)) {
 				_, cmd := m.deleteConfirmedTab(current, at)
 				return cmd
