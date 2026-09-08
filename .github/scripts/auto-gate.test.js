@@ -2571,12 +2571,13 @@ test("transient CodeQL neutral waits for Analyze jobs and later passes", async (
   assert.equal(settled.shouldMerge, true);
 });
 
-test("an automatic review clears the gate from its summary row alone", async () => {
+test("an automatic review clears the gate with a corroborated summary timestamp", async () => {
   // #3606: Codex emits the `Reviewed commit:` prose line when a review is
   // REQUESTED, and only edits its summary table when it reviews automatically on
   // a push. The head was reviewed, passed, and blocked forever on "has not
   // reviewed head … yet" until someone posted `@codex review`.
   const github = fakeGateGithub({
+    reviews: [automaticReview()],
     issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
   });
 
@@ -2606,11 +2607,10 @@ test("a Running summary row is progress, not a verdict", async () => {
   });
 
   assert.equal(result.shouldMerge, false);
-  // …and the message says a review exists rather than sending the reader to look
-  // for one that never ran: the row names this head, it just is not a verdict.
+  // A status row alone says nothing about whether a review produced an artifact.
   assert.ok(
     result.reasons.some((reason) =>
-      reason.includes(`a Codex review exists for head ${HEAD_SHA} but carried no parseable verdict`),
+      reason.includes(`Codex has not reviewed head ${HEAD_SHA} yet`),
     ),
     `got: ${result.reasons.join("; ")}`,
   );
@@ -2655,7 +2655,7 @@ test("a summary row older than the head is stale evidence", async () => {
   assert.equal(result.shouldMerge, false);
   assert.ok(
     result.reasons.some((reason) =>
-      reason.includes("Codex verdict for the head commit is older than the head commit timestamp"),
+      reason.includes(`Codex has not reviewed head ${HEAD_SHA} yet`),
     ),
     `got: ${result.reasons.join("; ")}`,
   );
@@ -2731,7 +2731,7 @@ test("summary rows are read positionally, and only when complete", () => {
 
   // The prose form is untouched and still reports its own kind.
   assert.equal(parseVerdictArtifact(codexVerdict(HEAD_SHA), HEAD_SHA).kind, "prose");
-  assert.equal(parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA).kind, "summary-row");
+  assert.equal(parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA, [automaticReview()]).kind, "summary-row");
 });
 
 test("a table-looking body without the summary marker is not a verdict", async () => {
@@ -2849,6 +2849,7 @@ test("an issue-comment finding blocks on the head its own links name", async () 
   // clean artifact, and the PR auto-merged with eight live P2s the gate never
   // read. Every finding in it links `blob/<head>/…`: the head IS stated.
   const github = fakeGateGithub({
+    reviews: [automaticReview()],
     issueComments: [
       codexIssueCommentFinding(HEAD_SHA, { timestamp: "2026-07-09T01:20:00Z" }),
       // The real ordering: Codex rewrites its table when it posts a finding, so
@@ -2923,12 +2924,13 @@ test("a finding artifact that names no commit blocks anyway", async () => {
   );
 });
 
-test("a clean head-bound summary row still passes", async () => {
+test("a clean automatic review with a summary row still passes", async () => {
   // The guard on both halves: neither may turn the ordinary passing shape — an
   // automatic review that completed cleanly and recorded itself in the table —
   // into a block. The summary comment names a commit, so it is not
   // unclassifiable; it carries no finding, so there is nothing to bind.
   const result = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
   });
 
@@ -2946,7 +2948,7 @@ test("only an assertion makes a finding stale, never a link", async () => {
   });
   const stated = await evaluateGate({
     issueComments: [summary],
-    reviews: [codexReview(OTHER_SHA, "P1: a finding about the previous head", "2026-07-09T01:19:00Z")],
+    reviews: [automaticReview(), codexReview(OTHER_SHA, "P1: a finding about the previous head", "2026-07-09T01:19:00Z")],
   });
   assert.equal(stated.shouldMerge, true, `blocked on: ${stated.reasons.join("; ")}`);
 
@@ -3100,7 +3102,7 @@ test("an unclassifiable finding clears only by an answer that names it", async (
     commentTime: "2026-07-09T01:20:06Z",
   });
   const clears = async (comment) =>
-    (await evaluateGate({ issueComments: [stripped, summary, comment] })).shouldMerge;
+    (await evaluateGate({ reviews: [automaticReview()], issueComments: [stripped, summary, comment] })).shouldMerge;
 
   // The lane round comment, verbatim in shape: allowed author, later, carries
   // RESOLVED, and is about something else entirely.
@@ -3163,6 +3165,7 @@ test("an answer to a longer id does not clear the artifact whose id it prefixes"
   });
 
   const neighbour = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [
       shortId,
       summary,
@@ -3172,6 +3175,7 @@ test("an answer to a longer id does not clear the artifact whose id it prefixes"
   assert.equal(neighbour.shouldMerge, false, "an answer to a different comment is not an answer");
 
   const itself = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [
       shortId,
       summary,
@@ -3207,6 +3211,7 @@ test("a RESOLVED answer owes a commit; ACCEPTED and gate-ack do not", async () =
   const anchor = `#issuecomment-${stripped.id}`;
   const withHead = (headCommittedDate, comment) => ({
     headCommittedDate,
+    reviews: [automaticReview(HEAD_SHA, "2026-07-09T01:22:30Z")],
     issueComments: [
       stripped,
       codexSummaryTable(HEAD_SHA, {
@@ -3298,6 +3303,7 @@ test("an answer in the same second as the finding still answers it", async () =>
     timestamp: "2026-07-09T01:20:00Z",
   });
   const result = await evaluateGate({
+    reviews: [automaticReview()],
     issueComments: [
       stripped,
       codexSummaryTable(HEAD_SHA, {
@@ -3402,7 +3408,7 @@ test("a row whose cell prefixes a different commit does not match this head", ()
 
   const otherHead = codexSummaryTable(OTHER_SHA);
   assert.equal(parseVerdictArtifact(otherHead, HEAD_SHA), null);
-  assert.notEqual(parseVerdictArtifact(otherHead, OTHER_SHA), null, "it is a verdict for its own head");
+  assert.notEqual(parseVerdictArtifact(otherHead, OTHER_SHA, [automaticReview(OTHER_SHA)]), null, "it is a verdict for its own head");
 
   // The prose form is held to the same rule.
   assert.equal(parseVerdictArtifact(codexVerdict(OTHER_SHA), HEAD_SHA), null);
@@ -3671,14 +3677,16 @@ test("transient failure notices do not diagnose a usage limit", async () => {
   }
 });
 
-test("completed summary rows for older heads supersede outages by row time", async () => {
+test("repeat summary rows for older heads cannot reuse proof from before an outage", async () => {
   for (const [rowTime, status, expected] of [
-    ["2026-07-09T01:25:00Z", "✅ **Completed**", false],
+    ["2026-07-09T01:25:00Z", "✅ **Completed**", true],
     ["2026-07-09T01:15:00Z", "✅ **Completed**", true],
     ["2026-07-09T01:25:00Z", "🔄 **Running**", true],
     [null, "✅ **Completed**", true],
   ]) {
-    const result = await evaluateGate({ issueComments: [
+    const result = await evaluateGate({ reviewComments: [{ ...codexFinding({ id: 3606, line: null }),
+      body: "P2: a finding on the older head", commit_id: OTHER_SHA, pull_request_review_id: 3606, created_at: "2026-07-09T01:14:00Z" },
+      findingReply({ id: 3607, inReplyToId: 3606, body: "ACCEPTED" })], issueComments: [
       codexRateLimit("2026-07-09T01:20:00Z"),
       codexSummaryTable(OTHER_SHA, { rowTime, status, commentTime: "2026-07-09T01:30:00Z" }),
     ] });
@@ -3696,7 +3704,7 @@ test("automatic summary verdict closes a transient failure outage at the row tim
   summary.html_url = "https://github.com/sachiniyer/agent-factory/pull/3953#issuecomment-summary";
   const collect = (artifact) => aggregate([{
     number: 3953, head: { sha: HEAD_SHA }, merged_at: at("25"),
-    artifacts: [failure, artifact],
+    artifacts: [failure, artifact, automaticReview(HEAD_SHA, at("19"))],
   }], at("30"));
   const episodes = collect(summary);
   assert.equal(episodes.length, 1);
@@ -3705,12 +3713,15 @@ test("automatic summary verdict closes a transient failure outage at the row tim
   assert.deepEqual(episodes[0].merged, []);
   assert.match(render(episodes, at("30")), /availability — recovered/);
 
+  // A corroborator arriving after the row cannot backdate recovery.
+  const earlyRow = codexSummaryTable(HEAD_SHA, { rowTime: at("05") });
+  assert.equal(collect(earlyRow)[0].end, new Date(at("19")).toISOString());
+
   // An edit after the outage must not refresh a stale row. Recovery can be for
   // any head, but needs a completed, timestamped row that is not in the future.
   for (const options of [
     { status: "🔄 **Running**" },
     { rowTime: null },
-    { rowTime: at("05") },
     { rowTime: at("35") },
   ]) {
     const invalid = codexSummaryTable(HEAD_SHA, {
@@ -10398,3 +10409,158 @@ function findingReply({ id, inReplyToId, body, line = 32 }) {
     line,
   };
 }
+
+test('#4052: Completed 71 seconds after a usage limit is not a verdict', async () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:21:11Z' });
+  const artifacts = [codexRateLimit('2026-07-09T01:20:00Z'), summary];
+  assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, artifacts, Date.parse('2026-07-09T01:00:00Z')), null);
+  const blocked = await evaluateGate({ issueComments: artifacts, reviews: [], reviewComments: [] });
+  assert.equal(blocked.shouldMerge, false);
+  assert.match(blocked.reasons.join('\n'), /Codex has not reviewed head/);
+  assert.equal(blocked.degradedForUnavailableReviewer, true);
+  const approved = await evaluateGate({ issueComments: [...artifacts,
+    prComment('sachiniyer', '## Review — approve', '2026-07-09T01:30:00Z')], reviews: [], reviewComments: [] });
+  assert.equal(approved.shouldMerge, true);
+  assert.equal(approved.degradedForUnavailableReviewer, true);
+});
+
+test('#4052: automatic review plus row still supplies a verdict without prose (#3606)', async () => {
+  const review = { ...codexReview(HEAD_SHA), id: 3606, body: '### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.', state: 'COMMENTED' };
+  const summary = codexSummaryTable(HEAD_SHA);
+  const result = await evaluateGate({ issueComments: [summary], reviews: [review], reviewComments: [] });
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(result.summary, /corroborated by review 3606/);
+});
+
+function automaticReview(sha = HEAD_SHA, timestamp = "2026-07-09T01:01:00Z") {
+  return { id: 3606, user: { login: "chatgpt-codex-connector[bot]" },
+    body: "### 💡 Codex Review\n\nDidn't find any major issues.",
+    commit_id: sha, submitted_at: timestamp, state: "COMMENTED" };
+}
+
+test('#4052: corroboration requires the exact head, author, transport and push freshness', () => {
+  const since = Date.parse('2026-07-09T01:10:00Z');
+  const summary = codexSummaryTable(HEAD_SHA);
+  const review = automaticReview(HEAD_SHA, '2026-07-09T01:15:00Z');
+  for (const invalid of [
+    { ...review, commit_id: OTHER_SHA },
+    { ...review, commit_id: HEAD_SHA.slice(0, 7) },
+    { ...review, commit_id: HEAD_SHA.slice(0, 7) + 'f'.repeat(33) },
+    { ...review, user: { login: 'someone' } },
+    { ...review, submitted_at: '2026-07-09T01:10:00Z' },
+    { ...review, submitted_at: 'invalid' },
+    { ...review, submitted_at: undefined },
+    { ...review, in_reply_to_id: 123 },
+    codexIssueCommentFinding(HEAD_SHA),
+  ]) assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, [invalid], since), null, JSON.stringify(invalid));
+  assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, [review], null), null);
+  assert.ok(__test.parseVerdictArtifact(summary, HEAD_SHA, [review], since));
+  assert.ok(__test.parseVerdictArtifact(summary, HEAD_SHA.toUpperCase(), [review], since));
+  const quoting = { ...summary, body: 'Codex Review quotes:\n' + summary.body };
+  assert.equal(__test.parseVerdictArtifact(quoting, HEAD_SHA, [review], since), null);
+});
+
+test('#4052: fresh inline artifacts corroborate a row while findings remain blocking', async () => {
+  const comments = [1, 2].map(id => ({ ...codexFinding({ id, line: 10 }),
+    commit_id: HEAD_SHA, pull_request_review_id: 3606 }));
+  const summary = codexSummaryTable(HEAD_SHA);
+  const blocked = await evaluateGate({ issueComments: [summary], reviews: [], reviewComments: comments });
+  assert.equal(blocked.shouldMerge, false);
+  assert.match(blocked.summary, /corroborated by 2 inline comments/);
+  const mixed = __test.parseVerdictArtifact(summary, HEAD_SHA, [...comments, automaticReview(HEAD_SHA, '2026-07-09T01:19:00Z')]);
+  assert.equal(mixed.time, Date.parse('2026-07-09T01:20:00Z'));
+  assert.equal(mixed.corroboration, '2 inline comments');
+  assert.match(blocked.reasons.join('\n'), /2 unresolved live Codex inline/);
+  const resolved = await evaluateGate({ issueComments: [summary], reviews: [], reviewComments: [
+    ...comments, ...comments.map(c => findingReply({ id: c.id + 10, inReplyToId: c.id, body: 'ACCEPTED' })),
+  ] });
+  assert.equal(resolved.shouldMerge, true, resolved.summary);
+  const since = Date.parse('2026-07-09T01:16:00Z');
+  assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, comments.map(c => ({
+    ...c, updated_at: '2026-07-09T01:30:00Z' })), since), null);
+});
+
+test('#4052: an unavailable inline reply and its empty review never corroborate completion', async () => {
+  const fixture = inlineLimitFixture();
+  fixture.issueComments = [codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:21:11Z' })];
+  const result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  assert.equal(result.degradedForUnavailableReviewer, true);
+  assert.match(result.reasons.join('\n'), /Codex has not reviewed head/);
+});
+
+test('3954286650: unrecognised submitted reviews never corroborate completion', async () => {
+  const summary = codexSummaryTable(HEAD_SHA);
+  for (const body of [CODEX_ENVIRONMENT_MISSING, 'Review started.', 'An unknown reviewer response.',
+    `### 💡 Codex Review\n\n${CODEX_ENVIRONMENT_MISSING}`]) {
+    const review = { ...automaticReview(HEAD_SHA, '2026-07-09T01:15:00Z'), body };
+    assert.equal(autoGate.codexEvidence.classifyCodexUnavailableArtifact(review).kind, 'unrecognised');
+    assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, [review]), null, body);
+    const result = await __test.evaluateCodex({ github: fakeGateGithub({ issueComments: [summary], reviews: [review] }),
+      context: fakeContext(), number: 1465, sha: HEAD_SHA,
+      lastCommitDate: '2026-07-09T01:00:00Z', prCreatedAt: '2026-07-09T00:00:00Z' });
+    assert.equal(result.reviewerUnavailable, true, body);
+    assert.equal(result.reviewerUnavailableKind, 'unrecognised');
+    assert.ok(result.reasons.join('\n').includes(body.split('\n', 1)[0]));
+  }
+});
+
+test('3954286650: a genuine automatic clean review still corroborates completion', async () => {
+  const review = { ...automaticReview(), body: "### 💡 Codex Review\n\nDidn't find any major issues." };
+  const result = await evaluateGate({ issueComments: [codexSummaryTable(HEAD_SHA)], reviews: [review] });
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(result.summary, /corroborated by review 3606/);
+});
+
+
+test('3954286650: an empty submitted review cannot corroborate completion', () => {
+  const review = { ...automaticReview(), body: '' };
+  assert.equal(__test.parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA, [review]), null);
+});
+
+test('3954623225: a repeated completion needs proof after the latest unavailable response', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:30:00Z' });
+  const oldReview = automaticReview(HEAD_SHA, '2026-07-09T01:10:00Z');
+  const limit = codexRateLimit('2026-07-09T01:20:00Z');
+  const since = Date.parse('2026-07-09T01:00:00Z');
+  const parse = artifacts => __test.parseVerdictArtifact(summary, HEAD_SHA, artifacts, since);
+  assert.equal(parse([oldReview, limit]), null);
+  const newReview = { ...automaticReview(HEAD_SHA, '2026-07-09T01:29:00Z'), id: 3954623225 };
+  assert.equal(parse([oldReview, limit, newReview]).corroboration, 'review 3954623225');
+  assert.equal(parse([oldReview]).corroboration, 'review 3606');
+});
+
+test('3954623225: the latest unavailable event advances the existing per-row floor', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:40:00Z' });
+  const proof = automaticReview(HEAD_SHA, '2026-07-09T01:25:00Z');
+  const earlier = codexRateLimit('2026-07-09T01:20:00Z');
+  const since = (commit, at) => {
+    assert.equal(commit, HEAD_SHA.slice(0, 7));
+    assert.equal(at, Date.parse('2026-07-09T01:40:00Z'));
+    return Date.parse('2026-07-09T01:00:00Z');
+  };
+  for (const body of [CODEX_LIMIT_ACCOUNT, CODEX_TRANSIENT_FAILURE, CODEX_ENVIRONMENT_MISSING]) {
+    const latest = codexRateLimit('2026-07-09T01:30:00Z', body);
+    for (const artifacts of [[proof, earlier, latest], [latest, earlier, proof]]) {
+      assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, artifacts, since), []);
+    }
+    const edited = { ...latest, updated_at: '2026-07-09T01:50:00Z' };
+    assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, [proof, edited], since), []);
+    const inlineReply = { ...edited, commit_id: HEAD_SHA, pull_request_review_id: 123, in_reply_to_id: 456 };
+    assert.deepEqual(autoGate.codexEvidence.corroboratedCodexSummaryRows(summary, [proof, inlineReply], since), []);
+  }
+});
+
+test('3954623225: later, other-head and non-Codex responses do not reset a row', () => {
+  const summary = codexSummaryTable(HEAD_SHA, { rowTime: '2026-07-09T01:20:00Z' });
+  const proof = automaticReview(HEAD_SHA, '2026-07-09T01:10:00Z');
+  for (const response of [
+    codexRateLimit('2026-07-09T01:30:00Z'),
+    { ...codexRateLimit('2026-07-09T01:15:00Z'), commit_id: OTHER_SHA },
+    { ...codexRateLimit('2026-07-09T01:15:00Z'), user: { login: 'someone' } },
+  ]) {
+    const verdict = __test.parseVerdictArtifact(summary, HEAD_SHA, [proof, response]);
+    assert.equal(verdict.corroboration, 'review 3606');
+    assert.equal(verdict.time, Date.parse('2026-07-09T01:20:00Z'));
+  }
+});
