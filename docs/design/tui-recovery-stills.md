@@ -49,10 +49,17 @@ An async create failure while another form is open preserves that newer form and
 retains the failed draft for the next create in its original project. Background
 snapshot failures retain loaded sessions and retry automatically.
 
-To verify, run `scripts/testbox.sh test ./app -run TestRecovery` and
+To verify, run `scripts/testbox.sh test ./app -run 'TestRecovery' -count=1` and
 `scripts/testbox.sh scenario scripts/tui-3915-scenario.sh`. To recapture, set
 `AF_TUI_RECOVERY_CAPTURE` to an output directory **inside** the testbox and run
-the recovery tests; inspect the SVGs before replacing the goldens under
-`app/testdata/recovery`. The gallery embedded above is **generated** from those
+the recovery tests. Capture mode writes both `<scene>-<theme>.svg` and
+`<scene>-<theme>.ansi` and skips golden comparisons. Inspect every SVG and ANSI
+diff before replacing both halves together under `app/testdata/recovery`.
+The gallery embedded above is **generated** from those
 goldens by `scripts/gen-docs.sh` and gated for drift in CI, so run that script
 and commit its output rather than copying the SVGs across by hand.
+Keep the gallery ANSI copies synchronized with the asserted frames too; the test
+rejects a stale or missing gallery copy in either format. Keep the `.gitattributes`
+ANSI whitespace rule: cell padding and trailing viewport rows are part of the
+asserted frame. Verify again without `AF_TUI_RECOVERY_CAPTURE` so the test checks
+the committed pairs.
