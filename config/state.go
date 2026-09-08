@@ -312,11 +312,17 @@ func repoInstancesPath(repoID string) (string, error) {
 
 // LoadRepoInstances loads instances for a specific repo.
 func LoadRepoInstances(repoID string) (json.RawMessage, error) {
+	return LoadRepoInstancesWithReader(repoID, os.ReadFile)
+}
+
+// LoadRepoInstancesWithReader preserves the storage envelope and empty-file
+// semantics while allowing lifecycle callers to impose a filesystem deadline.
+func LoadRepoInstancesWithReader(repoID string, readFile func(string) ([]byte, error)) (json.RawMessage, error) {
 	path, err := repoInstancesPath(repoID)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return json.RawMessage("[]"), nil
