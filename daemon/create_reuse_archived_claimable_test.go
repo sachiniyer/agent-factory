@@ -172,14 +172,14 @@ func TestValidateTitleClaimable_IgnoresTheRowBeingRenamed(t *testing.T) {
 	hookRow := []session.InstanceData{{Title: "MyApp", Path: repoPath, BackendType: "remote"}}
 	require.True(t, hookRow[0].IsRemoteHook(), "the fixture must actually be a hook row or this asserts nothing")
 
-	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, archived)
+	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, archived, false)
 	require.NoError(t, err,
 		"the archived row being renamed must not be counted as the collision that blocks its own reuse")
 
 	// Without the exclusion the very same row refuses — proof the scan really does
 	// see it, so the NoError above is the exclusion working rather than a scan that
 	// never fired.
-	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, nil)
+	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, nil, false)
 	require.Error(t, err, "an unignored hook row with the same slug must still refuse")
 	assert.Contains(t, err.Error(), "already maps to hook name")
 }
