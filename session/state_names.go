@@ -218,6 +218,11 @@ func (d InstanceData) MarshalJSON() ([]byte, error) {
 // MarshalJSON emits the stored tab plus its derived kind name, so `tabs[].kind`
 // and `tab_kinds[].kind` finally spell the same concept the same way (#3631).
 func (t TabData) MarshalJSON() ([]byte, error) {
+	t.WebProxied = nil
+	if t.Kind == TabKindWeb {
+		proxied := IsLoopbackWebTarget(t.URL)
+		t.WebProxied = &proxied
+	}
 	type alias TabData
 	return json.Marshal(struct {
 		alias

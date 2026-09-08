@@ -61,6 +61,8 @@ import {
   canUsePreviewOrigin,
   iframeIdentity,
   iframeIsProxied,
+  iframeRoute,
+  blockedWebTargetMessage,
   type IframeSpec,
   nextReloadNonce,
   paneAddressUsesOrdinal,
@@ -122,6 +124,8 @@ interface Pane {
   // swaps the pane — without it, neither the target nor the tab index changes and
   // the rebuild guard would keep a live iframe on an archived session.
   webArchived: boolean;
+  // Rebuild if a new snapshot changes the daemon proxy decision.
+  iframeProxied?: boolean;
 }
 
 function el(tag: string, cls: string): HTMLElement {
@@ -297,6 +301,7 @@ export class SplitView {
   // terminal tab. Parallel to the tab list, refreshed on every setSession, so
   // reconcile can mount an iframe for a web leaf without extra plumbing.
   private tabTargets: (string | undefined)[] = [];
+  private tabWebProxied: (boolean | undefined)[] = [];
   // The kind of each tab, parallel to tabIds — kept because the tab identity is now
   // the opaque stable id (#1738), which no longer encodes the kind the way the old
   // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
@@ -383,6 +388,7 @@ export class SplitView {
     tabRealIds: string[] = [],
     archived = false,
     tabNames: string[] = [],
+    tabWebProxied: (boolean | undefined)[] = [],
   ): void {
     this.token = token;
     // Snapshot what the panes are currently bound to BEFORE overwriting it, so the
@@ -390,10 +396,12 @@ export class SplitView {
     const prevIds = this.tabIds;
     const prevKinds = this.tabKinds;
     const prevTargets = this.tabTargets;
+    const prevWebProxied = this.tabWebProxied;
     const prevNames = this.tabNames;
     this.tabIds = tabIds;
     this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
+    this.tabWebProxied = tabWebProxied;
     this.tabKinds = tabKinds;
     this.tabNames = tabNames;
     // An archive/restore of the SHOWN session must re-render its web panes even when
@@ -446,7 +454,9 @@ export class SplitView {
       // nothing: every pane's identity still matches, so the pass falls through to
       // the label refresh at the end and stops.
       const renamed = !sameTabs(prevNames, tabNames);
-      if (before !== this.tree || rebound || archivedChanged || renamed) {
+      const proxyChanged = tabWebProxied.some((value, idx) => value !== prevWebProxied[idx]) ||
+        prevWebProxied.length !== tabWebProxied.length;
+      if (before !== this.tree || rebound || archivedChanged || renamed || proxyChanged) {
         this.reconcile();
         this.report();
       }
@@ -782,6 +792,7 @@ export class SplitView {
         if (
           pane.term ||
           pane.webUrl !== iframeIdentity(spec) ||
+          pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) ||
           staleAddress ||
           pane.webArchived !== this.archived
         ) {
@@ -902,7 +913,7 @@ export class SplitView {
     }
     const kind = this.tabKinds[idx];
     if (kind === TabKind.Web) {
-      return { kind: TabKind.Web, target: this.tabTargets[idx] ?? "" };
+      return { kind: TabKind.Web, target: this.tabTargets[idx] ?? "", web_proxied: this.tabWebProxied[idx] };
     }
     if (kind === TabKind.VSCode) {
       return { kind: TabKind.VSCode, target: "" };
@@ -934,6 +945,7 @@ export class SplitView {
     // all, which the unaddressable branch below renders honestly rather than as a
     // blank pane.
     const proxied = realId !== "" && iframeIsProxied(spec);
+    pane.iframeProxied = proxied;
     // An archived session is inert (#1809 follow-up), so the frame is never pointed
     // at the target: the daemon refuses to proxy an archived session's tab, and for
     // a DIRECT external tab there is no daemon in the path to refuse — the frame
@@ -951,6 +963,16 @@ export class SplitView {
     const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
 
     const wrap = el("div", "af-webpane");
+    if (iframeRoute(spec) === "blocked") {
+      const refusal = el("div", "af-webpane-fallback af-webpane-dead");
+      const message = el("div", "af-webpane-fallback-msg");
+      message.textContent = blockedWebTargetMessage(target);
+      refusal.append(message);
+      wrap.append(refusal);
+      pane.host.replaceChildren(wrap);
+      pane.webDispose = null;
+      return;
+    }
 
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
