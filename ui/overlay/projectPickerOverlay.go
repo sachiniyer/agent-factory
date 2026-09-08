@@ -213,7 +213,6 @@ func (p *ProjectPickerOverlay) Render() string {
 	titleStyle := ui.DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
-	hintStyle := ui.DialogHintStyle()
 	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
 	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 	countStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
@@ -239,18 +238,18 @@ func (p *ProjectPickerOverlay) Render() string {
 		// A failed registry read may hide every registered sessionless
 		// project — say so rather than render the remainder as complete
 		// (#3298).
-		lines = append(lines, truncateOverlayLine(warnStyle.Render("registry unreadable · list may be incomplete"), cw))
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · list may be incomplete"), cw))
 	}
 
 	if p.adding {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("Add project — enter a repo path:"), cw))
+		lines = append(lines, truncateOverlayLine(normalStyle.Render("Enter a repo path:"), cw))
 		lines = append(lines, truncateOverlayLine("  "+queryStyle.Render(p.pathInput)+ui.InputCaret(), cw))
 		if p.addErr != "" {
 			lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.addErr), cw))
 		}
 		lines = append(lines, "")
 		hint := "enter add · esc back"
-		lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
+		lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), cw))
 		return finishRender(style, fit, textRect, lines)
 	}
 
@@ -276,14 +275,14 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 
 	lines = append(lines, "")
-	hint := "j/k navigate · enter add · esc cancel"
+	hint := "j/k select · enter add · esc cancel"
 	if _, ok := p.HighlightedProject(); ok {
-		hint = "j/k navigate · enter switch · D delete · esc cancel"
+		hint = "j/k select · enter switch · D delete · esc cancel"
 	}
 	if layout.Cells(hint) > cw {
 		hint = "j/k · enter · esc"
 	}
-	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
+	lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), cw))
 
 	return finishRender(style, fit, textRect, lines)
 }

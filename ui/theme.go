@@ -115,10 +115,10 @@ func applyThemeStyles() {
 	automationsHintStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.InkMuted)
 
-	keyStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	keyStyle = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Accent)
 	descStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
-	actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	actionGroupStyle = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Accent)
 	menuStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
 	tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)

@@ -1,0 +1,3576 @@
+file,line at e4e67cb2,Unicode characters (template length),literal (includes technical strings)
+ui/consts.go,3,33,github.com/charmbracelet/lipgloss
+ui/consts.go,5,265,"
+░█████╗░░██████╗░███████╗███╗░░██╗████████╗
+██╔══██╗██╔════╝░██╔════╝████╗░██║╚══██╔══╝
+███████║██║░░██╗░█████╗░░██╔██╗██║░░░██║░░░
+██╔══██║██║░░╚██╗██╔══╝░░██║╚████║░░░██║░░░
+██║░░██║╚██████╔╝███████╗██║░╚███║░░░██║░░░
+╚═╝░░╚═╝░╚═════╝░╚══════╝╚═╝░░╚══╝░░░╚═╝░░░
+"
+ui/consts.go,12,355,"
+███████╗░█████╗░░██████╗████████╗░█████╗░██████╗░██╗░░░██╗
+██╔════╝██╔══██╗██╔════╝╚══██╔══╝██╔══██╗██╔══██╗╚██╗░██╔╝
+█████╗░░███████║██║░░░░░░░░██║░░░██║░░██║██████╔╝░╚████╔╝░
+██╔══╝░░██╔══██║██║░░░░░░░░██║░░░██║░░██║██╔══██╗░░╚██╔╝░░
+██║░░░░░██║░░██║╚██████╗░░░██║░░░╚█████╔╝██║░░██║░░░██║░░░
+╚═╝░░░░░╚═╝░░╚═╝░╚═════╝░░░╚═╝░░░░╚════╝░╚═╝░░╚═╝░░░╚═╝░░░
+"
+ui/config_pane_accounts.go,4,3,fmt
+ui/config_pane_accounts.go,5,7,strings
+ui/config_pane_accounts.go,7,42,github.com/charmbracelet/bubbles/textinput
+ui/config_pane_accounts.go,8,34,github.com/charmbracelet/bubbletea
+ui/config_pane_accounts.go,9,33,github.com/charmbracelet/lipgloss
+ui/config_pane_accounts.go,11,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/config_pane_accounts.go,119,8,Accounts
+ui/config_pane_accounts.go,126,96,"agent identities, not config keys · af runs the agent's own login and never reads the credential"
+ui/config_pane_accounts.go,137,0,
+ui/config_pane_accounts.go,169,0,
+ui/config_pane_accounts.go,245,5,enter
+ui/config_pane_accounts.go,253,0,
+ui/config_pane_accounts.go,274,0,
+ui/config_pane_accounts.go,278,12,account name
+ui/config_pane_accounts.go,294,0,
+ui/config_pane_accounts.go,295,0,
+ui/config_pane_accounts.go,315,0,
+ui/config_pane_accounts.go,336,2,  
+ui/config_pane_accounts.go,338,2,› 
+ui/config_pane_accounts.go,343,13,+ register a 
+ui/config_pane_accounts.go,343,8, account
+ui/config_pane_accounts.go,353,2,  
+ui/config_pane_accounts.go,356,1,"
+"
+ui/config_pane_accounts.go,359,3, · 
+ui/config_pane_accounts.go,366,13,not logged in
+ui/config_pane_accounts.go,368,9,logged in
+ui/config_pane_accounts.go,373,2,  
+ui/config_pane_accounts.go,374,1,"
+"
+ui/config_pane_accounts.go,384,0,
+ui/config_pane_accounts.go,389,0,
+ui/config_pane_accounts.go,391,32,A session cannot be scoped to a 
+ui/config_pane_accounts.go,391,46, account yet; registering and logging in work.
+ui/config_pane_accounts.go,407,94,"Holds a %s credential · ↵ runs %s's own login again in a tmux session scoped to this account, "
+ui/config_pane_accounts.go,408,44,replacing it. af never reads the credential.
+ui/config_pane_accounts.go,411,100,No %s credential yet · ↵ runs %s's own login in a tmux session scoped to this account and hands you 
+ui/config_pane_accounts.go,412,94,"the terminal. It is a device code — the pane prints a URL, you finish it in your own browser. "
+ui/config_pane_accounts.go,413,30,af never reads the credential.
+ui/config_pane_accounts.go,418,20,Cannot load accounts
+ui/config_pane_accounts.go,418,28,Accounts could not be read: 
+ui/config_pane_accounts.go,418,25,Reopen settings to retry.
+ui/config_pane_accounts.go,429,1,"
+"
+ui/config_pane_accounts.go,430,2,  
+ui/config_pane_accounts.go,434,1,"
+"
+ui/config_pane_width.go,4,7,strings
+ui/config_pane_width.go,6,33,github.com/charmbracelet/lipgloss
+ui/config_pane_width.go,7,31,github.com/charmbracelet/x/ansi
+ui/config_pane_width.go,8,29,github.com/mattn/go-runewidth
+ui/config_pane_width.go,9,22,github.com/muesli/ansi
+ui/config_pane_width.go,11,42,github.com/sachiniyer/agent-factory/config
+ui/config_pane_width.go,75,0,
+ui/config_pane_width.go,254,10,appearance
+ui/config_pane_width.go,257,0,
+ui/config_pane_width.go,258,7,(unset)
+ui/config_pane_width.go,354,1,…
+ui/config_pane_width.go,356,0,
+ui/config_pane_width.go,483,3, · 
+ui/task_pane_recovery.go,15,0,
+ui/schedule_picker.go,4,3,fmt
+ui/schedule_picker.go,5,7,strconv
+ui/schedule_picker.go,6,7,strings
+ui/schedule_picker.go,7,4,time
+ui/schedule_picker.go,8,7,unicode
+ui/schedule_picker.go,10,42,github.com/charmbracelet/bubbles/textinput
+ui/schedule_picker.go,11,34,github.com/charmbracelet/bubbletea
+ui/schedule_picker.go,12,33,github.com/charmbracelet/lipgloss
+ui/schedule_picker.go,14,44,github.com/sachiniyer/agent-factory/schedule
+ui/schedule_picker.go,15,40,github.com/sachiniyer/agent-factory/task
+ui/schedule_picker.go,59,15,Every N minutes
+ui/schedule_picker.go,60,13,Every N hours
+ui/schedule_picker.go,61,6,Hourly
+ui/schedule_picker.go,62,5,Daily
+ui/schedule_picker.go,63,6,Weekly
+ui/schedule_picker.go,64,7,Monthly
+ui/schedule_picker.go,65,13,Custom (cron)
+ui/schedule_picker.go,72,1,M
+ui/schedule_picker.go,72,1,T
+ui/schedule_picker.go,72,1,W
+ui/schedule_picker.go,72,1,T
+ui/schedule_picker.go,72,1,F
+ui/schedule_picker.go,72,1,S
+ui/schedule_picker.go,72,1,S
+ui/schedule_picker.go,92,16,e.g. 0 9 * * 1-5
+ui/schedule_picker.go,107,2,15
+ui/schedule_picker.go,108,1,9
+ui/schedule_picker.go,109,2,00
+ui/schedule_picker.go,110,1,1
+ui/schedule_picker.go,114,0,
+ui/schedule_picker.go,131,4,%02d
+ui/schedule_picker.go,153,4,%02d
+ui/schedule_picker.go,271,1, 
+ui/schedule_picker.go,299,0,
+ui/schedule_picker.go,434,0,
+ui/schedule_picker.go,435,27,cron expression is required
+ui/schedule_picker.go,438,16,invalid cron: %v
+ui/schedule_picker.go,442,35,select at least one day of the week
+ui/schedule_picker.go,446,16,invalid cron: %v
+ui/schedule_picker.go,448,0,
+ui/schedule_picker.go,489,9,Schedule:
+ui/schedule_picker.go,489,1, 
+ui/schedule_picker.go,491,0,
+ui/schedule_picker.go,501,1,"
+"
+ui/schedule_picker.go,504,2,  
+ui/schedule_picker.go,525,0,
+ui/schedule_picker.go,535,15,No upcoming run
+ui/schedule_picker.go,537,9,Next run 
+ui/schedule_picker.go,537,12,Jan 02 15:04
+ui/schedule_picker.go,539,5,  ·  
+ui/schedule_picker.go,545,2,◂ 
+ui/schedule_picker.go,545,2, ▸
+ui/schedule_picker.go,556,5,Every
+ui/schedule_picker.go,556,7,minutes
+ui/schedule_picker.go,558,5,Every
+ui/schedule_picker.go,558,5,hours
+ui/schedule_picker.go,560,9,At minute
+ui/schedule_picker.go,566,4,Days
+ui/schedule_picker.go,571,3,Day
+ui/schedule_picker.go,574,5,Cron 
+ui/schedule_picker.go,579,2,AM
+ui/schedule_picker.go,581,2,PM
+ui/schedule_picker.go,583,2,At
+ui/schedule_picker.go,583,1,:
+ui/schedule_picker.go,592,1, 
+ui/schedule_picker.go,592,1, 
+ui/schedule_picker.go,597,1,[
+ui/schedule_picker.go,597,1,]
+ui/schedule_picker.go,612,0,
+ui/schedule_picker.go,613,1, 
+ui/schedule_picker.go,619,1, 
+ui/schedule_picker.go,619,1, 
+ui/schedule_picker.go,627,33,type cron · ↑/↓ fields · tab next
+ui/schedule_picker.go,629,35,←/→ day · space toggle · ↑/↓ fields
+ui/schedule_picker.go,631,34,←/→ change · ↑/↓ fields · tab next
+ui/schedule_picker.go,633,35,type or ←/→ · ↑/↓ fields · tab next
+ui/selection_marker.go,3,33,github.com/charmbracelet/lipgloss
+ui/quit_key.go,4,36,github.com/charmbracelet/bubbles/key
+ui/quit_key.go,5,34,github.com/charmbracelet/bubbletea
+ui/quit_key.go,7,40,github.com/sachiniyer/agent-factory/keys
+ui/statusbar.go,4,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/statusbar.go,6,34,github.com/charmbracelet/bubbletea
+ui/statusbar.go,7,33,github.com/charmbracelet/lipgloss
+ui/statusbar.go,63,0,
+ui/config_input_style.go,4,42,github.com/charmbracelet/bubbles/textinput
+ui/config_input_style.go,5,33,github.com/charmbracelet/lipgloss
+ui/sidebar_zones.go,4,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/sidebar_zones.go,5,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+ui/sidebar_zones.go,6,43,github.com/sachiniyer/agent-factory/ui/tree
+ui/rail_header.go,4,7,strings
+ui/rail_header.go,6,33,github.com/charmbracelet/lipgloss
+ui/rail_header.go,8,40,github.com/sachiniyer/agent-factory/keys
+ui/rail_header.go,9,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/rail_header.go,20,3, · 
+ui/rail_header.go,31,1, 
+ui/rail_header.go,50,1, 
+ui/rail_header.go,50,1, 
+ui/rail_header.go,53,1, 
+ui/rail_header.go,58,0,
+ui/rail_header.go,59,0,
+ui/rail_header.go,61,1, 
+ui/rail_header.go,71,0,
+ui/rail_header.go,73,1, 
+ui/rail_header.go,73,1, 
+ui/rail_header.go,119,0,
+ui/rail_header.go,123,0,
+ui/rail_header.go,127,0,
+ui/rail_header.go,134,0,
+ui/projects.go,4,3,fmt
+ui/projects.go,5,7,reflect
+ui/projects.go,6,7,strings
+ui/projects.go,8,40,github.com/sachiniyer/agent-factory/keys
+ui/projects.go,9,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/projects.go,10,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+ui/projects.go,12,34,github.com/charmbracelet/bubbletea
+ui/projects.go,13,33,github.com/charmbracelet/lipgloss
+ui/projects.go,129,0,
+ui/projects.go,192,2,up
+ui/projects.go,192,1,k
+ui/projects.go,195,4,down
+ui/projects.go,195,1,j
+ui/projects.go,253,6,switch
+ui/projects.go,276,2,  
+ui/projects.go,278,1,▹
+ui/projects.go,278,1, 
+ui/projects.go,281,0,
+ui/projects.go,282,9,(unnamed)
+ui/projects.go,284,7,%s (%d)
+ui/projects.go,288,2,▸ 
+ui/projects.go,290,2,▹ 
+ui/projects.go,305,0,
+ui/projects.go,328,2,%d
+ui/projects.go,330,1,?
+ui/projects.go,333,9,Projects:
+ui/projects.go,341,8,Projects
+ui/projects.go,342,4,(%d)
+ui/projects.go,351,46,  registry unreadable · list may be incomplete
+ui/projects.go,353,23,  No other projects yet
+ui/projects.go,400,1,"
+"
+ui/recovery.go,4,7,strings
+ui/recovery.go,6,33,github.com/charmbracelet/lipgloss
+ui/recovery.go,7,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/recovery.go,8,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/recovery.go,19,0,
+ui/recovery.go,26,0,
+ui/recovery.go,29,0,
+ui/recovery.go,30,0,
+ui/recovery.go,32,1,"
+"
+ui/recovery.go,42,0,
+ui/recovery.go,45,0,
+ui/recovery.go,48,0,
+ui/recovery.go,48,0,
+ui/recovery.go,52,0,
+ui/recovery.go,57,1,"
+"
+ui/recovery.go,61,1,"
+"
+ui/recovery.go,63,0,
+ui/recovery.go,64,0,
+ui/recovery.go,66,1,"
+"
+ui/sidebar_nav.go,4,43,github.com/sachiniyer/agent-factory/session
+ui/sidebar_nav.go,5,43,github.com/sachiniyer/agent-factory/ui/tree
+ui/sidebar_nav.go,89,0,
+ui/sidebar_nav.go,98,0,
+ui/sidebar_nav.go,169,0,
+ui/sidebar_nav.go,173,0,
+ui/sidebar_nav.go,174,0,
+ui/sidebar_nav.go,178,0,
+ui/sidebar_nav.go,179,0,
+ui/sidebar_nav.go,183,0,
+ui/sidebar_nav.go,424,0,
+ui/sidebar_nav.go,616,0,
+ui/sidebar_nav.go,617,0,
+ui/sidebar_nav.go,909,0,
+ui/task_pane_state.go,3,40,github.com/sachiniyer/agent-factory/task
+ui/task_pane_state.go,172,0,
+ui/menu.go,4,4,math
+ui/menu.go,5,6,slices
+ui/menu.go,6,7,strings
+ui/menu.go,8,40,github.com/sachiniyer/agent-factory/keys
+ui/menu.go,9,43,github.com/sachiniyer/agent-factory/session
+ui/menu.go,10,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/menu.go,11,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+ui/menu.go,13,36,github.com/charmbracelet/bubbles/key
+ui/menu.go,14,33,github.com/charmbracelet/lipgloss
+ui/menu.go,27,3, · 
+ui/menu.go,673,0,
+ui/menu.go,675,0,
+ui/menu.go,809,1,/
+ui/menu.go,813,1, 
+ui/menu.go,820,1, 
+ui/caret.go,4,33,github.com/charmbracelet/lipgloss
+ui/caret.go,5,25,github.com/muesli/termenv
+ui/caret.go,14,1,▌
+ui/caret.go,31,1, 
+ui/dialog_recovery.go,4,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/dialog_recovery.go,5,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/automations.go,4,3,fmt
+ui/automations.go,5,7,strings
+ui/automations.go,6,4,time
+ui/automations.go,8,40,github.com/sachiniyer/agent-factory/keys
+ui/automations.go,9,40,github.com/sachiniyer/agent-factory/task
+ui/automations.go,10,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/automations.go,11,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+ui/automations.go,12,44,github.com/sachiniyer/agent-factory/ui/store
+ui/automations.go,13,43,github.com/sachiniyer/agent-factory/ui/tree
+ui/automations.go,15,34,github.com/charmbracelet/bubbletea
+ui/automations.go,16,33,github.com/charmbracelet/lipgloss
+ui/automations.go,166,2,up
+ui/automations.go,166,1,k
+ui/automations.go,169,4,down
+ui/automations.go,169,1,j
+ui/automations.go,238,8,watching
+ui/automations.go,242,0,
+ui/automations.go,253,0,
+ui/automations.go,256,0,
+ui/automations.go,275,5,next 
+ui/automations.go,275,12,Jan 02 15:04
+ui/automations.go,287,5,armed
+ui/automations.go,307,15,No upcoming run
+ui/automations.go,315,16,from cron: next 
+ui/automations.go,315,12,Jan 02 15:04
+ui/automations.go,321,5,last 
+ui/automations.go,321,12,Jan 02 15:04
+ui/automations.go,331,8,errored:
+ui/automations.go,332,7,errored
+ui/automations.go,334,3, · 
+ui/automations.go,347,3,[✓]
+ui/automations.go,349,3,[✗]
+ui/automations.go,361,3,[?]
+ui/automations.go,364,3,[!]
+ui/automations.go,366,1, 
+ui/automations.go,369,1,▾
+ui/automations.go,377,0,
+ui/automations.go,378,9,(unnamed)
+ui/automations.go,380,2,  
+ui/automations.go,396,0,
+ui/automations.go,401,7,watch: 
+ui/automations.go,403,0,
+ui/automations.go,406,0,
+ui/automations.go,409,3, · 
+ui/automations.go,468,10,No trigger
+ui/automations.go,470,23,Invalid cron expression
+ui/automations.go,472,15,No upcoming run
+ui/automations.go,477,7,overdue
+ui/automations.go,480,20,overdue · missed %d+
+ui/automations.go,482,19,overdue · missed %d
+ui/automations.go,487,9,not armed
+ui/automations.go,492,14,Health unknown
+ui/automations.go,494,0,
+ui/automations.go,501,0,
+ui/automations.go,502,0,
+ui/automations.go,504,1, 
+ui/automations.go,507,0,
+ui/automations.go,514,0,
+ui/automations.go,515,5,last 
+ui/automations.go,518,5,last 
+ui/automations.go,524,7,watch: 
+ui/automations.go,526,0,
+ui/automations.go,529,3, · 
+ui/automations.go,567,6,manage
+ui/automations.go,568,5,hooks
+ui/automations.go,577,0,
+ui/automations.go,596,12,Automations:
+ui/automations.go,597,10,%d (%d on)
+ui/automations.go,598,2,%d
+ui/automations.go,626,19,%d (%d on · [!] %d)
+ui/automations.go,627,6,[!] %d
+ui/automations.go,641,11,Automations
+ui/automations.go,642,4,(%d)
+ui/automations.go,695,0,
+ui/automations.go,705,1,"
+"
+ui/task_list_window.go,3,7,strings
+ui/task_list_window.go,8,1,"
+"
+ui/task_list_window.go,8,1,"
+"
+ui/task_list_window.go,20,1,"
+"
+ui/alarm.go,4,3,fmt
+ui/alarm.go,5,7,strings
+ui/alarm.go,6,4,time
+ui/alarm.go,8,33,github.com/charmbracelet/lipgloss
+ui/alarm.go,9,29,github.com/mattn/go-runewidth
+ui/alarm.go,11,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/alarm.go,65,0,
+ui/alarm.go,69,0,
+ui/alarm.go,72,23,a new session per event
+ui/alarm.go,74,10,%d pending
+ui/alarm.go,79,40,pending count unknown (queue unreadable)
+ui/alarm.go,81,54,⚠ events not delivering to %q — %s since %s (task: %s)
+ui/alarm.go,82,5,15:04
+ui/alarm.go,84,12,  (+%d more)
+ui/alarm.go,87,1,…
+ui/alarm.go,90,1,"
+"
+ui/sidebar_render.go,4,3,fmt
+ui/sidebar_render.go,5,7,strings
+ui/sidebar_render.go,7,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/sidebar_render.go,8,43,github.com/sachiniyer/agent-factory/ui/tree
+ui/sidebar_render.go,10,33,github.com/charmbracelet/lipgloss
+ui/sidebar_render.go,11,29,github.com/mattn/go-runewidth
+ui/sidebar_render.go,90,1,"
+"
+ui/sidebar_render.go,112,1,"
+"
+ui/sidebar_render.go,113,1,▲
+ui/sidebar_render.go,116,1,"
+"
+ui/sidebar_render.go,120,1,"
+"
+ui/sidebar_render.go,121,1,▼
+ui/sidebar_render.go,141,1,"
+"
+ui/sidebar_render.go,142,1,"
+"
+ui/sidebar_render.go,248,10,%s %d more
+ui/sidebar_render.go,253,1,…
+ui/sidebar_render.go,255,0,
+ui/sidebar_render.go,280,0,
+ui/sidebar_render.go,281,1, 
+ui/sidebar_render.go,281,1, 
+ui/sidebar_render.go,283,15, Agent Factory 
+ui/sidebar_render.go,291,0,
+ui/sidebar_render.go,305,2,▶ 
+ui/sidebar_render.go,307,2,▼ 
+ui/sidebar_render.go,317,13,Sessions (%d)
+ui/sidebar_render.go,319,13,Archived (%d)
+ui/sidebar_render.go,333,1,…
+ui/sidebar_render.go,335,0,
+ui/sidebar_render.go,351,0,
+ui/sidebar_render.go,353,1,─
+ui/sidebar_render.go,359,0,
+ui/sidebar_render.go,371,0,
+ui/sidebar_render.go,376,0,
+ui/hooks_pane.go,4,7,strings
+ui/hooks_pane.go,6,34,github.com/charmbracelet/bubbletea
+ui/hooks_pane.go,7,33,github.com/charmbracelet/lipgloss
+ui/hooks_pane.go,68,0,
+ui/hooks_pane.go,84,6,ctrl+c
+ui/hooks_pane.go,88,3,esc
+ui/hooks_pane.go,91,2,up
+ui/hooks_pane.go,91,1,k
+ui/hooks_pane.go,96,4,down
+ui/hooks_pane.go,96,1,j
+ui/hooks_pane.go,101,1,n
+ui/hooks_pane.go,103,0,
+ui/hooks_pane.go,105,5,enter
+ui/hooks_pane.go,111,1,D
+ui/hooks_pane.go,130,0,
+ui/hooks_pane.go,141,0,
+ui/hooks_pane.go,145,0,
+ui/hooks_pane.go,152,1, 
+ui/hooks_pane.go,169,19,Post-worktree hooks
+ui/hooks_pane.go,170,1,"
+"
+ui/hooks_pane.go,171,35,Commands run async in new worktrees
+ui/hooks_pane.go,172,2,"
+
+"
+ui/hooks_pane.go,175,59,"  No hooks configured. Press Enter to focus, then n to add."
+ui/hooks_pane.go,177,38,  No hooks configured. Press n to add.
+ui/hooks_pane.go,180,1,"
+"
+ui/hooks_pane.go,186,2,▸ 
+ui/hooks_pane.go,188,2,▸ 
+ui/hooks_pane.go,190,2,  
+ui/hooks_pane.go,192,1,"
+"
+ui/hooks_pane.go,196,2,▸ 
+ui/hooks_pane.go,197,1,"
+"
+ui/hooks_pane.go,200,1,"
+"
+ui/hooks_pane.go,203,23,enter save · esc cancel
+ui/hooks_pane.go,205,40,n add · enter edit · D delete · esc back
+ui/hooks_pane.go,207,24,n add · enter · esc back
+ui/hooks_pane.go,212,29,enter to focus and edit hooks
+ui/fallback.go,4,3,fmt
+ui/fallback.go,5,7,strings
+ui/fallback.go,7,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/fallback.go,9,33,github.com/charmbracelet/lipgloss
+ui/fallback.go,16,18,Terminal too small
+ui/fallback.go,16,0,
+ui/fallback.go,17,25,Resize to at least %d×%d.
+ui/fallback.go,37,0,
+ui/fallback.go,41,1,"
+"
+ui/fallback.go,43,1,"
+"
+ui/fallback.go,51,1,"
+"
+ui/fallback.go,63,0,
+ui/task_pane_edit.go,4,3,fmt
+ui/task_pane_edit.go,5,7,strings
+ui/task_pane_edit.go,7,34,github.com/charmbracelet/bubbletea
+ui/task_pane_edit.go,8,33,github.com/charmbracelet/lipgloss
+ui/task_pane_edit.go,9,31,github.com/charmbracelet/x/ansi
+ui/task_pane_edit.go,11,42,github.com/sachiniyer/agent-factory/config
+ui/task_pane_edit.go,12,47,github.com/sachiniyer/agent-factory/session/git
+ui/task_pane_edit.go,13,40,github.com/sachiniyer/agent-factory/task
+ui/task_pane_edit.go,26,0,
+ui/task_pane_edit.go,27,16,name is required
+ui/task_pane_edit.go,30,0,
+ui/task_pane_edit.go,31,25,watch command is required
+ui/task_pane_edit.go,37,0,
+ui/task_pane_edit.go,40,0,
+ui/task_pane_edit.go,41,24,prompt must be non-empty
+ui/task_pane_edit.go,50,0,
+ui/task_pane_edit.go,51,24,project path is required
+ui/task_pane_edit.go,55,16,invalid path: %v
+ui/task_pane_edit.go,62,47,could not check — git did not answer; try again
+ui/task_pane_edit.go,64,26,%s is not a git repository
+ui/task_pane_edit.go,67,0,
+ui/task_pane_edit.go,73,1,r
+ui/task_pane_edit.go,76,1,x
+ui/task_pane_edit.go,79,1,D
+ui/task_pane_edit.go,82,0,
+ui/task_pane_edit.go,97,0,
+ui/task_pane_edit.go,107,0,
+ui/task_pane_edit.go,118,0,
+ui/task_pane_edit.go,132,16,invalid path: %v
+ui/task_pane_edit.go,180,4,left
+ui/task_pane_edit.go,180,1,h
+ui/task_pane_edit.go,180,2,up
+ui/task_pane_edit.go,180,1,k
+ui/task_pane_edit.go,182,5,right
+ui/task_pane_edit.go,182,1,l
+ui/task_pane_edit.go,182,4,down
+ui/task_pane_edit.go,182,1,j
+ui/task_pane_edit.go,195,2,up
+ui/task_pane_edit.go,195,1,k
+ui/task_pane_edit.go,195,4,left
+ui/task_pane_edit.go,195,1,h
+ui/task_pane_edit.go,199,4,down
+ui/task_pane_edit.go,199,1,j
+ui/task_pane_edit.go,199,5,right
+ui/task_pane_edit.go,199,1,l
+ui/task_pane_edit.go,222,2,up
+ui/task_pane_edit.go,222,1,k
+ui/task_pane_edit.go,222,4,left
+ui/task_pane_edit.go,222,1,h
+ui/task_pane_edit.go,226,4,down
+ui/task_pane_edit.go,226,1,j
+ui/task_pane_edit.go,226,5,right
+ui/task_pane_edit.go,226,1,l
+ui/task_pane_edit.go,295,45,(optional) {{line}} expands to the event line
+ui/task_pane_edit.go,297,18,Enter task prompt…
+ui/task_pane_edit.go,301,4,%-9s
+ui/task_pane_edit.go,308,0,
+ui/task_pane_edit.go,309,4,  ! 
+ui/task_pane_edit.go,309,1,"
+"
+ui/task_pane_edit.go,311,0,
+ui/task_pane_edit.go,324,1,"
+"
+ui/task_pane_edit.go,329,1,"
+"
+ui/task_pane_edit.go,334,8,New task
+ui/task_pane_edit.go,337,12,Edit task %s
+ui/task_pane_edit.go,339,1,"
+"
+ui/task_pane_edit.go,341,10,Essentials
+ui/task_pane_edit.go,342,1,"
+"
+ui/task_pane_edit.go,344,5,Name:
+ui/task_pane_edit.go,346,1,"
+"
+ui/task_pane_edit.go,350,8,Trigger:
+ui/task_pane_edit.go,352,1,"
+"
+ui/task_pane_edit.go,359,6,Watch:
+ui/task_pane_edit.go,366,1,"
+"
+ui/task_pane_edit.go,370,7,Prompt:
+ui/task_pane_edit.go,372,11, (optional)
+ui/task_pane_edit.go,374,1,"
+"
+ui/task_pane_edit.go,376,1,"
+"
+ui/task_pane_edit.go,379,1,"
+"
+ui/task_pane_edit.go,381,8,Delivery
+ui/task_pane_edit.go,382,1,"
+"
+ui/task_pane_edit.go,384,7,Target:
+ui/task_pane_edit.go,386,1,"
+"
+ui/task_pane_edit.go,389,8,On done:
+ui/task_pane_edit.go,391,1,"
+"
+ui/task_pane_edit.go,394,5,Path:
+ui/task_pane_edit.go,396,1,"
+"
+ui/task_pane_edit.go,400,8,Program:
+ui/task_pane_edit.go,402,1,"
+"
+ui/task_pane_edit.go,404,1,"
+"
+ui/task_pane_edit.go,406,6, Save 
+ui/task_pane_edit.go,408,8, Create 
+ui/task_pane_edit.go,416,1,"
+"
+ui/task_pane_edit.go,418,1,"
+"
+ui/task_pane_edit.go,419,5, quit
+ui/task_pane_edit.go,421,51,tab/shift+tab fields · enter create · esc cancel · 
+ui/task_pane_edit.go,423,34,tab fields · enter · esc cancel · 
+ui/task_pane_edit.go,427,33,tab/shift+tab fields · enter save
+ui/task_pane_edit.go,429,23,tab fields · enter save
+ui/task_pane_edit.go,432,1,"
+"
+ui/task_pane_edit.go,442,45,r run now · x toggle · D delete · esc list · 
+ui/task_pane_edit.go,443,38,r run · x toggle · D del · esc list · 
+ui/task_pane_edit.go,444,33,r run · x toggle · D del · esc · 
+ui/task_pane_edit.go,450,33,x toggle · D delete · esc list · 
+ui/task_pane_edit.go,451,30,x toggle · D del · esc list · 
+ui/task_pane_edit.go,452,25,x toggle · D del · esc · 
+ui/task_pane_edit.go,476,1,"
+"
+ui/task_pane_edit.go,517,8,  ↑ more
+ui/task_pane_edit.go,520,8,  ↓ more
+ui/task_pane_edit.go,522,1,"
+"
+ui/task_pane_edit.go,539,2,▸ 
+ui/task_pane_edit.go,541,2,▸ 
+ui/task_pane_edit.go,543,2,  
+ui/task_pane_edit.go,546,4,cron
+ui/task_pane_edit.go,546,2,  
+ui/task_pane_edit.go,546,5,watch
+ui/task_pane_edit.go,548,13,   ←/→ switch
+ui/task_pane_edit.go,565,49,n/a — a target session is not this task's to reap
+ui/task_pane_edit.go,577,2,◂ 
+ui/task_pane_edit.go,577,2, ▸
+ui/task_pane_edit.go,578,4,←/→ 
+ui/task_pane_edit.go,580,10,"
+         "
+ui/task_pane_edit.go,582,3,   
+ui/task_pane_edit.go,596,0,
+ui/task_pane_edit.go,596,1,"
+"
+ui/task_pane_edit.go,596,10,"
+         "
+ui/task_pane_edit.go,623,2,◂ 
+ui/task_pane_edit.go,623,2, ▸
+ui/task_pane_edit.go,623,19,   ←/→ change agent
+ui/tabbed_window.go,4,3,fmt
+ui/tabbed_window.go,5,7,strings
+ui/tabbed_window.go,6,11,sync/atomic
+ui/tabbed_window.go,8,39,github.com/sachiniyer/agent-factory/log
+ui/tabbed_window.go,9,43,github.com/sachiniyer/agent-factory/session
+ui/tabbed_window.go,10,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/tabbed_window.go,11,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+ui/tabbed_window.go,12,44,github.com/sachiniyer/agent-factory/ui/store
+ui/tabbed_window.go,13,43,github.com/sachiniyer/agent-factory/ui/tree
+ui/tabbed_window.go,15,34,github.com/charmbracelet/bubbletea
+ui/tabbed_window.go,16,33,github.com/charmbracelet/lipgloss
+ui/tabbed_window.go,263,0,
+ui/tabbed_window.go,325,0,
+ui/tabbed_window.go,447,0,
+ui/tabbed_window.go,515,37,tabbed window failed to scroll up: %v
+ui/tabbed_window.go,521,39,tabbed window failed to scroll down: %v
+ui/tabbed_window.go,598,19, %s · %s · Preview 
+ui/tabbed_window.go,601,9, %s · %s 
+ui/tabbed_window.go,602,0,
+ui/tabbed_window.go,603,24, %s · %s — selected: %s 
+ui/tabbed_window.go,606,21, No session selected 
+ui/tabbed_window.go,609,1, 
+ui/tabbed_window.go,609,12, · Keyboard 
+ui/tabbed_window.go,615,1, 
+ui/tabbed_window.go,615,22, — Scroll · Esc exits 
+ui/tabbed_window.go,653,0,
+ui/tabbed_window.go,662,0,
+ui/sidebar_model.go,4,3,fmt
+ui/sidebar_model.go,5,4,sort
+ui/sidebar_model.go,6,4,time
+ui/sidebar_model.go,8,43,github.com/sachiniyer/agent-factory/session
+ui/sidebar_model.go,9,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/sidebar_model.go,10,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+ui/sidebar_model.go,11,44,github.com/sachiniyer/agent-factory/ui/store
+ui/sidebar_model.go,12,43,github.com/sachiniyer/agent-factory/ui/tree
+ui/sidebar_model.go,14,34,github.com/charmbracelet/bubbletea
+ui/sidebar_model.go,15,33,github.com/charmbracelet/lipgloss
+ui/sidebar_model.go,202,8,Sessions
+ui/sidebar_model.go,206,8,Archived
+ui/sidebar_model.go,286,0,
+ui/sidebar_model.go,302,17,%d|%s|%d|%t|%s|%v
+ui/dialog.go,4,7,strings
+ui/dialog.go,6,33,github.com/charmbracelet/lipgloss
+ui/dialog.go,7,25,github.com/muesli/termenv
+ui/dialog.go,8,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/dialog.go,33,0,
+ui/dialog.go,34,1,m
+ui/dialog.go,35,1,m
+ui/scroll_controller.go,3,41,github.com/charmbracelet/bubbles/viewport
+ui/scroll_controller.go,116,0,
+ui/scroll_controller.go,197,0,
+ui/scroll_controller.go,271,0,
+ui/config_pane.go,4,3,fmt
+ui/config_pane.go,5,7,strings
+ui/config_pane.go,7,42,github.com/charmbracelet/bubbles/textinput
+ui/config_pane.go,8,34,github.com/charmbracelet/bubbletea
+ui/config_pane.go,9,33,github.com/charmbracelet/lipgloss
+ui/config_pane.go,11,42,github.com/sachiniyer/agent-factory/config
+ui/config_pane.go,189,0,
+ui/config_pane.go,323,3,esc
+ui/config_pane.go,332,2,up
+ui/config_pane.go,332,1,k
+ui/config_pane.go,335,4,down
+ui/config_pane.go,335,1,j
+ui/config_pane.go,338,1,a
+ui/config_pane.go,342,1,C
+ui/config_pane.go,357,5,enter
+ui/config_pane.go,374,0,
+ui/config_pane.go,375,0,
+ui/config_pane.go,388,0,
+ui/config_pane.go,390,0,
+ui/config_pane.go,395,0,
+ui/config_pane.go,455,0,
+ui/config_pane.go,463,11,set %s = %s
+ui/config_pane.go,500,11,  ↑ %d more
+ui/config_pane.go,501,1,"
+"
+ui/config_pane.go,503,1,"
+"
+ui/config_pane.go,505,1,"
+"
+ui/config_pane.go,508,11,  ↓ %d more
+ui/config_pane.go,509,1,"
+"
+ui/config_pane.go,519,6,Config
+ui/config_pane.go,520,0,
+ui/config_pane.go,521,2,  
+ui/config_pane.go,530,2,"
+
+"
+ui/config_pane.go,540,1,"
+"
+ui/config_pane.go,540,1,"
+"
+ui/config_pane.go,543,1,"
+"
+ui/config_pane.go,543,1,"
+"
+ui/config_pane.go,548,17,Loading accounts…
+ui/config_pane.go,548,1,"
+"
+ui/config_pane.go,548,1,"
+"
+ui/config_pane.go,549,0,
+ui/config_pane.go,550,1,"
+"
+ui/config_pane.go,552,11,No accounts
+ui/config_pane.go,552,0,
+ui/config_pane.go,552,49,Select a register row and press enter to add one.
+ui/config_pane.go,552,1,"
+"
+ui/config_pane.go,554,1,"
+"
+ui/config_pane.go,554,1,"
+"
+ui/config_pane.go,612,0,
+ui/config_pane.go,615,1,"
+"
+ui/config_pane.go,624,2,  
+ui/config_pane.go,626,2,› 
+ui/config_pane.go,647,2,  
+ui/config_pane.go,662,1,"
+"
+ui/config_pane.go,666,5,table
+ui/config_pane.go,667,8,one of: 
+ui/config_pane.go,674,4,    
+ui/config_pane.go,681,1,"
+"
+ui/config_pane.go,681,1,"
+"
+ui/config_pane.go,684,1,"
+"
+ui/config_pane.go,699,0,
+ui/config_pane.go,705,0,
+ui/config_pane.go,706,0,
+ui/config_pane.go,717,0,
+ui/config_pane.go,730,1,"
+"
+ui/config_pane.go,730,1,"
+"
+ui/config_pane.go,738,1,"
+"
+ui/config_pane.go,739,6,↵ save
+ui/config_pane.go,740,10,esc cancel
+ui/config_pane.go,741,1,"
+"
+ui/config_pane.go,744,1,"
+"
+ui/config_pane.go,745,10,↵ register
+ui/config_pane.go,746,10,esc cancel
+ui/config_pane.go,747,1,"
+"
+ui/config_pane.go,750,8,↵ log in
+ui/config_pane.go,752,10,↵ register
+ui/config_pane.go,754,20,registration pending
+ui/config_pane.go,756,0,
+ui/config_pane.go,757,17,login unavailable
+ui/config_pane.go,759,1,"
+"
+ui/config_pane.go,760,8,↑/↓ move
+ui/config_pane.go,762,11,C assistant
+ui/config_pane.go,763,9,esc close
+ui/config_pane.go,764,1,"
+"
+ui/config_pane.go,766,15,a show advanced
+ui/config_pane.go,768,15,a hide advanced
+ui/config_pane.go,775,1,"
+"
+ui/config_pane.go,776,8,↑/↓ move
+ui/config_pane.go,777,6,↵ edit
+ui/config_pane.go,779,11,C assistant
+ui/config_pane.go,780,9,esc close
+ui/config_pane.go,781,1,"
+"
+ui/workspace.go,4,33,github.com/charmbracelet/lipgloss
+ui/workspace.go,5,7,strings
+ui/workspace.go,7,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/workspace.go,15,40,No panes open — s opens the selected tab
+ui/workspace.go,24,15,No sessions yet
+ui/workspace.go,24,0,
+ui/workspace.go,24,22,Press n to create one.
+ui/workspace.go,42,0,
+ui/workspace.go,45,19,No project selected
+ui/workspace.go,45,0,
+ui/workspace.go,45,1,.
+ui/workspace.go,50,0,
+ui/workspace.go,71,21,No project registered
+ui/workspace.go,71,0,
+ui/workspace.go,71,55,Run af projects register <path> to register a checkout.
+ui/task_pane.go,4,3,fmt
+ui/task_pane.go,5,2,os
+ui/task_pane.go,6,7,strings
+ui/task_pane.go,7,4,time
+ui/task_pane.go,9,44,github.com/sachiniyer/agent-factory/schedule
+ui/task_pane.go,10,48,github.com/sachiniyer/agent-factory/session/tmux
+ui/task_pane.go,11,40,github.com/sachiniyer/agent-factory/task
+ui/task_pane.go,12,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/task_pane.go,14,41,github.com/charmbracelet/bubbles/textarea
+ui/task_pane.go,15,42,github.com/charmbracelet/bubbles/textinput
+ui/task_pane.go,16,34,github.com/charmbracelet/bubbletea
+ui/task_pane.go,17,33,github.com/charmbracelet/lipgloss
+ui/task_pane.go,18,31,github.com/charmbracelet/x/ansi
+ui/task_pane.go,23,18,Use config default
+ui/task_pane.go,28,70,"watch tasks run on their watch command's output, not on manual trigger"
+ui/task_pane.go,168,9,Task name
+ui/task_pane.go,175,0,
+ui/task_pane.go,190,41,long-running cmd; 1 stdout line = 1 event
+ui/task_pane.go,196,21,(new session per run)
+ui/task_pane.go,218,0,
+ui/task_pane.go,225,0,
+ui/task_pane.go,226,0,
+ui/task_pane.go,236,0,
+ui/task_pane.go,238,0,
+ui/task_pane.go,248,0,
+ui/task_pane.go,272,0,
+ui/task_pane.go,290,0,
+ui/task_pane.go,326,0,
+ui/task_pane.go,340,0,
+ui/task_pane.go,343,0,
+ui/task_pane.go,347,0,
+ui/task_pane.go,357,0,
+ui/task_pane.go,359,0,
+ui/task_pane.go,417,0,
+ui/task_pane.go,418,0,
+ui/task_pane.go,446,0,
+ui/task_pane.go,454,6,ctrl+c
+ui/task_pane.go,458,1,?
+ui/task_pane.go,461,3,esc
+ui/task_pane.go,464,2,up
+ui/task_pane.go,464,1,k
+ui/task_pane.go,469,4,down
+ui/task_pane.go,469,1,j
+ui/task_pane.go,474,1,x
+ui/task_pane.go,477,1,D
+ui/task_pane.go,480,5,enter
+ui/task_pane.go,485,1,r
+ui/task_pane.go,488,1,n
+ui/task_pane.go,562,0,
+ui/task_pane.go,583,0,
+ui/task_pane.go,616,7,stopped
+ui/task_pane.go,619,7,stopped
+ui/task_pane.go,620,7,stopped
+ui/task_pane.go,621,7,errored
+ui/task_pane.go,621,8,errored:
+ui/task_pane.go,622,7,errored
+ui/task_pane.go,624,8,watching
+ui/task_pane.go,631,14,watch: %s [%s]
+ui/task_pane.go,633,0,
+ui/task_pane.go,634,10,No trigger
+ui/task_pane.go,641,0,
+ui/task_pane.go,642,2,→ 
+ui/task_pane.go,644,11,new session
+ui/task_pane.go,648,0,
+ui/task_pane.go,649,17,Cannot load tasks
+ui/task_pane.go,649,36,The last loaded tasks are retained. 
+ui/task_pane.go,649,20,Check the task file.
+ui/task_pane.go,652,8,No tasks
+ui/task_pane.go,652,0,
+ui/task_pane.go,652,22,Press n to create one.
+ui/task_pane.go,664,5,Tasks
+ui/task_pane.go,665,2,"
+
+"
+ui/task_pane.go,676,1,"
+"
+ui/task_pane.go,678,3,[✓]
+ui/task_pane.go,681,3,[✗]
+ui/task_pane.go,688,0,
+ui/task_pane.go,692,5,next 
+ui/task_pane.go,692,12,Jan 02 15:04
+ui/task_pane.go,694,2,  
+ui/task_pane.go,698,2,▸ 
+ui/task_pane.go,700,2,  
+ui/task_pane.go,702,1,"
+"
+ui/task_pane.go,710,8,errored:
+ui/task_pane.go,711,6,      
+ui/task_pane.go,712,1,"
+"
+ui/task_pane.go,718,6,      
+ui/task_pane.go,718,1,"
+"
+ui/task_pane.go,720,0,
+ui/task_pane.go,721,6,      
+ui/task_pane.go,722,1,"
+"
+ui/task_pane.go,724,5,never
+ui/task_pane.go,726,12,Jan 02 15:04
+ui/task_pane.go,729,0,
+ui/task_pane.go,732,19,      %s · last: %s
+ui/task_pane.go,733,0,
+ui/task_pane.go,737,8,errored:
+ui/task_pane.go,738,7,errored
+ui/task_pane.go,740,3, · 
+ui/task_pane.go,743,1,"
+"
+ui/task_pane.go,745,1,"
+"
+ui/task_pane.go,747,1,"
+"
+ui/task_pane.go,758,0,
+ui/task_pane.go,764,0,
+ui/task_pane.go,764,1,"
+"
+ui/task_pane.go,767,4,    
+ui/task_pane.go,769,4,  ! 
+ui/task_pane.go,772,1,"
+"
+ui/task_pane.go,778,76,↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back
+ui/task_pane.go,779,46,r run now · x toggle · D delete · ? back · esc
+ui/task_pane.go,783,64,↑/↓ select · n new · enter edit · x toggle · D delete · esc back
+ui/task_pane.go,784,34,x toggle · D delete · ? back · esc
+ui/task_pane.go,787,41,enter edit · n new · ? actions · esc back
+ui/task_pane.go,788,28,enter edit · ? actions · esc
+ui/task_pane.go,795,29,enter to focus and edit tasks
+ui/task_pane.go,806,0,
+ui/task_pane.go,808,1, 
+ui/task_pane.go,811,1,…
+ui/fit.go,4,7,strings
+ui/fit.go,6,31,github.com/charmbracelet/x/ansi
+ui/fit.go,8,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/fit.go,30,0,
+ui/fit.go,35,1,…
+ui/fit.go,37,0,
+ui/fit.go,40,4,\x1b
+ui/fit.go,41,7,\x1b[0m
+ui/fit.go,47,1,"
+"
+ui/fit.go,52,1,"
+"
+ui/fit.go,65,8,  ↓ more
+ui/fit.go,71,1,"
+"
+ui/theme.go,4,33,github.com/charmbracelet/lipgloss
+ui/theme.go,6,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/theme.go,7,43,github.com/sachiniyer/agent-factory/ui/tree
+ui/appearance.go,4,7,strings
+ui/appearance.go,6,33,github.com/charmbracelet/lipgloss
+ui/appearance.go,7,25,github.com/muesli/termenv
+ui/appearance.go,8,42,github.com/sachiniyer/agent-factory/config
+ui/appearance.go,23,5,light
+ui/appearance.go,25,6,system
+ui/appearance.go,36,5,theme
+ui/appearance.go,36,6,theme.
+ui/appearance.go,45,5,light
+ui/appearance.go,46,5,Light
+ui/appearance.go,47,4,dark
+ui/appearance.go,48,4,Dark
+ui/appearance.go,50,6,System
+ui/appearance.go,54,10,appearance
+ui/appearance.go,55,21,Light · Dark · System
+ui/appearance.go,57,3, · 
+ui/tab_pane.go,4,6,errors
+ui/tab_pane.go,5,3,fmt
+ui/tab_pane.go,6,7,strings
+ui/tab_pane.go,7,4,sync
+ui/tab_pane.go,9,43,github.com/sachiniyer/agent-factory/session
+ui/tab_pane.go,10,48,github.com/sachiniyer/agent-factory/session/tmux
+ui/tab_pane.go,11,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/tab_pane.go,13,41,github.com/charmbracelet/bubbles/viewport
+ui/tab_pane.go,14,33,github.com/charmbracelet/lipgloss
+ui/tab_pane.go,203,27,ui: unknown scroll owner %d
+ui/tab_pane.go,360,1,"
+"
+ui/tab_pane.go,492,40,No sessions yet — press n to create one.
+ui/tab_pane.go,496,21,Setting up workspace…
+ui/tab_pane.go,503,21,Tearing down session…
+ui/tab_pane.go,510,26,Session no longer running.
+ui/tab_pane.go,517,40,Session lost — its tmux session is gone.
+ui/tab_pane.go,528,26,Session no longer running.
+ui/tab_pane.go,551,26,Session no longer running.
+ui/tab_pane.go,560,36,Please enter a name for the session.
+ui/tab_pane.go,571,53,"%s
+
+Web tab — view in the web UI or open in a browser"
+ui/tab_pane.go,579,103,"VS Code tab — view in the web UI
+
+The editor opens this session's worktree. A terminal can't render it."
+ui/tab_pane.go,592,0,
+ui/tab_pane.go,606,35,Select a session to open a terminal
+ui/tab_pane.go,614,21,Tearing down session…
+ui/tab_pane.go,619,27,Session is not started yet.
+ui/tab_pane.go,641,53,Press Enter to open a terminal on the remote machine.
+ui/tab_pane.go,643,138,"Terminal tab not available for remote sessions.
+Configure remote_hooks.terminal_cmd to enable it.
+Use the Agent tab to see session output."
+ui/tab_pane.go,660,31,Terminal session not available.
+ui/tab_pane.go,668,35,Terminal session no longer running.
+ui/tab_pane.go,693,35,Terminal session no longer running.
+ui/tab_pane.go,696,48,tab pane: failed to capture terminal content: %w
+ui/tab_pane.go,714,0,
+ui/tab_pane.go,734,1,"
+"
+ui/tab_pane.go,751,1, 
+ui/tab_pane.go,762,1,"
+"
+ui/tab_pane.go,813,21,Tearing down session…
+ui/tab_pane.go,823,26,Session no longer running.
+ui/tab_pane.go,826,40,Session lost — its tmux session is gone.
+ui/tab_pane.go,843,31,Terminal session not available.
+ui/tab_pane.go,883,21,Setting up workspace…
+ui/tab_pane.go,885,21,Tearing down session…
+ui/tab_pane.go,887,26,Session no longer running.
+ui/tab_pane.go,889,40,Session lost — its tmux session is gone.
+ui/config_target.go,4,7,context
+ui/config_target.go,5,3,fmt
+ui/config_target.go,6,13,path/filepath
+ui/config_target.go,7,7,strings
+ui/config_target.go,9,45,github.com/sachiniyer/agent-factory/apiclient
+ui/config_target.go,10,42,github.com/sachiniyer/agent-factory/config
+ui/config_target.go,11,42,github.com/sachiniyer/agent-factory/daemon
+ui/config_target.go,67,0,
+ui/config_target.go,73,0,
+ui/config_target.go,73,16,read config from
+ui/config_target.go,73,9,GetConfig
+ui/config_target.go,73,16,Nothing was read
+ui/config_target.go,81,0,
+ui/config_target.go,81,61,the config editor read no config keys from the daemon at %s; 
+ui/config_target.go,82,37,check that the URL names an af daemon
+ui/config_target.go,96,0,
+ui/config_target.go,96,33,cannot open the config editor: %w
+ui/config_target.go,100,0,
+ui/config_target.go,130,0,
+ui/config_target.go,148,0,
+ui/config_target.go,164,0,
+ui/config_target.go,164,16,change config on
+ui/config_target.go,164,14,SetConfigValue
+ui/config_target.go,164,19,Nothing was written
+ui/config_target.go,172,0,
+ui/config_target.go,172,78,the daemon at %s reported the config change succeeded but returned no result; 
+ui/config_target.go,173,37,check that the URL names an af daemon
+ui/config_target.go,199,0,
+ui/config_target.go,200,25, Daemon now listening at 
+ui/config_target.go,200,1,.
+ui/config_target.go,203,1, 
+ui/config_target.go,203,1, 
+ui/config_target.go,231,0,
+ui/config_target.go,234,7,%s · %s
+ui/config_target.go,253,92,the config editor cannot %s the daemon at %s: that daemon (%s) does not serve the %s route. 
+ui/config_target.go,254,71,%s — af never falls back to this machine's config for a remote target. 
+ui/config_target.go,255,53,"Upgrade the daemon, or edit config on the daemon host"
+ui/err.go,4,7,strings
+ui/err.go,6,33,github.com/charmbracelet/lipgloss
+ui/err.go,7,31,github.com/charmbracelet/x/ansi
+ui/err.go,8,29,github.com/mattn/go-runewidth
+ui/err.go,9,40,github.com/sachiniyer/agent-factory/keys
+ui/err.go,10,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/err.go,81,0,
+ui/err.go,91,0,
+ui/err.go,98,0,
+ui/err.go,112,1,"
+"
+ui/err.go,112,3, · 
+ui/err.go,116,0,
+ui/err.go,117,2,  
+ui/err.go,137,1,""
+ui/err.go,137,0,
+ui/err.go,145,1,…
+ui/err.go,150,0,
+ui/err.go,152,0,
+ui/err.go,160,0,
+ui/err.go,163,0,
+ui/err.go,163,0,
+ui/err.go,164,0,
+ui/err.go,166,1, 
+ui/tabjump.go,4,7,strconv
+ui/tabjump.go,5,7,strings
+ui/tabjump.go,36,0,
+ui/tabjump.go,87,0,
+ui/termpane/modes.go,4,31,github.com/charmbracelet/x/ansi
+ui/termpane/modes.go,5,44,github.com/sachiniyer/agent-factory/terminal
+ui/termpane/modes.go,68,41,termpane: unknown repaint cursor coverage
+ui/termpane/modes.go,92,35,termpane: unknown replay continuity
+ui/termpane/mouse.go,4,34,github.com/charmbracelet/bubbletea
+ui/termpane/mouse.go,5,31,github.com/charmbracelet/x/ansi
+ui/termpane/mouse.go,6,29,github.com/charmbracelet/x/vt
+ui/termpane/keymap.go,4,3,fmt
+ui/termpane/keymap.go,6,34,github.com/charmbracelet/bubbletea
+ui/termpane/keymap.go,7,36,github.com/charmbracelet/ultraviolet
+ui/termpane/keymap.go,103,11,\x1b[1;%d%c
+ui/termpane/keymap.go,105,11,\x1b[%d;%d~
+ui/termpane/render.go,4,7,strings
+ui/termpane/render.go,6,36,github.com/charmbracelet/ultraviolet
+ui/termpane/render.go,7,29,github.com/charmbracelet/x/vt
+ui/termpane/render.go,36,0,
+ui/termpane/render.go,47,1, 
+ui/termpane/render.go,48,0,
+ui/termpane/render.go,55,1, 
+ui/termpane/render.go,66,6,\x1b[m
+ui/termpane/render.go,76,1, 
+ui/termpane/render.go,80,0,
+ui/termpane/termpane.go,30,7,context
+ui/termpane/termpane.go,31,3,fmt
+ui/termpane/termpane.go,32,2,io
+ui/termpane/termpane.go,33,4,sync
+ui/termpane/termpane.go,34,4,time
+ui/termpane/termpane.go,36,34,github.com/charmbracelet/bubbletea
+ui/termpane/termpane.go,37,31,github.com/charmbracelet/x/ansi
+ui/termpane/termpane.go,38,29,github.com/charmbracelet/x/vt
+ui/termpane/termpane.go,39,44,github.com/sachiniyer/agent-factory/terminal
+ui/termpane/termpane.go,432,0,
+ui/termpane/termpane.go,549,56,termpane: goroutines did not drain within %v after close
+ui/overlay/projectPickerOverlay.go,4,3,fmt
+ui/overlay/projectPickerOverlay.go,5,7,strings
+ui/overlay/projectPickerOverlay.go,7,38,github.com/sachiniyer/agent-factory/ui
+ui/overlay/projectPickerOverlay.go,8,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/projectPickerOverlay.go,10,34,github.com/charmbracelet/bubbletea
+ui/overlay/projectPickerOverlay.go,11,33,github.com/charmbracelet/lipgloss
+ui/overlay/projectPickerOverlay.go,133,0,
+ui/overlay/projectPickerOverlay.go,156,3,esc
+ui/overlay/projectPickerOverlay.go,156,6,ctrl+c
+ui/overlay/projectPickerOverlay.go,159,5,enter
+ui/overlay/projectPickerOverlay.go,162,0,
+ui/overlay/projectPickerOverlay.go,169,2,up
+ui/overlay/projectPickerOverlay.go,169,1,k
+ui/overlay/projectPickerOverlay.go,173,4,down
+ui/overlay/projectPickerOverlay.go,173,1,j
+ui/overlay/projectPickerOverlay.go,186,0,
+ui/overlay/projectPickerOverlay.go,187,0,
+ui/overlay/projectPickerOverlay.go,190,0,
+ui/overlay/projectPickerOverlay.go,198,0,
+ui/overlay/projectPickerOverlay.go,201,1, 
+ui/overlay/projectPickerOverlay.go,202,0,
+ui/overlay/projectPickerOverlay.go,205,0,
+ui/overlay/projectPickerOverlay.go,235,14,Switch project
+ui/overlay/projectPickerOverlay.go,236,0,
+ui/overlay/projectPickerOverlay.go,242,44,registry unreadable · list may be incomplete
+ui/overlay/projectPickerOverlay.go,246,32,Add project — enter a repo path:
+ui/overlay/projectPickerOverlay.go,247,2,  
+ui/overlay/projectPickerOverlay.go,248,0,
+ui/overlay/projectPickerOverlay.go,249,2,  
+ui/overlay/projectPickerOverlay.go,251,0,
+ui/overlay/projectPickerOverlay.go,252,20,enter add · esc back
+ui/overlay/projectPickerOverlay.go,269,19,    … %d more above
+ui/overlay/projectPickerOverlay.go,275,23,    … and %d more below
+ui/overlay/projectPickerOverlay.go,278,0,
+ui/overlay/projectPickerOverlay.go,279,37,j/k navigate · enter add · esc cancel
+ui/overlay/projectPickerOverlay.go,281,51,j/k navigate · enter switch · D delete · esc cancel
+ui/overlay/projectPickerOverlay.go,284,17,j/k · enter · esc
+ui/overlay/projectPickerOverlay.go,296,14,+ Add project…
+ui/overlay/projectPickerOverlay.go,298,2,  
+ui/overlay/projectPickerOverlay.go,298,2,▸ 
+ui/overlay/projectPickerOverlay.go,300,4,    
+ui/overlay/projectPickerOverlay.go,303,5, (%d)
+ui/overlay/projectPickerOverlay.go,305,2,  
+ui/overlay/projectPickerOverlay.go,305,2,▸ 
+ui/overlay/projectPickerOverlay.go,305,5, (%d)
+ui/overlay/projectPickerOverlay.go,307,4,    
+ui/overlay/projectPickerOverlay.go,317,1,"
+"
+ui/overlay/textOverlay.go,4,7,strings
+ui/overlay/textOverlay.go,6,34,github.com/charmbracelet/bubbletea
+ui/overlay/textOverlay.go,7,33,github.com/charmbracelet/lipgloss
+ui/overlay/textOverlay.go,8,31,github.com/charmbracelet/x/ansi
+ui/overlay/textOverlay.go,10,38,github.com/sachiniyer/agent-factory/ui
+ui/overlay/textOverlay.go,57,0,
+ui/overlay/textOverlay.go,90,1,"
+"
+ui/overlay/textOverlay.go,93,1,"
+"
+ui/overlay/textOverlay.go,210,1,"
+"
+ui/overlay/textOverlay.go,218,6,↑ more
+ui/overlay/textOverlay.go,221,6,↓ more
+ui/overlay/textOverlay.go,223,1,"
+"
+ui/overlay/textOverlay.go,235,0,
+ui/overlay/textOverlay.go,235,1,"
+"
+ui/overlay/promptOverlay.go,4,7,strings
+ui/overlay/promptOverlay.go,6,41,github.com/charmbracelet/bubbles/textarea
+ui/overlay/promptOverlay.go,7,34,github.com/charmbracelet/bubbletea
+ui/overlay/promptOverlay.go,8,33,github.com/charmbracelet/lipgloss
+ui/overlay/promptOverlay.go,10,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/promptOverlay.go,12,38,github.com/sachiniyer/agent-factory/ui
+ui/overlay/promptOverlay.go,58,0,
+ui/overlay/promptOverlay.go,59,41,Sent to the agent as soon as it is ready…
+ui/overlay/promptOverlay.go,149,0,
+ui/overlay/promptOverlay.go,150,1,"
+"
+ui/overlay/promptOverlay.go,151,0,
+ui/overlay/promptOverlay.go,153,40,enter newline · tab done · ctrl+c cancel
+ui/overlay/promptOverlay.go,155,24,tab done · ctrl+c cancel
+ui/overlay/promptOverlay.go,163,1,"
+"
+ui/overlay/selectionOverlay.go,4,7,strings
+ui/overlay/selectionOverlay.go,6,34,github.com/charmbracelet/bubbletea
+ui/overlay/selectionOverlay.go,7,33,github.com/charmbracelet/lipgloss
+ui/overlay/selectionOverlay.go,9,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/selectionOverlay.go,11,38,github.com/sachiniyer/agent-factory/ui
+ui/overlay/selectionOverlay.go,40,2,up
+ui/overlay/selectionOverlay.go,40,1,k
+ui/overlay/selectionOverlay.go,44,4,down
+ui/overlay/selectionOverlay.go,44,1,j
+ui/overlay/selectionOverlay.go,48,5,enter
+ui/overlay/selectionOverlay.go,51,3,esc
+ui/overlay/selectionOverlay.go,51,6,ctrl+c
+ui/overlay/selectionOverlay.go,129,0,
+ui/overlay/selectionOverlay.go,133,14,  … more above
+ui/overlay/selectionOverlay.go,138,2,▸ 
+ui/overlay/selectionOverlay.go,140,2,  
+ui/overlay/selectionOverlay.go,144,14,  … more below
+ui/overlay/selectionOverlay.go,148,0,
+ui/overlay/selectionOverlay.go,153,10,esc cancel
+ui/overlay/selectionOverlay.go,155,40,↑/↓ navigate · enter select · esc cancel
+ui/overlay/selectionOverlay.go,156,28,↑/↓ nav · enter · esc cancel
+ui/overlay/selectionOverlay.go,157,18,enter · esc cancel
+ui/overlay/selectionOverlay.go,174,1,"
+"
+ui/overlay/confirmationOverlay.go,4,3,fmt
+ui/overlay/confirmationOverlay.go,5,7,strings
+ui/overlay/confirmationOverlay.go,7,34,github.com/charmbracelet/bubbletea
+ui/overlay/confirmationOverlay.go,8,33,github.com/charmbracelet/lipgloss
+ui/overlay/confirmationOverlay.go,10,38,github.com/sachiniyer/agent-factory/ui
+ui/overlay/confirmationOverlay.go,11,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/confirmationOverlay.go,24,1,y
+ui/overlay/confirmationOverlay.go,60,1,n
+ui/overlay/confirmationOverlay.go,73,3,esc
+ui/overlay/confirmationOverlay.go,73,6,ctrl+c
+ui/overlay/confirmationOverlay.go,85,5,enter
+ui/overlay/confirmationOverlay.go,180,0,
+ui/overlay/confirmationOverlay.go,205,0,
+ui/overlay/confirmationOverlay.go,208,0,
+ui/overlay/confirmationOverlay.go,208,0,
+ui/overlay/confirmationOverlay.go,210,0,
+ui/overlay/confirmationOverlay.go,265,0,
+ui/overlay/confirmationOverlay.go,267,0,
+ui/overlay/confirmationOverlay.go,267,1,"
+"
+ui/overlay/confirmationOverlay.go,279,1,"
+"
+ui/overlay/confirmationOverlay.go,285,0,
+ui/overlay/confirmationOverlay.go,301,1,"
+"
+ui/overlay/confirmationOverlay.go,309,3,esc
+ui/overlay/confirmationOverlay.go,309,7, cancel
+ui/overlay/confirmationOverlay.go,331,0,
+ui/overlay/confirmationOverlay.go,337,1,"
+"
+ui/overlay/confirmationOverlay.go,344,5,lines
+ui/overlay/confirmationOverlay.go,346,4,line
+ui/overlay/confirmationOverlay.go,349,99,"Too small to confirm safely — %d more %s needed to show what this destroys. Resize, then try again."
+ui/overlay/confirmationOverlay.go,350,56,Too small to confirm safely — %d more %s needed. Resize.
+ui/overlay/confirmationOverlay.go,351,36,Too small to confirm safely · resize
+ui/overlay/confirmationOverlay.go,352,18,Too small · resize
+ui/overlay/confirmationOverlay.go,361,11, confirm · 
+ui/overlay/confirmationOverlay.go,362,1,/
+ui/overlay/confirmationOverlay.go,362,3,esc
+ui/overlay/confirmationOverlay.go,362,7, cancel
+ui/overlay/confirmationOverlay.go,368,1,/
+ui/overlay/confirmationOverlay.go,368,5,enter
+ui/overlay/confirmationOverlay.go,370,6,Press 
+ui/overlay/confirmationOverlay.go,370,13," to confirm, "
+ui/overlay/confirmationOverlay.go,371,4, or 
+ui/overlay/confirmationOverlay.go,371,3,esc
+ui/overlay/confirmationOverlay.go,371,10, to cancel
+ui/overlay/confirmationOverlay.go,398,0,
+ui/overlay/confirmationOverlay.go,408,30,… 1 more line · resize to read
+ui/overlay/confirmationOverlay.go,410,32,… %d more lines · resize to read
+ui/overlay/searchOverlay.go,4,3,fmt
+ui/overlay/searchOverlay.go,5,7,strings
+ui/overlay/searchOverlay.go,6,7,unicode
+ui/overlay/searchOverlay.go,8,43,github.com/sachiniyer/agent-factory/session
+ui/overlay/searchOverlay.go,9,38,github.com/sachiniyer/agent-factory/ui
+ui/overlay/searchOverlay.go,11,34,github.com/charmbracelet/bubbletea
+ui/overlay/searchOverlay.go,12,33,github.com/charmbracelet/lipgloss
+ui/overlay/searchOverlay.go,14,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/searchOverlay.go,15,30,golang.org/x/text/unicode/norm
+ui/overlay/searchOverlay.go,108,1, 
+ui/overlay/searchOverlay.go,136,0,
+ui/overlay/searchOverlay.go,274,15,Search sessions
+ui/overlay/searchOverlay.go,276,0,
+ui/overlay/searchOverlay.go,278,2,/ 
+ui/overlay/searchOverlay.go,280,0,
+ui/overlay/searchOverlay.go,284,0,
+ui/overlay/searchOverlay.go,285,17,  type to search…
+ui/overlay/searchOverlay.go,287,18,  No matches found
+ui/overlay/searchOverlay.go,293,19,    … %d more above
+ui/overlay/searchOverlay.go,303,1, 
+ui/overlay/searchOverlay.go,308,1,●
+ui/overlay/searchOverlay.go,310,1,◆
+ui/overlay/searchOverlay.go,312,1,◌
+ui/overlay/searchOverlay.go,314,1,○
+ui/overlay/searchOverlay.go,316,1,▧
+ui/overlay/searchOverlay.go,322,1, 
+ui/overlay/searchOverlay.go,326,0,
+ui/overlay/searchOverlay.go,327,2, (
+ui/overlay/searchOverlay.go,327,1,)
+ui/overlay/searchOverlay.go,331,2,  
+ui/overlay/searchOverlay.go,331,2,▸ 
+ui/overlay/searchOverlay.go,332,0,
+ui/overlay/searchOverlay.go,333,2, (
+ui/overlay/searchOverlay.go,333,1,)
+ui/overlay/searchOverlay.go,337,2,  
+ui/overlay/searchOverlay.go,337,2,  
+ui/overlay/searchOverlay.go,344,23,    … and %d more below
+ui/overlay/searchOverlay.go,348,0,
+ui/overlay/searchOverlay.go,350,39,↑/↓ navigate · enter select · esc close
+ui/overlay/searchOverlay.go,352,27,↑/↓ nav · enter · esc close
+ui/overlay/searchOverlay.go,360,1,"
+"
+ui/overlay/fit.go,4,7,strings
+ui/overlay/fit.go,6,33,github.com/charmbracelet/lipgloss
+ui/overlay/fit.go,7,31,github.com/charmbracelet/x/ansi
+ui/overlay/fit.go,9,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/fit.go,37,0,
+ui/overlay/fit.go,39,1, 
+ui/overlay/fit.go,40,1,"
+"
+ui/overlay/fit.go,49,0,
+ui/overlay/fit.go,54,1,…
+ui/overlay/fit.go,55,4,\x1b
+ui/overlay/fit.go,56,7,\x1b[0m
+ui/overlay/fit.go,62,1,"
+"
+ui/overlay/overlay.go,4,6,regexp
+ui/overlay/overlay.go,5,7,strconv
+ui/overlay/overlay.go,6,7,strings
+ui/overlay/overlay.go,8,33,github.com/charmbracelet/lipgloss
+ui/overlay/overlay.go,9,31,github.com/charmbracelet/x/ansi
+ui/overlay/overlay.go,10,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/overlay/overlay.go,12,25,github.com/muesli/termenv
+ui/overlay/overlay.go,13,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/overlay.go,23,2,39
+ui/overlay/overlay.go,23,2,49
+ui/overlay/overlay.go,33,14,\x1b\[[0-9;]*m
+ui/overlay/overlay.go,43,1,5
+ui/overlay/overlay.go,45,1,2
+ui/overlay/overlay.go,67,5,\x1b[
+ui/overlay/overlay.go,67,1,m
+ui/overlay/overlay.go,68,0,
+ui/overlay/overlay.go,68,1,0
+ui/overlay/overlay.go,72,1,;
+ui/overlay/overlay.go,120,5,\x1b[
+ui/overlay/overlay.go,120,1,m
+ui/overlay/overlay.go,132,2,39
+ui/overlay/overlay.go,138,2,49
+ui/overlay/overlay.go,140,5,\x1b[
+ui/overlay/overlay.go,140,1,;
+ui/overlay/overlay.go,140,1,m
+ui/overlay/overlay.go,186,56,\x1b\]8;[^;]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c})
+ui/overlay/overlay.go,208,7,\x1b[0m
+ui/overlay/overlay.go,208,6,\x1b[m
+ui/overlay/overlay.go,209,7,\x1b[0m
+ui/overlay/overlay.go,213,0,
+ui/overlay/overlay.go,216,14,\x1b]8;;\x1b\\
+ui/overlay/overlay.go,241,1,"
+"
+ui/overlay/overlay.go,322,1, 
+ui/overlay/overlay.go,447,0,
+ui/overlay/overlay.go,457,0,
+ui/overlay/overlay.go,494,0,
+ui/overlay/overlay.go,495,1, 
+ui/overlay/overlay.go,526,1, 
+ui/overlay/zones.go,4,7,strings
+ui/overlay/zones.go,6,31,github.com/charmbracelet/x/ansi
+ui/overlay/zones.go,8,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/overlay/zones.go,9,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+ui/overlay/zones.go,39,11, to confirm
+ui/overlay/zones.go,43,17,/enter to confirm
+ui/overlay/zones.go,45,17, or esc to cancel
+ui/overlay/zones.go,46,8, confirm
+ui/overlay/zones.go,47,11,/esc cancel
+ui/overlay/zones.go,48,1,"
+"
+ui/overlay/zones.go,92,1,"
+"
+ui/overlay/zones.go,102,2,│ 
+ui/overlay/zones.go,103,2,▸ 
+ui/tree/tree.go,11,43,github.com/sachiniyer/agent-factory/session
+ui/tree/labels.go,4,3,fmt
+ui/tree/labels.go,5,7,strings
+ui/tree/labels.go,7,43,github.com/sachiniyer/agent-factory/session
+ui/tree/labels.go,14,0,
+ui/tree/labels.go,15,1,›
+ui/tree/labels.go,16,1,›
+ui/tree/labels.go,17,1,◱
+ui/tree/labels.go,50,5,Agent
+ui/tree/labels.go,95,0,
+ui/tree/labels.go,99,0,
+ui/tree/labels.go,104,5,%d %s
+ui/tree/labels.go,118,1, 
+ui/tree/render.go,4,3,fmt
+ui/tree/render.go,5,7,strings
+ui/tree/render.go,6,4,time
+ui/tree/render.go,8,33,github.com/charmbracelet/lipgloss
+ui/tree/render.go,9,29,github.com/mattn/go-runewidth
+ui/tree/render.go,11,39,github.com/sachiniyer/agent-factory/log
+ui/tree/render.go,12,43,github.com/sachiniyer/agent-factory/session
+ui/tree/render.go,13,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/tree/render.go,14,44,github.com/sachiniyer/agent-factory/ui/theme
+ui/tree/render.go,17,2,● 
+ui/tree/render.go,23,2,  
+ui/tree/render.go,43,2,○ 
+ui/tree/render.go,49,2,◌ 
+ui/tree/render.go,54,2,▧ 
+ui/tree/render.go,62,2,◆ 
+ui/tree/render.go,68,1,▾
+ui/tree/render.go,69,1,▸
+ui/tree/render.go,70,1, 
+ui/tree/render.go,102,8,[limit] 
+ui/tree/render.go,104,18,[limit] resets %s 
+ui/tree/render.go,114,6,3:04pm
+ui/tree/render.go,116,3,3pm
+ui/tree/render.go,121,5,Jan 2
+ui/tree/render.go,121,1, 
+ui/tree/render.go,170,3,ink
+ui/tree/render.go,171,3,ink
+ui/tree/render.go,172,9,ink-muted
+ui/tree/render.go,173,9,ink-muted
+ui/tree/render.go,174,14,surface-raised
+ui/tree/render.go,175,3,ink
+ui/tree/render.go,176,5,ready
+ui/tree/render.go,177,4,lost
+ui/tree/render.go,178,4,dead
+ui/tree/render.go,179,4,dead
+ui/tree/render.go,188,8,archived
+ui/tree/render.go,189,13,limit-reached
+ui/tree/render.go,267,1,⎇
+ui/tree/render.go,292,0,
+ui/tree/render.go,294,4, %s 
+ui/tree/render.go,298,12,retained at 
+ui/tree/render.go,301,0,
+ui/tree/render.go,305,15,; skipped paths
+ui/tree/render.go,305,12,; af skipped
+ui/tree/render.go,393,0,
+ui/tree/render.go,393,0,
+ui/tree/render.go,401,9,[remote] 
+ui/tree/render.go,411,7,[lost] 
+ui/tree/render.go,414,11,[deleting] 
+ui/tree/render.go,449,0,
+ui/tree/render.go,450,1,[
+ui/tree/render.go,450,2,] 
+ui/tree/render.go,455,0,
+ui/tree/render.go,456,21,[archive incomplete] 
+ui/tree/render.go,463,16,[model changed] 
+ui/tree/render.go,466,0,
+ui/tree/render.go,474,0,
+ui/tree/render.go,479,1,…
+ui/tree/render.go,481,0,
+ui/tree/render.go,499,0,
+ui/tree/render.go,500,5,%s %s
+ui/tree/render.go,510,1, 
+ui/tree/render.go,524,48,could not get repo name in instance renderer: %v
+ui/tree/render.go,526,5, (%s)
+ui/tree/render.go,538,0,
+ui/tree/render.go,541,3, · 
+ui/tree/render.go,550,0,
+ui/tree/render.go,551,0,
+ui/tree/render.go,555,0,
+ui/tree/render.go,557,1,…
+ui/tree/render.go,562,0,
+ui/tree/render.go,564,1, 
+ui/tree/render.go,567,10,%s %s-%s%s
+ui/tree/render.go,567,1, 
+ui/tree/render.go,570,0,
+ui/tree/render.go,571,0,
+ui/tree/render.go,577,0,
+ui/tree/render.go,581,0,
+ui/tree/render.go,588,2,  
+ui/tree/render.go,590,2,⚠ 
+ui/tree/render.go,592,1, 
+ui/tree/render.go,595,0,
+ui/tree/render.go,597,1,…
+ui/tree/render.go,622,0,
+ui/tree/render.go,623,0,
+ui/tree/render.go,627,4, ago
+ui/tree/render.go,629,3, · 
+ui/tree/render.go,631,16, · pane changed 
+ui/tree/render.go,640,3,<1m
+ui/tree/render.go,643,3,%dm
+ui/tree/render.go,646,3,%dh
+ui/tree/render.go,648,3,%dd
+ui/tree/render.go,653,7, · open
+ui/tree/render.go,664,1,├
+ui/tree/render.go,666,1,└
+ui/tree/render.go,668,0,
+ui/tree/render.go,672,8,%s%s %d 
+ui/tree/render.go,673,1, 
+ui/tree/render.go,679,1,…
+ui/tree/render.go,681,0,
+ui/tree/render.go,707,0,
+ui/theme/theme.go,6,33,github.com/charmbracelet/lipgloss
+ui/theme/theme.go,16,6,accent
+ui/theme/theme.go,16,7,#2d6271
+ui/theme/theme.go,16,7,#2296f3
+ui/theme/theme.go,17,8,archived
+ui/theme/theme.go,17,7,#4c566a
+ui/theme/theme.go,17,7,#d8dee9
+ui/theme/theme.go,18,6,border
+ui/theme/theme.go,18,7,#657084
+ui/theme/theme.go,18,7,#3d3d3d
+ui/theme/theme.go,19,4,dead
+ui/theme/theme.go,19,7,#883b43
+ui/theme/theme.go,19,7,#e4c8cd
+ui/theme/theme.go,20,3,ink
+ui/theme/theme.go,20,7,#2e3440
+ui/theme/theme.go,20,7,#cccccc
+ui/theme/theme.go,21,9,ink-muted
+ui/theme/theme.go,21,7,#4c566a
+ui/theme/theme.go,21,7,#9d9d9d
+ui/theme/theme.go,22,13,limit-reached
+ui/theme/theme.go,22,7,#73436b
+ui/theme/theme.go,22,7,#dbb9d5
+ui/theme/theme.go,23,4,lost
+ui/theme/theme.go,23,7,#705014
+ui/theme/theme.go,23,7,#ebcb8b
+ui/theme/theme.go,24,5,ready
+ui/theme/theme.go,24,7,#405430
+ui/theme/theme.go,24,7,#d5e2cc
+ui/theme/theme.go,25,7,running
+ui/theme/theme.go,25,7,#4c566a
+ui/theme/theme.go,25,7,#d8dee9
+ui/theme/theme.go,26,7,surface
+ui/theme/theme.go,26,7,#f8f9fc
+ui/theme/theme.go,26,7,#1f1f1f
+ui/theme/theme.go,27,14,surface-raised
+ui/theme/theme.go,27,7,#eceff4
+ui/theme/theme.go,27,7,#2b2b2b
+ui/theme/theme.go,50,6,accent
+ui/theme/theme.go,51,8,archived
+ui/theme/theme.go,52,6,border
+ui/theme/theme.go,53,4,dead
+ui/theme/theme.go,54,3,ink
+ui/theme/theme.go,55,9,ink-muted
+ui/theme/theme.go,56,13,limit-reached
+ui/theme/theme.go,57,4,lost
+ui/theme/theme.go,58,5,ready
+ui/theme/theme.go,59,7,running
+ui/theme/theme.go,60,7,surface
+ui/theme/theme.go,61,14,surface-raised
+ui/theme/theme.go,68,14,radius-control
+ui/theme/theme.go,69,13,radius-dialog
+ui/theme/theme.go,70,7,space-1
+ui/theme/theme.go,71,7,space-2
+ui/theme/theme.go,72,7,space-3
+ui/theme/theme.go,73,7,space-4
+ui/theme/theme.go,74,9,type-body
+ui/theme/theme.go,75,12,type-caption
+ui/theme/theme.go,76,12,type-display
+ui/theme/theme.go,77,12,type-heading
+ui/theme/theme.go,78,10,type-title
+ui/theme/theme.go,84,7,running
+ui/theme/theme.go,84,7,Running
+ui/theme/theme.go,84,0,
+ui/theme/theme.go,84,7,running
+ui/theme/theme.go,85,5,ready
+ui/theme/theme.go,85,5,Ready
+ui/theme/theme.go,85,1,●
+ui/theme/theme.go,85,5,ready
+ui/theme/theme.go,86,4,lost
+ui/theme/theme.go,86,4,Lost
+ui/theme/theme.go,86,1,◌
+ui/theme/theme.go,86,4,lost
+ui/theme/theme.go,87,4,dead
+ui/theme/theme.go,87,4,Dead
+ui/theme/theme.go,87,1,○
+ui/theme/theme.go,87,4,dead
+ui/theme/theme.go,88,8,archived
+ui/theme/theme.go,88,8,Archived
+ui/theme/theme.go,88,1,▧
+ui/theme/theme.go,88,8,archived
+ui/theme/theme.go,89,13,limit-reached
+ui/theme/theme.go,89,13,Limit reached
+ui/theme/theme.go,89,1,◆
+ui/theme/theme.go,89,13,limit-reached
+ui/theme/theme.go,105,3,ink
+ui/theme/theme.go,105,7,surface
+ui/theme/theme.go,108,9,ink-muted
+ui/theme/theme.go,110,14,surface-raised
+ui/theme/theme.go,111,6,accent
+ui/theme/theme.go,112,14,surface-raised
+ui/theme/theme.go,112,13,radius-dialog
+ui/theme/theme.go,112,6,border
+ui/theme/theme.go,112,7,space-3
+ui/theme/theme.go,113,4,dead
+ui/theme/disabled.go,3,33,github.com/charmbracelet/lipgloss
+ui/theme/disabled.go,9,1,┄
+ui/theme/disabled.go,9,1,┄
+ui/theme/disabled.go,9,1,┆
+ui/theme/disabled.go,9,1,┆
+ui/theme/disabled.go,10,1,┌
+ui/theme/disabled.go,10,1,┐
+ui/theme/disabled.go,10,1,└
+ui/theme/disabled.go,10,1,┘
+ui/theme/disabled.go,11,7,space-2
+ui/store/projection.go,27,3,fmt
+ui/store/projection.go,28,4,sort
+ui/store/projection.go,29,11,sync/atomic
+ui/store/projection.go,31,39,github.com/sachiniyer/agent-factory/log
+ui/store/projection.go,32,43,github.com/sachiniyer/agent-factory/session
+ui/store/projection.go,33,40,github.com/sachiniyer/agent-factory/task
+ui/store/projection.go,229,27,could not get repo name: %v
+ui/store/projection.go,270,27,could not kill instance: %w
+ui/store/projection.go,273,27,could not get repo name: %v
+ui/store/projection.go,274,0,
+ui/store/projection.go,365,27,could not get repo name: %v
+ui/store/projection.go,412,17,repo %s not found
+ui/store/order.go,3,43,github.com/sachiniyer/agent-factory/session
+ui/layout/pane.go,3,34,github.com/charmbracelet/bubbletea
+ui/layout/grid.go,4,3,fmt
+ui/layout/grid.go,5,7,strings
+ui/layout/grid.go,13,4,tree
+ui/layout/grid.go,14,11,automations
+ui/layout/grid.go,15,8,projects
+ui/layout/grid.go,21,7,pane:%d
+ui/layout/grid.go,24,5,pane:
+ui/layout/ring.go,32,0,
+ui/layout/ring.go,58,0,
+ui/layout/ring.go,100,0,
+ui/layout/clamp.go,4,7,strings
+ui/layout/clamp.go,37,0,
+ui/layout/clamp.go,39,1,"
+"
+ui/layout/clamp.go,57,1,"
+"
+ui/layout/cells.go,4,7,strings
+ui/layout/cells.go,6,31,github.com/charmbracelet/x/ansi
+ui/layout/cells.go,7,22,github.com/muesli/ansi
+ui/layout/cells.go,82,1,"
+"
+ui/layout/cells.go,109,1,"
+"
+ui/layout/cells.go,152,0,
+ui/layout/cells.go,158,0,
+ui/layout/cells.go,163,0,
+ui/layout/contract.go,4,7,strings
+ui/layout/contract.go,6,31,github.com/charmbracelet/x/ansi
+ui/layout/contract.go,129,0,
+ui/layout/contract.go,135,0,
+ui/layout/contract.go,140,0,
+ui/layout/contract.go,147,1, 
+ui/layout/contract.go,182,0,
+ui/layout/contract.go,206,0,
+ui/layout/contract.go,223,4,\x1b
+ui/layout/contract.go,224,7,\x1b[0m
+ui/layout/join.go,3,7,strings
+ui/layout/join.go,50,1,"
+"
+ui/layout/join.go,60,1,"
+"
+ui/layout/join.go,76,1,"
+"
+ui/layout/join.go,91,0,
+ui/layout/join.go,102,1,"
+"
+ui/layout/join.go,107,0,
+ui/layout/zones/ids.go,4,7,strconv
+ui/layout/zones/ids.go,5,7,strings
+ui/layout/zones/ids.go,20,11,tree:header
+ui/layout/zones/ids.go,24,20,tree:header:archived
+ui/layout/zones/ids.go,27,7,tree:bg
+ui/layout/zones/ids.go,30,7,auto:bg
+ui/layout/zones/ids.go,34,11,projects:bg
+ui/layout/zones/ids.go,37,19,overlay:confirm:yes
+ui/layout/zones/ids.go,38,18,overlay:confirm:no
+ui/layout/zones/ids.go,42,14,tree:instance:
+ui/layout/zones/ids.go,46,14,tree:instance:
+ui/layout/zones/ids.go,52,13,projects:row:
+ui/layout/zones/ids.go,56,13,projects:row:
+ui/layout/zones/ids.go,60,11,tree:arrow:
+ui/layout/zones/ids.go,64,11,tree:arrow:
+ui/layout/zones/ids.go,70,9,tree:tab:
+ui/layout/zones/ids.go,70,1,:
+ui/layout/zones/ids.go,76,9,tree:tab:
+ui/layout/zones/ids.go,78,0,
+ui/layout/zones/ids.go,80,1,:
+ui/layout/zones/ids.go,82,0,
+ui/layout/zones/ids.go,86,0,
+ui/layout/zones/ids.go,95,6,header
+ui/layout/zones/ids.go,97,4,body
+ui/layout/zones/ids.go,102,4,term
+ui/layout/zones/ids.go,106,1,:
+ui/layout/zones/ids.go,109,1,:
+ui/layout/zones/ids.go,112,1,:
+ui/layout/zones/ids.go,118,1,:
+ui/layout/zones/ids.go,122,0,
+ui/layout/zones/ids.go,122,0,
+ui/layout/zones/ids.go,127,10,auto:task:
+ui/layout/zones/ids.go,131,10,auto:task:
+ui/layout/zones/ids.go,137,12,status:hint:
+ui/layout/zones/ids.go,141,12,status:hint:
+ui/layout/zones/ids.go,145,15,overlay:select:
+ui/layout/zones/ids.go,149,15,overlay:select:
+ui/layout/zones/ids.go,154,15,overlay:search:
+ui/layout/zones/ids.go,158,15,overlay:search:
+ui/layout/zones/registry.go,13,45,github.com/sachiniyer/agent-factory/ui/layout
+ui/layout/zones/registry.go,48,0,
+app/account_target.go,4,3,fmt
+app/account_target.go,6,45,github.com/sachiniyer/agent-factory/apiclient
+app/account_target.go,7,42,github.com/sachiniyer/agent-factory/daemon
+app/account_target.go,43,0,
+app/account_target.go,44,2,%s
+app/account_target.go,51,0,
+app/account_target.go,54,92,af accounts login runs the agent's login flow on the machine whose agent-factory home holds 
+app/account_target.go,55,92,"the account, and hands you that pane's terminal; it cannot do that against a remote daemon. "
+app/account_target.go,56,86,"Unset --daemon-url/AF_DAEMON_URL to act on this host, or run af accounts login on the "
+app/account_target.go,57,18,daemon's host (%s)
+app/scroll_ownership.go,4,44,github.com/sachiniyer/agent-factory/terminal
+app/scroll_ownership.go,5,38,github.com/sachiniyer/agent-factory/ui
+app/scroll_ownership.go,6,44,github.com/sachiniyer/agent-factory/ui/store
+app/session_action_target.go,4,11,crypto/rand
+app/session_action_target.go,5,12,encoding/hex
+app/session_action_target.go,6,4,time
+app/session_action_target.go,8,42,github.com/sachiniyer/agent-factory/daemon
+app/session_action_target.go,9,43,github.com/sachiniyer/agent-factory/session
+app/session_action_target.go,32,0,
+app/session_action_target.go,32,0,
+app/session_action_target.go,32,0,
+app/session_action_target.go,42,0,
+app/session_action_target.go,42,0,
+app/session_action_target.go,43,0,
+app/session_action_target.go,53,0,
+app/session_action_target.go,56,0,
+app/session_action_target.go,111,0,
+app/session_action_target.go,113,4,tui-
+app/session_action_target.go,113,1,-
+app/session_action_target.go,146,6,vscode
+app/home_update.go,4,3,fmt
+app/home_update.go,5,7,strings
+app/home_update.go,6,4,time
+app/home_update.go,8,34,github.com/charmbracelet/bubbletea
+app/home_update.go,9,40,github.com/sachiniyer/agent-factory/keys
+app/home_update.go,10,39,github.com/sachiniyer/agent-factory/log
+app/home_update.go,11,43,github.com/sachiniyer/agent-factory/session
+app/home_update.go,12,38,github.com/sachiniyer/agent-factory/ui
+app/home_update.go,13,45,github.com/sachiniyer/agent-factory/ui/layout
+app/home_update.go,85,41,PR info refresh request failed for %q: %v
+app/home_update.go,94,40,tickRefreshExternalMessage-handler-entry
+app/home_update.go,103,32,snapshotFetchedMsg-handler-entry
+app/home_update.go,125,37,snapshotFetchedMsg-reconcile-returned
+app/home_update.go,144,29,failed to trigger task %q: %w
+app/home_update.go,146,12,triggered %s
+app/home_update.go,269,35,repaintAfterDetachMsg-handler-entry
+app/home_update.go,276,34,repaintAfterDetachMsg-handler-exit
+app/home_update.go,295,31,panesRefreshedMsg-handler-entry
+app/home_update.go,351,24,Your input is retained. 
+app/home_update.go,352,36,Press any key to return to the form.
+app/home_update.go,354,58, The next create in this project reopens the failed draft.
+app/home_update.go,355,26,Press any key to continue.
+app/home_update.go,357,21,Cannot create session
+app/home_update.go,458,5,enter
+app/home_update.go,460,3,tab
+app/home_update.go,462,9,shift+tab
+app/home_update.go,466,0,
+app/home_update.go,469,6,ctrl+r
+app/home_update.go,475,6,ctrl+o
+app/home_update.go,481,3,esc
+app/home_update.go,596,6,ctrl+c
+app/detach_trace.go,4,3,fmt
+app/detach_trace.go,5,2,os
+app/detach_trace.go,6,13,path/filepath
+app/detach_trace.go,7,7,runtime
+app/detach_trace.go,8,4,sync
+app/detach_trace.go,9,4,time
+app/detach_trace.go,11,42,github.com/sachiniyer/agent-factory/config
+app/detach_trace.go,12,39,github.com/sachiniyer/agent-factory/log
+app/detach_trace.go,29,15,AF_DETACH_TRACE
+app/detach_trace.go,29,1,1
+app/detach_trace.go,43,15,detach-slow.log
+app/detach_trace.go,51,28,[detach-trace] %s elapsed=%v
+app/detach_trace.go,62,17,[detach-trace] %s
+app/detach_trace.go,81,61,[detach-trace] could not resolve config dir for slow-dump: %v
+app/detach_trace.go,89,59,[detach-trace] could not mkdir config dir for slow-dump: %v
+app/detach_trace.go,95,51,[detach-trace] could not open slow-dump file %s: %v
+app/detach_trace.go,101,29,"=== %s — %s — elapsed=%v ===
+"
+app/detach_trace.go,104,51,[detach-trace] failed to write slow-dump header: %v
+app/detach_trace.go,108,51,[detach-trace] failed to write slow-dump stacks: %v
+app/detach_trace.go,111,2,"
+
+"
+app/detach_trace.go,112,52,[detach-trace] failed to write slow-dump trailer: %v
+app/detach_trace.go,115,0,
+app/detach_trace.go,117,55, — re-run with AF_DETACH_TRACE=1 for step-level tracing
+app/detach_trace.go,119,76,[detach-trace] SLOW DETACH (%s) elapsed=%v — goroutine dump appended to %s%s
+app/messages.go,4,43,github.com/sachiniyer/agent-factory/session
+app/project_path_resolver.go,4,7,context
+app/project_path_resolver.go,5,6,errors
+app/project_path_resolver.go,6,2,os
+app/project_path_resolver.go,7,13,path/filepath
+app/project_path_resolver.go,8,4,time
+app/project_path_resolver.go,10,42,github.com/sachiniyer/agent-factory/config
+app/project_path_resolver.go,74,8,resolved
+app/project_path_resolver.go,76,26,answered: not a repository
+app/project_path_resolver.go,78,36,git ran and failed without a verdict
+app/project_path_resolver.go,80,38,unanswered: the probe did not complete
+app/project_path_resolver.go,149,0,
+app/project_path_resolver.go,149,0,
+app/project_path_resolver.go,157,0,
+app/project_path_resolver.go,314,0,
+app/kill_confirm.go,4,7,context
+app/kill_confirm.go,5,6,errors
+app/kill_confirm.go,6,3,fmt
+app/kill_confirm.go,7,2,os
+app/kill_confirm.go,8,7,os/exec
+app/kill_confirm.go,9,7,strings
+app/kill_confirm.go,10,7,syscall
+app/kill_confirm.go,11,4,time
+app/kill_confirm.go,13,39,github.com/sachiniyer/agent-factory/log
+app/kill_confirm.go,42,3,git
+app/kill_confirm.go,42,2,-C
+app/kill_confirm.go,85,1,k
+app/kill_confirm.go,95,1,k
+app/kill_confirm.go,109,66,"[!] '%s' is the daemon-managed root agent, not a scratch session.
+"
+app/kill_confirm.go,110,68,"Killing it stops scheduled and watch-task delivery to '%s' until it
+"
+app/kill_confirm.go,111,48,"self-heals (~2 min) or you restart the daemon.
+
+"
+app/kill_confirm.go,112,27,Kill the root agent anyway?
+app/kill_confirm.go,114,22,[!] Kill session '%s'?
+app/kill_confirm.go,116,0,
+app/kill_confirm.go,117,2,"
+
+"
+app/kill_confirm.go,141,6,status
+app/kill_confirm.go,141,11,--porcelain
+app/kill_confirm.go,141,24,--untracked-files=normal
+app/kill_confirm.go,143,55,could not verify worktree status for %s before kill: %v
+app/kill_confirm.go,144,101,Warning: Could not verify worktree status (%v); it may contain uncommitted changes that will be lost!
+app/kill_confirm.go,147,65,Warning: This worktree has uncommitted changes that will be lost!
+app/kill_confirm.go,149,0,
+app/kill_confirm.go,186,0,
+app/kill_confirm.go,187,16,no worktree path
+app/kill_confirm.go,221,0,
+app/kill_confirm.go,225,2,"
+
+"
+app/kill_confirm.go,234,0,
+app/kill_confirm.go,235,22,no session branch name
+app/kill_confirm.go,237,11,refs/heads/
+app/kill_confirm.go,238,9,rev-parse
+app/kill_confirm.go,238,8,--verify
+app/kill_confirm.go,238,7,--quiet
+app/kill_confirm.go,238,9,^{commit}
+app/kill_confirm.go,239,40,session branch could not be resolved: %w
+app/kill_confirm.go,243,42,base branch/commit could not be determined
+app/kill_confirm.go,249,3,log
+app/kill_confirm.go,249,9,--oneline
+app/kill_confirm.go,249,2,..
+app/kill_confirm.go,254,0,
+app/kill_confirm.go,259,6,MERGED
+app/kill_confirm.go,260,0,
+app/kill_confirm.go,264,3,log
+app/kill_confirm.go,264,9,--oneline
+app/kill_confirm.go,264,2,..
+app/kill_confirm.go,264,5,--not
+app/kill_confirm.go,264,9,--remotes
+app/kill_confirm.go,270,0,
+app/kill_confirm.go,280,12,symbolic-ref
+app/kill_confirm.go,280,7,--quiet
+app/kill_confirm.go,280,4,HEAD
+app/kill_confirm.go,281,0,
+app/kill_confirm.go,288,9,rev-parse
+app/kill_confirm.go,288,8,--verify
+app/kill_confirm.go,288,7,--quiet
+app/kill_confirm.go,288,13,HEAD^{commit}
+app/kill_confirm.go,289,30,HEAD could not be resolved: %w
+app/kill_confirm.go,291,12,for-each-ref
+app/kill_confirm.go,291,15,--contains=HEAD
+app/kill_confirm.go,291,19,--format=%(refname)
+app/kill_confirm.go,295,1,"
+"
+app/kill_confirm.go,297,0,
+app/kill_confirm.go,300,94,Detached HEAD points to one or more commits not reachable from any ref that survives cleanup. 
+app/kill_confirm.go,301,82,Killing removes the worktree and permanently orphans them — this cannot be undone.
+app/kill_confirm.go,305,0,
+app/kill_confirm.go,310,11,refs/bisect
+app/kill_confirm.go,310,13,refs/worktree
+app/kill_confirm.go,310,14,refs/rewritten
+app/kill_confirm.go,311,1,/
+app/kill_confirm.go,315,11,refs/heads/
+app/kill_confirm.go,322,73,Could not verify whether detached HEAD contains local-only commits (%v); 
+app/kill_confirm.go,323,84,any unreferenced commits would be permanently orphaned when the worktree is removed.
+app/kill_confirm.go,336,9,rev-parse
+app/kill_confirm.go,336,8,--verify
+app/kill_confirm.go,336,7,--quiet
+app/kill_confirm.go,336,9,^{commit}
+app/kill_confirm.go,339,0,
+app/kill_confirm.go,340,0,
+app/kill_confirm.go,343,12,symbolic-ref
+app/kill_confirm.go,343,7,--short
+app/kill_confirm.go,343,2,-q
+app/kill_confirm.go,343,24,refs/remotes/origin/HEAD
+app/kill_confirm.go,344,0,
+app/kill_confirm.go,345,7,origin/
+app/kill_confirm.go,348,4,main
+app/kill_confirm.go,348,6,master
+app/kill_confirm.go,349,7,origin/
+app/kill_confirm.go,350,7,origin/
+app/kill_confirm.go,353,0,
+app/kill_confirm.go,353,0,
+app/kill_confirm.go,360,7,commits
+app/kill_confirm.go,360,4,them
+app/kill_confirm.go,361,37,that aren't merged or pushed anywhere
+app/kill_confirm.go,363,6,commit
+app/kill_confirm.go,363,2,it
+app/kill_confirm.go,364,36,that isn't merged or pushed anywhere
+app/kill_confirm.go,366,0,
+app/kill_confirm.go,367,33,not on %s and not pushed anywhere
+app/kill_confirm.go,369,79,Branch %q has %d %s %s. Killing permanently deletes %s — this cannot be undone.
+app/kill_confirm.go,376,18,the session branch
+app/kill_confirm.go,377,0,
+app/kill_confirm.go,378,17,session branch %q
+app/kill_confirm.go,380,109,Could not verify whether %s has unmerged commits (%v); any that exist only here would be permanently deleted.
+app/kill_confirm.go,386,1,"
+"
+app/kill_confirm.go,387,0,
+app/kill_confirm.go,399,0,
+app/kill_confirm.go,403,2,"
+
+"
+app/home_panes.go,4,3,fmt
+app/home_panes.go,5,4,time
+app/home_panes.go,7,34,github.com/charmbracelet/bubbletea
+app/home_panes.go,8,40,github.com/sachiniyer/agent-factory/keys
+app/home_panes.go,9,39,github.com/sachiniyer/agent-factory/log
+app/home_panes.go,10,43,github.com/sachiniyer/agent-factory/session
+app/home_panes.go,11,38,github.com/sachiniyer/agent-factory/ui
+app/home_panes.go,12,43,github.com/sachiniyer/agent-factory/ui/tree
+app/home_panes.go,29,22,selectionChanged-entry
+app/home_panes.go,61,43,selectionChanged-instance-branch-built-cmds
+app/home_panes.go,251,31,refreshPanesCmd-goroutine-entry
+app/home_panes.go,253,24,UpdateContent failed: %v
+app/home_panes.go,255,30,refreshPanesCmd-goroutine-exit
+app/home_panes.go,263,27,session %q is being deleted
+app/live_stream.go,4,7,context
+app/live_stream.go,5,13,encoding/json
+app/live_stream.go,7,26,github.com/coder/websocket
+app/live_stream.go,9,46,github.com/sachiniyer/agent-factory/agentproto
+app/live_stream.go,10,45,github.com/sachiniyer/agent-factory/apiclient
+app/live_stream.go,11,42,github.com/sachiniyer/agent-factory/daemon
+app/live_stream.go,12,43,github.com/sachiniyer/agent-factory/session
+app/live_stream.go,13,48,github.com/sachiniyer/agent-factory/session/tmux
+app/live_stream.go,14,38,github.com/sachiniyer/agent-factory/ui
+app/live_stream.go,15,47,github.com/sachiniyer/agent-factory/ui/termpane
+app/live_stream.go,151,0,
+app/account_picker.go,4,3,fmt
+app/account_picker.go,5,7,strings
+app/account_picker.go,7,34,github.com/charmbracelet/bubbletea
+app/account_picker.go,9,45,github.com/sachiniyer/agent-factory/apiclient
+app/account_picker.go,10,42,github.com/sachiniyer/agent-factory/daemon
+app/account_picker.go,11,55,github.com/sachiniyer/agent-factory/internal/sessionenv
+app/account_picker.go,12,40,github.com/sachiniyer/agent-factory/keys
+app/account_picker.go,13,43,github.com/sachiniyer/agent-factory/session
+app/account_picker.go,14,38,github.com/sachiniyer/agent-factory/ui
+app/account_picker.go,15,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/account_picker.go,51,0,
+app/account_picker.go,97,40,Ambient identity (the agent's own login)
+app/account_picker.go,125,0,
+app/account_picker.go,148,15,project default
+app/account_picker.go,151,17,registration only
+app/account_picker.go,154,14,not registered
+app/account_picker.go,156,13,not logged in
+app/account_picker.go,161,3, — 
+app/account_picker.go,163,3, · 
+app/account_picker.go,244,0,
+app/account_picker.go,246,84,"af cannot tell which agent %q runs as, so it has no account registry to offer for it"
+app/account_picker.go,252,0,
+app/account_picker.go,271,0,
+app/account_picker.go,286,0,
+app/account_picker.go,348,31,cannot list accounts for %s: %w
+app/account_picker.go,364,91,no %s accounts are registered on the daemon host yet — register one in the config tab (%s) 
+app/account_picker.go,365,35,or with `af accounts add %s <name>`
+app/account_picker.go,384,17,Select %s account
+app/account_picker.go,406,86,"the daemon reports no agents that support accounts, so there is nothing to pick for %s"
+app/account_picker.go,408,64,%s sessions cannot be scoped to an account (agents that can: %s)
+app/account_picker.go,409,2,", "
+app/account_picker.go,462,93,"account %q is this project's default but is not registered for %s on the daemon host, so the "
+app/account_picker.go,463,90,"create will be refused — register it with `af accounts add %s %s`, or pick another account"
+app/account_picker.go,473,98,account %q has no %s credential yet — the session will run as it until you log in from the config 
+app/account_picker.go,474,42,tab (%s) or with `af accounts login %s %s`
+app/account_picker.go,511,37,account %q cannot scope a session: %s
+app/account_picker.go,514,100,account %q cannot scope a session: the daemon reports %s accounts as registration only — one can be 
+app/account_picker.go,515,62,"registered and logged into, but a session cannot run as it yet"
+app/account_picker.go,538,99,session was created for account %q but the daemon returned nothing to check it against — it may be 
+app/account_picker.go,539,86,running on the ambient identity. Verify with `af sessions list --json` before using it
+app/account_picker.go,550,0,
+app/account_picker.go,552,94,session %q was created but the daemon did not apply account %q — it is running on the ambient 
+app/account_picker.go,553,94,identity. The running daemon predates account support; upgrade it (af daemon restart after an 
+app/account_picker.go,554,52,"upgrade), then kill this session and create it again"
+app/account_picker.go,558,104,"session %q was created but the daemon applied account %q, not the %q that was picked — it is running as "
+app/account_picker.go,559,69,an identity you did not choose. Kill this session and create it again
+app/account_load.go,4,34,github.com/charmbracelet/bubbletea
+app/account_load.go,5,42,github.com/sachiniyer/agent-factory/daemon
+app/recovery.go,4,34,github.com/charmbracelet/bubbletea
+app/recovery.go,5,43,github.com/sachiniyer/agent-factory/session
+app/recovery.go,6,38,github.com/sachiniyer/agent-factory/ui
+app/recovery.go,34,0,
+app/recovery.go,35,0,
+app/recovery.go,36,0,
+app/tui_state.go,4,3,fmt
+app/tui_state.go,5,7,reflect
+app/tui_state.go,6,4,sort
+app/tui_state.go,7,4,time
+app/tui_state.go,9,34,github.com/charmbracelet/bubbletea
+app/tui_state.go,10,42,github.com/sachiniyer/agent-factory/config
+app/tui_state.go,11,39,github.com/sachiniyer/agent-factory/log
+app/tui_state.go,12,43,github.com/sachiniyer/agent-factory/session
+app/tui_state.go,13,45,github.com/sachiniyer/agent-factory/ui/layout
+app/tui_state.go,14,44,github.com/sachiniyer/agent-factory/ui/store
+app/tui_state.go,17,4,pane
+app/tui_state.go,27,0,
+app/tui_state.go,74,0,
+app/tui_state.go,88,0,
+app/tui_state.go,106,0,
+app/tui_state.go,278,0,
+app/tui_state.go,290,28,failed to save TUI state: %v
+app/tui_state.go,322,37,failed to flush TUI state on quit: %v
+app/tui_state.go,335,0,
+app/tui_state.go,348,0,
+app/tui_state.go,355,0,
+app/tui_state.go,362,0,
+app/tui_state.go,381,0,
+app/tui_state.go,381,0,
+app/tui_state.go,388,0,
+app/tui_state.go,412,0,
+app/tui_state.go,416,0,
+app/tui_state.go,423,0,
+app/tui_state.go,429,0,
+app/tui_state.go,430,15,title:%s:tab:%s
+app/tui_state.go,432,12,id:%s:tab:%s
+app/tui_state.go,436,0,
+app/tui_state.go,436,0,
+app/tui_state.go,439,0,
+app/sync.go,4,3,fmt
+app/sync.go,5,7,reflect
+app/sync.go,6,4,time
+app/sync.go,8,34,github.com/charmbracelet/bubbletea
+app/sync.go,9,42,github.com/sachiniyer/agent-factory/daemon
+app/sync.go,10,39,github.com/sachiniyer/agent-factory/log
+app/sync.go,11,43,github.com/sachiniyer/agent-factory/session
+app/sync.go,12,47,github.com/sachiniyer/agent-factory/session/git
+app/sync.go,13,40,github.com/sachiniyer/agent-factory/task
+app/sync.go,14,38,github.com/sachiniyer/agent-factory/ui
+app/sync.go,189,37,skipping session %q from snapshot: %v
+app/sync.go,223,39,Restoring sessions… (daemon warming up)
+app/sync.go,227,66,daemon is still restoring sessions after %s; try again in a moment
+app/sync.go,253,32,refreshPRInfoCmd-goroutine-entry
+app/sync.go,255,32,refreshPRInfoCmd-daemon-returned
+app/sync.go,290,35,failed to fetch daemon snapshot: %v
+app/sync.go,312,0,
+app/sync.go,365,27,failed to refresh tasks: %v
+app/sync.go,563,0,
+app/sync.go,581,0,
+app/sync.go,581,0,
+app/sync.go,594,45,failed to build instance %q from snapshot: %v
+app/sync.go,609,55,failed to build recreated instance %q from snapshot: %v
+app/sync.go,748,49,failed to reconcile tabs for %q from snapshot: %v
+app/sync.go,884,41,failed to adopt snapshot op %v for %q: %v
+app/account_login.go,4,3,fmt
+app/account_login.go,5,7,os/exec
+app/account_login.go,7,34,github.com/charmbracelet/bubbletea
+app/account_login.go,9,45,github.com/sachiniyer/agent-factory/apiclient
+app/account_login.go,10,42,github.com/sachiniyer/agent-factory/daemon
+app/account_login.go,11,39,github.com/sachiniyer/agent-factory/log
+app/account_login.go,12,38,github.com/sachiniyer/agent-factory/ui
+app/account_login.go,80,72,accounts: could not read the registered accounts for the config pane: %v
+app/account_login.go,135,29,Registered %s account %q · %s
+app/account_login.go,140,3, · 
+app/account_login.go,180,29,Starting the %s login for %q…
+app/account_login.go,209,49,accounts: could not start the %s login for %q: %v
+app/account_login.go,214,0,
+app/account_login.go,225,93,"The %s login for %q ended without leaving a credential, so the account is registered but not "
+app/account_login.go,226,74,"logged in. Try again, or run `af accounts login %s %s` on the daemon host."
+app/account_login.go,229,31,Account %q is logged in for %s.
+app/account_login.go,231,1, 
+app/account_login.go,265,62,accounts: the %s login takeover for %q ended with an error: %v
+app/account_login.go,268,51,the %s login for %q could not take the terminal: %w
+app/account_login.go,275,30,Back from the %s login for %q.
+app/account_login.go,294,12,accounts: %s
+app/handle_mouse.go,4,3,fmt
+app/handle_mouse.go,5,7,strings
+app/handle_mouse.go,6,4,time
+app/handle_mouse.go,8,43,github.com/sachiniyer/agent-factory/session
+app/handle_mouse.go,9,38,github.com/sachiniyer/agent-factory/ui
+app/handle_mouse.go,10,45,github.com/sachiniyer/agent-factory/ui/layout
+app/handle_mouse.go,11,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+app/handle_mouse.go,12,44,github.com/sachiniyer/agent-factory/ui/store
+app/handle_mouse.go,13,43,github.com/sachiniyer/agent-factory/ui/tree
+app/handle_mouse.go,15,34,github.com/charmbracelet/bubbletea
+app/handle_mouse.go,206,0,
+app/handle_mouse.go,254,0,
+app/handle_mouse.go,263,0,
+app/handle_mouse.go,267,0,
+app/handle_mouse.go,271,0,
+app/handle_mouse.go,278,0,
+app/handle_mouse.go,301,0,
+app/handle_mouse.go,433,5,tree:
+app/handle_mouse.go,441,5,auto:
+app/handle_mouse.go,574,0,
+app/handle_mouse.go,577,0,
+app/handle_mouse.go,578,9,%s tab %d
+app/handle_mouse.go,580,0,
+app/handle_mouse.go,581,10,Dragging… 
+app/handle_mouse.go,583,10,Dragging… 
+app/handle_mouse.go,583,20, — drop to open pane
+app/handle_mouse.go,697,0,
+app/handle_mouse.go,708,0,
+app/handle_mouse.go,748,5,enter
+app/handle_mouse.go,750,3,tab
+app/handle_mouse.go,752,9,shift+tab
+app/handle_mouse.go,754,3,esc
+app/handle_mouse.go,756,2,up
+app/handle_mouse.go,758,4,down
+app/handle_mouse.go,760,4,left
+app/handle_mouse.go,762,5,right
+app/handle_mouse.go,764,8,shift+up
+app/handle_mouse.go,766,10,shift+down
+app/handle_mouse.go,768,6,ctrl+u
+app/handle_mouse.go,770,6,ctrl+d
+app/handle_mouse.go,772,6,ctrl+p
+app/handle_mouse.go,777,6,ctrl+r
+app/handle_mouse.go,780,6,ctrl+o
+app/handle_mouse.go,782,6,ctrl+]
+app/home_model.go,4,7,context
+app/home_model.go,5,6,errors
+app/home_model.go,6,3,fmt
+app/home_model.go,7,2,os
+app/home_model.go,8,11,sync/atomic
+app/home_model.go,9,4,time
+app/home_model.go,11,34,github.com/charmbracelet/bubbletea
+app/home_model.go,12,42,github.com/sachiniyer/agent-factory/config
+app/home_model.go,13,42,github.com/sachiniyer/agent-factory/daemon
+app/home_model.go,14,40,github.com/sachiniyer/agent-factory/keys
+app/home_model.go,15,39,github.com/sachiniyer/agent-factory/log
+app/home_model.go,16,43,github.com/sachiniyer/agent-factory/session
+app/home_model.go,17,48,github.com/sachiniyer/agent-factory/session/tmux
+app/home_model.go,18,40,github.com/sachiniyer/agent-factory/task
+app/home_model.go,19,38,github.com/sachiniyer/agent-factory/ui
+app/home_model.go,20,45,github.com/sachiniyer/agent-factory/ui/layout
+app/home_model.go,21,51,github.com/sachiniyer/agent-factory/ui/layout/zones
+app/home_model.go,22,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/home_model.go,23,44,github.com/sachiniyer/agent-factory/ui/store
+app/home_model.go,24,43,github.com/sachiniyer/agent-factory/ui/tree
+app/home_model.go,474,26,"Failed to load config: %v
+"
+app/home_model.go,484,0,
+app/home_model.go,488,42,invalid detach_keys %q (%v); using default
+app/home_model.go,566,0,
+app/home_model.go,568,39,failed to load sessions from daemon: %v
+app/home_model.go,581,0,
+app/home_model.go,591,0,
+app/home_model.go,594,24,failed to load tasks: %v
+app/home_model.go,612,33,failed to resolve repo config: %v
+app/home_model.go,780,16,a pane is hidden
+app/home_model.go,782,7, hidden
+app/home_model.go,784,25,%s — too narrow; resize%s
+app/home_model.go,804,0,
+app/home_model.go,818,0,
+app/home_model.go,819,0,
+app/home_model.go,823,0,
+app/home_model.go,825,7,%s · %s
+app/home_model.go,833,9,pane list
+app/home_model.go,833,0,
+app/home_model.go,834,18, or `%s` pane list
+app/home_model.go,838,0,
+app/home_model.go,838,0,
+app/home_model.go,839,11, or `%s` %s
+app/home_model.go,842,0,
+app/home_model.go,848,0,
+app/home_model.go,852,0,
+app/home_model.go,856,0,
+app/home_model.go,860,0,
+app/home_model.go,979,0,
+app/clipboard.go,4,5,bytes
+app/clipboard.go,5,6,errors
+app/clipboard.go,6,3,fmt
+app/clipboard.go,7,7,os/exec
+app/clipboard.go,8,7,runtime
+app/clipboard.go,9,7,strings
+app/clipboard.go,29,6,darwin
+app/clipboard.go,30,6,pbcopy
+app/clipboard.go,36,7,wl-copy
+app/clipboard.go,39,5,xclip
+app/clipboard.go,40,10,-selection
+app/clipboard.go,40,9,clipboard
+app/clipboard.go,53,0,
+app/clipboard.go,54,15,copy failed: %s
+app/clipboard.go,56,15,copy failed: %w
+app/clipboard.go,62,72,"no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS)"
+app/interactive.go,4,3,fmt
+app/interactive.go,6,34,github.com/charmbracelet/bubbletea
+app/interactive.go,8,45,github.com/sachiniyer/agent-factory/ui/layout
+app/interactive.go,9,44,github.com/sachiniyer/agent-factory/ui/store
+app/interactive.go,111,73,couldn't open an embedded terminal for %s — press o to attach full-screen
+app/interactive.go,136,0,
+app/interactive.go,137,1,'
+app/interactive.go,137,1,'
+app/interactive.go,140,9,this pane
+app/auto_open.go,3,43,github.com/sachiniyer/agent-factory/session
+app/session_control.go,4,7,context
+app/session_control.go,5,6,errors
+app/session_control.go,6,3,fmt
+app/session_control.go,7,4,time
+app/session_control.go,9,45,github.com/sachiniyer/agent-factory/apiclient
+app/session_control.go,10,42,github.com/sachiniyer/agent-factory/daemon
+app/session_control.go,11,43,github.com/sachiniyer/agent-factory/session
+app/session_control.go,12,40,github.com/sachiniyer/agent-factory/task
+app/session_control.go,167,22,daemon did not respond
+app/session_control.go,182,78,%w within %s — it may be wedged or busy recovering this session; the teardown 
+app/session_control.go,183,34,may still finish in the background
+app/session_control.go,517,0,
+app/content_persistence.go,4,6,errors
+app/content_persistence.go,5,3,fmt
+app/content_persistence.go,7,34,github.com/charmbracelet/bubbletea
+app/content_persistence.go,8,45,github.com/sachiniyer/agent-factory/apiclient
+app/content_persistence.go,9,42,github.com/sachiniyer/agent-factory/config
+app/content_persistence.go,10,39,github.com/sachiniyer/agent-factory/log
+app/content_persistence.go,11,40,github.com/sachiniyer/agent-factory/task
+app/content_persistence.go,69,24,failed to save hooks: %v
+app/content_persistence.go,74,24,failed to save hooks: %w
+app/content_persistence.go,115,25,failed to update task: %v
+app/content_persistence.go,116,26,failed to save task %q: %w
+app/content_persistence.go,130,54,task removal committed but schedule refresh failed: %v
+app/content_persistence.go,132,71,"task %q was removed, but the daemon could not refresh its schedules: %w"
+app/content_persistence.go,135,25,failed to remove task: %v
+app/content_persistence.go,136,28,failed to remove task %q: %w
+app/content_persistence.go,151,37,failed to reload tasks after save: %w
+app/content_persistence.go,154,16,Cannot save task
+app/content_persistence.go,154,27,Your changes are retained. 
+app/content_persistence.go,154,26,Press any key to continue.
+app/adopted_ops.go,3,43,github.com/sachiniyer/agent-factory/session
+app/handle_overlay.go,4,3,fmt
+app/handle_overlay.go,5,7,strings
+app/handle_overlay.go,7,55,github.com/sachiniyer/agent-factory/internal/sessionenv
+app/handle_overlay.go,8,40,github.com/sachiniyer/agent-factory/keys
+app/handle_overlay.go,9,48,github.com/sachiniyer/agent-factory/session/tmux
+app/handle_overlay.go,10,38,github.com/sachiniyer/agent-factory/ui
+app/handle_overlay.go,11,45,github.com/sachiniyer/agent-factory/ui/layout
+app/handle_overlay.go,12,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/handle_overlay.go,14,36,github.com/charmbracelet/bubbles/key
+app/handle_overlay.go,15,34,github.com/charmbracelet/bubbletea
+app/handle_overlay.go,78,0,
+app/handle_overlay.go,128,21,no sessions to search
+app/handle_overlay.go,153,5,enter
+app/handle_overlay.go,156,3,esc
+app/handle_overlay.go,199,5,enter
+app/handle_overlay.go,205,3,esc
+app/handle_overlay.go,246,6,ctrl+c
+app/handle_overlay.go,308,6,ctrl+c
+app/handle_overlay.go,319,1,D
+app/handle_overlay.go,321,12,Delete task 
+app/handle_overlay.go,321,24,? Future runs will stop.
+app/handle_overlay.go,321,55,Sessions already created by this task remain available.
+app/handle_overlay.go,349,16,Cannot save task
+app/handle_overlay.go,349,24,Your input is retained. 
+app/handle_overlay.go,349,36,Press any key to return to the form.
+app/handle_overlay.go,364,6,ctrl+c
+app/handle_overlay.go,427,6,ctrl+c
+app/handle_overlay.go,468,6,ctrl+c
+app/handle_overlay.go,486,6,ctrl+c
+app/handle_input.go,4,6,errors
+app/handle_input.go,5,3,fmt
+app/handle_input.go,6,7,strings
+app/handle_input.go,7,7,unicode
+app/handle_input.go,9,52,github.com/sachiniyer/agent-factory/internal/namegen
+app/handle_input.go,10,55,github.com/sachiniyer/agent-factory/internal/sessionenv
+app/handle_input.go,11,40,github.com/sachiniyer/agent-factory/keys
+app/handle_input.go,12,39,github.com/sachiniyer/agent-factory/log
+app/handle_input.go,13,43,github.com/sachiniyer/agent-factory/session
+app/handle_input.go,14,47,github.com/sachiniyer/agent-factory/session/git
+app/handle_input.go,15,48,github.com/sachiniyer/agent-factory/session/tmux
+app/handle_input.go,16,38,github.com/sachiniyer/agent-factory/ui
+app/handle_input.go,17,45,github.com/sachiniyer/agent-factory/ui/layout
+app/handle_input.go,18,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/handle_input.go,20,34,github.com/charmbracelet/bubbletea
+app/handle_input.go,21,29,github.com/mattn/go-runewidth
+app/handle_input.go,26,6,ctrl+c
+app/handle_input.go,32,41,failed to clean up instance on cancel: %v
+app/handle_input.go,37,0,
+app/handle_input.go,38,0,
+app/handle_input.go,39,0,
+app/handle_input.go,73,0,
+app/handle_input.go,76,0,
+app/handle_input.go,77,21,title cannot be empty
+app/handle_input.go,102,54,a session titled %q conflicts with existing session %q
+app/handle_input.go,123,104,remote hook session title %q must retain at least one ASCII letter or digit after hook-name sanitization
+app/handle_input.go,137,0,
+app/handle_input.go,139,55,a remote session titled %q already maps to hook name %q
+app/handle_input.go,172,0,
+app/handle_input.go,176,0,
+app/handle_input.go,179,0,
+app/handle_input.go,245,14,Select program
+app/handle_input.go,254,14,Initial prompt
+app/handle_input.go,283,41,title cannot be longer than 32 characters
+app/handle_input.go,297,1, 
+app/handle_input.go,299,41,title cannot be longer than 32 characters
+app/handle_input.go,308,41,failed to clean up instance on cancel: %v
+app/handle_input.go,312,0,
+app/handle_input.go,313,0,
+app/handle_input.go,314,0,
+app/handle_input.go,351,0,
+app/handle_input.go,358,0,
+app/handle_input.go,359,0,
+app/handle_input.go,362,0,
+app/handle_input.go,391,204,"remote sessions need a remote_hooks backend configured for this repo — press n for a local session, or configure remote_hooks and try again. Guide: https://sachiniyer.github.io/agent-factory/remote-hooks/"
+app/handle_input.go,420,0,
+app/handle_input.go,464,25,select a project first — 
+app/handle_input.go,465,87,"; af is running with no active project, so there is no repo for this session to live in"
+app/handle_input.go,496,23,press enter to pick one
+app/handle_input.go,502,16,"press esc, then "
+app/handle_input.go,502,11, to add one
+app/handle_input.go,504,12, to pick one
+app/handle_input.go,511,0,
+app/handle_input.go,512,8,press %s
+app/handle_input.go,514,24,use the Projects section
+app/handle_input.go,525,0,
+app/handle_input.go,535,0,
+app/handle_input.go,553,0,
+app/handle_input.go,554,0,
+app/app.go,4,7,context
+app/app.go,6,34,github.com/charmbracelet/bubbletea
+app/app.go,7,42,github.com/sachiniyer/agent-factory/config
+app/switch_project.go,4,3,fmt
+app/switch_project.go,5,13,path/filepath
+app/switch_project.go,6,4,sort
+app/switch_project.go,8,34,github.com/charmbracelet/bubbletea
+app/switch_project.go,10,45,github.com/sachiniyer/agent-factory/apiclient
+app/switch_project.go,11,42,github.com/sachiniyer/agent-factory/config
+app/switch_project.go,12,53,github.com/sachiniyer/agent-factory/internal/pathutil
+app/switch_project.go,13,40,github.com/sachiniyer/agent-factory/keys
+app/switch_project.go,14,39,github.com/sachiniyer/agent-factory/log
+app/switch_project.go,15,43,github.com/sachiniyer/agent-factory/session
+app/switch_project.go,16,40,github.com/sachiniyer/agent-factory/task
+app/switch_project.go,17,38,github.com/sachiniyer/agent-factory/ui
+app/switch_project.go,18,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/switch_project.go,19,44,github.com/sachiniyer/agent-factory/ui/store
+app/switch_project.go,46,54,project picker: failed to list cross-repo sessions: %v
+app/switch_project.go,94,56,failed to read the project registry for the switcher: %v
+app/switch_project.go,99,0,
+app/switch_project.go,120,0,
+app/switch_project.go,120,0,
+app/switch_project.go,128,0,
+app/switch_project.go,152,0,
+app/switch_project.go,203,0,
+app/switch_project.go,271,0,
+app/switch_project.go,343,38,failed to refresh projects section: %v
+app/switch_project.go,363,26,cannot open project %q: %w
+app/switch_project.go,372,1,D
+app/switch_project.go,400,26,cannot open project %q: %w
+app/switch_project.go,425,47,could not check — git did not answer; try again
+app/switch_project.go,428,24,not a git repository: %s
+app/switch_project.go,462,49,failed to register project %s in the registry: %v
+app/switch_project.go,472,7,session
+app/switch_project.go,474,8,sessions
+app/switch_project.go,500,24,[!] Delete project '%s'?
+app/switch_project.go,502,42,%d in-place %s torn down — not restorable.
+app/switch_project.go,503,28,%d %s archived — restorable.
+app/switch_project.go,504,127,"Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone."
+app/switch_project.go,505,59,Restore an archived session (%s) to bring the project back.
+app/switch_project.go,506,38,Your real git repository is untouched.
+app/switch_project.go,510,60,"
+It has no live sessions — it just leaves the projects list."
+app/switch_project.go,512,1,"
+"
+app/switch_project.go,513,80,"tmux torn down, worktrees moved out — branches and uncommitted work preserved.
+
+"
+app/switch_project.go,513,1, 
+app/switch_project.go,515,1,"
+"
+app/switch_project.go,515,1, 
+app/switch_project.go,517,1,"
+"
+app/switch_project.go,517,1,"
+"
+app/switch_project.go,518,2,"
+
+"
+app/switch_project.go,518,1, 
+app/switch_project.go,535,49,Deleted project '%s' — no live sessions to remove
+app/switch_project.go,537,50,Deleted project '%s' — archived %d %s (restorable)
+app/switch_project.go,539,95,"Deleted project '%s' — tore down %d in-place %s (not restorable, worktree and branch untouched)"
+app/switch_project.go,542,125,"Deleted project '%s' — tore down %d in-place %s (not restorable, worktree and branch untouched) · archived %d %s (restorable)"
+app/switch_project.go,554,0,
+app/switch_project.go,555,60,cannot delete project %q: repository identity is unavailable
+app/switch_project.go,592,33,failed to delete project '%s': %w
+app/switch_project.go,635,34,failed to load sessions for %s: %w
+app/switch_project.go,676,0,
+app/switch_project.go,684,51,switch project: failed to resolve config for %s: %v
+app/switch_project.go,709,47,switch project: failed to load tasks for %s: %v
+app/handle_actions.go,4,7,context
+app/handle_actions.go,5,6,errors
+app/handle_actions.go,6,3,fmt
+app/handle_actions.go,7,7,os/exec
+app/handle_actions.go,8,7,runtime
+app/handle_actions.go,10,46,github.com/sachiniyer/agent-factory/agentproto
+app/handle_actions.go,11,45,github.com/sachiniyer/agent-factory/apiclient
+app/handle_actions.go,12,40,github.com/sachiniyer/agent-factory/keys
+app/handle_actions.go,13,39,github.com/sachiniyer/agent-factory/log
+app/handle_actions.go,14,43,github.com/sachiniyer/agent-factory/session
+app/handle_actions.go,15,38,github.com/sachiniyer/agent-factory/ui
+app/handle_actions.go,17,34,github.com/charmbracelet/bubbletea
+app/handle_actions.go,172,37,session '%s' is already being deleted
+app/handle_actions.go,211,0,
+app/handle_actions.go,222,0,
+app/handle_actions.go,224,0,
+app/handle_actions.go,227,0,
+app/handle_actions.go,231,0,
+app/handle_actions.go,245,0,
+app/handle_actions.go,252,86,Archive (%s) preserves the worktree and its refs — kill removes the worktree for good.
+app/handle_actions.go,290,27,could not kill instance: %v
+app/handle_actions.go,317,19,Cannot kill session
+app/handle_actions.go,317,25,The session is retained. 
+app/handle_actions.go,317,39,Press any key to return to the session.
+app/handle_actions.go,317,31,failed to kill session '%s': %w
+app/handle_actions.go,345,29,session '%s' is being deleted
+app/handle_actions.go,363,72,cannot archive remote session '%s': it has no local worktree to relocate
+app/handle_actions.go,366,90,"cannot archive in-place session '%s': archive relocates the worktree, which it doesn't own"
+app/handle_actions.go,369,168,"[!] Archive session '%s'?
+
+Its tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s."
+app/handle_actions.go,404,29,session '%s' is being deleted
+app/handle_actions.go,419,38,session '%s' is already being restored
+app/handle_actions.go,470,381,"[!] Restore remote session '%s'?
+
+If its sandbox can't be reached, restore refuses to replace it because unreachability is not proof that it is gone. If the sandbox answers that its agent is gone, restore provisions a fresh one from the last pushed commit and discards any changes on the old sandbox that were never pushed. A reachable live sandbox just reconnects, losing nothing."
+app/handle_actions.go,494,33,could not archive instance %q: %v
+app/handle_actions.go,506,33,could not restore instance %q: %v
+app/handle_actions.go,530,22,Cannot archive session
+app/handle_actions.go,530,25,The session is retained. 
+app/handle_actions.go,530,39,Press any key to return to the session.
+app/handle_actions.go,530,34,failed to archive session '%s': %w
+app/handle_actions.go,569,29,session '%s' is being deleted
+app/handle_actions.go,572,44,session '%s' is not blocked on a usage limit
+app/handle_actions.go,585,39,could not resume limited session %q: %v
+app/handle_actions.go,598,33,failed to resume session '%s': %w
+app/handle_actions.go,629,34,failed to restore session '%s': %w
+app/handle_actions.go,739,0,
+app/handle_actions.go,774,29,session '%s' is being deleted
+app/handle_actions.go,777,47,session '%s' was killed and is pending deletion
+app/handle_actions.go,783,30,session '%s' is being restored
+app/handle_actions.go,793,43,session '%s' was lost — press %s to restore
+app/handle_actions.go,796,55,session '%s' is no longer running — press %s to restore
+app/handle_actions.go,804,46,session '%s' is archived — press %s to restore
+app/handle_actions.go,814,33,session '%s' is no longer running
+app/handle_actions.go,822,44,session liveness contradicted the projection
+app/handle_actions.go,893,75,this is a web tab (%s) — view it in the web UI or open the URL in a browser
+app/handle_actions.go,896,81,this is a VS Code tab — view it in the web UI; a terminal can't render the editor
+app/handle_actions.go,912,19,handleEnter-sidebar
+app/handle_actions.go,912,20,handleEnter-terminal
+app/handle_actions.go,949,0,
+app/handle_actions.go,956,60,no PR for this session yet — push a branch / open a PR first
+app/handle_actions.go,969,6,darwin
+app/handle_actions.go,970,4,open
+app/handle_actions.go,972,8,xdg-open
+app/handle_actions.go,975,21,failed to open PR: %w
+app/handle_actions.go,996,14,%w; PR URL: %s
+app/account_register.go,4,3,fmt
+app/account_register.go,6,34,github.com/charmbracelet/bubbletea
+app/account_register.go,7,42,github.com/sachiniyer/agent-factory/daemon
+app/account_register.go,49,26,Registering %s account %q…
+app/account_register.go,63,0,
+app/account_register.go,71,0,
+app/home_view.go,4,6,errors
+app/home_view.go,5,7,strings
+app/home_view.go,6,4,time
+app/home_view.go,8,34,github.com/charmbracelet/bubbletea
+app/home_view.go,9,39,github.com/sachiniyer/agent-factory/log
+app/home_view.go,10,38,github.com/sachiniyer/agent-factory/ui
+app/home_view.go,11,45,github.com/sachiniyer/agent-factory/ui/layout
+app/home_view.go,12,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/home_view.go,16,2,%v
+app/home_view.go,28,2,%v
+app/home_view.go,36,0,
+app/home_view.go,75,0,
+app/home_view.go,81,11,Last notice
+app/home_view.go,83,10,Last error
+app/home_view.go,85,2,"
+
+"
+app/home_view.go,96,0,
+app/home_view.go,106,0,
+app/home_view.go,117,30,confirmation action failed: %v
+app/home_view.go,146,0,
+app/home_view.go,164,23,Cannot reach the daemon
+app/home_view.go,164,64,The last loaded sessions are retained. af retries automatically.
+app/home_view.go,165,28,Check the daemon connection.
+app/home_view.go,206,0,
+app/home_view.go,207,20,Cannot load projects
+app/home_view.go,207,36,The project registry is unavailable.
+app/home_view.go,207,27,Check the project registry.
+app/home_view.go,208,0,
+app/home_view.go,210,0,
+app/home_view.go,235,0,
+app/home_view.go,244,19,text overlay is nil
+app/home_view.go,249,27,confirmation overlay is nil
+app/home_view.go,256,21,search overlay is nil
+app/home_view.go,263,29,project picker overlay is nil
+app/home_view.go,269,24,selection overlay is nil
+app/home_view.go,276,33,tab-kind selection overlay is nil
+app/home_view.go,287,21,prompt overlay is nil
+app/home_view.go,304,0,
+app/home_view.go,306,1, 
+app/home_view.go,311,1,"
+"
+app/handle_panes.go,4,36,github.com/charmbracelet/bubbles/key
+app/handle_panes.go,5,40,github.com/sachiniyer/agent-factory/keys
+app/handle_panes.go,6,43,github.com/sachiniyer/agent-factory/session
+app/handle_panes.go,7,38,github.com/sachiniyer/agent-factory/ui
+app/handle_panes.go,8,45,github.com/sachiniyer/agent-factory/ui/layout
+app/handle_panes.go,9,44,github.com/sachiniyer/agent-factory/ui/store
+app/handle_panes.go,11,34,github.com/charmbracelet/bubbletea
+app/handle_panes.go,73,0,
+app/handle_panes.go,77,0,
+app/handle_panes.go,80,0,
+app/handle_panes.go,223,6,ctrl+c
+app/handle_panes.go,223,5,enter
+app/handle_panes.go,223,3,tab
+app/handle_panes.go,223,9,shift+tab
+app/handle_panes.go,223,3,esc
+app/handle_panes.go,223,6,ctrl+]
+app/handle_panes.go,365,0,
+app/handle_panes.go,409,0,
+app/handle_panes.go,423,0,
+app/handle_panes.go,596,0,
+app/handle_panes.go,628,16,handleEnter-pane
+app/handle_panes.go,628,25,handleEnter-pane-terminal
+app/home_attach.go,4,7,context
+app/home_attach.go,5,2,io
+app/home_attach.go,6,2,os
+app/home_attach.go,7,4,time
+app/home_attach.go,9,34,github.com/charmbracelet/bubbletea
+app/home_attach.go,10,45,github.com/sachiniyer/agent-factory/apiclient
+app/home_attach.go,11,42,github.com/sachiniyer/agent-factory/daemon
+app/home_attach.go,12,39,github.com/sachiniyer/agent-factory/log
+app/home_attach.go,46,0,
+app/home_attach.go,47,11,\x1b[?1049h
+app/home_attach.go,48,9,\x1b[?25l
+app/home_attach.go,49,22,\x1b[?1002h\x1b[?1006h
+app/home_attach.go,50,11,\x1b[?2004h
+app/home_attach.go,71,11,\x1b[?1049h
+app/home_attach.go,160,16,-onDismiss-entry
+app/home_attach.go,182,25,failed to attach (%s): %v
+app/home_attach.go,204,6,attach
+app/home_attach.go,212,17,-blocking-on-<-ch
+app/home_attach.go,227,15,-<-ch-unblocked
+app/home_attach.go,236,30,-repaintAfterDetachMsg-emitted
+app/home_attach.go,290,48,failed to release the terminal to the attach: %v
+app/home_attach.go,330,47,failed to reclaim the terminal after attach: %v
+app/home_attach.go,356,45,failed to pause daemon status poll for %q: %v
+app/home_attach.go,382,46,failed to resume daemon status poll for %q: %v
+app/live_termpane.go,4,3,fmt
+app/live_termpane.go,5,4,sync
+app/live_termpane.go,6,11,sync/atomic
+app/live_termpane.go,7,4,time
+app/live_termpane.go,9,34,github.com/charmbracelet/bubbletea
+app/live_termpane.go,11,39,github.com/sachiniyer/agent-factory/log
+app/live_termpane.go,12,43,github.com/sachiniyer/agent-factory/session
+app/live_termpane.go,13,44,github.com/sachiniyer/agent-factory/terminal
+app/live_termpane.go,14,38,github.com/sachiniyer/agent-factory/ui
+app/live_termpane.go,15,44,github.com/sachiniyer/agent-factory/ui/store
+app/live_termpane.go,16,47,github.com/sachiniyer/agent-factory/ui/termpane
+app/live_termpane.go,143,0,
+app/live_termpane.go,147,0,
+app/live_termpane.go,156,0,
+app/live_termpane.go,294,0,
+app/live_termpane.go,315,7,preview
+app/live_termpane.go,391,0,
+app/live_termpane.go,391,0,
+app/live_termpane.go,391,0,
+app/live_termpane.go,391,0,
+app/live_termpane.go,395,0,
+app/live_termpane.go,396,0,
+app/live_termpane.go,396,0,
+app/live_termpane.go,396,0,
+app/live_termpane.go,396,0,
+app/live_termpane.go,410,11,%d/%d/%s/%s
+app/live_termpane.go,423,0,
+app/live_termpane.go,429,0,
+app/live_termpane.go,433,0,
+app/live_termpane.go,453,27,termpane: close pane %d: %v
+app/theme.go,4,33,github.com/charmbracelet/lipgloss
+app/theme.go,6,38,github.com/sachiniyer/agent-factory/ui
+app/quit.go,3,34,github.com/charmbracelet/bubbletea
+app/help.go,4,3,fmt
+app/help.go,5,7,strings
+app/help.go,7,40,github.com/sachiniyer/agent-factory/keys
+app/help.go,8,39,github.com/sachiniyer/agent-factory/log
+app/help.go,9,43,github.com/sachiniyer/agent-factory/session
+app/help.go,10,48,github.com/sachiniyer/agent-factory/session/tmux
+app/help.go,11,38,github.com/sachiniyer/agent-factory/ui
+app/help.go,12,45,github.com/sachiniyer/agent-factory/ui/layout
+app/help.go,13,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/help.go,15,36,github.com/charmbracelet/bubbles/key
+app/help.go,16,34,github.com/charmbracelet/bubbletea
+app/help.go,17,33,github.com/charmbracelet/lipgloss
+app/help.go,145,0,
+app/help.go,150,1, 
+app/help.go,151,2,- 
+app/help.go,164,2,- 
+app/help.go,168,0,
+app/help.go,171,0,
+app/help.go,212,0,
+app/help.go,220,39,pgup/pgdn · ctrl+home/end · mouse wheel
+app/help.go,221,52,ctrl+t opens transcript · then pgup/pgdn or home/end
+app/help.go,227,6,Claude
+app/help.go,229,5,Codex
+app/help.go,231,0,
+app/help.go,231,0,
+app/help.go,277,1,/
+app/help.go,282,4,pgup
+app/help.go,283,4,pgdn
+app/help.go,289,4,home
+app/help.go,290,3,end
+app/help.go,304,2,", "
+app/help.go,305,6,Page: 
+app/help.go,306,0,
+app/help.go,307,3, · 
+app/help.go,309,1,/
+app/help.go,310,6,Line: 
+app/help.go,311,0,
+app/help.go,312,3, · 
+app/help.go,312,5, jump
+app/help.go,316,0,
+app/help.go,317,96,A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.
+app/help.go,318,0,
+app/help.go,321,13,Close: esc · 
+app/help.go,321,13, toggles help
+app/help.go,324,9,Managing:
+app/help.go,325,20,Create a new session
+app/help.go,326,58,Create a new remote session (requires remote_hooks config)
+app/help.go,339,1,/
+app/help.go,339,1, 
+app/help.go,340,1,/
+app/help.go,341,79,While naming a new session: pick its agent / initial prompt / backend / account
+app/help.go,342,41,Switch to another project (repo) in place
+app/help.go,343,59,"Manage tasks (n inside the manager creates one, r runs one)"
+app/help.go,344,34,Kill (delete) the selected session
+app/help.go,345,33,Archive the selected live session
+app/help.go,346,51,Restore the selected archived / lost / dead session
+app/help.go,347,60,Retry a session blocked at a usage limit (re-spawn + resume)
+app/help.go,348,25,Navigate between sessions
+app/help.go,349,57,Interact with the session in its pane (all keys go to it)
+app/help.go,350,43,Leave interactive mode (back to navigation)
+app/help.go,351,42,Attach to the selected session full-screen
+app/help.go,352,33,Detach from a full-screen session
+app/help.go,354,10,Workspace:
+app/help.go,355,44,Cycle focus: tree → open panes → automations
+app/help.go,356,21,Cycle focus backwards
+app/help.go,357,51,Open the selected tab as a pane (or focus its pane)
+app/help.go,358,42,Commit the current preview as another pane
+app/help.go,359,45,Hide the focused pane (the tab keeps running)
+app/help.go,360,1,/
+app/help.go,360,29,Move focus between open panes
+app/help.go,361,43,Navigate the tree (sessions and their tabs)
+app/help.go,362,36,Collapse the selected session's tabs
+app/help.go,363,34,Expand the selected session's tabs
+app/help.go,365,14,Configuration:
+app/help.go,366,45,Open the config agent to change your settings
+app/help.go,367,30,Open the worktree hooks editor
+app/help.go,368,29,Open the global config editor
+app/help.go,370,10,GitHub PR:
+app/help.go,371,18,Open PR in browser
+app/help.go,372,24,Copy PR URL to clipboard
+app/help.go,374,5,Tabs:
+app/help.go,375,72,"Select one of the first nine tabs by number (s opens it, enter attaches)"
+app/help.go,378,57,Jump to ANY tab by number or name — there is no tab limit
+app/help.go,379,32,Choose a terminal or VS Code tab
+app/help.go,380,53,Close the current tab (the agent tab can't be closed)
+app/help.go,381,1,/
+app/help.go,381,53,Scroll the current tab preview (navigation mode only)
+app/help.go,383,22,Full-screen scrolling:
+app/help.go,384,6,Claude
+app/help.go,385,5,Codex
+app/help.go,387,6,Other:
+app/help.go,388,20,Quit the application
+app/help.go,405,4,1-9/
+app/help.go,405,137," - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; %s new tab, %s close; tabs live in the tree)"
+app/help.go,407,4,1-9/
+app/help.go,407,115," - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; tabs live in the tree)"
+app/help.go,410,15,Session created
+app/help.go,411,0,
+app/help.go,412,20,New session created:
+app/help.go,413,36,• Git branch: %s (isolated worktree)
+app/help.go,415,50,• Agent process running in background tmux session
+app/help.go,416,0,
+app/help.go,417,9,Managing:
+app/help.go,418,64,     - Interact with the session in its pane (%s returns to nav)
+app/help.go,419,40,     - Attach to the session full-screen
+app/help.go,420,40,     - Detach from a full-screen session
+app/help.go,422,41,     - Kill (delete) the selected session
+app/help.go,423,0,
+app/help.go,424,8,Actions:
+app/help.go,425,26,enter continue · esc close
+app/help.go,432,20,Attaching to session
+app/help.go,433,0,
+app/help.go,434,46,The attached program owns input and scrolling.
+app/help.go,435,5,AF's 
+app/help.go,435,1,/
+app/help.go,435,49, preview scrolling works only in navigation mode.
+app/help.go,437,0,
+app/help.go,438,31,%s owns attached scrolling: %s.
+app/help.go,441,0,
+app/help.go,442,37,enter attach full-screen · esc cancel
+app/help.go,443,18,Detach later with 
+app/help.go,450,16,Interactive pane
+app/help.go,451,0,
+app/help.go,452,69,You are typing into this pane's terminal: every key — including tab —
+app/help.go,453,70,goes to the agent/shell. The pane's frame turns green while it has the
+app/help.go,454,46,"keyboard, and the sessions rail stays visible."
+app/help.go,455,0,
+app/help.go,456,6,Press 
+app/help.go,456,25, to return to navigation.
+app/help.go,457,41,Full-screen attach is still available on 
+app/help.go,457,17, (from nav mode).
+app/help.go,542,0,
+app/help.go,543,19,Preview returns to 
+app/help.go,543,2,"
+
+"
+app/help.go,709,36,failed to save help screen state: %v
+app/preflight.go,4,3,fmt
+app/preflight.go,6,42,github.com/sachiniyer/agent-factory/config
+app/preflight.go,7,45,github.com/sachiniyer/agent-factory/preflight
+app/preflight.go,8,43,github.com/sachiniyer/agent-factory/session
+app/preflight.go,60,0,
+app/preflight.go,63,53,failed to resolve project before starting session: %w
+app/preflight.go,67,52,failed to resolve config before starting session: %w
+app/preflight.go,76,49,failed to load config before starting session: %w
+app/help_title.go,4,0,
+app/help_title.go,5,13,Agent Factory
+app/help_title.go,7,15,Agent Factory v
+app/pane_preview.go,4,3,fmt
+app/pane_preview.go,5,4,time
+app/pane_preview.go,7,34,github.com/charmbracelet/bubbletea
+app/pane_preview.go,8,43,github.com/sachiniyer/agent-factory/session
+app/pane_preview.go,9,38,github.com/sachiniyer/agent-factory/ui
+app/pane_preview.go,10,45,github.com/sachiniyer/agent-factory/ui/layout
+app/pane_preview.go,11,44,github.com/sachiniyer/agent-factory/ui/store
+app/pane_preview.go,12,43,github.com/sachiniyer/agent-factory/ui/tree
+app/pane_preview.go,90,0,
+app/pane_preview.go,91,0,
+app/pane_preview.go,93,0,
+app/pane_preview.go,93,0,
+app/pane_preview.go,94,0,
+app/pane_preview.go,222,16,Loading preview…
+app/pane_preview.go,262,13,Loading pane…
+app/pane_preview.go,309,0,
+app/pane_preview.go,310,0,
+app/pane_preview.go,330,23,%d/%t/%d/%t/%d/%s/%s/%d
+app/pane_preview.go,396,13,Loading pane…
+app/pane_preview.go,435,20,no preview to commit
+app/pane_preview.go,438,57,cannot commit preview for %q: session operation in flight
+app/pane_preview.go,442,55,cannot commit preview for %q: session no longer running
+app/pane_preview.go,444,46,cannot commit preview for %q: session was lost
+app/pane_preview.go,450,49,cannot commit preview for %q: session is archived
+app/pane_preview.go,517,10,no session
+app/pane_preview.go,526,0,
+app/pane_preview.go,529,7,%s · %s
+app/handle_handoff.go,4,3,fmt
+app/handle_handoff.go,6,34,github.com/charmbracelet/bubbletea
+app/handle_handoff.go,8,42,github.com/sachiniyer/agent-factory/daemon
+app/handle_handoff.go,9,39,github.com/sachiniyer/agent-factory/log
+app/handle_handoff.go,10,43,github.com/sachiniyer/agent-factory/session
+app/handle_handoff.go,11,48,github.com/sachiniyer/agent-factory/session/tmux
+app/handle_handoff.go,12,38,github.com/sachiniyer/agent-factory/ui
+app/handle_handoff.go,13,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/handle_handoff.go,49,0,
+app/handle_handoff.go,50,16,Hand '%s' to %s?
+app/handle_handoff.go,52,24,Hand '%s' from %s to %s?
+app/handle_handoff.go,69,84,session '%s' cannot be handed off: only local-worktree sessions can swap their agent
+app/handle_handoff.go,75,47,no other agent is available to hand '%s' off to
+app/handle_handoff.go,80,11,Hand off to
+app/handle_handoff.go,120,62,The new agent starts fresh with a summary of the work so far. 
+app/handle_handoff.go,121,48,Same worktree and branch — nothing is discarded.
+app/handle_handoff.go,156,39,could not hand session %q off to %s: %v
+app/handle_handoff.go,167,32,handoff of '%s' to %s failed: %w
+app/handle_handoff.go,170,0,
+app/handle_handoff.go,171,18,its previous agent
+app/handle_handoff.go,173,25,'%s' handed from %s to %s
+app/handle_tabs.go,4,3,fmt
+app/handle_tabs.go,6,34,github.com/charmbracelet/bubbletea
+app/handle_tabs.go,8,43,github.com/sachiniyer/agent-factory/session
+app/handle_tabs.go,9,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/handle_tabs.go,10,43,github.com/sachiniyer/agent-factory/ui/tree
+app/handle_tabs.go,23,8,Terminal
+app/handle_tabs.go,24,7,VS Code
+app/handle_tabs.go,39,145,"only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"
+app/handle_tabs.go,47,7,New tab
+app/handle_tabs.go,73,0,
+app/handle_tabs.go,102,145,"only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"
+app/handle_tabs.go,108,41,tab kind %d is not available from the TUI
+app/handle_tabs.go,192,56,the agent tab can't be closed; use D to kill the session
+app/handle_tabs.go,195,67,this session's tab list is fixed by its runtime and can't be edited
+app/handle_tabs.go,199,20,tab cannot be closed
+app/handle_tabs.go,213,0,
+app/handle_tabs.go,271,0,
+app/render.go,4,7,strings
+app/render.go,6,33,github.com/charmbracelet/lipgloss
+app/render.go,8,38,github.com/sachiniyer/agent-factory/ui
+app/render.go,9,45,github.com/sachiniyer/agent-factory/ui/layout
+app/render.go,10,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/render.go,278,0,
+app/render.go,282,0,
+app/render.go,284,2,"│
+"
+app/render.go,284,1,"
+"
+app/render.go,294,0,
+app/render.go,296,1,─
+app/render.go,305,0,
+app/render.go,307,1,─
+app/handle_jump_tab.go,4,3,fmt
+app/handle_jump_tab.go,5,7,strings
+app/handle_jump_tab.go,7,34,github.com/charmbracelet/bubbletea
+app/handle_jump_tab.go,9,43,github.com/sachiniyer/agent-factory/session
+app/handle_jump_tab.go,10,38,github.com/sachiniyer/agent-factory/ui
+app/handle_jump_tab.go,11,45,github.com/sachiniyer/agent-factory/ui/layout
+app/handle_jump_tab.go,12,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/handle_jump_tab.go,44,28,Jump to tab (number or name)
+app/handle_jump_tab.go,44,0,
+app/handle_jump_tab.go,142,0,
+app/handle_jump_tab.go,143,18,; available tabs: 
+app/handle_jump_tab.go,146,53,more than one tab matches %q; type more of the name%s
+app/handle_jump_tab.go,148,19,no tab matches %q%s
+app/handle_jump_tab.go,170,0,
+app/handle_jump_tab.go,171,7,%s (%s)
+app/handle_jump_tab.go,172,0,
+app/handle_jump_tab.go,176,2,", "
+app/backend_picker.go,4,6,errors
+app/backend_picker.go,5,3,fmt
+app/backend_picker.go,7,34,github.com/charmbracelet/bubbletea
+app/backend_picker.go,9,45,github.com/sachiniyer/agent-factory/apiclient
+app/backend_picker.go,10,42,github.com/sachiniyer/agent-factory/daemon
+app/backend_picker.go,11,43,github.com/sachiniyer/agent-factory/session
+app/backend_picker.go,12,38,github.com/sachiniyer/agent-factory/ui
+app/backend_picker.go,13,46,github.com/sachiniyer/agent-factory/ui/overlay
+app/backend_picker.go,40,0,
+app/backend_picker.go,65,12,Repo default
+app/backend_picker.go,66,0,
+app/backend_picker.go,76,17,Repo default (%s)
+app/backend_picker.go,88,0,
+app/backend_picker.go,94,0,
+app/backend_picker.go,112,14, — unavailable
+app/backend_picker.go,114,15, — cannot check
+app/backend_picker.go,185,38,cannot list backends for this repo: %w
+app/backend_picker.go,191,45,the daemon returned no backends for this repo
+app/backend_picker.go,206,14,Select backend
+app/backend_picker.go,273,0,
+app/backend_picker.go,274,69,"backend %q is not usable for this repo, and the daemon gave no reason"
+app/daemon_restart.go,4,3,fmt
+app/daemon_restart.go,5,2,os
+app/daemon_restart.go,6,7,os/exec
+app/daemon_restart.go,7,7,strings
+app/daemon_restart.go,9,34,github.com/charmbracelet/bubbletea
+app/daemon_restart.go,11,45,github.com/sachiniyer/agent-factory/apiclient
+app/daemon_restart.go,45,34,could not locate the af binary: %w
+app/daemon_restart.go,50,6,daemon
+app/daemon_restart.go,50,7,restart
+app/daemon_restart.go,50,7,--quiet
+app/daemon_restart.go,53,0,
+app/daemon_restart.go,54,6,%w: %s
+app/daemon_restart.go,65,65,[!] The daemon stopped responding while killing '%s'. Restart it?
+app/daemon_restart.go,66,112,"Restarting recovers the daemon, but sessions it is running may be dropped. The kill may still finish on its own."
+app/daemon_restart.go,88,86,could not restart the daemon: %w — restart it from a terminal with `af daemon restart`
+app/daemon_restart.go,90,17,Daemon restarted.
+app/home_tasks.go,4,6,errors
+app/home_tasks.go,5,3,fmt
+app/home_tasks.go,6,7,strings
+app/home_tasks.go,7,4,time
+app/home_tasks.go,9,34,github.com/charmbracelet/bubbletea
+app/home_tasks.go,10,45,github.com/sachiniyer/agent-factory/apiclient
+app/home_tasks.go,11,42,github.com/sachiniyer/agent-factory/config
+app/home_tasks.go,12,40,github.com/sachiniyer/agent-factory/task
+app/home_tasks.go,13,45,github.com/sachiniyer/agent-factory/ui/layout
+app/home_tasks.go,30,0,
+app/home_tasks.go,31,21,task name is required
+app/home_tasks.go,36,0,
+app/home_tasks.go,37,0,
+app/home_tasks.go,39,44,exactly one of cron or watch cmd is required
+app/home_tasks.go,42,0,
+app/home_tasks.go,43,24,prompt must be non-empty
+app/home_tasks.go,46,16,invalid cron: %v
+app/home_tasks.go,61,16,invalid path: %v
+app/home_tasks.go,63,0,
+app/home_tasks.go,68,30,failed to generate task id: %v
+app/home_tasks.go,94,16,Cannot save task
+app/home_tasks.go,94,24,Your input is retained. 
+app/home_tasks.go,94,36,Press any key to return to the form.
+app/home_tasks.go,94,23,failed to save task: %v
+app/home_tasks.go,111,124,"the task was saved, but this list could not be reloaded, so it is showing the tasks from before — do not create it again: %w"
+app/home_tasks.go,115,66,"task was saved, but the daemon could not refresh its schedules: %w"
+app/home_tasks.go,147,16,no task selected
+app/config_agent.go,4,6,errors
+app/config_agent.go,5,3,fmt
+app/config_agent.go,6,2,os
+app/config_agent.go,7,7,os/exec
+app/config_agent.go,8,7,strings
+app/config_agent.go,10,34,github.com/charmbracelet/bubbletea
+app/config_agent.go,12,45,github.com/sachiniyer/agent-factory/apiclient
+app/config_agent.go,13,42,github.com/sachiniyer/agent-factory/config
+app/config_agent.go,14,47,github.com/sachiniyer/agent-factory/configagent
+app/config_agent.go,15,39,github.com/sachiniyer/agent-factory/log
+app/config_agent.go,121,85,the config assistant cannot administer the daemon at %s: it is local-only — it edits 
+app/config_agent.go,122,83,this machine's config.toml — so it refuses a remote target rather than editing the 
+app/config_agent.go,123,81,"wrong host. Use the config editor (,) to change that daemon's config, or run the "
+app/config_agent.go,124,28,assistant on the daemon host
+app/config_agent.go,144,26,Starting the config agent…
+app/config_agent.go,163,36,could not start the config agent: %v
+app/config_agent.go,176,0,
+app/config_agent.go,180,61,the config agent started but reported no session to attach to
+app/config_agent.go,250,0,
+app/config_agent.go,251,2,-S
+app/config_agent.go,253,14,attach-session
+app/config_agent.go,253,2,-t
+app/config_agent.go,254,4,tmux
+app/config_agent.go,274,5,TMUX=
+app/config_agent.go,289,43,config agent attach ended with an error: %v
+app/config_agent.go,294,35,config agent: reaping %s failed: %v
+app/config_agent.go,307,67,config agent: could not reload the config after the walkthrough: %v
+app/config_agent.go,319,150,"could not attach to the config agent — it may have exited, or tmux is unavailable · press C to retry, or run af config set to edit config directly: %w"
+keys/keys.go,4,3,fmt
+keys/keys.go,5,4,sort
+keys/keys.go,6,7,strings
+keys/keys.go,7,12,unicode/utf8
+keys/keys.go,9,36,github.com/charmbracelet/bubbles/key
+keys/keys.go,219,2,up
+keys/keys.go,219,2,up
+keys/keys.go,219,1,k
+keys/keys.go,219,2,up
+keys/keys.go,220,4,down
+keys/keys.go,220,4,down
+keys/keys.go,220,1,j
+keys/keys.go,220,4,down
+keys/keys.go,221,9,scroll_up
+keys/keys.go,221,6,ctrl+u
+keys/keys.go,221,14,preview scroll
+keys/keys.go,222,11,scroll_down
+keys/keys.go,222,6,ctrl+d
+keys/keys.go,222,14,preview scroll
+keys/keys.go,223,5,enter
+keys/keys.go,223,8,interact
+keys/keys.go,226,6,attach
+keys/keys.go,226,1,o
+keys/keys.go,226,6,attach
+keys/keys.go,227,6,ctrl+]
+keys/keys.go,227,8,nav mode
+keys/keys.go,228,3,new
+keys/keys.go,228,1,n
+keys/keys.go,228,3,new
+keys/keys.go,229,4,kill
+keys/keys.go,229,1,D
+keys/keys.go,229,4,kill
+keys/keys.go,230,7,archive
+keys/keys.go,230,1,a
+keys/keys.go,230,7,archive
+keys/keys.go,231,7,restore
+keys/keys.go,231,1,r
+keys/keys.go,231,7,restore
+keys/keys.go,232,11,limit_retry
+keys/keys.go,232,1,c
+keys/keys.go,232,11,retry limit
+keys/keys.go,244,7,handoff
+keys/keys.go,244,1,F
+keys/keys.go,244,8,hand off
+keys/keys.go,245,4,help
+keys/keys.go,245,1,?
+keys/keys.go,245,4,help
+keys/keys.go,246,4,quit
+keys/keys.go,246,1,q
+keys/keys.go,246,4,quit
+keys/keys.go,247,13,error_details
+keys/keys.go,247,1,E
+keys/keys.go,247,7,details
+keys/keys.go,248,10,new_remote
+keys/keys.go,248,1,N
+keys/keys.go,248,10,new remote
+keys/keys.go,249,3,tab
+keys/keys.go,249,5,focus
+keys/keys.go,250,9,shift+tab
+keys/keys.go,250,10,focus prev
+keys/keys.go,251,7,new_tab
+keys/keys.go,251,1,t
+keys/keys.go,251,7,new tab
+keys/keys.go,252,9,close_tab
+keys/keys.go,252,1,w
+keys/keys.go,252,9,close tab
+keys/keys.go,265,1,1
+keys/keys.go,265,1,2
+keys/keys.go,265,1,3
+keys/keys.go,265,1,4
+keys/keys.go,265,1,5
+keys/keys.go,265,1,6
+keys/keys.go,265,1,7
+keys/keys.go,265,1,8
+keys/keys.go,265,1,9
+keys/keys.go,265,5,1-9/g
+keys/keys.go,265,2,go
+keys/keys.go,266,1,g
+keys/keys.go,266,1,g
+keys/keys.go,266,28,jump to tab (number or name)
+keys/keys.go,267,5,tasks
+keys/keys.go,267,1,m
+keys/keys.go,267,5,tasks
+keys/keys.go,268,5,enter
+keys/keys.go,268,6,manage
+keys/keys.go,269,5,enter
+keys/keys.go,269,6,switch
+keys/keys.go,270,1,D
+keys/keys.go,270,14,delete project
+keys/keys.go,271,9,open_pane
+keys/keys.go,271,1,s
+keys/keys.go,271,9,open pane
+keys/keys.go,272,10,split_pane
+keys/keys.go,272,1,S
+keys/keys.go,272,10,split pane
+keys/keys.go,273,9,hide_pane
+keys/keys.go,273,1,x
+keys/keys.go,273,9,hide pane
+keys/keys.go,274,9,pane_prev
+keys/keys.go,274,4,left
+keys/keys.go,274,9,prev pane
+keys/keys.go,275,9,pane_next
+keys/keys.go,275,5,right
+keys/keys.go,275,9,next pane
+keys/keys.go,276,6,search
+keys/keys.go,276,1,/
+keys/keys.go,276,6,search
+keys/keys.go,277,7,open_pr
+keys/keys.go,277,1,p
+keys/keys.go,277,7,open PR
+keys/keys.go,278,7,copy_pr
+keys/keys.go,278,1,y
+keys/keys.go,278,11,copy PR URL
+keys/keys.go,279,5,hooks
+keys/keys.go,279,1,e
+keys/keys.go,279,14,worktree hooks
+keys/keys.go,285,12,config_agent
+keys/keys.go,285,1,C
+keys/keys.go,285,12,config agent
+keys/keys.go,286,13,config_editor
+keys/keys.go,286,1,","
+keys/keys.go,286,6,config
+keys/keys.go,287,14,switch_project
+keys/keys.go,287,6,ctrl+p
+keys/keys.go,287,14,switch project
+keys/keys.go,288,8,collapse
+keys/keys.go,288,1,h
+keys/keys.go,288,4,left
+keys/keys.go,288,8,collapse
+keys/keys.go,289,6,expand
+keys/keys.go,289,1,l
+keys/keys.go,289,5,right
+keys/keys.go,289,6,expand
+keys/keys.go,290,12,next_section
+keys/keys.go,290,1,]
+keys/keys.go,290,12,next section
+keys/keys.go,291,12,prev_section
+keys/keys.go,291,1,[
+keys/keys.go,291,12,prev section
+keys/keys.go,294,5,enter
+keys/keys.go,294,5,enter
+keys/keys.go,294,11,submit name
+keys/keys.go,295,3,tab
+keys/keys.go,295,14,change program
+keys/keys.go,296,9,shift+tab
+keys/keys.go,296,14,initial prompt
+keys/keys.go,297,9,shift+tab
+keys/keys.go,297,16,initial prompt ✓
+keys/keys.go,298,6,ctrl+r
+keys/keys.go,298,7,backend
+keys/keys.go,299,6,ctrl+r
+keys/keys.go,299,9,backend ✓
+keys/keys.go,300,6,ctrl+o
+keys/keys.go,300,7,account
+keys/keys.go,301,6,ctrl+o
+keys/keys.go,301,9,account ✓
+keys/keys.go,302,3,esc
+keys/keys.go,302,6,cancel
+keys/keys.go,312,5,enter
+keys/keys.go,312,29,it is the interact/submit key
+keys/keys.go,313,3,tab
+keys/keys.go,313,24,it cycles the focus ring
+keys/keys.go,314,9,shift+tab
+keys/keys.go,314,24,it cycles the focus ring
+keys/keys.go,315,3,esc
+keys/keys.go,315,19,it cancels overlays
+keys/keys.go,316,6,ctrl+]
+keys/keys.go,316,45,it is the reserved exit from interactive mode
+keys/keys.go,317,1,1
+keys/keys.go,317,16,1-9 jump to tabs
+keys/keys.go,318,1,2
+keys/keys.go,318,16,1-9 jump to tabs
+keys/keys.go,319,1,3
+keys/keys.go,319,16,1-9 jump to tabs
+keys/keys.go,320,1,4
+keys/keys.go,320,16,1-9 jump to tabs
+keys/keys.go,321,1,5
+keys/keys.go,321,16,1-9 jump to tabs
+keys/keys.go,322,1,6
+keys/keys.go,322,16,1-9 jump to tabs
+keys/keys.go,323,1,7
+keys/keys.go,323,16,1-9 jump to tabs
+keys/keys.go,324,1,8
+keys/keys.go,324,16,1-9 jump to tabs
+keys/keys.go,325,1,9
+keys/keys.go,325,16,1-9 jump to tabs
+keys/keys.go,331,2,up
+keys/keys.go,331,1,↑
+keys/keys.go,332,4,down
+keys/keys.go,332,1,↓
+keys/keys.go,333,4,left
+keys/keys.go,333,1,←
+keys/keys.go,334,5,right
+keys/keys.go,334,1,→
+keys/keys.go,335,5,enter
+keys/keys.go,335,1,↵
+keys/keys.go,336,8,shift+up
+keys/keys.go,336,2,⇧↑
+keys/keys.go,337,10,shift+down
+keys/keys.go,337,2,⇧↓
+keys/keys.go,338,1, 
+keys/keys.go,338,5,space
+keys/keys.go,339,6,ctrl+@
+keys/keys.go,339,10,ctrl+space
+keys/keys.go,346,2,up
+keys/keys.go,346,4,down
+keys/keys.go,346,4,left
+keys/keys.go,346,5,right
+keys/keys.go,347,4,home
+keys/keys.go,347,3,end
+keys/keys.go,347,4,pgup
+keys/keys.go,347,6,pgdown
+keys/keys.go,348,5,space
+keys/keys.go,348,9,backspace
+keys/keys.go,348,6,delete
+keys/keys.go,348,6,insert
+keys/keys.go,351,5,enter
+keys/keys.go,351,3,tab
+keys/keys.go,351,3,esc
+keys/keys.go,352,2,f1
+keys/keys.go,352,2,f2
+keys/keys.go,352,2,f3
+keys/keys.go,352,2,f4
+keys/keys.go,352,2,f5
+keys/keys.go,352,2,f6
+keys/keys.go,353,2,f7
+keys/keys.go,353,2,f8
+keys/keys.go,353,2,f9
+keys/keys.go,353,3,f10
+keys/keys.go,353,3,f11
+keys/keys.go,353,3,f12
+keys/keys.go,371,42,keys: default binding table is invalid: %v
+keys/keys.go,433,0,
+keys/keys.go,452,0,
+keys/keys.go,495,0,
+keys/keys.go,531,73,keys: %q is bound to both %q and %q; each key can trigger only one action
+keys/keys.go,566,0,
+keys/keys.go,595,0,
+keys/keys.go,617,0,
+keys/keys.go,631,48,keys: unknown action %q (rebindable actions: %s)
+keys/keys.go,631,2,", "
+keys/keys.go,634,74,keys: action %q has no keys; give it a key string or a list of key strings
+keys/keys.go,640,130,"keys: action %q: %q is not a valid key (use a single character, a named key like ""up"" or ""f5"", or a ctrl+/alt+/shift+ combination)"
+keys/keys.go,643,36,keys: action %q: %q is reserved — %s
+keys/keys.go,663,1,/
+keys/keys.go,667,0,
+keys/keys.go,667,3," 	
+"
+keys/keys.go,668,0,
+keys/keys.go,674,5,ctrl+
+keys/keys.go,676,0,
+keys/keys.go,679,5,ctrl+
+keys/keys.go,680,4,alt+
+keys/keys.go,682,0,
+keys/keys.go,685,4,alt+
+keys/keys.go,686,6,shift+
+keys/keys.go,688,0,
+keys/keys.go,691,6,shift+
+keys/keys.go,693,5,space
+keys/keys.go,695,1,@
+keys/keys.go,697,1, 
+keys/keys.go,701,0,
+keys/keys.go,705,4,alt+
+keys/keys.go,708,5,ctrl+
+keys/keys.go,711,6,shift+
+keys/keys.go,716,0,
+keys/keys.go,717,0,
+api/sessions_watch.go,4,6,errors
+api/sessions_watch.go,5,3,fmt
+api/sessions_watch.go,6,4,time
+api/sessions_watch.go,8,42,github.com/sachiniyer/agent-factory/daemon
+api/sessions_watch.go,9,39,github.com/sachiniyer/agent-factory/log
+api/sessions_watch.go,10,43,github.com/sachiniyer/agent-factory/session
+api/sessions_watch.go,12,22,github.com/spf13/cobra
+api/sessions_watch.go,83,64,session %q disappeared while watching (it was killed or removed)
+api/sessions_watch.go,94,36,session %q will not become ready: %s
+api/sessions_watch.go,100,67,timed out after %s waiting for session %q to become idle (still %s)
+api/sessions_watch.go,112,13,being created
+api/sessions_watch.go,114,12,being killed
+api/sessions_watch.go,116,14,being archived
+api/sessions_watch.go,118,14,being restored
+api/sessions_watch.go,123,14,being replaced
+api/sessions_watch.go,129,15,being respawned
+api/sessions_watch.go,139,93,in an operation a newer daemon understands and this af build does not — upgrade af to read it
+api/sessions_watch.go,143,7,working
+api/sessions_watch.go,145,24,blocked on a usage limit
+api/sessions_watch.go,149,7,working
+api/sessions_watch.go,151,8,not idle
+api/sessions_watch.go,161,35,"--interval must be positive, got %s"
+api/sessions_watch.go,164,60,"--timeout cannot be negative, got %s (use 0 to wait forever)"
+api/sessions_watch.go,180,0,
+api/sessions_watch.go,189,0,
+api/sessions_watch.go,193,0,
+api/sessions_watch.go,198,0,
+api/sessions_watch.go,201,0,
+api/sessions_watch.go,201,13,session %q %w
+api/sessions_watch.go,205,13,watch [title]
+api/sessions_watch.go,206,80,"Block until a session goes idle, or until any session in the fleet changes state"
+api/sessions_watch.go,207,1834,"Watch a session and return when its agent finishes working: exit 0 the moment
+the session goes IDLE (the agent stopped working and is awaiting input), so an
+operator or root agent can dispatch a session and be notified on completion
+instead of polling 'af sessions preview'.
+
+Polls the daemon's snapshot (the same read path as 'af sessions get') every
+--interval (default 2s). Exits non-zero if the session reaches a terminal state
+it can't leave on its own (lost, dead, or archived), if it disappears (killed),
+or if --timeout elapses first (default 30m). A session that is still working, a
+usage-limit block that auto-resumes, or a create/archive/restore in progress all
+keep the watch waiting.
+
+By default prints a concise line on transition; with --json emits the final
+session record. Honors --repo to scope the title lookup to one repository.
+
+With NO title (or --all) it watches every session in scope and returns when the
+first one CHANGES STATE, printing which and why. That form is edge-triggered: the
+first poll establishes a baseline and reports nothing, so a session that was
+already idle before you called does not fire. Pass --include-current to report
+those too, for a driver that wants a starting snapshot; that snapshot omits
+archived sessions, which are inert by construction and cannot change on their own
+(a session archived WHILE you watch is still reported).
+
+Each reported session carries a reason a driver can act on: idle, usage-limited
+(af resumes it automatically — do not prompt it), lost, dead, archived, killed,
+gone, or unknown. ""idle"" covers both ""finished its work"" and ""waiting on input"":
+af records both as the same state and does not distinguish them, so neither does
+this. A session af cannot classify reports ""unknown"" and is never reported as
+idle, because an idle report tells a driver to act."
+api/sessions_watch.go,246,71,"--all watches every session, so it cannot be combined with the title %q"
+api/sessions_watch.go,251,109,--include-current applies to the fleet form; a single-title watch already reports the session's current state
+api/sessions_watch.go,285,38,"session %q is idle (ready for review)
+"
+api/sessions_watch_fleet.go,4,3,fmt
+api/sessions_watch_fleet.go,5,4,sort
+api/sessions_watch_fleet.go,6,4,time
+api/sessions_watch_fleet.go,8,42,github.com/sachiniyer/agent-factory/daemon
+api/sessions_watch_fleet.go,9,43,github.com/sachiniyer/agent-factory/session
+api/sessions_watch_fleet.go,48,4,idle
+api/sessions_watch_fleet.go,52,13,usage-limited
+api/sessions_watch_fleet.go,55,4,lost
+api/sessions_watch_fleet.go,57,4,dead
+api/sessions_watch_fleet.go,59,8,archived
+api/sessions_watch_fleet.go,62,6,killed
+api/sessions_watch_fleet.go,66,4,gone
+api/sessions_watch_fleet.go,74,7,unknown
+api/sessions_watch_fleet.go,77,7,working
+api/sessions_watch_fleet.go,85,12,"json:""title"""
+api/sessions_watch_fleet.go,86,19,"json:""id,omitempty"""
+api/sessions_watch_fleet.go,87,21,"json:""path,omitempty"""
+api/sessions_watch_fleet.go,88,13,"json:""reason"""
+api/sessions_watch_fleet.go,89,23,"json:""detail,omitempty"""
+api/sessions_watch_fleet.go,92,24,"json:""session,omitempty"""
+api/sessions_watch_fleet.go,108,41,killed; its teardown may still be running
+api/sessions_watch_fleet.go,115,107,af could not confirm which runtime owns this workspace; inspect it and remove it explicitly before retrying
+api/sessions_watch_fleet.go,125,0,
+api/sessions_watch_fleet.go,127,0,
+api/sessions_watch_fleet.go,128,0,
+api/sessions_watch_fleet.go,133,0,
+api/sessions_watch_fleet.go,135,39,the agent stopped and is awaiting input
+api/sessions_watch_fleet.go,137,88,blocked on a provider usage limit; af resumes it automatically — do not send it a prompt
+api/sessions_watch_fleet.go,139,73,its backing tmux/worktree vanished; recover it with 'af sessions restore'
+api/sessions_watch_fleet.go,141,27,its backing runtime is gone
+api/sessions_watch_fleet.go,143,50,archived and inert; restore it before sending work
+api/sessions_watch_fleet.go,155,107,this session reports a state a newer daemon understands and this af build does not; upgrade af to act on it
+api/sessions_watch_fleet.go,171,74,the agent stopped and is awaiting input (from this record's legacy status)
+api/sessions_watch_fleet.go,177,0,
+api/sessions_watch_fleet.go,179,108,its backing tmux/worktree vanished; recover it with 'af sessions restore' (from this record's legacy status)
+api/sessions_watch_fleet.go,185,101,its backing runtime is gone; recover it with 'af sessions restore' (from this record's legacy status)
+api/sessions_watch_fleet.go,187,85,archived and inert; restore it before sending work (from this record's legacy status)
+api/sessions_watch_fleet.go,189,56,af cannot determine this session's state from its record
+api/sessions_watch_fleet.go,201,0,
+api/sessions_watch_fleet.go,202,3,id:
+api/sessions_watch_fleet.go,206,5,path:
+api/sessions_watch_fleet.go,206,4,\x00
+api/sessions_watch_fleet.go,300,67,the session's record disappeared while watching (killed or removed)
+api/sessions_watch_fleet.go,348,0,
+api/sessions_watch_fleet.go,349,1,	
+api/sessions_watch_fleet.go,351,1,	
+api/sessions_watch_fleet.go,352,0,
+api/sessions_watch_fleet.go,353,1,	
+api/sessions_watch_fleet.go,404,81,"stopped watching: the session snapshot switched from the %s to the %s mid-watch, "
+api/sessions_watch_fleet.go,405,101,and comparing the two would report transitions that did not happen — re-run to start a fresh baseline
+api/sessions_watch_fleet.go,412,71,timed out after %s waiting for any session to change state (%d watched)
+api/sessions_watch_fleet.go,434,0,
+api/sessions_watch_fleet.go,435,15,daemon snapshot
+api/sessions_watch_fleet.go,436,23,on-disk session records
+api/sessions_watch_fleet.go,466,6,events
+api/sessions_watch_fleet.go,470,0,
+api/sessions_lifecycle.go,4,3,fmt
+api/sessions_lifecycle.go,6,22,github.com/spf13/cobra
+api/sessions_lifecycle.go,8,45,github.com/sachiniyer/agent-factory/apiclient
+api/sessions_lifecycle.go,9,42,github.com/sachiniyer/agent-factory/daemon
+api/sessions_lifecycle.go,10,39,github.com/sachiniyer/agent-factory/log
+api/sessions_lifecycle.go,21,12,kill <title>
+api/sessions_lifecycle.go,22,59,Permanently destroy a session and prune its worktree branch
+api/sessions_lifecycle.go,23,477,"Permanently destroy a session: tear down tmux, remove the worktree,
+delete the stored session record, and prune the session branch when Agent
+Factory owns it.
+
+For normal ""done with this session"" cleanup, prefer:
+  af sessions archive <title>
+
+Kill always destroys the session, including any uncommitted or unmerged work on
+its branch — there is no undo. To keep a session restorable instead, archive it.
+--force is accepted but has no effect (kept for backward compatibility)."
+api/sessions_lifecycle.go,54,2,ok
+api/sessions_lifecycle.go,59,15,archive [title]
+api/sessions_lifecycle.go,60,55,Finish with a session by archiving it for later restore
+api/sessions_lifecycle.go,61,1136,"Archive is the default way to finish with a session: tear down its tmux
+and move its git worktree out to the global archive directory
+(<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/), preserving the branch and any
+uncommitted changes. The session is not deleted — it becomes a quiescent
+""archived"" row that survives restarts and can be brought back later with
+'af sessions restore <title>'.
+
+Archive is refused while any enabled task targets the session. The error names
+every blocking task; disable or retarget them, then archive again. Agent Factory
+never silently restores the target or disables its automation as a side effect.
+While a session is archiving or archived, task writes that would newly enable it
+as a target are likewise refused until the session is restored.
+
+With --self, archive the current session (resolved via whoami) instead of a
+named one — use it from inside a session when your work is done. --self and a
+<title> argument are mutually exclusive.
+
+Not available for remote or in-place (--here) sessions: archive relocates the
+worktree, which those don't own. The relocated worktree path is printed on
+success."
+api/sessions_lifecycle.go,86,0,
+api/sessions_lifecycle.go,99,0,
+api/sessions_lifecycle.go,100,82,cannot combine --self with a <title> argument; --self archives the current session
+api/sessions_lifecycle.go,104,48,--self must be run from inside an af session: %w
+api/sessions_lifecycle.go,133,0,
+api/sessions_lifecycle.go,134,77,a session <title> is required (or pass --self to archive the current session)
+api/sessions_lifecycle.go,148,0,
+api/sessions_lifecycle.go,155,2,ok
+api/sessions_lifecycle.go,155,5,title
+api/sessions_lifecycle.go,155,13,archived_path
+api/sessions_lifecycle.go,156,0,
+api/sessions_lifecycle.go,157,7,warning
+api/sessions_lifecycle.go,164,15,restore <title>
+api/sessions_lifecycle.go,165,42,"Restore an archived, lost, or dead session"
+api/sessions_lifecycle.go,166,1054,"Restore a session that is currently archived, lost, or dead.
+
+Archived sessions are moved back next to the repository, re-registered,
+re-spawned, and marked running. Lost/dead sessions are recovered in place,
+rebuilding a missing worktree when possible and resuming the recorded agent
+conversation when required.
+
+Fails if the session is not restorable, or if its origin repository is gone.
+The restored worktree path is printed on success.
+
+For a sandbox session (docker/ssh/hook) whose sandbox still ANSWERS but whose
+agent is gone, restore first pushes the sandbox's work to origin, because
+recovery re-clones from there and anything unpushed would be destroyed. If that
+push fails, or if af cannot tell whether the sandbox is gone or merely
+unreachable, the restore REFUSES and the session stays recoverable.
+
+--force-reap replaces the sandbox anyway, without the push. It discards whatever
+that sandbox has not pushed, so it is for a sandbox you know is expendable. It
+applies to this one session and this one command; there is no global equivalent."
+api/sessions_lifecycle.go,195,10,force-reap
+api/sessions_lifecycle.go,201,0,
+api/sessions_lifecycle.go,208,2,ok
+api/sessions_lifecycle.go,208,5,title
+api/sessions_lifecycle.go,208,13,worktree_path
+api/sessions_lifecycle.go,209,0,
+api/sessions_lifecycle.go,210,7,warning
+config/manifest.go,4,4,sort
+config/manifest.go,5,7,strings
+config/manifest.go,7,55,github.com/sachiniyer/agent-factory/internal/sessionenv
+config/manifest.go,8,48,github.com/sachiniyer/agent-factory/session/tmux
+config/manifest.go,123,14,schema_version
+config/manifest.go,123,53,"machine-managed migration bookkeeping, never user-set"
+config/manifest.go,134,15,default_program
+config/manifest.go,135,6,string
+config/manifest.go,136,6,claude
+config/manifest.go,137,38,The coding agent a new session starts.
+config/manifest.go,147,19,network.listen_addr
+config/manifest.go,148,6,string
+config/manifest.go,149,14,127.0.0.1:8443
+config/manifest.go,150,108,"Address the browser interface and HTTP API are served on · set it to """" to turn the web server off entirely."
+config/manifest.go,159,21,network.require_token
+config/manifest.go,160,4,bool
+config/manifest.go,161,5,false
+config/manifest.go,162,122,"Require an access token from other machines on the network · off by default, so the browser interface opens with no login."
+config/manifest.go,171,30,network.require_loopback_token
+config/manifest.go,172,4,bool
+config/manifest.go,173,5,false
+config/manifest.go,174,163,"Also require the token from browsers on this same machine · has no effect on its own, since it only tightens a token that network.require_token must first turn on."
+config/manifest.go,183,14,update_channel
+config/manifest.go,184,6,string
+config/manifest.go,185,6,stable
+config/manifest.go,186,91,"Which releases updates come from · stable, or preview for early builds cut every few hours."
+config/manifest.go,196,11,auto_update
+config/manifest.go,197,4,bool
+config/manifest.go,198,4,true
+config/manifest.go,199,65,Check for a newer version on launch and install it automatically.
+config/manifest.go,209,10,appearance
+config/manifest.go,209,6,string
+config/manifest.go,209,6,system
+config/manifest.go,210,89,"TUI appearance · Light, Dark or System (terminal background); applies on next TUI launch."
+config/manifest.go,211,5,light
+config/manifest.go,211,4,dark
+config/manifest.go,211,6,system
+config/manifest.go,217,20,vscode_server_binary
+config/manifest.go,218,6,string
+config/manifest.go,219,2,""""""
+config/manifest.go,220,100,Which editor program a VS Code tab runs · empty finds code-server or openvscode-server on your PATH.
+config/manifest.go,231,27,network.preview_listen_addr
+config/manifest.go,232,6,string
+config/manifest.go,233,2,""""""
+config/manifest.go,234,201,"Address for a separate per-tab web-tab preview origin, kept apart from the main interface · off by default; it hosts previews only and never the control API, and it works for same-machine viewing only."
+config/manifest.go,243,20,daemon_poll_interval
+config/manifest.go,244,8,duration
+config/manifest.go,245,4,1000
+config/manifest.go,246,148,How often the background service checks sessions for new output · use a duration such as 1500ms or 30m; legacy integer milliseconds remain accepted.
+config/manifest.go,255,11,debug_pprof
+config/manifest.go,256,4,bool
+config/manifest.go,257,5,false
+config/manifest.go,258,267,"Serve Go runtime profiles from the background service, for diagnosing a memory or goroutine problem · off by default, reachable only over the local control socket, and never on the web address · a profile contains live process memory, so turn it off again afterwards."
+config/manifest.go,267,15,log_max_size_mb
+config/manifest.go,268,3,int
+config/manifest.go,269,2,50
+config/manifest.go,270,75,"How large the log may grow, in MB, before it is rotated into a backup file."
+config/manifest.go,279,15,log_max_backups
+config/manifest.go,280,3,int
+config/manifest.go,281,1,2
+config/manifest.go,282,79,How many rotated log files to keep before the oldest is deleted · 0 keeps none.
+config/manifest.go,291,13,branch_prefix
+config/manifest.go,292,6,string
+config/manifest.go,293,34,"your username, followed by a slash"
+config/manifest.go,294,51,Prefix for the git branch each new session creates.
+config/manifest.go,303,18,on_archive_command
+config/manifest.go,304,6,string
+config/manifest.go,305,2,""""""
+config/manifest.go,306,166,Operator command run in a session worktree after its panes exit and before it moves into the archive · empty disables it; failures warn but do not cancel the archive.
+config/manifest.go,315,13,worktree_root
+config/manifest.go,316,6,string
+config/manifest.go,318,144,"Where a session's copy of the repository is created · sibling puts it next to the repository, subdirectory puts it under the agent-factory home."
+config/manifest.go,328,11,detach_keys
+config/manifest.go,329,6,string
+config/manifest.go,330,6,ctrl-w
+config/manifest.go,331,86,The key that leaves a session you are attached to and returns you to the session list.
+config/manifest.go,340,17,program_overrides
+config/manifest.go,341,5,table
+config/manifest.go,342,61,"claude, pointed at the claude command found when af first ran"
+config/manifest.go,343,105,"The full command to run for an agent, when it needs a specific path or extra flags · one entry per agent."
+config/manifest.go,353,16,default_accounts
+config/manifest.go,354,5,table
+config/manifest.go,358,52,none · sessions run on the agent's own ambient login
+config/manifest.go,359,187,"Which of an agent's logged-in accounts a new session runs as · one entry per agent, most useful set per project so one project runs as your work identity and another as your personal one."
+config/manifest.go,376,23,session_env_passthrough
+config/manifest.go,377,4,list
+config/manifest.go,378,4,none
+config/manifest.go,379,170,"Extra environment variable names an agent session may inherit · exact names only, values stay out of config, and each name explicitly trusts a repo-selected Docker image."
+config/manifest.go,388,14,limit_patterns
+config/manifest.go,389,5,table
+config/manifest.go,390,37,none · the built-in patterns are used
+config/manifest.go,391,125,"A custom regular expression for recognizing an agent's usage-limit message, replacing the built-in one · one entry per agent."
+config/manifest.go,401,17,limit_auto_resume
+config/manifest.go,402,4,bool
+config/manifest.go,403,5,false
+config/manifest.go,404,79,Let a session that hit its usage limit resume on its own once the limit resets.
+config/manifest.go,413,24,limit_account_candidates
+config/manifest.go,414,4,list
+config/manifest.go,415,4,none
+config/manifest.go,416,171,"Registered account names a usage-limited session may switch to, in order · empty keeps waiting on the current identity; set globally or as a personal per-project override."
+config/manifest.go,425,19,global_agent_skills
+config/manifest.go,426,4,bool
+config/manifest.go,427,5,false
+config/manifest.go,428,127,Let af add its af-usage skill to your own codex/gemini/amp/devin config folders · off means those agents are not told about af.
+config/manifest.go,437,30,docker.mount_agent_credentials
+config/manifest.go,438,4,bool
+config/manifest.go,439,5,false
+config/manifest.go,440,228,"Let a docker-backend session mount the operator's on-disk credential file for that session's own agent, read-only, so it can authenticate · global-only: a repo selects the image but only the operator grants it credential access."
+config/manifest.go,449,25,ssh.host_key_verification
+config/manifest.go,450,6,string
+config/manifest.go,451,6,strict
+config/manifest.go,452,292,How the ssh backend verifies a remote host key · strict (default) refuses an unknown or changed key; accept-new trusts an unknown key on first connect (still refuses a changed one); insecure skips verification · global-only: a repo selects ssh.host but only the operator relaxes verification.
+config/manifest.go,462,11,sandbox.ssh
+config/manifest.go,463,6,string
+config/manifest.go,464,2,""""""
+config/manifest.go,465,263,"The free-form ssh command the `sandbox` backend runs to reach the sandbox host (jump hosts, ProxyCommand, custom flags) · global-only: af executes it on the daemon host, so a repo selecting backend=sandbox cannot dictate what command runs — only the operator can."
+config/manifest.go,474,20,limit_retry_interval
+config/manifest.go,475,6,string
+config/manifest.go,476,3,30m
+config/manifest.go,477,124,How long to wait before retrying a usage-limited session whose message gave no reset time · empty or 0 means never retry it.
+config/manifest.go,486,28,network.cors_allowed_origins
+config/manifest.go,487,4,list
+config/manifest.go,488,4,none
+config/manifest.go,489,98,Other websites allowed to call this machine's API from a browser · empty blocks every one of them.
+config/manifest.go,498,11,root_agents
+config/manifest.go,499,5,table
+config/manifest.go,500,4,none
+config/manifest.go,501,179,Legacy path map: repositories that always keep a session named root running · accepted forever for compatibility; use the current root_agent project profile for new configuration.
+config/manifest.go,510,10,root_agent
+config/manifest.go,511,5,table
+config/manifest.go,512,11,not enabled
+config/manifest.go,513,197,"Current project profile: whether a registered project keeps a session named root running, and the command it runs · the singleton successor to the legacy root_agents path map, settable per project."
+config/manifest.go,522,4,keys
+config/manifest.go,523,5,table
+config/manifest.go,524,37,none · the built-in bindings are used
+config/manifest.go,525,113,"Which key triggers each action in the terminal interface · one entry per action, replacing that action's default."
+config/manifest.go,534,7,backend
+config/manifest.go,535,6,string
+config/manifest.go,537,48,The runtime used for this repository's sessions.
+config/manifest.go,547,6,docker
+config/manifest.go,548,5,table
+config/manifest.go,549,4,none
+config/manifest.go,550,79,Container image and run arguments for repositories that use the docker backend.
+config/manifest.go,559,22,post_worktree_commands
+config/manifest.go,560,4,list
+config/manifest.go,561,4,none
+config/manifest.go,562,61,Commands run after af creates a worktree for this repository.
+config/manifest.go,571,12,remote_hooks
+config/manifest.go,572,5,table
+config/manifest.go,573,4,none
+config/manifest.go,574,85,Commands that provision and tear down this repository's hook-backed remote workspace.
+config/manifest.go,583,3,ssh
+config/manifest.go,584,5,table
+config/manifest.go,585,4,none
+config/manifest.go,586,78,Connection details for repositories that run sessions through the SSH backend.
+config/manifest.go,595,36,upgrade_clear_unverifiable_artifacts
+config/manifest.go,596,4,bool
+config/manifest.go,597,5,false
+config/manifest.go,598,191,Let an upgrade set aside a binary staged beside af whose owning agent-factory home af cannot read · only for a leftover you have checked yourself; af already clears the ones it can attribute.
+config/manifest.go,666,4, or 
+config/manifest.go,728,4,core
+config/manifest.go,730,6,common
+config/manifest.go,732,8,advanced
+config/manifest.go,734,5,other
