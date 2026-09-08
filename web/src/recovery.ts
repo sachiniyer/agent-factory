@@ -44,12 +44,12 @@ export interface MutationOutcomeNotice {
 
 export function renderMutationOutcome(notice: MutationOutcomeNotice): HTMLElement {
   if (notice.kind === "uncertain") {
-    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before taking further action.", false);
+    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before acting.", false);
   }
   if (notice.kind === "confirmed") {
-    return mutationNotice("Operation completed", notice.detail, "Review the details before taking further action.", false);
+    return mutationNotice("Operation completed", notice.detail, "Review the result before acting.", false);
   }
-  return mutationNotice("Operation failed", notice.detail, "Review the details, then try again.");
+  return mutationNotice("Operation failed", notice.detail, "Check the error, then retry.");
 }
 
 /** Keep overlapping outcomes readable without turning an unknown outcome into a retry invitation. */

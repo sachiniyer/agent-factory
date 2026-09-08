@@ -34,11 +34,11 @@ for (const kind of ["uncertain", "confirmed", "failed"] as const) {
     } else if (kind === "confirmed") {
       assert.equal(heading.textContent, "Operation completed");
       assert.doesNotMatch(notice.textContent, /failed|try again/i);
-      assert.match(notice.textContent, /Review the details before taking further action/);
+      assert.match(notice.textContent, /Review the result before acting/);
       assert.equal(heading.className, "");
     } else {
       assert.equal(heading.textContent, "Operation failed");
-      assert.match(notice.textContent, /Review the details, then try again/);
+      assert.match(notice.textContent, /Check the error, then retry/);
       assert.equal(heading.className, "af-recovery-failed");
     }
   });
