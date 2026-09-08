@@ -104,12 +104,9 @@ func TestProjectsAddResolvesPathAgainstClientCwd(t *testing.T) {
 	require.Equal(t, wantCwd, gotPath, "`af projects add .` must register the client's cwd repo")
 }
 
-// TestProjectsAddForwardsRawPathForRemoteTarget is the other half of the branch:
-// with --daemon-url set, the path names a directory on the REMOTE host, so
-// resolving it against this client's cwd is meaningless — it must be forwarded
-// raw for the daemon to resolve. Guards against a future change that resolves
-// unconditionally and would corrupt a remote path with the client's cwd.
-func TestProjectsAddForwardsRawPathForRemoteTarget(t *testing.T) {
+// The registry RPC is local even when a remote target is selected, so paths
+// must still be resolved against the caller's directory.
+func TestProjectsAddResolvesClientCwdWithRemoteTarget(t *testing.T) {
 	t.Setenv("AF_DAEMON_URL", "http://remote.example:8443")
 	require.True(t, apiclient.IsRemoteTarget(), "precondition: the target must read as remote")
 
@@ -122,9 +119,10 @@ func TestProjectsAddForwardsRawPathForRemoteTarget(t *testing.T) {
 	t.Cleanup(func() { registerProjectViaDaemon = restore })
 
 	add := findSubcommand(t, "add")
-	_ = captureJSON(t, func() error { return add.RunE(add, []string{"./on/the/remote"}) })
-	require.Equal(t, "./on/the/remote", gotPath,
-		"against a remote target the raw path must be forwarded, not resolved against the local cwd")
+	_ = captureJSON(t, func() error { return add.RunE(add, []string{"."}) })
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.Equal(t, cwd, gotPath, "the local registry RPC must receive the caller directory, even with a remote target")
 }
 
 // TestProjectsAddSurfacesDaemonError: a daemon-side rejection (not a git repo,

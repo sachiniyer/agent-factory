@@ -13,7 +13,7 @@ import (
 
 // TestSessionsCreate_RejectsReservedRootTitle covers the CLI side of the
 // #1106 name reservation: `af sessions create --name root` (any casing)
-// fails fast with an actionable error naming the root_agents opt-in, without
+// fails fast with an actionable error naming the [root_agent] profile, without
 // a daemon round trip. The daemon's reserveCreate stays the authoritative,
 // race-safe gate.
 func TestSessionsCreate_RejectsReservedRootTitle(t *testing.T) {
@@ -37,8 +37,8 @@ func TestSessionsCreate_RejectsReservedRootTitle(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected reserved title %q to be rejected", name)
 		}
-		if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), "root_agents") {
-			t.Fatalf("rejection for %q must name the reservation and the root_agents opt-in, got: %v", name, err)
+		if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), "[root_agent]") {
+			t.Fatalf("rejection for %q must name the reservation and the [root_agent] profile, got: %v", name, err)
 		}
 	}
 }
