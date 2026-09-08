@@ -326,7 +326,7 @@ and the original agent's conversation is stranded in the archived worktree
    worktree and codex's thread survives the handoff — when its limit resets,
    handing back re-enters codex's own conversation via
    `ResumeProgramWithConversationID`. A successor with a new worktree strands it.
-4. **It preserves every association**: task binding, PR info, tabs, session id,
+4. **It preserves every association**: task binding, tabs, session id,
    branch. Nothing downstream has to learn that a session can have a predecessor.
 
 Cost of (A), stated plainly: `Instance.Program` becomes time-varying, so "which

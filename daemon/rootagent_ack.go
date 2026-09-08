@@ -53,7 +53,7 @@ func (m *Manager) acknowledgeRootRecreate(instance *session.Instance) {
 
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
-		// Put the note back in memory, the way SetPRInfo rolls its value back: the
+		// Put the note back in memory on persistence failure: the
 		// clear above is not durable, so leaving it applied would make THIS daemon's
 		// snapshots drop the notice while disk still carries it — and every later
 		// stream open would take the early return above and never retry the write.

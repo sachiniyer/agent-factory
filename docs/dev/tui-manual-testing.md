@@ -106,7 +106,7 @@ actually on it.
 | `D` | kill instance | | `/` | search |
 | `a` | archive | | `r` | restore |
 | `q` | quit |
-| `p`/`y` | open/copy PR | | `e` | hooks editor |
+| `e` | hooks editor |
 | `Ctrl-P` | switch project | | `Ctrl-U`/`Ctrl-D` | preview scroll |
 | `Ctrl-W` | detach (full-screen) |
 

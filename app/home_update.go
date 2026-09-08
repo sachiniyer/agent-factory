@@ -7,7 +7,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -68,22 +67,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	case keyupMsg:
 		m.menu.ClearKeydownIfMatch(msg.name)
-		return m, nil
-	case tickUpdatePRInfoMessage:
-		// Poke daemon-owned discovery only for the selected instance; the daemon's
-		// background sweep covers the rest. The request runs off the event loop.
-		// Skip it while attached because the sidebar badge is hidden (#598).
-		if m.attached.Load() {
-			return m, tickUpdatePRInfoCmd
-		}
-		selected := m.sidebar.GetSelectedInstance()
-		return m, tea.Batch(tickUpdatePRInfoCmd, refreshPRInfoCmd(selected, m.repoID, true))
-	case prInfoRefreshFinishedMsg:
-		// The command is only a daemon poke. PR data arrives through Snapshot,
-		// keeping the TUI a read-only mirror of the daemon projection (#3296).
-		if msg.err != nil {
-			log.WarningLog.Printf("PR info refresh request failed for %q: %v", msg.target.title, msg.err)
-		}
 		return m, nil
 	case tickRefreshExternalMessage:
 		// The tick only PACES the loop; the actual Snapshot fetch runs off the
@@ -282,7 +265,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// panesRefreshedMsg ever arrives, and the watchdog would fire a
 		// spurious goroutine dump after slowDetachThreshold even though there
 		// was nothing to paint. Cancel it here: a nil cmd, or a cmd carrying
-		// only non-capture work (the PR-info fetch), means the detach already
+		// only non-capture work, means the detach already
 		// completed everything it was going to paint (#683 class).
 		if cmd == nil || len(m.visiblePanes) == 0 {
 			endDetachWatchdog()

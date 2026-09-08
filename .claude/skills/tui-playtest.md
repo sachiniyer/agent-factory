@@ -262,10 +262,6 @@ to cross-check the help view against reality):
 10. **CLI parity** — `"$AF" sessions list/get/preview/send-prompt/kill`
     against the same sandbox; confirm CLI and TUI agree.
 
-Things that don't apply in the sandbox (e.g. `p` open-PR with no GitHub
-remote) are still worth one press: a graceful, well-worded error is a pass;
-a panic or silent nothing is a finding.
-
 Keep a running findings log (`$WORK/findings.md`): one line per
 observation, with the exact repro (keys pressed, screen state, expected vs
 actual) and a severity guess.
