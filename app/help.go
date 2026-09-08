@@ -233,7 +233,7 @@ func attachedScrollControls(agent string) (string, string) {
 }
 
 func firstRunActionLine(actions string) string {
-	return descStyle.Render(actions)
+	return ui.ActionHint(actions)
 }
 
 type helpAlias struct {
@@ -314,7 +314,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render(helpProductTitle()),
 		"",
-		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
+		"Manage agents in separate workspaces.",
 		"",
 		pageLine,
 		lineControls,
@@ -322,8 +322,8 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 	)
 	return renderHelpSections(header, []helpSection{
 		{title: "Managing:", rows: []helpRow{
-			{helpKey(keys.KeyNew), "Create a new session"},
-			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
+			{helpKey(keys.KeyNew), "Create a session"},
+			{helpKey(keys.KeyNewRemote), "Create a remote session (needs remote_hooks)"},
 			// The naming form's four optional fields, named here because its own
 			// status-bar hints shed by terminal width (ui/menu.go hintDropOrder): on a
 			// narrow bar this is the only surface that still advertises them.
@@ -338,54 +338,56 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			// three, and one line at any width that fits the row.
 			{helpKey(keys.KeyChangeProgram) + "/" + helpKey(keys.KeySetPrompt) + " " +
 				helpKey(keys.KeySetBackend) + "/" + helpKey(keys.KeySetAccount),
-				"While naming a new session: pick its agent / initial prompt / backend / account"},
-			{helpKey(keys.KeySwitchProject), "Switch to another project (repo) in place"},
-			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one, r runs one)"},
-			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},
-			{helpKey(keys.KeyArchive), "Archive the selected live session"},
-			{helpKey(keys.KeyRestore), "Restore the selected archived / lost / dead session"},
-			{helpKey(keys.KeyLimitRetry), "Retry a session blocked at a usage limit (re-spawn + resume)"},
-			{navKeys, "Navigate between sessions"},
-			{helpKey(keys.KeyEnter), "Interact with the session in its pane (all keys go to it)"},
-			{helpKey(keys.KeyExitInteractive), "Leave interactive mode (back to navigation)"},
-			{helpKey(keys.KeyAttach), "Attach to the selected session full-screen"},
-			{tmux.DetachKeyDisplay, "Detach from a full-screen session"},
+				"New session: agent · prompt · backend · account"},
+			{helpKey(keys.KeySwitchProject), "Switch projects"},
+			{helpKey(keys.KeyTaskList), "Manage tasks · n create · r run"},
+			{helpKey(keys.KeyKill), "Delete session · its af-owned worktree and branch are removed"},
+			{helpKey(keys.KeyHandoff), "Hand off to another agent"},
+			{helpKey(keys.KeySearch), "Search sessions"},
+			{helpKey(keys.KeyArchive), "Archive locally · sandboxes publish work first"},
+			{helpKey(keys.KeyRestore), "Restore · reconnect or recover; absent sandboxes use last push"},
+			{helpKey(keys.KeyLimitRetry), "Resume after a usage limit"},
+			{navKeys, "Select a session"},
+			{helpKey(keys.KeyEnter), "Type in the pane · all keys go to that pane"},
+			{helpKey(keys.KeyExitInteractive), "Return to navigation"},
+			{helpKey(keys.KeyAttach), "Attach full-screen"},
+			{tmux.DetachKeyDisplay, "Leave full-screen"},
 		}},
 		{title: "Workspace:", rows: []helpRow{
-			{helpKey(keys.KeyTab), "Cycle focus: tree → open panes → automations"},
-			{helpKey(keys.KeyShiftTab), "Cycle focus backwards"},
-			{helpKey(keys.KeyOpenPane), "Open the selected tab as a pane (or focus its pane)"},
-			{helpKey(keys.KeySplitPane), "Commit the current preview as another pane"},
-			{helpKey(keys.KeyHidePane), "Hide the focused pane (the tab keeps running)"},
-			{helpKey(keys.KeyPanePrev) + "/" + helpKey(keys.KeyPaneNext), "Move focus between open panes"},
-			{navKeys, "Navigate the tree (sessions and their tabs)"},
-			{helpKey(keys.KeyLeft), "Collapse the selected session's tabs"},
-			{helpKey(keys.KeyRight), "Expand the selected session's tabs"},
+			{helpKey(keys.KeyTab), "Focus tree → panes → tasks"},
+			{helpKey(keys.KeyShiftTab), "Focus previous area"},
+			{helpKey(keys.KeyOpenPane), "Open or focus the tab’s pane"},
+			{helpKey(keys.KeySplitPane), "Keep the preview as a pane"},
+			{helpKey(keys.KeyHidePane), "Hide pane · tab keeps running"},
+			{helpKey(keys.KeyPanePrev) + "/" + helpKey(keys.KeyPaneNext), "Focus another pane"},
+			{navKeys, "Select a session or tab"},
+			{helpKey(keys.KeyLeft), "Collapse tabs"},
+			{helpKey(keys.KeyRight), "Expand tabs"},
 		}},
 		{title: "Configuration:", rows: []helpRow{
-			{helpKey(keys.KeyConfigAgent), "Open the config agent to change your settings"},
-			{helpKey(keys.KeyHooks), "Open the worktree hooks editor"},
-			{helpKey(keys.KeyConfigEditor), "Open the global config editor"},
+			{helpKey(keys.KeyConfigAgent), "Configure with assistant"},
+			{helpKey(keys.KeyHooks), "Edit worktree hooks"},
+			{helpKey(keys.KeyConfigEditor), "Edit settings"},
 		}},
 		{title: "GitHub PR:", rows: []helpRow{
 			{helpKey(keys.KeyOpenPR), "Open PR in browser"},
-			{helpKey(keys.KeyCopyPR), "Copy PR URL to clipboard"},
+			{helpKey(keys.KeyCopyPR), "Copy PR link"},
 		}},
 		{title: "Tabs:", rows: []helpRow{
-			{helpKey(keys.KeyJumpTab), "Select one of the first nine tabs by number (s opens it, enter attaches)"},
+			{helpKey(keys.KeyJumpTab), "Select tab 1–9 · s open · enter attach"},
 			// The unbounded jump-to-tab prompt comes from #3021; keep the issue
 			// reference in source rather than exposing it in the help overlay.
-			{helpKey(keys.KeyJumpTabPrompt), "Jump to ANY tab by number or name — there is no tab limit"},
+			{helpKey(keys.KeyJumpTabPrompt), "Jump to any tab by number or name"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
-			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
-			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll the current tab preview (navigation mode only)"},
+			{helpKey(keys.KeyCloseTab), "Close tab · agent tab stays"},
+			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll preview in navigation mode"},
 		}},
 		{title: "Full-screen scrolling:", rows: []helpRow{
 			{"Claude", claudeAttachedScrollControls},
 			{"Codex", codexAttachedScrollControls},
 		}},
 		{title: "Other:", rows: []helpRow{
-			{helpKey(keys.KeyQuit), "Quit the application"},
+			{helpKey(keys.KeyQuit), "Quit"},
 		}},
 	}, contentWidth)
 }
@@ -417,9 +419,9 @@ func (h helpTypeInstanceStart) toContent() string {
 		headerStyle.Render("Managing:"),
 		keyStyle.Render(helpKey(keys.KeyEnter))+descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))),
 		keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render("     - Attach to the session full-screen"),
-		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("     - Detach from a full-screen session"),
+		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("     - Leave full-screen"),
 		tabHelp,
-		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Kill (delete) the selected session"),
+		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Permanently delete the session"),
 		"",
 		headerStyle.Render("Actions:"),
 		firstRunActionLine("enter continue · esc close"),
@@ -449,12 +451,12 @@ func (h helpTypeInteractive) toContent() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Interactive pane"),
 		"",
-		descStyle.Render("You are typing into this pane's terminal: every key — including tab —"),
-		descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"),
-		descStyle.Render("keyboard, and the sessions rail stays visible."),
+		descStyle.Render("All keys, including tab, go to the pane."),
+		descStyle.Render("The pane’s keyboard label shows where you type."),
+		descStyle.Render("The sessions rail stays visible."),
 		"",
-		descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to return to navigation."),
-		descStyle.Render("Full-screen attach is still available on ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" (from nav mode)."),
+		descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to navigate."),
+		descStyle.Render("Attach full-screen with ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" in navigation mode."),
 	)
 	return content
 }

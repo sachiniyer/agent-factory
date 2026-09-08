@@ -409,7 +409,7 @@ func watchFleet(d fleetWatchDeps, includeCurrent bool) ([]watchEvent, error) {
 			return events, nil
 		}
 		if d.timeout > 0 && !d.now().Before(start.Add(d.timeout)) {
-			return nil, fmt.Errorf("timed out after %s waiting for any session to change state (%d watched)",
+			return nil, fmt.Errorf("timed out after %s waiting for a session stop-state change or disappearance (%d watched)",
 				d.timeout, len(snapshot))
 		}
 		// Never sleep past the deadline. --interval and --timeout are validated

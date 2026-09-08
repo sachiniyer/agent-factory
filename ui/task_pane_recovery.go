@@ -51,13 +51,13 @@ func (s *TaskPane) renderListRecovery(condition, detail, action string, failed b
 	if body != "" {
 		b.WriteString("\n")
 	}
-	b.WriteString(DialogHintStyle().Render(fitLine("n new · esc back", s.width)))
+	b.WriteString(ActionHint(fitLine("n new · esc back", s.width)))
 	return fitBlockToSize(b.String(), s.width, s.height, footerRows)
 }
 
 func (s *TaskPane) listModeHint() string {
 	if !s.hasFocus {
-		return "enter to focus and edit tasks"
+		return "enter edit tasks"
 	}
 
 	hint := "↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back"
