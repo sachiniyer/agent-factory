@@ -107,10 +107,10 @@ func TestAccountsSectionListsAccountsAndOffersRegistrationPerAgent(t *testing.T)
 // exactly this: there is no account key anywhere in config/, and a row that
 // reads as a config row implies a settable key participating in the precedence
 // chain.
-func TestAccountsSectionSaysItIsNotConfig(t *testing.T) {
+func TestAccountsSectionOffersAgentLogin(t *testing.T) {
 	pane := accountsPane(t, []AccountRow{{Agent: "codex", Name: "work"}}, []string{"codex"})
 	view := pane.String()
-	if !strings.Contains(view, "not config keys") {
+	if !strings.Contains(view, "login flow") {
 		t.Fatalf("the Accounts heading does not distinguish itself from config:\n%s", view)
 	}
 }
@@ -265,11 +265,11 @@ func TestAccountsSectionIsAbsentUntilLoaded(t *testing.T) {
 
 // The selected account explains what enter will do, and says the thing the whole
 // feature rests on: af runs the agent's own flow and never reads the credential.
-func TestSelectedAccountExplainsThatAfNeverReadsTheCredential(t *testing.T) {
+func TestSelectedAccountExplainsHowToLogIn(t *testing.T) {
 	pane := accountsPane(t, []AccountRow{{Agent: "codex", Name: "work"}}, []string{"codex"})
 	selectAccount(t, pane, "codex", "work")
 	view := pane.String()
-	for _, fragment := range []string{"never reads the credential", "own login"} {
+	for _, fragment := range []string{"Log in to codex", "URL and device code"} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("the selected account does not say %q:\n%s", fragment, view)
 		}
@@ -285,7 +285,7 @@ func TestSelectedAccountExplainsThatAfNeverReadsTheCredential(t *testing.T) {
 func TestSelectedLoggedInAccountSaysTheLoginReplacesIt(t *testing.T) {
 	pane := accountsPane(t, []AccountRow{{Agent: "claude", Name: "work", LoggedIn: true}}, []string{"claude"})
 	selectAccount(t, pane, "claude", "work")
-	if !strings.Contains(pane.String(), "replacing it") {
+	if !strings.Contains(pane.String(), "replace it") {
 		t.Fatalf("a logged-in account does not say the login replaces its credential:\n%s", pane.String())
 	}
 }

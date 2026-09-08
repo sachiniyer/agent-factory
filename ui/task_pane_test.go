@@ -314,7 +314,7 @@ func TestTaskPaneWatchTaskEditFooterOmitsRunNow(t *testing.T) {
 	// queuing a doomed run.
 	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
 	assert.False(t, tp.HasPendingTrigger())
-	assert.Contains(t, tp.String(), "not on manual trigger",
+	assert.Contains(t, tp.String(), "not manually",
 		"r on a watch task must explain why manual run is unavailable")
 }
 

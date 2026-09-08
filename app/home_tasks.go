@@ -103,6 +103,9 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	var reloadErr error
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
+		// Like refreshTasks, a successful read clears load errors separately
+		// from replacing the task data and its transient pane state.
+		sp.SetUnavailable(nil)
 		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
 		// Reflow so the new automation grows the rail's section (#1126).

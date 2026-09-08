@@ -206,10 +206,10 @@ func (h *HooksPane) String() string {
 			if h.width > 0 && lipgloss.Width(hint) > h.width {
 				hint = "n add · enter · esc back"
 			}
-			b.WriteString(hintStyle.Render(hint))
+			b.WriteString(ActionHint(hint))
 		}
 	} else {
-		b.WriteString(hintStyle.Render("enter to focus and edit hooks"))
+		b.WriteString(hintStyle.Render("enter edit hooks"))
 	}
 
 	return fitBlockToSize(b.String(), h.width, h.height, 1)

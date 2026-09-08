@@ -157,7 +157,7 @@ func TestGeneralHelpNamesEveryNamingFormField(t *testing.T) {
 		helpKey(keys.KeySetPrompt),
 		helpKey(keys.KeySetBackend),
 		helpKey(keys.KeySetAccount),
-		"initial prompt / backend / account",
+		"prompt · backend · account",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("the general help must name the naming form's %q field; got:\n%s", want, content)
@@ -174,7 +174,7 @@ func TestInstanceStartHelpMentionsFullScreenDetach(t *testing.T) {
 	local := newStartedInstance(t, "local")
 	content := helpStart(local).toContent()
 
-	if !strings.Contains(content, "ctrl-w") || !strings.Contains(content, "Detach from a full-screen session") {
+	if !strings.Contains(content, "ctrl-w") || !strings.Contains(content, "Leave full-screen") {
 		t.Errorf("instance-start help must name the full-screen detach key; got:\n%s", content)
 	}
 }
@@ -315,7 +315,7 @@ func TestHelpAttachOnlyNamesControlsForAgentTab(t *testing.T) {
 func TestGeneralHelpSeparatesPreviewAndAttachedScrolling(t *testing.T) {
 	content := helpTypeGeneral{}.toContent()
 
-	require.Contains(t, content, "Scroll the current tab preview (navigation mode only)")
+	require.Contains(t, content, "Scroll preview in navigation mode")
 	require.Contains(t, content, "Claude")
 	require.Contains(t, content, claudeAttachedScrollControls)
 	require.Contains(t, content, "Codex")
@@ -453,19 +453,19 @@ func TestGeneralHelpWrappedDescriptionsStayOutOfKeyColumnAt80x24(t *testing.T) {
 	lines := strings.Split(xansi.Strip(h.textOverlay.Render()), "\n")
 	var retryLine, continuationLine string
 	for _, line := range lines {
-		if strings.Contains(line, "Retry") {
+		if strings.Contains(line, "Restore ·") {
 			retryLine = line
 		}
-		if strings.Contains(line, "usage limit") {
+		if strings.Contains(line, "last push") {
 			continuationLine = line
 		}
 	}
-	require.NotEmpty(t, retryLine, "the narrow help viewport must contain the retry binding")
-	require.NotEmpty(t, continuationLine, "the retry description must wrap at 80 columns")
+	require.NotEmpty(t, retryLine, "the narrow help viewport must contain the restore binding")
+	require.NotEmpty(t, continuationLine, "the restore description must wrap at 80 columns")
 
 	retryContent := strings.TrimSuffix(strings.TrimPrefix(retryLine, "│"), "│")
 	continuationContent := strings.TrimSuffix(strings.TrimPrefix(continuationLine, "│"), "│")
-	descriptionColumn := strings.Index(retryContent, "Retry")
+	descriptionColumn := strings.Index(retryContent, "Restore")
 	require.GreaterOrEqual(t, descriptionColumn, 0)
 	continuationColumn := len(continuationContent) - len(strings.TrimLeft(continuationContent, " "))
 	require.Equal(t, descriptionColumn, continuationColumn,
@@ -511,9 +511,9 @@ func TestHelpKeyColumnWrapsOnlyTheOutlier(t *testing.T) {
 	narrow := 44
 	sections := []helpSection{{title: "Managing:", rows: []helpRow{
 		{"tab/shift+tab ctrl+r/ctrl+o",
-			"While naming a new session: pick its agent / initial prompt / backend / account"},
-		{"ctrl+u/ctrl+d", "Scroll the current tab preview (navigation mode only)"},
-		{"n", "Create a new session"},
+			"New session: agent · prompt · backend · account"},
+		{"ctrl+u/ctrl+d", "Scroll preview in navigation mode"},
+		{"n", "Create a session"},
 	}}}
 
 	lines := strings.Split(xansi.Strip(renderHelpSections("header", sections, narrow)), "\n")
@@ -529,7 +529,7 @@ func TestHelpKeyColumnWrapsOnlyTheOutlier(t *testing.T) {
 	require.NotEmpty(t, ordinaryRow)
 	require.NotEmpty(t, wideRow)
 
-	require.Contains(t, ordinaryRow, "Scroll the current tab",
+	require.Contains(t, ordinaryRow, "Scroll preview",
 		"the widest ORDINARY key must still fit its column on one line, beside its description")
 	require.NotContains(t, wideRow, "ctrl+o",
 		"the over-cap key must wrap inside its own column rather than widen everyone's")
