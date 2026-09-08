@@ -10713,9 +10713,9 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
 function confirmModal(opts) {
   const copy = {
     kill: {
-      title: `Kill ${opts.sessionTitle}?`,
-      confirmLabel: "Kill",
-      confirmClass: "af-primary",
+      title: `Delete session ${opts.sessionTitle}?`,
+      confirmLabel: "Delete session",
+      confirmClass: "af-danger",
       body: "This permanently destroys the session and prunes its branch. This can't be undone."
     },
     archive: {
