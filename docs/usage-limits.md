@@ -307,7 +307,7 @@ on its own).
 Resume a limit-blocked session immediately from any surface:
 
 - TUI: select it and press **`c`**.
-- Web: select it and click **Retry**.
+- Web: select it and click **Retry limit**.
 - CLI: run `af sessions retry-limit <title>` (with `--repo` when needed).
 
 Every surface calls the same daemon recovery action. It:

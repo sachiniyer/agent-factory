@@ -100,7 +100,7 @@ Against the live SPA served over the daemon's plain-HTTP listener:
 | **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → tasks) and `[` cycles it back (tasks → sessions), the active view tab following each step. |
 | **Tabs (#1592 PR7)** | The tab bar creates a shell tab (`+` / `t`), switches to it (click / `1`-`9`) and shows its distinct PTY output, and deletes it after confirmation (`×` / `w` → Delete tab) — the agent tab stays undeletable. |
 | **Create** | The **+ New** modal creates a session and its row appears in the rail. |
-| **Kill** | The kill confirm removes the session's row. |
+| **Delete session** | The Delete session confirmation removes the session's row. |
 | **Archive** | The archive confirm moves a session into the archived group. |
 
 ## Toolchain boundary

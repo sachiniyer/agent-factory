@@ -432,7 +432,7 @@ export class ConfigPane {
             h(
               "p",
               { class: "af-config-empty" },
-              "No settings are available — use Configure with assistant or check the daemon connection.",
+              "No settings available. Try Configure with assistant.",
             ),
           ];
     // Accounts LAST: the config keys are what this view is for, and a credential

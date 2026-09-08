@@ -41,6 +41,7 @@ for (const operation of ["kill", "archive"]) {
     const card = focusable(() => { focusedAction = false; doc.activeElement = card; });
     let projectionCount = 0;
     const context = {
+      isArchived: () => false, isOffBoxWorkspace: () => false,
       document: doc, CSS: { escape: (value: string) => value },
       getComputedStyle: () => ({ visibility: "visible" }),
       root: { querySelector: (selector: string) => selector.includes("data-session-id")

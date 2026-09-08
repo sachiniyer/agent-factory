@@ -16,12 +16,11 @@
 // innerHTML with markup and no inline handlers, so the daemon's default-src 'self'
 // policy holds.
 
+import { AccountSelection } from "./account_selection.js";
 import type { CreateSessionInput, DirectoryListing } from "./api.js";
 import {
-  AMBIENT_ACCOUNT,
   type AccountChoice,
   accountAgentFor,
-  accountAgentSupported,
   accountChoices,
   accountDefaultFor,
   accountNotice,
@@ -157,22 +156,13 @@ export function newSessionModal(
   accountHint.setAttribute("role", "status");
 
   // The registry as the daemon reports it, and the agent slice currently offered.
-  // null until the fetch lands (or forever, if it fails), which renders the ambient
-  // identity alone — the pre-#3844 behavior.
+  // null means unknown: block while pending, disclose daemon inheritance on failure.
   let accounts: AccountsResponse | null = null;
+  let accountsFailed = false;
   let programCatalog: ProgramCatalog | null = null;
   let accountRows: AccountChoice[] = accountChoices(null, "");
-  // The agent the offered rows currently belong to. Tracked explicitly rather than
-  // read back off a row, because it is what decides whether a re-render may keep the
-  // user's pick — and that decision must not depend on the shape of the list.
-  let accountAgent = "";
-  // Whether the USER decided this field, as opposed to it holding the project
-  // default the daemon reported. The two must be distinguishable, and the select's
-  // value alone cannot do it: the ambient identity IS the empty string, so "chose
-  // ambient" and "not answered yet" are the same value. The registry lands
-  // asynchronously, so without this a preselection arriving after a deliberate pick
-  // would silently replace it — the outcome this field exists to prevent.
-  let accountPicked = false;
+  const accountSelection = new AccountSelection();
+  let programsPending = false;
 
   // Mirrors the chrome's busy flag. An async availability refresh can land at ANY
   // time — including mid-submit — and it must never be the thing that decides
@@ -192,12 +182,15 @@ export function newSessionModal(
   const syncSubmitState = (): void => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
     accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    if (accountSelection.namedChoicePending && !programsPending && (accountsFailed || programCatalog === null)) {
+      accountHint.textContent = "Cannot verify the selected account. Reopen this form to try again.";
+    }
     const choiceLabel = (select: HTMLSelectElement) => (select.selectedOptions[0]?.textContent ?? "Loading…")
       .replace(/^Repo default \((.*)\)$/, "$1 (default)")
-      .replace("Ambient identity (the agent's own login)", "ambient");
+      .replace(/^Use configured default \((.*)\)$/, "$1 (default)");
     // Ambiguity, unavailable choices and explicit overrides must remain in view.
-    const accountNeedsChoice = !!accountHint.textContent || accountPicked
-      || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgent));
+    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked
+      || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)));
     defaults.setSummary([`Program: ${choiceLabel(programSelect)}`, `Backend: ${choiceLabel(backendSelect)}`,
       ...(accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`])]);
     const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
@@ -212,7 +205,8 @@ export function newSessionModal(
     confirmBtn.disabled = busy
       || projects.length === 0
       || !backendSelectable(choices, backendSelect.value)
-      || !accountSelectable(accountRows, accountSelect.value);
+      || !accountSelectable(accountRows, accountSelect.value)
+      || ((accounts === null || programsPending || !accountAgentFor(programSelect.value, programCatalog)) && accountSelection.namedChoicePending);
   };
 
   // Route the chrome's setBusy through the same writer. index.ts drives busy around
@@ -249,35 +243,20 @@ export function newSessionModal(
    *  pick; different agent, back to the ambient identity. */
   const renderAccounts = (): void => {
     const agent = accountAgentFor(programSelect.value, programCatalog);
-    const previous = accountSelect.value;
-    const sameAgent = agent === accountAgent;
-    accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
-    accountAgent = agent;
+    // Wait for both per-project facts before judging whether a choice exists.
+    const knownAccounts = programsPending ? null : accounts;
+    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
+    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
     }
-    if (!sameAgent) {
-      // A different agent means a different registry, so a deliberate pick for the
-      // previous one says nothing about this one.
-      accountPicked = false;
-    }
-    if (accountPicked && accountRows.some((c) => c.value === previous)) {
-      accountSelect.value = previous;
-    } else {
-      // PRESELECT the project default rather than sending nothing and letting the
-      // daemon fill it in (#3386). The session is identical either way; what
-      // changes is that the user sees which identity it will run as, can change it,
-      // and — because the value is now actually sent — the skew check below has
-      // something to compare the created session against.
-      const preselect = accountDefaultFor(accounts, agent);
-      accountSelect.value = accountRows.some((c) => c.value === preselect) ? preselect : AMBIENT_ACCOUNT;
-    }
+    accountSelect.value = selected;
     syncSubmitState();
   };
 
   accountSelect.addEventListener("change", () => {
-    accountPicked = true;
+    accountSelection.pick(accountSelect.value);
     syncSubmitState();
   });
   programSelect.addEventListener("change", renderAccounts);
@@ -305,6 +284,10 @@ export function newSessionModal(
   let loadSeq = 0;
   const loadCatalogsFor = (repoPath: string): void => {
     const seq = ++loadSeq;
+    accounts = null;
+    programsPending = true;
+    accountsFailed = false;
+    renderAccounts();
 
     // The program enum is global, so this is asked even with no project picked —
     // repoPath only sharpens which agent "repo default" resolves to.
@@ -314,6 +297,7 @@ export function newSessionModal(
         if (seq !== loadSeq) {
           return;
         }
+        programsPending = false;
         programCatalog = catalog;
         programs = programChoices(catalog);
         renderPrograms();
@@ -325,6 +309,7 @@ export function newSessionModal(
         // Degrade to "repo default" only — the same contract as the backend field:
         // an unreachable catalog costs the user the choice, never the session, since
         // sending no program is exactly what "repo default" means on the wire.
+        programsPending = false;
         programCatalog = null;
         programs = programChoices(null);
         renderPrograms();
@@ -333,9 +318,8 @@ export function newSessionModal(
     // The registry is the daemon host's, but the DEFAULT it reports is the picked
     // project's (#3386), so this rides the same per-load token as the two catalogs:
     // a slow answer for the project the user just left must not preselect an
-    // account for the one they just picked. A failure is silent by design — the
-    // field keeps the ambient identity alone, which is what every create did before
-    // it existed, so an unreachable registry costs the choice and never the session.
+    // account for the one they just picked. A failed load keeps creation available
+    // but explicitly discloses that the daemon default, if any, will apply.
     void callbacks
       .loadAccounts(repoPath)
       .then((registry) => {
@@ -350,6 +334,7 @@ export function newSessionModal(
           return;
         }
         accounts = null;
+        accountsFailed = true;
         renderAccounts();
       });
 
@@ -433,43 +418,12 @@ export function newSessionModal(
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
       // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
-      // `account` entirely and the session runs on the agent's own login (#3844).
+      // `account` entirely and the daemon applies its default, if any (#3844).
       account: accountSelect.value,
     });
   });
 
   queueMicrotask(() => titleInput.focus());
-  return handle;
-}
-
-/** The send-prompt modal: a textarea whose text is sent to the named session. */
-export function promptModal(
-  sessionTitle: string,
-  callbacks: { onSubmit: (text: string) => void; onCancel: () => void },
-): ModalHandle {
-  const { handle, body } = modalChrome({
-    title: `Send prompt to ${sessionTitle}`,
-    confirmLabel: "Send",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel,
-  });
-
-  const area = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt", rows: 4 });
-  area.setAttribute("aria-label", "Prompt");
-  body.append(area);
-
-  const card = handle.el.firstElementChild as HTMLElement;
-  asForm(card, () => {
-    const text = area.value.trim();
-    if (text === "") {
-      handle.setError("Enter a prompt to send.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit(text);
-  });
-
-  queueMicrotask(() => area.focus());
   return handle;
 }
 
@@ -517,7 +471,7 @@ export function handoffModal(
     h(
       "p",
       { class: "af-modal-text" },
-      "The new agent starts fresh with a summary of the work so far. Same worktree and branch — nothing is discarded.",
+      "Start a new agent with a summary. Keep the worktree and branch.",
     ),
   );
 
@@ -553,10 +507,38 @@ export function handoffModal(
   return handle;
 }
 
+export interface DeletionWorkspace {
+  archived: boolean;
+  offBox: boolean;
+  externalWorktree: boolean;
+  branchCreatedByUs: boolean;
+}
+
+/** Deletion consequences, selected from the same workspace ownership facts as teardown. */
+export function deletionConfirmationBody(opts: DeletionWorkspace): string {
+  if (opts.archived && opts.offBox) {
+    return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
+  }
+  if (opts.archived && !opts.externalWorktree) {
+    return opts.branchCreatedByUs
+      ? "Permanently deletes the session, archived worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Restore instead to keep the session."
+      : "Permanently deletes the session and archived worktree. Your branch and its commits stay. Uncommitted changes are lost. Restore instead to keep the session.";
+  }
+  if (opts.offBox) {
+    return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
+  }
+  if (opts.externalWorktree) {
+    return "Permanently deletes the session record and runtime. Your checkout and branch stay.";
+  }
+  return opts.branchCreatedByUs
+    ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
+    : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.";
+}
+
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; isRoot?: boolean; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -568,19 +550,19 @@ export function confirmModal(
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-danger",
-      body: "This permanently destroys the session and prunes its branch. This can't be undone.",
+      body: deletionConfirmationBody(opts),
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
       confirmLabel: "Archive",
       confirmClass: "af-primary",
-      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later.",
+      body: "Local: move the worktree to the archive. Sandboxes: publish work, then remove the sandbox. Restore anytime.",
     },
     restore: {
       title: `Restore ${opts.sessionTitle}?`,
       confirmLabel: "Restore",
       confirmClass: "af-primary",
-      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail.",
+      body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain.",
     },
   }[opts.action];
 
@@ -629,7 +611,7 @@ export function confirmModal(
  *  the real git repo is untouched, while the durable project registration is
  *  removed. */
 export function confirmDeleteProjectModal(
-  opts: { projectLabel: string; sessionCount: number; onConfirm: () => void; onCancel: () => void },
+  opts: { projectLabel: string; sessionCount: number; inPlaceCount: number; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   const word = opts.sessionCount === 1 ? "session" : "sessions";
   const { handle, body } = modalChrome({
@@ -639,12 +621,18 @@ export function confirmDeleteProjectModal(
     onCancel: opts.onCancel,
   });
 
-  // A registered project with no live sessions (#2456) has nothing to archive — the
-  // delete just drops its registry record. Say so, rather than "Archive 0 sessions".
-  const message =
-    opts.sessionCount === 0
-      ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched — you can add it again anytime."
-      : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`;
+  let message = opts.sessionCount === 0
+    ? "No live sessions to archive. Remove the project; the repo stays and you can add it again."
+    : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  if (opts.inPlaceCount > 0) {
+    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
+    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
+  }
   body.append(h("p", { class: "af-modal-text" }, message));
 
   const card = handle.el.firstElementChild as HTMLElement;
@@ -721,7 +709,7 @@ export function addProjectModal(callbacks: {
       h(
         "div",
         { class: "af-modal-field" },
-        h("span", { class: "af-modal-label" }, "Browse the daemon host"),
+        h("span", { class: "af-modal-label" }, "Browse host"),
         picker.el,
       ),
     );
@@ -732,7 +720,7 @@ export function addProjectModal(callbacks: {
     h(
       "p",
       { class: "af-modal-hint" },
-      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into.",
+      "Enter an absolute repo path on the daemon host (~ works).",
     ),
   );
 
@@ -744,7 +732,7 @@ export function addProjectModal(callbacks: {
   asForm(card, () => {
     const path = pathInput.value.trim();
     if (path === "") {
-      handle.setError("Enter a repository path, or pick one above.");
+      handle.setError("Enter or choose a repo path.");
       return;
     }
     handle.setError(null);
@@ -790,7 +778,7 @@ export function projectLabel(root: string): string {
 /** Target-specific task deletion; failures retain the open confirmation. */
 export function removeTaskModal(name: string, onConfirm: () => void, onCancel: () => void): ModalHandle {
   const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
-  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "This deletes the task and stops future runs. Existing sessions are kept."));
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
   asForm(handle.el.firstElementChild as HTMLElement, onConfirm);
   return handle;
 }
