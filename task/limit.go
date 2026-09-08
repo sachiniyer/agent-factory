@@ -281,13 +281,12 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 		}
 		rejected = append(rejected, m[1])
 	}
-	if len(rejected) > 0 && len(rejected) == len(candidates) {
-		warnClaudeTimezoneOnce(content, rejected, loc)
-	}
-
 	hour, minute, ok := parseClockTime(reset)
 	if !ok {
 		return time.Time{}, false
+	}
+	if len(rejected) > 0 && len(rejected) == len(candidates) {
+		warnClaudeTimezoneOnce(content, rejected, loc)
 	}
 
 	// Explicit calendar date wins (weekly variant that carries a date).

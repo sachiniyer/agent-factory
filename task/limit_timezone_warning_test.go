@@ -110,3 +110,40 @@ func TestClaudeResetTimezoneWarningKey(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeResetLimitTimezoneWarningRequiresClock(t *testing.T) {
+	resetTimezoneWarningsForTest(t)
+	var warnings bytes.Buffer
+	previous := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	now := time.Date(2026, 9, 7, 11, 0, 0, 0, time.FixedZone("daemon", -4*60*60))
+	const firstLine = "Claude usage limit reached.\n"
+	detector := NewLimitDetector(nil)
+	hit, reset, parsed := detector.Check(firstLine+"Your limit will reset when available (XYZ)", "claude", now)
+	if !hit || parsed || !reset.IsZero() {
+		t.Fatalf("incomplete banner: hit=%v parsed=%v reset=%s", hit, parsed, reset)
+	}
+	if warnings.Len() != 0 {
+		t.Errorf("incomplete clock must not warn: %s", &warnings)
+	}
+	claudeTimezoneWarnings.mu.Lock()
+	claimed := len(claudeTimezoneWarnings.seen)
+	claudeTimezoneWarnings.mu.Unlock()
+	if claimed != 0 {
+		t.Errorf("incomplete clock claimed %d warning keys; want 0", claimed)
+	}
+
+	// Keep the first line and rejected candidates identical, completing only the
+	// clock. The incomplete capture must not suppress this actual fallback.
+	warnings.Reset()
+	for i := 0; i < 2; i++ {
+		hit, reset, parsed = detector.Check(firstLine+"Your limit will reset at 5pm (XYZ)", "claude", now)
+		if !hit || !parsed || reset.Format(time.RFC3339) != "2026-09-07T21:00:00Z" {
+			t.Fatalf("complete banner: hit=%v parsed=%v reset=%s", hit, parsed, reset)
+		}
+		if got := strings.Count(warnings.String(), "\n"); got != 1 {
+			t.Errorf("complete capture %d: got %d warnings; want 1", i, got)
+		}
+	}
+}
