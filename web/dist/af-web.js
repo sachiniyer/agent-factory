@@ -7892,18 +7892,28 @@ function accountAgentSupported(accounts, agent) {
   }
   return accounts.agents.includes(agent);
 }
-function accountChoices(accounts, agent) {
+function accountChoices(accounts, agent, failed = false) {
+  if (accounts === null) {
+    return [{
+      value: AMBIENT_ACCOUNT,
+      agent,
+      projectDefault: false,
+      label: failed ? "Accounts unavailable" : "Loading accounts\u2026",
+      blocked: failed ? "" : "Wait for the account policy to load.",
+      note: failed ? "Accounts could not be loaded. The daemon default, if any, applies." : ""
+    }];
+  }
   const choices = [
     {
       value: AMBIENT_ACCOUNT,
-      label: accountDefaultFor(accounts, agent) ? `Use configured default (${accountDefaultFor(accounts, agent)})` : "Use agent login (no default)",
+      label: agent === "" ? "Use daemon default" : accountDefaultFor(accounts, agent) ? `Use configured default (${accountDefaultFor(accounts, agent)})` : "Use agent login (no default)",
       agent,
       blocked: "",
-      note: "",
+      note: agent === "" ? "The daemon default, if any, applies." : "",
       projectDefault: false
     }
   ];
-  if (accounts === null || agent === "") {
+  if (agent === "" || !accountAgentSupported(accounts, agent)) {
     return choices;
   }
   const fallback = accountDefaultFor(accounts, agent);
@@ -10487,6 +10497,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
   accountHint.setAttribute("role", "status");
   let accounts = null;
+  let accountsFailed = false;
   let programCatalog = null;
   let accountRows = accountChoices(null, "");
   let accountAgent = "";
@@ -10536,7 +10547,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     const agent = accountAgentFor(programSelect.value, programCatalog);
     const previous = accountSelect.value;
     const sameAgent = agent === accountAgent;
-    accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
+    accountRows = accountChoices(accounts, agent, accountsFailed);
     accountAgent = agent;
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
@@ -10570,6 +10581,9 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   let loadSeq = 0;
   const loadCatalogsFor = (repoPath) => {
     const seq = ++loadSeq;
+    accounts = null;
+    accountsFailed = false;
+    renderAccounts();
     void callbacks.loadPrograms(repoPath).then((catalog) => {
       if (seq !== loadSeq) {
         return;
@@ -10596,6 +10610,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
         return;
       }
       accounts = null;
+      accountsFailed = true;
       renderAccounts();
     });
     if (repoPath === "") {
@@ -10721,7 +10736,7 @@ function confirmModal(opts) {
       title: `Delete session ${opts.sessionTitle}?`,
       confirmLabel: "Delete session",
       confirmClass: "af-danger",
-      body: opts.externalWorktree ? "Permanently deletes the session record and runtime. Your checkout and branch stay." : "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
+      body: opts.externalWorktree ? "Permanently deletes the session record and runtime. Your checkout and branch stay." : opts.branchCreatedByUs ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them." : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them."
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
@@ -16576,6 +16591,7 @@ function openConfirm(action, session) {
       action,
       sessionTitle: target.title,
       externalWorktree: session.worktree?.external_worktree === true,
+      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {

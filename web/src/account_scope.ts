@@ -36,8 +36,8 @@ import type { AccountsResponse, SessionData } from "./types.js";
 /** The sentinel value of the "ambient identity" choice — the identity every
  *  session ran as before this field existed. It is the EMPTY STRING on purpose:
  *  it is what createSession omits on, so picking it sends no account and the
- *  agent's own ambient credential decides, exactly as leaving `--account` off
- *  does. Any non-empty sentinel here would eventually be sent as a literal
+ *  daemon applies the configured default, if any, exactly as leaving `--account`
+ *  off does. Any non-empty sentinel here would eventually be sent as a literal
  *  account name. */
 export const AMBIENT_ACCOUNT = "";
 
@@ -122,20 +122,27 @@ export function accountAgentSupported(accounts: AccountsResponse | null, agent: 
  * account offered to a claude session is a create that fails, or worse, one that
  * quietly does not.
  */
-export function accountChoices(accounts: AccountsResponse | null, agent: string): AccountChoice[] {
+export function accountChoices(accounts: AccountsResponse | null, agent: string, failed = false): AccountChoice[] {
+  if (accounts === null) {
+    return [{ value: AMBIENT_ACCOUNT, agent, projectDefault: false,
+      label: failed ? "Accounts unavailable" : "Loading accounts…",
+      blocked: failed ? "" : "Wait for the account policy to load.",
+      note: failed ? "Accounts could not be loaded. The daemon default, if any, applies." : "",
+    }];
+  }
   const choices: AccountChoice[] = [
     {
       value: AMBIENT_ACCOUNT,
-      label: accountDefaultFor(accounts, agent)
+      label: agent === "" ? "Use daemon default" : accountDefaultFor(accounts, agent)
         ? `Use configured default (${accountDefaultFor(accounts, agent)})`
         : "Use agent login (no default)",
       agent,
       blocked: "",
-      note: "",
+      note: agent === "" ? "The daemon default, if any, applies." : "",
       projectDefault: false,
     },
   ];
-  if (accounts === null || agent === "") {
+  if (agent === "" || !accountAgentSupported(accounts, agent)) {
     return choices;
   }
   const fallback = accountDefaultFor(accounts, agent);

@@ -11291,8 +11291,8 @@ test("320px focused keybar keeps its last button inside the viewport", async ({ 
   }
 });
 
-for (const external of [true, false]) {
-  test(`session deletion ownership disclosure: external=${external}`, async ({ browser }) => {
+for (const [external, branchCreated] of [[true, true], [false, false], [false, true], [false, undefined]]) {
+  test(`session deletion ownership disclosure: external=${external}, branchCreated=${branchCreated}`, async ({ browser }) => {
     const ctx = await browser.newContext();
     try {
       const p = await ctx.newPage();
@@ -11301,7 +11301,10 @@ for (const external of [true, false]) {
         const response = await route.fetch();
         const body = await response.json();
         for (const session of body.data.instances) {
-          if (session.worktree) session.worktree.external_worktree = external;
+          if (session.worktree) {
+            session.worktree.external_worktree = external;
+            session.worktree.branch_created_by_us = branchCreated;
+          }
         }
         await route.fulfill({ json: body });
       });
@@ -11316,6 +11319,11 @@ for (const external of [true, false]) {
         await expect(modal).toContainText("checkout and branch stay");
         await expect(modal).not.toContainText("Archive");
         await expect(modal).not.toContainText("are lost");
+      } else if (!branchCreated) {
+        await expect(modal).toContainText("worktree");
+        await expect(modal).toContainText("branch and its commits stay");
+        await expect(modal).toContainText("Uncommitted changes are lost");
+        await expect(modal).not.toContainText("unpushed commits are lost");
       } else {
         await expect(modal).toContainText("Uncommitted changes and unpushed commits are lost.");
         await expect(modal).toContainText("Archive to keep them.");

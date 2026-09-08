@@ -199,3 +199,46 @@ Read the container captures individually:
 The 320px light/dark keybars and phone keyboard/create captures were also read;
 the Arrows control fits within the viewport. Unrelated fixture capture drift was
 not copied into the committed goldens.
+### Round four: ownership and unknown account policy
+
+Deletion copy now follows both daemon ownership flags. A missing legacy
+`branch_created_by_us` flag preserves the branch, matching `session/instance_data.go`.
+The external-checkout and af-created-branch variants remain unchanged.
+
+The form now disables Create while ListAccounts is pending, including after a
+project switch. If the request fails, Create remains available with an explicit
+notice that the daemon default, if any, applies. The form claims no default only when a loaded registry
+reports none for the resolved agent. These are form-state changes;
+no persisted data or request shape changes.
+
+| Surface/state | Before | After |
+| --- | --- | --- |
+| Delete session · af-owned worktree, preserved branch | Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them. | Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them. |
+| Account · pending | Use agent login (no default) | Loading accounts… |
+| Account · pending hint | — | Wait for the account policy to load. |
+| Account · failed | Use agent login (no default) | Accounts unavailable |
+| Account · failed hint | — | Accounts could not be loaded. The daemon default, if any, applies. |
+| Account · program unresolved | Use agent login (no default) | Use daemon default |
+| Account · program unresolved hint | — | The daemon default, if any, applies. |
+
+Regression evidence: the account unit tests went red with actual
+`Use agent login (no default)` versus expected `Loading accounts…` and
+`Accounts unavailable`; the container ownership tests went red for both false
+and missing branch-ownership flags, expecting `branch and its commits stay`
+but receiving the branch-loss warning. The initial account browser reproduction
+also had a wrong field selector (`Title` versus `Session title`), corrected before
+the full run; those selector timeouts are not product-failure evidence.
+
+Validation: full unfiltered container web selftest **217 passed (6.6m)**,
+unit tests **750 passed**, typecheck/build passed, design suite **5 passed**, and
+the three-run 1,000-session performance budget passed. Container runs were serial
+and observed load1 < 110 and fewer than four running containers before starting.
+
+Read the recaptured `kill-confirmation.png` and `kill-confirmation-dark.png`
+individually: both exactly match the committed goldens because their fixture has
+an af-created branch; the danger action, neutral Cancel, full loss disclosure,
+and wrapping remain intact. Read `create-compact.png` and
+`create-compact-dark.png`: loaded account choices and the primary action remain
+visible without a stale loading/failure message. No golden was re-baselined for
+unrelated edge-pixel capture differences. The four ownership browser cases cover
+external, preserved, created, and missing legacy branch flags.

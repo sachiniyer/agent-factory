@@ -9,7 +9,10 @@ for (const theme of ["light", "dark"] as const) {
       const response = await route.fetch();
       const body = await response.json();
       for (const session of body.data.instances) {
-        if (session.worktree) session.worktree.external_worktree = false;
+        if (session.worktree) {
+          session.worktree.external_worktree = false;
+          session.worktree.branch_created_by_us = true;
+        }
       }
       await route.fulfill({ json: body });
     });

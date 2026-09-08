@@ -21,7 +21,6 @@ import {
   AMBIENT_ACCOUNT,
   type AccountChoice,
   accountAgentFor,
-  accountAgentSupported,
   accountChoices,
   accountDefaultFor,
   accountNotice,
@@ -157,9 +156,9 @@ export function newSessionModal(
   accountHint.setAttribute("role", "status");
 
   // The registry as the daemon reports it, and the agent slice currently offered.
-  // null until the fetch lands (or forever, if it fails), which renders the ambient
-  // identity alone — the pre-#3844 behavior.
+  // null means unknown: block while pending, disclose daemon inheritance on failure.
   let accounts: AccountsResponse | null = null;
+  let accountsFailed = false;
   let programCatalog: ProgramCatalog | null = null;
   let accountRows: AccountChoice[] = accountChoices(null, "");
   // The agent the offered rows currently belong to. Tracked explicitly rather than
@@ -251,7 +250,7 @@ export function newSessionModal(
     const agent = accountAgentFor(programSelect.value, programCatalog);
     const previous = accountSelect.value;
     const sameAgent = agent === accountAgent;
-    accountRows = accountAgentSupported(accounts, agent) ? accountChoices(accounts, agent) : accountChoices(null, agent);
+    accountRows = accountChoices(accounts, agent, accountsFailed);
     accountAgent = agent;
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
@@ -305,6 +304,9 @@ export function newSessionModal(
   let loadSeq = 0;
   const loadCatalogsFor = (repoPath: string): void => {
     const seq = ++loadSeq;
+    accounts = null;
+    accountsFailed = false;
+    renderAccounts();
 
     // The program enum is global, so this is asked even with no project picked —
     // repoPath only sharpens which agent "repo default" resolves to.
@@ -333,9 +335,8 @@ export function newSessionModal(
     // The registry is the daemon host's, but the DEFAULT it reports is the picked
     // project's (#3386), so this rides the same per-load token as the two catalogs:
     // a slow answer for the project the user just left must not preselect an
-    // account for the one they just picked. A failure is silent by design — the
-    // field keeps the ambient identity alone, which is what every create did before
-    // it existed, so an unreachable registry costs the choice and never the session.
+    // account for the one they just picked. A failed load keeps creation available
+    // but explicitly discloses that the daemon default, if any, will apply.
     void callbacks
       .loadAccounts(repoPath)
       .then((registry) => {
@@ -350,6 +351,7 @@ export function newSessionModal(
           return;
         }
         accounts = null;
+        accountsFailed = true;
         renderAccounts();
       });
 
@@ -525,7 +527,7 @@ export function handoffModal(
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; externalWorktree: boolean; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -539,7 +541,9 @@ export function confirmModal(
       confirmClass: "af-danger",
       body: opts.externalWorktree
         ? "Permanently deletes the session record and runtime. Your checkout and branch stay."
-        : "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them.",
+        : opts.branchCreatedByUs
+          ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
+          : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.",
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,

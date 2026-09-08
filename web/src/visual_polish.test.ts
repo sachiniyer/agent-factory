@@ -8,9 +8,12 @@ test("lifecycle confirmation copy fits a 160-character reading budget", () => {
   const lifecycle = source.slice(source.indexOf("const copy = {"), source.indexOf("}[opts.action]"));
   const bodies = [...lifecycle.matchAll(/body:([\s\S]*?)(?=\n    },)/g)]
     .flatMap(match => [...match[1].matchAll(/"([^"]+)"/g)].map(literal => literal[1]));
-  assert.equal(bodies.length, 4);
+  assert.equal(bodies.length, 5);
   for (const body of bodies) assert.ok([...body].length <= 160, `${[...body].length} characters: ${body}`);
-  const [external, owned, archive, restore] = bodies;
+  const [external, owned, preserved, archive, restore] = bodies;
+  assert.match(preserved, /branch and its commits stay/);
+  assert.match(preserved, /Uncommitted changes are lost/);
+  assert.doesNotMatch(preserved, /unpushed commits are lost/);
   assert.match(external, /session record and runtime/);
   assert.match(external, /checkout and branch stay/);
   assert.doesNotMatch(external, /Archive|are lost/);

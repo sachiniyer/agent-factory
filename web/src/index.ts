@@ -840,6 +840,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
       action,
       sessionTitle: target.title,
       externalWorktree: session.worktree?.external_worktree === true,
+      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
