@@ -8,8 +8,10 @@ These are **deterministic app-model driver captures**, not recordings of a live
 daemon. `app/recovery_test.go` drives the real `home.Update` and `home.View`
 paths, injects rejected mutations, and checks that session and task input
 survives. The SVGs faithfully convert the resulting ANSI cell grid. Matching
-SVG goldens in `app/testdata/recovery` make geometry, copy, weight and colour
-changes reviewable in tests. Existing surrounding TUI chrome is outside P4.
+SVG and ANSI goldens in `app/testdata/recovery` are both compared byte-for-byte
+by `TestRecoveryDriverScenes`, making geometry, copy, weight, colour and terminal
+escape sequences reviewable in tests. The 14 scenes in both themes have 28
+`.svg`/`.ansi` pairs. Existing surrounding TUI chrome is outside P4.
 The zero-task and task-load-failure scenes keep the task manager's `Tasks`
 title and a pinned `n new · esc back` hint containing only live actions.
 
@@ -45,7 +47,21 @@ An async create failure while another form is open preserves that newer form and
 retains the failed draft for the next create in its original project. Background
 snapshot failures retain loaded sessions and retry automatically.
 
-To verify, run `scripts/testbox.sh test ./app -run TestRecovery` and
-`scripts/testbox.sh scenario scripts/tui-3915-scenario.sh`. To recapture, set
-`AF_TUI_RECOVERY_CAPTURE` to an output directory **inside** the testbox and run
-the recovery tests; inspect the SVGs before replacing both gallery and goldens.
+To verify, run `scripts/testbox.sh test ./app -run 'TestRecovery' -count=1` and
+`scripts/testbox.sh scenario scripts/tui-3915-scenario.sh`.
+
+To recapture, run the following from the writable source copy **inside** an
+isolated [testbox sandbox](../dev/container-testing.md):
+
+```sh
+AF_TUI_RECOVERY_CAPTURE=/tmp/recovery-stills \
+go test ./app -run 'TestRecoveryDriverScenes' -count=1
+```
+
+Capture mode writes both `<scene>-<theme>.svg` and `<scene>-<theme>.ansi` to
+that directory and skips golden comparisons. Copy the directory out before the
+sandbox exits. Inspect every SVG and ANSI diff, then replace both halves in
+`app/testdata/recovery` and the gallery's `docs/assets/recovery/tui-model-driver`
+as needed. Keep the `.gitattributes` ANSI whitespace rule: terminal cell padding
+and trailing viewport rows are part of the asserted frame. Verify again without
+`AF_TUI_RECOVERY_CAPTURE` so the test checks the committed pairs.
