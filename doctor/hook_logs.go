@@ -41,6 +41,8 @@ func checkHookLogs(report *Report, dir string) {
 		report.Pass(sectionConfig, "hook logs", "not present; created on demand at "+dir)
 		return
 	}
+	// Lookup/resolution errors concern creation until a nested scan says otherwise.
+	creationPath := true
 	var total int64
 	var scanDir string
 	if err == nil {
@@ -55,6 +57,7 @@ func checkHookLogs(report *Report, dir string) {
 				return nil // A completed hook or concurrent retention pass removed it.
 			}
 			if walkErr != nil {
+				creationPath = path == scanDir
 				return walkErr
 			}
 			if !entry.Type().IsRegular() {
@@ -65,6 +68,7 @@ func checkHookLogs(report *Report, dir string) {
 				return nil
 			}
 			if err != nil {
+				creationPath = path == scanDir
 				return err
 			}
 			if info.Mode().IsRegular() {
@@ -75,7 +79,7 @@ func checkHookLogs(report *Report, dir string) {
 	}
 	if err != nil {
 		report.markIncomplete("hook logs")
-		if failHookLogPermission(report, dir, "", err) {
+		if creationPath && failHookLogPermission(report, dir, "", err) {
 			return
 		}
 		report.Warn(sectionConfig, "hook logs", fmt.Sprintf("cannot measure %s: %v", dir, err),
@@ -143,8 +147,8 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 	}
 }
 
-// Use one classifier at both error exits so later Stat, symlink resolution,
-// and WalkDir failures cannot bypass actionable permission reporting.
+// Classify creation-path permissions at both error exits. Nested measurement
+// failures bypass this classifier because they do not prevent new hook logs.
 func failHookLogPermission(report *Report, dir, blocking string, err error) bool {
 	if !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.EROFS) {
 		return false

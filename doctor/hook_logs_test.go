@@ -92,22 +92,28 @@ func TestHomeHealthHookLogsUnreadableChildIsIncomplete(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can read a directory with mode 0000")
 	}
-	home := t.TempDir()
-	locked := filepath.Join(home, "logs", "hooks", "unreadable")
-	require.NoError(t, os.MkdirAll(locked, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(locked, "output.log"), []byte("hidden output"), 0o600))
-	require.NoError(t, os.Chmod(locked, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
-	report := &Report{}
-	checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
-	row := findCheck(t, report, "hook logs")
-	require.Equal(t, StatusFail, row.Status)
-	require.True(t, row.Problem)
-	require.Contains(t, row.Detail, locked)
-	require.Equal(t, []string{"hook logs"}, report.Incomplete)
-	summary := BuildJSONReport(report, false, false).Summary
-	require.Equal(t, []string{"hook logs"}, summary.Incomplete)
-	require.Equal(t, 1, summary.Unresolved)
+	for _, mode := range []os.FileMode{0o000, 0o400} {
+		t.Run(mode.String(), func(t *testing.T) {
+			home := t.TempDir()
+			locked := filepath.Join(home, "logs", "hooks", "unreadable")
+			require.NoError(t, os.MkdirAll(locked, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(locked, "output.log"), []byte("hidden output"), 0o600))
+			require.NoError(t, os.Chmod(locked, mode))
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+			report := &Report{}
+			checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
+			row := findCheck(t, report, "hook logs")
+			require.Equal(t, StatusWarn, row.Status)
+			require.False(t, row.Problem)
+			require.Contains(t, row.Detail, locked)
+			require.Contains(t, row.Detail, "cannot measure")
+			require.Equal(t, []string{"hook logs"}, report.Incomplete)
+			summary := BuildJSONReport(report, false, false).Summary
+			require.Equal(t, []string{"hook logs"}, summary.Incomplete)
+			require.Zero(t, summary.Unresolved)
+
+		})
+	}
 }
 
 func TestHomeHealthHookLogsSymlinkedRoot(t *testing.T) {
