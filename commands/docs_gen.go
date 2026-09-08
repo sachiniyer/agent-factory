@@ -231,7 +231,9 @@ func writeAPIReference(path string) error {
 		"See the [response envelope contract](../http-api.md#response-envelope) for details.\n\n")
 
 	b.WriteString("Session snapshot `tabs[]` records include `web_proxied` for web tabs: " +
-		"`true` means use the daemon proxy, `false` means iframe the target directly. " +
+		"`true` means use the daemon proxy, `false` means the daemon will not proxy the target. " +
+		"Before direct navigation, clients must also check browser URL canonicalization: " +
+		"a target that still resolves to loopback must be blocked, not opened on the viewer’s machine. " +
 		"It is derived by `session.IsLoopbackWebTarget`, the same predicate the proxy checks; " +
 		"clients should use this decision rather than classify the URL themselves. " +
 		"Non-web tabs omit it, and clients of older daemons may fall back when it is absent.\n\n")

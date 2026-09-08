@@ -37,12 +37,15 @@ func TestWebLoopbackParity(t *testing.T) {
 	raw, err := os.ReadFile("../parity/web-loopback.json")
 	require.NoError(t, err)
 	var vectors []struct {
-		Host    string
-		Proxied bool
+		Host         string
+		Proxied      bool
+		DirectUnsafe bool `json:"direct_unsafe"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &vectors))
 	for _, v := range vectors {
-		require.Equal(t, v.Proxied, IsLoopbackWebTarget("http://"+v.Host+"/"), v.Host)
+		target := "http://" + v.Host + "/"
+		require.Equal(t, v.Proxied, IsLoopbackWebTarget(target), v.Host)
+		require.Equal(t, v.DirectUnsafe, !v.Proxied && webTargetHostIsBrowserLoopbackShorthand(target), v.Host)
 	}
 }
 

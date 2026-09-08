@@ -30,6 +30,25 @@ export function iframeIsProxied(spec: IframeSpec): boolean {
   return spec.web_proxied ?? (spec.target !== "" && isLoopbackWebUrl(spec.target));
 }
 
+/** A refused proxy target must not fall through to the viewer's loopback.
+ * The daemon owns proxy eligibility; browser parsing owns direct-navigation safety. */
+export function iframeRoute(spec: IframeSpec): "proxied" | "direct" | "blocked" {
+  if (iframeIsProxied(spec)) return "proxied";
+  if (spec.target === "") return "direct"; // existing missing-URL state
+  try {
+    return isLoopbackHost(new URL(spec.target).hostname) ? "blocked" : "direct";
+  } catch {
+    return "blocked"; // an invalid URL is not provably safe to open directly
+  }
+}
+
+export function blockedWebTargetMessage(target: string): string {
+  const authority = target.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i)?.[1] ?? "";
+  const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+  const host = hostPort.startsWith("[") ? hostPort.slice(0, hostPort.indexOf("]") + 1) : hostPort.split(":")[0];
+  return `Cannot open web target ${host || "(invalid URL)"} safely: the daemon cannot proxy it, and opening it directly could reach your own machine. Recreate the tab with a canonical workspace URL.`;
+}
+
 /** The stable identity of what an iframe pane is showing, used to decide whether a
  *  reconcile must rebuild the frame. It must NOT change across reconciles of an
  *  unchanged tab: a rebuild reloads the iframe, dropping a dev server's in-page

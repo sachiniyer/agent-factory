@@ -61,6 +61,8 @@ import {
   canUsePreviewOrigin,
   iframeIdentity,
   iframeIsProxied,
+  iframeRoute,
+  blockedWebTargetMessage,
   type IframeSpec,
   nextReloadNonce,
   paneAddressUsesOrdinal,
@@ -961,6 +963,16 @@ export class SplitView {
     const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
 
     const wrap = el("div", "af-webpane");
+    if (iframeRoute(spec) === "blocked") {
+      const refusal = el("div", "af-webpane-fallback af-webpane-dead");
+      const message = el("div", "af-webpane-fallback-msg");
+      message.textContent = blockedWebTargetMessage(target);
+      refusal.append(message);
+      wrap.append(refusal);
+      pane.host.replaceChildren(wrap);
+      pane.webDispose = null;
+      return;
+    }
 
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");

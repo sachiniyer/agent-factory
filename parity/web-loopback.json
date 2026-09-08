@@ -1,118 +1,147 @@
 [
   {
     "host": "localhost",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "localhost.",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "app.localhost",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "deep.app.localhost.",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "APP.LOCALHOST",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "127.0.0.1",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "127.255.255.255",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "127.0.0.1.",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "[::1]",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "[0:0:0:0:0:0:0:1]",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "[::ffff:7f00:1]",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "[::ffff:127.0.0.1]",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "[::ffff:7fff:ffff]",
-    "proxied": true
+    "proxied": true,
+    "direct_unsafe": false
   },
   {
     "host": "example.com",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "127.example.com",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "localhost.example",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "localhost..",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "app.localhost..",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "128.0.0.1",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "0.0.0.0",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "[::]",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "[::ffff:8000:1]",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "[::127.0.0.1]",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   },
   {
     "host": "127.1",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": true
   },
   {
     "host": "2130706433",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": true
   },
   {
     "host": "0177.0.0.1",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": true
   },
   {
     "host": "0x7f000001",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": true
   },
   {
     "host": "127.00.0.1",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": true
   },
   {
     "host": "127.0.0.256",
-    "proxied": false
+    "proxied": false,
+    "direct_unsafe": false
   }
 ]

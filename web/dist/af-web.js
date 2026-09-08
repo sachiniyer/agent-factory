@@ -11750,6 +11750,21 @@ function iframeIsProxied(spec) {
   }
   return spec.web_proxied ?? (spec.target !== "" && isLoopbackWebUrl(spec.target));
 }
+function iframeRoute(spec) {
+  if (iframeIsProxied(spec)) return "proxied";
+  if (spec.target === "") return "direct";
+  try {
+    return isLoopbackHost(new URL(spec.target).hostname) ? "blocked" : "direct";
+  } catch {
+    return "blocked";
+  }
+}
+function blockedWebTargetMessage(target) {
+  const authority = target.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i)?.[1] ?? "";
+  const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+  const host = hostPort.startsWith("[") ? hostPort.slice(0, hostPort.indexOf("]") + 1) : hostPort.split(":")[0];
+  return `Cannot open web target ${host || "(invalid URL)"} safely: the daemon cannot proxy it, and opening it directly could reach your own machine. Recreate the tab with a canonical workspace URL.`;
+}
 function iframeIdentity(spec) {
   return spec.kind === TabKind.VSCode ? " vscode" : spec.target;
 }
@@ -12442,6 +12457,16 @@ var SplitView = class {
     const src = this.archived ? "" : proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     const wrap = el("div", "af-webpane");
+    if (iframeRoute(spec) === "blocked") {
+      const refusal = el("div", "af-webpane-fallback af-webpane-dead");
+      const message = el("div", "af-webpane-fallback-msg");
+      message.textContent = blockedWebTargetMessage(target);
+      refusal.append(message);
+      wrap.append(refusal);
+      pane.host.replaceChildren(wrap);
+      pane.webDispose = null;
+      return;
+    }
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
     reload.type = "button";
