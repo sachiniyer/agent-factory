@@ -33,8 +33,10 @@ func TestHandoffAccountReadinessFailureBecomesInert(t *testing.T) {
 	backend := &accountReadinessGoneBackend{limitResumeBackend: base}
 	inst.SetBackend(backend)
 	inst.ClearLimitReached()
-	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	resp, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
 	require.ErrorIs(t, err, task.ErrAgentReadiness)
+	require.True(t, isMutationCommitted(err))
+	require.Equal(t, "personal", resp.ToAccount)
 	require.True(t, inst.StartupStateUnknown())
 	require.NotNil(t, persistedInstanceByTitle(t, repo, inst.Title).PendingAccountSwap)
 	_, beforeRespawns, _ := backend.snapshot()
@@ -140,8 +142,10 @@ func TestHandoffAccountReadinessLimitRetainsMission(t *testing.T) {
 	b := &accountReadinessBackend{limitResumeBackend: base, previewed: make(chan struct{}), release: make(chan struct{}), limited: true}
 	close(b.release)
 	inst.SetBackend(b)
-	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	resp, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
 	require.Error(t, err)
+	require.True(t, isMutationCommitted(err))
+	require.Equal(t, "personal", resp.ToAccount)
 	_, _, prompts := base.snapshot()
 	require.Empty(t, prompts)
 	saved := persistedInstanceByTitle(t, repo, inst.Title)

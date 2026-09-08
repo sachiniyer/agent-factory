@@ -454,13 +454,26 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 // resumeFromLimitOutcome calls this body directly; the auto-resume scheduler's
 // resumeLimitedSession reaches it through resumeFromLimitLockedWithAccount. Both
 // take the two locks before calling in, so this body never acquires either itself.
-func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap) (resumeFromLimitOutcome, error) {
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap) (outcome resumeFromLimitOutcome, resultErr error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
 	var settleErr error
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
 	manual := accountSwap != nil && accountSwap.manual
+	identityCommitted := accountSwap != nil && accountSwap.alreadySet
+	defer func() {
+		if resultErr == nil || !manual || !identityCommitted || isMutationCommitted(resultErr) {
+			return
+		}
+		// A successful identity checkpoint is already an externally visible
+		// mutation even when startup, readiness, or mission delivery later fails.
+		// Preserve that distinction so every client keeps the resolved identities
+		// and warns against treating this as an untouched, freely retryable request.
+		resultErr = &mutationCommittedError{err: fmt.Errorf(
+			"account handoff for %q committed %s, but startup or mission delivery did not complete; inspect the reported failure before retrying: %w",
+			requestedTitle, accountSwapIdentity(accountSwap.agent, accountSwap.to), resultErr)}
+	}()
 	originalLiveness := instance.GetLiveness()
 	restorePendingLiveness := func(resetAt time.Time) error {
 		if manual && (originalLiveness == session.LiveRunning || originalLiveness == session.LiveReady) {
@@ -594,6 +607,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			accountSwap = nil
 			releaseAccountSwapFences()
 		} else {
+			identityCommitted = true
 			releaseAccountSwapFences()
 			forceRespawn = true
 		}

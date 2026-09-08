@@ -42,6 +42,7 @@ func TestHandoffAccountPartialStopRecordsLostRecovery(t *testing.T) {
 	require.True(t, inst.TabAlive(1))
 	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
 	require.ErrorContains(t, err, "sibling teardown refused")
+	require.False(t, isMutationCommitted(err))
 	require.False(t, inst.TabAlive(0), "the agent stopped before the sibling refused teardown")
 	require.True(t, inst.TabAlive(1))
 	require.Equal(t, session.LiveLost, inst.GetLiveness())

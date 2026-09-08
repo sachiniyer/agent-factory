@@ -863,7 +863,12 @@ for (const scoped of [true, false]) {
         { agent: "codex", name: "personal", dir: "", logged_in: true, registration_only: false },
       ] }, error: null } })
       : route.fulfill({ status: 500, json: { data: null, error: { message: "registry unreadable" } } }));
-    await page.route("**/v1/HandoffSession", route => route.fulfill({ json: { data: { ok: true, from: "claude", to: "codex" }, error: null } }));
+    await page.route("**/v1/HandoffSession", route => route.fulfill({ json: { data: {
+      ok: true,
+      from: "claude",
+      to: "codex",
+      ...(scoped ? { to_account: "personal" } : {}),
+    }, error: null } }));
     await openAfterInitialResync(page, async () => { await page.goto("/"); });
     await row(page, SESSION_JSON).click();
     await page.getByRole("button", { name: "Session actions", exact: true }).click();
