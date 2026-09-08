@@ -199,7 +199,7 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		return fmt.Errorf("%w%s", err, outputReport)
 	}
 	if outputReadErr == nil {
-		if removeErr := os.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := hooklog.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
 			log.WarningLog.Printf("on-archive hook completed but its output log %s could not be removed: %v", outputPath, removeErr)
 		}
 	}
