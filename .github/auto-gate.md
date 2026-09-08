@@ -195,17 +195,43 @@ A real review quoting an unavailable message remains a review.
 `<!-- codex-pull-request-review-summary -->` identifies the maintained
 “Codex Review Summary” activity comment. Its edit time is excluded from
 latest-response selection: an edit cannot supersede an earlier head-current
-unavailable answer. Parseable Completed rows participate using their own times,
-even for an older commit, because they prove Codex answered again. Running rows
-and rows without a commit or timestamp remain excluded from the availability
-pool. Any artifact carrying the summary marker is status, never an
-unrecognised outage response, whether it has valid Completed rows or not; an
-incomplete summary therefore cannot add a cause or replace the latest notice.
-A completed row older than the unavailable answer does not supersede it.
-Verdict parsing for the current head continues to use the row's own time. The
-repository outage record likewise treats every authenticated Completed row as
-recovery at its own time, regardless of the commit; only merge accounting
-requires a verdict for the merged head.
+unavailable answer. A Completed row is **never a verdict by itself** (#4052).
+It may supply a completion timestamp only when a Codex-authored artifact for
+the same commit corroborates it: a `Reviewed commit:` prose verdict, a submitted
+pull-request review (`/pulls/N/reviews`, matching `commit_id`), or at least one
+top-level inline review comment (`/pulls/N/comments`, matching `commit_id`).
+The row and corroborating artifact must both post-date the head's push anchor
+(`headCurrentSince`). An inline comment uses its creation time, so editing it
+cannot refresh old evidence. A submitted review without the prose footer must
+carry a known automatic-review body: the Codex review heading with a clean
+result, automated-suggestions wrapper, or findings. Empty wrappers and arbitrary
+submitted bodies do not count. Every reviewer-unavailable classification,
+including `unrecognised` (such as the environment-missing response), is rejected
+as corroboration and retains its outage meaning. Replies do not corroborate a
+review, and body links alone do not corroborate one.
+For each row, the existing push floor is advanced to the latest preceding
+unavailable Codex response for that commit. The corroborating artifact must be
+strictly newer than this combined floor: an earlier successful review cannot
+certify a later bare Completed row after a failed retry on the same head.
+Unavailable issue comments bind by time; reviews and replies naming another
+commit do not reset the floor. Response creation/submission times are used so
+later edits cannot hide an earlier failed attempt.
+
+This preserves #3606: an automatic review with real artifacts counts even when
+it omits the prose footer. The gate summary identifies the corroborating review,
+prose verdict, or inline comment count. A bare row instead reports “Codex has not
+reviewed head”; a usage-limit notice still requires maintainer approval through
+the degraded path.
+
+Running rows, malformed rows, and uncorroborated Completed rows are excluded
+from availability ordering as well as verdict selection. A maintained summary
+is status, never an unrecognised outage response. The repository outage record
+uses the same corroboration rule for current and superseded commits, with
+commit dates, PR creation, force-push history and recorded head announcements
+supplying historical freshness floors. Only merge accounting requires the merged head specifically.
+Recovery uses the row's own time, never the summary edit time, and cannot be
+earlier than the corroborating artifact. A later artifact therefore cannot
+backdate a recovery or erase an earlier degraded merge.
 
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
