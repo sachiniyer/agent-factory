@@ -5283,7 +5283,7 @@ test("#2218: slow create closes immediately, shows daemon state, then opens atta
   await clickRailAction(page, created, "Kill session");
   const killModal = page.locator(".af-modal-card");
   await expect(killModal).toBeVisible();
-  await killModal.locator("button.af-primary").click();
+  await killModal.getByRole("button", { name: "Delete session", exact: true }).click();
   await expect(row(page, created)).toHaveCount(0, { timeout: 30_000 });
 });
 
@@ -5488,7 +5488,7 @@ test.describe("create → kill (one session, two flows)", () => {
 
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
-    await modal.locator("button.af-primary").click();
+    await modal.getByRole("button", { name: "Delete session", exact: true }).click();
 
     // The killed row disappears from the rail (the killed event removes it).
     await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });

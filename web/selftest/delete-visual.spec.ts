@@ -3,7 +3,8 @@ import { test, expect } from "@playwright/test";
 for (const theme of ["light", "dark"]) {
   test(`session deletion has destructive confirmation in ${theme}`, async ({ page }, info) => {
     await page.goto("/");
-    await page.evaluate(theme => document.documentElement.setAttribute("data-theme", theme), theme);
+    await page.getByRole("button", { name: theme === "light" ? "Light" : "Dark", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-af-theme", theme);
     const row = page.locator(".af-row").first();
     await row.hover();
     await row.getByRole("button", { name: /^Actions for / }).click();
