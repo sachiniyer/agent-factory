@@ -105,7 +105,7 @@ it.
 | `D` | kill instance | | `/` | search |
 | `a` | archive | | `r` | restore |
 | `q` | quit |
-| `p`/`y` | open/copy PR | | `e` | hooks editor |
+| `e` | hooks editor |
 | `Ctrl-P` | switch project | | `Ctrl-U`/`Ctrl-D` | preview scroll |
 | `Ctrl-W` | detach (full-screen) |
 
@@ -401,7 +401,7 @@ af_boot                                       # 112 cols or wider
 af_ensure_nav; af_focus_tree
 af_send n; af_wait_for 'account'              # the field is advertised
 af_send C-o; af_wait_for 'Select claude account'   # the title names the AGENT
-af_wait_for 'Ambient identity'                # first row is the pre-#3844 default
+af_wait_for "Use the agent's own login"       # no configured default in this fixture
 af_send Escape; af_wait_for 'submit name'     # esc backs out of the field only
 af_send C-o; af_send Down; af_send Enter      # pick a registered account
 af_wait_for 'account ✓'                       # hint confirms a scoped create

@@ -72,8 +72,8 @@ One bubbletea program (`tea.NewProgram(newHome(...), tea.WithAltScreen(), tea.Wi
 
 ### 1.5 Daemon data flow (post-#960)
 
-- **Read**: the TUI polls `Snapshot` every 750 ms (`snapshotRefreshInterval`, `app/sync.go:70`), one fetch in flight at a time (`app/app.go:354-377`). The daemon RPC is Go `net/rpc` + gob over a unix socket (`daemon/control.go:843-879`, socket `<configDir>/daemon.sock`), strictly request/response — **no push/subscribe channel exists**. Snapshot payload = `[]session.InstanceData` (`session/storage.go:12`): title, path, branch, status, tabs (`TabData{Name,Kind,Command,TmuxName}`, `session/storage.go:38`), PR info, worktree, remote meta. `reconcileSnapshot` (`app/sync.go:282-362`) mirrors it into the sidebar's instance list: add / swap (same title, different CreatedAt) / update-in-place / remove; selection re-pinned by title. Cold start blocks on `coldStartFromSnapshot` (`app/sync.go:119-136`) with a 2-minute daemon warm-up budget.
-- **Write**: all session/tab mutations are daemon RPCs via swappable seams in `app/session_control.go`: `CreateSession`, `KillSession`, `CreateTab`, `CloseTab`, and `ImportRemoteHookSessions`. PR discovery is daemon-owned: the TUI's selection/tick command sends an identity-only `RefreshPRInfo` poke and applies no PR fields itself (#3296). Mutations and refresh pokes run in `tea.Cmd` goroutines with the seam captured on the event loop first (#960 race pattern).
+- **Read**: the TUI polls `Snapshot` every 750 ms (`snapshotRefreshInterval`, `app/sync.go:70`), one fetch in flight at a time (`app/app.go:354-377`). The daemon RPC is Go `net/rpc` + gob over a unix socket (`daemon/control.go:843-879`, socket `<configDir>/daemon.sock`), strictly request/response — **no push/subscribe channel exists**. Snapshot payload = `[]session.InstanceData` (`session/storage.go:12`): title, path, branch, status, tabs (`TabData{Name,Kind,Command,TmuxName}`, `session/storage.go:38`), worktree, remote meta. `reconcileSnapshot` (`app/sync.go:282-362`) mirrors it into the sidebar's instance list: add / swap (same title, different CreatedAt) / update-in-place / remove; selection re-pinned by title. Cold start blocks on `coldStartFromSnapshot` (`app/sync.go:119-136`) with a 2-minute daemon warm-up budget.
+- **Write**: all session/tab mutations are daemon RPCs via swappable seams in `app/session_control.go`: `CreateSession`, `KillSession`, `CreateTab`, `CloseTab`, and `ImportRemoteHookSessions`. Mutations run in `tea.Cmd` goroutines with the seam captured on the event loop first (#960 race pattern).
 - **Tasks** were added to the daemon RPC surface in #1029 PR 3 (CLI) and #1029 PR 6 (TUI): `ListTasks`/`AddTask`/`UpdateTask`/`RemoveTask`/`TriggerTask`. The daemon is the sole task writer; the TUI sends field-level patches (`UpdateTask(id, patch)`) so a single-field edit cannot clobber a concurrent edit another client made to a different field (#1700).
 
 ### 1.6 Attach / PTY passthrough
@@ -130,7 +130,7 @@ Three regions, all always visible (subject to §2.6 minimums):
 | **Workspace** (full height, #1090) | 1–N content panes, vertical splits (#1088). Each pane is bound to one (instance, tab) and hosts an embedded interactive terminal (§2.4); header shows `title · tab`. Tabs not open as a pane keep running in the background. | ContentPane + TabbedWindow (`ui/content_pane.go`, `ui/tabbed_window.go`); the PR-5 pane-A/pane-B split |
 | **Status bar** | Context-sensitive key hints (driven by focus and mode) + error line. 1–2 rows. | Menu (`ui/menu.go`) + ErrBox (`ui/err.go`) |
 
-The tab bar disappears: tabs live in the tree (and in the pane header), so `TabbedWindow`'s even-split tab row (`ui/tabbed_window.go:282-345`) is no longer needed. Number keys 1-9 keep jumping tabs of the selected instance (preserving the #930 muscle memory); `t` creates tabs; `w` opens Delete tab confirmation (`y` accepts, `n`/`Esc` cancels).
+The tab bar disappears: tabs live in the tree (and in the pane header), so `TabbedWindow`'s even-split tab row (`ui/tabbed_window.go:282-345`) is no longer needed. Number keys 1-9 keep jumping tabs of the selected instance (preserving the #930 muscle memory); `t`/`w` keep creating/closing tabs.
 
 Hooks lose their persistent sidebar slot and move behind a key/click from the rail's automations section (they are set-and-forget; a persistent row is not warranted). The full `HooksPane` editor is kept, shown as an overlay.
 
@@ -173,7 +173,7 @@ The root model shrinks to: dispatch messages → store, route input → focused 
 
 **Two modes** (Sachin-confirmed, 2026-07-03):
 
-- **Nav mode (default).** The host owns the keyboard. `Tab`/`Shift-Tab` cycles the focus ring `tree → pane 1 → … → pane N → automations`; `1-9` jumps tabs of the selected instance; j/k moves the tree; all existing stateDefault actions (`app/handle_actions.go:18-142`) work and are selection-relative: kill, PR open/copy, new tab, confirmed tab deletion, scroll.
+- **Nav mode (default).** The host owns the keyboard. `Tab`/`Shift-Tab` cycles the focus ring `tree → pane 1 → … → pane N → automations`; `1-9` jumps tabs of the selected instance; j/k moves the tree; all existing stateDefault actions (`app/handle_actions.go:18-142`) work and are selection-relative: kill, new tab, confirmed tab deletion, scroll.
 - **Interactive mode.** `Enter` on a focused pane (or on a tree row, opening the pane first if needed) enters the pane. From then on **all keystrokes — including `Tab` — forward down the pane's PTY** to the agent/shell. There is **no full-screen takeover**: the pane keeps its rect and the instances rail stays visible the whole time. `Ctrl-]` pops back to nav mode.
 
 **Why `Tab` cannot be a global host key**: shells, vim, and every agent CLI need `Tab` (completion). That is exactly why focus-switching lives in nav mode only and interactive mode forwards `Tab` to the agent. The **only** host-reserved key while interactive is `Ctrl-]` (already the attach detach-key default, `DetachKeyByte`), plus at most one prefix chord — final call in #1026/#1027.
@@ -181,7 +181,7 @@ The root model shrinks to: dispatch messages → store, route input → focused 
 **N-pane open/close/hide** (#1088, replaces the PR-5 A/B split):
 
 - `s` on a tree row (or in a pane) opens the selected tab as a **new vertical-split pane** to the right of the existing panes. Splits are vertical (side-by-side) only for now.
-- `x` on a focused pane **hides it back to the background**: the pane disappears from the workspace, the remaining panes re-divide the width, and the tab keeps running in its tmux session — reopen it any time from the tree. Nothing is killed; closing a pane and hiding a pane are the same operation (deleting a tab uses `w` followed by confirmation).
+- `x` on a focused pane **hides it back to the background**: the pane disappears from the workspace, the remaining panes re-divide the width, and the tab keeps running in its tmux session — reopen it any time from the tree. Nothing is killed; closing a pane and hiding a pane are the same operation (killing tabs stays `w`, an instance action).
 - Focus moves across the N open panes via the nav-mode `Tab` focus ring; there is no pinned/primary pane distinction.
 
 **Selection vs focus**: tree selection (which instance/tab is highlighted) is separate from pane focus (which region gets keys). If the selected tab is already open as a pane, the pane header highlights; `Enter` jumps focus there and enters interactive mode. If it is not open, `Enter`/`s` opens it. On leaving interactive mode, focus stays on that pane in nav mode.
@@ -310,7 +310,7 @@ The tree renders more rows (instances × tabs) than the flat list. Mitigation: t
 
 ### 5.4 Keeping the TUI usable through the cutover
 
-Every phase ships a complete, keyboard-operable TUI. The flow matrix verified manually (dev-install on the dev box) before merging each visible-change PR: create (local+remote), name-collision, enter/exit interactive mode (agent tab, shell tab, remote; `Ctrl-]` returns to nav), **Tab-completion forwards inside an interactive pane**, a full-screen program (vim or htop) driven inside a pane, open/hide/close panes across the N-pane ring, tab create/close/jump, kill, search, task create/edit/run-now from the rail, hooks edit, PR open/copy, daemon restart mid-session, cold start with daemon warm-up, external `tmux attach` to a pane's session (shrink behavior), 80×24 terminal. This matrix becomes a checklist in each PR description.
+Every phase ships a complete, keyboard-operable TUI. The flow matrix verified manually (dev-install on the dev box) before merging each visible-change PR: create (local+remote), name-collision, enter/exit interactive mode (agent tab, shell tab, remote; `Ctrl-]` returns to nav), **Tab-completion forwards inside an interactive pane**, a full-screen program (vim or htop) driven inside a pane, open/hide/close panes across the N-pane ring, tab create/close/jump, kill, search, task create/edit/run-now from the rail, hooks edit, daemon restart mid-session, cold start with daemon warm-up, external `tmux attach` to a pane's session (shrink behavior), 80×24 terminal. This matrix becomes a checklist in each PR description.
 
 ### 5.5 Terminal-size edge cases
 

@@ -46,7 +46,6 @@ import {
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
-  prBadgeContent,
   rowStatus,
   rowTitle,
 } from "./status.js";
@@ -205,7 +204,7 @@ export interface AppState {
  *  be a drop target (the browser then shows a no-drop cursor); a finger has no cursor
  *  to read, so the same refusal has to be said out loud. Sentence case, `·` as the
  *  fragment separator, per the repo's copy conventions. */
-export const TAB_PINNED_NOTICE = "The agent tab stays first · drag it onto a pane to split instead";
+export const TAB_PINNED_NOTICE = "Agent tab stays first · drag to a pane to split";
 
 export interface Actions {
   connect(token: string): void;
@@ -348,7 +347,7 @@ export interface Actions {
   /** Opens the delete-project confirm for a project row (#1735); on confirm
    *  index.ts calls DeleteProject, which removes the project registration and
    *  archives each restorable live session. */
-  deleteProject(root: string, label: string, sessionCount: number): void;
+  deleteProject(root: string, label: string): void;
   /** Opens the add-project modal (#2456): register a git checkout by path via
    *  RegisterProject so it appears as an empty project you can create into. */
   addProject(): void;
@@ -370,6 +369,11 @@ export interface Actions {
  *  what ui.test.ts pins. */
 const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
 
+/** The existing backend-type fallback for off-box workspace ownership. */
+export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+
 /** The kinds this session may gain a tab of, as the DAEMON decided them.
  *
  *  This reads session.Capabilities.RefuseTabKind projected onto the snapshot
@@ -385,7 +389,7 @@ export function allowedTabKinds(s: SessionData): TabKindAllowance[] {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
     return s.tab_kinds;
   }
-  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  const legacyAllowed = !isOffBoxWorkspace(s);
   return LEGACY_TAB_KINDS.map((kind) => ({
     kind,
     allowed: legacyAllowed,
@@ -612,7 +616,7 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
 function loginView(state: AppState, actions: Actions): HTMLElement {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
-      detail: state.loginError ?? "Check the daemon and its listener address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
+      detail: state.loginError ?? "Check the daemon address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
       run: () => actions.retryConnection?.(), });
     screen.classList.add("af-recovery-login");
     return screen;
@@ -665,14 +669,14 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
     h(
       "p",
       { class: "af-subtitle" },
-      "Paste the daemon bearer token to connect. Get it from ",
+      "Paste the daemon token from ",
       h("code", {}, "af token show"),
       " on the host.",
     ),
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you disconnect."),
     form,
   ];
   if (state.loginError) {
@@ -711,7 +715,7 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
     h(
       "p",
       { class: "af-subtitle" },
-      "This daemon does not require a token for your connection.",
+      "No token needed.",
     ),
     form,
   ];
@@ -838,12 +842,6 @@ export class AppShell {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   private handoffBtn: HTMLElement | null = null;
   private handoffVisible = false;
-  // The PR badge link and the signature of what it currently draws (#3285). Same
-  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
-  // session's PR — or its state flips open → merged — WITHOUT a selection change,
-  // so patchMainHead fills it rather than deciding once at build time.
-  private prBadge: HTMLAnchorElement | null = null;
-  private prBadgeSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1518,9 +1516,9 @@ export class AppShell {
       const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        "Kill",
+        "Delete session",
       );
-      const killLabel = `Kill session “${killSession.title}”`;
+      const killLabel = `Delete session “${killSession.title}”`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
       killBtn.addEventListener("click", (e) => {
@@ -1597,7 +1595,7 @@ export class AppShell {
       return h(
         "li",
         { class: "af-rail-empty-project" },
-        `No sessions match the filter — ${hiddenCount(scoped, state.statusFilter)} hidden `,
+        `No matches · ${hiddenCount(scoped, state.statusFilter)} hidden `,
         reset,
       );
     }
@@ -1709,15 +1707,13 @@ export class AppShell {
       } else {
         del.setAttribute(
           "title",
-          currentSummary.liveCount > 0
-            ? `Delete project ${currentSummary.name} (archives its sessions, restorable)`
-            : `Delete project ${currentSummary.name} (removes the empty project)`,
+          `Delete project ${currentSummary.name} (review session consequences)`,
         );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
           this.appControls.close();
-          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+          this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
       footChildren.push(del);
@@ -1767,7 +1763,7 @@ export class AppShell {
     const wrap = h("div", { class: "af-tab-new-wrap" });
     const trigger = h(
       "button",
-      { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
+      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
       icon("plus", "af-tab-new-plus"),
       h("span", {}, "New tab"),
       icon("chevron-down", "af-tab-new-caret"),
@@ -1963,8 +1959,6 @@ export class AppShell {
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
-    this.prBadge = chrome.pr;
-    this.prBadgeSig = "";
     this.retryBtn = chrome.retry;
     this.retryVisible = isLimitReached(selected);
     chrome.retry.hidden = !this.retryVisible;
@@ -2013,7 +2007,7 @@ export class AppShell {
       [chrome.title, this.header], [chrome.keyboard, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel], [chrome.pr, this.appControls.panel],
+      [chrome.tabs, this.appControls.panel],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -2583,25 +2577,6 @@ export class AppShell {
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
-    }
-
-    // Fill/patch the PR badge (#3285) in place, like Retry/Handoff above and for
-    // the same reason: the daemon's sweep discovers a PR while the session is
-    // already selected, which is no selection change, so renderMain never runs.
-    // The sig covers everything the badge draws, so an unrelated snapshot never
-    // touches the DOM and a state flip (open → merged) patches exactly once.
-    if (this.prBadge) {
-      const badge = prBadgeContent(selected);
-      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
-      if (sig !== this.prBadgeSig) {
-        this.prBadgeSig = sig;
-        if (badge) {
-          this.prBadge.textContent = badge.label;
-          this.prBadge.href = badge.url;
-          this.prBadge.title = badge.tooltip;
-        }
-        this.prBadge.hidden = badge === null;
-      }
     }
   }
 

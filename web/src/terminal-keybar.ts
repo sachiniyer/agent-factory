@@ -41,7 +41,7 @@ export function keybarPointerDown(event: Pick<Event, "preventDefault">, act: () 
   act();
 }
 
-export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["Back", "←", "↑", "↓", "→"]] as const;
+export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
 
 export class TerminalKeybar {
   private arrows = false;
@@ -90,7 +90,7 @@ export class TerminalKeybar {
         button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
         const act = () => {
           if (!this.focused || !this.phone.matches) return;
-          if (key === "Arrows" || key === "Back") this.arrows = key === "Arrows";
+          if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           else this.input(keyBytes(key, false, false, this.applicationCursor()));
           this.paint();

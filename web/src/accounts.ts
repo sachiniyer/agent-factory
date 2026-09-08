@@ -86,9 +86,7 @@ export const ACCOUNT_INPUT_ATTR = "data-account-input";
 /** The heading's note — the answer to #3385's placement question, said before the
  *  first row can suggest these are settable keys. */
 const ACCOUNTS_NOTE =
-  "Agent identities, not config keys. af runs the agent's own login flow against a directory " +
-  "and never reads, stores or forwards the credential. Signing in is a device code · the pane " +
-  "prints a URL, you finish it in your own browser.";
+  "Sign in with the agent’s login flow. Follow the URL in the pane.";
 
 /**
  * Renders the Accounts section into a single element the config view appends.
@@ -126,7 +124,7 @@ export function renderAccountsSection(state: AccountsState, actions: AccountActi
       h(
         "p",
         { class: "af-accounts-empty" },
-        "This daemon reports no agents that support accounts.",
+        "No agents support accounts.",
       ),
     );
     return section;
@@ -204,7 +202,7 @@ function renderAccountRow(entry: AccountEntry, status: AccountStatus | null, act
       h(
         "div",
         { class: "af-accounts-notice" },
-        `A session cannot be scoped to a ${entry.agent} account yet — registering and logging in work.`,
+        `${entry.agent} accounts support login only; sessions cannot use them yet.`,
       ),
     );
   }

@@ -1293,32 +1293,6 @@ button:disabled,
 .af-kb-terminal .af-pane-focused .af-pane-keyboard { display: inline; }
 .af-term-title-separator { color: var(--af-ink); font-size: var(--af-type-heading); }
 
-/* The session's daemon-discovered PR, as a static text chip that IS the link
- * (#3285) — no glyph animation (#1766). It never steals width from the title
- * (flex 0 0), and the hidden case is pinned as an author rule for the same
- * reason as .af-term-action[hidden] above: the day this gains a `display`
- * for icon alignment, the UA default would lose and an empty badge would
- * appear on every session. */
-.af-pr-badge {
-  flex: 0 0 auto;
-  font-size: var(--af-type-body);
-  color: var(--af-accent);
-  text-decoration: none;
-  border: 0;
-  border-radius: 0;
-  padding: 0;
-  white-space: nowrap;
-}
-
-.af-pr-badge:hover {
-  color: var(--af-accent);
-  border-color: var(--af-accent);
-}
-
-.af-pr-badge[hidden] {
-  display: none;
-}
-
 /* A durable incomplete-archive notice, sourced from the daemon snapshot rather
  * than from the restore call that may have happened before this client existed.
  * Keep the complete bounded text scrollable so retained source paths remain
@@ -2952,13 +2926,6 @@ button:disabled,
     min-width: 0;
     flex-wrap: nowrap;
   }
-  .af-term-head:has(> .af-pr-badge:not([hidden])) .af-tabbar { grid-column: 1; }
-  .af-term-head > .af-pr-badge { grid-row: 2; grid-column: 2 / -1; }
-  .af-term-head > .af-pr-badge:not([hidden]) {
-    display: flex;
-    align-items: center;
-    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-  }
   .af-term-head > .af-term-action:not(.af-copy-link-desktop) { grid-column: 1 / -1; }
 
   /* Touch targets: lift the primary controls to a ~40-44px tap area so nothing on the
@@ -3490,7 +3457,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   }
 }
 
-/* Phone terminal keys: six primary controls or Back plus four arrows. */
+/* Phone terminal keys: six primary controls or More keys plus four arrows. */
 .af-terminal-keybar { display: none; }
 @media (max-width: 768px) {
   .af-terminal-keybar {
@@ -3510,7 +3477,10 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-keybar-row[hidden] { display: none; }
   .af-keybar-row button {
     position: relative;
-    flex: 1;
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     padding: var(--af-space-1);
@@ -3572,4 +3542,26 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-session-first .af-divider,
   .af-session-first .af-pane:not(.af-pane-focused),
   .af-session-first .af-split:not(:has(.af-pane-focused)) { display: none; }
+}
+
+/* Shared action treatment: visible edges in both palettes, quiet hover, and
+ * balanced label padding. Navigation keeps its existing geometry and selection. */
+:is(.af-app, .af-modal-card, .af-recovery) button[class]:not(.af-danger):not([aria-pressed="true"]):not([aria-selected="true"]) {
+  border-color: var(--af-border);
+  font-weight: 600;
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:hover:not(:disabled):not(.af-danger) {
+  border-color: var(--af-accent);
+  text-decoration: none;
+}
+:is(.af-app, .af-modal-card, .af-recovery) :is(.af-primary, .af-ghost, .af-danger, .af-recovery-action) {
+  padding-inline: var(--af-space-3);
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:focus-visible {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+  outline-offset: calc(var(--af-space-1) / 2);
+}
+:is(.af-app, .af-modal-card, .af-recovery) button:disabled:not(.af-danger) {
+  color: var(--af-ink-muted);
+  border-style: dashed;
 }

@@ -420,7 +420,7 @@ func (m *Manager) RefreshStatuses() {
 // The poll writes only the liveness axis (SetLiveness), gated on there being no
 // in-flight op — so it can never clobber a concurrent kill/archive marker, which
 // lives on the separate op axis (#1195). Only a real transition is persisted, and it persists
-// under the per-repo start lock (mirroring CreateTab/CloseTab/SetPRInfo) through
+// under the per-repo start lock (mirroring CreateTab/CloseTab) through
 // the targeted writer persistInstanceData — never a whole-list re-marshal, the
 // dual-writer clobber surface #960 PR 4 retired — so an idle session never churns
 // instances.json.

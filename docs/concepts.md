@@ -20,7 +20,7 @@ or VS Code tabs you add in the same workspace — and an explicit lifecycle:
   moves aside, and the record and branch stay restorable.
 - **Restore** brings an archived, lost, or dead session back, resuming its
   recorded conversation where the agent supports it.
-- **Kill** is permanent. It destroys the session and prunes the workspace and
+- **Delete session** is permanent. It destroys the session and prunes the workspace and
   branch `af` owns, including uncommitted or unmerged work.
 
 Full page: [Sessions and worktrees](sessions.md).

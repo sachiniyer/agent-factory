@@ -53,11 +53,11 @@ export function spawnFailureCopy(e: unknown): { status: string; error: string } 
   if (e instanceof ApiError && e.status === 503) {
     return {
       status: "Unavailable",
-      error: e.message !== "" ? e.message : "The daemon reported the config assistant unavailable. Close and try again.",
+      error: e.message !== "" ? e.message : "Assistant unavailable. Close and retry.",
     };
   }
   if (e instanceof ApiError && e.status === 0) {
-    return { status: "Offline", error: "Could not reach the daemon. Close and try again." };
+    return { status: "Offline", error: "Daemon unreachable. Close and retry." };
   }
   return {
     status: "Failed to start",
@@ -84,7 +84,7 @@ export function openConfigAssistant(opts: {
   let term: AttachTerminal | null = null;
 
   // --- overlay DOM ----------------------------------------------------------
-  const status = h("span", { class: "af-assistant-status" }, "Starting the assistant…");
+  const status = h("span", { class: "af-assistant-status" }, "Starting…");
   status.setAttribute("role", "status");
 
   const closeBtn = h("button", { type: "button", class: "af-ghost af-assistant-close" }, "×");

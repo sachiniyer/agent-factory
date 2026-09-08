@@ -103,16 +103,14 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const pr = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-  pr.hidden = true;
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
   keyboard.hidden = true;
   const actions = h("div", { class: "af-term-actions" });
   actions.hidden = true;
-  const retry = action("Retry", "", opts.retry);
-  retry.title = "Resume this session from its usage-limit wall";
+  const retry = action("Retry limit", "", opts.retry);
+  retry.title = "Retry after the usage limit";
   const handoff = action("Handoff", "", opts.handoff);
-  handoff.title = "Continue this session under a different agent";
+  handoff.title = "Continue with another agent";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
   copy.title = "Copy link";
   copy.setAttribute("aria-label", "Copy link");
@@ -121,11 +119,11 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
-  const closePane = action("Close pane", "af-phone-pane-close", () => opts.closePane?.());
+  const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, pr, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, pr, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
+  return { head, title, tabs, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */
@@ -133,8 +131,8 @@ export function paneChrome(onClose: () => void) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
   const label = h("span", { class: "af-pane-label" });
   const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
-  const close = h("button", { type: "button", class: "af-pane-close", title: "Close pane" }, icon("x"));
-  close.setAttribute("aria-label", "Close pane");
+  const close = h("button", { type: "button", class: "af-pane-close", title: "Hide pane" }, icon("x"));
+  close.setAttribute("aria-label", "Hide pane");
   close.addEventListener("click", (event) => { event.stopPropagation(); onClose(); });
   return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
 }
@@ -236,7 +234,7 @@ export function modalChrome(opts: {
     },
     setError(msg: string | null) {
       if (msg) {
-        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Review the details, then ${opts.confirmLabel.toLowerCase()} again.`));
+        errorLine.replaceChildren(mutationNotice(`${opts.title} failed`, msg, `Check the error, then ${opts.confirmLabel.toLowerCase()} again.`));
         errorLine.hidden = false;
       } else {
         errorLine.textContent = "";
@@ -258,7 +256,7 @@ export function field(label: string, control: HTMLElement): HTMLElement {
 /** Compact inherited choices; callers update the summary without replacing fields. */
 export function defaultsDisclosure() {
   const summaryText = h("span", { class: "af-defaults-summary" });
-  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Edit defaults ·"), " ", summaryText);
+  const summary = h("summary", {}, h("span", { class: "af-defaults-fragment" }, "Defaults ·"), " ", summaryText);
   const body = h("div", { class: "af-defaults-body" });
   const el = h("details", { class: "af-defaults" }, summary, body);
   const setSummary = (fragments: string[]) => {
