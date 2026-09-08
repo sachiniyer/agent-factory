@@ -148,7 +148,7 @@ func SetAttachStreamFnForTest(fn func(context.Context, string, string, string, i
 // The defer on m.attached.Store(false) is load-bearing: it guarantees the
 // flag clears even if `<-ch` is woken by an abnormal close or a panic
 // further down the stack. Leaving the flag stuck at true would silently
-// stall the metadata tick, preview refresh, and PR info fetcher until the
+// stall the metadata tick and preview refresh until the
 // next process restart — exactly the kind of regression #598 wants to
 // avoid creating while fixing the original hang.
 //

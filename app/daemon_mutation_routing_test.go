@@ -174,32 +174,3 @@ func TestHandleCloseTab_AgentTabSkipsDaemon(t *testing.T) {
 	require.False(t, called, "the agent tab must not round-trip to the daemon")
 	require.Equal(t, 2, inst.TabCount(), "the agent tab must never be closed")
 }
-
-// TestRefreshPRInfoCmdRoutesIdentityThroughDaemon proves the #3296 ownership
-// boundary: the TUI sends stable identity and no PR payload. It neither fetches
-// nor paints a badge; the daemon's next Snapshot carries the projection.
-func TestRefreshPRInfoCmdRoutesIdentityThroughDaemon(t *testing.T) {
-	h := newTestHome(t)
-	inst := newLoadingInstance(t, "pr-target")
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-
-	var gotRequest daemon.RefreshPRInfoRequest
-	restore := SetPRInfoRefresherForTest(func(request daemon.RefreshPRInfoRequest) error {
-		gotRequest = request
-		return nil
-	})
-	defer restore()
-
-	cmd := refreshPRInfoCmd(inst, h.repoID, true)
-	require.NotNil(t, cmd)
-	_ = cmd()
-
-	require.Equal(t, daemon.RefreshPRInfoRequest{
-		ID: inst.ID, Title: inst.Title, RepoID: h.repoID,
-	}, gotRequest)
-	require.Nil(t, inst.GetPRInfo(), "a refresh poke must not apply local PR state")
-
-	// The daemon owns the persist; the TUI writes nothing to instances.json.
-	requireTUIInstancesEmpty(t, h)
-}

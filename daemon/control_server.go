@@ -506,20 +506,6 @@ func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabRespon
 	return nil
 }
 
-func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	if err := s.manager.SetPRInfo(req); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
 	return s.killSession(context.Background(), req, resp)
 }

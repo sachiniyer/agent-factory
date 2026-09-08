@@ -9,18 +9,12 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
-// prInfoStaleAfter throttles repeated TUI pokes for one local projection. The
-// daemon independently owns the authoritative debounce across all clients.
-const prInfoStaleAfter = 60 * time.Second
-
 // -- Ticker message types --
 
-type tickUpdatePRInfoMessage struct{}
 type tickRefreshExternalMessage struct{}
 
 // snapshotFetchedMsg carries the result of an off-loop daemon Snapshot fetch
@@ -62,21 +56,9 @@ type snapshotFetchedMsg struct {
 	allReposErr error
 }
 
-// prInfoRefreshFinishedMsg reports only whether the daemon accepted a refresh
-// poke. It carries no PR data: Snapshot is the TUI's sole projection read path.
-type prInfoRefreshFinishedMsg struct {
-	target sessionActionTarget
-	err    error
-}
-
 // -- Ticker commands --
 // Each ticker sleeps for a fixed interval, then returns its message type to
 // re-enter Update(). The ticker is re-scheduled at the end of its handler.
-
-var tickUpdatePRInfoCmd = func() tea.Msg {
-	time.Sleep(60 * time.Second)
-	return tickUpdatePRInfoMessage{}
-}
 
 // snapshotRefreshInterval is how often the TUI polls the daemon for the
 // authoritative session snapshot and reconciles its sidebar to it (#960 PR 3).
@@ -230,33 +212,6 @@ func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, er
 	}
 }
 
-// refreshPRInfoCmd pokes daemon-owned discovery off the event loop. The TUI
-// captures stable identity only: it never inspects a worktree, runs gh, accepts
-// PR fields in this message, or writes the projection. force bypasses the local
-// transport throttle for the minute tick; the daemon still atomically debounces
-// concurrent clients.
-func refreshPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd {
-	if inst == nil {
-		return nil
-	}
-	if !force && inst.PRInfoAge() < prInfoStaleAfter {
-		return nil
-	}
-	// This is a client-side transport throttle only. The daemon repeats the
-	// debounce atomically because other windows do not share this timestamp.
-	inst.MarkPRInfoFetched()
-	target := captureSessionActionTarget(inst, repoID)
-	refresh := refreshPRInfoThroughDaemon
-	request := target.refreshPRInfoRequest()
-	return func() tea.Msg {
-		refreshStart := time.Now()
-		detachTraceMark("refreshPRInfoCmd-goroutine-entry")
-		err := refresh(request)
-		detachTrace(refreshStart, "refreshPRInfoCmd-daemon-returned")
-		return prInfoRefreshFinishedMsg{target: target, err: err}
-	}
-}
-
 // -- Sync methods --
 
 // snapshotFailureGrace keeps transient poll failures from replacing a loaded layout.
@@ -389,7 +344,7 @@ func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
 //     reconnecting tabs by tmux name) and added;
 //   - sessions gone from the snapshot are removed;
 //   - existing rows are updated IN PLACE — same *session.Instance pointer, only
-//     its tab list and PR info mutated — which is the #959 "live display" fix
+//     its tab list mutated — which is the #959 "live display" fix
 //     (an out-of-band tab now appears without a restart);
 //   - a same-title row whose identity (CreatedAt) differs from the snapshot is a
 //     kill+recreate of the title (#765); it is swapped for a freshly built
@@ -642,7 +597,7 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 }
 
 // updateInstanceFromSnapshot reconciles an existing row's tab list and
-// PR badge to the snapshot IN PLACE (same pointer, so view state survives).
+// metadata to the snapshot IN PLACE (same pointer, so view state survives).
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
@@ -772,12 +727,6 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			}
 		}
 	}
-	// PR info mirrors the daemon's recorded value. The TUI has no PR producer;
-	// Snapshot is the sole path that applies these projected fields (#3296).
-	if prInfoDiffersFromData(inst, d.PRInfo) {
-		inst.SetPRInfo(prInfoFromData(d.PRInfo))
-		changed = true
-	}
 	return changed
 }
 
@@ -888,29 +837,6 @@ func (m *home) adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv
 	// waiting on it. Recorded here, at the only moment the fact is known (#3005).
 	m.adoptedOpsFor().note(inst, op)
 	return true
-}
-
-// prInfoFromData rebuilds a *git.PRInfo from its serialized form, returning nil
-// for the zero value (Number 0 = "no PR"), matching FromInstanceData.
-func prInfoFromData(d session.PRInfoData) *git.PRInfo {
-	if d.Number == 0 {
-		return nil
-	}
-	return &git.PRInfo{Number: d.Number, Title: d.Title, URL: d.URL, State: d.State, Branch: d.Branch}
-}
-
-// prInfoDiffersFromData reports whether an instance's in-memory PR info differs
-// from the snapshot's, so the reconcile only writes (and reports a change) on an
-// actual diff.
-func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
-	cur := inst.GetPRInfo()
-	if d.Number == 0 {
-		return cur != nil
-	}
-	if cur == nil {
-		return true
-	}
-	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State || cur.Branch != d.Branch
 }
 
 // snapshotLiveness resolves the daemon-owned liveness a snapshot record carries

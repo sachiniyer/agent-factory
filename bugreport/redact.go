@@ -728,12 +728,6 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.AgentConversation != nil {
 		d.AgentConversation.ID = ""
 	}
-	if d.PRInfo.Title != "" {
-		d.PRInfo.Title = redactedMarker
-	}
-	if d.PRInfo.URL != "" {
-		d.PRInfo.URL = redactedMarker
-	}
 	// Path is the session's own absolute path. See collapsePathField.
 	d.Path = r.collapsePathField(d.Path)
 	d.Worktree.RepoPath = r.collapsePathField(d.Worktree.RepoPath)
@@ -846,8 +840,7 @@ func redactTabData(tab *session.TabData) {
 	}
 	// A web tab's URL is user-supplied (any http/https target passes
 	// NormalizeWebTabURL) and can name internal infrastructure or a private
-	// repo — the same class of sensitive URL PRInfo.URL is redacted for
-	// below (#1954). External targets are dropped wholesale. For a loopback
+	// repo (#1954). External targets are dropped wholesale. For a loopback
 	// dev-server, retain only the origin needed for triage: userinfo, paths,
 	// queries and fragments can all carry credentials even though the host is
 	// safe to name.

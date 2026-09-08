@@ -461,19 +461,19 @@ tasks = "ctrl+t"
 - **Compatibility binding:** `[keys].new_remote` has no default key. If configured,
   it opens the creation form with the backend field focused, where you choose the
   backend; it no longer forces remote creation or checks local `remote_hooks` first.
-- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `tasks`, `search`, `open_pr`, `copy_pr`, `hooks`, `config_agent`, `config_editor`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `restore`, `limit_retry`, `handoff`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
+- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `tasks`, `search`, `hooks`, `config_agent`, `config_editor`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `restore`, `limit_retry`, `handoff`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
 - `pane_prev` / `pane_next` are contextual: their default `left` / `right` bindings switch panes only while a workspace pane has focus. With tree focus, the same arrows keep the tree's collapse/expand behavior.
 - **Reserved keys** are rejected: binding any action to `enter`, `tab`, `shift+tab`, `esc`, `ctrl+]`, or a digit `1`–`9` is a startup error naming the key and why it's reserved (they drive interaction, the focus ring, overlay cancel, the interactive-mode exit, and the 1–9 tab jump respectively).
 - **`ctrl+c` is a fixed hard exit, not a reserved key.** Validation does *not* reject it — you can write `quit = "ctrl+c"` (or point any action at it) with no error — but `ctrl+c` always quits and is handled before the keymap ever sees the keypress, so binding an action to it has no effect: the hard exit wins. It is therefore not *effectively* rebindable, which is different from the reserved keys above that are outright rejected at load.
-- Any problem — an unknown action, an unparseable or reserved key, or two user overrides bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. A user override on a key *suppresses* any default binding for that key rather than erroring, so an upgrade that ships a new default binding never breaks an existing config — the user's binding wins and the new action is simply unbound by default. The bottom menu and the `?` help overlay both reflect your rebinds.
+- Any problem — an unknown action, an unparseable or reserved key, or two user overrides bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. **Compatibility exception:** the retired `open_pr` and `copy_pr` actions are ignored with a one-line warning naming the config file and removed action (once per file and action per process). Every other unknown action remains a hard startup error. A user override on a key *suppresses* any default binding for that key rather than erroring, so an upgrade that ships a new default binding never breaks an existing config — the user's binding wins and the new action is simply unbound by default. The bottom menu and the `?` help overlay both reflect your rebinds.
 - **Global-only.** `keys` is rejected in in-repo configs — a cloned repository can never rebind your terminal.
 - **TOML-only.** The keymap exists only in `config.toml`; a `keys` block in a legacy `config.json` is ignored with a warning.
 
 Run `af keys` to see the effective bindings (defaults plus your rebinds).
 
 The default TUI keys changed to ergonomic lower-case bindings in #1027:
-archive is `a`, restore is `r` (#1605), the task manager is `m`, copy PR URL
-is `y`, hooks is `e`, and preview scrolling is `ctrl+u` / `ctrl+d`. The previous
+archive is `a`, restore is `r` (#1605), the task manager is `m`, hooks is `e`,
+and preview scrolling is `ctrl+u` / `ctrl+d`. The previous
 defaults are not built-in
 aliases; restore any old binding you still want by pinning it here:
 
@@ -482,7 +482,6 @@ aliases; restore any old binding you still want by pinning it here:
 archive = "A"
 tasks = "S"
 split_pane = "alt+s"
-copy_pr = "P"
 hooks = "H"
 scroll_up = "shift+up"
 scroll_down = "shift+down"

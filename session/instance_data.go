@@ -204,17 +204,6 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		}
 	}
 
-	// Only include PR info if it exists
-	if i.prInfo != nil {
-		data.PRInfo = PRInfoData{
-			Number: i.prInfo.Number,
-			Title:  i.prInfo.Title,
-			URL:    i.prInfo.URL,
-			State:  i.prInfo.State,
-			Branch: i.prInfo.Branch,
-		}
-	}
-
 	return data
 }
 
@@ -486,16 +475,6 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// retries the kill, and a spawn reserves against them, but no tab is
 		// rebuilt from a tombstone.
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
-	}
-
-	if data.PRInfo.Number != 0 {
-		instance.prInfo = &git.PRInfo{
-			Number: data.PRInfo.Number,
-			Title:  data.PRInfo.Title,
-			URL:    data.PRInfo.URL,
-			State:  data.PRInfo.State,
-			Branch: data.PRInfo.Branch,
-		}
 	}
 
 	// The local runtime and worktree are already gone. Keep this terminal row
