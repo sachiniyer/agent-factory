@@ -1,4 +1,4 @@
-type RestoreRow = { id?: string; restoreEligible: boolean; restoreInFlight?: boolean };
+type RestoreRow = { id?: string; restoreEligible: boolean; restoreSettled?: boolean };
 export type RestoreEvidence =
   | { kind: "snapshot"; generation: number; operationLockTimeoutMs?: number }
   | { kind: "updated" | "restored"; id: string };
@@ -133,16 +133,18 @@ export class PendingRestores {
       if (ticket.uncertain && authoritative && causalUncertainSnapshot) {
         if (!eligibility.has(id)) {
           uncertainCompleted = true;
-        } else if (row?.restoreInFlight) {
-          ticket.sawBusy = true;
-        } else if (!row?.restoreEligible) {
+        } else if (row?.restoreSettled) {
           uncertainCompleted = true;
-        } else {
+        } else if (row?.restoreEligible) {
           // A reconnect can hold these captured rows behind slower task/project
           // loads. Processing time cannot turn a pre-deadline Snapshot into proof.
           const deadline = this.operationLockTimeoutMs === null ? null :
             ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
           uncertainCompleted = ticket.sawBusy || (deadline !== null && issuedAt !== undefined && issuedAt > deadline);
+        } else {
+          // LifecycleActionNone covers every operation fence and several unsettled
+          // states. Only a positive Archive capability proves restore completion.
+          ticket.sawBusy = true;
         }
       }
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {

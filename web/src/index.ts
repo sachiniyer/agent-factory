@@ -127,7 +127,7 @@ import {
   type NewTabKind,
 } from "./ui.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
-import { InFlightOp, type AccountsResponse, type SessionData, type TaskData, type WireEvent } from "./types.js";
+import type { AccountsResponse, SessionData, TaskData, WireEvent } from "./types.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -2401,7 +2401,7 @@ function applySessions(sessions: SessionData[]): void {
   // Evidence distinguishes causal completion from delayed updates/cache repaints.
   if (evidence) pendingRestores.observe(authoritative.map(s => ({
     id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
-    restoreInFlight: s.in_flight_op === InFlightOp.Restoring,
+    restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive",
   })), evidence);
 }
 

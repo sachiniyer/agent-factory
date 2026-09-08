@@ -137,7 +137,7 @@ for (const [name, error] of [
     assert.equal(pending.has("session"), true);
     pending.observe([{ id: "session", restoreEligible: true }]);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", restoreEligible: false, restoreInFlight: true }], {
+    pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
       kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
     });
     assert.equal(pending.has("session"), true);
@@ -169,7 +169,7 @@ test("Dead to Lost normalization does not settle an uncertain restore", async ()
   reject(new ApiError(0, "connection lost"));
   await assert.rejects(request!, /connection lost/);
   assert.equal(pending.has("session"), true);
-  pending.observe([{ id: "session", restoreEligible: false, restoreInFlight: true }], {
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), true);
@@ -189,7 +189,7 @@ test("a queued uncertain restore ignores an eligible Snapshot until busy then re
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), true, "the daemon may still be queued on its operation lock");
-  pending.observe([{ id: "session", restoreEligible: false, restoreInFlight: true }], {
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   now += 1;
@@ -266,25 +266,46 @@ test("wall-clock suspension cannot expire a monotonic admission deadline", async
   assert.equal(pending.has("session"), false);
 });
 
+for (const state of ["OpArchiving", "startup-unknown"] as const) {
+  test(`an uncertain restore stays fenced through the ${state} no-action projection`, async () => {
+    const timer = fakeRestoreTimer();
+    const pending = new PendingRestores(
+      () => {}, isMutationOutcomeUncertain, () => false, () => 1_000, () => {}, timer.schedule, timer.cancel,
+    );
+    pending.observe([{ id: "session", restoreEligible: true }], {
+      kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+    });
+    await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+
+    // Both projections have LifecycleActionNone for reasons other than a settled
+    // restore. Absence of positive completion evidence must fail closed.
+    pending.observe([{ id: "session", restoreEligible: false }], {
+      kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+    });
+    assert.equal(pending.has("session"), true);
+    assert.equal(timer.armed(), true);
+  });
+}
+
 test("an uncertain restore distinguishes the restoring projection from a settled live row", async () => {
   let now = 1_000;
   const timer = fakeRestoreTimer();
   const pending = new PendingRestores(
     () => {}, isMutationOutcomeUncertain, () => false, () => now, () => {}, timer.schedule, timer.cancel,
   );
-  pending.observe([{ id: "session", restoreEligible: true, restoreInFlight: false }], {
+  pending.observe([{ id: "session", restoreEligible: true, restoreSettled: false }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
 
-  pending.observe([{ id: "session", restoreEligible: false, restoreInFlight: true }], {
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), true, "lifecycle None while OpRestoring remains fenced");
   assert.equal(timer.armed(), true);
 
   now += 1;
-  pending.observe([{ id: "session", restoreEligible: false, restoreInFlight: false }], {
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: true }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), false, "an archivable live row proves the restore settled");
@@ -364,7 +385,7 @@ test("early release and reset cancel an uncertain ticket's reconciliation timer"
   pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
   await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
   assert.equal(timer.armed(), true);
-  pending.observe([{ id: "session", restoreEligible: false, restoreInFlight: true }], {
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
