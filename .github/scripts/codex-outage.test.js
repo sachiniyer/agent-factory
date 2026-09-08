@@ -430,7 +430,7 @@ test('older-head completed summary rows recover outages at every row time', () =
   const failure = comment(2, 'Codex Review: Something went wrong. Unknown error');
   const collect = artifacts => aggregate([{ number: 3953, head: { sha: head }, artifacts }], t(8));
   const summary = summaryArtifact([summaryRow(4)]);
-  const proof = comment(3, "", { commit_id: "b".repeat(40), submitted_at: t(3), id: 3606 });
+  const proof = comment(3, "### 💡 Codex Review\n\nDidn't find any major issues.", { commit_id: "b".repeat(40), submitted_at: t(3), id: 3606 });
   const episodes = collect([failure, summary, proof]);
   assert.equal(episodes[0].end, t(4));
   assert.equal(episodes[0].recovery, summary.html_url);
@@ -500,7 +500,7 @@ test('#4052: a Completed row without a review artifact cannot close an episode',
 test('#4052: superseded rows need matching fresh corroboration and cannot backdate a merge', () => {
   const old = 'b'.repeat(40);
   const summary = summaryArtifact([summaryRow(3, { commit: old.slice(0, 7) })]);
-  const review = comment(5, '', { id: 3606, commit_id: old, submitted_at: t(5) });
+  const review = comment(5, "### 💡 Codex Review\n\nDidn't find any major issues.", { id: 3606, commit_id: old, submitted_at: t(5) });
   const pull = { number: 4051, head: { sha: head }, created_at: t(0), merged_at: t(4),
     commitDates: { [old]: t(1) }, artifacts: [comment(2, limits[0]), summary, review] };
   assert.deepEqual(aggregate([pull], t(6)).map(e => [e.end, e.merged]), [[t(5), [4051]]]);
@@ -513,7 +513,7 @@ test('#4052: superseded rows need matching fresh corroboration and cannot backda
 
 test('#4052: live sweep reads commit and paginated push anchors before accepting a row', async () => {
   const summary = summaryArtifact([summaryRow(4, { commit: head.slice(0, 7) })]);
-  const review = comment(2, '', { id: 3606, commit_id: head, submitted_at: t(2) });
+  const review = comment(2, "### 💡 Codex Review\n\nDidn't find any major issues.", { id: 3606, commit_id: head, submitted_at: t(2) });
   let unreadable = false;
   const calls = [];
   const writes = [];
@@ -544,4 +544,15 @@ test('#4052: live sweep reads commit and paginated push anchors before accepting
   unreadable = true;
   await assert.rejects(sweep(api, 'owner/repo', t(6)), /push history unavailable/);
   assert.equal(writes.length, 1, 'failed reads must preserve the previous record');
+});
+
+test('3954286650: an unrecognised submitted review cannot turn a row into recovery', () => {
+  const response = comment(3, environmentMissing, { id: 3606, commit_id: head, submitted_at: t(3) });
+  const summary = summaryArtifact([summaryRow(4, { commit: head.slice(0, 7) })]);
+  const [episode] = aggregate([{ number: 4053, head: { sha: head }, merged_at: t(5),
+    artifacts: [comment(2, limits[0]), response, summary] }], t(6));
+  assert.equal(episode.end, null);
+  assert.equal(episode.latest.kind, 'unrecognised');
+  assert.equal(episode.latest.body, environmentMissing);
+  assert.deepEqual(episode.merged, [4053]);
 });

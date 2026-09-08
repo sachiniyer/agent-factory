@@ -202,8 +202,13 @@ pull-request review (`/pulls/N/reviews`, matching `commit_id`), or at least one
 top-level inline review comment (`/pulls/N/comments`, matching `commit_id`).
 The row and corroborating artifact must both post-date the head's push anchor
 (`headCurrentSince`). An inline comment uses its creation time, so editing it
-cannot refresh old evidence. Replies and empty reviews wrapping unavailable
-replies do not corroborate a review. Body links alone do not corroborate one.
+cannot refresh old evidence. A submitted review without the prose footer must
+carry a known automatic-review body: the Codex review heading with a clean
+result, automated-suggestions wrapper, or findings. Empty wrappers and arbitrary
+submitted bodies do not count. Every reviewer-unavailable classification,
+including `unrecognised` (such as the environment-missing response), is rejected
+as corroboration and retains its outage meaning. Replies do not corroborate a
+review, and body links alone do not corroborate one.
 This preserves #3606: an automatic review with real artifacts counts even when
 it omits the prose footer. The gate summary identifies the corroborating review,
 prose verdict, or inline comment count. A bare row instead reports “Codex has not

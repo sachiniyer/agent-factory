@@ -4648,6 +4648,19 @@ async function evaluateCodex({
   };
 }
 
+// Automatic reviews omit the commit footer, but retain the review heading and
+// a clean result, the inline-suggestions wrapper, or findings. A submitted
+// review's transport alone says nothing about whether Codex actually reviewed.
+function isCodexAutomaticReviewBody(body) {
+  const text = String(body || "").trim();
+  const heading = /^### (?:💡 )?Codex Review[ \t]*(?:\r?\n|$)/i.test(text);
+  return (heading && (
+    /\bDidn't find any major issues\b/i.test(text) ||
+    /^Here are some automated review suggestions for this pull request\./m.test(text) ||
+    CODEX_BODY_FINDING_RE.test(text)
+  )) || /^Codex Review: Didn't find any major issues\b/i.test(text);
+}
+
 // Shared by the health watch and gate. Known vendor responses retain their
 // specific kinds; any other Codex response defaults to unrecognised after the
 // review, finding and verdict guards have had the first word (#3985).
@@ -4669,6 +4682,7 @@ function classifyCodexUnavailableArtifact(artifact, isInlineReply = Boolean(arti
   if (body.trimStart().startsWith(CODEX_SUMMARY_MARKER)) return null;
   if (failed) return { kind: "failure" };
   if (codexReportsReviewUsageLimit(body)) return { kind: "usage-limit" };
+  if (isCodexAutomaticReviewBody(body)) return null;
   // GitHub pairs an inline reply with an empty enclosing review. The wrapper is
   // transport, not a response, and has no first line to report as a cause.
   if (!body.trim()) return null;
@@ -4738,7 +4752,7 @@ function completedCodexSummaryRows(artifact) {
 }
 
 // Review transport identity is required: body links and status rows cannot
-// manufacture an artifact. Replies (and their unavailable empty wrappers) are
+// manufacture an artifact. Replies and empty wrappers are
 // answers to a thread, not a new review of the commit.
 function summaryCorroboration(artifacts, commit, since) {
   commit = String(commit || "").toLowerCase();
@@ -4756,10 +4770,9 @@ function summaryCorroboration(artifacts, commit, since) {
     const review = artifact.submitted_at != null && artifact.commit_id != null;
     if (!prose && !inline && !review) return false;
     const unavailable = classifyCodexUnavailableArtifact(artifact);
-    if (unavailable && unavailable.kind !== "unrecognised") return false;
-    if (review && !String(artifact.body || "").trim() && artifacts.some(reply =>
-      reply.user?.login === CODEX_REVIEWER && reply.in_reply_to_id &&
-      reply.pull_request_review_id === artifact.id && classifyCodexUnavailableArtifact(reply))) return false;
+    if (unavailable) return false;
+    if (!prose && !(inline ? CODEX_BODY_FINDING_RE.test(artifact.body || "")
+      : isCodexAutomaticReviewBody(artifact.body))) return false;
     // Editing an old inline comment cannot refresh a review for a later push.
     const at = inline ? parseTimestamp(artifact.created_at) : reviewArtifactTime(artifact);
     return at != null && at > since;

@@ -3685,7 +3685,7 @@ test("completed summary rows for older heads supersede outages by row time", asy
     [null, "✅ **Completed**", true],
   ]) {
     const result = await evaluateGate({ reviewComments: [{ ...codexFinding({ id: 3606, line: null }),
-      body: "", commit_id: OTHER_SHA, pull_request_review_id: 3606, created_at: "2026-07-09T01:14:00Z" },
+      body: "P2: a finding on the older head", commit_id: OTHER_SHA, pull_request_review_id: 3606, created_at: "2026-07-09T01:14:00Z" },
       findingReply({ id: 3607, inReplyToId: 3606, body: "ACCEPTED" })], issueComments: [
       codexRateLimit("2026-07-09T01:20:00Z"),
       codexSummaryTable(OTHER_SHA, { rowTime, status, commentTime: "2026-07-09T01:30:00Z" }),
@@ -10425,7 +10425,7 @@ test('#4052: Completed 71 seconds after a usage limit is not a verdict', async (
 });
 
 test('#4052: automatic review plus row still supplies a verdict without prose (#3606)', async () => {
-  const review = { ...codexReview(HEAD_SHA), id: 3606, body: '### Codex Review', state: 'COMMENTED' };
+  const review = { ...codexReview(HEAD_SHA), id: 3606, body: '### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.', state: 'COMMENTED' };
   const summary = codexSummaryTable(HEAD_SHA);
   const result = await evaluateGate({ issueComments: [summary], reviews: [review], reviewComments: [] });
   assert.equal(result.shouldMerge, true, result.summary);
@@ -10434,7 +10434,8 @@ test('#4052: automatic review plus row still supplies a verdict without prose (#
 
 function automaticReview(sha = HEAD_SHA, timestamp = "2026-07-09T01:01:00Z") {
   return { id: 3606, user: { login: "chatgpt-codex-connector[bot]" },
-    body: "", commit_id: sha, submitted_at: timestamp, state: "COMMENTED" };
+    body: "### 💡 Codex Review\n\nDidn't find any major issues.",
+    commit_id: sha, submitted_at: timestamp, state: "COMMENTED" };
 }
 
 test('#4052: corroboration requires the exact head, author, transport and push freshness', () => {
@@ -10486,4 +10487,33 @@ test('#4052: an unavailable inline reply and its empty review never corroborate 
   assert.equal(result.shouldMerge, false);
   assert.equal(result.degradedForUnavailableReviewer, true);
   assert.match(result.reasons.join('\n'), /Codex has not reviewed head/);
+});
+
+test('3954286650: unrecognised submitted reviews never corroborate completion', async () => {
+  const summary = codexSummaryTable(HEAD_SHA);
+  for (const body of [CODEX_ENVIRONMENT_MISSING, 'Review started.', 'An unknown reviewer response.',
+    `### 💡 Codex Review\n\n${CODEX_ENVIRONMENT_MISSING}`]) {
+    const review = { ...automaticReview(HEAD_SHA, '2026-07-09T01:15:00Z'), body };
+    assert.equal(autoGate.codexEvidence.classifyCodexUnavailableArtifact(review).kind, 'unrecognised');
+    assert.equal(__test.parseVerdictArtifact(summary, HEAD_SHA, [review]), null, body);
+    const result = await __test.evaluateCodex({ github: fakeGateGithub({ issueComments: [summary], reviews: [review] }),
+      context: fakeContext(), number: 1465, sha: HEAD_SHA,
+      lastCommitDate: '2026-07-09T01:00:00Z', prCreatedAt: '2026-07-09T00:00:00Z' });
+    assert.equal(result.reviewerUnavailable, true, body);
+    assert.equal(result.reviewerUnavailableKind, 'unrecognised');
+    assert.ok(result.reasons.join('\n').includes(body.split('\n', 1)[0]));
+  }
+});
+
+test('3954286650: a genuine automatic clean review still corroborates completion', async () => {
+  const review = { ...automaticReview(), body: "### 💡 Codex Review\n\nDidn't find any major issues." };
+  const result = await evaluateGate({ issueComments: [codexSummaryTable(HEAD_SHA)], reviews: [review] });
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(result.summary, /corroborated by review 3606/);
+});
+
+
+test('3954286650: an empty submitted review cannot corroborate completion', () => {
+  const review = { ...automaticReview(), body: '' };
+  assert.equal(__test.parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA, [review]), null);
 });
