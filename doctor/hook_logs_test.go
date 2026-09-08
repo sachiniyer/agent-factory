@@ -278,7 +278,8 @@ func TestHomeHealthHookLogsUnsearchableAncestorFails(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can traverse directories with mode 0600")
 	}
-	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	ancestor := filepath.Join(home, "logs")
 	require.NoError(t, os.Mkdir(ancestor, 0o700))
 	require.NoError(t, os.Chmod(ancestor, 0o600))
@@ -320,4 +321,48 @@ func TestHomeHealthHookLogsInaccessibleSymlinkTargetFails(t *testing.T) {
 			require.Equal(t, 1, report.UnresolvedCount())
 		})
 	}
+}
+
+func TestHomeHealthHookLogsUnreadableCreatableRootIsAdvisory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read mode 0300 directories")
+	}
+	dir := filepath.Join(t.TempDir(), "logs", "hooks")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.Chmod(dir, 0o300))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	// Creation still works even though best-effort size measurement cannot.
+	file, err := os.CreateTemp(dir, "probe-*.log")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	report := &Report{}
+	checkHookLogs(report, dir)
+	row := findCheck(t, report, "hook logs")
+	require.Equal(t, StatusWarn, row.Status)
+	require.False(t, row.Problem)
+	require.Contains(t, row.Detail, "cannot measure")
+	require.Contains(t, row.Detail, dir)
+	require.NotContains(t, row.Detail, "hooks cannot start")
+	require.Equal(t, []string{"hook logs"}, report.Incomplete)
+	require.Zero(t, report.UnresolvedCount())
+}
+
+func TestHomeHealthHookLogsUnsearchableHomeNamesExistingBlocker(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can traverse mode 0600 directories")
+	}
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(home, 0o600))
+	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+	report := &Report{}
+	checkHookLogs(report, filepath.Join(home, "logs", "hooks"))
+	row := findCheck(t, report, "hook logs")
+	require.Equal(t, StatusFail, row.Status)
+	require.True(t, row.Problem)
+	require.Contains(t, row.Detail, home+" is not writable")
+	require.Contains(t, row.Remediation, "chmod u+x "+home+")")
+	require.NotContains(t, row.Remediation, filepath.Join(home, "logs"))
+	require.Equal(t, 1, report.UnresolvedCount())
+	require.Empty(t, report.Incomplete)
 }

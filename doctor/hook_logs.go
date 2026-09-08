@@ -41,8 +41,6 @@ func checkHookLogs(report *Report, dir string) {
 		report.Pass(sectionConfig, "hook logs", "not present; created on demand at "+dir)
 		return
 	}
-	// Lookup/resolution errors concern creation until a nested scan says otherwise.
-	creationPath := true
 	var total int64
 	var scanDir string
 	if err == nil {
@@ -57,7 +55,6 @@ func checkHookLogs(report *Report, dir string) {
 				return nil // A completed hook or concurrent retention pass removed it.
 			}
 			if walkErr != nil {
-				creationPath = path == scanDir
 				return walkErr
 			}
 			if !entry.Type().IsRegular() {
@@ -68,7 +65,6 @@ func checkHookLogs(report *Report, dir string) {
 				return nil
 			}
 			if err != nil {
-				creationPath = path == scanDir
 				return err
 			}
 			if info.Mode().IsRegular() {
@@ -77,11 +73,9 @@ func checkHookLogs(report *Report, dir string) {
 			return nil
 		})
 	}
+	// Once creation access has passed, read failures only limit measurement.
 	if err != nil {
 		report.markIncomplete("hook logs")
-		if creationPath && failHookLogPermission(report, dir, "", err) {
-			return
-		}
 		report.Warn(sectionConfig, "hook logs", fmt.Sprintf("cannot measure %s: %v", dir, err),
 			"check the hook log directory and its permissions, then rerun `af doctor`", false)
 		return
@@ -136,19 +130,17 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 			}
 			return "", "", nil
 		}
-		// A lookup denied before reaching the leaf means its parent cannot
-		// be traversed, so this prevents hooks from starting, not just scanning.
-		if os.IsPermission(err) {
-			return filepath.Dir(path), "", err
-		}
-		if (!os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP)) || filepath.Dir(path) == path {
+		// A higher ancestor may deny traversal before even the immediate
+		// parent exists. Keep ascending until Lstat finds an existing entry;
+		// the W_OK|X_OK check above then identifies its denied search access.
+		if (!os.IsNotExist(err) && !os.IsPermission(err) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP)) || filepath.Dir(path) == path {
 			return path, "", err
 		}
 	}
 }
 
-// Classify creation-path permissions at both error exits. Nested measurement
-// failures bypass this classifier because they do not prevent new hook logs.
+// Classify permissions from the creation-path check. Measurement failures
+// bypass this classifier because they do not prevent new hook logs.
 func failHookLogPermission(report *Report, dir, blocking string, err error) bool {
 	if !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.EROFS) {
 		return false
