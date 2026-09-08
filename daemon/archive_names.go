@@ -22,8 +22,8 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 	if inPlace {
 		return nil
 	}
-	collision := func(existing string) error {
-		if archiveTitlesCollide(existing, title) {
+	collision := func(existing, claim string) error {
+		if archiveTitlesCollide(claim, title) {
 			return fmt.Errorf("session titled %q already maps to archive directory %q", existing, sanitizeArchiveTitle(title))
 		}
 		return nil
@@ -31,7 +31,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 	for key := range m.reservedArchiveTitles {
 		rid, existing := splitDaemonInstanceKey(key)
 		if rid == repoID {
-			if err := collision(existing); err != nil {
+			if err := collision(existing, existing); err != nil {
 				return err
 			}
 		}
@@ -41,7 +41,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		if rid != repoID || inst == nil || inst == ignore || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree || inst.IsExternalWorktree() {
 			continue
 		}
-		if err := collision(inst.Title); err != nil {
+		if err := collision(inst.Title, archiveClaimName(inst.ToInstanceData())); err != nil {
 			return err
 		}
 	}
@@ -49,7 +49,7 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 		if !data.UsesLocalTmux() || data.Status == session.Loading || (ignore != nil && data.Title == ignore.Title) {
 			continue
 		}
-		if !archiveTitlesCollide(data.Title, title) {
+		if !archiveTitlesCollide(archiveClaimName(data), title) {
 			continue
 		}
 		owned, err := ownsArchiveDirectory(data)
@@ -57,10 +57,19 @@ func (m *Manager) validateArchiveTitleLocked(repoID, title string, disk []sessio
 			return err
 		}
 		if owned {
-			return collision(data.Title)
+			return collision(data.Title, archiveClaimName(data))
 		}
 	}
 	return nil
+}
+
+// archiveClaimName preserves the directory owned by an archived row even when
+// title reuse has renamed the row without moving its worktree.
+func archiveClaimName(data session.InstanceData) string {
+	if session.RecordedLiveness(data) == session.LiveArchived && data.Worktree.WorktreePath != "" {
+		return filepath.Base(data.Worktree.WorktreePath)
+	}
+	return sanitizeArchiveTitle(data.Title)
 }
 
 // archiveTitlesCollide is shared by create admission and archive destination scans.

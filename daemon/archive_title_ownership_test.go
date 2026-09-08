@@ -58,3 +58,15 @@ func TestArchiveTitleMalformedOwnershipRefusesClaim(t *testing.T) {
 	require.ErrorIs(t, err, errTitleCheckFatal, "an unreadable ownership claim must not be silently skipped or retried through 10,000 suffixes")
 	require.NoError(t, m.validateArchiveTitleLocked("repo", "unrelated", disk, nil, false))
 }
+
+func TestArchiveTitleClaimsRenamedArchivedPath(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	data := session.InstanceData{Title: "foo (archived)", Path: repoPath, Status: session.Archived, BackendType: "local", Worktree: session.GitWorktreeData{WorktreePath: repoPath + "/archived/foo"}}
+	require.NoError(t, appendInstanceData(repoID, data))
+	failLoadFor(t, data.Title)
+	_, _, release, _, err := m.reserveCreate(CreateSessionRequest{Title: "foo", RepoPath: repoPath, Program: "claude"})
+	if release != nil {
+		defer release()
+	}
+	require.ErrorContains(t, err, `session titled "foo (archived)" already maps to archive directory "foo"`)
+}
