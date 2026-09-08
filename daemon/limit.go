@@ -461,6 +461,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
 	manual := accountSwap != nil && accountSwap.manual
+	originalLiveness := instance.GetLiveness()
+	restorePendingLiveness := func(resetAt time.Time) error {
+		if manual && (originalLiveness == session.LiveRunning || originalLiveness == session.LiveReady) {
+			// The pending manual transaction is the recovery obligation. A healthy
+			// handoff must never manufacture quota evidence for the selected account.
+			return instance.Transition(session.ObserveLiveness(originalLiveness))
+		}
+		return m.reparkLimitUnderResumeFence(instance, resetAt)
+	}
 	if !instance.LimitReached() && !manual {
 		return resumeNotPerformed, nil
 	}
@@ -684,7 +693,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		if rerr != nil {
 			if accountSwap != nil {
-				if perr := m.reparkLimitUnderResumeFence(instance, resetAt); perr != nil {
+				if perr := restorePendingLiveness(resetAt); perr != nil {
 					rerr = errors.Join(rerr, perr)
 				}
 			}
@@ -728,7 +737,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// through prompt delivery now (#2997), and the plain SetLimitReached refuses
 		// while any op is in flight — it would no-op here and lose this episode's
 		// reset time, which the auto-resume scheduler schedules off.
-		if perr := m.reparkLimitUnderResumeFence(instance, resetAt); perr != nil {
+		if perr := restorePendingLiveness(resetAt); perr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to restore the limit window for %q: %w", requestedTitle, perr)
 		}
 		// Write the respawn's durable state NOW, not at the end of the happy path
@@ -855,6 +864,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	repoStartLock.Unlock()
 	if persistErr != nil {
 		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+		if manual {
+			return resumePerformed, fmt.Errorf("handed off %q and delivered its mission, but completion has a pending settlement; the daemon retries the disk write, and an unclean exit before it lands could repeat the mission: %w",
+				requestedTitle, errors.Join(settleErr, persistErr))
+		}
 	}
 	if settleErr != nil {
 		// The resume itself landed — the prompt was delivered and the limit lifted —

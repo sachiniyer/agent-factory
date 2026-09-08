@@ -315,6 +315,15 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	*scheduled = *admitted
 
 	if err := m.prepareRuntimeForAccountSwap(key, instance); err != nil {
+		if scheduled.manual && !instance.LimitReached() {
+			probe := probeLiveness(instance, instance.AgentServer())
+			if probe == probeAbsent || probe == probeAnsweredDead {
+				// The agent may have stopped before a sibling refused teardown.
+				// No identity was selected: persist ordinary recovery on the old one.
+				_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+				err = errors.Join(err, m.persistSettlement(repoID, key, instance))
+			}
+		}
 		return true, err
 	}
 	var previousConversation session.AgentConversationData

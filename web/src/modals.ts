@@ -460,18 +460,28 @@ export function handoffModal(
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
   const requiresAccount = (agent: string): boolean => agent === currentAgent || !!callbacks.currentAccount;
+  let accountRows: ReturnType<typeof handoffAccountChoices> = [];
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
+  const syncAccountSelection = (): void => {
+    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    confirmBtn.disabled = !accountsLoaded || !agentSelect.value || (requiresAccount(agentSelect.value) && !accountSelect.value);
+  };
   const refreshAccounts = (): void => {
     const agent = agentSelect.value;
     const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
+    else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
     const fallback = accounts.defaults?.[agent];
-    if (fallback && choices.some((choice) => choice.value === fallback)) accountSelect.value = fallback;
+    const selected = choices.find((choice) => choice.value === fallback && choice.logged_in)
+      ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : undefined);
+    accountSelect.value = selected?.value ?? "";
     accountSelect.disabled = choices.length === 0;
-    confirmBtn.disabled = !accountsLoaded || !agent || (requiresAccount(agent) && !accountSelect.value);
+    syncAccountSelection();
   };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
@@ -489,6 +499,7 @@ export function handoffModal(
   body.append(
     field("New agent", agentSelect),
     field("New account", accountSelect),
+    accountHint,
     h(
       "p",
       { class: "af-modal-text" },
@@ -516,6 +527,7 @@ export function handoffModal(
     });
 
   agentSelect.addEventListener("change", refreshAccounts);
+  accountSelect.addEventListener("change", syncAccountSelection);
   if (callbacks.loadAccounts) {
     void callbacks.loadAccounts().then((result) => {
       accounts = result; accountsLoaded = true; refreshAccounts();

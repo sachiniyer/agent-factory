@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -134,7 +135,8 @@ func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
-	if agent != "" && agent != i.CurrentAgentName() {
+	crossAgent := agent != "" && agent != i.CurrentAgentName()
+	if crossAgent {
 		program = agent
 		resolved := resolveResolvedConfigForInstance(i)
 		resolution.command = resolveProgramForAgent(i, agent)
@@ -153,6 +155,16 @@ func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 	// being replaced, and the af skill has to land in the root the replacement
 	// pane will actually read (see resolveSkillTargetForAccount).
 	launchProgram = injectSystemPrompt(launchProgram, resolveSkillTargetForAccount(i, launchProgram, name))
+	if crossAgent {
+		workDir := i.GetWorktreePath()
+		if workDir == "" {
+			return fmt.Errorf("handoff target %s has no worktree path for launch preflight", agent)
+		}
+		if _, err := preflight.CheckCommandAt(launchProgram, workDir); err != nil {
+			return fmt.Errorf("handoff target %s failed launch preflight: %w", agent,
+				preflight.ProgramError(agent, resolvedProgram, err))
+		}
+	}
 	proof := accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase)
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)

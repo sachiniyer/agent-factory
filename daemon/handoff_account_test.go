@@ -82,6 +82,7 @@ func TestHandoffAccountRefusesWalledTarget(t *testing.T) {
 
 func TestHandoffAccountCombinesNewAgentAndAccount(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", true, "old brief", time.Now().Add(time.Hour))
+	prepareHandoffTargetPreflight(t, inst)
 	configureLimitAccountCandidate(t, m, "personal")
 	inst.Program = "codex"
 	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex"))
@@ -140,6 +141,7 @@ func TestHandoffAccountRecoversHealthyCheckpoint(t *testing.T) {
 
 func TestHandoffAccountKeepsLimitInOutgoingAgentNamespace(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	prepareHandoffTargetPreflight(t, inst)
 	configureLimitAccountCandidate(t, m, "personal")
 	inst.Program = "codex"
 	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex"))
