@@ -16,8 +16,14 @@ type handoffAccountsLoadedMsg struct {
 
 func (m *home) loadHandoffAccounts(agent, path string) tea.Cmd {
 	target, fetch := m.handoffTarget, listAccountsThroughDaemon
+	queryAgent := agent
+	if selected := m.resolveSessionActionTarget(target); selected != nil {
+		if account, _ := selected.AccountSelection(); account != "" {
+			queryAgent = ""
+		}
+	}
 	return func() tea.Msg {
-		resp, err := fetch(agent, path)
+		resp, err := fetch(queryAgent, path)
 		return handoffAccountsLoadedMsg{target: target, agent: agent, response: resp, err: err}
 	}
 }
@@ -34,28 +40,58 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 		return m, m.handleNotice(fmt.Errorf("load handoff accounts: %w", msg.err))
 	}
 	current, _ := selected.AccountSelection()
-	agents, accounts, labels := []string{}, []string{}, []string{}
-	preselected := 0
-	for _, entry := range msg.response.Entries {
-		if entry.Agent != msg.agent || entry.Name == current || entry.RegistrationOnly {
+	agents, accounts, labels, warnings := []string{}, []string{}, []string{}, []string{}
+	preselected := -1
+	for _, agent := range append([]string{msg.agent}, handoffAgentChoices(msg.agent)...) {
+		if agent != msg.agent && current == "" {
+			if preselected < 0 {
+				preselected = len(labels)
+			}
+			agents = append(agents, agent)
+			accounts = append(accounts, "")
+			labels = append(labels, agent)
+			warnings = append(warnings, "")
 			continue
 		}
-		label := fmt.Sprintf("%s: %s", msg.agent, entry.Name)
-		if msg.response.Defaults[msg.agent] == entry.Name {
-			preselected = len(labels)
-			label += " (project default)"
+		for _, entry := range msg.response.Entries {
+			if entry.Agent != agent || (agent == msg.agent && entry.Name == current) || entry.RegistrationOnly {
+				continue
+			}
+			label := fmt.Sprintf("%s: %s", agent, entry.Name)
+			warning := ""
+			if !entry.LoggedIn {
+				label += " (not logged in)"
+				warning = fmt.Sprintf("%s has no %s credential yet. Log in before handing off. ", entry.Name, agent)
+			}
+			isDefault := msg.response.Defaults[agent] == entry.Name
+			if isDefault {
+				label += " (project default)"
+			}
+			if entry.LoggedIn && (preselected < 0 || (isDefault && agents[preselected] == agent)) {
+				preselected = len(labels)
+			}
+			agents = append(agents, agent)
+			accounts = append(accounts, entry.Name)
+			labels = append(labels, label)
+			warnings = append(warnings, warning)
 		}
-		agents = append(agents, msg.agent)
-		accounts = append(accounts, entry.Name)
-		labels = append(labels, label)
 	}
-	for _, agent := range handoffAgentChoices(msg.agent) {
-		agents = append(agents, agent)
-		accounts = append(accounts, "")
-		labels = append(labels, agent)
+	if len(labels) == 0 {
+		m.selectionOverlay = nil
+		m.state = stateDefault
+		return m, m.handleNotice(fmt.Errorf("no registered target account is available to hand %q off to", selected.Title))
 	}
+	if preselected < 0 {
+		agents = append([]string{""}, agents...)
+		accounts = append([]string{""}, accounts...)
+		labels = append([]string{"Choose an account"}, labels...)
+		warnings = append([]string{""}, warnings...)
+		preselected = 0
+	}
+	m.handoffWarnings = warnings
 	m.handoffChoices, m.handoffAccounts = agents, accounts
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", labels)
+	m.selectionOverlay.SetWidth(64)
 	m.selectionOverlay.SetSelectedIndex(preselected)
 	return m, nil
 }

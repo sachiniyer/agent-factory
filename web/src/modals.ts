@@ -488,12 +488,32 @@ export function handoffModal(
   // Nothing to pick until the catalog lands; Hand off is disabled until it does.
   confirmBtn.disabled = true;
 
+  let catalogChoices: ProgramChoice[] | null = null;
   const renderChoices = (choices: ProgramChoice[]): void => {
     agentSelect.replaceChildren();
     for (const choice of choices) {
       agentSelect.append(h("option", { value: choice.value }, choice.label));
     }
     confirmBtn.disabled = choices.length === 0;
+  };
+
+  // Both async replies recompute eligibility: their arrival order must not
+  // leave a same-agent row with an empty account picker selected.
+  const refreshAgentChoices = (): void => {
+    if (catalogChoices === null || !accountsLoaded) return;
+    const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, agent,
+      agent === currentAgent ? callbacks.currentAccount : "").length > 0;
+    const choices = catalogChoices.filter(choice => !callbacks.currentAccount || hasAccount(choice.value));
+    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
+      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    }
+    const previous = agentSelect.value;
+    renderChoices(choices);
+    if (choices.some(choice => choice.value === previous)) agentSelect.value = previous;
+    refreshAccounts();
+    if (accountsLoaded) handle.setError(choices.length === 0
+      ? (callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to.")
+      : null);
   };
 
   body.append(
@@ -510,13 +530,8 @@ export function handoffModal(
   void callbacks
     .loadPrograms()
     .then((catalog) => {
-      const choices = handoffAgentChoices(catalog, currentAgent);
-      if (callbacks.loadAccounts && currentAgent && !accountsFailed) choices.unshift({value: currentAgent, label: currentAgent + " (another account)"});
-      renderChoices(choices);
-      refreshAccounts();
-      if (choices.length === 0) {
-        handle.setError("No other agent is available to hand off to.");
-      }
+      catalogChoices = handoffAgentChoices(catalog, currentAgent);
+      refreshAgentChoices();
     })
     .catch(() => {
       // A handoff needs a concrete target and the web cannot read the enum itself —
@@ -530,17 +545,11 @@ export function handoffModal(
   accountSelect.addEventListener("change", syncAccountSelection);
   if (callbacks.loadAccounts) {
     void callbacks.loadAccounts().then((result) => {
-      accounts = result; accountsLoaded = true; refreshAccounts();
+      accounts = result; accountsLoaded = true; refreshAgentChoices();
     }).catch(() => {
       accountsLoaded = true;
       accountsFailed = true;
-      const selected = agentSelect.value;
-      const choices = Array.from(agentSelect.options)
-        .filter(option => option.value !== currentAgent)
-        .map(option => ({ value: option.value, label: option.label }));
-      renderChoices(choices);
-      if (choices.some(choice => choice.value === selected)) agentSelect.value = selected;
-      refreshAccounts();
+      refreshAgentChoices();
       handle.setError(callbacks.currentAccount
         ? "Could not load accounts. Try again to choose a registered target account."
         : "Could not load accounts. You can still hand off to another agent using its ambient identity.");

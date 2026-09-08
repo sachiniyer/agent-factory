@@ -365,7 +365,7 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	if instance == nil {
 		return resumeNotPerformed, fmt.Errorf("session %q not found", title)
 	}
-	if !instance.LimitReached() {
+	if !accountSwapResumeEligible(instance) {
 		return resumeNotPerformed, fmt.Errorf("session %q is not blocked on a usage limit", title)
 	}
 
@@ -799,7 +799,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
 	}
-	_, serr := instance.SendPromptWithEvidence(prompt, nowFunc)
+	var serr error
+	if manual {
+		serr = m.deliverManualAccountMission(instance, prompt)
+	} else {
+		_, serr = instance.SendPromptWithEvidence(prompt, nowFunc)
+	}
 	if serr != nil {
 		// The send crossed the runtime boundary, so even an error is an observed
 		// delivery fact: remote transport failure means could-not-confirm, not that

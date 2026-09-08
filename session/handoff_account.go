@@ -1,6 +1,9 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // BeginManualAccountSwap raises the existing account-replacement fence after
 // validating the handoff lifecycle, including healthy and limit-blocked rows.
@@ -47,4 +50,24 @@ func (i *Instance) PendingManualAccountSwap() (bool, string) {
 		return false, ""
 	}
 	return i.pendingAccountSwap.Manual, i.pendingAccountSwap.Mission
+}
+
+// ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement
+// identity without releasing the account transaction's fence or its mission.
+func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
+		return fmt.Errorf("manual account limit requires the pending replacement fence")
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = LiveLimitReached
+	i.limitResetAt = resetAt
+	if i.limitAccount != i.Account {
+		i.limitAccount = i.Account
+		i.touchLocked()
+	}
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return nil
 }

@@ -77,6 +77,11 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 
 	m.handoffChoices = choices
 	m.handoffAccounts = nil
+	m.handoffWarnings = nil
+	if account, _ := selected.AccountSelection(); account != "" {
+		m.handoffChoices = nil
+		choices = []string{"Loading accounts…"}
+	}
 	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
 	m.state = stateSelectHandoffAgent
@@ -89,6 +94,12 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 // live branch and the picker alone is a single keystroke away from doing that
 // by accident.
 func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyEnter {
+		idx := m.selectionOverlay.GetSelectedIndex()
+		if idx < 0 || idx >= len(m.handoffChoices) || m.handoffChoices[idx] == "" {
+			return m, nil
+		}
+	}
 	shouldClose := m.selectionOverlay.HandleKeyPress(msg)
 	if !shouldClose {
 		return m, nil
@@ -98,11 +109,13 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	idx := m.selectionOverlay.GetSelectedIndex()
 	choices := m.handoffChoices
 	accounts := m.handoffAccounts
+	warnings := m.handoffWarnings
 	pickerTarget := m.handoffTarget
 
 	m.selectionOverlay = nil
 	m.handoffChoices = nil
 	m.handoffAccounts = nil
+	m.handoffWarnings = nil
 	m.handoffTarget = handoffPickerTarget{}
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
@@ -130,6 +143,9 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	detail := "The new agent starts fresh with a summary of the work so far. " +
 		"Same worktree and branch — nothing is discarded."
 
+	if idx < len(warnings) {
+		detail = warnings[idx] + detail
+	}
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		// Confirmation is a second retained-intent boundary after the picker.
 		// Re-resolve the captured identity so an id-less legacy row replaced while

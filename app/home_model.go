@@ -384,6 +384,7 @@ type home struct {
 	// back through tmux.SupportedPrograms the way the create-time picker's can.
 	handoffChoices  []string
 	handoffAccounts []string
+	handoffWarnings []string
 	// handoffTarget is the immutable session identity that opened the picker.
 	// Background snapshots may move the sidebar cursor or replace a same-title
 	// row while the modal owns the keyboard; submit must never re-read that

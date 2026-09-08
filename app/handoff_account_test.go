@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/base64"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/stretchr/testify/require"
 	"os"
@@ -65,4 +66,48 @@ func TestHandoffAccountDesignScenes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandoffPinnedAccountsAndCredentialWarning(t *testing.T) {
+	h := newTestHome(t)
+	inst := handoffActionInstance(t, "worker", "claude")
+	inst.Account = "work"
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	restore := SetAccountListerForTest(func(agent, _ string) (daemon.ListAccountsResponse, error) {
+		require.Empty(t, agent, "pinned handoff needs the target agents' registry too")
+		return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{
+			{Agent: "claude", Name: "work", LoggedIn: true},
+			{Agent: "claude", Name: "personal", LoggedIn: false},
+			{Agent: "codex", Name: "spare", LoggedIn: true},
+		}, Defaults: map[string]string{"claude": "personal"}}, nil
+	})
+	defer restore()
+	_, cmd := h.handleHandoff()
+	require.Empty(t, h.handoffChoices, "pinned sessions cannot submit ambient rows while loading")
+	h.Update(cmd())
+	require.Equal(t, []string{"claude", "codex"}, h.handoffChoices)
+	require.Equal(t, []string{"personal", "spare"}, h.handoffAccounts)
+	require.Contains(t, h.selectionOverlay.Render(), "not logged in")
+	require.Equal(t, 1, h.selectionOverlay.GetSelectedIndex(), "unauthenticated default must not be preselected")
+	h.selectionOverlay.SetSelectedIndex(0)
+	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Contains(t, h.confirmationOverlay.Render(), "no claude credential yet")
+}
+
+func TestHandoffCredentialWarning(t *testing.T) {
+	h := newTestHome(t)
+	h.store.AddInstance(handoffActionInstance(t, "worker", "claude"))
+	h.sidebar.SetSelectedInstance(0)
+	restore := SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "claude", Name: "personal"}}, Defaults: map[string]string{"claude": "personal"}}, nil
+	})
+	defer restore()
+	_, cmd := h.handleHandoff()
+	h.Update(cmd())
+	require.Contains(t, h.selectionOverlay.Render(), "not logged in")
+	require.NotEqual(t, 0, h.selectionOverlay.GetSelectedIndex())
+	h.selectionOverlay.SetSelectedIndex(0)
+	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Contains(t, h.confirmationOverlay.Render(), "no claude credential yet")
 }

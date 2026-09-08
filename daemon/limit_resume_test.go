@@ -447,3 +447,7 @@ func TestResumeFromLimit_NotLimited_Errors(t *testing.T) {
 		t.Fatal("a Ready session must not become limit-blocked")
 	}
 }
+
+func (b *limitResumeBackend) Preview(*session.Instance) (string, error) {
+	return "ready\n❯\n›\n> \n╰", nil
+}
