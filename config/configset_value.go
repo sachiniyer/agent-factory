@@ -487,6 +487,35 @@ func canonicalStructuredTOMLValue(content, key string) (string, error) {
 	return string(encoded), nil
 }
 
+// projectStructuredCurrentValue returns the typed, writer-accepted form of a
+// structured personal-project value. root_agent needs its source shape as well
+// as its decoded value: enabled=false and program="" are meaningful when
+// explicitly present, while an omitted field must keep inheriting.
+func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool) {
+	field, ok := taggedFieldByKey(reflect.ValueOf(cfg), key)
+	if !ok {
+		return "", false
+	}
+	if key != "root_agent" {
+		return editorValue(field), true
+	}
+	shapeValue, _ := cfg.source.topLevel(key)
+	shape, ok := shapeValue.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	var value rootAgentConfigJSON
+	if _, present := shape["enabled"]; present {
+		enabled := cfg.RootAgent.Enabled
+		value.Enabled = &enabled
+	}
+	if _, present := shape["program"]; present {
+		program := cfg.RootAgent.Program
+		value.Program = &program
+	}
+	return editorValue(reflect.ValueOf(value)), true
+}
+
 // preserveStructuredMembers retains omitted root_agent profile fields and
 // carries fields this binary does not know
 // from the old target table into its replacement. The loader deliberately
