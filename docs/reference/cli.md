@@ -1289,17 +1289,18 @@ and remain actionable even though --fix does not perform them.
 UNKNOWN observations stay visible as advisory warnings with inspection
 guidance, but they are not actionable: "inspect it and decide" is not a finding
 that the run is unhealthy. A CI step or health probe should fail on the command
-exit code (equivalently, JSON summary.unresolved > 0), which includes only
-actionable rows.
+exit code: 1 means unresolved actionable issues remain or a check did not finish
+looking. Advisory warnings alone do not fail the run.
 
-A clean run and a run that did not finish looking are NOT the same thing, and
-the exit code cannot tell them apart. A check that stops early — the temp-home
-sweep hits a candidate budget on a machine with a very large temp dir — reports
-no unhealthy condition for what it never looked at, so it exits 0 while having
-assessed only part of the machine. Such a run says so: the summary line ends
-with "INCOMPLETE" naming the checks that gave up, and summary.incomplete lists
-them in --json. A probe that treats unresolved == 0 as healthy must require
-summary.incomplete to be empty as well.
+A check that stops early — for example, the temp-home sweep hits a candidate
+budget on a machine with a very large temp dir — now exits 1 even if it found
+no unhealthy condition. The summary line ends with "INCOMPLETE" naming the
+checks that gave up, and summary.incomplete lists them in --json. The exit code
+already covers incomplete checks, so a plain-exit-code probe needs no extra
+JSON check. To distinguish the exit-1 cases, read summary.unresolved and
+summary.incomplete under data in the JSON envelope: exit status -eq 1 with
+unresolved == 0 means incomplete; unresolved > 0 means actionable issues remain
+(and summary.incomplete may also be non-empty).
 
 High-volume findings are summarized by default so the actionable problem is
 visible first — process findings, abandoned temp homes, and dead-socket
@@ -1313,9 +1314,9 @@ removing directories holding nothing but a dead daemon socket — logging each
 action. Ambiguous cases are always reported rather than acted on, and remain
 advisory unless another check establishes a specific unhealthy condition.
 
-Exits 1 when unresolved actionable issues remain, 0 when doctor established no
-unhealthy condition (advisory warnings may still be present, and a check may
-have stopped early — see summary.incomplete above).
+Exits 1 when unresolved actionable issues remain or summary.incomplete is
+non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
+(advisory warnings may still be present).
 
 ```
 af doctor [flags]
@@ -2478,6 +2479,8 @@ af sessions watch [title] [flags]
 Identify the current Agent Factory session
 
 Returns the session info for the current tmux session by matching the tmux session name against stored sessions.
+
+Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.
 
 Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not.
 

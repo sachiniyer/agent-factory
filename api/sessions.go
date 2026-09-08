@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -181,21 +179,6 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 		return nil, err
 	}
 	return diskWhoami(tmuxName)
-}
-
-// currentTmuxName returns the tmux session name of the calling process. Held in
-// a var so `whoami`/`archive --self` tests can resolve a session without a real
-// tmux server.
-var currentTmuxName = func() (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
-	if err != nil {
-		return "", fmt.Errorf("not running inside a tmux session: %w", err)
-	}
-	name := strings.TrimSpace(string(out))
-	if name == "" {
-		return "", fmt.Errorf("could not determine tmux session name")
-	}
-	return name, nil
 }
 
 // resolveSelfSession identifies the caller's own af session the same way
@@ -752,6 +735,9 @@ var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
 	Long: "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.\n\n" +
+		"Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. " +
+		"When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; " +
+		"otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.\n\n" +
 		"Identity is not scoped: you are the session you are, in whatever project it " +
 		"belongs to. --repo therefore acts as an assertion — it checks that the " +
 		"resolved session really is in that project, and errors if it is not.",
