@@ -171,6 +171,12 @@ type Manager struct {
 	// open until Start, after the worktree already exists. Keyed per repo by the
 	// exact sanitized tmux name; the value is the user-facing title for errors.
 	reservedTmuxNames map[string]string
+	// reservedArchiveTitles holds only creates of local, relocatable worktrees.
+	// Unlike tmux names, these exclude --here sessions. Keys are (repoID, title).
+	reservedArchiveTitles map[string]struct{}
+	// reservedArchiveDestinations holds active archive moves by (repoID, path).
+	// The owning instance identifies both the refusal and the release authority.
+	reservedArchiveDestinations map[string]*session.Instance
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//
@@ -365,6 +371,10 @@ type Manager struct {
 	// after restart; this map prevents a second worker in the same daemon process.
 	// Values are stable IDs so title reuse cannot inherit an old fence.
 	ghostCleanupStalls map[string]string
+	// lateGhostCleanupWG joins detached finalizers before tests restore their
+	// seams. Launchers must return before waiting so every Add precedes Wait;
+	// the production kill path never waits for these retrying workers.
+	lateGhostCleanupWG sync.WaitGroup
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
