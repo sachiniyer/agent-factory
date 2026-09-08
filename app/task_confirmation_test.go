@@ -94,3 +94,33 @@ func TestUnavailableTasksEditorCapture(t *testing.T) {
 	require.Contains(t, pane.String(), "Cannot load tasks")
 	require.NotContains(t, pane.String(), "enter save")
 }
+
+func TestUnavailableTasksCreateClearsLoadFailure(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = setupRealRepo(t)
+	t.Chdir(h.repoRoot)
+	h.termWidth, h.termHeight = 100, 30
+	h.relayout()
+	pane := h.automations.TaskPane()
+	h.showTasksOverlay()
+	pane.SetUnavailable(errors.New("task file was unreadable"))
+	key := func(msg tea.KeyMsg) { h.handleStateTasks(msg) }
+	key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	require.True(t, pane.IsCreating())
+	key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Recovery task")})
+	for i := 0; i < 3; i++ {
+		key(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Review changes")})
+	for i := 0; i < 3; i++ {
+		key(tea.KeyMsg{Type: tea.KeyShiftTab})
+	}
+	key(tea.KeyMsg{Type: tea.KeyEnter})
+	require.False(t, pane.IsCreating())
+	require.Len(t, pane.GetTasks(), 1, "successful creation reloads the new task")
+	require.Equal(t, "Recovery task", pane.GetTasks()[0].Name)
+	_, available := pane.SelectedTask()
+	require.True(t, available, "a successful reload clears the unavailable state")
+	require.NotContains(t, pane.String(), "Cannot load tasks")
+	require.Contains(t, pane.String(), "Recovery task")
+}

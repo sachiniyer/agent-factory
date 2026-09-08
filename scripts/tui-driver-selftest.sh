@@ -911,6 +911,13 @@ _expect_task_overlay_marker_context() {
         return 1
     fi
 
+    local incomplete_enclosing
+    incomplete_enclosing=$'╭────────────────────────────────────╮\n        ╭────────────────────╮\n        │ Tasks              │\n        │ n new · esc back   │\n        ╰────────────────────╯'
+    if ! printf '%s\n' "$incomplete_enclosing" | _af_tasks_overlay_visible; then
+        _af_fail 'an incomplete enclosing pane frame hid the completed task dialog'
+        return 1
+    fi
+
     local create_modal
     create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab/shift+tab fields · enter create · esc cancel · q quit   │\n╰────────────────────────────────────────────────────────────╯'
     if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then

@@ -947,9 +947,9 @@ _af_tab_count() {
 
 # _af_tasks_dialog_has <content-regex> reads a captured screen on stdin and
 # succeeds only when the marker is enclosed by one complete rounded dialog. The
-# scanner tracks side-by-side candidates independently, including edges sharing
-# a row. Only a matching bottom closes each candidate; nested boxes are ignored,
-# and footer-like text beyond a candidate bottom cannot revive it.
+# scanner tracks every candidate independently, including nested frames and
+# edges sharing a row. Only its own matching bottom can complete a candidate;
+# incomplete enclosing frames cannot hide a complete dialog inside them.
 # Force byte semantics for mawk/gawk parity, then count prefix characters by
 # removing UTF-8 continuation bytes. This makes a multibyte sidebar glyph count
 # as one column on both edges; double-width CJK glyphs remain out of scope.
@@ -982,24 +982,16 @@ _af_tasks_dialog_has() {
         {
             rest = $0
             offset = 0
-            # Register every outer top edge, not just the leftmost match.
+            # Register every top edge, even inside an incomplete enclosing frame.
             while (match(rest, top_re)) {
                 edge_start = offset + RSTART - 1
                 edge_bytes = RLENGTH
                 left = columns(substr($0, 1, edge_start))
                 width = columns(substr(rest, RSTART, edge_bytes))
-                nested = 0
-                for (id in active) {
-                    if (left >= starts[id] && left + width <= starts[id] + widths[id]) {
-                        nested = 1
-                    }
-                }
-                if (!nested) {
-                    id = ++candidate
-                    active[id] = NR
-                    starts[id] = left
-                    widths[id] = width
-                }
+                id = ++candidate
+                active[id] = NR
+                starts[id] = left
+                widths[id] = width
                 offset = edge_start + edge_bytes
                 rest = substr($0, offset + 1)
             }
@@ -1008,7 +1000,7 @@ _af_tasks_dialog_has() {
                 if (frame_row($0, starts[id], widths[id]) ~ content_re) { footer[id] = NR }
                 rest = $0
                 offset = 0
-                # A same-row foreign bottom must not hide this candidates edge.
+                # A foreign bottom on this row must not hide this frame edge.
                 while (match(rest, bottom_re)) {
                     edge_start = offset + RSTART - 1
                     edge_bytes = RLENGTH
