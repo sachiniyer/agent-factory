@@ -36,6 +36,9 @@ type hookRun struct {
 	// actually enters a scope, so the session can persist the durable handle a
 	// later daemon generation needs to find a survivor.
 	onScopeLaunched func(prefix string)
+	// A recovery runner must leave its journal pending if cancellation interrupts
+	// the suffix; adoption can then retry it after the scope is gone.
+	leaveProgressUnfinishedOnCancel bool
 }
 
 // RunPostWorktreeHooksAsyncWithEnvironment runs the per-repo post_worktree_commands
@@ -133,9 +136,10 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 	go func() {
 		defer close(done)
 		finishProgress := true
+		abandonResumable := func() { finishProgress = false }
 		if run.progress != nil {
 			defer func() {
-				if finishProgress {
+				if finishProgress && !(run.leaveProgressUnfinishedOnCancel && ctx.Err() != nil) {
 					run.progress.finish()
 				}
 			}()
@@ -151,10 +155,11 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				return
 			default:
 			}
-			outputFile, outputErr := hooklog.Open(hooklog.PostWorktree)
+			outputFile, outputErr := openHookLog(hooklog.PostWorktree)
 			if outputErr != nil {
 				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", cmdStr, outputErr)
 				if !run.progress.recordLaunchFailure(index, outputErr) {
+					abandonResumable()
 					return
 				}
 				continue
@@ -251,8 +256,13 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 					waitErr = fmt.Errorf("hook launcher exited before claiming entry %d", index)
 				}
 				if scopeStopErr != nil || !run.progress.recordLaunchFailure(index, waitErr) {
-					finishProgress = false
+					abandonResumable()
 					_ = outputFile.Close()
+					if scopeStopErr != nil && waitForHookScopeGone(ctx, run.progress.Prefix) {
+						resumed := run
+						resumed.leaveProgressUnfinishedOnCancel = true
+						<-runPostWorktreeHooks(ctx, resumed)
+					}
 					return
 				}
 			}
@@ -282,6 +292,8 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 }
 
 var stopHookScopeUnits = systemdunit.StopScopeUnits
+
+var openHookLog = hooklog.Open
 
 // Successful and deliberately cancelled hooks historically retained no output.
 // Keep that contract (and avoid an unbounded success-log collection), while a

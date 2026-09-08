@@ -31,17 +31,7 @@ func TestHookProgressUnclaimedLauncherLeavesJournalResumable(t *testing.T) {
 	}
 	done := runPostWorktreeHooks(t.Context(), hookRun{repoPath: repo, worktreePath: tree, progress: p})
 	waitForClosed(t, done, 5*time.Second, "launcher failure did not finish runner")
-	if p.finished() {
-		t.Fatal("unclaimed launcher failure marked the journal finished")
-	}
-	if _, err := readPendingHookProgress(tree, "owner"); err != nil {
-		t.Fatalf("unfinished journal was not resumable: %v", err)
-	}
-
-	stopHookScopeUnits = originalStop
-	resumed := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, resumed, 5*time.Second, "resumed hook did not finish")
 	if !p.claimed(0) || !p.finished() {
-		t.Fatal("resume did not claim the unclaimed entry and finish the journal")
+		t.Fatal("scope-stop recovery did not claim the unclaimed entry and finish the journal")
 	}
 }

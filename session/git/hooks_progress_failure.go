@@ -8,6 +8,8 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+var hookProgressWriteFile = os.WriteFile
+
 // Preserve continue-on-error semantics without leaving a pending hole before
 // later commands. mkdir is the same atomic claim used by the scoped shell: a
 // competing/late launcher cannot execute a command after this terminal claim.
@@ -24,11 +26,18 @@ func (p *hookProgress) recordLaunchFailure(index int, cause error) bool {
 		log.ErrorLog.Printf("cannot claim failed post-worktree hook entry %d: %v", index, err)
 		return false
 	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(receipt)
+		}
+	}()
 	for name, value := range map[string]string{"launch-failed": fmt.Sprintln(cause), "exit": "125\n"} {
-		if err := os.WriteFile(filepath.Join(receipt, name), []byte(value), 0600); err != nil {
+		if err := hookProgressWriteFile(filepath.Join(receipt, name), []byte(value), 0600); err != nil {
 			log.ErrorLog.Printf("cannot record failed post-worktree hook entry %d: %v", index, err)
 			return false
 		}
 	}
+	published = true
 	return true
 }
