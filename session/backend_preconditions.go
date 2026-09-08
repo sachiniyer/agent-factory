@@ -65,11 +65,11 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 	switch kind {
 	case BackendDocker:
 		if cfg == nil || cfg.Docker == nil || strings.TrimSpace(cfg.Docker.Image) == "" {
-			return fmt.Errorf("backend=docker requires docker.image to be set in this repo's .agent-factory/config.json (the container image that carries git + tmux + the agent CLIs; the `af` binary is copied in automatically)")
+			return fmt.Errorf("backend=docker requires docker.image to be set in this repo's %s (the container image that carries git + tmux + the agent CLIs; the `af` binary is copied in automatically)", backendConfigFile(cfg))
 		}
 	case BackendSSH:
 		if cfg == nil || cfg.SSH == nil || strings.TrimSpace(cfg.SSH.Host) == "" {
-			return fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json (the remote host the session's workspace + agent run on)")
+			return fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's %s (the remote host the session's workspace + agent run on)", backendConfigFile(cfg))
 		}
 		// The address is a local, side-effect-free fact, so the picker must reflect
 		// it rather than offering a backend whose every create fails in the
@@ -84,14 +84,14 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 		// (af executes the command on the daemon host, so a repo-settable version
 		// would be code execution from a clone; #2476).
 		if cfg == nil || strings.TrimSpace(cfg.SandboxSSH) == "" {
-			return fmt.Errorf("backend=sandbox requires sandbox.ssh to be set in the OPERATOR's global config " +
-				"(~/.agent-factory/config.toml, or `af config set sandbox.ssh '<your ssh command>'`) — the ssh " +
-				"invocation af runs to reach the sandbox host. It is global-only on purpose: af executes it on " +
-				"this machine, so a repository cannot choose it")
+			return fmt.Errorf("backend=sandbox requires sandbox.ssh to be set in the OPERATOR's global config "+
+				"(%s, or `af config set sandbox.ssh '<your ssh command>'`) — the ssh "+
+				"invocation af runs to reach the sandbox host. It is global-only on purpose: af executes it on "+
+				"this machine, so a repository cannot choose it", config.GlobalConfigFileForDisplay())
 		}
 	case BackendHook:
 		if cfg == nil || cfg.RemoteHooks == nil {
-			return fmt.Errorf("backend=hook requires remote_hooks to be configured in this repo's .agent-factory/config.json (the launch/delete commands that provision the session on your own infrastructure)")
+			return fmt.Errorf("backend=hook requires remote_hooks to be configured in this repo's %s (the launch/delete commands that provision the session on your own infrastructure)", backendConfigFile(cfg))
 		}
 	}
 	// BackendLocal needs nothing from the repo config, and an unregistered kind is
@@ -206,4 +206,17 @@ func sshCLIMissingError(err error) error {
 // the durable store), so neither can run in a repo that has no origin.
 func missingOriginError(kind BackendKind, repoRoot string) error {
 	return fmt.Errorf("backend=%s: repo %q has no `origin` remote to clone the workspace from; add one (GitHub is the durable workspace store) or push the repo first", kind, repoRoot)
+}
+
+// Keep remedies tied to the file read, even if files change after resolution.
+func backendConfigFile(cfg *config.ResolvedConfig) string {
+	if cfg != nil {
+		if cfg.InRepoConfigFile != "" {
+			return cfg.InRepoConfigFile
+		}
+		if cfg.ProjectRoot != "" {
+			return config.InRepoConfigFileName(cfg.ProjectRoot)
+		}
+	}
+	return config.InRepoConfigFileName("")
 }

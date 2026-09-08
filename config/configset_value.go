@@ -440,8 +440,9 @@ type byteRange struct {
 // for source ranges: unlike line regexes it sees a multiline array or inline
 // table as one expression, so replacing session_env_passthrough cannot strand
 // half of the old value in the file. Unrelated expressions stay byte-identical.
+// root_agent is a field-wise patch: omitted profile members are retained.
 func setTOMLStructured(content, key, definition string) (string, error) {
-	definition, err := preserveUnknownStructuredMembers(content, key, definition)
+	definition, err := preserveStructuredMembers(content, key, definition)
 	if err != nil {
 		return "", err
 	}
@@ -467,13 +468,62 @@ func setTOMLStructured(content, key, definition string) (string, error) {
 	return setTOMLScalar(cleaned, "", key, strings.TrimSuffix(strings.TrimPrefix(definition, prefix), "\n")), nil
 }
 
-// preserveUnknownStructuredMembers carries fields this binary does not know
+// canonicalStructuredTOMLValue returns the compact JSON form of the value
+// actually stored in a structured TOML definition. This is the read-back form
+// used by config set after a field-wise merge.
+func canonicalStructuredTOMLValue(content, key string) (string, error) {
+	var document map[string]any
+	if err := toml.Unmarshal([]byte(content), &document); err != nil {
+		return "", err
+	}
+	value, ok := document[key]
+	if !ok {
+		return "", fmt.Errorf("stored structured value %s is missing", key)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// projectStructuredCurrentValue returns the typed, writer-accepted form of a
+// structured personal-project value. root_agent needs its source shape as well
+// as its decoded value: enabled=false and program="" are meaningful when
+// explicitly present, while an omitted field must keep inheriting.
+func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool) {
+	field, ok := taggedFieldByKey(reflect.ValueOf(cfg), key)
+	if !ok {
+		return "", false
+	}
+	if key != "root_agent" {
+		return editorValue(field), true
+	}
+	shapeValue, _ := cfg.source.topLevel(key)
+	shape, ok := shapeValue.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	var value rootAgentConfigJSON
+	if _, present := shape["enabled"]; present {
+		enabled := cfg.RootAgent.Enabled
+		value.Enabled = &enabled
+	}
+	if _, present := shape["program"]; present {
+		program := cfg.RootAgent.Program
+		value.Program = &program
+	}
+	return editorValue(reflect.ValueOf(value)), true
+}
+
+// preserveStructuredMembers retains omitted root_agent profile fields and
+// carries fields this binary does not know
 // from the old target table into its replacement. The loader deliberately
 // ignores such fields for rollback tolerance; dropping them during an edit of a
 // known sibling would make that tolerance destructive. Dynamic map keys remain
-// ordinary user values, so omission still removes them. Only unknown members
-// inside a typed struct (including a struct stored in a map) are retained.
-func preserveUnknownStructuredMembers(content, key, definition string) (string, error) {
+// ordinary user values, so omission still removes them. For other typed structs
+// (including structs stored in maps), only unknown members are retained.
+func preserveStructuredMembers(content, key, definition string) (string, error) {
 	var existingDoc, replacementDoc map[string]any
 	if err := toml.Unmarshal([]byte(content), &existingDoc); err != nil {
 		return "", err
@@ -491,9 +541,27 @@ func preserveUnknownStructuredMembers(content, key, definition string) (string, 
 	if !ok {
 		return definition, nil
 	}
-	merged, changed, err := mergeUnknownStructuredMembers(existing, replacement, field.Type(), key)
-	if err != nil {
-		return "", err
+	var merged any
+	var changed bool
+	if key == "root_agent" {
+		previous, oldOK := existing.(map[string]any)
+		next, newOK := replacement.(map[string]any)
+		if !oldOK || !newOK {
+			return "", fmt.Errorf("root_agent must be a table")
+		}
+		for member, value := range previous {
+			if _, supplied := next[member]; !supplied {
+				next[member] = value
+				changed = true
+			}
+		}
+		merged = next
+	} else {
+		var err error
+		merged, changed, err = mergeUnknownStructuredMembers(existing, replacement, field.Type(), key)
+		if err != nil {
+			return "", err
+		}
 	}
 	if !changed {
 		return definition, nil

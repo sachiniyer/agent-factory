@@ -97,8 +97,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		// the actionable "global setting" rejection rather than the generic
 		// "unknown key" one it got while it was missing from
 		// inRepoGlobalOnlyKeys. It exists in both config.json and config.toml
-		// (unlike [keys]/[theme]), so the message points at the resolved
-		// global config file, not config.toml.
+		// but the remedy must name the authoritative global TOML file.
 		home := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", home)
 		repoRoot := t.TempDir()
@@ -110,7 +109,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "global setting")
 		assert.NotContains(t, err.Error(), "unknown key",
 			"a global-only key must not fall through to the generic unknown-key message")
-		assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)))
+		assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, TomlConfigFileName)))
 	})
 
 	t.Run("rejects grouped network settings as global-only", func(t *testing.T) {
