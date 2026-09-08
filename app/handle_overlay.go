@@ -55,12 +55,9 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleStateInitialPrompt handles key events while the naming form's
-// initial-prompt field is open (#1936). Closing keeps the text — the field is
-// part of the create form, so Tab/Esc back out of it rather than discarding it
-// — and returns to naming, mirroring handleStateSelectProgram. ctrl+c is the
-// exception: it means "cancel this create", so it is replayed into the naming
-// handler, which owns the kill-and-clean-up path (#717).
+// handleStateInitialPrompt returns to naming when the nested prompt field closes.
+// Tab/Esc keep the edit; Ctrl+C discards this edit and preserves the prior prompt
+// and every other pending form value. Canceling the create belongs to naming.
 func (m *home) handleStateInitialPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	shouldClose := m.promptOverlay.HandleKeyPress(msg)
 	if !shouldClose {
@@ -72,9 +69,6 @@ func (m *home) handleStateInitialPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.promptOverlay = nil
 	m.state = stateNew
-	if canceled {
-		return m.handleStateNew(tea.KeyMsg{Type: tea.KeyCtrlC})
-	}
 	m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
