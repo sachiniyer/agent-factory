@@ -10,20 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReservedTitleRefusalResolvedConfigFile(t *testing.T) {
+func TestReservedTitleRefusalProjectScopedRemedy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	for _, dir := range []string{filepath.Join(home, "relocated"), t.TempDir()} {
 		t.Run(filepath.Base(dir), func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", dir)
-			want := filepath.Join(dir, config.TomlConfigFileName)
-			if dir == filepath.Join(home, "relocated") {
-				want = "~/relocated/" + config.TomlConfigFileName
-			}
 			for _, title := range []string{"root", "ro ot"} {
 				err := ReservedTitleRefusal(title)
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), want)
+				assert.Contains(t, err.Error(), "from this repo")
+				assert.Contains(t, err.Error(), "af projects add .")
+				assert.Contains(t, err.Error(), `af config set --project . root_agent '{"enabled":true}'`)
+				assert.NotContains(t, err.Error(), config.GlobalConfigFileForDisplay())
+				assert.NotContains(t, err.Error(), "config.toml")
 				assert.Contains(t, err.Error(), "[root_agent]")
 				assert.NotContains(t, err.Error(), "config.json")
 				assert.NotContains(t, err.Error(), "root_agents")

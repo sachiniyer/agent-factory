@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -73,7 +72,9 @@ func ReservedTitleRefusal(title string) error {
 	if reserved == "" {
 		return nil
 	}
-	remedy := fmt.Sprintf("pick another name (to run a root agent on this repo, configure the [root_agent] project profile in %s)", config.GlobalConfigFileForDisplay())
+	const remedy = `pick another name (to run a root agent on this repo, from this repo run ` +
+		"`af projects add .`, then enable its personal [root_agent] profile with " +
+		"`af config set --project . root_agent '{\"enabled\":true}'`; restart the daemon to apply)"
 	if IsReservedTitle(title) {
 		return fmt.Errorf("session title %q is reserved for the daemon-managed root agent; %s", title, remedy)
 	}
