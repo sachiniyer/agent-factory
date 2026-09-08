@@ -117,12 +117,16 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 			if !info.IsDir() {
 				return path, "", nil
 			}
-			// Only a missing destination needs creation in its nearest existing
-			// ancestor. Access asks the kernel, honoring ACLs and root privileges.
-			if path != dir {
-				if err := unix.Access(path, unix.W_OK|unix.X_OK); err != nil {
-					return path, "", err
-				}
+			// Creating logs needs write and search access to an existing leaf,
+			// or to the nearest existing ancestor when the leaf is absent.
+			// Resolve links so remediation names the directory to repair.
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return "", "", err
+			}
+			// Ask the kernel, honoring ACLs and root privileges.
+			if err := unix.Access(resolved, unix.W_OK|unix.X_OK); err != nil {
+				return resolved, "", err
 			}
 			return "", "", nil
 		}
