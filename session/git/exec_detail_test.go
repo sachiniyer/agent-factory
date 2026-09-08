@@ -3,7 +3,6 @@ package git
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -22,34 +21,6 @@ func exitErrorWithStderr(t *testing.T, stderr string) error {
 		t.Fatalf("expected an *exec.ExitError from a failing command, got %T (%v)", err, err)
 	}
 	return err
-}
-
-// TestFetchPRInfo_SurfacesGhStderr is the #3392 regression: a non-zero `gh`
-// exit must report what gh actually said, not just "exit status 1". Before the
-// fix the message was exactly "failed to fetch PR info: exit status 1", from
-// which a maintainer could not distinguish an auth failure from a rate limit,
-// an unreachable network, or a repo with no GitHub remote.
-func TestFetchPRInfo_SurfacesGhStderr(t *testing.T) {
-	dir := t.TempDir()
-	const ghMessage = "gh: Bad credentials (HTTP 401)"
-	stub := "#!/bin/sh\nprintf '%s\\n' '" + ghMessage + "' >&2\nexit 1\n"
-	if err := os.WriteFile(dir+"/gh", []byte(stub), 0o755); err != nil {
-		t.Fatalf("failed to write gh stub: %v", err)
-	}
-	t.Setenv("PATH", dir)
-
-	_, err := FetchPRInfo(t.TempDir(), "some-branch")
-	if err == nil {
-		t.Fatal("a non-zero gh exit must be an error")
-	}
-	if !strings.Contains(err.Error(), ghMessage) {
-		t.Errorf("the error must carry gh's own explanation.\n got: %q\nwant it to contain: %q", err.Error(), ghMessage)
-	}
-	// The wrap must stay a wrap: callers and errors.As still need the exit code.
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Errorf("the *exec.ExitError must remain unwrappable, got %T", err)
-	}
 }
 
 // TestCommandFailureDetail_NonExitErrorsAddNothing pins the negative half. A

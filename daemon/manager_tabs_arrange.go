@@ -33,12 +33,6 @@ type tabMutationLabels struct {
 // and its post-lock gate so a mutation that LOSES the race to an archive is
 // indistinguishable — to a CLI user or the web UI — from one that arrived after
 // it: same refusal, same advice, roster intact.
-//
-// SetPRInfo (daemon/manager_tabs.go) is the third caller and not a tab mutation
-// at all; it takes this refusal because the user-facing goal is one consistent
-// message and remedy for every mutation an archive turns away, whatever it was
-// trying to change. The name has stayed narrower than the use — worth widening
-// the day a fourth non-tab caller appears.
 func errTabMutationArchived(action, title string) error {
 	return fmt.Errorf("cannot %s on archived session %q; restore it first (af sessions restore)", action, title)
 }
@@ -220,8 +214,7 @@ func stableTabTargetID(tab *session.Tab, title string) (string, error) {
 // Rename and reorder are the third case: pure in-memory metadata, no tmux, no
 // side effect, and exactly reversible. So memory can and should be put back —
 // leaving it diverged would show the user a name/order that silently reverts on
-// the next restart, which reads as data loss. This matches SetPRInfo, the other
-// pure-metadata mutation.
+// the next restart, which reads as data loss.
 
 // RenameTab relabels one tab of the target session, persists the roster, and
 // returns the RESOLVED name (#1813). It mirrors CloseTab's discipline via

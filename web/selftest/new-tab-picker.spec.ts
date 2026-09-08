@@ -141,6 +141,43 @@ test("desktop picker stays visible after phone recomposition", async ({ page, re
   await expect(controls).toHaveAttribute("aria-expanded", "false");
 });
 
+test("picker closes before keyboard activation of a sibling action", async ({ page, request }) => {
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  await page.keyboard.press("Control+]");
+  await page.keyboard.press("t");
+  const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+  await expect(menu).toBeVisible();
+  await menu.evaluate(el => {
+    const sibling = document.createElement("button");
+    sibling.textContent = "Sibling action";
+    sibling.addEventListener("click", () => {
+      const dialog = document.createElement("div");
+      dialog.setAttribute("role", "dialog");
+      dialog.textContent = "Sibling modal";
+      dialog.addEventListener("keydown", event => {
+        if (event.key === "Escape") dialog.remove();
+      });
+      dialog.tabIndex = -1;
+      document.body.append(dialog);
+      dialog.focus();
+    });
+    el.parentElement!.append(sibling);
+  });
+  await page.keyboard.press("End");
+  await page.keyboard.press("Tab");
+  const sibling = page.getByRole("button", { name: "Sibling action", exact: true });
+  await expect(sibling).toBeFocused();
+  await expect(menu).toBeHidden();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toBeVisible();
+});
+
 for (const key of ["Enter", "Space"]) {
   test(`picker does not consume ${key} after Tab leaves its items`, async ({ page, request }) => {
     const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();

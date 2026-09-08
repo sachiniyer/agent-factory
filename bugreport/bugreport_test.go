@@ -140,7 +140,6 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 			},
 		},
 		AgentConversation: &session.AgentConversationData{Agent: "claude", ID: "019f386f-7206-7fc2-803b-f7045e07a242"},
-		PRInfo:            session.PRInfoData{Number: 42, State: "open", Title: "secret pr title", URL: "https://example.com/pr/42"},
 		RuntimeCleanup: &session.RuntimeCleanupData{SSH: &session.SSHRuntimeCleanupData{
 			Config:     config.SSHConfig{Host: "private-builder.internal", User: "alice", IdentityFile: "/home/alice/.ssh/private-builder"},
 			SessionDir: "/srv/private/proprietary-session",
@@ -182,15 +181,9 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	if d.Tabs[0].Conversation.ID != "" || d.AgentConversation.ID != "" {
 		t.Errorf("conversation ids not redacted: tab=%q instance=%q", d.Tabs[0].Conversation.ID, d.AgentConversation.ID)
 	}
-	if d.PRInfo.Title != redactedMarker || d.PRInfo.URL != redactedMarker {
-		t.Errorf("PR free-text not redacted: %+v", d.PRInfo)
-	}
 	// Structural fields intact.
 	if d.ID != "abc123" || d.Program != "claude" || d.Status != session.Status(1) {
 		t.Errorf("structural fields mutated: %+v", d)
-	}
-	if d.PRInfo.Number != 42 || d.PRInfo.State != "open" {
-		t.Errorf("structural PR fields mutated: %+v", d.PRInfo)
 	}
 	if d.Worktree.BaseCommitSHA != testSHA {
 		t.Errorf("base commit SHA must survive: %q", d.Worktree.BaseCommitSHA)
@@ -446,8 +439,8 @@ func TestScrubSessionTitlesDoesNotRewriteItsOwnMarker(t *testing.T) {
 
 // TestRedactInstanceDataRedactsNonLoopbackWebTabURL pins the #1954 fix: a web
 // tab's URL is user-supplied (any http/https target passes NormalizeWebTabURL)
-// and can name internal infrastructure or a private repo, exactly the class of
-// data PRInfo.URL is redacted for. A NON-loopback URL must be redacted; a
+// and can name internal infrastructure or a private repo. A NON-loopback URL
+// must be redacted; a
 // loopback URL (the proxied dev-server case) is kept for triage, mirroring the
 // same loopback/non-loopback split the daemon proxy draws.
 func TestRedactInstanceDataRedactsNonLoopbackWebTabURL(t *testing.T) {
@@ -466,7 +459,7 @@ func TestRedactInstanceDataRedactsNonLoopbackWebTabURL(t *testing.T) {
 	redactOneInstanceData(&d)
 
 	if d.Tabs[0].URL != redactedMarker {
-		t.Errorf("non-loopback web tab URL not redacted: %q (leaks internal/private identifiers, same class as PRInfo.URL)", d.Tabs[0].URL)
+		t.Errorf("non-loopback web tab URL not redacted: %q (leaks internal/private identifiers, a private link)", d.Tabs[0].URL)
 	}
 	if d.Tabs[1].URL != loopbackOrigin {
 		t.Errorf("loopback web tab URL must retain only its origin: got %q, want %q", d.Tabs[1].URL, loopbackOrigin)
@@ -1053,7 +1046,6 @@ func TestBuildEndToEnd(t *testing.T) {
 			Name:    "agent",
 			Command: "claude --token sk-INSTANCESECRET0123456789",
 		}},
-		PRInfo: session.PRInfoData{Number: 42, State: "open", Title: "secret pr", URL: "https://x/pr/42"},
 	}})
 	if err != nil {
 		t.Fatalf("marshal instances: %v", err)

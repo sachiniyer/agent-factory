@@ -606,40 +606,6 @@ type ReorderTabResponse struct {
 	Index int    `json:"index"`
 }
 
-// SetPRInfoRequest records (or clears) the GitHub PR info for a session and
-// persists it (#960). ID is authoritative when present; legacy callers resolve
-// by {Title, RepoID}. A zero-value PRInfo (Number 0) clears the recorded info,
-// matching how pr_info round-trips through storage (FromInstanceData treats
-// Number 0 as "no PR").
-type SetPRInfoRequest struct {
-	Title  string `json:"title"`
-	RepoID string `json:"repo_id"`
-	// ID is the session's stable id; see KillSessionRequest.ID. The TUI's PR
-	// lookup is asynchronous, so a completed fetch must not persist onto a
-	// different same-title row that appeared while gh was running.
-	ID string `json:"id"`
-	// PRInfo is the fetched projection to persist.
-	PRInfo session.PRInfoData `json:"pr_info"`
-}
-
-type SetPRInfoResponse struct {
-	OK bool `json:"ok"`
-}
-
-// RefreshPRInfoRequest asks the daemon to refresh its GitHub PR projection for
-// one session. The client supplies identity only: discovery, eligibility, and
-// the projected fields are daemon-owned (#3296). ID is authoritative when
-// present; legacy callers may address the row by {Title, RepoID}.
-type RefreshPRInfoRequest struct {
-	Title  string `json:"title"`
-	RepoID string `json:"repo_id"`
-	ID     string `json:"id"`
-}
-
-type RefreshPRInfoResponse struct {
-	OK bool `json:"ok"`
-}
-
 // PauseStatusPollRequest asks the daemon to pause its per-instance capture-pane
 // liveness poll for ONE session while a TUI is attached full-screen to it
 // (#1160, Fix A follow-up to #1157). ID identifies the lease owner when

@@ -440,7 +440,7 @@ type home struct {
 
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server
-	// (capture-pane via runMetadataTick, refreshPanesCmd, refreshPRInfoCmd) is
+	// (capture-pane via runMetadataTick, refreshPanesCmd) is
 	// paused so the user's detach key-press is never queued behind it. See
 	// issue #598 — the 44s detach hang was traced to wg.Wait waiting on
 	// the tmux client to exit, which itself was blocked behind ~40 RPS of
@@ -984,7 +984,6 @@ func (m *home) Init() tea.Cmd {
 			time.Sleep(100 * time.Millisecond)
 			return previewTickMsg{}
 		},
-		tickUpdatePRInfoCmd,
 		tickRefreshExternalCmd,
 	)
 }
