@@ -60,13 +60,17 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	swap := &autoAccountSwap{manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account), agent: target, reason: reason}
 	outgoing := instance.CurrentAgentName()
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, FromAccount: from, ToAccount: swap.to, HeadSHA: swap.headSHA}
 	if err != nil {
+		if outcome == resumePerformed || isMutationCommitted(err) {
+			return response, err
+		}
 		return HandoffSessionResponse{}, err
 	}
 	if outcome == resumeNotPerformed {
 		return HandoffSessionResponse{}, fmt.Errorf("session %q is no longer available to hand off", instance.Title)
 	}
-	return HandoffSessionResponse{OK: true, From: outgoing, To: target, FromAccount: from, ToAccount: swap.to, HeadSHA: swap.headSHA}, nil
+	return response, nil
 }
 
 // Manual admission uses the same registered and limit evidence sources as the

@@ -54,3 +54,54 @@ func TestHandoffAccountPartialStopRecordsLostRecovery(t *testing.T) {
 	m.RestoreLostSessions()
 	require.Equal(t, 1, recovery.recoverCalls(), "confirmed agent stop still permits ordinary recovery")
 }
+
+func TestHandoffAccountSiblingBlindStopRecordsStartupUnknown(t *testing.T) {
+	m, repo, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.ClearLimitReached()
+	prepareHandoffTargetPreflight(t, inst)
+	const agentName = "af_blind_sibling_agent"
+	const siblingName = "af_blind_sibling_tab"
+	var missing *exec.ExitError
+	require.ErrorAs(t, exec.Command("sh", "-c", "exit 1").Run(), &missing)
+	missing.Stderr = []byte("can't find session: " + siblingName)
+	vanished := false
+	started := false
+	inner := tabNameKeyedExec(map[string]bool{agentName: true, siblingName: true})
+	executor := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if vanished && strings.Contains(cmd.String(), "has-session") && strings.Contains(cmd.String(), siblingName) {
+				return errors.New("session does not exist")
+			}
+			if started {
+				require.NotContains(t, cmd.String(), "new-session")
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "display-message") && strings.Contains(cmd.String(), siblingName) && strings.Contains(cmd.String(), "pane_pid") {
+				vanished = true
+				return nil, nil
+			}
+			if vanished && strings.Contains(cmd.String(), "list-panes") && strings.Contains(cmd.String(), siblingName) {
+				return nil, missing
+			}
+			return inner.Output(cmd)
+		},
+	}
+	inst.SetBackend(&session.LocalBackend{})
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", tabPtyFactory{t: t, cmdExec: executor}, executor))
+	_, err := inst.AddProcessTab("cat", siblingName)
+	require.NoError(t, err)
+	started = true
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.True(t, vanished)
+	require.ErrorContains(t, err, "detached child")
+	require.ErrorIs(t, err, session.ErrAccountSwapAgentTeardownBlind)
+	require.True(t, inst.StartupStateUnknown())
+	require.NotEqual(t, session.LiveLost, inst.GetLiveness())
+	recovery := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(recovery)
+	m.RestoreLostSessions()
+	require.Zero(t, recovery.recoverCalls())
+}

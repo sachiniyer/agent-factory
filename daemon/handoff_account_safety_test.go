@@ -100,7 +100,9 @@ func TestHandoffAccountFinalSettlementFailureIsReportedAndNotRedelivered(t *test
 func TestControlHandoffAccountSettlementFailureUsesCommittedEnvelope(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
 	inst.ClearLimitReached()
+	prepareHandoffTargetPreflight(t, inst)
 	previous := testHookPersistInstanceData
 	defer func() { testHookPersistInstanceData = previous }()
 	fail := true
@@ -114,6 +116,11 @@ func TestControlHandoffAccountSettlementFailureUsesCommittedEnvelope(t *testing.
 	cs := &controlServer{manager: m}
 	require.NoError(t, cs.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"}, &resp))
 	require.True(t, resp.OK)
+	require.Equal(t, "claude", resp.From)
+	require.Equal(t, "claude", resp.To)
+	require.Equal(t, "work", resp.FromAccount)
+	require.Equal(t, "personal", resp.ToAccount)
+	require.NotEmpty(t, resp.HeadSHA)
 	require.Equal(t, apiproto.ErrorCodeMutationCommitted, resp.MutationOutcome.Code)
 	require.Contains(t, resp.MutationOutcome.Warning, "pending settlement")
 	_, _, prompts := backend.snapshot()

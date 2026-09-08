@@ -54,7 +54,7 @@ func TestAccountSwapBlindTeardownIdentifiesOnlyAgent(t *testing.T) {
 			}
 			err = inst.StopForAccountSwap()
 			require.ErrorContains(t, err, "detached child")
-			require.Equal(t, agentBlind, errors.Is(fmt.Errorf("wrapped teardown: %w", err), ErrAccountSwapAgentTeardownBlind))
+			require.True(t, errors.Is(fmt.Errorf("wrapped teardown: %w", err), ErrAccountSwapAgentTeardownBlind), "every blind credential-bearing tab must classify the teardown as unsafe")
 		})
 	}
 }

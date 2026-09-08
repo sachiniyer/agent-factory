@@ -680,7 +680,10 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 	var resp HandoffSessionResponse
 	if err := callDaemon("HandoffSession", req, &resp); err != nil {
-		return HandoffSessionResponse{}, err
+		if !isMutationCommitted(err) {
+			return HandoffSessionResponse{}, err
+		}
+		return resp, err
 	}
 	return resp, nil
 }
