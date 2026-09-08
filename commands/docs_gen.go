@@ -230,6 +230,14 @@ func writeAPIReference(path string) error {
 		"takes precedence over that boolean and means the mutation must not be retried. " +
 		"See the [response envelope contract](../http-api.md#response-envelope) for details.\n\n")
 
+	b.WriteString("Session snapshot `tabs[]` records include `web_proxied` for web tabs: " +
+		"`true` means use the daemon proxy, `false` means the daemon will not proxy the target. " +
+		"Before direct navigation, clients must also check browser URL canonicalization: " +
+		"a target that still resolves to loopback must be blocked, not opened on the viewer’s machine. " +
+		"It is derived by `session.IsLoopbackWebTarget`, the same predicate the proxy checks; " +
+		"clients should use this decision rather than classify the URL themselves. " +
+		"Non-web tabs omit it, and clients of older daemons may fall back when it is absent.\n\n")
+
 	b.WriteString("`CreateSession.force_remote` remains accepted for compatibility with older clients. It selects the hook backend when `backend` is empty; an explicit `backend` takes precedence. New clients should use `backend` (for example, `\"hook\"`), as the TUI creation form does.\n\n")
 
 	b.WriteString("## Endpoints\n\n")
