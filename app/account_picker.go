@@ -291,8 +291,7 @@ func (m *home) fetchAccountDefault(naming *session.Instance, agent string) tea.C
 // handleAccountDefault applies a delivered project default to the open naming
 // form.
 //
-// Every guard here is one the picker's own handler needs, for the same reason:
-// the fetch is asynchronous, so by the time it lands the user may have submitted,
+// The fetch is asynchronous, so by the time it lands the user may have submitted,
 // cancelled, started naming a different session, or changed the program — which
 // changes which agent's registry the answer belongs to. The one guard this handler
 // adds is pendingAccountChosen: a default must never overwrite a decision the user
@@ -304,7 +303,14 @@ func (m *home) fetchAccountDefault(naming *session.Instance, agent string) tea.C
 // never the create — and an error toast on every `n` in a project with no daemon
 // route would be noise about something that did not go wrong.
 func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) {
-	if m.state != stateNew || m.namingInstance == nil || m.namingInstance != msg.naming {
+	switch m.state {
+	case stateNew, stateSelectBackend, stateSelectProgram, stateSelectAccount, statePromptInput:
+		// These fields edit the same naming flow. Opening a picker before the
+		// default arrives must not discard it or move focus away from that field.
+	default:
+		return m, nil
+	}
+	if m.namingInstance == nil || m.namingInstance != msg.naming {
 		return m, nil
 	}
 	if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
