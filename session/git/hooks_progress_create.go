@@ -11,15 +11,15 @@ func (g *GitWorktree) retainHookProgressForCreate(p *hookProgress) {
 	if !g.hookCreatePending || p == nil || !p.retainLease() {
 		return
 	}
-	g.hookCreateProgress = p
+	g.hookCreateRelease = p.releaseLease
 }
 
 // SettleHookCreatePersistence releases the create's hold after either the owner
 // row commits or the create aborts. It is idempotent for deferred cleanup.
 func (g *GitWorktree) SettleHookCreatePersistence() {
 	g.hookCreatePending = false
-	if g.hookCreateProgress != nil {
-		g.hookCreateProgress.releaseLease()
-		g.hookCreateProgress = nil
+	if g.hookCreateRelease != nil {
+		g.hookCreateRelease()
+		g.hookCreateRelease = nil
 	}
 }

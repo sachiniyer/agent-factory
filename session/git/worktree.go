@@ -130,7 +130,7 @@ type GitWorktree struct {
 	hookScopeSessionID  string
 	hooksResumeDisabled bool
 	hookCreatePending   bool
-	hookCreateProgress  *hookProgress
+	hookCreateRelease   func()
 	// hookScopeUnitPrefix is the durable handle: the prefix of every scope unit
 	// this session's hooks have entered. Written by the hook goroutine the first
 	// time a scope is actually created and by the storage restore, read by the
