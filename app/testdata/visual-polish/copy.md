@@ -1,10 +1,10 @@
 | File | Before | Length | After | Length |
 | --- | --- | ---: | --- | ---: |
 | ui/config_pane.go | Select a register row and press enter to add one. | 49 | Select register · enter to add an account. | 42 |
-| ui/config_pane_accounts.go | agent identities, not config keys · af runs the agent's own login and never reads the credential | 96 | Sign in with the agent’s login flow · follow the URL in the pane | 64 |
+| ui/config_pane_accounts.go | agent identities, not config keys · af runs the agent's own login and never reads the credential | 96 | Sign in with the agent's login flow · af never reads or stores the credential | 77 |
 | ui/overlay/promptOverlay.go | Sent to the agent as soon as it is ready… | 41 | Prompt for the agent… | 21 |
 | ui/overlay/selectionOverlay.go | ↑/↓ navigate · enter select · esc cancel | 40 | ↑/↓ select · enter confirm · esc cancel | 39 |
-| ui/overlay/searchOverlay.go | ↑/↓ navigate · enter select · esc close | 39 | ↑/↓ select · enter open · esc close | 35 |
+| ui/overlay/searchOverlay.go | ↑/↓ navigate · enter select · esc close | 39 | ↑/↓ select · enter select · esc close | 37 |
 | ui/overlay/projectPickerOverlay.go | registry unreadable · list may be incomplete | 44 | Cannot read registry · list may be incomplete | 45 |
 | ui/overlay/projectPickerOverlay.go | Add project — enter a repo path: | 32 | Enter a repo path: | 18 |
 | ui/overlay/projectPickerOverlay.go | j/k navigate · enter add · esc cancel | 37 | j/k select · enter add · esc cancel | 35 |
@@ -18,24 +18,24 @@
 | ui/tabbed_window.go |  No session selected  | 21 |  Select a session  | 18 |
 | ui/hooks_pane.go | enter to focus and edit hooks | 29 | enter edit hooks | 16 |
 | ui/task_pane.go | watch tasks run on their watch command's output, not on manual trigger | 70 | Watch tasks run on output, not manually. | 40 |
-| ui/task_pane.go | long-running cmd; 1 stdout line = 1 event | 41 | One output line triggers one run | 32 |
+| ui/task_pane.go | long-running cmd; 1 stdout line = 1 event | 41 | Long-running command · one output line triggers one run | 55 |
 | ui/task_pane.go | enter to focus and edit tasks | 29 | enter edit tasks | 16 |
 | ui/task_pane_edit.go | n/a — a target session is not this task's to reap | 49 | Target session is kept. | 23 |
 | ui/task_pane_edit.go | (optional) {{line}} expands to the event line | 45 | Optional · {{line}} inserts the event | 37 |
 | app/handle_overlay.go | Sessions already created by this task remain available. | 55 | Keep existing sessions. | 23 |
-| app/home_view.go | The last loaded sessions are retained. af retries automatically. | 64 | Showing saved sessions · retrying automatically. | 48 |
+| app/home_view.go | The last loaded sessions are retained. af retries automatically. | 64 | Previous sessions are retained · retrying automatically. | 56 |
 | app/help.go | A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces. | 96 | Manage agents in separate workspaces. | 37 |
 | app/help.go | Create a new session | 20 | Create a session | 16 |
 | app/help.go | Create a new remote session (requires remote_hooks config) | 58 | Create a remote session (needs remote_hooks) | 44 |
 | app/help.go | While naming a new session: pick its agent / initial prompt / backend / account | 79 | New session: agent · prompt · backend · account | 47 |
 | app/help.go | Switch to another project (repo) in place | 41 | Switch projects | 15 |
 | app/help.go | Manage tasks (n inside the manager creates one, r runs one) | 59 | Manage tasks · n create · r run | 31 |
-| app/help.go | Kill (delete) the selected session | 34 | Delete session · its worktree and branch are removed | 52 |
+| app/help.go | Kill (delete) the selected session | 34 | Delete session · its af-owned worktree and branch are removed | 61 |
 | app/help.go | Archive the selected live session | 33 | Archive locally · sandboxes publish work first | 46 |
-| app/help.go | Restore the selected archived / lost / dead session | 51 | Restore · sandboxes push before replacement or refuse | 53 |
+| app/help.go | Restore the selected archived / lost / dead session | 51 | Restore · reconnect or recover; absent sandboxes use last push | 62 |
 | app/help.go | Retry a session blocked at a usage limit (re-spawn + resume) | 60 | Resume after a usage limit | 26 |
 | app/help.go | Navigate between sessions | 25 | Select a session | 16 |
-| app/help.go | Interact with the session in its pane (all keys go to it) | 57 | Type in the pane · all keys go to the agent | 43 |
+| app/help.go | Interact with the session in its pane (all keys go to it) | 57 | Type in the pane · all keys go to that pane | 43 |
 | app/help.go | Leave interactive mode (back to navigation) | 43 | Return to navigation | 20 |
 | app/help.go | Attach to the selected session full-screen | 42 | Attach full-screen | 18 |
 | app/help.go | Detach from a full-screen session | 33 | Leave full-screen | 17 |
@@ -57,7 +57,7 @@
 | app/help.go | Close the current tab (the agent tab can't be closed) | 53 | Close tab · agent tab stays | 27 |
 | app/help.go | Scroll the current tab preview (navigation mode only) | 53 | Scroll preview in navigation mode | 33 |
 | app/help.go | Quit the application | 20 | Quit | 4 |
-| app/help.go | You are typing into this pane's terminal: every key — including tab — | 69 | All keys, including tab, go to the agent. | 41 |
+| app/help.go | You are typing into this pane's terminal: every key — including tab — | 69 | All keys, including tab, go to the pane. | 40 |
 | app/help.go | goes to the agent/shell. The pane's frame turns green while it has the | 70 | The pane’s keyboard label shows where you type. | 47 |
 | app/help.go | keyboard, and the sessions rail stays visible. | 46 | The sessions rail stays visible. | 32 |
 | app/help.go |  to return to navigation. | 25 |  to navigate. | 13 |
@@ -66,8 +66,8 @@
 | ui/config_pane_accounts.go | Holds a %s credential · ↵ runs %s's own login again in a tmux session scoped to this account, replacing it. af never reads the credential. | 138 | %s credential saved · enter to log in again and replace it. | 59 |
 | ui/config_pane_accounts.go | No %s credential yet · ↵ runs %s's own login in a tmux session scoped to this account and hands you the terminal. It is a device code — the pane prints a URL, you finish it in your own browser. af never reads the credential. | 224 | Log in to %s · follow the URL and device code in the pane. | 58 |
 | ui/overlay/confirmationOverlay.go | Press y/enter to confirm, n or esc to cancel | 44 | y/enter confirm · n/esc cancel | 30 |
-| app/design_stills_test.go | Kill Apply design roles? Its running process will stop. | 55 | Delete session Apply design roles? Permanently remove its af-owned worktree and branch. | 87 |
-| app/design_stills_test.go | The worktree and conversation remain available. | 47 | Uncommitted changes and unpushed commits in them are lost. Archive to keep them. | 80 |
+| app/design_stills_test.go | Kill Apply design roles? Its running process will stop. | 55 |  | 0 |
+| app/design_stills_test.go | The worktree and conversation remain available. | 47 |  | 0 |
 | api/sessions_watch.go | idle (ready for review) | 23 | idle · awaiting input | 21 |
 | api/sessions_watch.go | session %q is idle (ready for review) | 37 | session %q is idle · awaiting input | 35 |
 | api/sessions_watch.go | Block until a session goes idle, or until any session in the fleet changes state | 80 | Wait for idle, or a fleet stop-state change or disappearance | 60 |
@@ -77,12 +77,14 @@
 | api/sessions_lifecycle.go | Not available for remote or in-place (--here) sessions: archive relocates the ⏎ worktree, which those don't own. The relocated worktree path is printed on ⏎ success. | 161 | Sandboxes publish work before removal; restore recreates them from the published ⏎ branch. In-place (--here) sessions cannot be archived because af does not own ⏎ their worktree. Local archives print the relocated worktree path on success. | 235 |
 | api/sessions_lifecycle.go | Archive is the default way to finish with a session: tear down its tmux ⏎ and move its git worktree out to the global archive directory | 133 | Archive keeps a session restorable. Locally, stop its terminals ⏎ and move its owned git worktree to the global archive directory | 127 |
 | app/handle_tabs.go | VS Code | 7 | VS Code (web UI) | 16 |
-| app/account_picker.go | Ambient identity (the agent's own login) | 40 | Use configured default | 22 |
+| app/account_picker.go | Ambient identity (the agent's own login) | 40 | Use the agent's own login (no default configured) | 49 |
 | app/help.go |  | 0 | Hand off to another agent | 25 |
 | app/help.go |  | 0 | Search sessions | 15 |
 | app/handle_actions.go | [!] Archive session '%s'? ⏎  ⏎ Its tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s. | 168 | Archive session '%s'? ⏎  ⏎ Local: stop terminals and move the worktree to the archive. ⏎ Sandboxes: publish work, then remove the sandbox. ⏎ Restore with %s. | 149 |
-| app/handle_actions.go | [!] Restore remote session '%s'? ⏎  ⏎ If its sandbox can't be reached, restore refuses to replace it because unreachability is not proof that it is gone. If the sandbox answers that its agent is gone, restore provisions a fresh one from the last pushed commit and discards any changes on the old sandbox that were never pushed. A reachable live sandbox just reconnects, losing nothing. | 381 | Restore sandbox session '%s'? ⏎  ⏎ Reconnect if live. Otherwise, push work before replacement. ⏎ Restore refuses if reachability or preservation is uncertain. | 152 |
-| app/kill_confirm.go | [!] Kill session '%s'? | 22 | Delete session '%s'? ⏎ Permanently remove the session and its af-owned worktree and branch. | 89 |
+| app/restore_confirm.go | [!] Restore remote session '%s'? ⏎  ⏎ If its sandbox can't be reached, restore refuses to replace it because unreachability is not proof that it is gone. If the sandbox answers that its agent is gone, restore provisions a fresh one from the last pushed commit and discards any changes on the old sandbox that were never pushed. A reachable live sandbox just reconnects, losing nothing. | 381 | Restore sandbox session '%s'? ⏎  ⏎ Reconnects if live. A dead agent's sandbox is pushed first. ⏎ An absent sandbox is restored from its last pushed state — never-pushed changes are lost. ⏎ Restore refuses when reachability is uncertain. | 228 |
+| app/kill_confirm.go |  | 0 | Its af-owned worktree is removed; the pre-existing branch is kept. Uncommitted changes and commits reachable only from this worktree are lost. Archive to keep them. | 164 |
+| app/kill_confirm.go |  | 0 | Your checkout and branch are kept. | 34 |
+| app/kill_confirm.go | [!] Kill session '%s'? | 22 | Delete session '%s'? ⏎ Permanently delete the session. | 52 |
 | app/kill_confirm.go | Kill the root agent anyway? | 27 | Delete the root session and its af-owned resources? | 51 |
 | keys/keys.go | kill | 4 | delete session | 14 |
 | api/sessions_lifecycle.go | Permanently destroy a session and prune its worktree branch | 59 | Permanently delete a session and af-owned resources | 51 |
@@ -93,4 +95,4 @@
 | app/help.go |      - Kill (delete) the selected session | 41 |      - Permanently delete the session | 37 |
 | app/help.go |      - Detach from a full-screen session | 40 |      - Leave full-screen | 24 |
 | ui/overlay/confirmationOverlay.go | Press %s to confirm, %s or esc to cancel | 40 | %s confirm · %s/esc cancel | 26 |
-| app/kill_confirm.go |  | 0 |  ⏎ Uncommitted changes and unpushed commits in them are lost. Archive to keep them. | 81 |
+| app/kill_confirm.go |  | 0 | Its af-owned worktree and branch are removed. Uncommitted changes and unpushed commits in them are lost. Archive to keep them. | 126 |

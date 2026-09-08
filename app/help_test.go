@@ -456,7 +456,7 @@ func TestGeneralHelpWrappedDescriptionsStayOutOfKeyColumnAt80x24(t *testing.T) {
 		if strings.Contains(line, "Restore ·") {
 			retryLine = line
 		}
-		if strings.Contains(line, "replacement") {
+		if strings.Contains(line, "last push") {
 			continuationLine = line
 		}
 	}

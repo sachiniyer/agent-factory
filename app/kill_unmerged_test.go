@@ -250,6 +250,9 @@ func TestHandleKill_ExternalWorktreeSkipsWorktreeLossWarnings(t *testing.T) {
 
 	rendered := flatten(hm.confirmationOverlay.Render())
 	assert.Contains(t, rendered, "Delete session 'external'?")
+	assert.Contains(t, rendered, "Your checkout and branch are kept.")
+	assert.NotContains(t, rendered, "are lost")
+	assert.NotContains(t, rendered, "Archive")
 	assert.NotContains(t, rendered, "will be lost")
 	assert.NotContains(t, rendered, "Detached HEAD")
 	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey)

@@ -94,12 +94,12 @@ type accountChoice struct {
 func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accountChoice {
 	choices := []accountChoice{{
 		value: ambientAccount,
-		label: "Use configured default",
+		label: "Use the agent's own login (no default configured)",
 		agent: agent,
 	}}
 	fallback := resp.Defaults[agent]
 	if fallback != "" {
-		choices[0].label += " (" + fallback + ")"
+		choices[0].label = "Use configured default (" + fallback + ")"
 	}
 	listed := false
 	for _, entry := range resp.Entries {

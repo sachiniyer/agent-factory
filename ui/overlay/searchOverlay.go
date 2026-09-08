@@ -347,7 +347,7 @@ func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	if !plan.compact {
 		lines = append(lines, "")
 	}
-	hint := "↑/↓ select · enter open · esc close"
+	hint := "↑/↓ select · enter select · esc close"
 	if plan.compact || layout.Cells(hint) > plan.contentWidth {
 		hint = "↑/↓ nav · enter · esc close"
 	}

@@ -28,11 +28,11 @@ import (
 // consequence, and the self-heal recovery (#1237) — and must NOT be the generic
 // scratch-session prompt.
 func TestKillConfirmMessage_RootIsDistinctAndNamesConsequence(t *testing.T) {
-	generic := killConfirmMessage("scratch-1", "", false)
-	assert.Equal(t, "Delete session 'scratch-1'?\nPermanently remove the session and its af-owned worktree and branch.\nUncommitted changes and unpushed commits in them are lost. Archive to keep them.", generic,
+	generic := killConfirmMessage("scratch-1", "", false, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true})
+	assert.Equal(t, "Delete session 'scratch-1'?\nPermanently delete the session.\nIts af-owned worktree and branch are removed. Uncommitted changes and unpushed commits in them are lost. Archive to keep them.", generic,
 		"ordinary deletion must name permanence and ownership")
 
-	root := killConfirmMessage(session.RootSessionTitle, "", true)
+	root := killConfirmMessage(session.RootSessionTitle, "", true, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true})
 	assert.NotEqual(t, "Delete session 'root'?", root,
 		"root must not show the generic scratch-session prompt")
 	assert.Contains(t, root, "daemon-managed root agent",
@@ -47,8 +47,8 @@ func TestKillConfirmMessage_RootIsDistinctAndNamesConsequence(t *testing.T) {
 // changes warning is still appended for reserved and non-reserved alike.
 func TestKillConfirmMessage_WarningAppendsForBothBranches(t *testing.T) {
 	warn := "you have uncommitted changes"
-	assert.Contains(t, killConfirmMessage("scratch-1", warn, false), warn)
-	assert.Contains(t, killConfirmMessage(session.RootSessionTitle, warn, true), warn)
+	assert.Contains(t, killConfirmMessage("scratch-1", warn, false, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true}), warn)
+	assert.Contains(t, killConfirmMessage(session.RootSessionTitle, warn, true, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true}), warn)
 }
 
 // TestHandleKill_RootRequiresDistinctConfirmKey is the core guard: selecting
@@ -164,11 +164,19 @@ func TestHandleKill_RootIgnoresEnter(t *testing.T) {
 
 func TestKillConfirmWarnsAboutWorkLoss(t *testing.T) {
 	for _, reserved := range []bool{false, true} {
-		message := killConfirmMessage("review", "dynamic unmerged-commit warning", reserved)
+		message := killConfirmMessage("review", "dynamic unmerged-commit warning", reserved, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true})
 		assert.Contains(t, message, "Uncommitted changes and unpushed commits")
 		assert.Contains(t, message, "lost")
 		assert.Contains(t, message, "Archive")
 		assert.Contains(t, message, "dynamic unmerged-commit warning")
 		assert.NotContains(t, message, "User-owned work stays")
 	}
+}
+
+func TestKillConfirmPreservesPreExistingBranchCopy(t *testing.T) {
+	message := killConfirmMessage("reused", "", false, &session.WorktreeCleanupImpact{RemoveWorktree: true})
+	assert.Contains(t, message, "the pre-existing branch is kept")
+	assert.Contains(t, message, "commits reachable only from this worktree")
+	assert.NotContains(t, message, "worktree and branch are removed")
+	assert.NotContains(t, killConfirmMessage("remote", "", false, nil), "Your checkout and branch are kept")
 }

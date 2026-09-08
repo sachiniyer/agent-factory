@@ -108,3 +108,21 @@ Full-suite follow-up: restored `— selected:` to preserve the CLAUDE.md clause 
 | `no-project` | Shared accent/bold footer actions; registration instruction unchanged. |
 | `projects-unavailable` | Shared accent/bold footer actions; registry failure and recovery instruction unchanged. |
 | `zero-sessions` | Shared accent/bold footer actions; create-session instruction unchanged. |
+
+
+Accuracy review: copy follows the actual cleanup/default predicates. An owned worktree and owned branch get the loss warning; a reused branch is explicitly kept; external checkouts get “Your checkout and branch are kept.” Missing cleanup metadata makes no checkout-preservation promise. Dynamic warnings and confirmation keys remain unchanged. Sandbox restore names all four outcomes. Account choices name the configured identity only when one exists, otherwise the agent’s own login. No Cobra text changed. Restore confirmation helpers moved together into `app/restore_confirm.go` to keep the action file below its line limit.
+
+Recaptured/read 26 added or changed stills (both themes for each entry):
+
+| Stills | Inspected change |
+| --- | --- |
+| design/confirmation | Uses production owned-resource copy; loss disclosure and actions fit. |
+| design/confirmation-external (new) | Checkout/branch preservation, with no loss or unavailable Archive advice. |
+| design/confirmation-reused (new) | Owned worktree removal and pre-existing branch preservation; worktree-only loss warning fits. |
+| design/sandbox-restore (new) | Live reconnect, dead-agent push, absent last-push loss and uncertain-reachability refusal are all visible. |
+| design/help, design/preview-help | Owned-resource deletion, conditional restore and pane input; wrapping retains the scroll footer. |
+| design/interactive-help (new) | All keys go to the pane; escape instruction remains visible. |
+| design/accounts, recovery/remote-accounts | Credential trust disclosure remains visible above account rows and remote-login limitation. |
+| design/search, design/search-overflow | Enter selects; result and overflow counts remain visible. |
+| design/task-watch (new) | Long-running command requirement and one-line trigger are visible in the Watch placeholder. |
+| recovery/no-daemon | Says prior sessions are retained, without claiming they are displayed. |

@@ -123,7 +123,7 @@ const accountsHeading = "Accounts"
 // config/, and a row that reads as a config row implies a settable key
 // participating in the precedence chain. The note says what these are before the
 // first row can suggest otherwise.
-const accountsHeadingNote = "Sign in with the agent’s login flow · follow the URL in the pane"
+const accountsHeadingNote = "Sign in with the agent's login flow · af never reads or stores the credential"
 
 // SetAccounts loads the section from what the daemon reported.
 //

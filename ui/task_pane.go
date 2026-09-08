@@ -187,7 +187,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	picker.now = s.now
 
 	watch := textinput.New()
-	watch.Placeholder = "One output line triggers one run"
+	watch.Placeholder = "Long-running command · one output line triggers one run"
 	watch.PlaceholderStyle = taskPlaceholderStyle
 	watch.CharLimit = 256
 	watch.Blur()

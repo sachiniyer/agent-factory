@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // killGitTimeout bounds the local git metadata reads the kill confirmation runs.
@@ -102,7 +103,7 @@ const unmergedKillConfirmKey = "k"
 // mirrors the reserved-title guard the create path already applies
 // (app/handle_input.go). #1237 made root self-heal ~2 min after a kill, so the
 // copy names that recovery rather than the pre-#1237 "until the daemon restarts".
-func killConfirmMessage(title, warning string, reserved bool) string {
+func killConfirmMessage(title, warning string, reserved bool, impact *session.WorktreeCleanupImpact) string {
 	var message string
 	if reserved {
 		message = fmt.Sprintf(
@@ -111,9 +112,18 @@ func killConfirmMessage(title, warning string, reserved bool) string {
 				"self-heals (~2 min) or you restart the daemon.\n\n"+
 				"Delete the root session and its af-owned resources?", title, title)
 	} else {
-		message = fmt.Sprintf("Delete session '%s'?\nPermanently remove the session and its af-owned worktree and branch.", title)
+		message = fmt.Sprintf("Delete session '%s'?\nPermanently delete the session.", title)
 	}
-	message += "\nUncommitted changes and unpushed commits in them are lost. Archive to keep them."
+	if impact != nil {
+		switch {
+		case impact.RemoveWorktree && impact.DeleteBranch:
+			message += "\nIts af-owned worktree and branch are removed. Uncommitted changes and unpushed commits in them are lost. Archive to keep them."
+		case impact.RemoveWorktree:
+			message += "\nIts af-owned worktree is removed; the pre-existing branch is kept. Uncommitted changes and commits reachable only from this worktree are lost. Archive to keep them."
+		default:
+			message += "\nYour checkout and branch are kept."
+		}
+	}
 	if warning != "" {
 		message += "\n\n" + warning
 	}
