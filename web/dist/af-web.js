@@ -16007,7 +16007,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, liv
     });
   }
   if (index > 0 && canClose) {
-    const close = h("span", { class: "af-tab-close", title: `Delete tab \u201C${tab.name}\u201D` }, icon("x"));
+    const close = h("span", { class: "af-tab-close", title: `Delete tab \u201C${tabDisplayLabel(tab)}\u201D` }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -16773,7 +16773,7 @@ function closeSessionTab(index) {
   const sessionId = sel.id;
   openModal(confirmDeleteTabModal({
     sessionTitle: sel.title,
-    tabName: target.name,
+    tabName: tabDisplayLabel(target),
     kind: target.kind,
     onCancel: closeModal,
     onConfirm: () => {

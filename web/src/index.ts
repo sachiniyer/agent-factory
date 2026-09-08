@@ -90,7 +90,7 @@ import {
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
-import { isRenameableTab } from "./tablabel.js";
+import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -1163,7 +1163,7 @@ function closeSessionTab(index: number): void {
   const sessionId = sel.id;
   openModal(confirmDeleteTabModal({
     sessionTitle: sel.title,
-    tabName: target.name,
+    tabName: tabDisplayLabel(target),
     kind: target.kind,
     onCancel: closeModal,
     onConfirm: () => {

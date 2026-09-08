@@ -200,16 +200,20 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	}
 	tab := tabs[idx]
 	target := captureSessionActionTarget(inst, m.repoID)
-	tabID, tabName := tab.ID, tab.Name
-	message := fmt.Sprintf("Delete tab %q from session %q?", tabName, inst.Title)
+	tabID := tab.ID
+	tabLabel, _ := tree.TabLabelAt(inst, idx)
+	message := fmt.Sprintf("Delete tab %q from session %q?", tabLabel, inst.Title)
 	detail := "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."
 	if tab.Kind == session.TabKindWeb {
 		detail = "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available."
 	}
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		current := m.resolveSessionActionTarget(target)
-		if current == nil || current.HasInFlightOp() || !current.Capabilities().TabManagement {
-			return nil
+		if current == nil || !current.Capabilities().TabManagement {
+			return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
+		}
+		if current.HasInFlightOp() {
+			return m.handleNotice(fmt.Errorf("Session %q is busy; try again", current.Title))
 		}
 		for at, candidate := range current.GetTabs() {
 			// IDs survive reorder/snapshot replacement. An ID-less legacy tab
@@ -219,7 +223,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 				return cmd
 			}
 		}
-		return nil
+		return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
 	})
 }
 

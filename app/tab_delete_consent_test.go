@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,12 +16,20 @@ func TestDeleteTabConsent(t *testing.T) {
 		t.Run(fmt.Sprint(kind), func(t *testing.T) {
 			h, inst := multiTabHome(t)
 			inst.GetTabs()[2].Kind = kind
+			switch kind {
+			case session.TabKindWeb:
+				inst.GetTabs()[2].Name = "web"
+			case session.TabKindVSCode:
+				inst.GetTabs()[2].Name = "vscode"
+			}
 			h.store.SetActiveTab(2)
 			calls := recordCloseTab(t, h)
 			_, _ = h.handleCloseTab()
 			require.Empty(t, *calls, "w must ask before deleting the tab")
 			require.Equal(t, stateConfirm, h.state)
-			require.Contains(t, h.confirmationOverlay.Render(), "shell-2")
+			label, ok := tree.TabLabelAt(inst, 2)
+			require.True(t, ok)
+			require.Contains(t, h.confirmationOverlay.Render(), fmt.Sprintf("Delete tab %q", label))
 			require.Contains(t, h.confirmationOverlay.Render(), "Hiding a pane")
 			_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 			require.Empty(t, *calls, "repeating w is not consent")
@@ -81,6 +90,33 @@ func TestDeleteTabConsentRejectsReplacement(t *testing.T) {
 			inst.AddTabForTest("shell-2", session.TabKindShell)
 			_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 			require.Empty(t, *calls, "a same-name replacement is not the confirmed tab")
+		})
+	}
+}
+
+func TestDeleteTabConsentReportsRefusal(t *testing.T) {
+	for _, reason := range []string{"vanished", "busy"} {
+		t.Run(reason, func(t *testing.T) {
+			h, inst := multiTabHome(t)
+			h.store.SetActiveTab(2)
+			calls := recordCloseTab(t, h)
+			_, _ = h.handleCloseTab()
+			if reason == "vanished" {
+				require.NoError(t, inst.DropClosedTab(2))
+			} else {
+				inst.SetInFlightOpForTest(session.OpRestoring)
+			}
+			_, cmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+			require.Empty(t, *calls, "refused confirmation must not mutate a tab")
+			require.Equal(t, stateDefault, h.state)
+			require.Nil(t, h.confirmationOverlay)
+			require.NotNil(t, cmd, "schedule the refusal notice expiry through the loop")
+			if reason == "vanished" {
+				require.Contains(t, h.errBox.String(), "is no longer available")
+				require.Contains(t, h.errBox.String(), "Terminal")
+			} else {
+				require.Contains(t, h.errBox.String(), "is busy; try again")
+			}
 		})
 	}
 }
