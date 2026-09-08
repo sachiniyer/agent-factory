@@ -35,7 +35,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "confirmation", "confirmation-external", "confirmation-reused", "sandbox-restore", "interactive-help", "task-watch", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				h, inst := newDesignDriverSceneHome(t, mode, nil)
 				switch scene {
@@ -166,8 +166,21 @@ func TestDesignDriverScenes(t *testing.T) {
 					}
 				case "help":
 					h.showHelpScreen(helpTypeGeneral{}, nil)
+				case "confirmation-external", "confirmation-reused":
+					impact := &session.WorktreeCleanupImpact{RemoveWorktree: scene == "confirmation-reused"}
+					h.confirmAction(killConfirmMessage(inst.Title, "", false, impact), nil)
+				case "interactive-help":
+					h.showHelpScreen(helpTypeInteractive{}, nil)
+				case "sandbox-restore":
+					h.confirmReprovisioningRestore(inst)
+				case "task-watch":
+					h.state = stateTasks
+					pane := h.automations.TaskPane()
+					pane.EnterCreateMode(h.repoRoot)
+					pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+					pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
 				case "confirmation":
-					h.confirmActionWithDetail("Kill Apply design roles? Its running process will stop.", "The worktree and conversation remain available.", nil)
+					h.confirmAction(killConfirmMessage(inst.Title, "", false, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true}), nil)
 				case "search-overflow", "selection-overflow", "project-picker-overflow":
 					var items []string
 					var instances []*session.Instance

@@ -47,7 +47,7 @@ func classifyWatch(d *session.InstanceData) (watchOutcome, string) {
 	activity, reason := session.ClassifyActivity(*d)
 	switch activity {
 	case session.ActivityIdle:
-		return watchReady, reason
+		return watchReady, "idle · awaiting input"
 	case session.ActivityTerminal:
 		return watchTerminal, reason
 	}
@@ -203,11 +203,9 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, stri
 
 var sessionsWatchCmd = &cobra.Command{
 	Use:   "watch [title]",
-	Short: "Block until a session goes idle, or until any session in the fleet changes state",
-	Long: `Watch a session and return when its agent finishes working: exit 0 the moment
-the session goes IDLE (the agent stopped working and is awaiting input), so an
-operator or root agent can dispatch a session and be notified on completion
-instead of polling 'af sessions preview'.
+	Short: "Wait for idle, or a fleet stop-state change or disappearance",
+	Long: `Watch a session and exit 0 when its agent is idle and awaiting input.
+Idle does not mean the work is complete.
 
 Polls the daemon's snapshot (the same read path as 'af sessions get') every
 --interval (default 2s). Exits non-zero if the session reaches a terminal state
@@ -219,8 +217,8 @@ keep the watch waiting.
 By default prints a concise line on transition; with --json emits the final
 session record. Honors --repo to scope the title lookup to one repository.
 
-With NO title (or --all) it watches every session in scope and returns when the
-first one CHANGES STATE, printing which and why. That form is edge-triggered: the
+With NO title (or --all) it watches every session in scope and returns on the
+first stop-state change or disappearance, printing which session and why. It is edge-triggered: the
 first poll establishes a baseline and reports nothing, so a session that was
 already idle before you called does not fire. Pass --include-current to report
 those too, for a driver that wants a starting snapshot; that snapshot omits
@@ -282,7 +280,7 @@ idle, because an idle report tells a driver to act.`,
 		if envelopeOutput {
 			return jsonOut(data)
 		}
-		fmt.Printf("session %q is idle (ready for review)\n", title)
+		fmt.Printf("session %q is idle · awaiting input\n", title)
 		return nil
 	},
 }

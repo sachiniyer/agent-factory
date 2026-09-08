@@ -142,10 +142,9 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 
-	// lipgloss folds the underline attribute (SGR 4) into a combined escape
-	// such as "\x1b[4;38;5;99;4m" rather than a bare "\x1b[4m", so match the
-	// underline parameter at the head of a sequence.
-	const underline = "\x1b[4;"
+	// Underline (SGR 4) can follow bold (SGR 1) in a combined escape.
+	// Match the attribute rather than assuming it starts the sequence.
+	const underline = `\x1b\[(?:1;)?4(?:;|m)`
 
 	cases := []struct {
 		name string
@@ -167,7 +166,7 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 			h.menu.SetSize(200, 3)
 
 			// Baseline: nothing highlighted before the keypress.
-			require.NotContains(t, h.menu.String(), underline,
+			require.NotRegexp(t, underline, h.menu.String(),
 				"menu should not be highlighted before the keypress")
 
 			cmd, returnEarly := h.handleMenuHighlighting(tc.key)
@@ -179,7 +178,7 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 
 			// keydownCallback runs synchronously when the batch is built, so the
 			// menu now renders the matching option underlined.
-			assert.Contains(t, h.menu.String(), underline,
+			assert.Regexp(t, underline, h.menu.String(),
 				"menu highlight render path should run for %s during stateNew", tc.name)
 		})
 	}

@@ -51,7 +51,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
-- [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
+- [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
@@ -66,7 +66,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
-- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle, or until any session in the fleet changes state
+- [`af sessions watch`](#af-sessions-watch) — Wait for idle, or a fleet stop-state change or disappearance
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
@@ -1595,7 +1595,7 @@ af sessions
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
-- [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
+- [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
@@ -1606,7 +1606,7 @@ af sessions
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
-- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle, or until any session in the fleet changes state
+- [`af sessions watch`](#af-sessions-watch) — Wait for idle, or a fleet stop-state change or disappearance
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 
 **Flags**
@@ -1627,8 +1627,8 @@ af sessions
 
 Finish with a session by archiving it for later restore
 
-Archive is the default way to finish with a session: tear down its tmux
-and move its git worktree out to the global archive directory
+Archive keeps a session restorable. Locally, stop its terminals
+and move its owned git worktree to the global archive directory
 (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/), preserving the branch and any
 uncommitted changes. The session is not deleted — it becomes a quiescent
 "archived" row that survives restarts and can be brought back later with
@@ -1644,9 +1644,9 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Not available for remote or in-place (--here) sessions: archive relocates the
-worktree, which those don't own. The relocated worktree path is printed on
-success.
+Sandboxes publish work before removal; restore recreates them from the published
+branch. In-place (--here) sessions cannot be archived because af does not own
+their worktree. Local archives print the relocated worktree path on success.
 
 ```
 af sessions archive [title] [flags]
@@ -1844,17 +1844,16 @@ af sessions handoff <title> [flags]
 
 ## af sessions kill
 
-Permanently destroy a session and prune its worktree branch
+Permanently delete a session and af-owned resources
 
-Permanently destroy a session: tear down tmux, remove the worktree,
-delete the stored session record, and prune the session branch when Agent
-Factory owns it.
+Permanently delete the session record and stop its terminals. Remove only
+worktrees and branches owned by af; user-owned resources stay.
 
 For normal "done with this session" cleanup, prefer:
   af sessions archive <title>
 
-Kill always destroys the session, including any uncommitted or unmerged work on
-its branch — there is no undo. To keep a session restorable instead, archive it.
+Deletion is permanent. Uncommitted or unmerged work in af-owned resources may
+be lost. Archive instead to keep the session restorable.
 --force is accepted but has no effect (kept for backward compatibility).
 
 ```
@@ -2411,12 +2410,10 @@ af sessions tabs reorder <title> [flags]
 
 ## af sessions watch
 
-Block until a session goes idle, or until any session in the fleet changes state
+Wait for idle, or a fleet stop-state change or disappearance
 
-Watch a session and return when its agent finishes working: exit 0 the moment
-the session goes IDLE (the agent stopped working and is awaiting input), so an
-operator or root agent can dispatch a session and be notified on completion
-instead of polling 'af sessions preview'.
+Watch a session and exit 0 when its agent is idle and awaiting input.
+Idle does not mean the work is complete.
 
 Polls the daemon's snapshot (the same read path as 'af sessions get') every
 --interval (default 2s). Exits non-zero if the session reaches a terminal state
@@ -2428,8 +2425,8 @@ keep the watch waiting.
 By default prints a concise line on transition; with --json emits the final
 session record. Honors --repo to scope the title lookup to one repository.
 
-With NO title (or --all) it watches every session in scope and returns when the
-first one CHANGES STATE, printing which and why. That form is edge-triggered: the
+With NO title (or --all) it watches every session in scope and returns on the
+first stop-state change or disappearance, printing which session and why. It is edge-triggered: the
 first poll establishes a baseline and reports nothing, so a session that was
 already idle before you called does not fire. Pass --include-current to report
 those too, for a driver that wants a starting snapshot; that snapshot omits
