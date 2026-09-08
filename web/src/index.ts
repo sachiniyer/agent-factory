@@ -727,22 +727,42 @@ function openModal(m: ModalHandle, focusCard = false): void {
   const row = focused?.closest(".af-row");
   const sessionId = row?.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId;
   const actionLabel = focused?.getAttribute("aria-label");
+  const header = !row ? focused?.closest(".af-term-head") : null;
   if (focusCard || row) {
     restoreModalFocus = () => {
+      const canFocus = (el: HTMLElement | null | undefined): el is HTMLElement =>
+        !!el && el.isConnected && el !== document.body && !el.matches(":disabled") &&
+        el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
       // Header actions do not live in the rail; return to their invoking control.
-      if (!row && focused?.isConnected && focused.getClientRects().length) {
+      if (!row && canFocus(focused)) {
         focused.focus({ preventScroll: true });
+        return;
+      }
+      if (!row && header?.isConnected) {
+        // Pending-state reconciliation can replace the original header button.
+        const action = actionLabel ? header.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action) ? action : header.querySelector<HTMLButtonElement>(".af-term-more");
+        if (canFocus(target)) {
+          target.focus({ preventScroll: true });
+          return;
+        }
+      }
+      // A phone row action closes the drawer before mounting its dialog. Hidden
+      // rail controls still have rectangles, but cannot receive keyboard focus.
+      const toggle = root?.querySelector<HTMLButtonElement>(".af-nav-toggle");
+      if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+        focusRail();
+        toggle.focus({ preventScroll: true });
         return;
       }
       focusRail();
       const menu = sessionId ? root?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
       const action = actionLabel ? menu?.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-      const target = action && !action.disabled && action.getClientRects().length
-        ? action : menu?.querySelector<HTMLButtonElement>("button");
-      if (target && target.getClientRects().length) target.focus({ preventScroll: true });
+      const target = canFocus(action) ? action : menu?.querySelector<HTMLButtonElement>("button");
+      if (canFocus(target)) target.focus({ preventScroll: true });
       else {
         const rail = root?.querySelector<HTMLElement>(".af-rail");
-        if (rail) { rail.tabIndex = -1; rail.focus({ preventScroll: true }); }
+        if (canFocus(rail)) { rail.tabIndex = -1; rail.focus({ preventScroll: true }); }
       }
     };
   }
