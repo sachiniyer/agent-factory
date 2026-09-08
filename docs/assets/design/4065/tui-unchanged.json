@@ -104,5 +104,7 @@
     "task-weekdays-unchecked-light.svg": "ea769490368e442253e61ae6290f9c21f517de8d7365121fe25f221e46f38753",
     "tasks-dark.svg": "0d01f4268951b22ca9f6d22583f595ba780966984d4a7ea104ebdf361ad0fe58",
     "tasks-light.svg": "830b341c73fc56d5a8be40ddf91032465e6ca74b2b58a5facd3c9d1d118279a8"
-  }
+  },
+  "verified_master_commit": "3181a936b20c34e58849ff8c5d41478acbbc3cb4",
+  "verification": "Existing capture hashes rechecked against the merged master tree; no recapture or TUI changes."
 }

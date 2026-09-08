@@ -308,6 +308,15 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).
 	origPath := relocationClaim.Path
+	moveDest, err := m.checkArchiveDestination(repoID, instance, dest, origPath)
+	if err != nil {
+		_ = instance.Transition(session.CancelArchive())
+		instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
+		m.persistInstance(repoID, instance)
+		return "", session.InstanceData{}, err
+	}
+	defer m.releaseArchiveDestination(repoID, instance, dest)
+	dest = moveDest
 
 	// Stop this session's VS Code editor BEFORE the worktree moves. Ordering is
 	// load-bearing for the same reason the pane-exit wait is: the editor's cwd is
@@ -751,17 +760,4 @@ func archivedWorktreePath(repoID, title string) (string, error) {
 		return "", fmt.Errorf("failed to resolve archive directory: %w", err)
 	}
 	return filepath.Join(dir, "archived", repoID, sanitizeArchiveTitle(title)), nil
-}
-
-// sanitizeArchiveTitle makes a session title safe as a single path segment,
-// mirroring NewGitWorktree's safeSessionName handling (strip "..", "/"→"-",
-// trim leading separators), falling back to "session" when nothing remains.
-func sanitizeArchiveTitle(title string) string {
-	s := strings.ReplaceAll(title, "..", "")
-	s = strings.ReplaceAll(s, "/", "-")
-	s = strings.TrimLeft(s, "-.")
-	if s == "" {
-		s = "session"
-	}
-	return s
 }

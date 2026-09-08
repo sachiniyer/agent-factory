@@ -47,7 +47,7 @@ func TestValidateTitleRefusesReservedDerivedName(t *testing.T) {
 	for _, title := range []string{"ro ot", "r o o t", "  ro ot  "} {
 		t.Run(title, func(t *testing.T) {
 			m := newTitleAdmissionManager()
-			err := m.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceLocalTmux, false, nil)
+			err := m.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceLocalTmux, false, nil, false)
 			if err == nil {
 				t.Fatalf("create admitted %q, which derives the reserved tmux session name %q", title, tmux.SanitizedNameForRepo(session.RootSessionTitle, repoPath))
 			}
@@ -62,7 +62,7 @@ func TestValidateTitleRefusesReservedDerivedName(t *testing.T) {
 			// The pre-rename path must refuse identically, or an archived-name
 			// reuse would mutate records for a create that is doomed anyway
 			// (#2415) — which is why the check sits in the SHAPE half.
-			if err := m.validateTitleClaimableLocked(repoID, repoPath, title, "claude", runtimeNamespaceLocalTmux, false, nil, nil); err == nil {
+			if err := m.validateTitleClaimableLocked(repoID, repoPath, title, "claude", runtimeNamespaceLocalTmux, false, nil, nil, false); err == nil {
 				t.Fatalf("the record-independent half admitted %q", title)
 			}
 		})
@@ -81,7 +81,7 @@ func TestValidateTitleRefusesReservedSpelling(t *testing.T) {
 	for _, title := range []string{"Root ", " ROOT", "root"} {
 		t.Run(title, func(t *testing.T) {
 			m := newTitleAdmissionManager()
-			err := m.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceLocalTmux, false, nil)
+			err := m.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceLocalTmux, false, nil, false)
 			if err == nil {
 				t.Fatalf("create admitted the reserved spelling %q", title)
 			}
@@ -102,13 +102,13 @@ func TestReservedNameRuleLeavesTheEnsureLoopAlone(t *testing.T) {
 	repoPath := t.TempDir()
 
 	m := newTitleAdmissionManager()
-	if err := m.validateTitleAvailableLocked(repoID, repoPath, session.RootSessionTitle, "claude", runtimeNamespaceLocalTmux, true, nil); err != nil {
+	if err := m.validateTitleAvailableLocked(repoID, repoPath, session.RootSessionTitle, "claude", runtimeNamespaceLocalTmux, true, nil, false); err != nil {
 		t.Fatalf("the ensure loop was refused its own reserved title: %v", err)
 	}
 	// A live root does not make every nearby title unavailable — only the ones
 	// that derive its name. "ro-ot" keeps its own branch AND its own tmux name.
 	m.instances[daemonInstanceKey(repoID, session.RootSessionTitle)] = &session.Instance{Title: session.RootSessionTitle}
-	if err := m.validateTitleAvailableLocked(repoID, repoPath, "ro-ot", "claude", runtimeNamespaceLocalTmux, false, nil); err != nil {
+	if err := m.validateTitleAvailableLocked(repoID, repoPath, "ro-ot", "claude", runtimeNamespaceLocalTmux, false, nil, false); err != nil {
 		t.Fatalf("a title with a distinct derived name was refused beside the root agent: %v", err)
 	}
 }
@@ -133,7 +133,7 @@ func TestValidateTitleRefusesWhitespaceDerivedCollisionWithLiveSession(t *testin
 	}
 	m.instances[daemonInstanceKey(repoID, existing)] = &session.Instance{Title: existing}
 
-	err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceLocalTmux, false, nil)
+	err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceLocalTmux, false, nil, false)
 	if err == nil {
 		t.Fatalf("create admitted %q beside live session %q; both derive tmux session %q", candidate, existing, tmux.SanitizedNameForRepo(candidate, repoPath))
 	}
