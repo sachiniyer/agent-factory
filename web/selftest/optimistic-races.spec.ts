@@ -79,7 +79,7 @@ for (const operation of ["archive", "kill"] as const) {
     });
     const row = f.row(f.a.title);
     await row.getByRole("button", { name: /^Actions for / }).click();
-    await row.getByRole("button", { name: new RegExp(`^${operation === "archive" ? "Archive" : "Kill"} session`) }).click();
+    await row.getByRole("button", { name: new RegExp(`^${operation === "archive" ? "Archive" : "Delete"} session`) }).click();
     const requested = page.waitForRequest(`**/v1/${method}`);
     await page.locator(".af-modal-card button[type=submit]").click();
     await requested;
@@ -181,7 +181,7 @@ for (const status of [502, 504]) {
     pending.release();
     const notice = page.locator(".af-toast .af-recovery-notice");
     await expect(notice).toContainText("Outcome not confirmed");
-    await expect(notice).toContainText("Check the session before taking further action.");
+    await expect(notice).toContainText("Check the session before acting.");
     await expect(notice).not.toContainText("Operation failed");
     await expect(notice).not.toContainText("then try again");
     await expect(page.locator(".af-toast .af-recovery-notice")).toContainText("Upstream response unavailable");
@@ -204,7 +204,7 @@ for (const operation of ["archive", "kill"] as const) {
     });
     const row = f.row(f.a.title);
     await row.getByRole("button", { name: /^Actions for / }).click();
-    await row.getByRole("button", { name: new RegExp(`^${operation === "archive" ? "Archive" : "Kill"} session`) }).click();
+    await row.getByRole("button", { name: new RegExp(`^${operation === "archive" ? "Archive" : "Delete"} session`) }).click();
     const requested = page.waitForRequest(`**/v1/${method}`);
     await page.locator(".af-modal-card button[type=submit]").click();
     await requested;
@@ -217,9 +217,9 @@ for (const operation of ["archive", "kill"] as const) {
     };
     pending.release();
     const notice = page.locator(".af-toast .af-recovery-notice");
-    await expect(notice).toContainText(`The ${operation} outcome could not be confirmed`);
+    await expect(notice).toContainText(`The ${operation === "kill" ? "Delete session" : operation} outcome could not be confirmed`);
     await expect(notice).toContainText("Outcome not confirmed");
-    await expect(notice).toContainText("Check the session before taking further action.");
+    await expect(notice).toContainText("Check the session before acting.");
     await expect(notice).not.toContainText("Operation failed");
     await expect(notice).not.toContainText("then try again");
     await expect(page.locator(".af-modal-card")).toHaveCount(0);

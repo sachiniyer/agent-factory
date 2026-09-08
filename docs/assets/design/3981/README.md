@@ -6,9 +6,9 @@ project choices, Sessions · Tasks · Config, Light · Dark · System, Disconnec
 install, pane actions, new-tab choices and the tab switcher reachable. Escape
 closes it and returns focus. Drawer, Tasks, Config and desktop layouts remain
 available. Opening the drawer preserves the session-first composition and the
-terminal rectangle. Split sessions show the focused pane, with Close pane in the menu,
+terminal rectangle. Split sessions show the focused pane, with Hide pane in the menu,
 and restore both panes on desktop. The six-button primary keybar is one 44px row; Arrows replaces it with
-Back and four arrow keys, preserving 44px targets and terminal focus.
+More keys and four arrow keys, preserving 44px targets and terminal focus.
 
 ## Measured height budget
 

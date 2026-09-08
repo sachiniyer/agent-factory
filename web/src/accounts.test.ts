@@ -152,7 +152,7 @@ test("loginTerminalStatusCopy: a pane that exits is the FLOW ending, not a dropp
   // the expected outcome — the sign-in finished — and reading it as a failure at
   // the moment of success is exactly backwards.
   const copy = loginTerminalStatusCopy("exited", loginResponse());
-  assert.match(copy, /login flow ended/);
+  assert.match(copy, /Login ended/);
   assert.doesNotMatch(copy, /disconnect/i);
 });
 
