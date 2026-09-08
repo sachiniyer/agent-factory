@@ -15465,7 +15465,6 @@ var AppShell = class {
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
     };
-    this.newTabPickerPosition = positionMenu;
     const close = () => {
       menu.hidden = true;
       this.newTabDisclosureReturn.delete(trigger);
@@ -15514,6 +15513,7 @@ var AppShell = class {
       items[next].focus();
     };
     const open = () => {
+      this.newTabPickerPosition = positionMenu;
       menu.hidden = false;
       positionMenu();
       trigger.setAttribute("aria-expanded", "true");

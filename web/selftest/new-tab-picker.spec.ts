@@ -111,9 +111,9 @@ test("picker returns to the desktop New tab trigger after phone recomposition", 
   await page.keyboard.press("Control+]");
   await page.keyboard.press("t");
   const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+  const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true, includeHidden: true });
   await expect(menu).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 844 });
-  const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true, includeHidden: true });
   await expect(trigger).toHaveAttribute("aria-expanded", "true");
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
@@ -131,6 +131,7 @@ test("desktop picker stays visible after phone recomposition", async ({ page, re
   await page.keyboard.press("Control+]");
   await page.keyboard.press("t");
   const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+  const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true, includeHidden: true });
   await expect(menu).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(menu).toBeVisible();
@@ -147,7 +148,25 @@ test("desktop picker stays visible after phone recomposition", async ({ page, re
   })).toBe(true);
   await expect(menu.getByRole("menuitem", { name: "Terminal", exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true })).toBeFocused();
+  await expect(trigger).toBeFocused();
+
+  // Closing clears the active callback. Reopening the same control must restore
+  // it so the next responsive recomposition anchors the menu again.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "More app controls", exact: true }).click();
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 844 });
+  await expect.poll(async () => page.evaluate(() => {
+    const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Tab type"]');
+    const trigger = document.querySelector<HTMLElement>(".af-tab-new");
+    if (!menu || !trigger) return false;
+    const menuBox = menu.getBoundingClientRect();
+    const triggerBox = trigger.getBoundingClientRect();
+    return menuBox.top >= triggerBox.bottom && menuBox.left >= 0 && menuBox.right <= window.innerWidth;
+  })).toBe(true);
+  await expect(menu.getByRole("menuitem", { name: "Terminal", exact: true })).toBeFocused();
 });
 
 test("picker closes before keyboard activation of a sibling action", async ({ page, request }) => {

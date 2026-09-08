@@ -1830,7 +1830,6 @@ export class AppShell {
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
     };
-    this.newTabPickerPosition = positionMenu;
     const close = (): void => {
       menu.hidden = true;
       this.newTabDisclosureReturn.delete(trigger);
@@ -1890,6 +1889,7 @@ export class AppShell {
       items[next].focus();
     };
     const open = (): void => {
+      this.newTabPickerPosition = positionMenu;
       menu.hidden = false;
       positionMenu();
       trigger.setAttribute("aria-expanded", "true");
