@@ -308,12 +308,15 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).
 	origPath := relocationClaim.Path
-	if err := m.checkArchiveDestination(repoID, instance, dest, origPath); err != nil {
+	moveDest, err := m.checkArchiveDestination(repoID, instance, dest, origPath)
+	if err != nil {
 		_ = instance.Transition(session.CancelArchive())
 		instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
 		m.persistInstance(repoID, instance)
 		return "", session.InstanceData{}, err
 	}
+	defer m.releaseArchiveDestination(repoID, instance, dest)
+	dest = moveDest
 
 	// Stop this session's VS Code editor BEFORE the worktree moves. Ordering is
 	// load-bearing for the same reason the pane-exit wait is: the editor's cwd is

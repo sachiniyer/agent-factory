@@ -174,6 +174,9 @@ type Manager struct {
 	// reservedArchiveTitles holds only creates of local, relocatable worktrees.
 	// Unlike tmux names, these exclude --here sessions. Keys are (repoID, title).
 	reservedArchiveTitles map[string]struct{}
+	// reservedArchiveDestinations holds active archive moves by (repoID, path).
+	// The owning instance identifies both the refusal and the release authority.
+	reservedArchiveDestinations map[string]*session.Instance
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//
