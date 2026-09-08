@@ -348,7 +348,7 @@ export interface Actions {
   /** Opens the delete-project confirm for a project row (#1735); on confirm
    *  index.ts calls DeleteProject, which removes the project registration and
    *  archives each restorable live session. */
-  deleteProject(root: string, label: string, sessionCount: number): void;
+  deleteProject(root: string, label: string): void;
   /** Opens the add-project modal (#2456): register a git checkout by path via
    *  RegisterProject so it appears as an empty project you can create into. */
   addProject(): void;
@@ -1709,15 +1709,13 @@ export class AppShell {
       } else {
         del.setAttribute(
           "title",
-          currentSummary.liveCount > 0
-            ? `Delete project ${currentSummary.name} (archives its sessions, restorable)`
-            : `Delete project ${currentSummary.name} (removes the empty project)`,
+          `Delete project ${currentSummary.name} (review session consequences)`,
         );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
           this.appControls.close();
-          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+          this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
       footChildren.push(del);

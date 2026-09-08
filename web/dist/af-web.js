@@ -10759,7 +10759,13 @@ function confirmDeleteProjectModal(opts) {
     onCancel: opts.onCancel
   });
   let message = opts.sessionCount === 0 ? "No live sessions to archive. Remove the project; the repo stays and you can add it again." : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
-  if (opts.sessionCount === 0) {
+  if (opts.inPlaceCount > 0) {
+    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
     message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
   }
   body.append(h("p", { class: "af-modal-text" }, message));
@@ -11455,6 +11461,11 @@ function persistProjectChoice(root2) {
     localStorage.setItem(PROJECT_KEY, root2);
   } catch {
   }
+}
+function projectDeletionBreakdown(sessions, root2) {
+  const live = sessions.filter((s) => s.worktree?.repo_path === root2 && !isArchived(s));
+  const inPlaceCount = live.filter((s) => s.worktree?.external_worktree === true).length;
+  return { sessionCount: live.length - inPlaceCount, inPlaceCount };
 }
 
 // src/sessions.ts
@@ -15208,13 +15219,13 @@ var AppShell = class {
       } else {
         del.setAttribute(
           "title",
-          currentSummary.liveCount > 0 ? `Delete project ${currentSummary.name} (archives its sessions, restorable)` : `Delete project ${currentSummary.name} (removes the empty project)`
+          `Delete project ${currentSummary.name} (review session consequences)`
         );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
           this.appControls.close();
-          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+          this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
       footChildren.push(del);
@@ -16620,11 +16631,11 @@ function openConfirm(action, session) {
     })
   );
 }
-function openDeleteProject(root2, label, sessionCount) {
+function openDeleteProject(root2, label) {
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      sessionCount,
+      ...projectDeletionBreakdown(store.get().sessions, root2),
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {

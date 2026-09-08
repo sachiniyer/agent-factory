@@ -254,6 +254,8 @@ export interface TabKindAllowance {
 
 export interface WorktreeData {
   repo_path?: string;
+  /** Daemon IsExternalWorktree: in-place/user-owned checkout, torn down rather than archived. */
+  external_worktree?: boolean;
 }
 
 /** The Snapshot RPC response (daemon/snapshot.go: SnapshotResponse). */

@@ -575,7 +575,7 @@ export function confirmModal(
  *  the real git repo is untouched, while the durable project registration is
  *  removed. */
 export function confirmDeleteProjectModal(
-  opts: { projectLabel: string; sessionCount: number; onConfirm: () => void; onCancel: () => void },
+  opts: { projectLabel: string; sessionCount: number; inPlaceCount: number; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   const word = opts.sessionCount === 1 ? "session" : "sessions";
   const { handle, body } = modalChrome({
@@ -588,7 +588,13 @@ export function confirmDeleteProjectModal(
   let message = opts.sessionCount === 0
     ? "No live sessions to archive. Remove the project; the repo stays and you can add it again."
     : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
-  if (opts.sessionCount === 0) {
+  if (opts.inPlaceCount > 0) {
+    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
     message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
   }
   body.append(h("p", { class: "af-modal-text" }, message));

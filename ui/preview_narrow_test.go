@@ -101,7 +101,7 @@ func TestPreviewBodyNonEmptyWhenCaptureTallerThanPane(t *testing.T) {
 				}
 			}
 			// The header must always be correct — the bug never touched it.
-			require(strings.Contains(rendered, "Preview"), "preview header must render")
+			require(strings.Contains(rendered, "preview"), "preview header must render")
 			require(previewBodyHasContent(rendered),
 				"preview body must not be empty when the capture is taller than the pane")
 			require(strings.Contains(xansi.Strip(rendered), marker),

@@ -43,7 +43,7 @@ func TestNoActiveProjectWorkspaceDoesNotAdvertiseCreate(t *testing.T) {
 		"the empty state must name the one key that moves the user forward")
 	assert.NotContains(t, out, "press n",
 		"advertising create in a mode where no focused region can run it is the bug")
-	assert.NotContains(t, out, "No sessions yet",
+	assert.NotContains(t, out, "No sessions ·",
 		"the blocker is the missing project, not the missing sessions")
 }
 
@@ -87,7 +87,7 @@ func TestWorkspaceEmptyStatesUseSentenceCase(t *testing.T) {
 		out  string
 		want string
 	}{
-		{"panes empty", EmptyWorkspace(lay.Workspace), "No panes open — s opens the selected tab"},
+		{"panes empty", EmptyWorkspace(lay.Workspace), "No panes · s open tab"},
 		{"first run", FirstRunWorkspace(lay.Workspace), "Press n to create one."},
 		{"no project", NoActiveProjectWorkspace(lay.Workspace, "press ctrl+p to pick one"), "Press ctrl+p to pick one."},
 	} {

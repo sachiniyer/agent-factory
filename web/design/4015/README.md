@@ -39,3 +39,15 @@ Review correction: deletion explicitly warns about losing uncommitted changes an
 
 
 Accuracy-round visual review: recaptured the container demo and read the account restriction states. The inherited registration-only choice keeps Create disabled with the same explanation; the logged-out choice keeps its credential notice; the logged-in choice allows Create. The no-default label is “Use agent login (no default)” so it fits the phone field. Add project names the absolute-path requirement. Updated goldens are limited to new-session, create-compact, create-defaults, phone-create and add-project in both themes; unrelated capture drift is retained locally, not rebaselined.
+
+
+Project/keybar review round: project removal now derives its regular/in-place breakdown from the selected root's non-archived store sessions and the daemon-projected `external_worktree` flag. Regular sessions retain the archive sentence; in-place sessions are explicitly ended permanently and cannot be restored. The project-delete tooltip no longer promises universal archival. Keybar buttons can shrink to their existing 44px minimum, and the design harness now covers a focused session at 320px in both themes. The user guide, style guide and original keybar evidence README say “More keys”.
+
+| Before | After |
+| --- | --- |
+| Archive N sessions and remove the project. Keep the repo; restore sessions anytime. (including in-place sessions) | N in-place sessions are ended permanently and cannot be restored. Their checkouts and branches are kept. Archive M regular sessions; restore those sessions anytime. Remove the project; the repo stays. (regular-session sentence only when M > 0; existing archive-only copy when N = 0) |
+| Delete project NAME (archives its sessions, restorable) | Delete project NAME (review session consequences) |
+| Delete project NAME (removes the empty project) | Delete project NAME (review session consequences) |
+| Back (keybar documentation, three locations) | More keys |
+
+Golden review: added only `phone-session-320.png` and `phone-session-320-dark.png`. Both show the focused session with all six keybar labels fully visible, 44px targets, a 48px header and a 44px keybar. Read all 24 differing captures. The four existing keyboard/modifier stills differ only by 1–3 pixels at the top-left header corner, not in the keybar; those and other unrelated capture drift are not rebaselined.

@@ -11242,3 +11242,51 @@ test("#3981: a split terminal fills the phone and restores both panes on desktop
     await expect(p.locator(".af-pane")).toHaveCount(1);
   } finally { await ctx.close(); }
 });
+
+for (const external of [true, false]) {
+  test(`project deletion discloses in-place teardown: ${external}`, async ({ browser }) => {
+    const ctx = await browser.newContext();
+    try {
+      const p = await ctx.newPage();
+      await p.routeWebSocket(url => url.pathname === "/v1/events", () => {});
+      await p.route("**/v1/Snapshot", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const session of body.data.instances) {
+          if (session.worktree) session.worktree.external_worktree = external;
+        }
+        await route.fulfill({ json: body });
+      });
+      await openTokenless(p);
+      await p.locator(".af-project-switch").click();
+      await p.locator(".af-project-menu .af-project-delete").click();
+      const modal = p.getByRole("dialog");
+      if (external) {
+        await expect(modal).toContainText("ended permanently and cannot be restored");
+        await expect(modal).not.toContainText("restore sessions anytime");
+      } else {
+        await expect(modal).toContainText("restore sessions anytime");
+        await expect(modal).not.toContainText("ended permanently");
+      }
+      await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    } finally {
+      await ctx.close();
+    }
+  });
+}
+
+test("320px focused keybar keeps its last button inside the viewport", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await row(p, SESSION_A).click();
+    await p.setViewportSize({ width: 320, height: 812 });
+    await p.locator(".af-pane-host .xterm").first().click();
+    const arrows = p.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Arrows", exact: true });
+    await expect(arrows).toBeVisible();
+    expect(await arrows.evaluate(el => el.getBoundingClientRect().right <= innerWidth)).toBe(true);
+  } finally {
+    await ctx.close();
+  }
+});

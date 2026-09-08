@@ -569,7 +569,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
       return;
     }
     // Issue #3981 evidence: the same real focused session at three phone widths.
-    for (const width of [360, 390, 430]) {
+    for (const width of [320, 360, 390, 430]) {
       await page.setViewportSize({ width, height: 812 });
       await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
       await settleTerminal(page);
@@ -577,6 +577,7 @@ async function recordChrome(browser: Browser, pass: Pick<Pass, "colorScheme" | "
       await assertPhoneKeybar(page, inputStream);
       await settleTerminal(page);
       await assertPhoneTerminalAlignment(page);
+      if (width === 320) await shot("phone-session-320");
       await page.screenshot({ path: visual ? test.info().outputPath(`after-phone-session-${width}${pass.suffix}.png`) : join(SHOT_DIR, `phone-session-${width}${pass.suffix}.png`),
         animations: "disabled", caret: "hide", style: visualStyle });
     }

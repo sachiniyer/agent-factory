@@ -3009,8 +3009,10 @@ textarea[class] {
   }
   .af-keybar-row button {
     position: relative;
-    flex: 1 0 auto;
+    flex: 1 1 auto;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
     padding: var(--af-space-1);

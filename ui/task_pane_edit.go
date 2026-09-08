@@ -68,6 +68,14 @@ func (s *TaskPane) validateForm() (string, int) {
 }
 
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
+	// Retain unsaved form text after a failed refresh, but do not act on the
+	// stale selected task until a successful refresh restores availability.
+	if s.unavailable != "" && s.editing && !s.creating {
+		switch msg.String() {
+		case "r", "x", "D":
+			return true
+		}
+	}
 	if s.editing && !s.creating {
 		switch msg.String() {
 		case "r":
@@ -102,6 +110,9 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 		// Enter on the Name field used to be a dead key).
 		if s.focusIndex == taskFocusPrompt {
 			s.editPrompt, _ = s.editPrompt.Update(msg)
+			return true
+		}
+		if s.unavailable != "" && s.editing && !s.creating {
 			return true
 		}
 		if errMsg, errField := s.validateForm(); errMsg != "" {
@@ -257,6 +268,7 @@ func (s *TaskPane) updateEditFocus() {
 }
 
 func (s *TaskPane) renderEditMode() string {
+	unavailable := s.unavailable != "" && s.editing && !s.creating
 	t := CurrentTheme()
 	editTitleStyle := DialogTitleStyle().
 		MarginBottom(1)
@@ -292,7 +304,7 @@ func (s *TaskPane) renderEditMode() string {
 	// The prompt's role depends on the trigger: cron tasks require it, watch
 	// tasks default each event to the raw emitted line.
 	if s.editTriggerIsWatch {
-		s.editPrompt.Placeholder = "(optional) {{line}} expands to the event line"
+		s.editPrompt.Placeholder = "Optional · {{line}} inserts the event"
 	} else {
 		s.editPrompt.Placeholder = "Enter task prompt…"
 	}
@@ -408,7 +420,9 @@ func (s *TaskPane) renderEditMode() string {
 		submitLabel = " Create "
 	}
 	markStart(taskFocusSave)
-	if s.focusIndex == taskFocusSave {
+	if unavailable {
+		b.WriteString(hintStyle.Render("Save unavailable"))
+	} else if s.focusIndex == taskFocusSave {
 		b.WriteString(focusedButtonStyle.Render(submitLabel))
 	} else {
 		b.WriteString(buttonStyle.Render(submitLabel))
@@ -422,13 +436,17 @@ func (s *TaskPane) renderEditMode() string {
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
 			hint = "tab fields · enter · esc cancel · " + quitHint
 		}
-		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
+		b.WriteString(ActionHint(fitLine(hint, s.width)))
+	} else if unavailable {
+		b.WriteString(s.unavailableEditNotice())
+		b.WriteString("\n")
+		b.WriteString(ActionHint(fitLine("tab fields · typing · esc back", s.width)))
 	} else {
 		hint := "tab/shift+tab fields · enter save"
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
 			hint = "tab fields · enter save"
 		}
-		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
+		b.WriteString(ActionHint(fitLine(hint, s.width)))
 		b.WriteString("\n")
 		// Three tiers, not two (#3630). The old ladder jumped straight from the
 		// full 51-cell row to a 39-cell one, and of everything it dropped it
@@ -459,7 +477,7 @@ func (s *TaskPane) renderEditMode() string {
 				break
 			}
 		}
-		b.WriteString(hintStyle.Render(fitLine(actions, s.width)))
+		b.WriteString(ActionHint(fitLine(actions, s.width)))
 	}
 
 	return fitBlockToSize(s.clampFormToHeight(b.String(), focusStart, focusEnd), s.width, 0, 0)
@@ -480,9 +498,13 @@ func (s *TaskPane) clampFormToHeight(content string, focusStart, focusEnd int) s
 	if maxH < 3 {
 		maxH = 3
 	}
-	hint := lines[len(lines)-1]
-	body := lines[:len(lines)-1]
-	visible := maxH - 1
+	footerRows := 1
+	if s.unavailable != "" && s.editing && !s.creating {
+		footerRows += strings.Count(s.unavailableEditNotice(), "\n") + 1
+	}
+	hint := strings.Join(lines[len(lines)-footerRows:], "\n")
+	body := lines[:len(lines)-footerRows]
+	visible := maxH - footerRows
 	if visible > len(body) {
 		// The raised floor can exceed a short body (degenerate heights); a
 		// window larger than the body would slice past its end.
@@ -562,7 +584,7 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 	t := CurrentTheme()
 	hintStyle := DialogHintStyle()
 	if !s.onCompleteApplies() {
-		return hintStyle.Render(s.wrapOnCompleteText("n/a — a target session is not this task's to reap"))
+		return hintStyle.Render(s.wrapOnCompleteText("Target session is kept."))
 	}
 
 	focused := s.focusIndex == taskFocusOnComplete

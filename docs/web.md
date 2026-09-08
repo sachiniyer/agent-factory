@@ -84,7 +84,7 @@ size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
 Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
-keys and Back. Tap Ctrl or Alt then type a character; double tap to lock (shown
+keys and More keys. Tap Ctrl or Alt then type a character; double tap to lock (shown
 by ▸ and an outline), then tap again to release. Keys retain terminal focus and
 the terminal resizes above the soft keyboard. With that keyboard closed, the
 terminal occupies at least 85% of the visual viewport at the verified phone widths.

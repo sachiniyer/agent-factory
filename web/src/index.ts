@@ -77,7 +77,7 @@ import {
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
-import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
+import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
   clampActiveTab,
   pickSelection,
@@ -910,11 +910,11 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
  *  archives the repo's regular live sessions, tears down in-place ones, and
  *  removes any durable project registration via DeleteProject; the lifecycle
  *  events + projects.changed resync the rail and drop the project from the view. */
-function openDeleteProject(root: string, label: string, sessionCount: number): void {
+function openDeleteProject(root: string, label: string): void {
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      sessionCount,
+      ...projectDeletionBreakdown(store.get().sessions, root),
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
