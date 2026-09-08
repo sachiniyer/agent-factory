@@ -110,7 +110,7 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     await expect(button).toHaveAttribute("data-state", "off");
     await expect(button).toHaveAttribute("aria-description", "Double tap to lock");
     await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
-    await page.keyboard.insertText("ls");
+    await page.keyboard.type("ls");
     await expect.poll(stream).toBe(before + bytes + "ls");
   }
   const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });

@@ -37,7 +37,7 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       await new Promise(resolve => setTimeout(resolve, 0));
     }, { postCommit, trailing, committed, eventData });
     await expect.poll(stream).toBe(before + committed + (trailing ? "\x18" : ""));
-    await expect(ctrl).toHaveAttribute("data-state", "once");
+    await expect(ctrl).toHaveAttribute("data-state", trailing ? "off" : "once");
     await expect.poll(stream).toBe(before + committed + (trailing ? "\x18" : ""));
     await expect(ctrl).toHaveAttribute("data-state", trailing ? "off" : "once");
     await expect(textarea).toBeFocused();
