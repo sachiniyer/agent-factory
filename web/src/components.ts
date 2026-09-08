@@ -218,6 +218,23 @@ export function modalChrome(opts: {
   // opened it. Focusing the card itself is the dialog-pattern answer: it is
   // announced (role/aria-modal/aria-label above) and raises no virtual keyboard.
   card.tabIndex = -1;
+  // Keep native Tab navigation within the currently enabled, visible controls.
+  // Re-query on each keypress: errors, disclosures and busy state can change them.
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const controls = [...card.querySelectorAll<HTMLElement>(
+      'button, input, select, textarea, a[href], summary, [tabindex]',
+    )].filter(control => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length > 0);
+    const first = controls[0], last = controls.at(-1);
+    if (!first) {
+      event.preventDefault();
+      card.focus();
+    } else if (!card.contains(document.activeElement) || document.activeElement === card ||
+      (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last! : first).focus();
+    }
+  });
   // Stop a click inside the card from bubbling to the backdrop's cancel handler.
   card.addEventListener("click", (e) => e.stopPropagation());
 
