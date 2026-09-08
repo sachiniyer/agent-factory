@@ -17,16 +17,24 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       const start = input.value.length;
       input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
       input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: eventData }));
-      if (committed === "가나") input.value += "ᄀ"; // shorter provisional value
-      if (committed === "ab") input.value += "a"; // append-shaped final commit
+      // Chrome commits and mutates before compositionend; Safari commits after
+      // it. Keep the two orders separate so the boundary is browser-derived.
+      if (!postCommit) {
+        input.value = input.value.substring(0, start) + committed;
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: true,
+        }));
+      }
       input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: eventData }));
-      if (postCommit || trailing) input.dispatchEvent(new InputEvent("beforeinput", {
+      if (postCommit) input.dispatchEvent(new InputEvent("beforeinput", {
         bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
       }));
-      input.value = input.value.substring(0, start) + committed;
-      if (postCommit || trailing) input.dispatchEvent(new InputEvent("input", {
-        bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
-      }));
+      if (postCommit) {
+        input.value = input.value.substring(0, start) + committed;
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true, composed: true, data: eventData, inputType: "insertText", isComposing: false,
+        }));
+      }
       if (trailing) {
         input.value += trailing;
         input.dispatchEvent(new InputEvent("input", {

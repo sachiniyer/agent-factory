@@ -1,5 +1,6 @@
+import { assertPhoneComposition } from "./phone-composition.js";
 import { expect, test } from "@playwright/test";
-import { assertPhoneBarModifiers, phoneInputStream } from "./phone-keybar.js";
+import { assertPhoneBarModifiers, assertPhoneStaleRecovery, phoneInputStream } from "./phone-keybar.js";
 import { assertPhoneKeybarInputEffects } from "./phone-keybar-effects.js";
 
 test("#4036 phone keybar applies and consumes modifiers before the next letter", async ({ page, request }, testInfo) => {
@@ -18,6 +19,8 @@ test("#4036 phone keybar applies and consumes modifiers before the next letter",
     await page.goto(`/#/session/${encodeURIComponent(id)}`);
     await page.locator(".af-pane-host .xterm").first().click();
     await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
+    await assertPhoneComposition(page, stream);
+    await assertPhoneStaleRecovery(page, stream);
     await assertPhoneBarModifiers(page, stream);
     // The demo repeats this flow after releasing terminal focus with Ctrl+].
     // Its keyup lands outside xterm; plain soft input must still work on return.

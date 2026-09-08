@@ -43,12 +43,19 @@ export class TerminalSoftInput {
     this.onCompositionUpdate(event);
     const range = this.active;
     this.active = undefined;
+    const value = this.textarea?.value;
+    // Chrome mutates the textarea and emits its composing insertText before
+    // compositionend. Freeze that browser-order boundary now so a later soft
+    // character without keydown cannot be mistaken for the commit. Safari
+    // reaches compositionend before mutating, so its first later insertText
+    // establishes the boundary in onInput instead.
+    if (range.start !== undefined && value !== undefined && value.length > range.start)
+      range.commitLength = value.length - range.start;
     this.pending.push(range);
     // Bound on the textarea AFTER xterm: its commit timer runs before this
-    // release. Pending membership is the IME mutation window: every native
-    // mutation in this turn belongs to the commit, even an append-shaped one.
-    // Removing the range closes that window before the next ordinary key.
-    // A microtask would expire ownership before the final mutation.
+    // release. Pending membership keeps that delayed send owned while Safari
+    // establishes its commit boundary or Chrome receives trailing input.
+    // A microtask would expire ownership before Safari's final mutation.
     range.release = setTimeout(() => this.remove(range), 0);
   };
   private readonly onInput = (event: Event): void => {
@@ -72,8 +79,18 @@ export class TerminalSoftInput {
       if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
       return;
     }
-    if (this.physicalInput() || (!this.staleKeydown && !this.hasArmedModifier()) ||
-      input.inputType !== "insertText" || !input.data) return;
+    if (this.physicalInput() || input.inputType !== "insertText" || !input.data) return;
+    if (this.staleKeydown) {
+      // Xterm drops the composed input while its keydown flag is stale. Send
+      // beforeinput ourselves, but preserve the native textarea mutation so a
+      // later 229 Backspace can diff it; intercept input to avoid sending twice.
+      input.stopImmediatePropagation();
+      if (input.type === "beforeinput") this.send(input.data);
+      return;
+    }
+    if (!this.hasArmedModifier()) return;
+    // Armed input differs: xterm would send the unmodified character, so cancel
+    // the native event before sending the transformed bytes ourselves.
     if (input.type === "beforeinput" && !input.cancelable) return;
     input.preventDefault();
     input.stopImmediatePropagation();

@@ -1,3 +1,4 @@
+import { assertPhoneComposition } from "./phone-composition.js";
 import { expect, type Page } from "@playwright/test";
 import { decode, Op } from "../src/frame.js";
 
@@ -45,19 +46,8 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
   await page.keyboard.insertText("c"); // input/beforeinput, without keydown
   await expect.poll(stream).toBe(before + "\x03");
   await expect(bar.getByRole("button", { name: "Ctrl", exact: true })).toHaveAttribute("aria-pressed", "false");
-  before = stream();
-  await bar.getByRole("button", { name: "Ctrl", exact: true }).click();
-  await textarea.evaluate(el => {
-    const input = el as HTMLTextAreaElement;
-    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
-    input.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, data: "c", inputType: "insertCompositionText", isComposing: true }));
-    input.value += "c";
-    input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "c" }));
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "c", inputType: "insertCompositionText", isComposing: true }));
-    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "c" }));
-  });
-  await expect.poll(stream).toBe(before + "\x03");
-  await expect(textarea).toBeFocused();
+  await assertPhoneComposition(page, stream);
+  await assertPhoneStaleRecovery(page, stream);
   // Locked modifiers must neither double-send physical keypress + input pairs,
   // nor release on a soft-keyboard character.
   const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
@@ -91,6 +81,42 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
   await expect(page.locator(".af-terminal-keybar")).toHaveCount(0);
   await textarea.focus();
   await expect(bar).toBeVisible();
+}
+
+/** Reproduce stale xterm keydown state and verify its textarea-based 229 deletion. */
+export async function assertPhoneStaleRecovery(page: Page, stream: () => string): Promise<void> {
+  const textarea = page.locator(".af-pane-host .xterm-helper-textarea").first();
+  const before = stream();
+  const recovered = await textarea.evaluate(async el => {
+    const input = el as HTMLTextAreaElement;
+    const key = (type: string, keyCode: number, name: string) => {
+      const event = new KeyboardEvent(type, { bubbles: true, cancelable: true, key: name });
+      Object.defineProperty(event, "keyCode", { value: keyCode });
+      input.dispatchEvent(event);
+    };
+    // Reproduce xterm's stale _keyDownSeen after focus is lost without keyup.
+    key("keydown", 17, "Control");
+    input.blur();
+    input.focus();
+    for (const letter of ["a", "b"]) {
+      const beforeInput = new InputEvent("beforeinput", {
+        bubbles: true, cancelable: true, composed: true, data: letter,
+        inputType: "insertText", isComposing: true,
+      });
+      if (input.dispatchEvent(beforeInput)) input.value += letter;
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: letter, inputType: "insertText", isComposing: true,
+      }));
+    }
+    const value = input.value;
+    key("keydown", 229, "Unidentified");
+    input.value = input.value.slice(0, -1);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    key("keyup", 229, "Unidentified");
+    return value;
+  });
+  expect(recovered).toBe("ab");
+  await expect.poll(stream).toBe(before + "ab\x7f");
 }
 
 /** The focused regression also runs with the ordinary selftest cat fixture. */
