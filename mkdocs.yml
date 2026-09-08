@@ -186,6 +186,7 @@ nav:
           - Palette retirement play-test: assets/design/daemon-palette-retirement/report.md
           - Session-first phone evidence: assets/design/3981/README.md
           - Branch PR removal evidence: assets/design/4016/README.md
+          - Phone keybar modifier evidence: assets/design/4036/README.md
           - Phone terminal keybar evidence: assets/design/3977/README.md
           - Focused-session phone header evidence: assets/design/3967/README.md
           - Dark Modern theme evidence: assets/design/3971/README.md
