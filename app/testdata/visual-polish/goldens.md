@@ -126,3 +126,5 @@ Recaptured/read 26 added or changed stills (both themes for each entry):
 | design/search, design/search-overflow | Enter selects; result and overflow counts remain visible. |
 | design/task-watch (new) | Long-running command requirement and one-line trigger are visible in the Watch placeholder. |
 | recovery/no-daemon | Says prior sessions are retained, without claiming they are displayed. |
+
+Master merge (#4006): recaptured and read `tasks-unavailable-{dark,light}.svg` and `zero-tasks-{dark,light}.svg`, including their documentation SVG/ANSI twins. Both states retain master’s Tasks title, centered recovery body and pinned `n new · esc back` footer. The footer uses the shared action-hint treatment; existing surrounding polish remains. All design-stills captures match the committed goldens unchanged.

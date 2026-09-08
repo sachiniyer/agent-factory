@@ -864,7 +864,7 @@ _expect_scrolled_rail_relaunch() {
         af_relaunch || rc=$?
         if [ "$rc" -eq 0 ]; then
             if ! af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
-                _af_log "#2148 premise not met: the 80x24 rail did NOT scroll, so this step proves nothing"
+                _af_log "#2148 premise not met: the 80x10 rail did NOT scroll, so this step proves nothing"
                 rc=1
             elif af_capture | grep -qE -- 'Sessions \('; then
                 _af_log "#2148 premise not met: the header is still visible, so the old gate would have passed too"
@@ -898,6 +898,8 @@ _seed_config_editor_start_value() {
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
+SELFTEST_BASE_COLS="$AF_DRIVER_COLS"
+SELFTEST_BASE_ROWS="$AF_DRIVER_ROWS"
 
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
@@ -963,9 +965,193 @@ step "assert beta is selected"                              af_expect_selected b
 step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
 step "af_select handles a target with an open pane (#1996)"  _expect_af_select_open_pane
 
-# --- #1757 regression: the task-editor run action ---
-# Open the task list, explicitly enter its editor, then recognize the compact
-# `r run` footer as well as the wider `r run now` spelling.
+# --- #1757/#3995 regressions: task-overlay context and run action ---
+# A populated reopen may settle in list mode after a refresh or remain in the
+# selected task's edit form. af_open_tasks syncs on the rounded dialog plus its
+# pinned footer rather than a scrollable title or optional run action. Reveal
+# secondary actions only in list mode, then retain #1757's assertion that the
+# compact run action is discoverable.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_overlay_marker_context() {
+    local pane foreign_modal list_modal compact_list_modal nested_edit footer_below no_footer_below glyph_footer_below glyph_no_footer_below scrolled_edit
+    pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
+    if printf '%s\n' "$pane" | _af_tasks_overlay_visible; then
+        _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
+        return 1
+    fi
+
+    foreign_modal=$'        ╭────────────────────╮\n        │  Agent prompt      │\n        │  esc back          │\n        ╰────────────────────╯'
+    if printf '%s\n' "$foreign_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a foreign rounded dialog with an Esc footer satisfied the task-overlay marker'
+        return 1
+    fi
+
+    list_modal=$'        ╭────────────────────╮\n        │                    │\n        │  Tasks             │\n        │  n new · esc back  │\n        │                    │\n        ╰────────────────────╯'
+    if ! printf '%s\n' "$list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the rounded task dialog and its pinned list footer did not satisfy the marker'
+        return 1
+    fi
+
+    local preceding_box mismatched_bottom
+    preceding_box=$'╭────────╮\n│ output │\n╰────────╯\n│ n new · esc back │'
+    if ! printf '%s\n%s\n' "$preceding_box" "$list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a footer-less rounded box above the real task dialog hid it'
+        return 1
+    fi
+    mismatched_bottom=$'╭────────────────────╮\n│ n new · esc back │\n    ╰────────╯'
+    if printf '%s\n' "$mismatched_bottom" | _af_tasks_overlay_visible; then
+        _af_fail 'an unrelated bottom with different geometry satisfied the task marker'
+        return 1
+    fi
+
+    local outside_footer hooks_modal
+    outside_footer=$'╭───────╮\n│ agent │ n new · esc back │\n╰───────╯'
+    if printf '%s\n' "$outside_footer" | _af_tasks_overlay_visible; then
+        _af_fail 'task-like text outside the candidate frame satisfied the marker'
+        return 1
+    fi
+    hooks_modal=$'╭────────────────────────────────────────────╮\n│ Post-worktree hooks                        │\n│ n add · enter edit · D delete · esc back    │\n╰────────────────────────────────────────────╯'
+    if printf '%s\n' "$hooks_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the hooks overlay footer satisfied the task marker'
+        return 1
+    fi
+
+    local footer_with_top
+    footer_with_top=$'╭────────────────────╮\n│  Tasks             │\n│  n new · esc back  │ ╭──╮\n╰────────────────────╯'
+    if ! printf '%s\n' "$footer_with_top" | _af_tasks_overlay_visible; then
+        _af_fail 'a pane top-edge fragment beside the footer hid the real task dialog'
+        return 1
+    fi
+
+    local stray_corner
+    stray_corner=$'╭ text  ╭────────────────────╮\n        │  Tasks             │\n        │  n new · esc back  │\n╰ text  ╰────────────────────╯'
+    if ! printf '%s\n' "$stray_corner" | _af_tasks_overlay_visible; then
+        _af_fail 'stray corner glyphs before the matched edges hid the task dialog'
+        return 1
+    fi
+
+    local unavailable_editor
+    unavailable_editor=$'╭────────────────────────────────────────────╮\n│ Cannot load tasks                          │\n│ tab fields · typing · esc back             │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$unavailable_editor" | _af_tasks_overlay_visible; then
+        _af_fail 'the unavailable editor live-key footer was not recognized'
+        return 1
+    fi
+
+    local side_by_side
+    side_by_side=$'╭───╮ ╭────────────────────╮\n│   │ │ Tasks              │\n│   │ │ n new · esc back   │\n╰───╯ ╰────────────────────╯'
+    if ! printf '%s\n' "$side_by_side" | _af_tasks_overlay_visible; then
+        _af_fail 'a complete foreign box left of the same-row task frame hid it'
+        return 1
+    fi
+
+    local incomplete_enclosing
+    incomplete_enclosing=$'╭────────────────────────────────────╮\n        ╭────────────────────╮\n        │ Tasks              │\n        │ n new · esc back   │\n        ╰────────────────────╯'
+    if ! printf '%s\n' "$incomplete_enclosing" | _af_tasks_overlay_visible; then
+        _af_fail 'an incomplete enclosing pane frame hid the completed task dialog'
+        return 1
+    fi
+
+    local create_modal
+    create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab/shift+tab fields · enter create · esc cancel · q quit   │\n╰────────────────────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a task create form footer was not recognized'
+        return 1
+    fi
+    create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab fields · enter · esc cancel · q quit                    │\n╰────────────────────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a task create form footer was not recognized'
+        return 1
+    fi
+
+    compact_list_modal=$'╭──────────────────────────────────────╮\n│                                      │\n│  enter edit · ? actions · esc        │\n│                                      │\n╰──────────────────────────────────────╯'
+    if ! printf '%s\n' "$compact_list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the rounded task dialog and its compact list footer did not satisfy the marker'
+        return 1
+    fi
+
+    nested_edit=$'╭────────────────────────────────────────────╮\n│  Edit task 1234                            │\n│  Prompt: ╭────────╮                       │\n│          │ inner  │                       │\n│          ╰────────╯                       │\n│  x toggle · D del · esc · q quit          │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$nested_edit" | _af_tasks_overlay_visible; then
+        _af_fail 'a task prompt containing a rounded box displaced the outer frame marker'
+        return 1
+    fi
+
+    footer_below=$'╭────────────────────╮\n│  Tasks             │\n│  n new · esc back  │\n╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if ! printf '%s\n' "$footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'footer-like pane output below the task frame rejected an open dialog'
+        return 1
+    fi
+
+    no_footer_below=$'╭────────────────────╮\n│  Agent prompt      │\n╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if printf '%s\n' "$no_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'footer-like pane output below a foreign frame satisfied the task marker'
+        return 1
+    fi
+
+    glyph_footer_below=$'● agent  ╭────────────────────╮\n  shell  │  Tasks             │\n◆ beta   │  n new · esc back  │\n         ╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if ! printf '%s\n' "$glyph_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'multibyte-prefix task frame with footer-like output below was rejected'
+        return 1
+    fi
+
+    glyph_no_footer_below=$'● agent  ╭────────────────────╮\n  shell  │  Tasks             │\n◆ beta   │                    │\n         ╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if printf '%s\n' "$glyph_no_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'multibyte-prefix frame with only footer-like output below was accepted'
+        return 1
+    fi
+
+    scrolled_edit=$'╭────────────────────────────────────────────╮\n│  ↑ more                                    │\n│  Name: focused                             │\n│  r run · x toggle · D del · esc · q quit   │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$scrolled_edit" | _af_tasks_overlay_visible; then
+        _af_fail 'a windowed edit dialog without its title did not satisfy the pinned-footer marker'
+        return 1
+    fi
+}
+
+# #4048 explicitly tests list-to-editor entry. A populated #4006 reopen can
+# already be editing, so establish list mode before that Enter step.
+# shellcheck disable=SC2317
+_open_tasks_list_for_selftest() {
+    af_open_tasks || return 1
+    if ! af_capture | _af_tasks_list_visible; then
+        af_send Escape
+    fi
+    af_wait_for "$_AF_TASKS_LIST_TITLE" 10 'task list'
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_run_action() {
+    local screen
+    screen="$(af_capture)"
+    if _af_tasks_list_visible <<<"$screen"; then
+        af_send '?'
+    fi
+    af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'task-overlay run action' || return 1
+    af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_edit_title_scrolled() {
+    local screen
+    screen="$(af_capture)"
+    if grep -qE -- 'Edit task[[:space:]][^[:space:]]+' <<<"$screen"; then
+        _af_fail '80x10 still shows the edit title, so the footer-only premise was not reached'
+        return 1
+    fi
+    if ! _af_tasks_overlay_visible <<<"$screen"; then
+        _af_fail 'the open 80x10 edit dialog was not recognized after its title scrolled away'
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_overlay_closed() {
+    local screen
+    screen="$(af_capture)"
+    if _af_tasks_overlay_visible <<<"$screen"; then
+        _af_fail 'the compact task overlay remained visible after af_close_tasks'
+        return 1
+    fi
+}
+
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 # _expect_config_editor_writes — the config editor's end-to-end flow against the
 # sandbox's throwaway AF home: open it, assert it rendered a tier-1 key FROM THE
@@ -1121,13 +1307,24 @@ _expect_config_agent_attaches_in_tmux() {
     return 0
 }
 
+step "task marker rejects a pane's bare Tasks line"         _expect_task_overlay_marker_context
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
-step "reopen tasks list"                                    af_open_tasks
+step "resize to the supported 80x10 floor"                  af_resize 80 10
+step "reopen tasks — pinned footer recognized (#1757/#3995)" af_open_tasks
+step "edit marker survives its scrolled-away title"         _expect_task_edit_title_scrolled
+step "reveal and assert the task run action"                _expect_task_run_action
+step "close the tasks overlay"                              af_close_tasks
+step "reopen tasks list"                                    _open_tasks_list_for_selftest
 step "open the selected task editor"                        af_send Enter
 step "task editor run action recognized (#1757)"             af_wait_for "$_AF_TASKS_RUN_HINT" 10
 step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
-step "close the tasks overlay"                              af_close_tasks
+step "close the explicitly opened task editor"              af_close_tasks
+step "resize to the documented 40x10 floor"                 af_resize 40 10
+step "open the populated task at 40x10"                     af_open_tasks
+step "close the compact task overlay"                       af_close_tasks
+step "assert the compact task overlay is gone"               _expect_task_overlay_closed
+step "restore the self-test launch size"                    af_resize "$SELFTEST_BASE_COLS" "$SELFTEST_BASE_ROWS"
 
 # --- #2019 regression: the config agent (C) must attach even though af is nested
 # inside tmux. On unfixed code the takeover collapses to "config agent: exit

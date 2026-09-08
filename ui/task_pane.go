@@ -9,7 +9,6 @@ import (
 	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
-	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -454,6 +453,17 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 	if msg.String() == "ctrl+c" || configuredQuitKey(msg) {
 		return false
 	}
+	// A failed refresh retains the last tasks internally so a later successful
+	// sync can reconcile them, but recovery mode deliberately renders no
+	// selection. Keep every selection-dependent key inert until the data is
+	// available again; `n` and Esc remain live affordances in the recovery
+	// footer.
+	if s.unavailable != "" {
+		switch msg.String() {
+		case "up", "k", "down", "j", "x", "D", "enter", "r":
+			return true
+		}
+	}
 	switch msg.String() {
 	case "?":
 		s.showActions = !s.showActions
@@ -505,7 +515,7 @@ func (s *TaskPane) selectedTaskIsWatch() bool {
 }
 
 func (s *TaskPane) toggleSelectedTask() {
-	if !s.selectedTaskInRange() {
+	if s.unavailable != "" || !s.selectedTaskInRange() {
 		return
 	}
 	s.tasks[s.selectedIdx].Enabled = !s.tasks[s.selectedIdx].Enabled
@@ -514,6 +524,12 @@ func (s *TaskPane) toggleSelectedTask() {
 
 // SelectedTask returns the selected identity for target-specific confirmations.
 func (s *TaskPane) SelectedTask() (task.Task, bool) {
+	if s.unavailable != "" {
+		// Recovery mode retains tasks internally for the next successful sync,
+		// but renders no selection and must not hand that hidden identity to
+		// root-routed actions such as the task delete confirmation.
+		return task.Task{}, false
+	}
 	if !s.selectedTaskInRange() {
 		return task.Task{}, false
 	}
@@ -521,18 +537,23 @@ func (s *TaskPane) SelectedTask() (task.Task, bool) {
 }
 
 // DeleteTask removes the confirmed identity even if a refresh moved the cursor.
-func (s *TaskPane) DeleteTask(id string) {
+// It refuses stale confirmations after a failed refresh without changing selection.
+func (s *TaskPane) DeleteTask(id string) bool {
+	if s.unavailable != "" {
+		return false
+	}
 	for i := range s.tasks {
 		if s.tasks[i].ID == id {
 			s.selectedIdx = i
 			s.deleteSelectedTask()
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func (s *TaskPane) deleteSelectedTask() {
-	if !s.selectedTaskInRange() {
+	if s.unavailable != "" || !s.selectedTaskInRange() {
 		return
 	}
 	deleted := s.tasks[s.selectedIdx]
@@ -557,6 +578,9 @@ func (s *TaskPane) deleteSelectedTask() {
 }
 
 func (s *TaskPane) runSelectedTask() {
+	if s.unavailable != "" {
+		return
+	}
 	if !s.selectedTaskInRange() {
 		s.pendingTrigger = true
 		s.pendingTriggerID = ""
@@ -579,13 +603,16 @@ func (s *TaskPane) runSelectedTask() {
 }
 
 func (s *TaskPane) enterEditMode() {
+	if s.unavailable != "" {
+		return
+	}
 	tsk := s.tasks[s.selectedIdx]
 	s.initForm(&tsk, "")
 	s.editing = true
 }
 
 // EnterEditSelected drops straight into the edit form for the currently
-// selected task, no-op'ing when the list is empty (so an empty overlay stays
+// selected task, no-op'ing when tasks are unavailable or the list is empty (so it stays
 // in list mode where `n` creates the first task). It bounds-guards the
 // selected index that the unexported enterEditMode assumes, letting the
 // overlay open a task directly into its config in a single action (#1249).
@@ -646,10 +673,10 @@ func taskDeliverySummary(tsk task.Task) string {
 
 func (s *TaskPane) renderListMode() string {
 	if s.unavailable != "" {
-		return DialogRecoveryScreen(layout.Rect{W: s.width, H: s.height}, "Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
+		return s.renderListRecovery("Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
 	}
 	if len(s.tasks) == 0 {
-		return DialogRecoveryScreen(layout.Rect{W: s.width, H: s.height}, "No tasks", "", "Press n to create one.", false)
+		return s.renderListRecovery("No tasks", "", "Press n to create one.", false)
 	}
 	t := CurrentTheme()
 	tStyle := DialogTitleStyle()
@@ -773,26 +800,7 @@ func (s *TaskPane) renderListMode() string {
 		}
 	}
 
-	if s.hasFocus {
-		hint := "↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back"
-		short := "r run now · x toggle · D delete · ? back · esc"
-		// A watch task can't be manually run (#1758): drop "r run now" so the
-		// hint never advertises an action that always fails.
-		if s.selectedTaskIsWatch() {
-			hint = "↑/↓ select · n new · enter edit · x toggle · D delete · esc back"
-			short = "x toggle · D delete · ? back · esc"
-		}
-		if !s.showActions {
-			hint = "enter edit · n new · ? actions · esc back"
-			short = "enter edit · ? actions · esc"
-		}
-		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = short
-		}
-		b.WriteString(ActionHint(fitLine(hint, s.width)))
-	} else {
-		b.WriteString(ActionHint(fitLine("enter edit tasks", s.width)))
-	}
+	b.WriteString(ActionHint(fitLine(s.listModeHint(), s.width)))
 
 	return fitTaskList(b.String(), s.width, s.height, pinnedFooter, selectedStart, selectedEnd)
 }
