@@ -167,7 +167,7 @@ func TestWebPromptParityNamesTheLiveTerminalTransport(t *testing.T) {
 // strictly better fixture because one request type now exercises BOTH failure
 // directions at once.
 //
-//   - under-reporting: the TUI sets title/program/prompt/backend/force_remote, so a
+//   - under-reporting: the TUI sets title/program/prompt/backend, so a
 //     walk that missed real usage would report them unreached and manufacture a
 //     false gap — including reporting #1933 as still open after it was fixed.
 //   - over-reporting: the TUI sets no in_place (session.create.opt.inplace, still
@@ -183,8 +183,8 @@ func TestDerivationTracksTUICreateFieldUse(t *testing.T) {
 			"(expected app/session_control.go, startSessionThroughDaemon)")
 	}
 	unreached := unreachedFields(auditedRequests["CreateSessionRequest"], u, typeUse)
-	// The remaining gap: --here has no TUI analogue (session.create.opt.inplace).
-	for _, f := range []string{"in_place"} {
+	// --here has no TUI analogue; force_remote is compatibility-only (#4017).
+	for _, f := range []string{"in_place", "force_remote"} {
 		if !contains(unreached, f) {
 			t.Errorf("derivation says the TUI reaches CreateSession.%s, but sessionStartRequest "+
 				"has no such field. Either the gap was fixed (retire the fixture) or the AST "+
@@ -192,7 +192,7 @@ func TestDerivationTracksTUICreateFieldUse(t *testing.T) {
 		}
 	}
 	// Not blind: the TUI provably does set these.
-	for _, f := range []string{"program", "prompt", "force_remote", "backend"} {
+	for _, f := range []string{"program", "prompt", "backend"} {
 		if contains(unreached, f) {
 			t.Errorf("derivation says the TUI never sets CreateSession.%s, but it does "+
 				"(app/session_control.go startSessionThroughDaemon) — the AST walk is "+

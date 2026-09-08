@@ -29,7 +29,6 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		"j":         KeyDown,
 		"ctrl+u":    KeyShiftUp,
 		"ctrl+d":    KeyShiftDown,
-		"N":         KeyNewRemote,
 		"enter":     KeyEnter,
 		"o":         KeyAttach,
 		"n":         KeyNew,
@@ -128,8 +127,8 @@ func TestOldErgonomicReplacementsAreNotBoundByDefault(t *testing.T) {
 	if _, gotLowerD := GlobalKeyStringsMap["d"]; gotLowerD {
 		t.Fatal("lower-case d must not kill sessions by default")
 	}
-	if got := GlobalKeyStringsMap["N"]; got != KeyNewRemote {
-		t.Fatalf("new remote key N must remain bound; got %v", got)
+	if _, bound := GlobalKeyStringsMap["N"]; bound {
+		t.Fatal("retired new remote shortcut must not have a default binding")
 	}
 	if got := GlobalKeyStringsMap["S"]; got != KeySplitPane {
 		t.Fatalf("S is now the approved split-pane default; got %v", got)

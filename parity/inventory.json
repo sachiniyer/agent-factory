@@ -754,7 +754,7 @@
       "title": "Force a session onto the remote hook backend",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:153 (N) -> app/handle_input.go ForceRemote; PLUS the naming form's backend field (ctrl+r) reaching backend='hook' — app/backend_picker.go"
+        "pointer": "app/backend_picker.go: creation form backend field (ctrl+r); configured keys.new_remote opens the same field for compatibility (#4017)"
       },
       "web": {
         "status": "partial",
@@ -766,7 +766,7 @@
       },
       "verdict": "real-gap",
       "issue": "#1933",
-      "notes": "TUI is now 'yes': `N` still resolves to the hook backend ONLY (session/instance_factory.go resolveBackendKind), but the naming form's backend field reaches backend='hook' explicitly, by the same STRONGER path described below for the web — and the TUI additionally sends the dedicated force_remote field, so it is a superset of both other surfaces here. The web is 'partial', not 'no': the hook backend is reachable from the browser via the #1968 backend picker (backend='hook'), which resolveBackendKind routes to the same BackendHook by a STRONGER path than force_remote — an explicit backend wins over ForceRemote, and both override the repo's backend config, so the picker's 'hook' is strictly more capable than the legacy selector. The dedicated force_remote FIELD is deliberately NOT sent by the web (it stays a field_coverage gap): it adds no capability over the picker, and an ungated 'remote hooks' checkbox reintroduces the 'offered then fails at provision' trap the picker's backendSelectable gate closes (#2406 was closed in favor of this ledger correction). Same unproven-provisioning caveat as session.create.opt.backend: reachable != proven to create a WORKING remote session from the browser (#1968)."
+      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. Web remains partial: its backend picker reaches hook, but working browser remote provisioning is still unproven (#1968)."
     },
     {
       "id": "session.create.opt.title",
@@ -1984,6 +1984,9 @@
           }
         },
         "tui": {
+          "force_remote": {
+            "ok": "Compatibility-only wire selector; the TUI uses the creation form backend field instead (#4017)."
+          },
           "in_place": {
             "gap": "session.create.opt.inplace"
           }

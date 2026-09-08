@@ -36,8 +36,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.backendPickerPending = false
 		m.pendingAccount = ""
-		m.pendingForceRemote = false
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -48,6 +48,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	instance := m.namingInstance
 	if instance == nil {
 		return m, nil
+	}
+	if m.backendPickerPending {
+		// Keep the requested picker reachable while its catalog is in flight.
+		// Switching fields would make the catalog's state guard discard it.
+		switch msg.Type {
+		case tea.KeyEnter, tea.KeyTab, tea.KeyShiftTab, tea.KeyCtrlR, tea.KeyCtrlO:
+			return m, m.handleNotice(errors.New("Loading backends…"))
+		}
 	}
 	switch msg.Type {
 	case tea.KeyEnter:
@@ -114,8 +122,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// that it is remote, would both be this side inventing an answer it does not
 		// have.
 		backendKind, backendKindErr := session.BackendKindFor(session.InstanceOptions{
-			Backend:     session.BackendKind(m.pendingBackend),
-			ForceRemote: m.pendingForceRemote,
+			Backend: session.BackendKind(m.pendingBackend),
 		}, instance.Path)
 		if backendKindErr == nil && backendKind == session.BackendHook {
 			if !session.RemoteHookTitleHasSpecificSlug(title) {
@@ -174,14 +181,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// on the loop, clear it with the rest of the naming state.
 		backend := m.pendingBackend
 		m.pendingBackend = ""
+		m.backendPickerPending = false
 		// And for the ctrl+o account field (#3844), on the loop for the same reason.
 		account := m.pendingAccount
 		m.pendingAccount = ""
-		// And for `N`. It is read from the model, not from instance.Capabilities(),
-		// because the placeholder no longer resolves a runtime to carry it (#2599) —
-		// this is the value that keeps a remote create remote.
-		forceRemote := m.pendingForceRemote
-		m.pendingForceRemote = false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -214,8 +217,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// field `af sessions create --account` fills. Empty means "the ambient
 				// identity", so an untouched field is byte-identical to every create
 				// before this field existed.
-				Account:     account,
-				ForceRemote: forceRemote,
+				Account: account,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
@@ -311,8 +313,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.backendPickerPending = false
 		m.pendingAccount = ""
-		m.pendingForceRemote = false
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -327,8 +329,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // startNewInstance creates a new instance and enters stateNew for naming.
-// If remote is true, the instance is forced to use the remote hook backend.
-func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
+func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
+	m.backendPickerPending = false
 	if m.restoreFailedCreate() {
 		return m, m.selectionChanged()
 	}
@@ -343,11 +345,6 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// status 128`. Nothing in that sentence tells them a project has to be picked
 	// first, and by then they had already done the work of naming the session.
 	//
-	// Both keys, not just `n`. `N` did refuse in registry mode, but by asking the
-	// cwd about remote_hooks and reporting that repo-shaped answer — sending a
-	// user with no project selected off to configure hooks for a directory that
-	// is not even a project. Ahead of that check, this one names the actual
-	// blocker, which is also why nothing below needs a repo-less path anymore.
 	if m.repoRoot == "" {
 		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.enterPicksAProject(), m.projectsFocused())))
 	}
@@ -358,7 +355,6 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
 	m.clearPendingAccount()
-	m.pendingForceRemote = false
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
@@ -368,30 +364,6 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// this is equivalent for the unswitched case. The guard above guarantees it is
 	// set.
 	repoPath := m.repoRoot
-	if remote {
-		configured, err := session.RemoteHooksConfiguredForPath(repoPath)
-		if err != nil {
-			return m, m.handleError(err)
-		}
-		if !configured {
-			// The menu advertises `N new remote` next to `n new`, so an
-			// unconfigured repo must SAY that rather than eat the keypress
-			// (#2020). RemoteHooksConfiguredForPath reports the unconfigured
-			// repo as (false, nil) — a normal empty state, not an error — which
-			// is why only a MALFORMED remote_hooks config used to surface
-			// anything, and the common case (no remote_hooks at all) did
-			// nothing at all. Every other gated action in the TUI explains
-			// itself; this was the one that did not.
-			//
-			// The cause and the fix lead the sentence: the transient notice
-			// clips to the terminal width and the tail is what disappears
-			// (#1973), so the guide URL — recoverable under `E details` — goes
-			// last.
-			return m, m.handleNotice(fmt.Errorf(
-				"remote sessions need a remote_hooks backend configured for this repo — press n for a local session, or configure remote_hooks and try again. Guide: https://sachiniyer.github.io/agent-factory/remote-hooks/"))
-		}
-	}
-	m.pendingForceRemote = remote
 	// The naming row needs a ROW, not a runtime (#2599).
 	//
 	// This instance exists so the rail has something to type a title into. It is
@@ -410,12 +382,6 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// &LocalBackend{}}) — no worktree, no tmux, no container, no git subprocess —
 	// so nothing is established anywhere until the daemon creates the real session.
 	//
-	// It costs no information: the placeholder's kind was never an input to the
-	// create. Both selectors travel to the daemon explicitly on
-	// sessionStartRequest — the naming form's backend field as Backend (#1933) and
-	// `N` as ForceRemote, now carried in m.pendingForceRemote rather than read back
-	// off this instance's capabilities — and the repo's own `backend` key is
-	// resolved daemon-side. All three still decide the session that gets built.
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:                          "",
 		Path:                           repoPath,
