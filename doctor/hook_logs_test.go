@@ -101,13 +101,13 @@ func TestHomeHealthHookLogsUnreadableChildIsIncomplete(t *testing.T) {
 	report := &Report{}
 	checkHomeHealth(&scanContext{opts: Options{ConfigDir: home}}, report)
 	row := findCheck(t, report, "hook logs")
-	require.Equal(t, StatusWarn, row.Status)
-	require.False(t, row.Problem, "an aborted scan establishes no unhealthy accumulation")
-	require.Contains(t, row.Detail, "cannot measure")
+	require.Equal(t, StatusFail, row.Status)
+	require.True(t, row.Problem)
+	require.Contains(t, row.Detail, locked)
 	require.Equal(t, []string{"hook logs"}, report.Incomplete)
 	summary := BuildJSONReport(report, false, false).Summary
 	require.Equal(t, []string{"hook logs"}, summary.Incomplete)
-	require.Zero(t, summary.Unresolved)
+	require.Equal(t, 1, summary.Unresolved)
 }
 
 func TestHomeHealthHookLogsSymlinkedRoot(t *testing.T) {
@@ -287,4 +287,31 @@ func TestHomeHealthHookLogsUnsearchableAncestorFails(t *testing.T) {
 	require.Contains(t, row.Remediation, "chmod u+x "+ancestor)
 	require.Equal(t, 1, report.UnresolvedCount())
 	require.Empty(t, report.Incomplete)
+}
+
+func TestHomeHealthHookLogsInaccessibleSymlinkTargetFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can traverse mode 0600 directories")
+	}
+	for _, relative := range []string{"logs/hooks", "logs"} {
+		t.Run(relative, func(t *testing.T) {
+			home := t.TempDir()
+			link := filepath.Join(home, relative)
+			locked := filepath.Join(t.TempDir(), "locked")
+			target := filepath.Join(locked, "target")
+			require.NoError(t, os.MkdirAll(target, 0o700))
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+			require.NoError(t, os.Symlink(target, link))
+			require.NoError(t, os.Chmod(locked, 0o600))
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+			report := &Report{}
+			checkHookLogs(report, filepath.Join(home, "logs", "hooks"))
+			row := findCheck(t, report, "hook logs")
+			require.Equal(t, StatusFail, row.Status)
+			require.True(t, row.Problem)
+			require.Contains(t, row.Detail, link)
+			require.Contains(t, row.Detail, "configured hooks cannot start")
+			require.Equal(t, 1, report.UnresolvedCount())
+		})
+	}
 }

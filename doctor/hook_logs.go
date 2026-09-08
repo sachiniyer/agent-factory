@@ -17,9 +17,7 @@ const hookLogsWarnBytes int64 = 100 * 1024 * 1024
 
 func checkHookLogs(report *Report, dir string) {
 	blocking, target, err := hookLogBlockingPath(dir)
-	if blocking != "" && (os.IsPermission(err) || errors.Is(err, syscall.EROFS)) {
-		report.Fail(sectionConfig, "hook logs", blocking+" is not writable; af cannot create "+dir+" so configured hooks cannot start",
-			"restore write and search access (chmod u+w "+blocking+"; chmod u+x "+blocking+") or fix directory ownership")
+	if failHookLogPermission(report, dir, blocking, err) {
 		return
 	}
 	if blocking != "" && (err == nil || errors.Is(err, syscall.ELOOP)) {
@@ -77,6 +75,9 @@ func checkHookLogs(report *Report, dir string) {
 	}
 	if err != nil {
 		report.markIncomplete("hook logs")
+		if failHookLogPermission(report, dir, "", err) {
+			return
+		}
 		report.Warn(sectionConfig, "hook logs", fmt.Sprintf("cannot measure %s: %v", dir, err),
 			"check the hook log directory and its permissions, then rerun `af doctor`", false)
 		return
@@ -93,7 +94,8 @@ func checkHookLogs(report *Report, dir string) {
 // Inspect links before following them: ENOENT can mean either an absent path
 // or a dangling link that MkdirAll cannot repair. Return the first blocking
 // path and, for a dangling symlink, its target. Empty paths mean no obstruction;
-// inspection errors remain advisory incomplete scans rather than false PASSes.
+// permission errors retain a blocking path; other inspection errors remain
+// advisory incomplete scans rather than false PASSes.
 func hookLogBlockingPath(dir string) (string, string, error) {
 	for path := dir; ; path = filepath.Dir(path) {
 		info, err := os.Lstat(path)
@@ -111,7 +113,7 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 					return path, "", nil
 				}
 				if err != nil {
-					return "", "", err
+					return path, "", err
 				}
 			}
 			if !info.IsDir() {
@@ -122,7 +124,7 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 			// Resolve links so remediation names the directory to repair.
 			resolved, err := filepath.EvalSymlinks(path)
 			if err != nil {
-				return "", "", err
+				return path, "", err
 			}
 			// Ask the kernel, honoring ACLs and root privileges.
 			if err := unix.Access(resolved, unix.W_OK|unix.X_OK); err != nil {
@@ -136,7 +138,27 @@ func hookLogBlockingPath(dir string) (string, string, error) {
 			return filepath.Dir(path), "", err
 		}
 		if (!os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP)) || filepath.Dir(path) == path {
-			return "", "", err
+			return path, "", err
 		}
 	}
+}
+
+// Use one classifier at both error exits so later Stat, symlink resolution,
+// and WalkDir failures cannot bypass actionable permission reporting.
+func failHookLogPermission(report *Report, dir, blocking string, err error) bool {
+	if !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.EROFS) {
+		return false
+	}
+	if blocking == "" {
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			blocking = pathErr.Path
+		}
+		if blocking == "" {
+			blocking = dir
+		}
+	}
+	report.Fail(sectionConfig, "hook logs", blocking+" is not writable; af cannot create "+dir+" so configured hooks cannot start",
+		"restore write and search access (chmod u+w "+blocking+"; chmod u+x "+blocking+") or fix directory ownership")
+	return true
 }
