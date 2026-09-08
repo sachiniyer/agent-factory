@@ -489,6 +489,10 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		return fmt.Errorf("swap agent: failed to stop the current agent for %q: %w", i.Title, closeErr)
 	}
 
+	if err := plan.CaptureAfterStop(); err != nil {
+		return err
+	}
+
 	ts.SetProgram(plan.program)
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("swap agent: %w", err)

@@ -56,13 +56,16 @@ func (b *handoffBackend) Capabilities() session.Capabilities {
 	return caps
 }
 
-func (b *handoffBackend) SwapAgent(i *session.Instance, _ session.AgentSwapPlan) error {
+func (b *handoffBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPlan) error {
 	b.mu.Lock()
 	b.swapCalls++
 	b.events = append(b.events, "swap")
 	err := b.swapErr
 	b.mu.Unlock()
 	if err != nil {
+		return err
+	}
+	if err := plan.CaptureAfterStop(); err != nil {
 		return err
 	}
 	// Mirror the local backend's SetProgram: readiness and conversation capture

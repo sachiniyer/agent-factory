@@ -43,15 +43,7 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	if instance.LimitReached() {
 		reason = session.HandoffReasonUsageLimit
 	}
-	brief := instance.BuildMissionBrief(target, req.Brief, reason)
-	mission := brief.Render()
-	if target == instance.CurrentAgentName() {
-		mission = strings.TrimSpace(req.Brief)
-		if mission == "" {
-			mission = instance.GetPrompt()
-		}
-	}
-	swap := &autoAccountSwap{manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account), agent: target, mission: mission, headSHA: brief.Work.HeadSHA, reason: reason}
+	swap := &autoAccountSwap{manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account), agent: target, reason: reason}
 	outgoing := instance.CurrentAgentName()
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
 	if err != nil {
