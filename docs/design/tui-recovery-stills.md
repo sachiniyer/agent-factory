@@ -12,6 +12,8 @@ SVG and ANSI goldens in `app/testdata/recovery` are both compared byte-for-byte
 by `TestRecoveryDriverScenes`, making geometry, copy, weight, colour and terminal
 escape sequences reviewable in tests. The 14 scenes in both themes have 28
 `.svg`/`.ansi` pairs. Existing surrounding TUI chrome is outside P4.
+The same test also requires every gallery `.svg` and `.ansi` under
+`docs/assets/recovery/tui-model-driver` to match its asserted golden byte-for-byte.
 The zero-task and task-load-failure scenes keep the task manager's `Tasks`
 title and a pinned `n new · esc back` hint containing only live actions.
 
@@ -62,6 +64,7 @@ Capture mode writes both `<scene>-<theme>.svg` and `<scene>-<theme>.ansi` to
 that directory and skips golden comparisons. Copy the directory out before the
 sandbox exits. Inspect every SVG and ANSI diff, then replace both halves in
 `app/testdata/recovery` and the gallery's `docs/assets/recovery/tui-model-driver`
-as needed. Keep the `.gitattributes` ANSI whitespace rule: terminal cell padding
+together. The test rejects a stale or missing gallery copy in either format.
+Keep the `.gitattributes` ANSI whitespace rule: terminal cell padding
 and trailing viewport rows are part of the asserted frame. Verify again without
 `AF_TUI_RECOVERY_CAPTURE` so the test checks the committed pairs.
