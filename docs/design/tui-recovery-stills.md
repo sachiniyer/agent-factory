@@ -48,4 +48,7 @@ snapshot failures retain loaded sessions and retry automatically.
 To verify, run `scripts/testbox.sh test ./app -run TestRecovery` and
 `scripts/testbox.sh scenario scripts/tui-3915-scenario.sh`. To recapture, set
 `AF_TUI_RECOVERY_CAPTURE` to an output directory **inside** the testbox and run
-the recovery tests; inspect the SVGs before replacing both gallery and goldens.
+the recovery tests; inspect the SVGs before replacing the goldens under
+`app/testdata/recovery`. The gallery embedded above is **generated** from those
+goldens by `scripts/gen-docs.sh` and gated for drift in CI, so run that script
+and commit its output rather than copying the SVGs across by hand.
