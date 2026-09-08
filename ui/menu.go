@@ -599,9 +599,9 @@ func centerStart(box, content int) int {
 // The full instance row is wider than common terminals, so something has to go
 // — and before this priority existed the CLAMP
 // decided, silently cutting the RIGHT edge, i.e. `? help` and `q quit` first:
-// exactly the hints a lost user needs (#1083 play-test). New, help, quit, and
-// kill are deliberately absent from this list: `n new` is the tree-focus
-// affordance, help/quit are the global escape hatches, and `D kill` is the
+// exactly the hints a lost user needs (#1083 play-test). New, help and quit
+// remain visible. Delete sheds only below the minimum; `n new` is the tree-focus
+// affordance, help/quit are the global escape hatches, and `D delete session` is the
 // selected-instance affordance the containerized TUI driver uses to distinguish
 // a real row cursor from the sticky single-instance display selection (#1174/#1422
 // redo).
@@ -660,12 +660,15 @@ var hintDropOrder = [][]keys.KeyName{
 	// fit and lets the row degrade honestly below that, instead of overflowing.
 	//
 	// Why not shed help/quit instead, to keep retry/handoff at any width: the
-	// floor forbids it. new+kill+help+quit is 32 cells; adding retry+handoff
-	// needs 61. Below ~61 something in that set must go, and #1083 settled which
+	// floor forbids it. new+delete+help+quit is 42 cells; adding retry+handoff
+	// needs 71. Below ~71 something in that set must go, and #1083 settled which
 	// — help and quit are the escape hatches a lost user needs most, and they are
 	// deliberately absent from this list entirely.
 	{keys.KeyHandoff},
 	{keys.KeyLimitRetry},
+	// Below the 42-cell minimum, keep new/help/quit visible; the full
+	// Delete session label remains available in general help.
+	{keys.KeyKill},
 }
 
 func (m *Menu) String() string {
