@@ -569,8 +569,9 @@ af_boot() {
 # (its row shows the ● ready dot). Cheap-instance config makes `bash` the
 # program, so ready arrives in seconds.
 af_new_instance() {
-    local name="$1"
+    local name="$1" name_re
     [ -n "$name" ] || { _af_fail "af_new_instance: name required"; return 1; }
+    name_re="$(_af_regex_escape "$name")"
     af_ensure_nav
     af_focus_tree || return 1
     af_send n
@@ -578,7 +579,7 @@ af_new_instance() {
     af_wait_gone '[Ss]ession [Nn]ame:' 1 'old name prompt label' || return 1
     af_send_literal "$name"
     af_send Enter
-    af_wait_for "${name}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
+    af_wait_for "${name_re}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
 }
 
 # af_select <name> — put the tree cursor on one of <name>'s TAB rows (so it is

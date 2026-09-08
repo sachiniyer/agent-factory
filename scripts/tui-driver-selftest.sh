@@ -92,6 +92,19 @@ _expect_tasks_frame_beside_foreign_box() {
     fi
 }
 
+# Exercise the public create/select/assert path, not just the escape helper.
+# shellcheck disable=SC2317
+_expect_literal_instance_title() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    af_resize 80 24 || return 1
+    af_new_instance 'a+b' || return 1
+    af_select 'a+b' || return 1
+    af_expect_selected 'a+b' || return 1
+    printf '\n=== literal a+b created, ready, and selected: 80x24 ===\n'
+    af_capture
+    af_resize "$saved_cols" "$saved_rows" || return 1
+}
+
 # Both lists are empty: the workspace and task recovery share their action copy.
 # Inject one captured pre-overlay frame to make the stale-frame race deterministic,
 # then exercise the real dialog and prove closing it sends exactly one Escape.
@@ -1210,6 +1223,7 @@ step "cycle: w closes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_cl
 
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.
+step "literal a+b creates, reaches ready, and is selectable" _expect_literal_instance_title
 step "relaunch boots with the rail scrolled past the header (#2148)" _expect_scrolled_rail_relaunch
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
