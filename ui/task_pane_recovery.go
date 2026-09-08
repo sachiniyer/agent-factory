@@ -1,5 +1,13 @@
 package ui
 
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+)
+
 // RestoreCreateMode keeps every field after a rejected create. SetTasks closes
 // the form only once the daemon has committed the mutation.
 func (s *TaskPane) RestoreCreateMode() {
@@ -14,7 +22,69 @@ func (s *TaskPane) SetUnavailable(err error) bool {
 	previous := s.unavailable
 	s.unavailable = ""
 	if err != nil {
-		s.unavailable = err.Error()
+		s.unavailable = sanitizeError(err.Error())
+		// A control-only error still represents a failed load.
+		if s.unavailable == "" {
+			s.unavailable = "Task load failed"
+		}
 	}
 	return previous != s.unavailable
+}
+
+// renderListRecovery keeps the task manager's identity and live affordances
+// pinned around the centered P4 empty/failure treatment. These states are still
+// list mode: n opens the create form even when the last load failed, and Esc
+// closes the modal. Selection-dependent actions stay hidden until a task exists.
+func (s *TaskPane) renderListRecovery(condition, detail, action string, failed bool) string {
+	const headerRows = 2
+	const footerRows = 1
+	bodyHeight := s.height - headerRows - footerRows
+	if bodyHeight < 0 {
+		bodyHeight = 0
+	}
+
+	var b strings.Builder
+	b.WriteString(DialogTitleStyle().Render("Tasks"))
+	b.WriteString("\n\n")
+	body := DialogRecoveryScreen(layout.Rect{W: s.width, H: bodyHeight}, condition, detail, action, failed)
+	b.WriteString(body)
+	if body != "" {
+		b.WriteString("\n")
+	}
+	b.WriteString(DialogHintStyle().Render(fitLine("n new · esc back", s.width)))
+	return fitBlockToSize(b.String(), s.width, s.height, footerRows)
+}
+
+func (s *TaskPane) listModeHint() string {
+	if !s.hasFocus {
+		return "enter to focus and edit tasks"
+	}
+
+	hint := "↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back"
+	short := "r run now · x toggle · D delete · ? back · esc"
+	// A watch task can't be manually run (#1758): drop "r run now" so the
+	// hint never advertises an action that always fails.
+	if s.selectedTaskIsWatch() {
+		hint = "↑/↓ select · n new · enter edit · x toggle · D delete · esc back"
+		short = "x toggle · D delete · ? back · esc"
+	}
+	if !s.showActions {
+		hint = "enter edit · n new · ? actions · esc back"
+		short = "enter edit · ? actions · esc"
+	}
+	if s.width > 0 && lipgloss.Width(hint) > s.width {
+		return short
+	}
+	return hint
+}
+
+// unavailableEditNotice stays pinned with the live-key footer while the form
+// scrolls, so a failed refresh never leaves a silently disabled editor.
+func (s *TaskPane) unavailableEditNotice() string {
+	notice := xansi.Wrap("Cannot load tasks · "+s.unavailable+" · changes cannot be saved until the next successful refresh", max(1, s.width), "")
+	if s.height > 0 {
+		// Leave one row each for the focused field and the live-key footer.
+		notice = fitBlockToSize(notice, s.width, max(1, s.height-2), 0)
+	}
+	return lipgloss.NewStyle().Foreground(CurrentTheme().Dead).Render(notice)
 }
