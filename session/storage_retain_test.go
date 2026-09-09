@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -891,4 +892,360 @@ func TestSaveInstances_MidArchiveSandboxPreservesRuntimeCleanupIdentity(t *testi
 		return
 	}
 	t.Fatal("mid-archive sandbox row was dropped from the checkpoint")
+}
+
+// TestSaveInstances_PrePushArchiveSandboxPreservesCommittedDiskRow covers
+// finding 3966202344 / 3966405841: a sandbox snapshot taken between BeginArchive
+// and the push returning (Branch still empty) must NOT use RuntimeCleanupState
+// Unknown to retain, and a committed LiveArchived disk row present when the file
+// lock is acquired must survive the wholesale write.
+func TestSaveInstances_PrePushArchiveSandboxPreservesCommittedDiskRow(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			const pushedBranch = "af/pre-push-archive"
+			commitTime := time.Now()
+			// Committed disk row: archive succeeded while the checkpoint was in
+			// the pre-push window (Branch was empty in memory at snapshot time).
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "pre-push-id",
+				Title:       "pre-push-archive",
+				Path:        repoPath,
+				Branch:      pushedBranch,
+				Program:     "claude",
+				Status:      Archived,
+				Liveness:    LiveArchived,
+				BackendType: backendType,
+				UpdatedAt:   commitTime,
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Pre-push in-memory snapshot: Branch empty, OpArchiving set.
+			prePush := &Instance{
+				ID:         "pre-push-id",
+				Title:      "pre-push-archive",
+				Path:       repoPath,
+				Branch:     "",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+				UpdatedAt:  commitTime.Add(-time.Second),
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, prePush}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != prePush.Title {
+					continue
+				}
+				if row.Branch != pushedBranch {
+					t.Fatalf("checkpoint overwrote the committed archive: Branch = %q, want %q "+
+						"(pre-push snapshot must not clobber a just-committed LiveArchived row)", row.Branch, pushedBranch)
+				}
+				if row.Liveness != LiveArchived {
+					t.Fatalf("Liveness = %v, want LiveArchived", row.Liveness)
+				}
+				return
+			}
+			t.Fatalf("committed archive row for %s was erased by the checkpoint", backendType)
+		})
+	}
+}
+
+// TestSaveInstances_PrePushDropsRowWithoutCleanupMarker verifies the safety
+// half of finding 3966202344: a pre-push row (Branch empty) that the archive
+// does NOT commit to disk before the lock is simply dropped — it must not be
+// retained with RuntimeCleanupStateUnknown, which would cause a restart to
+// reap the live sandbox.
+func TestSaveInstances_PrePushDropsRowWithoutCleanupMarker(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			alive := makeAliveInstance("alive", repoPath)
+			prePush := &Instance{
+				ID:         "pre-push-id",
+				Title:      "pre-push",
+				Path:       repoPath,
+				Branch:     "",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend: &dockerBackend{
+					containerID: "live-container",
+					cleanup: &DockerRuntimeCleanupData{
+						ContainerID: "live-container",
+						EngineID:    "engine-id",
+					},
+				},
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, prePush}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title == prePush.Title {
+					t.Fatalf("pre-push row must be dropped; retaining with RuntimeCleanupStateUnknown "+
+						"would allow a restart to reap the live sandbox mid-push (%s)", backendType)
+				}
+			}
+		})
+	}
+}
+
+// TestSaveInstances_ReconcileUsesAbortArchiveOutcome covers finding 3966202352:
+// when archiveRemoteSession runs AbortArchiveToLost (push succeeded, teardown
+// failed), the committed disk row has Liveness=LiveLost with a non-empty Branch.
+// reconcilePendingArchiveRows must prefer that durable outcome over the stale
+// in-memory pre-Branch snapshot, not only LiveArchived.
+func TestSaveInstances_ReconcileUsesAbortArchiveOutcome(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			const pushedBranch = "af/abort-archive"
+			snapshotTime := time.Now().Add(-time.Second)
+			commitTime := time.Now()
+
+			// Disk: AbortArchiveToLost row — push succeeded, teardown failed.
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "abort-archive-id",
+				Title:       "abort-archive",
+				Path:        repoPath,
+				Branch:      pushedBranch,
+				Program:     "claude",
+				Status:      Lost,
+				Liveness:    LiveLost,
+				BackendType: backendType,
+				UpdatedAt:   commitTime,
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Stale snapshot: Branch already set (post-push), but snapshot was
+			// taken before AbortArchiveToLost ran.
+			midArchive := &Instance{
+				ID:         "abort-archive-id",
+				Title:      "abort-archive",
+				Path:       repoPath,
+				Branch:     pushedBranch,
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+				UpdatedAt:  snapshotTime,
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				if row.Liveness != LiveLost {
+					t.Fatalf("committed AbortArchiveToLost outcome overwritten: Liveness = %v, want LiveLost", row.Liveness)
+				}
+				if row.Branch != pushedBranch {
+					t.Fatalf("Branch = %q, want %q (pushed work must survive", row.Branch, pushedBranch)
+				}
+				return
+			}
+			t.Fatalf("abort-archive row missing after checkpoint for %s", backendType)
+		})
+	}
+}
+
+// TestSaveInstances_ReconcileRequiresFresherUpdateAt covers finding 3966293189:
+// reconcilePendingArchiveRows must only adopt a disk row whose UpdatedAt is
+// strictly after the snapshot's. A stale Archived disk row from a prior archive
+// cycle must not displace a fresh sandbox snapshot.
+func TestSaveInstances_ReconcileRequiresFresherUpdateAt(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			// Disk: stale Archived row from a PREVIOUS archive cycle, same key,
+			// but UpdatedAt is BEFORE the snapshot.
+			snapshotTime := time.Now()
+			priorArchiveTime := snapshotTime.Add(-time.Second)
+			const staleBranch = "af/prior-archive"
+			const freshBranch = "af/fresh-archive"
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "reused-id",
+				Title:       "reused-session",
+				Path:        repoPath,
+				Branch:      staleBranch,
+				Program:     "claude",
+				Status:      Archived,
+				Liveness:    LiveArchived,
+				BackendType: backendType,
+				UpdatedAt:   priorArchiveTime,
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Fresh snapshot: branch pushed, archive in flight.
+			midArchive := &Instance{
+				ID:         "reused-id",
+				Title:      "reused-session",
+				Path:       repoPath,
+				Branch:     freshBranch,
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+				UpdatedAt:  snapshotTime,
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				// The stale Archived row must NOT displace the fresh snapshot.
+				if row.Liveness == LiveArchived && row.Branch == staleBranch {
+					t.Fatalf("stale Archived row from a prior archive cycle replaced the fresh snapshot: "+
+						"reconciliation adopted a disk row with UpdatedAt before the snapshot (%s)", backendType)
+				}
+				return
+			}
+		})
+	}
+}
+
+// TestSaveInstances_PostTeardownNoRuntimeCleanupUnknown covers finding 3966293181:
+// when ArchiveSandbox has already completed teardown (as.Kill returned and cleared
+// the backend's cleanup handle), the snapshot has runtimeCleanup == nil. The
+// checkpoint must NOT set RuntimeCleanupStateUnknown in that case, because a
+// restart would then re-run cleanup on a backend that is already gone.
+func TestSaveInstances_PostTeardownNoRuntimeCleanupUnknown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+
+	// Post-teardown snapshot: Branch set (push completed), OpArchiving set (commit
+	// not yet run), but backend has no live cleanup handle (teardown is done).
+	postTeardown := &Instance{
+		ID:         "post-teardown-id",
+		Title:      "post-teardown",
+		Path:       repoPath,
+		Branch:     "af/post-teardown",
+		Program:    "claude",
+		started:    true,
+		liveness:   LiveRunning,
+		inFlightOp: OpArchiving,
+		// dockerBackend with nil cleanup: teardown completed, no identity to retain.
+		backend: &dockerBackend{containerID: ""},
+	}
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, postTeardown}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title != postTeardown.Title {
+			continue
+		}
+		if row.RuntimeCleanupStateUnknown {
+			t.Fatal("post-teardown row must not have RuntimeCleanupStateUnknown: teardown already completed " +
+				"(runtimeCleanup nil), so marking unknown would cause a restart to attempt cleanup " +
+				"on an already-gone backend")
+		}
+		return
+	}
+	t.Fatal("post-teardown row was not retained")
+}
+
+// failOnGetInstancesMockStorage wraps mockInstanceStorage and returns an error
+// on GetInstances for a specific repo, simulating a transient read failure
+// during reconciliation.
+type failOnGetInstancesMockStorage struct {
+	*mockInstanceStorage
+	failRepoID string
+}
+
+func (m *failOnGetInstancesMockStorage) GetInstances(repoID string) (json.RawMessage, error) {
+	if repoID == m.failRepoID {
+		return nil, fmt.Errorf("simulated transient read failure")
+	}
+	return m.mockInstanceStorage.GetInstances(repoID)
+}
+
+// TestSaveInstances_ReconcileReadFailureIsPropagatd covers finding 3966293172:
+// if GetInstances fails during the archive reconciliation read, SaveInstances
+// must return an error rather than silently proceeding to overwrite disk. A
+// silent overwrite would clobber a committed archive row with the stale snapshot.
+func TestSaveInstances_ReconcileReadFailureIsPropagated(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	ms := newMockStorage()
+	rid := config.RepoIDFromRoot(repoPath)
+	failingState := &failOnGetInstancesMockStorage{
+		mockInstanceStorage: ms,
+		failRepoID:          rid,
+	}
+
+	alive := makeAliveInstance("alive", repoPath)
+	midArchive := &Instance{
+		ID:         "mid-archive-id",
+		Title:      "mid-archive",
+		Path:       repoPath,
+		Branch:     "af/mid-archive",
+		Program:    "claude",
+		started:    true,
+		liveness:   LiveRunning,
+		inFlightOp: OpArchiving,
+		backend:    newInertSandboxBackend("docker"),
+	}
+
+	storage, err := NewStorage(failingState, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, midArchive}); err == nil {
+		t.Fatal("SaveInstances must return an error when GetInstances fails during archive reconciliation: " +
+			"silently proceeding would overwrite a committed archive row with the stale snapshot")
+	}
 }

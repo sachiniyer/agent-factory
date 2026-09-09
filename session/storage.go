@@ -715,6 +715,10 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// the per-repo write below, so the file-lock body re-reads disk for these
 	// rows and prefers the durable committed version over the pre-Branch snapshot.
 	pendingArchiveIDs := make(map[string]map[string]struct{})
+	// sandboxArchivingRepos: repos with pre-push archive rows dropped from grouped.
+	// The file-lock body merges committed disk rows so the overwrite cannot erase
+	// a just-committed archive.
+	sandboxArchivingRepos := make(map[string]struct{})
 	for _, inst := range instances {
 		data := inst.ToInstanceData()
 		status := data.Status
@@ -722,22 +726,22 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
 		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
 		archiveReportPending := data.archiveReportPending
-		// An off-box sandbox (docker/ssh/sandbox/hook) caught mid-archive at the
-		// checkpoint has already pushed its branch to origin — durable there — and
-		// recorded that branch on i.Branch (session/archive_sandbox.go). BeginArchive
-		// raised OpArchiving and left liveness LiveRunning until CommitArchive lands,
-		// so composeStatus(LiveRunning, OpArchiving) is Deleting and the row hits the
-		// (Loading/Deleting) skip below WITHOUT this claim: dropping it erases (the
-		// sibling case) or strands (the no-sibling stale case) the only af-side handle
-		// to the pushed branch, exactly the obligation lostSandboxRecord exists for —
-		// but lostSandbox requires LiveLost and a mid-archive row is still LiveRunning.
-		// An off-box session has no daemon-side gitWorktree, so archiveReportPending
-		// (the LOCAL mid-archive claim) never becomes true for it; this is its
-		// analogue. Scoped to OpArchiving (an in-flight KILL still wins below) and to
-		// LiveArchived-on-the-disk state never happening under an in-flight op anyway;
-		// the != LiveArchived guard keeps the claim inside the mid-archive window.
+		// Off-box sandbox mid-archive: BeginArchive raised OpArchiving (composing
+		// to Deleting), but CommitArchive has not run. The row would be silently
+		// dropped without this claim, erasing the only af-side handle to the pushed
+		// branch. archiveReportPending (the local analogue) never fires for off-box
+		// sessions. Scoped to Branch != "": ArchiveSandbox records Branch after the
+		// push returns; pre-push, Branch is empty and there is nothing durable to
+		// preserve — retaining that row with unknown cleanup would permit a restart
+		// to reap the live (mid-push) sandbox.
 		pendingArchiveSandbox := isSandboxBackendType(data.BackendType) &&
-			data.InFlightOp == OpArchiving && data.Liveness != LiveArchived
+			data.InFlightOp == OpArchiving && data.Liveness != LiveArchived &&
+			data.Branch != ""
+		// prePushArchiveSandbox: OpArchiving set, Branch still empty. Row dropped
+		// below, but a targeted writer may have committed to disk. Track the repo.
+		prePushArchiveSandbox := isSandboxBackendType(data.BackendType) &&
+			data.InFlightOp == OpArchiving && data.Liveness != LiveArchived &&
+			data.Branch == ""
 		pendingTabs := len(data.PendingTabs) > 0
 		durableRetention := pendingHandoff || unknownRuntimeCleanup ||
 			unresolvedRelocation || archiveReportPending || pendingArchiveSandbox
@@ -755,6 +759,10 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// PendingTabs does NOT override Deleting: an explicit delete still wins over
 		// preserving its UI metadata, so a crash cannot resurrect the session.
 		if (status == Loading || status == Deleting) && !durableRetention {
+			if prePushArchiveSandbox {
+				// Row dropped but a committed archive row on disk must survive.
+				sandboxArchivingRepos[inst.repoIDForStorage()] = struct{}{}
+			}
 			continue
 		}
 		// The !Started() skip drops transient never-started junk (a create that
@@ -785,16 +793,16 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		}
 		rid := inst.repoIDForStorage()
 		if pendingArchiveSandbox {
-			// This snapshot was taken while an archive push was still in flight.
-			// The sandbox teardown's outcome is unknown from this vantage point:
-			// process exit interrupts ArchiveSandbox before as.Kill returns, so
-			// neither UserKilled nor RuntimeCleanupStateUnknown is set yet. Mark
-			// the row as having an unknown cleanup boundary so ForStorage
-			// preserves its staged teardown identity; without this the
-			// !UserKilled && !RuntimeCleanupStateUnknown branch in ForStorage
-			// strips RuntimeCleanup, and the next restart has no handle to prove
-			// the old sandbox gone before reprovisioning.
-			data.RuntimeCleanupStateUnknown = true
+			// Post-push archive in flight. Mark unknown cleanup so ForStorage
+			// preserves the staged teardown identity (the !UserKilled &&
+			// !RuntimeCleanupStateUnknown branch would otherwise strip it). Only
+			// set when runtimeCleanup != nil: a nil handle means as.Kill already
+			// completed (teardown is done), so falsely flagging unknown would
+			// cause the next restart to re-run cleanup on a backend that is gone,
+			// potentially blocking recovery.
+			if data.runtimeCleanup != nil {
+				data.RuntimeCleanupStateUnknown = true
+			}
 			// Record that this row needs reconciliation with disk inside the
 			// per-repo file lock (see pendingArchiveIDs comment above).
 			key := data.ID
@@ -815,17 +823,27 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			return pathErr
 		}
 		inFlightArchive := pendingArchiveIDs[rid]
+		_, hasSandboxArchiving := sandboxArchivingRepos[rid]
 		if err := config.WithFileLock(path, func() error {
-			// For any row snapshotted while its archive was in flight, a targeted
-			// writer (CommitArchive / persistInstanceData) may have already
-			// committed the correct Archived state before this lock. Reconcile
-			// those rows with disk so the wholesale overwrite never regresses a
-			// finished archive back to a pre-Branch snapshot.
-			if len(inFlightArchive) > 0 {
-				if raw, readErr := s.state.GetInstances(rid); readErr == nil && len(raw) > 0 {
+			// Reconcile disk when in-flight or pre-push archive rows exist for
+			// this repo: a targeted writer may have committed Archived or
+			// AbortArchiveToLost before the lock. Propagate a read failure so
+			// the caller can retry — silently skipping would overwrite the
+			// committed row with the stale snapshot.
+			if len(inFlightArchive) > 0 || hasSandboxArchiving {
+				raw, readErr := s.state.GetInstances(rid)
+				if readErr != nil {
+					return fmt.Errorf("reconcile: read disk for repo %s: %w", rid, readErr)
+				}
+				if len(raw) > 0 {
 					var onDisk []InstanceData
 					if jsonErr := json.Unmarshal(raw, &onDisk); jsonErr == nil {
-						reconcilePendingArchiveRows(group, inFlightArchive, onDisk)
+						if len(inFlightArchive) > 0 {
+							reconcilePendingArchiveRows(group, inFlightArchive, onDisk)
+						}
+						if hasSandboxArchiving {
+							group = mergeCommittedArchiveRows(group, onDisk)
+						}
 					}
 				}
 			}
