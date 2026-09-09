@@ -1,27 +1,59 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 func checkWorktreeIntegrity(ctx *scanContext, report *Report, health daemon.HealthStatus) {
+	inventory := ctx.opts.worktreeInventory
+	inventoryName := "live session"
 	if worktreeInventoryInapplicable(ctx, health) {
-		report.Pass(sectionProcesses, "worktree-integrity", "not inspected because this home's daemon is not running, so it has no live lanes")
-		return
+		// A stopped daemon leaves local tmux sessions running for the next daemon
+		// to re-adopt. Disk is therefore the authoritative fallback, not evidence
+		// that there are no live lanes.
+		inventory = persistedWorktreeInventory
+		inventoryName = "persisted session"
 	}
-	rows, err := ctx.opts.worktreeInventory()
+	rows, err := inventory()
 	if err != nil {
 		report.markIncomplete("worktree-integrity")
 		report.Warn(sectionProcesses, "worktree-integrity",
-			fmt.Sprintf("could not read the live session inventory, so worktree safety is unknown: %v", err),
-			"restore daemon access and rerun `af doctor`; no worktree was changed", true)
+			fmt.Sprintf("could not read the %s inventory, so worktree safety is unknown: %v", inventoryName, err),
+			"restore access to the session inventory and rerun `af doctor`; no worktree was changed", true)
 		return
 	}
 	checkWorktreeIntegrityRows(report, session.InspectSessionWorktrees(rows))
+}
+
+func persistedWorktreeInventory() ([]session.InstanceData, error) {
+	records, skipped, err := config.LoadAllRepoInstancesReportingSkipDetails()
+	if err != nil {
+		return nil, err
+	}
+	if len(skipped) > 0 {
+		return nil, fmt.Errorf("persisted session inventory is incomplete: %s", config.DescribeRepoInstancesSkips(skipped))
+	}
+	repoIDs := make([]string, 0, len(records))
+	for repoID := range records {
+		repoIDs = append(repoIDs, repoID)
+	}
+	sort.Strings(repoIDs)
+	var rows []session.InstanceData
+	for _, repoID := range repoIDs {
+		var repoRows []session.InstanceData
+		if err := json.Unmarshal(records[repoID], &repoRows); err != nil {
+			return nil, fmt.Errorf("could not parse persisted sessions for repository %s: %w", repoID, err)
+		}
+		rows = append(rows, repoRows...)
+	}
+	return rows, nil
 }
 
 func checkWorktreeIntegrityRows(report *Report, inspections []session.SessionWorktreeInspection) {

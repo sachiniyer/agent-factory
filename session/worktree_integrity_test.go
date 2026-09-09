@@ -134,3 +134,15 @@ func TestWorktreeWarningIsProjectionOnly(t *testing.T) {
 	assert.Empty(t, restored.ToInstanceData().ForStorage().WorktreeWarning)
 	assert.Empty(t, data.ForClientRead().WorktreeWarning)
 }
+
+func TestIncompleteWorktreeScanReplacesStaleWarningWithNewDanger(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "holder", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	require.True(t, inst.ReconcileWorktreeInspection("DANGER: old branch held by old-lane", nil))
+
+	require.True(t, inst.ReconcileWorktreeInspection("DANGER: new branch held by new-lane", assert.AnError))
+	warning := inst.WorktreeWarning()
+	assert.Contains(t, warning, "new branch held by new-lane", "new positive evidence must replace a stale confirmed warning")
+	assert.NotContains(t, warning, "old branch held by old-lane")
+	assert.Contains(t, warning, "could not be verified", "the correlation gap must remain visible")
+}

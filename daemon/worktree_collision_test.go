@@ -189,6 +189,49 @@ func TestCompleteWorktreeScanCanClearConfirmedWarning(t *testing.T) {
 	assert.Empty(t, inst.WorktreeWarning(), "only a complete clean scan may clear the last confirmed warning")
 }
 
+func TestStaleWorktreeScanCannotClearRestoredLaneWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "holder", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	confirmed := "DANGER: confirmed duplicate branch"
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID, Warning: confirmed}}
+	}
+	manager.refreshWorktreeIntegrityWarnings()
+	inst.SetStatusForTest(session.Archived)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	observed := make(chan []session.InstanceData, 1)
+	manager.worktreeInspector = func(_ context.Context, rows []session.InstanceData) []session.SessionWorktreeInspection {
+		observed <- rows
+		close(entered)
+		<-release
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		manager.refreshWorktreeIntegrityWarnings()
+		close(done)
+	}()
+	<-entered
+	rows := <-observed
+	require.Len(t, rows, 1)
+	require.True(t, session.IsArchivedData(rows[0]), "the stale scan must snapshot the lane while archived")
+	inst.SetStatusForTest(session.Ready)
+	close(release)
+	<-done
+
+	assert.Contains(t, inst.WorktreeWarning(), confirmed,
+		"an archived snapshot must not clear a warning after the lane becomes live again")
+}
+
 func TestSessionStatusProjectsWorktreeIntegrityWarning(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "unsafe-lane", Path: repoPath, Program: "claude"})

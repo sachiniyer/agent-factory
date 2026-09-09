@@ -423,17 +423,13 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 	m.mu.Lock()
 	instances := make(map[string]*session.Instance, len(m.instances))
 	repos := make(map[string]string, len(m.instances))
-	type worktreeEntry struct {
-		repoID   string
-		instance *session.Instance
-	}
-	entries := make([]worktreeEntry, 0, len(m.instances))
+	entries := make([]worktreeInspectionEntry, 0, len(m.instances))
 	for key, instance := range m.instances {
 		if instance == nil {
 			continue
 		}
 		repoID, _ := splitDaemonInstanceKey(key)
-		entries = append(entries, worktreeEntry{repoID: repoID, instance: instance})
+		entries = append(entries, worktreeInspectionEntry{key: key, repoID: repoID, instance: instance})
 	}
 	m.mu.Unlock()
 	rows := make([]session.InstanceData, 0, len(entries))
@@ -451,7 +447,7 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 		inspector = session.InspectSessionWorktreesContext
 	}
 	inspections := inspector(ctx, rows)
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || !m.worktreeInspectionSnapshotCurrent(entries, rows) {
 		return
 	}
 	seen := make(map[string]bool, len(inspections))

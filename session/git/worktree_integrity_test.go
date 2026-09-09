@@ -128,6 +128,36 @@ func TestInspectWorktreeIntegrityRejectsEmptyHeadReflog(t *testing.T) {
 	assert.Contains(t, err.Error(), "HEAD reflog")
 }
 
+func TestInspectWorktreeIntegrityRejectsHeadChangeDuringProbe(t *testing.T) {
+	binDir := t.TempDir()
+	statusSeen := filepath.Join(t.TempDir(), "status-seen")
+	fakeGit := filepath.Join(binDir, "git")
+	oldHead := "1111111111111111111111111111111111111111"
+	newHead := "2222222222222222222222222222222222222222"
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$3" = "status" ]; then
+	if [ -e %q ]; then
+		printf '%%s\n' '# branch.oid %s' '# branch.head shared'
+	else
+		: > %q
+		printf '%%s\n' '# branch.oid %s' '# branch.head shared'
+	fi
+	exit 0
+fi
+if [ "$3" = "log" ]; then
+	printf '%%s\n' %s
+	exit 0
+fi
+exit 2
+`, statusSeen, newHead, statusSeen, oldHead, newHead)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got, err := InspectWorktreeIntegrity(t.TempDir())
+	require.Error(t, err, "a HEAD change between status and reflog is an incomplete observation, not takeover evidence")
+	assert.False(t, got.HeadMovedWithoutReflog)
+}
+
 func TestParseIntegrityStatusRejectsMissingBranchObservation(t *testing.T) {
 	_, err := parseIntegrityStatus("# branch.oid 0123456789012345678901234567890123456789\n")
 	require.Error(t, err, "missing branch metadata is unknown, not a detached checkout")
