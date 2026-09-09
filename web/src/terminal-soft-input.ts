@@ -46,8 +46,10 @@ export class TerminalSoftInput {
     this.staleBeforeValue = undefined;
     const range = this.pending.at(-1);
     const keyCode = (event as KeyboardEvent).keyCode;
-    // Xterm keeps IME ownership for its composition key and modifier keys.
-    if (range && ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
+    // Only a key that xterm accepted past its custom handler can make
+    // CompositionHelper finalize the pending commit before handling that key.
+    if (range && this.keydownReachesCompositionHelper(event) &&
+      ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
   };
   private readonly onKeyUp = (): void => {
     this.keyDownSeen = false;
@@ -123,11 +125,9 @@ export class TerminalSoftInput {
         const value = this.textarea?.value;
         const mutationLength = value !== undefined && range.start !== undefined && value.length > range.start
           ? value.length - range.start : undefined;
-        const candidate = mutationLength !== undefined && range.start !== undefined ? value?.substring(range.start) : undefined;
         const fallbackLength = input.data?.length;
         const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !range.keydownAfterEnd &&
-          range.commitLength !== undefined && (mutationLength ?? fallbackLength ?? 0) > range.commitLength &&
-          (candidate !== undefined ? candidate === range.updateText : input.data === range.updateText);
+          range.commitLength !== undefined && (mutationLength ?? fallbackLength ?? 0) > range.commitLength;
         if (range.keydownAfterEnd) {
           range.trailingLength = mutationLength !== undefined
             ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0))
@@ -189,7 +189,8 @@ export class TerminalSoftInput {
   constructor(private readonly host: EventTarget, private readonly textarea: (EventTarget & { value?: string }) | null,
     private readonly enabled: () => boolean, private readonly physicalInput: () => boolean,
     private readonly send: (text: string) => void,
-    private readonly hasArmedModifier: () => boolean = () => true) {
+    private readonly hasArmedModifier: () => boolean = () => true,
+    private readonly keydownReachesCompositionHelper: (event: Event) => boolean = () => true) {
     textarea?.addEventListener("compositionstart", this.onCompositionStart);
     textarea?.addEventListener("compositionupdate", this.onCompositionUpdate);
     textarea?.addEventListener("compositionend", this.onCompositionEnd);

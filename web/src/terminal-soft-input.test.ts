@@ -143,6 +143,28 @@ test("post-end textarea growth extends a provisional composition commit", t => {
   assert.equal(soft.transform("x", value => modifiers.input(value)), "\x18");
 });
 
+test("reshaped post-end textarea growth completes a provisional composition commit", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionupdate", "ab"));
+  textarea.value = "a";
+  host.dispatchEvent(insertText("a", "input", true));
+  textarea.dispatchEvent(composition("compositionend", "ab"));
+  textarea.value = "ac";
+  host.dispatchEvent(insertText(null));
+
+  assert.equal(soft.transform("ac", value => modifiers.input(value)), "ac");
+  assert.equal(modifiers.state("Ctrl"), "once");
+  assert.equal(soft.transform("x", value => modifiers.input(value)), "\x18");
+});
+
 test("a complete Chrome commit does not absorb a same-character ordinary key", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
@@ -311,6 +333,29 @@ test("Safari keycode 229 after compositionend belongs to the IME commit", t => {
   textarea.dispatchEvent(Object.assign(new Event("keyup"), { keyCode: 229 }));
   assert.equal(soft.transform("x", value => modifiers.input(value)), "\x1bx");
   assert.equal(modifiers.state("Alt"), "off");
+});
+
+test("a custom-suppressed keydown cannot classify a Safari-order commit as trailing", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Alt", 0);
+  const suppressed = Object.assign(new Event("keydown", { cancelable: true }), {
+    key: "v", keyCode: 86, ctrlKey: true,
+  });
+  const soft = Reflect.construct(TerminalSoftInput, [host, textarea, () => true, () => false,
+    () => {}, () => true, (event: Event) => event !== suppressed]) as TerminalSoftInput;
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.dispatchEvent(suppressed);
+  textarea.value = "字";
+  host.dispatchEvent(insertText("字"));
+
+  assert.equal(soft.transform("字", value => modifiers.input(value)), "字");
+  assert.equal(modifiers.state("Alt"), "once");
 });
 
 for (const [keyCode, modifier, modified] of [

@@ -2,6 +2,18 @@ import { assertPhoneComposition } from "./phone-composition.js";
 import { expect, type Page } from "@playwright/test";
 import { decode, Op } from "../src/frame.js";
 
+interface NavigablePage {
+  goto(url: string): Promise<unknown>;
+}
+
+export async function leavePageAndCleanup(page: NavigablePage, cleanup: () => Promise<void>): Promise<void> {
+  try {
+    await page.goto("about:blank");
+  } finally {
+    await cleanup();
+  }
+}
+
 /** Observe the actual outgoing binary PTY stream, not echoed terminal content. */
 export function phoneInputStream(page: Page): () => string {
   let input = "";

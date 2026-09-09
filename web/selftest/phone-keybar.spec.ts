@@ -1,6 +1,7 @@
 import { assertPhoneComposition } from "./phone-composition.js";
 import { expect, test } from "@playwright/test";
-import { assertPhoneBarModifiers, assertPhoneStaleRecovery, phoneInputStream } from "./phone-keybar.js";
+import { assertPhoneBarModifiers, assertPhoneStaleRecovery, leavePageAndCleanup,
+  phoneInputStream } from "./phone-keybar.js";
 import { assertPhoneKeybarInputEffects } from "./phone-keybar-effects.js";
 
 test("#4036 phone keybar applies and consumes modifiers before the next letter", async ({ page, request }, testInfo) => {
@@ -37,9 +38,10 @@ test("#4036 phone keybar applies and consumes modifiers before the next letter",
       await page.screenshot({ path: testInfo.outputPath("phone-keybar.png") });
       console.log("#4036 PTY input:", JSON.stringify(stream()));
     } finally {
-      await page.goto("about:blank");
-      const killed = await request.post("/v1/KillSession", { data: { id } });
-      expect((await killed.json()).error).toBeFalsy();
+      await leavePageAndCleanup(page, async () => {
+        const killed = await request.post("/v1/KillSession", { data: { id } });
+        expect((await killed.json()).error).toBeFalsy();
+      });
     }
   }
 });

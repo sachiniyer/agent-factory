@@ -228,6 +228,7 @@ export class TerminalKeybar {
   private userInputGeneration = 0;
   private deferred229: { before: string; generation: number } | undefined;
   private deferred229Generation = 0;
+  private readonly suppressedKeydowns = new WeakSet<Event>();
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
     private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
@@ -274,7 +275,8 @@ export class TerminalKeybar {
     host.addEventListener("keyup", this.onKeyUp, true);
     this.softInput = new TerminalSoftInput(host, this.textarea,
       () => this.focused && this.phone.matches, () => this.physicalInput, data => this.sendUserInput(data),
-      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off");
+      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off",
+      event => !this.suppressedKeydowns.delete(event));
     this.paint();
   }
 
@@ -324,6 +326,10 @@ export class TerminalKeybar {
     queueMicrotask(() => setTimeout(() => {
       if (this.deferred229?.generation === generation) this.deferred229 = undefined;
     }, 0));
+  }
+  /** Record that xterm's custom handler rejected this event before CompositionHelper. */
+  markKeydownSuppressed(event: KeyboardEvent): void {
+    this.suppressedKeydowns.add(event);
   }
   private takeDeferred229(text: string): boolean {
     const pending = this.deferred229;

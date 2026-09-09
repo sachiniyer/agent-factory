@@ -629,7 +629,7 @@ export class AttachTerminal {
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
       }
-      return handleClipboardKeydown(ev, {
+      const accepted = handleClipboardKeydown(ev, {
         composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
@@ -640,6 +640,10 @@ export class AttachTerminal {
         // it scrolls to bottom and clears selection, then fires onData above.
         sendUserInput: (text) => this.keybar.sendUserInput(text),
       });
+      // Xterm runs this handler before CompositionHelper.keydown. Its later
+      // capture listener must not infer that a rejected key finalized the IME.
+      if (!accepted) this.keybar.markKeydownSuppressed(ev);
+      return accepted;
     });
 
     // Re-fit + re-announce size whenever the container changes (window resize,

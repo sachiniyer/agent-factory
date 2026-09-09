@@ -8080,13 +8080,14 @@ function insertedTextareaText(before, after) {
   return after.slice(prefix, after.length - suffix);
 }
 var TerminalSoftInput = class {
-  constructor(host, textarea, enabled, physicalInput, send, hasArmedModifier = () => true) {
+  constructor(host, textarea, enabled, physicalInput, send, hasArmedModifier = () => true, keydownReachesCompositionHelper = () => true) {
     this.host = host;
     this.textarea = textarea;
     this.enabled = enabled;
     this.physicalInput = physicalInput;
     this.send = send;
     this.hasArmedModifier = hasArmedModifier;
+    this.keydownReachesCompositionHelper = keydownReachesCompositionHelper;
     textarea?.addEventListener("compositionstart", this.onCompositionStart);
     textarea?.addEventListener("compositionupdate", this.onCompositionUpdate);
     textarea?.addEventListener("compositionend", this.onCompositionEnd);
@@ -8111,7 +8112,7 @@ var TerminalSoftInput = class {
     this.staleBeforeValue = void 0;
     const range = this.pending.at(-1);
     const keyCode = event.keyCode;
-    if (range && ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
+    if (range && this.keydownReachesCompositionHelper(event) && ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
   };
   onKeyUp = () => {
     this.keyDownSeen = false;
@@ -8167,9 +8168,8 @@ var TerminalSoftInput = class {
       if (range && input.inputType === "insertText" && input.type === "input" && input.isComposing === false) {
         const value = this.textarea?.value;
         const mutationLength = value !== void 0 && range.start !== void 0 && value.length > range.start ? value.length - range.start : void 0;
-        const candidate = mutationLength !== void 0 && range.start !== void 0 ? value?.substring(range.start) : void 0;
         const fallbackLength = input.data?.length;
-        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !range.keydownAfterEnd && range.commitLength !== void 0 && (mutationLength ?? fallbackLength ?? 0) > range.commitLength && (candidate !== void 0 ? candidate === range.updateText : input.data === range.updateText);
+        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !range.keydownAfterEnd && range.commitLength !== void 0 && (mutationLength ?? fallbackLength ?? 0) > range.commitLength;
         if (range.keydownAfterEnd) {
           range.trailingLength = mutationLength !== void 0 ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0)) : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         } else if (range.commitLength === void 0) {
@@ -8500,7 +8500,8 @@ var TerminalKeybar = class {
       () => this.focused && this.phone.matches,
       () => this.physicalInput,
       (data) => this.sendUserInput(data),
-      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off"
+      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off",
+      (event) => !this.suppressedKeydowns.delete(event)
     );
     this.paint();
   }
@@ -8528,6 +8529,7 @@ var TerminalKeybar = class {
   userInputGeneration = 0;
   deferred229;
   deferred229Generation = 0;
+  suppressedKeydowns = /* @__PURE__ */ new WeakSet();
   setFocused(focused) {
     this.focused = focused;
     if (!focused) {
@@ -8581,6 +8583,10 @@ var TerminalKeybar = class {
     queueMicrotask(() => setTimeout(() => {
       if (this.deferred229?.generation === generation) this.deferred229 = void 0;
     }, 0));
+  }
+  /** Record that xterm's custom handler rejected this event before CompositionHelper. */
+  markKeydownSuppressed(event) {
+    this.suppressedKeydowns.add(event);
   }
   takeDeferred229(text) {
     const pending = this.deferred229;
@@ -9162,7 +9168,7 @@ var AttachTerminal = class {
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
       }
-      return handleClipboardKeydown(ev, {
+      const accepted = handleClipboardKeydown(ev, {
         composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
@@ -9173,6 +9179,8 @@ var AttachTerminal = class {
         // it scrolls to bottom and clears selection, then fires onData above.
         sendUserInput: (text) => this.keybar.sendUserInput(text)
       });
+      if (!accepted) this.keybar.markKeydownSuppressed(ev);
+      return accepted;
     });
     this.ro = new ResizeObserver(() => this.scheduleFit());
     this.ro.observe(container);
