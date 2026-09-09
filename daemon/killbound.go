@@ -69,6 +69,10 @@ func operationClockMilliseconds() int64 {
 // opLockPollInterval is how often lockWithin re-attempts a contended op lock.
 var opLockPollInterval = 5 * time.Millisecond
 
+// afterOperationLockPollSleep is a test seam for delaying a waiter between its
+// bounded sleep and TryLock. Production leaves it as a no-op.
+var afterOperationLockPollSleep = func(*sync.Mutex) {}
+
 // lockWithin acquires mu, giving up after d and reporting whether it got the
 // lock. It preserves mutual exclusion exactly — a true result means the caller
 // holds the lock and must Unlock it, the same contract as mu.Lock().
@@ -87,6 +91,10 @@ var opLockPollInterval = 5 * time.Millisecond
 // acceptable here and nowhere near the hot path: the bounded acquirers are
 // user-initiated lifecycle operations, the poll cost lasts only as long as the
 // contention, and the alternative it replaces is waiting forever.
+//
+// A successful TryLock is checked against the deadline AFTER acquisition. A
+// waiter can be suspended between Sleep and TryLock; accepting that late win
+// would make the projected timeout advisory rather than an admission bound.
 func lockWithin(mu *sync.Mutex, d time.Duration) (bool, time.Duration) {
 	if mu.TryLock() {
 		return true, 0
@@ -101,8 +109,15 @@ func lockWithin(mu *sync.Mutex, d time.Duration) (bool, time.Duration) {
 		if wait > 0 {
 			time.Sleep(wait)
 		}
+		afterOperationLockPollSleep(mu)
 		if mu.TryLock() {
-			return true, time.Since(start)
+			now := time.Now()
+			waited := now.Sub(start)
+			if !now.Before(deadline) {
+				mu.Unlock()
+				return false, waited
+			}
+			return true, waited
 		}
 		if !time.Now().Before(deadline) {
 			return false, time.Since(start)
@@ -115,13 +130,10 @@ func lockWithin(mu *sync.Mutex, d time.Duration) (bool, time.Duration) {
 // session yet, so timeout is a known no-op: the requested action did not start
 // and a later kill or retry remains possible (#2641).
 //
-// The two kinds of caller differ in what they hold across this wait, and that is
-// #3600. Archive registers in killsInFlight first, so its timeout also has to
-// release that guard — which its deferred cleanup does. Both restore paths take
-// this lock BEFORE claiming anything, so their wait holds nothing at all: the row
-// is unclaimed and unfenced for its whole duration, which is what keeps the Kill
-// it advertises admissible. It returns how long it waited so those callers can
-// say so in a refusal that is now decided at the END of the wait.
+// All three callers take this lock BEFORE claiming anything, so their wait holds
+// no lifecycle state: the row is unclaimed and unfenced for its whole duration,
+// which is what keeps the Kill it advertises admissible. It returns how long it
+// waited so those callers can say so in a refusal decided at the END of the wait.
 func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*sync.Mutex, time.Duration, error) {
 	opLock := m.opLockFor(key)
 	acquired, waited := lockWithin(opLock, opLockTimeout)
