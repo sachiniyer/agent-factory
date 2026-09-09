@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -300,6 +301,94 @@ func TestCollapseKnownRootsRecognizesShellBoundaries(t *testing.T) {
 				t.Errorf("shell command output = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestScrubbersDetectCredentialsBeforeUsernameRedaction(t *testing.T) {
+	const secret = "S3NT1NELVALUEDONOTLOG"
+	r := &redactor{users: []string{"token"}}
+	line := "token=" + secret
+	for _, tc := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "generic", scrub: r.scrub},
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.scrub(line)
+			if strings.Contains(got, secret) {
+				t.Fatalf("username replacement hid a credential key before its value was scrubbed: %s", got)
+			}
+			if want := userMarker + "=" + secretMarker; got != want {
+				t.Errorf("scrubber output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestScrubbersRedactUncoveredPartOfPartiallyOverlappingTitle(t *testing.T) {
+	const (
+		title = "secret /srv"
+		repo  = "/srv/reallylong/repo"
+	)
+	r := &redactor{}
+	r.noteTitle(title)
+	r.noteRepoRoot(repo)
+	line := "title=" + title + "/reallylong/repo"
+	for _, tc := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.scrub(line)
+			if strings.Contains(got, "secret") {
+				t.Fatalf("scrubber leaked the uncovered part of a title overlapping a longer root:\n%s", got)
+			}
+			if want := "title=" + redactedMarker + "[repo:1]"; got != want {
+				t.Errorf("scrubber output = %q, want union-preserving %q", got, want)
+			}
+		})
+	}
+}
+
+func TestScrubbersRedactGoEscapedSiblingRecoveryPath(t *testing.T) {
+	const diskTitle = "fix-bug"
+	for _, repo := range []string{
+		`/srv/client"name/repo`,
+		`/srv/client\name/repo`,
+	} {
+		for _, scrubber := range []struct {
+			name  string
+			scrub func(*redactor, string) string
+		}{
+			{name: "log", scrub: func(r *redactor, s string) string { return r.scrubLog(s) }},
+			{name: "diagnostic", scrub: func(r *redactor, s string) string { return r.scrubDiagnostic(s) }},
+		} {
+			t.Run(strconv.Quote(repo)+"/"+scrubber.name, func(t *testing.T) {
+				r := &redactor{}
+				r.noteSession(&session.InstanceData{
+					Title:    "fix bug",
+					Worktree: session.GitWorktreeData{RepoPath: repo},
+				})
+				sibling := repo + "-" + diskTitle
+				line := "recover_error=" + strconv.Quote("recovery location: "+sibling) + "; classification=" + diskTitle
+
+				got := scrubber.scrub(r, line)
+				escapedRepo := strconv.Quote(repo)
+				escapedRepo = escapedRepo[1 : len(escapedRepo)-1]
+				if strings.Count(got, diskTitle) != 1 || strings.Contains(got, escapedRepo) {
+					t.Fatalf("scrubber leaked a Go-escaped repo or derived title from the sibling path:\n%s", got)
+				}
+				if want := `recover_error="recovery location: [repo:1]-[redacted]"`; !strings.Contains(got, want) {
+					t.Errorf("scrubber lost the quoted recovery shape, want %q in %q", want, got)
+				}
+			})
+		}
 	}
 }
 

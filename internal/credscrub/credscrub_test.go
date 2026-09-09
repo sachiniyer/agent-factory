@@ -114,6 +114,10 @@ func TestScrubKeepsTriageContext(t *testing.T) {
 	if got := Scrub(multi); got != multi {
 		t.Fatalf("stranded pass crossed a newline and ate the next line: %q", got)
 	}
+	wholeField := "auth: " + RedactedMarker + " authentication-failed-now"
+	if got := Scrub(wholeField); got != wholeField {
+		t.Fatalf("scheme recovery treated a whole-field marker as a credential marker: %q", got)
+	}
 	in := "worktree af_0f8fc14c_fix-login at 4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a removed; session id 01J8Z9"
 	if got := Scrub(in); got != in {
 		t.Fatalf("Scrub destroyed benign triage context:\n in: %q\nout: %q", in, got)

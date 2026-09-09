@@ -143,9 +143,8 @@ func normalizeRoot(path string) string {
 // $HOME is part of this list rather than a separate pass because the two are one
 // ordered decision: the AF home usually sits INSIDE $HOME, so collapsing $HOME
 // first would rewrite "~/.agent-factory" and leave the more specific token
-// unreachable. It is the same prefix-shadowing rule sortLongestFirst enforces
-// for titles and usernames, and it is part of the privacy invariant for the same
-// reason.
+// unreachable. The text planner handles the same prefix-shadowing relationship
+// for titles and usernames before it applies any replacements.
 //
 // Each root is also matched in its DISPLAY spelling, for the reason scrub
 // collapses both spellings of $HOME: a path whose bytes are not valid UTF-8

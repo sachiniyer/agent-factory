@@ -7,7 +7,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -162,50 +161,12 @@ func addUserVariant(users []string, name string) []string {
 // scrub is the catch-all text pass applied to every section: it removes PEM
 // blocks and pattern-matched credentials, collapses every known path root — the
 // AF home and each session's repo/worktree to its token, the home directory to
-// "~" — and blanks bare username tokens to "[user]". It runs last over already
-// field-redacted content, so it is defense-in-depth, not the only line of
-// defense.
+// "~" — and blanks account/username tokens. All candidates are found before a
+// replacement is applied, including inside valid Go-quoted values. It runs last
+// over already field-redacted content, so it is defense-in-depth, not the only
+// line of defense.
 func (r *redactor) scrub(s string) string {
-	s = credscrub.Scrub(s)
-	s = r.collapseKnownRoots(s)
-	// Account labels are swept HERE as well as in scrubLog's combined span pass.
-	// They reach the bundle through two otherwise separate sections: collectLog
-	// uses scrubLog, while collectConfig hands the global config file straight to
-	// scrub(). Removing the catch-all sweep would silently miss the config file
-	// that NAMES the default account (#3871).
-	//
-	// It runs before the username pass for the reason that pass runs longest-first
-	// within itself: a username that is a token-boundary prefix of a label would
-	// otherwise consume the prefix, destroy the only exact match for the label, and
-	// strand its suffix in the bundle. The account alphabet makes the reverse
-	// impossible — a label never matches inside a longer run of label characters —
-	// so this order is safe in both directions rather than a coin flip.
-	s = r.scrubAccountLabels(s)
-	return r.scrubUsernames(s)
-}
-
-// scrubUsernames is the final name pass for the general scrubber. Log and
-// diagnostic text include usernames in their original-input span resolution.
-func (r *redactor) scrubUsernames(s string) string {
-	// Blank bare username tokens with the SAME manual token boundary the title
-	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
-	// when the username ends in a non-word rune (an OS username like "test-"), so
-	// "test-/fix-login-bug" in a branch leaked the username unredacted — a silent
-	// redaction failure in a bundle meant to be safe to share (#2533).
-	//
-	// Longest-first, exactly as scrubSessionTitles orders titles and for the same
-	// reason: a shorter username can be a prefix of a longer one (a raw "jdoe" vs a
-	// home basename "jdoe.admin"), and redacting the prefix first destroys the only
-	// exact match for the longer token and strands its suffix. The manual boundary
-	// makes that prefix-shadowing easier to hit than `\b` did, so the ordering is
-	// part of the privacy invariant, not a nicety. Sort a copy so scrub stays a pure
-	// read of r.users.
-	names := append([]string(nil), r.users...)
-	sortLongestFirst(names)
-	for _, name := range names {
-		s = replaceBareToken(s, name, userMarker)
-	}
-	return s
+	return r.scrubGenericText(s)
 }
 
 // scrubUnstructured is the single sanitizer for a free-text scalar or blob
@@ -224,7 +185,7 @@ func (r *redactor) scrubUsernames(s string) string {
 // told to read, and the safe direction for an artifact meant to be shared
 // (#3871).
 func (r *redactor) scrubUnstructured(s string) string {
-	return r.scrub(r.scrubKnownLabels(s))
+	return r.scrubKnownDiagnosticValues(s)
 }
 
 // scrubLog scrubs the daemon log tail. On top of the standard scrub() pass it
@@ -246,12 +207,11 @@ func (r *redactor) scrubLog(s string) string {
 	// the rest of the name — and matching the whole quoted token makes that
 	// impossible in either order.
 	s = r.scrubArchiveWarningPaths(s)
-	// Resolve labels, contextual worktree titles, roots, and tmux shapes against
-	// the same unmodified text. Either a title or a root can contain the other;
-	// sequential passes let the first consume the second's evidence and strand a
-	// private suffix. Longest non-overlapping spans make both directions one rule.
-	s = r.scrubKnownLogValues(s)
-	return credscrub.Scrub(s)
+	// Resolve credentials, labels, contextual worktree titles, roots, usernames,
+	// and tmux shapes against the same unmodified text. Their union is redacted:
+	// longest matches choose useful role markers, but every uncovered portion of
+	// an overlap still receives the generic marker.
+	return r.scrubKnownLogValues(s)
 }
 
 // scrubDiagnostic sanitizes an af-AUTHORED diagnostic string that QUOTES an
@@ -269,32 +229,20 @@ func (r *redactor) scrubLog(s string) string {
 // Known labels, contextual paths, roots, and tmux shapes are resolved against
 // one original string for scrubLog's #4099 overlap reason.
 func (r *redactor) scrubDiagnostic(s string) string {
-	return credscrub.Scrub(r.scrubKnownDiagnosticValues(s))
+	return r.scrubKnownDiagnosticValues(s)
 }
 
-// scrubSessionTitles removes exact Go-quoted forms of every known title, then
-// applies the conservative word-bearing bare-title matcher. The quoted form is
+// scrubSessionTitles plans exact Go-quoted forms of every known title together
+// with the conservative word-bearing bare-title matches. The quoted form is
 // the important invariant for task targets: daemon delivery logs and persisted
 // delivery errors both format them with %q. Matching strconv.Quote therefore
 // covers every legal title byte-for-byte, including short names and punctuation
 // that are unsafe to replace globally, plus quotes/backslashes that %q escapes
-// (#2238 review). scrubLog handles legacy raw punctuation emitters by their
-// fixed field syntax.
+// (#2238 review). Resolving every title against the original input also covers
+// partial overlap between two known titles. scrubLog handles legacy raw
+// punctuation emitters by their fixed field syntax.
 func (r *redactor) scrubSessionTitles(s string) string {
-	titles := make([]string, 0, len(r.titles))
-	for title := range r.titles {
-		titles = append(titles, title)
-	}
-	// A shorter title may be a prefix of a longer one. Redacting the prefix
-	// first destroys the only exact match for the longer secret and leaves its
-	// suffix behind, so the order is part of the privacy invariant. The lexical
-	// tie-break makes output deterministic even though titles are stored in a map.
-	sortLongestFirst(titles)
-	for _, title := range titles {
-		s = strings.ReplaceAll(s, strconv.Quote(title), strconv.Quote(redactedMarker))
-		s = replaceBareTitle(s, title)
-	}
-	return s
+	return applyRedactionSpans(s, r.appendTitleSpans(nil, s))
 }
 
 // tmuxPrefixMarker is the redaction of an af tmux session name whose title

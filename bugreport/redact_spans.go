@@ -2,16 +2,17 @@ package bugreport
 
 import (
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/credscrub"
+	"github.com/sachiniyer/agent-factory/internal/redactspan"
 )
 
-// redactionSpan is one replacement located in the unmodified input. Log and
-// diagnostic redaction has several independently useful views of the same text:
-// a title can contain a root, a root can contain a title, and a tmux name can
-// contain either. Recording all matches first keeps one matcher from destroying
-// the evidence another needs.
+// redactionSpan is one replacement located in the unmodified input. Credentials,
+// names, paths, and transport-decoded values are independent views of the same
+// text; recording all matches first keeps one producer from destroying another's
+// evidence.
 type redactionSpan struct {
 	start       int
 	end         int
@@ -26,23 +27,49 @@ const (
 	spanTmuxName
 	spanWorktreeTitle
 	spanKnownRoot
+	spanCredential
 	spanUsername
+	spanQuotedValue
 )
 
 // scrubKnownLogValues includes the historical task-log shapes whose title is
 // known from fixed syntax rather than the current record set.
 func (r *redactor) scrubKnownLogValues(s string) string {
-	spans := r.knownTextSpans(s)
+	spans := r.sensitiveTextSpans(s)
 	spans = appendLegacyTaskTitleSpans(spans, s)
+	spans = r.appendQuotedValueSpans(spans, s, true)
 	return applyRedactionSpans(s, spans)
 }
 
 func (r *redactor) scrubKnownDiagnosticValues(s string) string {
-	return applyRedactionSpans(s, r.knownTextSpans(s))
+	spans := r.sensitiveTextSpans(s)
+	spans = r.appendQuotedValueSpans(spans, s, false)
+	return applyRedactionSpans(s, spans)
+}
+
+func (r *redactor) scrubGenericText(s string) string {
+	spans := r.genericTextSpans(s)
+	spans = r.appendGenericQuotedValueSpans(spans, s)
+	return applyRedactionSpans(s, spans)
+}
+
+func (r *redactor) sensitiveTextSpans(s string) []redactionSpan {
+	spans := r.knownTextSpans(s)
+	spans = appendCredentialSpans(spans, s)
+	return r.appendUsernameSpans(spans, s)
+}
+
+func (r *redactor) genericTextSpans(s string) []redactionSpan {
+	spans := make([]redactionSpan, 0)
+	spans = r.appendAccountLabelSpans(spans, s)
+	spans = r.appendKnownRootSpans(spans, s)
+	spans = appendCredentialSpans(spans, s)
+	return r.appendUsernameSpans(spans, s)
 }
 
 // knownTextSpans resolves every contextual/name/path match against one original
-// string. Priority only breaks equal-length ties; a longer match always wins.
+// string. Priority only chooses a semantic marker for equal-length matches;
+// applyRedactionSpans always covers the union.
 func (r *redactor) knownTextSpans(s string) []redactionSpan {
 	spans := make([]redactionSpan, 0)
 	spans = r.appendKnownLabelSpans(spans, s)
@@ -50,22 +77,118 @@ func (r *redactor) knownTextSpans(s string) []redactionSpan {
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
-	for _, name := range r.users {
-		spans = appendTokenSpans(spans, s, name, userMarker, isWordRune, spanUsername)
-	}
 	return spans
 }
 
 func (r *redactor) appendKnownLabelSpans(spans []redactionSpan, s string) []redactionSpan {
-	for label := range r.accounts {
-		spans = appendTokenSpans(spans, s, label, redactedMarker, isAccountNameRune, spanKnownLabel)
-	}
+	spans = r.appendAccountLabelSpans(spans, s)
+	return r.appendTitleSpans(spans, s)
+}
+
+// appendTitleSpans treats titles as user-authored free text. Exact %q forms
+// cover every legal byte sequence; bare forms require a whole word-bearing
+// token so punctuation-only titles do not erase ordinary syntax globally.
+func (r *redactor) appendTitleSpans(spans []redactionSpan, s string) []redactionSpan {
 	for title := range r.titles {
 		quoted := strconv.Quote(title)
 		spans = appendExactSpans(spans, s, quoted, strconv.Quote(redactedMarker), spanQuotedTitle)
 		spans = appendTokenSpans(spans, s, title, redactedMarker, isWordRune, spanKnownLabel)
 	}
 	return spans
+}
+
+// appendAccountLabelSpans removes a registered, user-chosen account name only
+// as a whole label. The account alphabet keeps "work" useful inside the
+// unrelated branch value "work-stuff" while still removing `--account work`.
+func (r *redactor) appendAccountLabelSpans(spans []redactionSpan, s string) []redactionSpan {
+	for label := range r.accounts {
+		spans = appendTokenSpans(spans, s, label, redactedMarker, isAccountNameRune, spanKnownLabel)
+	}
+	return spans
+}
+
+// appendUsernameSpans uses a whole word-bearing token instead of regexp \b, so
+// an OS username ending in punctuation (for example "test-") is still removed
+// from a branch path without erasing the same bytes inside a longer word.
+func (r *redactor) appendUsernameSpans(spans []redactionSpan, s string) []redactionSpan {
+	for _, name := range r.users {
+		spans = appendTokenSpans(spans, s, name, userMarker, isWordRune, spanUsername)
+	}
+	return spans
+}
+
+func appendCredentialSpans(spans []redactionSpan, s string) []redactionSpan {
+	for _, credential := range credscrub.Redactions(s) {
+		spans = append(spans, redactionSpan{
+			start: credential.Start, end: credential.End,
+			replacement: credential.Replacement, priority: spanCredential,
+		})
+	}
+	return spans
+}
+
+func (r *redactor) appendQuotedValueSpans(spans []redactionSpan, s string, legacyLog bool) []redactionSpan {
+	return appendGoQuotedSpans(spans, s, func(value string) string {
+		inner := r.sensitiveTextSpans(value)
+		if legacyLog {
+			inner = appendLegacyTaskTitleSpans(inner, value)
+		}
+		return applyRedactionSpans(value, inner)
+	})
+}
+
+func (r *redactor) appendGenericQuotedValueSpans(spans []redactionSpan, s string) []redactionSpan {
+	return appendGoQuotedSpans(spans, s, func(value string) string {
+		return applyRedactionSpans(value, r.genericTextSpans(value))
+	})
+}
+
+func appendGoQuotedSpans(spans []redactionSpan, s string, scrub func(string) string) []redactionSpan {
+	for scan := 0; scan < len(s); {
+		rel := strings.IndexByte(s[scan:], '"')
+		if rel < 0 {
+			break
+		}
+		start := scan + rel
+		end := goQuotedEnd(s, start)
+		if end < 0 {
+			scan = start + 1
+			continue
+		}
+		quoted := s[start:end]
+		value, err := strconv.Unquote(quoted)
+		if err != nil {
+			// Treat the matching quote as the end of this malformed token rather
+			// than reconsidering it as an opener and swallowing the next valid %q
+			// field.
+			scan = end
+			continue
+		}
+		if redacted := scrub(value); redacted != value {
+			spans = append(spans, redactionSpan{
+				start: start, end: end, replacement: strconv.Quote(redacted), priority: spanQuotedValue,
+			})
+		}
+		scan = end
+	}
+	return spans
+}
+
+func goQuotedEnd(s string, start int) int {
+	escaped := false
+	for i := start + 1; i < len(s); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch s[i] {
+		case '\\':
+			escaped = true
+		case '"':
+			return i + 1
+		}
+	}
+	return -1
 }
 
 func (r *redactor) appendTmuxNameSpans(spans []redactionSpan, s string) []redactionSpan {
@@ -230,56 +353,11 @@ func appendTokenSpans(
 }
 
 func applyRedactionSpans(s string, spans []redactionSpan) string {
-	if len(spans) == 0 {
-		return s
+	shared := make([]redactspan.Span, 0, len(spans))
+	for _, span := range spans {
+		shared = append(shared, redactspan.Span{
+			Start: span.start, End: span.end, Replacement: span.replacement, Priority: span.priority,
+		})
 	}
-	sort.SliceStable(spans, func(i, j int) bool {
-		iLen := spans[i].end - spans[i].start
-		jLen := spans[j].end - spans[j].start
-		if iLen != jLen {
-			return iLen > jLen
-		}
-		if spans[i].priority != spans[j].priority {
-			return spans[i].priority < spans[j].priority
-		}
-		if spans[i].start != spans[j].start {
-			return spans[i].start < spans[j].start
-		}
-		return false
-	})
-
-	selected := make([]redactionSpan, 0, len(spans))
-	occupied := make([]bool, len(s))
-	for _, candidate := range spans {
-		if candidate.start < 0 || candidate.end <= candidate.start || candidate.end > len(s) {
-			continue
-		}
-		overlaps := false
-		for i := candidate.start; i < candidate.end; i++ {
-			if occupied[i] {
-				overlaps = true
-				break
-			}
-		}
-		if !overlaps {
-			selected = append(selected, candidate)
-			for i := candidate.start; i < candidate.end; i++ {
-				occupied[i] = true
-			}
-		}
-	}
-	if len(selected) == 0 {
-		return s
-	}
-	sort.Slice(selected, func(i, j int) bool { return selected[i].start < selected[j].start })
-
-	var out strings.Builder
-	copied := 0
-	for _, span := range selected {
-		out.WriteString(s[copied:span.start])
-		out.WriteString(span.replacement)
-		copied = span.end
-	}
-	out.WriteString(s[copied:])
-	return out.String()
+	return redactspan.Apply(s, shared, redactedMarker)
 }
