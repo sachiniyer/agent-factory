@@ -202,3 +202,55 @@ func TestDottedSiblingProjectPathHeaderFormStillWorks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/bin/claude", resolved.ProgramOverrides["claude"])
 }
+
+// TestInsertTOMLDottedLeafAfterMultilineStringSibling guards the
+// lastSiblingIdx-placement fix: when the last dotted sibling has a multiline
+// string value (''' ... '''), the new leaf must land AFTER the closing
+// delimiter, not on the line immediately after the opening line. Before the
+// fix, lastSiblingIdx recorded the opening line and insertAt(i+1) wrote the
+// new key inside the string literal, producing a corrupt file that failed the
+// rewrite-drift gate.
+func TestInsertTOMLDottedLeafAfterMultilineStringSibling(t *testing.T) {
+	input := "program_overrides.codex = '''\nsome\nvalue\n'''\n"
+	got := insertTOMLDottedLeaf(input, "program_overrides", "claude", "'/bin/claude'")
+
+	// The result must be valid TOML.
+	loadsTOML(t, got)
+	// The new leaf must be present.
+	assert.Contains(t, got, "program_overrides.claude = '/bin/claude'",
+		"new dotted leaf must be inserted")
+	// The existing multiline sibling must be preserved verbatim.
+	assert.Contains(t, got, "program_overrides.codex = '''\nsome\nvalue\n'''",
+		"multiline string sibling must be preserved")
+	// The new leaf must not appear inside the multiline string value.
+	siblingClose := strings.Index(got, "'''\n")
+	lastClose := strings.LastIndex(got, "'''")
+	newLeafIdx := strings.Index(got, "program_overrides.claude")
+	if siblingClose >= 0 && newLeafIdx >= 0 && newLeafIdx < lastClose {
+		t.Fatalf("new leaf was inserted inside the multiline string value:\n%s", got)
+	}
+}
+
+// TestInsertTOMLDottedLeafAfterMultilineArraySibling guards the same
+// lastSiblingIdx-placement fix for a dotted sibling whose value is a multiline
+// array. tomlAssignmentEnd covers both multiline strings and arrays, so a
+// single fix handles both shapes; this test pins the array variant.
+func TestInsertTOMLDottedLeafAfterMultilineArraySibling(t *testing.T) {
+	input := "program_overrides.codex = [\n  'a',\n  'b',\n]\n"
+	got := insertTOMLDottedLeaf(input, "program_overrides", "claude", "'/bin/claude'")
+
+	// The result must be valid TOML.
+	loadsTOML(t, got)
+	// The new leaf must be present.
+	assert.Contains(t, got, "program_overrides.claude = '/bin/claude'",
+		"new dotted leaf must be inserted")
+	// The existing multiline array sibling must be preserved verbatim.
+	assert.Contains(t, got, "program_overrides.codex = [\n  'a',\n  'b',\n]",
+		"multiline array sibling must be preserved")
+	// The new leaf must appear after the closing bracket of the array.
+	arrayClose := strings.Index(got, "]")
+	newLeafIdx := strings.Index(got, "program_overrides.claude")
+	if arrayClose >= 0 && newLeafIdx >= 0 && newLeafIdx < arrayClose {
+		t.Fatalf("new leaf was inserted inside the multiline array value:\n%s", got)
+	}
+}

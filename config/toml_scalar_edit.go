@@ -226,8 +226,12 @@ func insertTOMLDottedLeaf(content, section, leaf, encoded string) string {
 			continue
 		}
 		// Look for a dotted key belonging to section at the root level.
+		// Use tomlAssignmentEnd so that the recorded index is the last line
+		// of the sibling's complete assignment (covers multiline strings and
+		// arrays), not just its opening line. Inserting at opening+1 would
+		// land inside the value for any multiline sibling.
 		if path, _, ok := tomlAssignmentPath(line); ok && len(path) >= 1 && path[0] == section {
-			lastSiblingIdx = i
+			lastSiblingIdx = tomlAssignmentEnd(ls, i)
 		}
 	}
 
