@@ -273,22 +273,27 @@ type Manager struct {
 	// restart-to-apply; only a read that failed at daemon start heals mid-run,
 	// by being read successfully for the first time.
 	rootAgentLayers atomic.Pointer[rootAgentSnapshot]
-	// rootHealFailures/rootHealNextAttempt pace healRootAgentLayers on the
-	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
-	// clock): while every retried read keeps failing the pass backs off to
-	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
+	// rootHealFailures/rootHealNextAttempt pace the personal-config, reconcile,
+	// and legacy root_agents retries on the shared ensure backoff
+	// (rootEnsureBackoffFor, injectable nowFunc). The registry arm paces on
+	// its OWN clock, rootHealRegistryNextAttempt — NOT the shared one a legacy
+	// narrowing resets to now: its two-strike discipline (#3315) needs two
+	// reads SPACED by a cadence (the personal absence streak carries its own
+	// spacing, rootHealAbsenceLastStrike, for the same reason). Guarded by
+	// m.mu, like rootEnsureStates.
+	//
 	// rootHealRegistryStreak/rootHealRegistryProjects and
-	// rootHealAbsenceStreaks carry the two-strike counters for
-	// absence-classified observations (the applyHomeCheck discipline):
-	// registry recovery publishes on the second consecutive MATCHING
-	// present-and-listable snapshot, and an ENOENT personal config heals to
-	// "removed" on the second consecutive dir-present observation. All
-	// guarded by m.mu, like rootEnsureStates.
-	rootHealFailures         int
-	rootHealNextAttempt      time.Time
-	rootHealRegistryStreak   int
-	rootHealRegistryProjects []config.Project
-	rootHealAbsenceStreaks   map[string]int
+	// rootHealAbsenceStreaks are the two-strike counters: registry recovery
+	// publishes on the second consecutive MATCHING present-and-listable
+	// snapshot, and an ENOENT personal config heals to "removed" on the
+	// second consecutive dir-present observation.
+	rootHealFailures            int
+	rootHealNextAttempt         time.Time
+	rootHealRegistryFailures    int
+	rootHealRegistryNextAttempt time.Time
+	rootHealRegistryStreak      int
+	rootHealRegistryProjects    []config.Project
+	rootHealAbsenceStreaks      map[string]int
 	// rootHealAbsenceLastStrike stamps each project's most recent ENOENT
 	// strike. The two-strike release requires the strikes to be SPACED by at
 	// least one backoff base regardless of what the shared retry clock does —
