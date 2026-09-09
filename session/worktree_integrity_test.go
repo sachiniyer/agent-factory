@@ -118,12 +118,61 @@ func TestInspectSessionWorktreesMarksPartialRepositoryScanUnknown(t *testing.T) 
 	require.Error(t, got[1].Err)
 }
 
+func TestInspectSessionWorktreesRejectsBranchObservationThatChangedAfterPeerScan(t *testing.T) {
+	binDir := t.TempDir()
+	repo := t.TempDir()
+	holder := filepath.Join(repo, "holder")
+	peer := filepath.Join(repo, "peer")
+	require.NoError(t, os.MkdirAll(holder, 0o755))
+	require.NoError(t, os.MkdirAll(peer, 0o755))
+	peerFirstStatus := filepath.Join(t.TempDir(), "peer-first-status")
+	peerSecondStatus := filepath.Join(t.TempDir(), "peer-second-status")
+	fakeGit := filepath.Join(binDir, "git")
+	oid := "1111111111111111111111111111111111111111"
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$3" = "log" ]; then
+	printf '%%s\n' %s
+	exit 0
+fi
+if [ "$3" != "status" ]; then
+	exit 2
+fi
+branch=shared
+if [ "$2" = %q ]; then
+	if [ ! -e %q ]; then
+		: > %q
+		branch=other
+	elif [ ! -e %q ]; then
+		: > %q
+		branch=other
+	fi
+fi
+printf '%%s\n' '# branch.oid %s' "# branch.head $branch"
+`, oid, peer, peerFirstStatus, peerFirstStatus, peerSecondStatus, peerSecondStatus, oid)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got := InspectSessionWorktrees([]InstanceData{
+		{ID: "holder", Title: "holder", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: holder}},
+		{ID: "peer", Title: "peer", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: peer}},
+	})
+	require.Len(t, got, 2)
+	require.Error(t, got[0].CorrelationErr,
+		"a clean correlation must be rejected when a peer's Git observation changed after its local probe")
+	require.Error(t, got[1].Err, "the peer whose own Git evidence changed must be unreadable, not clean")
+}
+
 func TestInspectSessionWorktreesSkipsOnlyPositivelyInapplicableRows(t *testing.T) {
 	got := InspectSessionWorktrees([]InstanceData{
 		{ID: "archived", Title: "archived", Liveness: LiveArchived, BackendType: "local"},
 		{ID: "remote", Title: "remote", Liveness: LiveReady, BackendType: "remote"},
+		{ID: "creating", Title: "creating", Liveness: LiveReady, InFlightOp: OpCreating},
+		{ID: "legacy-loading", Title: "legacy-loading", Status: Loading},
 	})
-	assert.Empty(t, got, "archived worktrees are inert and remote lanes have no local checkout to inspect")
+	assert.Empty(t, got, "archived, remote, and not-yet-created worktrees are positively inapplicable")
+	assert.True(t, NeedsWorktreeIntegrityInspection(InstanceData{
+		ID: "replacing", Title: "replacing", Status: Loading, Liveness: LiveReady, InFlightOp: OpReplacing,
+	}), "Loading is only create-inapplicable without a non-create operation axis")
 }
 
 func TestWorktreeWarningIsProjectionOnly(t *testing.T) {

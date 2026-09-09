@@ -527,7 +527,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 		t.Fatalf("save corrupted repo: %v", err)
 	}
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances(nil) returned error on corrupted-repo input — daemon startup would fail and orphan every live session: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestRefreshDaemonInstances_BackfillsLegacyIDBeforeMaterialize(t *testing.T)
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refresh legacy row: %v", err)
 	}
@@ -632,12 +632,48 @@ func TestRefreshDaemonInstances_DoesNotMaterializeUnpersistedLegacyID(t *testing
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refresh should isolate one legacy backfill failure: %v", err)
 	}
 	if materialized || got[daemonInstanceKey(repoID, title)] != nil {
 		t.Fatal("legacy session was materialized after its stable ID could not be persisted")
+	}
+}
+
+func TestRefreshDaemonInstancesCarriesUnmaterializedRowsIntoWorktreeInventory(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	const repoID = "skipped-worktree-repo"
+	row := session.InstanceData{
+		ID: "skipped-id", Title: "skipped-live-lane", Liveness: session.LiveReady, BackendType: "local",
+		Worktree: session.GitWorktreeData{RepoPath: "/repo", WorktreePath: "/repo/skipped"},
+	}
+	raw, err := json.Marshal([]session.InstanceData{row})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	previous := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(session.InstanceData) (*session.Instance, error) {
+		return nil, fmt.Errorf("forced materialization failure")
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = previous })
+
+	loaded, _, worktreeInventory, err := refreshDaemonInstances(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("materialization failure loaded %d instance(s), want none", len(loaded))
+	}
+	if len(worktreeInventory.unmaterialized) != 1 {
+		t.Fatalf("persisted lane may be absent from m.instances but not the safety cohort; got %d rows", len(worktreeInventory.unmaterialized))
+	}
+	if got := worktreeInventory.unmaterialized[0].ID; got != row.ID {
+		t.Fatalf("preserved row id = %q, want %q", got, row.ID)
 	}
 }
 
@@ -667,7 +703,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 	prior := &session.Instance{}
 	existing := map[string]*session.Instance{priorKey: prior}
 
-	got, _, err := refreshDaemonInstances(existing)
+	got, _, _, err := refreshDaemonInstances(existing)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances on poll path errored on corrupted-repo input: %v", err)
 	}
@@ -734,7 +770,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 		t.Fatalf("remove missing repo dir: %v", err)
 	}
 
-	got, _, err := refreshDaemonInstances(existing)
+	got, _, _, err := refreshDaemonInstances(existing)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances returned error: %v", err)
 	}
@@ -757,7 +793,7 @@ func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	silenceWarnings(t)
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("startup refresh errored: %v", err)
 	}

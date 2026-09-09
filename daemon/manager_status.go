@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -429,18 +430,22 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 		repoID, _ := splitDaemonInstanceKey(key)
 		entries = append(entries, worktreeInspectionEntry{key: key, repoID: repoID, instance: instance})
 	}
+	additionalRows := append([]session.InstanceData(nil), m.worktreeInventory.unmaterialized...)
+	inventoryState := m.worktreeInventory
+	inventoryVersion := m.worktreeInventoryVersion
 	m.mu.Unlock()
 	rows := make([]session.InstanceData, 0, len(entries))
 	for _, entry := range entries {
 		rows = append(rows, entry.instance.ToInstanceData())
 	}
+	scanRows := append(append([]session.InstanceData(nil), rows...), additionalRows...)
 
 	inspector := m.worktreeInspector
 	if inspector == nil {
 		inspector = session.InspectSessionWorktreesContext
 	}
-	inspections := inspector(ctx, rows)
-	if ctx.Err() != nil || !m.worktreeInspectionSnapshotCurrent(entries, rows) {
+	inspections := inspector(ctx, scanRows)
+	if ctx.Err() != nil || !m.worktreeInspectionSnapshotCurrent(entries, rows, inventoryVersion) {
 		return
 	}
 	if m.worktreeBeforeReconcile != nil {
@@ -456,9 +461,14 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 		update := session.WorktreeInspectionReconciliation{Instance: entry.instance, Snapshot: row}
 		if inspection, ok := inspectionsByID[row.ID]; ok {
 			update.Warning = inspection.Warning
-			update.Incomplete = inspection.IncompleteError()
+			update.Incomplete = errors.Join(inspection.IncompleteError(), inventoryState.incompleteFor(entry.repoID))
 		} else if session.NeedsWorktreeIntegrityInspection(row) {
-			update.Incomplete = fmt.Errorf("worktree safety inspector returned no result for live local lane %q", row.Title)
+			update.Incomplete = errors.Join(
+				fmt.Errorf("worktree safety inspector returned no result for live local lane %q", row.Title),
+				inventoryState.incompleteFor(entry.repoID),
+			)
+		} else {
+			update.Incomplete = inventoryState.incompleteFor(entry.repoID)
 		}
 		updates[index] = update
 	}
@@ -470,7 +480,7 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 	// restore or membership change rejects every update before a warning clears.
 	changed, applied := session.ReconcileWorktreeInspectionCohortIfCurrent(updates, func() (bool, func()) {
 		m.mu.Lock()
-		if !m.worktreeInspectionMembershipCurrentLocked(entries) {
+		if !m.worktreeInspectionMembershipCurrentLocked(entries, inventoryVersion) {
 			m.mu.Unlock()
 			return false, nil
 		}

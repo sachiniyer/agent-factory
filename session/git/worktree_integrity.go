@@ -71,6 +71,21 @@ func InspectWorktreeIntegrityContext(ctx context.Context, worktreePath string) (
 	return result, nil
 }
 
+// RevalidateWorktreeIntegrityContext confirms that every Git observation used
+// by a completed integrity result still agrees after its repository peers were
+// inspected. A correlated clean result cannot be trusted when one checkout
+// changed between its own probe window and the cohort-wide correlation.
+func RevalidateWorktreeIntegrityContext(ctx context.Context, worktreePath string, observed WorktreeIntegrity) error {
+	current, err := InspectWorktreeIntegrityContext(ctx, worktreePath)
+	if err != nil {
+		return fmt.Errorf("revalidate Git worktree observation: %w", err)
+	}
+	if current != observed {
+		return fmt.Errorf("git worktree observation changed before branch correlation; worktree safety is unknown")
+	}
+	return nil
+}
+
 func parseIntegrityStatus(output string) (WorktreeIntegrity, error) {
 	var result WorktreeIntegrity
 	branchObserved := false
@@ -112,8 +127,10 @@ func runIntegrityGit(parent context.Context, worktreePath string, args ...string
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
 	cmd.Env = append(repoGoneGitCommandEnvironment(), "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=cat")
+	isolateGitCommandTree(cmd)
 	cmd.WaitDelay = gitWaitDelay
 	output, err := cmd.Output()
+	terminateGitCommandTree(cmd)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("git %s in %s timed out after %s: %w", strings.Join(args, " "), worktreePath, worktreeIntegrityTimeout, ctx.Err())

@@ -12,7 +12,7 @@ type worktreeInspectionEntry struct {
 // while the asynchronous Git scan was running. Discarding the whole correlated
 // scan preserves the last confirmed warning; an archived/remote snapshot must
 // never clear a lane that became live/local before reconciliation.
-func (m *Manager) worktreeInspectionSnapshotCurrent(entries []worktreeInspectionEntry, rows []session.InstanceData) bool {
+func (m *Manager) worktreeInspectionSnapshotCurrent(entries []worktreeInspectionEntry, rows []session.InstanceData, inventoryVersion uint64) bool {
 	if len(entries) != len(rows) {
 		return false
 	}
@@ -26,13 +26,16 @@ func (m *Manager) worktreeInspectionSnapshotCurrent(entries []worktreeInspection
 	// per-instance identities were being serialized invalidates the scan too.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.worktreeInspectionMembershipCurrentLocked(entries)
+	return m.worktreeInspectionMembershipCurrentLocked(entries, inventoryVersion)
 }
 
 // worktreeInspectionMembershipCurrentLocked checks the non-instance half of a
 // scan cohort. The caller holds m.mu, which keeps this roster fixed until it has
 // finished applying the correlated result.
-func (m *Manager) worktreeInspectionMembershipCurrentLocked(entries []worktreeInspectionEntry) bool {
+func (m *Manager) worktreeInspectionMembershipCurrentLocked(entries []worktreeInspectionEntry, inventoryVersion uint64) bool {
+	if m.worktreeInventoryVersion != inventoryVersion {
+		return false
+	}
 	if len(m.instances) != len(entries) {
 		return false
 	}

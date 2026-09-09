@@ -8,8 +8,50 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+// completeWorktreeInventory joins the daemon's freshest projections with every
+// persisted row. The daemon intentionally skips records it cannot materialize;
+// those rows still own worktrees and must remain in a safety correlation.
+func completeWorktreeInventory() ([]session.InstanceData, error) {
+	live, err := daemonSessionInventory()
+	if err != nil {
+		return nil, err
+	}
+	persisted, err := persistedWorktreeInventory()
+	if err != nil {
+		return nil, err
+	}
+	return mergeWorktreeInventories(live, persisted), nil
+}
+
+func mergeWorktreeInventories(live, persisted []session.InstanceData) []session.InstanceData {
+	merged := append([]session.InstanceData(nil), persisted...)
+	positions := make(map[string]int, len(merged))
+	for index, row := range merged {
+		positions[worktreeInventoryIdentity(row)] = index
+	}
+	for _, row := range live {
+		key := worktreeInventoryIdentity(row)
+		if index, ok := positions[key]; ok {
+			merged[index] = row
+			continue
+		}
+		positions[key] = len(merged)
+		merged = append(merged, row)
+	}
+	return merged
+}
+
+func worktreeInventoryIdentity(row session.InstanceData) string {
+	if row.ID != "" {
+		return "id\x00" + row.ID
+	}
+	return "legacy\x00" + pathutil.ResolveForCompare(row.Worktree.RepoPath) + "\x00" +
+		pathutil.ResolveForCompare(row.Worktree.WorktreePath) + "\x00" + row.Title
+}
 
 func checkWorktreeIntegrity(ctx *scanContext, report *Report, health daemon.HealthStatus) {
 	inventory := ctx.opts.worktreeInventory

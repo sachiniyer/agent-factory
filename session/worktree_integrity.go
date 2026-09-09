@@ -41,6 +41,9 @@ func (i SessionWorktreeInspection) IncompleteError() error {
 // (archived or non-local) from live local rows that must never disappear merely
 // because their worktree metadata is incomplete.
 func NeedsWorktreeIntegrityInspection(row InstanceData) bool {
+	if row.InFlightOp == OpCreating || (row.InFlightOp == OpNone && row.Status == Loading) {
+		return false
+	}
 	return !IsArchivedData(row) && row.UsesLocalTmux()
 }
 
@@ -95,6 +98,36 @@ func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []
 				evidence, err := sessiongit.InspectWorktreeIntegrityContext(ctx, eligible[index].Worktree.WorktreePath)
 				inspections[index].Evidence = evidence
 				inspections[index].Err = err
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Each checkout's first pass is internally stable, but branch duplication is
+	// a cohort correlation: an early lane may change after its own final status
+	// read and before a later peer is observed. Re-read every successful Git
+	// observation after the first pass completes. Any change or failed re-read is
+	// unknown for the entire repository, never a clean correlation.
+	revalidate := make([]int, 0, len(inspectable))
+	for _, index := range inspectable {
+		if inspections[index].Err == nil {
+			revalidate = append(revalidate, index)
+		}
+	}
+	workers = min(maxConcurrentWorktreeInspections, len(revalidate))
+	jobs = make(chan int, len(revalidate))
+	for _, index := range revalidate {
+		jobs <- index
+	}
+	close(jobs)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				inspections[index].Err = sessiongit.RevalidateWorktreeIntegrityContext(
+					ctx, eligible[index].Worktree.WorktreePath, inspections[index].Evidence,
+				)
 			}
 		}()
 	}

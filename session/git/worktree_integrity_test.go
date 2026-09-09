@@ -2,10 +2,14 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -195,4 +199,49 @@ func TestInspectWorktreeIntegrityContextCancelsOutstandingProbe(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("canceled Git probe did not return within its WaitDelay bound")
 	}
+}
+
+func TestIntegrityProbeCancellationKillsDescendants(t *testing.T) {
+	binDir := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "child-pid")
+	entered := filepath.Join(t.TempDir(), "entered")
+	fakeGit := filepath.Join(binDir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+sleep 30 &
+child=$!
+printf '%%s' "$child" > %q
+: > %q
+wait "$child"
+`, pidFile, entered)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := runIntegrityGit(ctx, t.TempDir(), "status")
+		done <- err
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(entered)
+		return err == nil
+	}, time.Second, 5*time.Millisecond, "fake Git probe never started")
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled Git probe did not return within its WaitDelay bound")
+	}
+
+	rawPID, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	require.Eventually(t, func() bool {
+		err := syscall.Kill(childPID, 0)
+		return errors.Is(err, syscall.ESRCH)
+	}, time.Second, 10*time.Millisecond,
+		"canceling an integrity probe must kill the helper process, not only the direct git child")
 }

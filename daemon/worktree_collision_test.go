@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -63,7 +65,12 @@ func TestReserveCreateRefusesLiveHolderWhenArchivedHolderIsListedLast(t *testing
 	manager, repoID, repoPath := newStatusTestManager(t)
 	branch := manager.branchForTitle("incoming")
 	liveTitle := "live-holder"
-	livePath := filepath.Join(t.TempDir(), "live")
+	// Spell the live worktree through a symlinked root. Git records and reports
+	// the resolved path (the same /var -> /private/var class macOS exercises),
+	// while the AF row deliberately retains the path the caller supplied.
+	recordedRoot := filepath.Join(t.TempDir(), "recorded-root")
+	require.NoError(t, os.Symlink(filepath.Dir(repoPath), recordedRoot))
+	livePath := filepath.Join(recordedRoot, "live")
 	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", "live-staging", livePath).CombinedOutput()
 	require.NoError(t, err, string(out))
 
@@ -87,7 +94,11 @@ func TestReserveCreateRefusesLiveHolderWhenArchivedHolderIsListedLast(t *testing
 
 	holds, err := sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, err)
-	assert.Equal(t, []string{resolvedPath(t, livePath), resolvedPath(t, archived.GetWorktreePath())}, holds[branch],
+	resolvedHolders := make([]string, 0, len(holds[branch]))
+	for _, holder := range holds[branch] {
+		resolvedHolders = append(resolvedHolders, resolvedPath(t, holder))
+	}
+	assert.Equal(t, []string{resolvedPath(t, livePath), resolvedPath(t, archived.GetWorktreePath())}, resolvedHolders,
 		"precondition: both holders must survive even when the archived holder is listed last")
 
 	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{
@@ -143,6 +154,34 @@ func TestMissingWorktreeInspectionCannotClearConfirmedWarning(t *testing.T) {
 	manager.refreshWorktreeIntegrityWarnings()
 	assert.Contains(t, inst.WorktreeWarning(), "confirmed duplicate branch")
 	assert.Contains(t, inst.WorktreeWarning(), "could not be verified")
+}
+
+func TestSkippedPersistedRepoCannotClearConfirmedWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "holder", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	confirmed := "DANGER: confirmed duplicate branch"
+	require.True(t, inst.ReconcileWorktreeInspection(confirmed, nil))
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID}}
+	}
+	manager.mu.Lock()
+	manager.setWorktreeInventoryLocked(worktreeInventoryState{incompleteRepo: map[string]error{
+		repoID: errors.New("persisted peer was skipped"),
+	}})
+	manager.mu.Unlock()
+
+	manager.refreshWorktreeIntegrityWarnings()
+
+	assert.Contains(t, inst.WorktreeWarning(), confirmed)
+	assert.Contains(t, inst.WorktreeWarning(), "persisted peer was skipped",
+		"a skipped required observation is unknown and cannot prove a prior collision was repaired")
 }
 
 func TestPartialWorktreeScanCannotClearConfirmedWarning(t *testing.T) {
