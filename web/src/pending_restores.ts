@@ -20,6 +20,7 @@ type RestoreTicket = {
   sawBusy: boolean;
   timer: RestoreTimer | null;
   retryDelayMs: number;
+  reconcileGeneration: number;
   restoreEligible: RestoreRow["restoreEligible"];
 };
 
@@ -37,7 +38,7 @@ export class PendingRestores {
     private readonly committedOnError: (error: unknown) => boolean = () => false,
     // Match the daemon's monotonic operation-lock deadline across machine sleep.
     private readonly now: () => number = () => globalThis.performance.now(),
-    private readonly requestReconcile: () => void = () => {},
+    private readonly requestReconcile: () => void | Promise<void> = () => {},
     private readonly schedule: (callback: () => void, delayMs: number) => RestoreTimer =
       (callback, delayMs) => {
         const timer = globalThis.setTimeout(callback, delayMs);
@@ -64,6 +65,7 @@ export class PendingRestores {
       sawBusy: false,
       timer: null,
       retryDelayMs: RESTORE_RECONCILE_RETRY_MIN_MS,
+      reconcileGeneration: 0,
       restoreEligible,
     };
     this.tickets.set(id, ticket);
@@ -75,7 +77,7 @@ export class PendingRestores {
           ticket.settled = true;
           // Events can advance the row before the HTTP response arrives.
           if (this.rows) this.observe(this.rows);
-          if (this.tickets.get(id) === ticket) this.armRetryTimer(id, ticket);
+          if (this.tickets.get(id) === ticket) this.reconcile(id, ticket);
         }
         return result;
       } catch (error) {
@@ -167,6 +169,7 @@ export class PendingRestores {
     // Logical disconnect does not stop the HTTP request or daemon mutation.
     for (const [id, ticket] of this.tickets) {
       this.cancelTimer(ticket);
+      ticket.reconcileGeneration++;
       ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
       if (ticket.settled) this.tickets.delete(id);
     }
@@ -187,8 +190,7 @@ export class PendingRestores {
     ticket.timer = this.schedule(() => {
       ticket.timer = null;
       if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
-      this.requestReconcile();
-      if (this.tickets.get(id) === ticket && this.needsReconcile(ticket)) this.armRetryTimer(id, ticket);
+      this.reconcile(id, ticket);
     }, remaining);
   }
 
@@ -199,9 +201,29 @@ export class PendingRestores {
     ticket.timer = this.schedule(() => {
       ticket.timer = null;
       if (this.tickets.get(id) !== ticket || !this.needsReconcile(ticket)) return;
-      this.requestReconcile();
-      if (this.tickets.get(id) === ticket && this.needsReconcile(ticket)) this.armRetryTimer(id, ticket);
+      this.reconcile(id, ticket);
     }, delay);
+  }
+
+  private reconcile(id: string, ticket: RestoreTicket): void {
+    const generation = ++ticket.reconcileGeneration;
+    const finish = () => {
+      if (this.tickets.get(id) !== ticket || ticket.reconcileGeneration !== generation) return;
+      if (!this.needsReconcile(ticket)) return;
+      this.armRetryTimer(id, ticket);
+    };
+    try {
+      const result = this.requestReconcile();
+      if (result && typeof result.then === "function") {
+        // requestResync absorbs transport errors; either outcome completes this
+        // attempt, and a still-fenced ticket then schedules the next backoff.
+        void result.then(finish, finish);
+      } else {
+        finish();
+      }
+    } catch {
+      finish();
+    }
   }
 
   private needsReconcile(ticket: RestoreTicket): boolean {

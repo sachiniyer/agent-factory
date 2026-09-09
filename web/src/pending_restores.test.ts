@@ -125,6 +125,7 @@ test("successful restore retries reconciliation after its first Snapshot fails",
     () => {}, () => false, () => false, () => 1_000,
     () => {
       reconciliations++;
+      if (reconciliations === 1) return; // The immediate post-success Snapshot failed.
       pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
     },
     timer.schedule,
@@ -133,15 +134,68 @@ test("successful restore retries reconciliation after its first Snapshot fails",
   pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
 
   await pending.run("session", async () => {}, true);
-  // The caller's immediate post-success Snapshot failed and never reached observe().
   assert.equal(pending.has("session"), true);
+  assert.equal(reconciliations, 1);
   assert.equal(timer.armed(), true, "settled tickets must retry without an events socket");
   assert.equal(timer.delay(), RESTORE_RECONCILE_RETRY_MIN_MS);
 
   timer.fire();
-  assert.equal(reconciliations, 1);
+  assert.equal(reconciliations, 2);
   assert.equal(pending.has("session"), false);
   assert.equal(timer.armed(), false);
+});
+
+test("a settled restore does not overlap a slow reconciliation", async () => {
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  let reconciliations = 0;
+  let finishReconciliation!: () => void;
+  const pending = new PendingRestores(
+    () => {}, () => false, () => false, () => 1_000,
+    () => {
+      reconciliations++;
+      return new Promise<void>(resolve => { finishReconciliation = resolve; });
+    },
+    timer.schedule,
+    timer.cancel,
+  );
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+
+  await pending.run("session", async () => {}, true);
+  assert.equal(reconciliations, 1, "success must start its confirming reconciliation");
+  assert.equal(timer.armed(), false, "a slow Snapshot must not race a retry timer");
+
+  // The accepted response commits its Snapshot before the resync promise settles.
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  finishReconciliation();
+  await Promise.resolve();
+  assert.equal(pending.has("session"), false);
+  assert.equal(reconciliations, 1);
+  assert.equal(timer.armed(), false);
+});
+
+test("a failed settled reconciliation arms the next backoff attempt", async () => {
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  let reconciliations = 0;
+  const pending = new PendingRestores(
+    () => {}, () => false, () => false, () => 1_000,
+    async () => { reconciliations++; }, // requestResync swallows a failed Snapshot.
+    timer.schedule,
+    timer.cancel,
+  );
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+
+  await pending.run("session", async () => {}, true);
+  await Promise.resolve();
+  assert.equal(reconciliations, 1);
+  assert.equal(timer.armed(), true, "a failed reconciliation must arm another attempt");
+  assert.equal(timer.delay(), RESTORE_RECONCILE_RETRY_MIN_MS);
+
+  timer.fire();
+  await Promise.resolve();
+  assert.equal(reconciliations, 2);
+  assert.equal(timer.armed(), true);
 });
 
 test("prompt confirmation of a successful restore cancels its reconciliation retry", async () => {

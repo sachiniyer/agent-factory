@@ -217,6 +217,7 @@ const loadCreateAccounts = (repoPath: string): Promise<AccountsResponse> =>
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
+let resyncCompletions: Array<() => void> = [];
 // Snapshot and events are two asynchronous projections of the same session state.
 // Fence them independently so a Snapshot requested before a session event cannot
 // resolve afterwards and rewind the event's newer roster (#2330).
@@ -989,10 +990,8 @@ function openConfirm(
     if (!run) return;
     void run.then(() => {
       if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
-        // The request survived reconnect; refresh the current connection without
-        // publishing the old connection's modal or error into it.
-        if (token !== null && store.get().phase === "app") requestResync();
-        else pendingRestoreResync = true;
+        // PendingRestores owns the reconnect-aware confirming Snapshot. Suppress
+        // only the old connection's modal work here.
         return;
       }
       if (mutation) {
@@ -1001,7 +1000,8 @@ function openConfirm(
         requestResync();
       } else {
         if (modal === m) closeModal();
-        if (immediateRestore) requestResync();
+        // PendingRestores starts and awaits the confirming Snapshot before it
+        // schedules another reconciliation attempt.
       }
     }).catch((e) => {
       if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
@@ -2312,6 +2312,7 @@ function stopStream(): void {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  settleResyncCompletions();
   if (taskResyncTimer !== null) {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
@@ -2453,6 +2454,7 @@ function requestResync(): void {
     const tok = token;
     // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
     if (tok === null) {
+      settleResyncCompletions();
       return;
     }
     const eventGeneration = sessionEventGeneration;
@@ -2487,18 +2489,31 @@ function requestResync(): void {
         // an application-level settlement signal instead of a network-timing guess
         // (#3081). stopStream clears it before a new stream owns the connection.
         root?.setAttribute("data-af-resync-settled", "");
+        settleResyncCompletions();
       })
       .catch((error) => {
         if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
         if (shouldForgetToken(error)) disconnect(describeError(error), true);
         // Transport failures retain state; the events stream owns reconnection.
+        settleResyncCompletions();
       });
   }, 150);
 }
 
-function requestPendingRestoreResync(): void {
-  if (token !== null && store.get().phase === "app") requestResync();
-  else pendingRestoreResync = true;
+function settleResyncCompletions(): void {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const complete of completions) complete();
+}
+
+function requestPendingRestoreResync(): Promise<void> {
+  if (token === null || store.get().phase !== "app") {
+    pendingRestoreResync = true;
+    return Promise.resolve();
+  }
+  const completion = new Promise<void>(resolve => { resyncCompletions.push(resolve); });
+  requestResync();
+  return completion;
 }
 
 // --- keyboard navigation ---------------------------------------------------

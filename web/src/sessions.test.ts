@@ -518,8 +518,8 @@ test("an uncertain restore deadline uses the reconnect-aware resync path", () =>
     /new PendingRestores\([\s\S]*?\(\) => globalThis\.performance\.now\(\),\n  requestPendingRestoreResync,\n\)/,
     "the ledger must share a monotonic clock with the daemon deadline and request an authoritative Snapshot");
   const body = topLevelFunction(source, "requestPendingRestoreResync");
-  assert.match(body, /phase === "app"\) requestResync\(\)/,
-    "a connected app must schedule the deadline Snapshot immediately");
-  assert.match(body, /else pendingRestoreResync = true/,
+  assert.match(body, /new Promise<void>[\s\S]*?requestResync\(\);[\s\S]*?return completion/,
+    "a connected app must await the authoritative Snapshot it schedules");
+  assert.match(body, /pendingRestoreResync = true/,
     "a reconnecting app must retain the deadline Snapshot request until app phase");
 });
