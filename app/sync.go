@@ -601,6 +601,12 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
+	// A combined agent+account handoff replaces the process behind the same row
+	// and tmux address. Reconcile every source CurrentAgentName consults before
+	// later action predicates choose which agent's accounts to load.
+	if inst.ReconcileAgentRuntimeSnapshot(d) {
+		changed = true
+	}
 	// Account identity and its pending delivery obligation can change while the
 	// row stays Running/Ready. Mirror them before action predicates are evaluated,
 	// so Retry addresses the daemon's transaction instead of stale local state.
