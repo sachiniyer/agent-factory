@@ -52,6 +52,20 @@ func (i *Instance) PendingManualAccountSwap() (bool, string) {
 	return i.pendingAccountSwap.Manual, i.pendingAccountSwap.Mission
 }
 
+// PendingManualAccountSwapDeliveryUnconfirmed reports whether the replacement
+// runtime may already have received its pending mission. Only a positive
+// PromptNotDelivered observation can authorize automatic redelivery; an
+// operator may still inspect the pane and explicitly retry.
+func (i *Instance) PendingManualAccountSwapDeliveryUnconfirmed() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual ||
+		!i.pendingAccountSwap.ReplacementPanesStarted || i.lastPromptAttemptAt.IsZero() {
+		return false
+	}
+	return i.lastPromptDeliveryStatus != PromptNotDelivered
+}
+
 // ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement
 // identity without releasing the account transaction's fence or its mission.
 func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
@@ -63,6 +77,10 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
+		i.limitAgent = agent
+		i.touchLocked()
+	}
 	if i.limitAccount != i.Account {
 		i.limitAccount = i.Account
 		i.touchLocked()

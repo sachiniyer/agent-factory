@@ -87,6 +87,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// in-memory field lingers after ClearLimitReached but is never serialized.
 	if i.liveness == LiveLimitReached {
 		data.LimitResetAt = i.limitResetAt
+		data.LimitAgent = i.limitAgent
 		data.LimitAccount = i.limitAccount
 	}
 
@@ -277,6 +278,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// status; the daemon finishes its teardown rather than restoring it.
 	liveness := livenessFromData(data)
 	limitAccount, accountLimitObservations := AccountLimitEvidenceFromData(data)
+	limitAgent := limitAgentFromData(data, limitAccount, accountLimitObservations)
 	// Resolve the in-flight-op axis from the snapshot payload, falling back to
 	// the legacy status for old daemons/records. A persisted record is always
 	// settled (disk writers scrub this field and SaveInstances skips
@@ -316,6 +318,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
 		limitResetAt:             data.LimitResetAt,
+		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
 		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),

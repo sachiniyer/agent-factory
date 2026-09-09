@@ -29,3 +29,29 @@ func AccountLimitEvidenceFromData(data InstanceData) (string, []AccountLimitObse
 		Agent: agent, Account: account, ResetAt: data.LimitResetAt,
 	}}
 }
+
+// limitAgentFromData resolves the provider namespace for the current wall.
+// New rows store it directly because account labels are agent-scoped. During a
+// rolling upgrade, rows written before limit_agent can recover it from the
+// durable observation that matches the current account and reset; only older
+// rows without that evidence fall back to their recorded program.
+func limitAgentFromData(data InstanceData, account string, observations []AccountLimitObservationData) string {
+	if data.LimitAgent != "" || EffectiveLiveness(data) != LiveLimitReached {
+		return data.LimitAgent
+	}
+	matched := ""
+	for _, observation := range observations {
+		if observation.Account != account || !observation.ResetAt.Equal(data.LimitResetAt) {
+			continue
+		}
+		if matched != "" && matched != observation.Agent {
+			matched = ""
+			break
+		}
+		matched = observation.Agent
+	}
+	if matched != "" {
+		return matched
+	}
+	return tmux.DetectAgentFromCommand(data.Program)
+}

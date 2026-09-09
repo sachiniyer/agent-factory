@@ -132,6 +132,9 @@ type InstanceData struct {
 	// drops it for every normal session; additive + rollforward, mirroring the
 	// Liveness precedent.
 	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// LimitAgent is the provider namespace for LimitAccount. Account labels are
+	// agent-scoped, so a pending cross-agent replacement must retain both values.
+	LimitAgent string `json:"limit_agent,omitempty"`
 	// LimitAccount is the identity that produced this limit observation. It may
 	// differ from Account while a durably selected replacement is still starting.
 	LimitAccount string `json:"limit_account,omitempty"`

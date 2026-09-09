@@ -136,7 +136,7 @@ func (m *Manager) ResumeLimitedSessions() {
 		if st == nil {
 			continue
 		}
-		if !accountSwapResumeEligible(inst) && !now.Before(st.nextAttempt) {
+		if !accountSwapScheduledResumeEligible(inst) && !now.Before(st.nextAttempt) {
 			delete(m.limitResumeStates, stateKey)
 		}
 	}
@@ -170,7 +170,7 @@ func (m *Manager) resumeLimitedSession(
 	retryInterval time.Duration,
 	loadEvidence accountLimitEvidenceLoader,
 ) {
-	if inst == nil || !inst.Started() || !accountSwapResumeEligible(inst) {
+	if inst == nil || !inst.Started() || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
 	if !cfg.LimitAutoResume {
@@ -221,15 +221,16 @@ func (m *Manager) resumeLimitedSession(
 	}
 	incomingManualReset := false
 	if accountSwap != nil && accountSwap.manual && hasReset {
-		limitedAccount, limited := inst.LimitAccount()
-		incomingManualReset = limited && limitedAccount == accountSwap.to
+		limitedAgent, limitedAccount, limited := inst.LimitIdentity()
+		incomingManualReset = limited && limitedAgent == accountSwap.agent && limitedAccount == accountSwap.to
 	}
 	due := ordinaryDue
 	if accountSwap != nil && !incomingManualReset {
-		// The ordinary reset belongs to the outgoing account, so it cannot delay
-		// candidate preflight for a different identity. A parked manual transaction
-		// is different: when its reset belongs to the incoming account, ordinaryDue
-		// is exactly when that same identity may be contacted again.
+		// Account labels are agent-scoped. The ordinary reset belongs to the
+		// outgoing agent/account, so it cannot delay candidate preflight for a
+		// different identity. A parked manual transaction is different: only when
+		// both its agent and label name the incoming identity is ordinaryDue exactly
+		// when that same identity may be contacted again.
 		due = now
 	}
 	// The per-attempt backoff/interval gate sits on top of the due time, so the
@@ -274,7 +275,7 @@ func (m *Manager) resumeLimitedSession(
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapResumeEligible(inst) {
+	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
 	if accountSwap != nil {

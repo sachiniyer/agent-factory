@@ -75,6 +75,9 @@ func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 			backend.sendPromptErr = nil
 			m.cfg.LimitAutoResume = false
 			m.ResumeLimitedSessions()
+			require.NotNil(t, inst.ToInstanceData().PendingAccountSwap,
+				"an unconfirmed delivery must wait for an explicit operator retry")
+			require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
 			require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 		})
 	}

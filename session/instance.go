@@ -110,7 +110,11 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
-	// limitAccount attributes the current limit after Account changes; empty means ambient.
+	// limitAgent and limitAccount attribute the current limit after Program or
+	// Account changes. Account labels are scoped to an agent, so neither field
+	// alone identifies the provider identity that produced the wall.
+	limitAgent string
+	// Empty means the agent's ambient identity.
 	limitAccount string
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData

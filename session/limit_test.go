@@ -27,14 +27,19 @@ func TestSetLimitReached(t *testing.T) {
 }
 
 func TestSetLimitReachedAttributesWallToAccountThatProducedIt(t *testing.T) {
-	i := &Instance{Account: "work", accountAutoSelected: true}
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work", accountAutoSelected: true}
 	i.SetLimitReached(time.Time{})
 
 	account, ok := i.LimitAccount()
 	require.True(t, ok)
 	require.Equal(t, "work", account)
+	agent, identityAccount, ok := i.LimitIdentity()
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramClaude, agent)
+	require.Equal(t, "work", identityAccount)
 
 	data := i.ToInstanceData()
+	require.Equal(t, tmux.ProgramClaude, data.LimitAgent)
 	require.Equal(t, "work", data.LimitAccount)
 	i.Account = "personal"
 	account, _ = i.LimitAccount()

@@ -155,6 +155,9 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
 	}
+	if account, automatic := instance.AccountSelection(); account != "" && !automatic {
+		return HandoffSessionResponse{}, fmt.Errorf("session %q is pinned to %s account %q; specify a target account with --account before handing it off to %s", req.Title, instance.CurrentAgentName(), account, target)
+	}
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)

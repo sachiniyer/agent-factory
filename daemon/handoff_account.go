@@ -117,3 +117,12 @@ func accountSwapResumeEligible(instance *session.Instance) bool {
 	live := instance.GetLiveness()
 	return manual && (live == session.LiveRunning || live == session.LiveReady)
 }
+
+// accountSwapScheduledResumeEligible applies the delivery contract to automatic
+// recovery. An explicit retry remains the operator's override after inspecting
+// the pane, but the scheduler may retry only when delivery was not attempted or
+// was positively observed absent; could-not-confirm may already have submitted.
+func accountSwapScheduledResumeEligible(instance *session.Instance) bool {
+	return accountSwapResumeEligible(instance) &&
+		!instance.PendingManualAccountSwapDeliveryUnconfirmed()
+}
