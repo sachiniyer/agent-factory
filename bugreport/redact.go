@@ -11,8 +11,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
+	"github.com/sachiniyer/agent-factory/internal/programprivacy"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -795,13 +795,7 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 // under two owners; see the block in redactInstanceData for why the agent is
 // kept and everything around it is not.
 func redactProgram(program string) string {
-	if program == "" {
-		return ""
-	}
-	if agent := tmux.DetectAgentFromCommand(program); agent != "" {
-		return agent
-	}
-	return redactedMarker
+	return programprivacy.Redact(program)
 }
 
 func redactTabData(tab *session.TabData) {

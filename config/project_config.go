@@ -324,8 +324,8 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", false, fmt.Errorf("inspect checkout marker location for %s: %w", root, ctx.Err())
+		if probeErr := checkoutMarkerProbeFailure(ctx, root, err); probeErr != nil {
+			return "", false, probeErr
 		}
 		return "", false, nil
 	}
@@ -359,6 +359,14 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	case <-ctx.Done():
 		return "", false, fmt.Errorf("read checkout marker for %s: %w", root, ctx.Err())
 	}
+}
+
+func checkoutMarkerProbeFailure(ctx context.Context, root string, err error) error {
+	classified := markUnansweredProbe(ctx, err)
+	if !RepoProbeUnanswered(classified) {
+		return nil
+	}
+	return fmt.Errorf("inspect checkout marker location for %s: %w", root, classified)
 }
 
 // ResolveRegisteredProjectRepoID returns the repository identity for a durable

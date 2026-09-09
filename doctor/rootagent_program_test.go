@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -244,8 +245,36 @@ func TestRootAgentDisabledProfileWithLiveSessionWarns(t *testing.T) {
 	check := findCheck(t, report, "root agent program")
 	require.Equal(t, StatusWarn, check.Status)
 	require.Contains(t, check.Detail, "disabled")
-	require.Contains(t, check.Remediation, "kill the root")
+	restartAt := strings.Index(check.Remediation, "restart the daemon")
+	killAt := strings.Index(check.Remediation, "kill the root")
+	require.GreaterOrEqual(t, restartAt, 0)
+	require.GreaterOrEqual(t, killAt, 0)
+	require.Less(t, restartAt, killAt, "the daemon must load the disable before the root is killed")
 	require.True(t, check.Problem)
+}
+
+func TestRootAgentProgramInspectionKeepsLegacyGlobalConfigReadOnly(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	legacyPath := filepath.Join(opts.ConfigDir, config.ConfigFileName)
+	body := fmt.Sprintf(`{"root_agents":{%q:{}}}`, repoPath)
+	require.NoError(t, os.WriteFile(legacyPath, []byte(body), 0o600))
+	opts.daemonHealth = rootAgentDoctorHealth
+	opts.sessionInventory = rootAgentInventory(repoPath, "claude --dangerously-skip-permissions")
+
+	before, err := os.ReadFile(legacyPath)
+	require.NoError(t, err)
+	_, err = Run(opts)
+	require.NoError(t, err)
+	after, err := os.ReadFile(legacyPath)
+	require.NoError(t, err, "doctor must not rename the legacy config while inspecting a command")
+	require.Equal(t, before, after)
+	_, err = os.Stat(filepath.Join(opts.ConfigDir, config.TomlConfigFileName))
+	require.ErrorIs(t, err, os.ErrNotExist, "doctor must not convert legacy config.json to config.toml")
+	backups, err := filepath.Glob(legacyPath + ".bak*")
+	require.NoError(t, err)
+	require.Empty(t, backups, "doctor must not create a legacy-config backup")
 }
 
 func TestRootAgentPendingCreateIsIncomplete(t *testing.T) {

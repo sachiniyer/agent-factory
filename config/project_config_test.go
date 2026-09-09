@@ -50,6 +50,16 @@ func TestProjectConfigTomlPathValidatesID(t *testing.T) {
 	require.Error(t, err, "an invalid id must never resolve to a path component")
 }
 
+func TestCheckoutMarkerCompletedFailureWinsOverExpiredContext(t *testing.T) {
+	completed := exec.Command("sh", "-c", "exit 7").Run()
+	require.Error(t, completed)
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := checkoutMarkerProbeFailure(parent, t.TempDir(), completed)
+	require.NoError(t, err, "a completed nonzero Git exit is an answer even if the caller deadline lands before classification")
+}
+
 func TestLoadProjectConfigAbsentIsNoLayer(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 	cfg, err := LoadProjectConfig(project.ID)

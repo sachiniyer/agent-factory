@@ -167,13 +167,13 @@ func TestAdoptedRootProgramDriftResolvesBareAgentOverride(t *testing.T) {
 	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "old-codex"))
 
 	manager.ensureRootAgentsAndWait()
-	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(warnings.String(), `configured command "new-codex"`) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForRootProgramWarning(t, warnings)
 	got := warnings.String()
-	if !strings.Contains(got, `configured command "new-codex"`) || !strings.Contains(got, `running command "old-codex"`) {
-		t.Fatalf("bare root program was not compared after override resolution:\n%s", got)
+	manager.mu.Lock()
+	configured := manager.rootEnsureStates[repoPath].programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if configured != "new-codex" || !strings.Contains(got, "root agent program drift") {
+		t.Fatalf("bare root program was not compared after override resolution: configured=%q warnings=%s", configured, got)
 	}
 }
 
@@ -364,6 +364,130 @@ func TestAdoptedRootProgramCacheIncludesRepositoryIdentity(t *testing.T) {
 	manager.mu.Unlock()
 	if configured != "gemini" {
 		t.Fatalf("repointed workspace reused configured command %q, want gemini", configured)
+	}
+}
+
+func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, warnings := newManagerCapturingWarnings(t,
+		rootTestConfig(repoPath, config.RootAgentConfig{Program: "codex"}))
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := findRootInstance(t, manager, repoPath)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	st := &rootEnsureState{programDriftResolving: true}
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+	evidence := root.ObserveRuntimeProgram()
+	if err := root.Transition(session.BeginHandoff()); err != nil {
+		t.Fatal(err)
+	}
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "codex"))
+	manager.finishAdoptedRootProgramDrift(repo.ID, key, repoPath, st,
+		config.RootAgent{Enabled: true, Program: "codex"}, "codex", nil, root, evidence)
+	if strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("completion latched drift from the replaced runtime:\n%s", warnings.String())
+	}
+	manager.mu.Lock()
+	logged := st.programDriftLogged || manager.rootProgramDriftLogged[repo.ID]
+	manager.mu.Unlock()
+	if logged {
+		t.Fatal("stale runtime evidence permanently latched the repository drift bit")
+	}
+}
+
+func TestAdoptedRootProgramDriftRedactsCommandPayloads(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	configured := "/home/private-user/bin/claude --token sk-ant-PRIVATEVALUE1234567890"
+	running := "/home/other-user/bin/codex --api-key=PRIVATE-RUNTIME-TOKEN"
+	manager, warnings := newManagerCapturingWarnings(t,
+		rootTestConfig(repoPath, config.RootAgentConfig{Program: configured}))
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	findRootInstance(t, manager, repoPath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", running))
+
+	manager.ensureRootAgentsAndWait()
+	got := warnings.String()
+	for _, private := range []string{"private-user", "other-user", "PRIVATEVALUE", "PRIVATE-RUNTIME-TOKEN"} {
+		if strings.Contains(got, private) {
+			t.Errorf("drift warning leaked %q:\n%s", private, got)
+		}
+	}
+	for _, label := range []string{`configured command "claude"`, `running command "codex"`} {
+		if !strings.Contains(got, label) {
+			t.Errorf("redacted warning missing bounded label %q:\n%s", label, got)
+		}
+	}
+}
+
+func TestAdoptedSingletonBareWorktreeUsesCheckoutCommandLayers(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	base := t.TempDir()
+	seedPath := filepath.Join(base, "seed")
+	barePath := filepath.Join(base, "identity.git")
+	worktreePath := filepath.Join(base, "checkout")
+	setupRootDriftRepoAt(t, seedPath)
+	if err := writeRootDriftRepoConfig(seedPath, "[program_overrides]\ncodex = '/repo/codex'\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "-C", seedPath, "add", ".").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "-C", seedPath, "commit", "-m", "config").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "clone", "--bare", seedPath, barePath).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "--git-dir", barePath, "worktree", "add", worktreePath).Run(); err != nil {
+		t.Fatal(err)
+	}
+	project := registerTestProject(t, worktreePath)
+	projectConfig, err := config.ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[root_agent]\nenabled = true\nprogram = 'codex'\n\n[program_overrides]\ncodex = '/personal/codex'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t, config.DefaultConfig())
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: worktreePath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	findRootInstance(t, manager, worktreePath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/personal/codex"))
+
+	manager.ensureRootAgentsAndWait()
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[worktreePath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("singleton ensure state was not created")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	configured := st.programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if configured != "/personal/codex" {
+		t.Fatalf("bare-worktree command = %q, want the registered checkout's personal override", configured)
+	}
+	if strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("bare-worktree root reported false drift:\n%s", warnings.String())
 	}
 }
 

@@ -910,6 +910,9 @@ func finishRootAgentProgram(program string) string {
 // interpretation to read-only diagnostics. The caller resolves the repository
 // under its own deadline; config resolution suppresses the durable in-repo load
 // observation that runtime callers intentionally record.
-func RootAgentProgramForProfileInspection(repo *config.RepoContext, ra config.RootAgent) (string, error) {
-	return rootAgentProgramForResolvedRepo(repo, ra, config.ResolveConfigForRepoInspection)
+func RootAgentProgramForProfileInspection(repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
+	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
+		return config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	}
+	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
 }

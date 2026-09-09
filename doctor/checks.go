@@ -305,7 +305,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			drifted++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("live root at %s remains running although its configured profile is disabled · the live root was adopted as-is", identityPath),
-				"kill the root; restarting the daemon does not stop an adopted live root", true)
+				"restart the daemon to load the disabled profile, then kill the root; restarting alone does not stop an adopted live root", true)
 			continue
 		}
 		runningProgram := strings.TrimSpace(inst.RuntimeProgram)
@@ -336,7 +336,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 				continue
 			}
 		}
-		configuredProgram, programErr := daemon.RootAgentProgramForProfileInspection(commandRepo, profile)
+		configuredProgram, programErr := daemon.RootAgentProgramForProfileInspection(commandRepo, profile, cfg)
 		if programErr != nil {
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",

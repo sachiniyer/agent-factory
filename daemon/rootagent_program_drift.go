@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/programprivacy"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -12,8 +13,9 @@ import (
 // repository config resolution, so that work is single-flighted off the
 // one-second ensure sweep and cached per repository/workspace/profile input.
 func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, workspace string, st *rootEnsureState, profile config.RootAgent, inst *session.Instance) {
-	runningProgram := inst.RuntimeProgram()
-	if strings.TrimSpace(runningProgram) == "" {
+	evidence := inst.ObserveRuntimeProgram()
+	runningProgram := evidence.Program()
+	if strings.TrimSpace(runningProgram) == "" || inst.GetInFlightOp() != session.OpNone {
 		return
 	}
 	repoID := repo.ID
@@ -30,7 +32,7 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		st.programDriftResolvedWorkspace == workspace &&
 		st.programDriftResolvedProfile == profile {
 		configuredProgram := st.programDriftConfiguredProgram
-		logDrift := configuredProgram != runningProgram
+		logDrift := inst.RuntimeProgramEvidenceCurrent(evidence) && configuredProgram != runningProgram
 		if logDrift {
 			st.programDriftLogged = true
 			st.programDriftLoggedRepoID = repoID
@@ -51,17 +53,17 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 	m.mu.Unlock()
 
 	if !RootAgentProfileNeedsRepoConfig(profile) {
-		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile, profile.Program, nil, inst)
+		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile, profile.Program, nil, inst, evidence)
 		return
 	}
 	go func() {
 		configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, config.ResolveConfigForRepo)
-		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile, configuredProgram, err, inst)
+		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile, configuredProgram, err, inst, evidence)
 	}()
 }
 
-func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, configuredProgram string, resolveErr error, inst *session.Instance) {
-	runningProgram := inst.RuntimeProgram()
+func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, configuredProgram string, resolveErr error, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
+	runningProgram := evidence.Program()
 	status := inst.GetStatus()
 	m.mu.Lock()
 	st.programDriftResolving = false
@@ -76,6 +78,7 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 	st.programDriftConfiguredProgram = configuredProgram
 	stateLogged := st.programDriftLogged && st.programDriftLoggedRepoID == repoID
 	logDrift := !stateLogged && !m.rootProgramDriftLogged[repoID] && m.instances[key] == inst &&
+		inst.RuntimeProgramEvidenceCurrent(evidence) &&
 		status != session.Dead && status != session.Lost && status != session.Archived &&
 		strings.TrimSpace(runningProgram) != "" &&
 		configuredProgram != runningProgram
@@ -91,5 +94,5 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 }
 
 func (m *Manager) logAdoptedRootProgramDrift(workspace, configuredProgram, runningProgram string) {
-	m.warn().Printf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is; kill the root, then restart the daemon", workspace, configuredProgram, runningProgram)
+	m.warn().Printf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is; kill the root, then restart the daemon", workspace, programprivacy.Redact(configuredProgram), programprivacy.Redact(runningProgram))
 }
