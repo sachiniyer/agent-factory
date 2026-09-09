@@ -801,9 +801,9 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 	// the os.ErrProcessDone surface.
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		if errIsProcessGone(err) {
-		log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
-		cleanupDaemonRuntimeFiles(pidFile, deadline)
-		return true, nil
+			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
+			cleanupDaemonRuntimeFiles(pidFile, deadline)
+			return true, nil
 		}
 		return false, fmt.Errorf("failed to signal daemon process: %w", err)
 	}
