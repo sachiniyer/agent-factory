@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ type preparedHookProgress struct {
 	progress        *hookProgress
 	temporary       string
 	retainArtifacts bool
+	journalFile     *os.File
+	resumeReadyAt   int64
 }
 
 type hookProgressPublicationRollback struct {
@@ -160,6 +163,7 @@ func prepareHookProgress(run hookRun, commands []string, prefix, generation, pat
 		leaseMu:   &sync.Mutex{},
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir, WorktreeIdentity: worktreeIdentity, ResumeDisabled: resumeDisabled,
+		PublicationVersion: 1,
 	}}
 	defer func() {
 		if resultErr != nil {
@@ -182,13 +186,21 @@ func prepareHookProgress(run hookRun, commands []string, prefix, generation, pat
 		return nil, err
 	}
 	prepared.temporary = f.Name()
+	readyToken := []byte(`"resume_ready":0`)
+	readyAt := bytes.Index(data, readyToken)
+	if readyAt < 0 {
+		_ = f.Close()
+		return nil, fmt.Errorf("hook journal has no publication commit field")
+	}
+	prepared.resumeReadyAt = int64(readyAt + len(readyToken) - 1)
 	if _, err = f.Write(data); err == nil {
 		err = f.Sync()
 	}
-	resultErr = errors.Join(err, f.Close())
-	if resultErr != nil {
+	if err != nil {
+		resultErr = errors.Join(err, f.Close())
 		return nil, resultErr
 	}
+	prepared.journalFile = f
 	return prepared, nil
 }
 
@@ -198,6 +210,10 @@ func (p *preparedHookProgress) discard(journal string, renamed bool) {
 	}
 	if p.progress != nil && p.progress.lease != nil {
 		p.progress.releaseLease()
+	}
+	if p.journalFile != nil {
+		closeHookProgressFile(p.journalFile)
+		p.journalFile = nil
 	}
 	if p.retainArtifacts {
 		return

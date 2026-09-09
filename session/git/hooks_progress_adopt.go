@@ -39,7 +39,11 @@ func (g *GitWorktree) recordUnresumableHookProgress(p *hookProgress, err error) 
 		return
 	}
 	g.SetHookScopeUnitPrefix(p.Prefix)
-	log.WarningLog.Printf("post-worktree hook list for %s cannot resume because its checkout identity was unavailable when it started; observing any surviving entry without retrying the suffix", p.Worktree)
+	reason := "its checkout identity was unavailable when it started"
+	if p.PublicationVersion > 0 && p.ResumeReady != 1 {
+		reason = "its publication was not durably committed for recovery"
+	}
+	log.WarningLog.Printf("post-worktree hook list for %s cannot resume because %s; observing any surviving entry without retrying the suffix", p.Worktree, reason)
 }
 
 func (g *GitWorktree) startHookProgressAdoption(worktreePath, sessionID string, p *hookProgress, err error, done chan struct{}) {

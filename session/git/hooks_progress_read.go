@@ -26,7 +26,7 @@ func readPendingHookProgress(worktreePath, sessionID string) (*hookProgress, err
 	}
 	info, err := BoundedLstat(filepath.Join(p.Directory, "finished"))
 	if os.IsNotExist(err) {
-		if p.ResumeDisabled {
+		if p.ResumeDisabled || (p.PublicationVersion > 0 && p.ResumeReady != 1) {
 			return p, errHookProgressResumeDisabled
 		}
 		return p, nil

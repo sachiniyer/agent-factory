@@ -38,6 +38,13 @@ type hookProgress struct {
 	// recording failed. Unlike a legacy tokenless journal, restore may safely
 	// treat this list as unresumable instead of installing a permanent retry.
 	ResumeDisabled bool `json:"resume_disabled,omitempty"`
+	// PublicationVersion and ResumeReady form a positive recovery commit.
+	// Version-one journals are written with ResumeReady=0 before their shared
+	// name is synced, then the same durable inode is flipped to 1. A failed
+	// publication therefore cannot become resumable if its rollback rename is
+	// lost in a host crash. Version zero preserves legacy fail-closed handling.
+	PublicationVersion int `json:"publication_version,omitempty"`
+	ResumeReady        int `json:"resume_ready"`
 }
 
 func hookProgressPath(worktree string) (string, error) {
@@ -74,6 +81,7 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	var candidates []keptProgress
 	var cleanups []hookProgressCleanup
 	var progress *hookProgress
+	var activation *preparedHookProgress
 	var rollback *hookProgressPublicationRollback
 	err = withHookProgressLock(filepath.Dir(path), func(dir string, identity os.FileInfo) error {
 		if ownersErr == nil && dir != ownerSnapshot.hookDirectory {
@@ -83,7 +91,7 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 			candidates, ownersErr = collectHookProgressCandidatesLocked(dir, pruneNow, ownerSnapshot.owners, &cleanups)
 		}
 		var publishErr error
-		progress, rollback, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity, resumeDisabled)
+		progress, activation, rollback, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity, resumeDisabled)
 		return publishErr
 	})
 	if rollback != nil {
@@ -91,6 +99,11 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	}
 	if errors.Is(err, config.ErrLockTimeout) {
 		return nil, fmt.Errorf("hook journal lock held by another process; hooks could not start; retry once the holder releases it: %w", err)
+	}
+	if err == nil && activation != nil {
+		if activateErr := activation.enableResume(); activateErr != nil {
+			log.WarningLog.Printf("post-worktree hook journal for %s could not confirm resumable publication: %v; the current run will continue without relying on restart recovery", run.worktreePath, activateErr)
+		}
 	}
 	if ownersErr == nil {
 		ownersErr = finishHookProgressPrune(filepath.Dir(path), pruneNow, ownerSnapshot, candidates, cleanups)
@@ -138,10 +151,10 @@ var previousHookProgressReadFile = BoundedReadFile
 
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
-func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*hookProgress, *hookProgressPublicationRollback, error) {
+func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*hookProgress, *preparedHookProgress, *hookProgressPublicationRollback, error) {
 	prepared, err := boundedPrepareHookProgress(run, commands, prefix, generation, path, worktreeIdentity, resumeDisabled)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	p := prepared.progress
 	rollback := &hookProgressPublicationRollback{prepared: prepared, path: path}
@@ -151,22 +164,22 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	}
 	currentParent, err := BoundedLstat(filepath.Dir(path))
 	if err != nil {
-		return nil, rollback, err
+		return nil, nil, rollback, err
 	}
 	if !currentParent.IsDir() || !os.SameFile(parentIdentity, currentParent) {
-		return nil, rollback, fmt.Errorf("hook journal directory changed while publication lock was held")
+		return nil, nil, rollback, fmt.Errorf("hook journal directory changed while publication lock was held")
 	}
 	if err := os.Rename(prepared.temporary, path); err != nil {
-		return nil, rollback, err
+		return nil, nil, rollback, err
 	}
 	rollback.renamed = true
 	if err := boundedSyncHookProgressDirectory(filepath.Dir(path)); err != nil {
-		return nil, rollback, fmt.Errorf("sync published hook journal directory: %w", err)
+		return nil, nil, rollback, fmt.Errorf("sync published hook journal directory: %w", err)
 	}
 	if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
 		p.supersededDirectory = previous.Directory
 	}
-	return p, nil, nil
+	return p, prepared, nil, nil
 }
 
 func (p *hookProgress) receipt(index int) string {

@@ -147,6 +147,40 @@ func withBoundedHookProgressFileLock(path string, timeout time.Duration, fn func
 	}
 }
 
+// tryWithBoundedHookProgressFileLock preserves teardown's do-not-queue
+// contract while bounding the file open and identity probes that precede the
+// nonblocking flock. A late open owns no callback: timeout returns before any
+// journal mutation can begin.
+func tryWithBoundedHookProgressFileLock(path string, timeout time.Duration, fn func() error) (bool, error) {
+	lockPath := path + ".lock"
+	file, err := boundedOpenHookProgressLock(lockPath, timeout)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, fmt.Errorf("%w on %s after %s (lock file open did not complete)", config.ErrLockTimeout, lockPath, timeout)
+		}
+		return false, fmt.Errorf("failed to open hook progress lock file %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		closeHookProgressFile(file)
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to acquire hook progress lock on %s: %w", lockPath, err)
+	}
+	current, err := hookProgressLockFileIsCurrent(file, lockPath)
+	if err != nil {
+		unlockAndCloseHookProgressFile(file)
+		return false, fmt.Errorf("failed to validate hook progress lock file %s: %w", lockPath, err)
+	}
+	if !current {
+		unlockAndCloseHookProgressFile(file)
+		return false, fmt.Errorf("hook progress lock file %s was replaced while acquiring it", lockPath)
+	}
+	err = fn()
+	unlockAndCloseHookProgressFile(file)
+	return true, err
+}
+
 func hookProgressLockFileIsCurrent(file *os.File, path string) (bool, error) {
 	opened, err := boundedHookProgressLeaseStat(file, path)
 	if err != nil {
