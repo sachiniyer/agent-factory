@@ -37,3 +37,28 @@ func TestHookCreateHoldArmsWorktreeProvisionedAfterHold(t *testing.T) {
 		t.Fatal("settled create retained its pre-commit hold")
 	}
 }
+
+func TestHookCreateHoldReleasesArmedWorktreeAfterTeardown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := initInPlaceRepo(t, "main")
+	cfg := config.DefaultConfig()
+	require.NoError(t, config.SaveConfig(cfg))
+	prefix := ""
+	instance, err := NewInstance(InstanceOptions{
+		Title: "hook-create-abort", Path: repo, Program: "claude", Backend: BackendLocal, BranchPrefix: &prefix,
+	})
+	require.NoError(t, err)
+	release := instance.HoldHookProgressUntilCreateSettled()
+	require.NoError(t, instance.backend.Provision(instance, true))
+	instance.mu.Lock()
+	worktree := instance.gitWorktree
+	instance.gitWorktree = nil // teardownKill.finalize clears this before create settlement
+	instance.mu.Unlock()
+	if worktree == nil || !reflect.ValueOf(worktree).Elem().FieldByName("hookCreatePending").Bool() {
+		t.Fatal("fixture did not arm the provisioned worktree")
+	}
+	release()
+	if reflect.ValueOf(worktree).Elem().FieldByName("hookCreatePending").Bool() {
+		t.Fatal("create settlement lost the armed worktree after teardown cleared the instance pointer")
+	}
+}

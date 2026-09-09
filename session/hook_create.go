@@ -14,6 +14,7 @@ func (i *Instance) HoldHookProgressUntilCreateSettled() func() {
 	i.hookCreatePersistencePending = true
 	if i.gitWorktree != nil {
 		i.gitWorktree.BeginHookCreatePersistence()
+		i.hookCreatePersistenceWorktree = i.gitWorktree
 	}
 	i.mu.Unlock()
 	var once sync.Once
@@ -21,7 +22,8 @@ func (i *Instance) HoldHookProgressUntilCreateSettled() func() {
 		once.Do(func() {
 			i.mu.Lock()
 			i.hookCreatePersistencePending = false
-			worktree := i.gitWorktree
+			worktree := i.hookCreatePersistenceWorktree
+			i.hookCreatePersistenceWorktree = nil
 			i.mu.Unlock()
 			if worktree != nil {
 				worktree.SettleHookCreatePersistence()
@@ -40,6 +42,7 @@ func (i *Instance) setGitWorktreeLocked(worktree *git.GitWorktree) {
 	i.gitWorktree = worktree
 	if worktree != nil && i.hookCreatePersistencePending {
 		worktree.BeginHookCreatePersistence()
+		i.hookCreatePersistenceWorktree = worktree
 	}
 	i.touchLocked()
 }

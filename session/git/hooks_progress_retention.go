@@ -28,6 +28,8 @@ import (
 // The complete owner snapshot is loaded under one deadline before .progress is
 // acquired; every optional directory, journal, and receipt probe under that lock
 // uses the shared bounded filesystem helpers rather than raw sequential reads.
+// The lock only publishes atomic journal-name transitions; receipt-tree removal
+// runs afterward in one bounded, deduplicated batch.
 // The age and count limits otherwise match #4045's hooklog retention policy.
 const (
 	keptProgressLimit = 20
@@ -49,19 +51,23 @@ func pruneHookProgress(dir string, now time.Time) {
 		log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
 		return
 	}
+	var retired []hookProgressCleanup
 	err = withHookProgressLock(dir, func(pinned string, _ os.FileInfo) error {
 		if pinned != ownerSnapshot.hookDirectory {
 			return fmt.Errorf("hook owner snapshot belongs to %s, not locked directory %s", ownerSnapshot.hookDirectory, pinned)
 		}
-		return pruneHookProgressLocked(pinned, now, ownerSnapshot.owners)
+		return pruneHookProgressLocked(pinned, now, ownerSnapshot.owners, &retired)
 	})
 	if err != nil {
 		log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
 	}
+	if err := cleanupHookProgressArtifacts(retired); err != nil {
+		log.WarningLog.Printf("cannot finish reclaiming inactive hook journals: %v", err)
+	}
 }
 
 // The caller owns .progress, whether pruning alone or just before publication.
-func pruneHookProgressLocked(dir string, now time.Time, owners map[string]bool) error {
+func pruneHookProgressLocked(dir string, now time.Time, owners map[string]bool, retired *[]hookProgressCleanup) error {
 	entries, err := BoundedReadDir(dir)
 	if err != nil {
 		return err
@@ -132,13 +138,11 @@ func pruneHookProgressLocked(dir string, now time.Time, owners map[string]bool) 
 	}
 	// Receipt discovery can also need metadata. Do it before deleting any
 	// journal so an inconclusive filesystem answer aborts this pass intact.
-	if err := pruneUnpublishedHookReceipts(dir, entries, now); err != nil {
+	if err := pruneUnpublishedHookReceipts(dir, entries, now, retired); err != nil {
 		return err
 	}
 	for _, path := range staleRetired {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+		*retired = append(*retired, hookProgressCleanup{journal: path})
 	}
 	// Exclude active scopes from the quota as well as deletion. One fleet
 	// probe also protects terminal-marked journals whose teardown is pending.
@@ -196,21 +200,22 @@ func pruneHookProgressLocked(dir string, now time.Time, owners map[string]bool) 
 	for _, prefix := range live {
 		running[prefix] = true
 	}
-	removed := 0
+	retiredCount := 0
 	for _, candidate := range reclaim {
 		if running[candidate.progress.Prefix] {
 			continue
 		}
-		reclaimed, err := pruneUnleasedHookProgress(candidate.path, candidate.progress)
+		retiredPath, reclaimed, err := retireUnleasedHookProgress(candidate.path, candidate.progress)
 		if err != nil {
 			return err
 		}
 		if reclaimed {
-			removed++
+			retiredCount++
+			*retired = append(*retired, hookProgressCleanup{journal: retiredPath, progress: candidate.progress})
 		}
 	}
-	if removed > 0 {
-		log.InfoLog.Printf("pruned %d inactive hook journals", removed)
+	if retiredCount > 0 {
+		log.InfoLog.Printf("retired %d inactive hook journals", retiredCount)
 	}
 	return nil
 }

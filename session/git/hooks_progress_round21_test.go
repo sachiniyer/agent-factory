@@ -32,12 +32,15 @@ func TestHookProgressExpiredClaimWaitKeepsSuffixPending(t *testing.T) {
 	}
 	previousTimeout := hookStopTimeout
 	hookStopTimeout = 100 * time.Millisecond
+	originalProbe := runningHookPrefixesForResume
+	runningHookPrefixesForResume = func(...string) ([]string, error) { return []string{p.Prefix}, nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
 	t.Cleanup(func() {
 		cancel()
 		waitForClosed(t, done, 5*time.Second, "pending claim waiter did not stop")
 		hookStopTimeout = previousTimeout
+		runningHookPrefixesForResume = originalProbe
 	})
 	time.Sleep(1500 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {

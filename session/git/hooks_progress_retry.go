@@ -13,7 +13,8 @@ import (
 // Snapshot identity checks under the publication lock protect a newer journal
 // at the same path, including a same-session rebuild.
 func retireHookProgressSnapshot(p *hookProgress, path string) (bool, error) {
-	return config.TryWithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
+	var cleanup hookProgressCleanup
+	acquired, err := config.TryWithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error {
 		current, err := readHookProgress(path)
 		if os.IsNotExist(err) {
 			retired := filepath.Join(filepath.Dir(path), "retired-"+filepath.Base(p.Directory)+".json")
@@ -21,7 +22,8 @@ func retireHookProgressSnapshot(p *hookProgress, path string) (bool, error) {
 				// A prior attempt may have renamed the resumable journal before
 				// failing to remove its receipts. Continue the same retirement
 				// against the non-resumable name.
-				return hookProgressRemove(retired, p)
+				cleanup = hookProgressCleanup{journal: retired, progress: p}
+				return nil
 			} else if !os.IsNotExist(statErr) {
 				return statErr
 			}
@@ -33,8 +35,16 @@ func retireHookProgressSnapshot(p *hookProgress, path string) (bool, error) {
 		if current.Directory != p.Directory || current.SessionID != p.SessionID || current.Generation != p.Generation {
 			return nil
 		}
-		return hookProgressRemove(path, p)
+		retired, err := retireHookProgressName(path, p)
+		if err == nil {
+			cleanup = hookProgressCleanup{journal: retired, progress: p}
+		}
+		return err
 	})
+	if err != nil || !acquired || cleanup.journal == "" {
+		return acquired, err
+	}
+	return acquired, cleanupHookProgressArtifacts([]hookProgressCleanup{cleanup})
 }
 
 // Test seam for a transient filesystem failure after the progress lock has

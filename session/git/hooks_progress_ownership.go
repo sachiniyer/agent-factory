@@ -212,14 +212,22 @@ func (p *hookProgress) completed() bool {
 	return true
 }
 
-// Retire the resumable name before deleting receipts. A crash leaves a
-// non-resumable retired journal that the next creation sweep can reclaim.
-func removeHookProgress(path string, p *hookProgress) error {
+// Retire the resumable name while .progress is held. A crash leaves this
+// non-resumable name for a later bounded cleanup outside the home-wide lock.
+func retireHookProgressName(path string, p *hookProgress) (string, error) {
 	retired := filepath.Join(filepath.Dir(path), "retired-"+filepath.Base(p.Directory)+".json")
 	if path != retired {
 		if err := os.Rename(path, retired); err != nil {
-			return err
+			return "", err
 		}
+	}
+	return retired, nil
+}
+
+func removeHookProgress(path string, p *hookProgress) error {
+	retired, err := retireHookProgressName(path, p)
+	if err != nil {
+		return err
 	}
 	if err := os.RemoveAll(p.Directory); err != nil {
 		return err

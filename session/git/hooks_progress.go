@@ -59,6 +59,7 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	checkoutIdentity, _ := boundedRecordHookWorktreeIdentity(run.repoPath, run.worktreePath)
 	ownerSnapshot, ownersErr := boundedHookProgressOwners()
 	var progress *hookProgress
+	var retired []hookProgressCleanup
 	err = withHookProgressLock(filepath.Dir(path), func(dir string, identity os.FileInfo) error {
 		// Share one acquisition budget for GC and publication; a contended home
 		// must not pay the timeout twice before reporting that hooks could not start.
@@ -66,7 +67,7 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 			ownersErr = fmt.Errorf("hook owner snapshot belongs to %s, not locked directory %s", ownerSnapshot.hookDirectory, dir)
 		}
 		if ownersErr == nil {
-			ownersErr = pruneHookProgressLocked(dir, time.Now(), ownerSnapshot.owners)
+			ownersErr = pruneHookProgressLocked(dir, time.Now(), ownerSnapshot.owners, &retired)
 		}
 		if ownersErr != nil {
 			log.WarningLog.Printf("cannot prune inactive hook journals: %v", ownersErr)
@@ -77,6 +78,9 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	})
 	if errors.Is(err, config.ErrLockTimeout) {
 		return nil, fmt.Errorf("hook journal lock held by another process; hooks could not start; retry once the holder releases it: %w", err)
+	}
+	if cleanupErr := cleanupHookProgressArtifacts(retired); cleanupErr != nil {
+		log.WarningLog.Printf("cannot finish reclaiming inactive hook journals: %v", cleanupErr)
 	}
 	if err == nil && progress != nil {
 		cleanupSupersededHookProgress(progress.supersededDirectory)

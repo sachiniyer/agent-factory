@@ -27,8 +27,14 @@ func newHookProgressLease(dir string) (*os.File, error) {
 // Called under .progress after the batched liveness probes. Keep the lease
 // locked through deletion. Never create a missing lease: older journals have
 // none, and opening for pruning must not recreate a removed receipt directory.
-func pruneUnleasedHookProgress(path string, p *hookProgress) (bool, error) {
-	return withInactiveHookProgressLease(p.Directory, func() error { return removeHookProgress(path, p) })
+func retireUnleasedHookProgress(path string, p *hookProgress) (string, bool, error) {
+	var retired string
+	reclaimed, err := withInactiveHookProgressLease(p.Directory, func() error {
+		var retireErr error
+		retired, retireErr = retireHookProgressName(path, p)
+		return retireErr
+	})
+	return retired, reclaimed, err
 }
 
 func withInactiveHookProgressLease(dir string, remove func() error) (bool, error) {

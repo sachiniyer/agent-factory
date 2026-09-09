@@ -301,10 +301,12 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 					return
 				}
 				if state == hookEntryStarted {
-					log.WarningLog.Printf("post-worktree hook entry %d has no terminal exit receipt; leaving suffix pending", index)
-					bailResumable()
-					_ = outputFile.Close()
-					return
+					if !run.progress.terminalizeInactiveClaim(ctx, index, waitErr) {
+						log.WarningLog.Printf("post-worktree hook entry %d has no terminal exit receipt; leaving suffix pending", index)
+						bailResumable()
+						_ = outputFile.Close()
+						return
+					}
 				}
 				if state == hookEntryUnclaimed {
 					if waitErr == nil {

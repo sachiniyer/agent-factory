@@ -20,7 +20,7 @@ var hookReceiptReferenceWarning sync.Once
 // Called with the publication lock held. No publisher can have an unreferenced
 // directory here, even if its write/sync stalled past the grace period. A crash
 // releases the lock, and its abandoned directory becomes eligible after grace.
-func pruneUnpublishedHookReceipts(dir string, entries []os.DirEntry, now time.Time) error {
+func pruneUnpublishedHookReceipts(dir string, entries []os.DirEntry, now time.Time, retired *[]hookProgressCleanup) error {
 	referenced := make(map[string]bool)
 	ambiguous := false
 	var abandoned []string
@@ -62,7 +62,10 @@ func pruneUnpublishedHookReceipts(dir string, entries []os.DirEntry, now time.Ti
 		abandoned = append(abandoned, path)
 	}
 	for _, path := range abandoned {
-		if _, err := withInactiveHookProgressLease(path, func() error { return os.RemoveAll(path) }); err != nil {
+		if _, err := withInactiveHookProgressLease(path, func() error {
+			*retired = append(*retired, hookProgressCleanup{receipt: path})
+			return nil
+		}); err != nil {
 			return err
 		}
 	}
