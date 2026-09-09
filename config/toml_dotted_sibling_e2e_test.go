@@ -150,6 +150,35 @@ func TestDottedSiblingProjectPathE2E(t *testing.T) {
 	assert.Equal(t, "/bin/claude", resolved.ProgramOverrides["claude"])
 }
 
+// TestInsertTOMLDottedLeafDoesNotOverwriteQuotedRootKey pins the distinction
+// between a two-component dotted path (program_overrides.claude = …) and a
+// root-level quoted key whose literal name contains a dot
+// ("program_overrides.claude" = …). TOML treats these as different keys and
+// both can coexist. The old rerouting path called
+// setTOMLScalar("", "program_overrides.claude", …), whose regex-based keyRe
+// matched the quoted key's line and overwrote it. insertTOMLDottedLeaf bypasses
+// that regex and locates siblings via tomlAssignmentPath (TOML-aware), so the
+// quoted root key survives and the new dotted entry is added beside the sibling.
+func TestInsertTOMLDottedLeafDoesNotOverwriteQuotedRootKey(t *testing.T) {
+	// A config that has BOTH a dotted sibling (opens the program_overrides table)
+	// and an unrelated quoted root key whose name happens to contain a dot.
+	// Both are syntactically and semantically distinct in TOML.
+	input := "program_overrides.codex = 'codex'\n\"program_overrides.claude\" = 'unrelated'\n"
+	got := insertTOMLDottedLeaf(input, "program_overrides", "claude", "'/bin/claude'")
+
+	// The quoted root key must be left untouched.
+	assert.Contains(t, got, `"program_overrides.claude" = 'unrelated'`,
+		"quoted root key must not be overwritten")
+	// The new dotted entry must be present.
+	assert.Contains(t, got, "program_overrides.claude = '/bin/claude'",
+		"new dotted leaf must be inserted")
+	// The existing sibling must be preserved.
+	assert.Contains(t, got, "program_overrides.codex = 'codex'",
+		"existing dotted sibling must be preserved")
+	// The result must be valid TOML.
+	loadsTOML(t, got)
+}
+
 // TestDottedSiblingProjectPathHeaderFormStillWorks is the project-path
 // counterpart of TestDottedSiblingSetGlobalHeaderFormStillWorks: a header-form
 // personal config keeps the [section] header. The guard only reroutes a

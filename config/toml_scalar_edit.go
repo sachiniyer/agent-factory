@@ -44,10 +44,21 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 
 	// TOML also lets a hand-editor write a table entry as a top-level dotted key
 	// (program_overrides.claude = "…") instead of under a [program_overrides]
-	// header. For a dynamic key we must recognize that form too, or we would
-	// miss the existing key and append a duplicate — corrupting the file (a
-	// valid config never has both forms, so at most one matches). dotted whitespace
-	// around the '.' is allowed by TOML, so tolerate it.
+	// header. For an UPDATE of an existing key we must recognize that form too,
+	// or we would miss the existing key and append a duplicate — corrupting the
+	// file. TOML forbids defining the same key twice, so a dotted path
+	// (section.leaf) and a section header ([section] leaf) for the same key
+	// cannot both appear in a valid file — at most one matches.
+	//
+	// Note: a quoted root key whose NAME contains a dot ("section.leaf" = …)
+	// is a DIFFERENT key from the dotted path section.leaf = … and CAN coexist
+	// with a dotted-path sibling. The caller (configset.go) handles insertions
+	// via insertTOMLDottedLeaf, which bypasses this regex-based matching and
+	// locates siblings via tomlAssignmentPath (TOML-aware, distinguishes dotted
+	// paths from quoted keys). setTOMLScalar is therefore only called for
+	// updates of an already-confirmed existing key or for plain root-block keys,
+	// and the "at most one matches" invariant holds in those cases.
+	// Dotted whitespace around the '.' is allowed by TOML, so tolerate it.
 	var dottedKeyRe *regexp.Regexp
 	if section != "" {
 		dottedKeyRe = regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(section) + `\s*\.\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
@@ -171,6 +182,79 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 		}
 	}
 	return rebuild()
+}
+
+// insertTOMLDottedLeaf inserts section.leaf = encoded into content as a new
+// root-level dotted key. It must only be called when the leaf is known to be
+// absent (tomlRootDottedLeafExists returned false), so it never searches for
+// an existing line — bypassing the keyRe / tomlScalarLineMatches machinery
+// that cannot distinguish a genuine dotted path (program_overrides.claude =
+// …) from a quoted root key whose name happens to contain a dot
+// ("program_overrides.claude" = …). The new line is placed immediately after
+// the last existing dotted key for the same section so siblings stay adjacent;
+// if no such sibling exists it falls back to setTOMLScalar(section="") which
+// applies the usual root-block insertion rules.
+func insertTOMLDottedLeaf(content, section, leaf, encoded string) string {
+	newLine := section + "." + leaf + " = " + encoded
+
+	if strings.TrimSpace(content) == "" {
+		return newLine + "\n"
+	}
+
+	hadTrailingNewline := strings.HasSuffix(content, "\n")
+	ls := strings.Split(content, "\n")
+	if hadTrailingNewline && len(ls) > 0 && ls[len(ls)-1] == "" {
+		ls = ls[:len(ls)-1]
+	}
+
+	stringContent := tomlStringContentLines(ls)
+	curSection := ""
+	lastSiblingIdx := -1
+	for i, line := range ls {
+		if stringContent[i] {
+			continue
+		}
+		if _, ok := tomlHeaderName(line); ok {
+			curSection = line
+			// Once we enter any named section the root block is over.
+			if curSection != "" {
+				break
+			}
+			continue
+		}
+		if curSection != "" {
+			continue
+		}
+		// Look for a dotted key belonging to section at the root level.
+		if path, _, ok := tomlAssignmentPath(line); ok && len(path) >= 1 && path[0] == section {
+			lastSiblingIdx = i
+		}
+	}
+
+	rebuild := func() string {
+		out := strings.Join(ls, "\n")
+		if hadTrailingNewline {
+			out += "\n"
+		}
+		return out
+	}
+	insertAt := func(idx int, s string) {
+		ls = append(ls, "")
+		copy(ls[idx+1:], ls[idx:])
+		ls[idx] = s
+	}
+
+	if lastSiblingIdx != -1 {
+		insertAt(lastSiblingIdx+1, newLine)
+		return rebuild()
+	}
+	// No sibling found: fall back to setTOMLScalar's root-block insert rules,
+	// passing section="" so it treats section+"."+leaf as a plain root key
+	// for placement purposes. We reach here only when the root block has no
+	// dotted sibling for section yet, so there is no quoted root key
+	// "section.leaf" to confuse the fallback: the TOML file would be invalid
+	// if both were present (same decoded key, two definitions).
+	return setTOMLScalar(content, "", section+"."+leaf, encoded)
 }
 
 // deleteTOMLScalar removes the [section] leaf line from content, changing only

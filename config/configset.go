@@ -646,7 +646,7 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 		// in with section="" would disable that syntax-aware matching.
 		if w.section != "" && tomlRootDottedTable(updated, w.section) &&
 			!tomlRootDottedLeafExists(updated, w.section, w.leaf) {
-			updated = setTOMLScalar(updated, "", w.section+"."+w.leaf, w.encoded)
+			updated = insertTOMLDottedLeaf(updated, w.section, w.leaf, w.encoded)
 		} else {
 			updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
 		}
@@ -737,7 +737,7 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 		// updates even when the existing key uses whitespace or quoting.
 		if w.section != "" && tomlRootDottedTable(updated, w.section) &&
 			!tomlRootDottedLeafExists(updated, w.section, w.leaf) {
-			updated = setTOMLScalar(updated, "", w.section+"."+w.leaf, w.encoded)
+			updated = insertTOMLDottedLeaf(updated, w.section, w.leaf, w.encoded)
 		} else {
 			updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
 		}
