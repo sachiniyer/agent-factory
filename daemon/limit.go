@@ -369,6 +369,20 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	if instance == nil {
 		return resumeNotPerformed, fmt.Errorf("session %q not found", title)
 	}
+	// ResumeFromLimit is also the explicit recovery door for an ambiguous
+	// agent-only handoff. The TUI c action, web Retry handoff button, and CLI
+	// retry-limit command all reach this branch. Automatic recovery cannot: it
+	// uses ResumePendingHandoffs and still requires PromptNotDelivered.
+	if mission := instance.PendingHandoffMission(); mission != "" && instance.CanRetryPendingHandoffMissionDelivery() {
+		key := daemonInstanceKey(repoID, instance.Title)
+		performed, retryErr := m.retryPendingHandoff(pendingHandoffEntry{
+			repoID: repoID, key: key, instance: instance,
+		}, mission, true)
+		if performed {
+			return resumePerformed, retryErr
+		}
+		return resumeNotPerformed, retryErr
+	}
 	if !accountSwapResumeEligible(instance) {
 		return resumeNotPerformed, fmt.Errorf("session %q is not blocked on a usage limit", title)
 	}

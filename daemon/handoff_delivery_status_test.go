@@ -17,14 +17,41 @@ func TestHandoffSession_NonDeliveryVerdictKeepsPendingMission(t *testing.T) {
 	}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "unconfirmed-mission", backend)
 
-	_, err := manager.HandoffSession(HandoffSessionRequest{
+	resp, err := manager.HandoffSession(HandoffSessionRequest{
 		Title: inst.Title, RepoID: repoID, To: tmux.ProgramGemini,
 	})
 	require.ErrorIs(t, err, task.ErrPromptDelivery)
+	require.True(t, isMutationCommitted(err),
+		"the target runtime was already installed before delivery became ambiguous")
+	require.Equal(t, tmux.ProgramClaude, resp.From)
+	require.Equal(t, tmux.ProgramGemini, resp.To)
+	require.NotEmpty(t, resp.HeadSHA)
 	require.NotEmpty(t, inst.PendingHandoffMission())
 	rec := recordFor(t, repoID, inst.Title)
 	require.NotEmpty(t, rec.PendingHandoffMission)
 	require.Equal(t, session.PromptCouldNotConfirm, rec.HandoffDeliveryStatus)
+}
+
+func TestResumeFromLimit_ExplicitlyRetriesAmbiguousAgentHandoff(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "explicit-agent-retry", backend)
+	mission := "continue the inherited work"
+	require.NoError(t, inst.Transition(session.BeginHandoff()))
+	inst.SetPendingHandoffMission(mission)
+	require.NoError(t, inst.BeginPendingHandoffMissionDelivery(mission))
+	require.NoError(t, inst.RecordPendingHandoffMissionDelivery(mission, session.PromptCouldNotConfirm))
+	manager.persistInstance(repoID, inst)
+
+	outcome, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: repoID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, resumePerformed, outcome)
+	require.Empty(t, inst.PendingHandoffMission())
+	require.Equal(t, session.OpNone, inst.GetInFlightOp())
+	_, prompts := backend.snapshot()
+	require.Equal(t, []string{mission}, prompts)
 }
 
 func TestResumePendingHandoffs_RetriesObservedNonDelivery(t *testing.T) {

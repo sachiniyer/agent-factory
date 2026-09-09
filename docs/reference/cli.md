@@ -55,7 +55,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected account handoff
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -1608,7 +1608,7 @@ af sessions
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected account handoff
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -2022,10 +2022,10 @@ af sessions restore <title> [flags]
 
 ## af sessions retry-limit
 
-Retry a usage-limit resume or inspected account handoff
+Retry a usage-limit resume or inspected handoff
 
 Retry a session parked at a provider usage-limit wall, or explicitly retry
-an account handoff whose mission delivery could not be confirmed.
+a handoff whose mission delivery could not be confirmed.
 
 The daemon runs the same recovery action as the TUI's c key and the web's Retry
 button: it re-spawns an exited agent when necessary, re-delivers the pending

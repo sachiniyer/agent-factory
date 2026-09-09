@@ -181,6 +181,10 @@ export interface SessionData {
   limit_reset_at?: string;
   /** Present while a committed identity change still owes its replacement mission. */
   pending_account_swap?: AccountSwapData;
+  /** Agent-only takeover brief awaiting confirmed delivery. */
+  pending_handoff_mission?: string;
+  /** Mission-scoped delivery verdict for pending_handoff_mission. */
+  pending_handoff_delivery_status?: PromptDeliveryStatus;
   /** The replacement runtime may exist, but its identity/liveness was not confirmed. */
   startup_state_unknown?: boolean;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */

@@ -226,7 +226,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ResumeFromLimit",
-		Description: "Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit.",
+		Description: "Resume a usage-limit-blocked session, or explicitly retry an inspected handoff whose mission delivery was ambiguous.",
 		requestType: reflect.TypeOf(ResumeFromLimitRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
 	},

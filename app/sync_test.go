@@ -93,6 +93,22 @@ func TestSnapshotReconcilesAccountHandoffBeforeRetryGate(t *testing.T) {
 		"the same-session projection must expose the daemon's pending inspected retry")
 }
 
+func TestSnapshotReconcilesAgentHandoffBeforeRetryGate(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "agent-handoff")
+	data := inst.ToInstanceData()
+	data.Liveness = session.LiveRunning
+	data.Status = session.Running
+	data.InFlightOp = session.OpReplacing
+	data.PendingHandoffMission = "continue the inherited work"
+	data.HandoffDeliveryStatus = session.PromptCouldNotConfirm
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, data.PendingHandoffMission, inst.PendingHandoffMission())
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
+		"the same-session projection must expose the daemon's pending inspected retry")
+}
+
 // TestSnapshotReconcilesUserKilledTombstone pins the same-session half of the
 // durable precedence rule. Cold materialization already goes through
 // FromInstanceData; an open TUI instead mutates its existing row in place and

@@ -607,6 +607,9 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileAccountHandoffSnapshot(d.Account, d.AccountAutoSelected, d.PendingAccountSwap) {
 		changed = true
 	}
+	if inst.ReconcilePendingHandoffSnapshot(d.PendingHandoffMission, d.HandoffDeliveryStatus) {
+		changed = true
+	}
 	// Startup-unknown is a fail-closed, monotonic outcome for this live runtime.
 	// Marking it locally also clears the stale started binding, matching a cold
 	// materialization of the same snapshot.

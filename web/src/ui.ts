@@ -44,6 +44,7 @@ import {
   isCreating,
   idleReasonDetail,
   isLimitReached,
+  isPendingAgentHandoffDeliveryUnconfirmed,
   isPendingManualHandoffDeliveryUnconfirmed,
   OPERATOR_KIND_LABELS,
   type OperatorKind,
@@ -108,7 +109,10 @@ export type RetryActionPresentation = {
 /** The selected row's explicit recovery action. A delivery-unconfirmed handoff
  * keeps a distinct label so Retry never looks like an unrelated quota control. */
 export function retryActionForSession(s: SessionData): RetryActionPresentation | null {
-  if (isPendingManualHandoffDeliveryUnconfirmed(s)) {
+  if (
+    isPendingManualHandoffDeliveryUnconfirmed(s) ||
+    isPendingAgentHandoffDeliveryUnconfirmed(s)
+  ) {
     return {
       kind: "handoff",
       label: "Retry handoff",

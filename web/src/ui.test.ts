@@ -23,7 +23,7 @@ import {
   canMutateTabRoster,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
-import { Liveness, type SessionData } from "./types.js";
+import { InFlightOp, Liveness, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
   return { id: "a", title: "s", branch: "b", ...over };
@@ -118,6 +118,30 @@ test("Retry names an ambiguous handoff separately from a usage-limit retry", () 
       label: "Retry handoff",
       title: "Retry the handoff after inspecting the pane",
     },
+  );
+  assert.deepEqual(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    },
+  );
+  assert.equal(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "could-not-confirm",
+      startup_state_unknown: true,
+    })),
+    null,
+    "an unknown replacement runtime has no pane the operator can safely inspect",
   );
   assert.deepEqual(
     retryActionForSession(sess({ liveness: Liveness.LimitReached })),

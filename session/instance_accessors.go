@@ -108,6 +108,37 @@ func (i *Instance) PendingHandoffMissionAutoRetryable() bool {
 	return i.pendingHandoffMission != "" && i.handoffDeliveryStatus == PromptNotDelivered
 }
 
+// CanRetryPendingHandoffMissionDelivery reports whether an operator can inspect
+// the known incoming pane and explicitly override an ambiguous mission verdict.
+// Positive non-delivery belongs to automatic recovery; delivered evidence and
+// an unknown/missing runtime never authorize another submission.
+func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady
+	ambiguous := i.handoffDeliveryStatus == PromptSentUnverified ||
+		i.handoffDeliveryStatus == PromptCouldNotConfirm
+	return i.pendingHandoffMission != "" && ambiguous && knownLive &&
+		!i.startupStateUnknown && !i.userKilled &&
+		(i.inFlightOp == OpNone || i.inFlightOp == OpReplacing)
+}
+
+// ReconcilePendingHandoffSnapshot mirrors the daemon-owned agent handoff
+// obligation onto an existing client projection. Open TUIs update rows in place,
+// so copying only OpReplacing would leave the explicit retry predicate blind to
+// the mission and its mission-scoped verdict until the client restarted.
+func (i *Instance) ReconcilePendingHandoffSnapshot(mission string, status PromptDeliveryStatus) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingHandoffMission == mission && i.handoffDeliveryStatus == status {
+		return false
+	}
+	i.pendingHandoffMission = mission
+	i.handoffDeliveryStatus = status
+	i.touchLocked()
+	return true
+}
+
 // ClearPendingHandoffMission clears the marker only if it still names mission.
 // The compare makes a delayed recovery attempt unable to erase a newer handoff's
 // brief after the same session has moved on.

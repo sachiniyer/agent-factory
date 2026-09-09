@@ -289,6 +289,23 @@ export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boole
   );
 }
 
+/** True when an agent-only handoff has a known incoming pane whose mission
+ * submission was ambiguous. The operator may inspect that pane and explicitly
+ * override the replay fence; positive non-delivery stays owned by automation. */
+export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolean {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  return (
+    s.pending_handoff_mission !== undefined &&
+    s.pending_handoff_mission !== "" &&
+    (status === "sent-unverified" || status === "could-not-confirm") &&
+    s.startup_state_unknown !== true &&
+    (liveness === Liveness.Running || liveness === Liveness.Ready) &&
+    (op === InFlightOp.None || op === InFlightOp.Replacing)
+  );
+}
+
 /** True when this session's agent can be handed off to a different one in place
  *  (#2013) — the state that gates the Handoff action, mirroring the TUI, which
  *  advertises `F` only for a handoff-capable selection (app/handle_handoff.go) and

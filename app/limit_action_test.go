@@ -111,6 +111,38 @@ func TestHandleLimitRetry_UnconfirmedAccountHandoffDispatches(t *testing.T) {
 	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
 }
 
+func TestHandleLimitRetry_UnconfirmedAgentHandoffDispatches(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "gemini",
+	})
+	require.NoError(t, err)
+	base.SetBackend(session.NewFakeBackend())
+	base.SetStartedForTest(true)
+	base.SetStatusForTest(session.Running)
+	require.NoError(t, base.Transition(session.BeginHandoff()))
+	mission := "continue the inherited work"
+	base.SetPendingHandoffMission(mission)
+	require.NoError(t, base.BeginPendingHandoffMissionDelivery(mission))
+	require.NoError(t, base.RecordPendingHandoffMissionDelivery(mission, session.PromptCouldNotConfirm))
+	h.store.AddInstance(base)
+	h.sidebar.SetSelectedInstance(0)
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.NotNil(t, cmd, "an inspected, ambiguous agent handoff must expose the c retry action")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: base.ID, Title: base.Title, RepoID: h.repoID}, gotRequest)
+}
+
 func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing.T) {
 	h := newTestHome(t)
 	base, err := session.NewInstance(session.InstanceOptions{

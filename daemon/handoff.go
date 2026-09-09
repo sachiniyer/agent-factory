@@ -266,12 +266,16 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		m.warn().Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}
 	if err := m.deliverHandoffMission(delivery); err != nil {
-		return HandoffSessionResponse{}, err
+		// SwapAgent already installed the incoming runtime. Preserve the resolved
+		// identity and classify every later delivery/settlement failure as
+		// committed so callers cannot present it as a safe refusal to retry.
+		return response, &mutationCommittedError{err: err}
 	}
 	m.info().Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
 
-	return HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}, nil
+	return response, nil
 }
 
 func shortSHA(sha string) string {

@@ -69,6 +69,55 @@ func TestPendingHandoffMissionWithoutEvidenceFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPendingHandoffMissionExplicitRetryRequiresAmbiguousKnownRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		status         PromptDeliveryStatus
+		startupUnknown bool
+		lost           bool
+		want           bool
+	}{
+		{name: "could not confirm", status: PromptCouldNotConfirm, want: true},
+		{name: "sent unverified", status: PromptSentUnverified, want: true},
+		{name: "positive non-delivery is automatic only", status: PromptNotDelivered},
+		{name: "startup unknown is inert", status: PromptCouldNotConfirm, startupUnknown: true},
+		{name: "lost runtime is not inspectable", status: PromptCouldNotConfirm, lost: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := NewInstance(InstanceOptions{Title: "ambiguous-handoff", Path: t.TempDir(), Program: "claude"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inst.SetBackend(NewFakeBackend())
+			inst.SetStartedForTest(true)
+			inst.SetStatusForTest(Running)
+			if err := inst.Transition(BeginHandoff()); err != nil {
+				t.Fatal(err)
+			}
+			mission := "continue the inherited work"
+			inst.SetPendingHandoffMission(mission)
+			if tc.status != PromptNotDelivered {
+				if err := inst.BeginPendingHandoffMissionDelivery(mission); err != nil {
+					t.Fatal(err)
+				}
+				if err := inst.RecordPendingHandoffMissionDelivery(mission, tc.status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.startupUnknown {
+				inst.MarkStartupStateUnknown()
+			}
+			if tc.lost {
+				inst.SetStatusForTest(Lost)
+			}
+			if got := inst.CanRetryPendingHandoffMissionDelivery(); got != tc.want {
+				t.Fatalf("CanRetryPendingHandoffMissionDelivery() = %v, want %v (liveness=%v op=%v startupUnknown=%v evidence=%q)",
+					got, tc.want, inst.GetLiveness(), inst.GetInFlightOp(), inst.StartupStateUnknown(), inst.ToInstanceData().HandoffDeliveryStatus)
+			}
+		})
+	}
+}
+
 // TestPendingHandoffMissionWithUserKilledDoesNotReconstructFence proves the
 // durable kill tombstone outranks an undelivered handoff mission after storage
 // has scrubbed the process-local operation axis. The row must remain settled and

@@ -422,7 +422,8 @@ func (m *Menu) addInstanceOptions() {
 	if m.instance != nil {
 		lifecycleAction = m.instance.LifecycleAction()
 		canKill = m.instance.CanKill()
-		canRetryHandoff = m.instance.CanRetryPendingManualAccountSwapDelivery()
+		canRetryHandoff = m.instance.CanRetryPendingManualAccountSwapDelivery() ||
+			m.instance.CanRetryPendingHandoffMissionDelivery()
 	}
 	if lifecycleAction == session.LifecycleActionNone && !canRetryHandoff {
 		m.options = []keys.KeyName{keys.KeyNew}
@@ -462,14 +463,14 @@ func (m *Menu) addInstanceOptions() {
 		actionGroup = append(actionGroup, keys.KeyShiftDown)
 	}
 
-	// Retry (#1146): advertised for a usage-limit wall or an inspected manual
-	// handoff whose mission submission could not be confirmed. Both re-enter the
-	// same durable recovery transaction; normal sessions keep the hint hidden.
+	// Retry (#1146): advertised for a usage-limit wall or an inspected account or
+	// agent handoff whose mission submission could not be confirmed. All re-enter
+	// the same durable recovery transaction; normal sessions keep the hint hidden.
 	// Not while an operation owns the session (#2997): a resume already in flight
 	// keeps the row LiveLimitReached by design — the fence preserves liveness — so
 	// LimitReached() alone would keep advertising `c` for a retry that
 	// RuntimeActionResumeLimit then refuses as busy.
-	if m.instance != nil && (m.instance.LimitReached() || canRetryHandoff) && m.instance.GetInFlightOp() == session.OpNone {
+	if m.instance != nil && ((m.instance.LimitReached() && m.instance.GetInFlightOp() == session.OpNone) || canRetryHandoff) {
 		actionGroup = append(actionGroup, keys.KeyLimitRetry)
 		// Handoff (#2013) is the OTHER answer to a limit wall: `c` waits for this
 		// agent's window to reset, `H` continues the work under a different one.

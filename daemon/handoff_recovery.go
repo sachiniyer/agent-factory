@@ -53,19 +53,24 @@ func (m *Manager) ResumePendingHandoffs() {
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 			continue
 		}
-		if err := m.resumePendingHandoff(entry, mission); err != nil {
+		if _, err := m.retryPendingHandoff(entry, mission, false); err != nil {
 			m.warn().Printf("handoff %q: pending mission retry did not complete: %v", entry.instance.Title, err)
 		}
 	}
 }
 
-func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string) error {
+// retryPendingHandoff is the single submission transaction for agent-only
+// takeover missions. Automatic callers require positive mission-scoped
+// non-delivery evidence and observe the retry delay. An explicit caller may
+// override an ambiguous verdict after inspecting a known pane, but still uses
+// the same pre-submission fence and settlement rules.
+func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string, explicit bool) (bool, error) {
 	unlock := m.lockTarget(entry.repoID, entry.instance.Title)
 	defer unlock()
 
 	opLock := m.opLockFor(entry.key)
 	if !opLock.TryLock() {
-		return nil
+		return false, nil
 	}
 	defer opLock.Unlock()
 
@@ -74,11 +79,15 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	_, killing := m.killsInFlight[entry.key]
 	m.mu.Unlock()
 	op := entry.instance.GetInFlightOp()
+	retryable := entry.instance.PendingHandoffMissionAutoRetryable()
+	if explicit {
+		retryable = entry.instance.CanRetryPendingHandoffMissionDelivery()
+	}
 	if killing || current != entry.instance || entry.instance.IsTearingDown() ||
 		(op != session.OpNone && op != session.OpReplacing) ||
-		entry.instance.PendingHandoffMission() != mission || !entry.instance.PendingHandoffMissionAutoRetryable() ||
+		entry.instance.PendingHandoffMission() != mission || !retryable ||
 		entry.instance.UserKilled() || entry.instance.StartupStateUnknown() {
-		return nil
+		return false, nil
 	}
 
 	switch entry.instance.GetLiveness() {
@@ -90,15 +99,15 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		if op == session.OpReplacing {
 			resetAt, _ := entry.instance.LimitResetAt()
 			if err := m.parkHandoffAtLimit(entry.instance, resetAt); err != nil {
-				return err
+				return false, err
 			}
 		}
 		if !entry.instance.ClearPendingHandoffMission(mission) {
-			return fmt.Errorf("pending mission changed while transferring it to limit retry")
+			return false, fmt.Errorf("pending mission changed while transferring it to limit retry")
 		}
 		perr := m.persistSettlement(entry.repoID, entry.key, entry.instance)
 		m.clearPendingHandoffRetry(entry.repoID, entry.instance)
-		return perr
+		return false, perr
 	case session.LiveReady:
 		// Positive readiness is the authorization to paste. LiveRunning is not:
 		// startup output and an already-delivered mission both look Running, so
@@ -107,22 +116,22 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		if op == session.OpReplacing {
 			break
 		}
-		return nil
+		return false, nil
 	}
 
-	if !m.pendingHandoffRetryAllowed(entry.repoID, entry.instance) {
-		return nil
+	if !explicit && !m.pendingHandoffRetryAllowed(entry.repoID, entry.instance) {
+		return false, nil
 	}
 	delivery := handoffDelivery{
 		repoID: entry.repoID, key: entry.key, title: entry.instance.Title,
 		mission: mission, instance: entry.instance,
 	}
 	if err := m.beginHandoffMissionDelivery(delivery); err != nil {
-		return err
+		return false, err
 	}
 	status, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), entry.instance, mission)
 	if evidenceErr := entry.instance.RecordPendingHandoffMissionDelivery(mission, status); evidenceErr != nil {
-		return errors.Join(err, evidenceErr)
+		return false, errors.Join(err, evidenceErr)
 	}
 	if err = handoffDeliveryResultError(status, err); err != nil {
 		var limitErr *task.LimitReachedError
@@ -130,20 +139,20 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 			entry.instance.SetPrompt(mission)
 			if op == session.OpReplacing {
 				if terr := m.parkHandoffAtLimit(entry.instance, limitErr.ResetAt); terr != nil {
-					return errors.Join(err, terr)
+					return false, errors.Join(err, terr)
 				}
 			} else {
 				m.setLimitReached(entry.instance, limitErr.ResetAt)
 			}
 			if !entry.instance.ClearPendingHandoffMission(mission) {
-				return fmt.Errorf("pending mission changed while parking its usage limit")
+				return false, fmt.Errorf("pending mission changed while parking its usage limit")
 			}
 			perr := m.persistSettlement(entry.repoID, entry.key, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 			if perr != nil {
-				return errors.Join(err, perr)
+				return false, errors.Join(err, perr)
 			}
-			return nil
+			return false, nil
 		}
 		// Best-effort, unlike the settlement writes above (#2781): this raises a
 		// suppression marker over a mission that was never delivered, so losing it
@@ -155,26 +164,28 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		}
 		if errors.Is(err, task.ErrPromptDelivery) {
 			if evidenceErr := m.persistSettlement(entry.repoID, entry.key, entry.instance); evidenceErr != nil {
-				return errors.Join(err, evidenceErr)
+				return false, errors.Join(err, evidenceErr)
 			}
 		}
-		return err
+		return false, err
 	}
 	if op == session.OpReplacing {
 		if err := entry.instance.Transition(session.CommitHandoff()); err != nil {
-			return err
+			return true, &mutationCommittedError{err: fmt.Errorf(
+				"delivered the pending handoff mission, but could not settle the replacement fence: %w", err)}
 		}
 	}
 	if !entry.instance.ClearPendingHandoffMission(mission) {
-		return fmt.Errorf("pending mission changed after delivery")
+		return true, &mutationCommittedError{err: fmt.Errorf("delivered the pending handoff mission, but its obligation changed before settlement")}
 	}
 	perr := m.persistSettlement(entry.repoID, entry.key, entry.instance)
 	m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 	if perr != nil {
-		return perr
+		return true, &mutationCommittedError{err: fmt.Errorf(
+			"delivered the pending handoff mission, but could not persist its settlement: %w", perr)}
 	}
 	m.info().Printf("handoff %q: delivered pending mission", entry.instance.Title)
-	return nil
+	return true, nil
 }
 
 func (m *Manager) pendingHandoffRetryAllowed(repoID string, instance *session.Instance) bool {
