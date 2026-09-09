@@ -7203,7 +7203,8 @@ function actionsDisclosure(label = "Session actions", enabled = () => true) {
   });
   return { el: el2, panel, trigger, open, close, dispose: close };
 }
-function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)")) {
+function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
+}) {
   const menu = actionsDisclosure("More app controls", () => phone.matches);
   menu.el.className = "af-appbar-tools-wrap";
   menu.trigger.className = "af-appbar-more";
@@ -7215,6 +7216,7 @@ function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"
   menu.panel.setAttribute("aria-label", "App controls");
   menu.panel.append(...controls);
   const sync = () => {
+    beforeSync();
     const hadFocus = menu.panel.contains(document.activeElement);
     menu.close();
     menu.trigger.hidden = !phone.matches;
@@ -14627,7 +14629,7 @@ var AppShell = class {
       ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
-    ], this.phone);
+    ], this.phone, this.captureNewTabCancelReturn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect2.addEventListener("click", () => {
       this.appControls.close();
@@ -14643,7 +14645,7 @@ var AppShell = class {
       this.appControls.el
     );
     this.header = header;
-    this.phone.addEventListener("change", this.syncPhone);
+    this.phone.addEventListener("change", this.schedulePhoneSync);
     this.appControls.panel.addEventListener("click", (event) => {
       const target = event.target.closest("button, a");
       if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle")) this.appControls.close();
@@ -14739,14 +14741,24 @@ var AppShell = class {
   sessionFirst = null;
   terminalSelected = false;
   newTabPickerPosition = null;
+  phoneSyncQueued = false;
+  schedulePhoneSync = () => {
+    if (this.phoneSyncQueued) return;
+    this.phoneSyncQueued = true;
+    queueMicrotask(() => {
+      this.phoneSyncQueued = false;
+      this.syncPhone();
+    });
+  };
   syncPhone = () => {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
     const pickerOpen = pickerTrigger?.getAttribute("aria-expanded") === "true";
-    const pickerCancelReturn = active && pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) : void 0;
-    if (!active && pickerTrigger) this.newTabCancelReturn.delete(pickerTrigger);
+    const responsiveReturn = this.responsiveNewTabCancelReturn;
+    this.responsiveNewTabCancelReturn = null;
+    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ?? (responsiveReturn?.trigger === pickerTrigger ? responsiveReturn.cancel : void 0) : void 0;
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
@@ -14843,6 +14855,12 @@ var AppShell = class {
   // Escape restores every enclosing disclosure a keyboard open changed before
   // returning to navigation. Pointer opens have no entry and return to the button.
   newTabCancelReturn = /* @__PURE__ */ new WeakMap();
+  responsiveNewTabCancelReturn = null;
+  captureNewTabCancelReturn = () => {
+    const trigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
+    const cancel = trigger ? this.newTabCancelReturn.get(trigger) : void 0;
+    this.responsiveNewTabCancelReturn = trigger && cancel ? { trigger, cancel } : null;
+  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -14893,7 +14911,7 @@ var AppShell = class {
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
-    this.phone.removeEventListener("change", this.syncPhone);
+    this.phone.removeEventListener("change", this.schedulePhoneSync);
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
@@ -15416,11 +15434,11 @@ var AppShell = class {
     const slot = this.terminalChrome?.newTabSlot;
     const trigger = slot?.querySelector(".af-tab-new");
     if (!trigger || !slot) return;
-    if (shortcutReturn && !this.newTabCancelReturn.has(trigger)) {
-      const preserveAppControls = this.appControls.panel.contains(slot) && !this.appControls.panel.hidden;
-      const sessionActionsWasHidden = this.terminalChrome?.menu.panel.hidden ?? false;
+    if (shortcutReturn) {
+      const preserveAppControls = this.appControls.panel.contains(slot) && this.appControls.trigger.getAttribute("aria-expanded") === "true";
+      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
       this.newTabCancelReturn.set(trigger, () => {
-        if (sessionActionsWasHidden) this.terminalChrome?.menu.close();
+        if (!preserveSessionActions) this.terminalChrome?.menu.close();
         if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
         shortcutReturn();
       });

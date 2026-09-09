@@ -109,7 +109,7 @@ for (const width of [1280, 390]) {
   });
 }
 
-test("picker returns to the desktop New tab trigger after phone recomposition", async ({ page, request }) => {
+test("phone shortcut cancel restores navigation after desktop recomposition", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
   const session = snapshot.data.instances.find((s: { title: string }) =>
@@ -120,12 +120,15 @@ test("picker returns to the desktop New tab trigger after phone recomposition", 
   await page.keyboard.press("t");
   const menu = page.getByRole("menu", { name: "Tab type", exact: true });
   const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true, includeHidden: true });
+  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
   await expect(menu).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 844 });
   await expect(trigger).toHaveAttribute("aria-expanded", "true");
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
-  await expect(trigger).toBeFocused();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
 });
 
 test("desktop shortcut cancel restores navigation while click cancel returns to the trigger", async ({ page, request }) => {
@@ -179,6 +182,29 @@ test("shortcut cancel preserves a Session actions disclosure the user opened", a
   await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
 });
 
+test("shortcut cancel preserves user-opened Session actions across desktop to phone", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  await page.keyboard.press("Control+]");
+  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
+  const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+
+  await sessionActions.click();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+});
+
 test("desktop shortcut cancel closes app controls opened by phone recomposition", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
   const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
@@ -213,6 +239,7 @@ test("desktop picker stays visible after phone recomposition", async ({ page, re
   await page.keyboard.press("t");
   const menu = page.getByRole("menu", { name: "Tab type", exact: true });
   const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true, includeHidden: true });
+  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
   await expect(menu).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(menu).toBeVisible();
@@ -229,7 +256,11 @@ test("desktop picker stays visible after phone recomposition", async ({ page, re
   })).toBe(true);
   await expect(menu.getByRole("menuitem", { name: "Terminal", exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(trigger).toBeFocused();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
 
   // Closing clears the active callback. Reopening the same control must restore
   // it so the next responsive recomposition anchors the menu again.

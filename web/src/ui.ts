@@ -754,16 +754,27 @@ export class AppShell {
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
   private terminalSelected = false;
   private newTabPickerPosition: (() => void) | null = null;
+  private phoneSyncQueued = false;
+  private readonly schedulePhoneSync = (): void => {
+    if (this.phoneSyncQueued) return;
+    this.phoneSyncQueued = true;
+    queueMicrotask(() => {
+      this.phoneSyncQueued = false;
+      this.syncPhone();
+    });
+  };
   private readonly syncPhone = (): void => {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement as HTMLElement | null;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
     const pickerOpen = pickerTrigger?.getAttribute("aria-expanded") === "true";
-    // A desktop shortcut owns the phone disclosure opened to keep its picker
-    // reachable. Moving home to desktop retains the established trigger fallback.
-    const pickerCancelReturn = active && pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) : undefined;
-    if (!active && pickerTrigger) this.newTabCancelReturn.delete(pickerTrigger);
+    // A shortcut transaction follows the picker through either responsive owner.
+    // The callback decides what to close from the layout that exists on Escape.
+    const responsiveReturn = this.responsiveNewTabCancelReturn;
+    this.responsiveNewTabCancelReturn = null;
+    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
+      (responsiveReturn?.trigger === pickerTrigger ? responsiveReturn.cancel : undefined) : undefined;
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
@@ -867,6 +878,12 @@ export class AppShell {
   // Escape restores every enclosing disclosure a keyboard open changed before
   // returning to navigation. Pointer opens have no entry and return to the button.
   private readonly newTabCancelReturn = new WeakMap<HTMLElement, () => void>();
+  private responsiveNewTabCancelReturn: { trigger: HTMLElement; cancel: () => void } | null = null;
+  private readonly captureNewTabCancelReturn = (): void => {
+    const trigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
+    const cancel = trigger ? this.newTabCancelReturn.get(trigger) : undefined;
+    this.responsiveNewTabCancelReturn = trigger && cancel ? { trigger, cancel } : null;
+  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -998,7 +1015,7 @@ export class AppShell {
     // in creation order and close the disclosure after syncPhone reopened it.
     this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
-    ], this.phone);
+    ], this.phone, this.captureNewTabCancelReturn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect.addEventListener("click", () => {
       this.appControls.close();
@@ -1016,7 +1033,9 @@ export class AppShell {
     );
 
     this.header = header;
-    this.phone.addEventListener("change", this.syncPhone);
+    // Run after every owner-specific media listener. That guarantees the app-controls
+    // disclosure has finished its own close/reflow before an open picker is restored.
+    this.phone.addEventListener("change", this.schedulePhoneSync);
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
@@ -1125,7 +1144,7 @@ export class AppShell {
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
-    this.phone.removeEventListener("change", this.syncPhone);
+    this.phone.removeEventListener("change", this.schedulePhoneSync);
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
@@ -1781,12 +1800,13 @@ export class AppShell {
     // Capture the whole pre-shortcut state before exposing either nested control.
     // Responsive recomposition calls this method again without a return callback;
     // keep the original record until the picker itself closes.
-    if (shortcutReturn && !this.newTabCancelReturn.has(trigger)) {
-      const preserveAppControls = this.appControls.panel.contains(slot) && !this.appControls.panel.hidden;
-      const sessionActionsWasHidden = this.terminalChrome?.menu.panel.hidden ?? false;
+    if (shortcutReturn) {
+      const preserveAppControls = this.appControls.panel.contains(slot) &&
+        this.appControls.trigger.getAttribute("aria-expanded") === "true";
+      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
       this.newTabCancelReturn.set(trigger, () => {
         // Close inside-out before restoring focus outside either disclosure.
-        if (sessionActionsWasHidden) this.terminalChrome?.menu.close();
+        if (!preserveSessionActions) this.terminalChrome?.menu.close();
         // Recomposition may have opened app controls after the shortcut began.
         // Preserve it only when the user had already opened the phone disclosure.
         if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
