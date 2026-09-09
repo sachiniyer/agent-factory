@@ -88,13 +88,14 @@ func TestAdoptRunningHooksSharesOneJournalReadBudget(t *testing.T) {
 	}
 	var candidates []candidate
 	for i := 0; i < 4; i++ {
-		g := &GitWorktree{repoPath: t.TempDir(), worktreePath: t.TempDir()}
+		repo, tree := linkedHookWorktree(t)
+		g := &GitWorktree{repoPath: repo, worktreePath: tree, branchName: "hook-resume"}
 		id := "batch-owner-" + string(rune('a'+i))
 		g.SetHookScopeSessionID(id)
 		ctx, cancel := context.WithCancel(context.Background())
 		g.hooksCtx, g.hooksCancel = ctx, cancel
 		prefix := systemdunit.HookScopeUnitPrefix(id)
-		p, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: id}, []string{"true"}, prefix, "test")
+		p, err := newHookProgress(hookRun{repoPath: repo, worktreePath: tree, scopeSessionID: id}, []string{"true"}, prefix, "test")
 		if err != nil {
 			t.Fatal(err)
 		}

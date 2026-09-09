@@ -11,8 +11,10 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+var errHookProgressResumeDisabled = errors.New("hook journal was published without a safe resume identity")
+
 func noResumableHookProgress(err error) bool {
-	return errors.Is(err, os.ErrNotExist) || errors.Is(err, errInvalidHookProgress)
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, errInvalidHookProgress) || errors.Is(err, errHookProgressResumeDisabled)
 }
 
 // Absence, invalid ownership/shape and a finished marker are conclusive.
@@ -24,6 +26,9 @@ func readPendingHookProgress(worktreePath, sessionID string) (*hookProgress, err
 	}
 	info, err := BoundedLstat(filepath.Join(p.Directory, "finished"))
 	if os.IsNotExist(err) {
+		if p.ResumeDisabled {
+			return p, errHookProgressResumeDisabled
+		}
 		return p, nil
 	}
 	if err != nil {
@@ -57,7 +62,7 @@ func waitForHookProgressRead(ctx context.Context, ticks <-chan time.Time, worktr
 			return p, nil
 		}
 		if noResumableHookProgress(err) {
-			return nil, err
+			return p, err
 		}
 	}
 }

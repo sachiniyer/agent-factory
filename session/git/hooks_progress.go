@@ -34,6 +34,10 @@ type hookProgress struct {
 	// The checkout's Git administrative directory carries a random identity
 	// that a later checkout at the same path cannot derive or inherit.
 	WorktreeIdentity *hookWorktreeIdentity `json:"worktree_identity,omitempty"`
+	// ResumeDisabled is positive publication-time evidence that identity
+	// recording failed. Unlike a legacy tokenless journal, restore may safely
+	// treat this list as unresumable instead of installing a permanent retry.
+	ResumeDisabled bool `json:"resume_disabled,omitempty"`
 }
 
 func hookProgressPath(worktree string) (string, error) {
@@ -54,9 +58,17 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 		return nil, err
 	}
 	// Identity recording and owner discovery happen before the home-wide lock.
-	// Both are optional recovery inputs: an unknown answer skips resume or GC,
-	// while publication still starts the operator-requested hooks.
-	checkoutIdentity, _ := boundedRecordHookWorktreeIdentity(run.repoPath, run.worktreePath)
+	// Identity failure must not veto the operator-requested run. Persist its
+	// explicit downgrade so restore observes any survivor but never installs an
+	// identity retry that cannot succeed from this immutable journal.
+	checkoutIdentity, identityErr := boundedRecordHookWorktreeIdentity(run.repoPath, run.worktreePath)
+	resumeDisabled := identityErr != nil || checkoutIdentity == nil
+	if resumeDisabled {
+		if identityErr == nil {
+			identityErr = fmt.Errorf("checkout identity recorder returned no identity")
+		}
+		log.WarningLog.Printf("post-worktree hook journal for %s is not resumable: %v; the current run will continue, but an interrupted suffix cannot be restarted safely", run.worktreePath, identityErr)
+	}
 	ownerSnapshot, ownersErr := boundedHookProgressOwners()
 	var progress *hookProgress
 	var retired []hookProgressCleanup
@@ -73,7 +85,7 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 			log.WarningLog.Printf("cannot prune inactive hook journals: %v", ownersErr)
 		}
 		var publishErr error
-		progress, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity)
+		progress, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity, resumeDisabled)
 		return publishErr
 	})
 	if errors.Is(err, config.ErrLockTimeout) {
@@ -116,7 +128,7 @@ var previousHookProgressReadFile = BoundedReadFile
 
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
-func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity) (*hookProgress, error) {
+func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*hookProgress, error) {
 	dir, err := os.MkdirTemp(filepath.Dir(path), "entries-")
 	if err != nil {
 		return nil, err
@@ -140,7 +152,7 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	p := &hookProgress{
 		lease:     lease,
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
-		Prefix: prefix, Generation: generation, Directory: dir, WorktreeIdentity: worktreeIdentity,
+		Prefix: prefix, Generation: generation, Directory: dir, WorktreeIdentity: worktreeIdentity, ResumeDisabled: resumeDisabled,
 	}
 	if lease != nil {
 		p.leaseMu = &sync.Mutex{}

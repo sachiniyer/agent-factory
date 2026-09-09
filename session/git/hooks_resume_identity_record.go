@@ -38,8 +38,9 @@ func (identity *hookWorktreeIdentity) same(other *hookWorktreeIdentity) bool {
 }
 
 // recordHookWorktreeIdentity establishes the positive resume identity before
-// publication. Its caller treats every error as an identity-free journal so a
-// recovery convenience can never veto the original operator-requested hooks.
+// publication. Its caller persists every error as an explicit non-resumable
+// journal so recovery cannot veto the original operator-requested hooks or
+// install a retry that an immutable identity-free journal can never satisfy.
 func recordHookWorktreeIdentity(repoPath, worktree string) (*hookWorktreeIdentity, error) {
 	dir, err := hookWorktreeIdentityDirectory(repoPath, worktree, true)
 	if err != nil {

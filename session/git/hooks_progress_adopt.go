@@ -25,12 +25,21 @@ func (g *GitWorktree) adoptHookProgress() bool {
 
 func (g *GitWorktree) installHookProgressAdoption(worktreePath, sessionID string, p *hookProgress, err error) bool {
 	if noResumableHookProgress(err) {
+		g.recordUnresumableHookProgress(p, err)
 		return false
 	}
 	done := make(chan struct{})
 	g.hooksDone = done
 	g.startHookProgressAdoption(worktreePath, sessionID, p, err, done)
 	return true
+}
+
+func (g *GitWorktree) recordUnresumableHookProgress(p *hookProgress, err error) {
+	if !errors.Is(err, errHookProgressResumeDisabled) || p == nil {
+		return
+	}
+	g.SetHookScopeUnitPrefix(p.Prefix)
+	log.WarningLog.Printf("post-worktree hook list for %s cannot resume because its checkout identity was unavailable when it started; observing any surviving entry without retrying the suffix", p.Worktree)
 }
 
 func (g *GitWorktree) startHookProgressAdoption(worktreePath, sessionID string, p *hookProgress, err error, done chan struct{}) {
@@ -53,6 +62,8 @@ func (g *GitWorktree) startHookProgressAdoption(worktreePath, sessionID string, 
 			if noResumableHookProgress(err) {
 				// A conclusive result after a transient failure still observes any legacy
 				// survivor, using the same already-published completion channel.
+				g.recordUnresumableHookProgress(p, err)
+				prefixes = g.hookScopePrefixes()
 				watchAdoptedHookRun(ctx, done, worktreePath, prefixes, interval)
 				return
 			}
@@ -130,6 +141,7 @@ func (g *GitWorktree) installRelocationPendingHookAdoption() {
 			if settled {
 				p, err := readPendingHookProgress(worktreePath, sessionID)
 				if noResumableHookProgress(err) {
+					g.recordUnresumableHookProgress(p, err)
 					watchAdoptedHookRun(ctx, done, worktreePath, g.hookScopePrefixes(), interval)
 					return
 				}
