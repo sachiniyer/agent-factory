@@ -1,6 +1,8 @@
 package session
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -17,52 +19,114 @@ const (
 
 // SessionWorktreeInspection is the read-only integrity result for one live,
 // local session workspace. Warning is empty when no dangerous shape was found;
-// Err means the checkout could not be inspected and is not treated as clean.
+// Err means the checkout could not be inspected. CorrelationErr means its local
+// evidence was read, but another lane in the repository was unreadable, so an
+// absent duplicate binding is not evidence that a prior warning cleared.
 type SessionWorktreeInspection struct {
-	InstanceID   string
-	Title        string
-	WorktreePath string
-	Warning      string
-	Evidence     sessiongit.WorktreeIntegrity
-	Err          error
+	InstanceID     string
+	Title          string
+	WorktreePath   string
+	Warning        string
+	Evidence       sessiongit.WorktreeIntegrity
+	Err            error
+	CorrelationErr error
+}
+
+// IncompleteError reports any local or repository-wide observation gap.
+func (i SessionWorktreeInspection) IncompleteError() error {
+	return errors.Join(i.Err, i.CorrelationErr)
+}
+
+// NeedsWorktreeIntegrityInspection distinguishes positively inapplicable rows
+// (archived or non-local) from live local rows that must never disappear merely
+// because their worktree metadata is incomplete.
+func NeedsWorktreeIntegrityInspection(row InstanceData) bool {
+	return !IsArchivedData(row) && row.UsesLocalTmux()
 }
 
 // InspectSessionWorktrees checks each live local worktree independently, then
 // correlates their actual branches to expose a duplicate binding by lane name.
 // Archived rows are intentionally excluded: their retained worktrees are inert.
 func InspectSessionWorktrees(rows []InstanceData) []SessionWorktreeInspection {
+	return InspectSessionWorktreesContext(context.Background(), rows)
+}
+
+// InspectSessionWorktreesContext is InspectSessionWorktrees with caller
+// cancellation for the daemon's shutdown-aware diagnostic loop.
+func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []SessionWorktreeInspection {
 	eligible := make([]InstanceData, 0, len(rows))
 	for _, row := range rows {
-		if IsArchivedData(row) || !row.UsesLocalTmux() || row.Worktree.WorktreePath == "" {
+		if !NeedsWorktreeIntegrityInspection(row) {
 			continue
 		}
 		eligible = append(eligible, row)
 	}
 	inspections := make([]SessionWorktreeInspection, len(eligible))
 	repoKeys := make([]string, len(eligible))
-	workers := min(maxConcurrentWorktreeInspections, len(eligible))
-	jobs := make(chan int)
+	inspectable := make([]int, 0, len(eligible))
+	for index, row := range eligible {
+		inspections[index] = SessionWorktreeInspection{
+			InstanceID: row.ID, Title: row.Title, WorktreePath: row.Worktree.WorktreePath,
+		}
+		if strings.TrimSpace(row.Worktree.RepoPath) != "" {
+			repoKeys[index] = pathutil.ResolveForCompare(row.Worktree.RepoPath)
+		}
+		switch {
+		case strings.TrimSpace(row.Worktree.WorktreePath) == "":
+			inspections[index].Err = fmt.Errorf("live local lane has no worktree path; worktree safety is unknown")
+		case strings.TrimSpace(row.Worktree.RepoPath) == "":
+			inspections[index].Err = fmt.Errorf("live local lane has no repository identity; branch correlation is unknown")
+		default:
+			inspectable = append(inspectable, index)
+		}
+	}
+	workers := min(maxConcurrentWorktreeInspections, len(inspectable))
+	jobs := make(chan int, len(inspectable))
+	for _, index := range inspectable {
+		jobs <- index
+	}
+	close(jobs)
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for index := range jobs {
-				row := eligible[index]
-				evidence, err := sessiongit.InspectWorktreeIntegrity(row.Worktree.WorktreePath)
-				inspections[index] = SessionWorktreeInspection{
-					InstanceID: row.ID, Title: row.Title, WorktreePath: row.Worktree.WorktreePath,
-					Evidence: evidence, Err: err,
-				}
-				repoKeys[index] = pathutil.ResolveForCompare(row.Worktree.RepoPath)
+				evidence, err := sessiongit.InspectWorktreeIntegrityContext(ctx, eligible[index].Worktree.WorktreePath)
+				inspections[index].Evidence = evidence
+				inspections[index].Err = err
 			}
 		}()
 	}
-	for index := range eligible {
-		jobs <- index
-	}
-	close(jobs)
 	wg.Wait()
+
+	// Correlation is a repository-wide observation. One unreadable lane makes an
+	// absent sibling in the readable subset unknown, never clean.
+	incompleteRepos := make(map[string]bool)
+	unknownRepo := false
+	for index, inspection := range inspections {
+		if inspection.Err == nil {
+			continue
+		}
+		if repoKeys[index] == "" {
+			unknownRepo = true
+		} else {
+			incompleteRepos[repoKeys[index]] = true
+		}
+	}
+	for index := range inspections {
+		if inspections[index].Err != nil {
+			continue
+		}
+		var correlationErrors []error
+		if unknownRepo {
+			correlationErrors = append(correlationErrors, fmt.Errorf("cannot safely correlate live branch bindings because another live lane has no repository identity"))
+		}
+		if incompleteRepos[repoKeys[index]] {
+			correlationErrors = append(correlationErrors, fmt.Errorf("cannot safely correlate live branch bindings because another worktree in this repository could not be inspected"))
+		}
+		inspections[index].CorrelationErr = errors.Join(correlationErrors...)
+	}
 
 	groups := make(map[string][]int)
 	for index, inspection := range inspections {
@@ -131,9 +195,37 @@ func shortOID(oid string) string {
 func (i *Instance) ReconcileWorktreeWarning(warning string) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.confirmedWorktreeWarning = warning
 	if i.worktreeWarning == warning {
 		return false
 	}
 	i.worktreeWarning = warning
 	return true
+}
+
+// ReconcileWorktreeInspection applies a complete observation or fails closed
+// around an incomplete one. Only a complete scan may clear the last confirmed
+// danger; an incomplete scan retains it and says why safety was not established.
+func (i *Instance) ReconcileWorktreeInspection(warning string, incomplete error) bool {
+	if incomplete == nil {
+		return i.ReconcileWorktreeWarning(warning)
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.confirmedWorktreeWarning == "" && warning != "" {
+		i.confirmedWorktreeWarning = warning
+	}
+	rendered := incompleteWorktreeWarning(i.confirmedWorktreeWarning, incomplete)
+	if i.worktreeWarning == rendered {
+		return false
+	}
+	i.worktreeWarning = rendered
+	return true
+}
+
+func incompleteWorktreeWarning(confirmed string, incomplete error) string {
+	if confirmed != "" {
+		return fmt.Sprintf("%s The latest worktree safety scan could not be verified (%v), so this confirmed danger remains until a complete scan succeeds.", confirmed, incomplete)
+	}
+	return fmt.Sprintf("DANGER: worktree safety could not be verified: %v. Treat this lane as unsafe until a complete scan succeeds; do not commit, reset, clean, or check out anything.", incomplete)
 }

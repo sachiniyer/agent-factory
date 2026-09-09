@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -405,8 +407,18 @@ func (m *Manager) RefreshStatuses() {
 // session status. It never writes Git state and deliberately preserves the last
 // definite warning when a later probe is unreadable: unknown is not clean.
 func (m *Manager) refreshWorktreeIntegrityWarnings() {
+	m.refreshWorktreeIntegrityWarningsContext(context.Background())
+}
+
+func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	m.worktreeIntegrityMu.Lock()
 	defer m.worktreeIntegrityMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
 
 	m.mu.Lock()
 	instances := make(map[string]*session.Instance, len(m.instances))
@@ -425,31 +437,44 @@ func (m *Manager) refreshWorktreeIntegrityWarnings() {
 	}
 	m.mu.Unlock()
 	rows := make([]session.InstanceData, 0, len(entries))
+	applicable := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		row := entry.instance.ToInstanceData()
 		rows = append(rows, row)
 		instances[row.ID] = entry.instance
 		repos[row.ID] = entry.repoID
+		applicable[row.ID] = session.NeedsWorktreeIntegrityInspection(row)
 	}
 
 	inspector := m.worktreeInspector
 	if inspector == nil {
-		inspector = session.InspectSessionWorktrees
+		inspector = session.InspectSessionWorktreesContext
 	}
-	inspections := inspector(rows)
+	inspections := inspector(ctx, rows)
+	if ctx.Err() != nil {
+		return
+	}
 	seen := make(map[string]bool, len(inspections))
 	for _, inspection := range inspections {
+		instance := instances[inspection.InstanceID]
+		if instance == nil {
+			continue
+		}
 		seen[inspection.InstanceID] = true
-		if inspection.Err == nil {
-			if instance := instances[inspection.InstanceID]; instance != nil {
-				if instance.ReconcileWorktreeWarning(inspection.Warning) {
-					m.publishWorktreeIntegrityChange(repos[inspection.InstanceID], instance)
-				}
-			}
+		if instance.ReconcileWorktreeInspection(inspection.Warning, inspection.IncompleteError()) {
+			m.publishWorktreeIntegrityChange(repos[inspection.InstanceID], instance)
 		}
 	}
 	for id, instance := range instances {
-		if !seen[id] {
+		if seen[id] {
+			continue
+		}
+		if applicable[id] {
+			incomplete := fmt.Errorf("worktree safety inspector returned no result for live local lane %q", instance.Title)
+			if instance.ReconcileWorktreeInspection("", incomplete) {
+				m.publishWorktreeIntegrityChange(repos[id], instance)
+			}
+		} else {
 			if instance.ReconcileWorktreeWarning("") {
 				m.publishWorktreeIntegrityChange(repos[id], instance)
 			}

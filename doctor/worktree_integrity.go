@@ -23,9 +23,8 @@ func checkWorktreeIntegrityRows(report *Report, inspections []session.SessionWor
 	var dangers []string
 	var unreadable []string
 	for _, inspection := range inspections {
-		if inspection.Err != nil {
-			unreadable = append(unreadable, fmt.Sprintf("%q (%v)", inspection.Title, inspection.Err))
-			continue
+		if incomplete := inspection.IncompleteError(); incomplete != nil {
+			unreadable = append(unreadable, fmt.Sprintf("%q (%v)", inspection.Title, incomplete))
 		}
 		if inspection.Warning != "" {
 			dangers = append(dangers, fmt.Sprintf("lane %q: %s", inspection.Title, inspection.Warning))

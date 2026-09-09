@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -18,11 +19,25 @@ func startWorktreeIntegrityLoop(manager *Manager, interval time.Duration, stopCh
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for {
-			manager.refreshWorktreeIntegrityWarnings()
-			timer := time.NewTimer(interval)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelDone := make(chan struct{})
+		go func() {
+			defer close(cancelDone)
 			select {
 			case <-stopCh:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		defer func() {
+			cancel()
+			<-cancelDone
+		}()
+		for {
+			manager.refreshWorktreeIntegrityWarningsContext(ctx)
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
 				timer.Stop()
 				return
 			case <-timer.C:

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -77,4 +78,40 @@ func TestDoctorPassesOrdinaryLargeStagedChange(t *testing.T) {
 	checkWorktreeIntegrityRows(report, inspections)
 	require.Len(t, report.Checks, 1)
 	assert.Equal(t, StatusPass, report.Checks[0].Status, "an ordinary git add -A must not fail doctor")
+}
+
+func TestDoctorReportsMissingHeadReflogAsIncomplete(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	doctorIntegrityGit(t, repo, "config", "core.logAllRefUpdates", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	doctorIntegrityGit(t, repo, "add", "--all")
+	doctorIntegrityGit(t, repo, "commit", "-q", "-m", "base")
+
+	inspections := session.InspectSessionWorktrees([]session.InstanceData{{
+		ID: "no-reflog", Title: "no-reflog", Liveness: session.LiveReady, BackendType: "local",
+		Worktree: session.GitWorktreeData{RepoPath: repo, WorktreePath: repo},
+	}})
+	require.Len(t, inspections, 1)
+	require.Error(t, inspections[0].Err)
+
+	report := &Report{}
+	checkWorktreeIntegrityRows(report, inspections)
+	require.Len(t, report.Checks, 1)
+	assert.Equal(t, StatusWarn, report.Checks[0].Status)
+	assert.Contains(t, report.Checks[0].Detail, "HEAD reflog")
+	assert.Equal(t, []string{"worktree-integrity"}, report.Incomplete)
+}
+
+func TestDoctorReportsIncompleteBranchCorrelation(t *testing.T) {
+	report := &Report{}
+	checkWorktreeIntegrityRows(report, []session.SessionWorktreeInspection{{
+		Title:          "readable",
+		CorrelationErr: errors.New("another lane was unreadable"),
+	}})
+
+	require.Len(t, report.Checks, 1)
+	assert.Equal(t, StatusWarn, report.Checks[0].Status)
+	assert.Contains(t, report.Checks[0].Detail, "another lane was unreadable")
+	assert.Equal(t, []string{"worktree-integrity"}, report.Incomplete)
 }
