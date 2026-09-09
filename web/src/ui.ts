@@ -753,15 +753,43 @@ export class AppShell {
   private readonly viewNav: HTMLElement;
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
   private terminalSelected = false;
+  private newTabPickerPosition: (() => void) | null = null;
+  private phoneSyncQueued = false;
+  private readonly schedulePhoneSync = (): void => {
+    if (this.phoneSyncQueued) return;
+    this.phoneSyncQueued = true;
+    queueMicrotask(() => {
+      this.phoneSyncQueued = false;
+      this.syncPhone();
+    });
+  };
   private readonly syncPhone = (): void => {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement as HTMLElement | null;
+    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
+    const pickerOpen = pickerTrigger?.getAttribute("aria-expanded") === "true";
+    // A shortcut transaction follows the picker through either responsive owner.
+    // The callback decides what to close from the layout that exists on Escape.
+    const responsiveReturn = this.responsiveNewTabCancelReturn;
+    this.responsiveNewTabCancelReturn = null;
+    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
+      (responsiveReturn?.trigger === pickerTrigger ? responsiveReturn.cancel : undefined) : undefined;
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
+    // Reparenting closes the old enclosing disclosure. Reopen through the new
+    // owner and capture its return state before restoring the focused item.
+    if (pickerOpen) {
+      this.openNewTabPicker();
+      // Closing the old owner can synchronously close the picker and clear its
+      // return. Preserve a shortcut transaction across this intentional reparent.
+      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
+        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
+      }
+    }
     if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
@@ -846,6 +874,16 @@ export class AppShell {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
+  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
+  // Escape restores every enclosing disclosure a keyboard open changed before
+  // returning to navigation. Pointer opens have no entry and return to the button.
+  private readonly newTabCancelReturn = new WeakMap<HTMLElement, () => void>();
+  private responsiveNewTabCancelReturn: { trigger: HTMLElement; cancel: () => void } | null = null;
+  private readonly captureNewTabCancelReturn = (): void => {
+    const trigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
+    const cancel = trigger ? this.newTabCancelReturn.get(trigger) : undefined;
+    this.responsiveNewTabCancelReturn = trigger && cancel ? { trigger, cancel } : null;
+  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -972,9 +1010,12 @@ export class AppShell {
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
+    // Share one MediaQueryList so app-controls closes its old layout before
+    // syncPhone reparents and reopens the picker. Separate lists can dispatch
+    // in creation order and close the disclosure after syncPhone reopened it.
     this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
-    ]);
+    ], this.phone, this.captureNewTabCancelReturn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect.addEventListener("click", () => {
       this.appControls.close();
@@ -992,7 +1033,9 @@ export class AppShell {
     );
 
     this.header = header;
-    this.phone.addEventListener("change", this.syncPhone);
+    // Run after every owner-specific media listener. That guarantees the app-controls
+    // disclosure has finished its own close/reflow before an open picker is restored.
+    this.phone.addEventListener("change", this.schedulePhoneSync);
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
@@ -1101,7 +1144,7 @@ export class AppShell {
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
-    this.phone.removeEventListener("change", this.syncPhone);
+    this.phone.removeEventListener("change", this.schedulePhoneSync);
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
@@ -1749,12 +1792,57 @@ export class AppShell {
     return item;
   }
 
+  /** Keyboard twin of the New tab button, including its per-kind availability. */
+  openNewTabPicker(shortcutReturn?: () => void): void {
+    const slot = this.terminalChrome?.newTabSlot;
+    const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
+    if (!trigger || !slot) return;
+    // Capture the whole pre-shortcut state before exposing either nested control.
+    // Responsive recomposition calls this method again without a return callback;
+    // keep the original record until the picker itself closes.
+    if (shortcutReturn) {
+      const preserveAppControls = this.appControls.panel.contains(slot) &&
+        this.appControls.trigger.getAttribute("aria-expanded") === "true";
+      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
+      this.newTabCancelReturn.set(trigger, () => {
+        // Close inside-out before restoring focus outside either disclosure.
+        if (!preserveSessionActions) this.terminalChrome?.menu.close();
+        // Recomposition may have opened app controls after the shortcut began.
+        // Preserve it only when the user had already opened the phone disclosure.
+        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
+        shortcutReturn();
+      });
+    }
+    // Phone composition moves these controls into the app-controls disclosure.
+    // Ask the DOM owner, rather than guessing from viewport width.
+    if (this.appControls.panel.contains(slot)) {
+      if (!this.newTabCancelReturn.has(trigger)) {
+        const wasHidden = this.appControls.panel.hidden;
+        this.newTabCancelReturn.set(trigger, () => {
+          // Recomposition can move the slot home and close its desktop disclosure.
+          if (!this.appControls.panel.contains(slot)) {
+            this.terminalChrome?.menu.open();
+            trigger.focus();
+            return;
+          }
+          if (wasHidden) this.appControls.close(true);
+          else this.appControls.trigger.focus(); // the phone's New tab button is hidden
+        });
+      }
+      this.appControls.open();
+    }
+    this.terminalChrome?.menu.open();
+    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
+    else trigger.click();
+    slot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }
+
   /** The visible New tab button and its kind menu.
    *
    *  The old split control created a terminal from a plus and hid VS Code behind a
    *  separate, unlabeled caret. Even the project's maintainer could not find that
    *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut remains the direct shell fast path.
+   *  editor will appear. The `t` shortcut opens this same picker.
    *
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
@@ -1793,12 +1881,22 @@ export class AppShell {
     };
     const close = (): void => {
       menu.hidden = true;
+      this.newTabCancelReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
       scrollParent?.removeEventListener("scroll", positionMenu);
       scrollParent = null;
       window.removeEventListener("resize", positionMenu);
+      wrap.removeEventListener("focusout", onFocusOut);
+      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
+    };
+    const onFocusOut = (e: FocusEvent): void => {
+      // Keyboard focus can leave the menu without a pointer event. Close before
+      // a sibling action receives Enter/Space so the capture listener cannot eat
+      // the modal's next Escape or navigate hidden menu items.
+      const next = e.relatedTarget as Node | null;
+      if (!next || !wrap.contains(next)) close();
     };
     const onDocMouseDown = (e: MouseEvent): void => {
       // A rerender can detach this control while the menu is open; closing on a
@@ -1809,17 +1907,38 @@ export class AppShell {
       }
     };
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") {
+      if (!wrap.isConnected) {
+        close();
         return;
       }
-      // Swallow it: an open menu owns Escape, so closing it must NOT also let the ESC
-      // reach the agent (a bare Escape now forwards to the PTY as the agent's
-      // interrupt, #2517 — an open menu is the exception).
+      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
+      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      // Tab can leave the picker open. Preserve the focused control's native
+      // activation rather than claiming Enter/Space for a nonexistent item.
+      if ((e.key === "Enter" || e.key === " ") && current < 0) return;
+      // Own these keys before document's rail handler or xterm can act on them.
+      e.preventDefault();
       e.stopPropagation();
-      close();
-      trigger.focus();
+      if (e.key === "Escape") {
+        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
+        close();
+        if (returnAfterCancel) returnAfterCancel();
+        else trigger.focus();
+        return;
+      }
+      if (!items.length) return;
+      if (e.key === "Enter" || e.key === " ") {
+        items[current]?.click();
+        return;
+      }
+      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
+        : e.key === "ArrowDown" ? (current + 1) % items.length
+        : current <= 0 ? items.length - 1 : current - 1;
+      items[next].focus();
     };
     const open = (): void => {
+      this.newTabPickerPosition = positionMenu;
       menu.hidden = false;
       positionMenu();
       trigger.setAttribute("aria-expanded", "true");
@@ -1827,15 +1946,10 @@ export class AppShell {
       scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
       window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
-      // CAPTURE phase, deliberately, so this runs BEFORE xterm's textarea handler:
-      // when the menu is open, Escape must close it here and this listener's own
-      // stopPropagation must keep the ESC from also reaching the agent (#2517: a bare
-      // Escape now forwards to the PTY as the agent's interrupt — an open menu is the
-      // exception that still owns it). It sits beside the app's own capture-phase
-      // document handler (index.ts onKeydown), which no longer stopPropagations
-      // Escape; same-node capture listeners both fire, so this one does the closing
-      // and the stopping.
-      document.addEventListener("keydown", onKeyDown, true);
+      wrap.addEventListener("focusout", onFocusOut);
+      // Window capture precedes the app's document capture listener, so menu
+      // navigation cannot also navigate sessions or send input to the agent.
+      window.addEventListener("keydown", onKeyDown, true);
     };
 
     const item = (label: string, kind: NewTabKind): HTMLElement => {
