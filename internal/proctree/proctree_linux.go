@@ -309,24 +309,46 @@ func readWorkingDir(pid int) (string, bool) {
 	if !strings.HasSuffix(dir, procDeletedSuffix) {
 		return dir, true
 	}
+	sameNamespace, known := sameMountNamespace(pid)
+	if !known || !sameNamespace {
+		// Readlink describes the cwd in the target's mount namespace, while
+		// os.Stat(dir) would resolve it in ours. If those namespaces differ (or
+		// cannot be compared), preserve the literal spelling: a missed match is
+		// safer than rewriting a genuine suffix-named directory.
+		return linuxWorkingDirPath(dir, nil, false), true
+	}
 	cwdInfo, err := os.Stat(procPath)
 	if err != nil {
 		return "", false
 	}
-	return linuxWorkingDirPath(dir, cwdInfo), true
+	return linuxWorkingDirPath(dir, cwdInfo, true), true
 }
 
 const procDeletedSuffix = " (deleted)"
 
+func sameMountNamespace(pid int) (same, known bool) {
+	target, err := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", pid))
+	if err != nil {
+		return false, false
+	}
+	self, err := os.Stat("/proc/self/ns/mnt")
+	if err != nil {
+		return false, false
+	}
+	return os.SameFile(target, self), true
+}
+
 // linuxWorkingDirPath removes procfs's annotation from an unlinked cwd. The
 // suffix is ambiguous because it is also legal in a real filename, so an
 // existing path is preserved only when it has the cwd's device/inode identity.
+// It strips only when the target demonstrably shares our mount namespace,
+// because otherwise this process cannot interpret an absolute path from there.
 // This matters when an unlinked "worktree" coexists with an unrelated real
 // "worktree (deleted)" sibling: existence alone would misidentify the latter as
 // the cwd. When a literal suffix-named directory is itself unlinked, procfs
 // appends a second suffix and this removes only the kernel-owned one.
-func linuxWorkingDirPath(path string, cwdInfo os.FileInfo) string {
-	if !strings.HasSuffix(path, procDeletedSuffix) {
+func linuxWorkingDirPath(path string, cwdInfo os.FileInfo, sameMountNamespace bool) string {
+	if !strings.HasSuffix(path, procDeletedSuffix) || !sameMountNamespace {
 		return path
 	}
 	pathInfo, err := os.Stat(path)
@@ -349,10 +371,5 @@ func openWorkingDir(pid int) (*os.File, string, bool) {
 		_ = directory.Close()
 		return nil, "", false
 	}
-	cwdInfo, err := directory.Stat()
-	if err != nil {
-		_ = directory.Close()
-		return nil, "", false
-	}
-	return directory, linuxWorkingDirPath(path, cwdInfo), true
+	return directory, path, true
 }

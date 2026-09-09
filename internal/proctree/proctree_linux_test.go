@@ -58,6 +58,18 @@ func TestWorkingDirRejectsUnrelatedDeletedSuffixSibling(t *testing.T) {
 		"an unrelated suffix-named sibling must not make procfs's annotation look like the cwd")
 }
 
+func TestLinuxWorkingDirPreservesSuffixOutsideMountNamespace(t *testing.T) {
+	path := "/container/worktree (deleted)"
+	require.Equal(t, path, linuxWorkingDirPath(path, nil, false),
+		"a host-side stat cannot disambiguate a path from another mount namespace")
+}
+
+func TestSameMountNamespaceRecognizesSelf(t *testing.T) {
+	same, known := sameMountNamespace(os.Getpid())
+	require.True(t, known)
+	require.True(t, same)
+}
+
 // TestSnapshotSurvivesUnreadableBootTime is the subset=pid regression: a procfs
 // that serves /proc/<pid>/stat but hides /proc/uptime must still yield a
 // process table.
