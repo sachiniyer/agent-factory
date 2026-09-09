@@ -734,6 +734,18 @@ var (
 // only escalate to SIGKILL if the daemon does not exit within stopDaemonGrace,
 // matching the SIGTERM-first pattern in signalAndWait (#571).
 func StopDaemon() (bool, error) {
+	return stopDaemonUntil(time.Time{})
+}
+
+// stopDaemonUntil applies an optional caller deadline to the graceful-exit
+// poll. When that earlier deadline expires after SIGTERM, it returns without
+// escalating to SIGKILL; a deadline-bounded EnsureDaemon caller will stop the
+// launch path rather than start a replacement while the old process may still
+// be releasing its singleton lock.
+func stopDaemonUntil(deadline time.Time) (bool, error) {
+	if admissionDeadlineExpired(deadline) {
+		return false, daemonAdmissionDeadlineError()
+	}
 	pidDir, err := config.GetConfigDir()
 	if err != nil {
 		return false, fmt.Errorf("failed to get config directory: %w", err)
@@ -790,25 +802,29 @@ func StopDaemon() (bool, error) {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		if errIsProcessGone(err) {
 			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
-			cleanupDaemonRuntimeFiles(pidFile)
+			cleanupDaemonRuntimeFiles(pidFile, deadline)
 			return true, nil
 		}
 		return false, fmt.Errorf("failed to signal daemon process: %w", err)
 	}
 
 	// Poll for graceful exit.
-	gracefulDeadline := time.Now().Add(stopDaemonGrace)
+	gracefulDeadline := admissionBoundedDeadline(deadline, stopDaemonGrace)
 	exited := false
 	for time.Now().Before(gracefulDeadline) {
 		if !pidLooksAlive(pid) {
 			exited = true
 			break
 		}
-		time.Sleep(stopDaemonPoll)
+		if !waitUntilAdmissionDeadline(gracefulDeadline, stopDaemonPoll) {
+			break
+		}
 	}
 
 	if exited {
 		log.InfoLog.Printf("daemon process (PID: %d) exited gracefully after SIGTERM", pid)
+	} else if admissionDeadlineExpired(deadline) {
+		return true, daemonAdmissionDeadlineError()
 	} else {
 		log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
 		if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
@@ -816,7 +832,7 @@ func StopDaemon() (bool, error) {
 		}
 	}
 
-	cleanupDaemonRuntimeFiles(pidFile)
+	cleanupDaemonRuntimeFiles(pidFile, deadline)
 	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
 	return true, nil
 }
@@ -838,8 +854,8 @@ func StopDaemon() (bool, error) {
 // died with the process. The worst false positive (a ping answered by a
 // process still mid-SIGKILL) merely leaves a stale socket behind, which the
 // next spawn's bind path replaces.
-func cleanupDaemonRuntimeFiles(pidFile string) {
-	if err := pingDaemon(); err == nil {
+func cleanupDaemonRuntimeFiles(pidFile string, deadline time.Time) {
+	if err := pingDaemonUntil(deadline); err == nil {
 		log.InfoLog.Printf("a live daemon answered on the control socket after stop; leaving its runtime files in place")
 		return
 	}
