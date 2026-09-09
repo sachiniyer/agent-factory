@@ -72,6 +72,60 @@ func TestInspectSessionWorktreesIgnoresOrdinaryFullyStagedChange(t *testing.T) {
 	assert.Empty(t, got[0].Warning, "an ordinary fully staged commit must never be surfaced as a takeover danger")
 }
 
+func TestInspectSessionWorktreesReportsMissingLocalPath(t *testing.T) {
+	got := InspectSessionWorktrees([]InstanceData{{
+		ID: "missing", Title: "missing", Liveness: LiveReady, BackendType: "local",
+		Worktree: GitWorktreeData{RepoPath: t.TempDir()},
+	}})
+	require.Len(t, got, 1, "a live local lane with no inspectable path is unknown, not inapplicable")
+	require.Error(t, got[0].Err)
+	assert.Contains(t, got[0].Err.Error(), "path")
+}
+
+func TestInspectSessionWorktreesReportsMissingRepositoryIdentity(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	worktreeScanGit(t, repo, "add", "--all")
+	worktreeScanGit(t, repo, "commit", "-q", "-m", "base")
+
+	got := InspectSessionWorktrees([]InstanceData{
+		{ID: "readable", Title: "readable", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: repo}},
+		{ID: "missing-repo", Title: "missing-repo", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{WorktreePath: t.TempDir()}},
+	})
+	require.Len(t, got, 2, "a missing repository identity must not join an invented clean group")
+	require.NoError(t, got[0].Err)
+	require.Error(t, got[0].CorrelationErr, "an ungroupable live lane makes every absent duplicate correlation unknown")
+	require.Error(t, got[1].Err)
+	assert.Contains(t, got[1].Err.Error(), "repository")
+}
+
+func TestInspectSessionWorktreesMarksPartialRepositoryScanUnknown(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	worktreeScanGit(t, repo, "add", "--all")
+	worktreeScanGit(t, repo, "commit", "-q", "-m", "base")
+
+	got := InspectSessionWorktrees([]InstanceData{
+		{ID: "readable", Title: "readable", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: repo}},
+		{ID: "unreadable", Title: "unreadable", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: filepath.Join(repo, "missing")}},
+	})
+	require.Len(t, got, 2)
+	require.NoError(t, got[0].Err, "the checkout itself was readable")
+	require.Error(t, got[0].CorrelationErr, "the repository-wide duplicate observation is incomplete")
+	assert.Contains(t, got[0].CorrelationErr.Error(), "correlate")
+	require.Error(t, got[1].Err)
+}
+
+func TestInspectSessionWorktreesSkipsOnlyPositivelyInapplicableRows(t *testing.T) {
+	got := InspectSessionWorktrees([]InstanceData{
+		{ID: "archived", Title: "archived", Liveness: LiveArchived, BackendType: "local"},
+		{ID: "remote", Title: "remote", Liveness: LiveReady, BackendType: "remote"},
+	})
+	assert.Empty(t, got, "archived worktrees are inert and remote lanes have no local checkout to inspect")
+}
+
 func TestWorktreeWarningIsProjectionOnly(t *testing.T) {
 	data := InstanceData{ID: "warning", Title: "lane", BackendType: "remote", Liveness: LiveReady, WorktreeWarning: "DANGER"}
 	restored, err := FromInstanceData(data)

@@ -1,11 +1,13 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -111,4 +113,56 @@ func TestInspectWorktreeIntegrityIgnoresOrdinaryUnstagedEdits(t *testing.T) {
 	assert.Zero(t, got.StagedPaths)
 	assert.Equal(t, 25, got.UnstagedPaths)
 	assert.False(t, got.HeadMovedWithoutReflog)
+}
+
+func TestInspectWorktreeIntegrityRejectsEmptyHeadReflog(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	integrityGit(t, repo, "config", "core.logAllRefUpdates", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	integrityGit(t, repo, "add", "--all")
+	integrityGit(t, repo, "commit", "-q", "-m", "base")
+
+	_, err := InspectWorktreeIntegrity(repo)
+	require.Error(t, err, "an absent local HEAD reflog is unknown, not evidence of a clean checkout")
+	assert.Contains(t, err.Error(), "HEAD reflog")
+}
+
+func TestParseIntegrityStatusRejectsMissingBranchObservation(t *testing.T) {
+	_, err := parseIntegrityStatus("# branch.oid 0123456789012345678901234567890123456789\n")
+	require.Error(t, err, "missing branch metadata is unknown, not a detached checkout")
+	assert.Contains(t, err.Error(), "branch")
+}
+
+func TestInspectWorktreeIntegrityContextCancelsOutstandingProbe(t *testing.T) {
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "entered")
+	fakeGit := filepath.Join(binDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\n: > %q\nexec sleep 30\n", marker)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := InspectWorktreeIntegrityContext(ctx, t.TempDir())
+		done <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake Git probe never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled Git probe did not return within its WaitDelay bound")
+	}
 }

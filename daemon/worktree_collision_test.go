@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,14 +19,15 @@ import (
 func TestReserveCreateRefusesBranchHeldByNamedLiveLane(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	branch := manager.branchForTitle("incoming")
+	liveHolder := "-live-holder"
 	holderPath := filepath.Join(t.TempDir(), "holder")
 	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, holderPath).CombinedOutput()
 	require.NoError(t, err, string(out))
 
 	worktree, err := sessiongit.NewGitWorktreeFromStorage(
-		repoPath, holderPath, "live-holder", manager.branchForTitle("live-holder"), "", false, true)
+		repoPath, holderPath, liveHolder, manager.branchForTitle(liveHolder), "", false, true)
 	require.NoError(t, err)
-	inst, err := session.NewInstance(session.InstanceOptions{Title: "live-holder", Path: repoPath, Program: "claude"})
+	inst, err := session.NewInstance(session.InstanceOptions{Title: liveHolder, Path: repoPath, Program: "claude"})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetGitWorktreeForTest(worktree)
@@ -50,9 +52,92 @@ func TestReserveCreateRefusesBranchHeldByNamedLiveLane(t *testing.T) {
 	assert.Nil(t, renamed)
 	msg := err.Error()
 	assert.Contains(t, msg, branch)
-	assert.Contains(t, msg, "live-holder", "the refusal must name the other lane, not only its filesystem path")
+	assert.Contains(t, msg, liveHolder, "the refusal must name the other lane, not only its filesystem path")
+	assert.Contains(t, msg, "af sessions handoff --to '<agent>' -- -live-holder",
+		"the actionable command must terminate options before a dash-leading lane title")
 	assert.True(t, strings.Contains(msg, "handoff") || strings.Contains(msg, "archive"),
 		"the refusal must tell the operator how to continue safely: %s", msg)
+}
+
+func TestUnreadableWorktreeScanCannotReportClean(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "unknown", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID, Title: inst.Title, Err: assert.AnError}}
+	}
+
+	manager.refreshWorktreeIntegrityWarnings()
+	assert.Contains(t, inst.WorktreeWarning(), "could not be verified")
+}
+
+func TestMissingWorktreeInspectionCannotClearConfirmedWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "holder", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID, Warning: "DANGER: confirmed duplicate branch"}}
+	}
+	manager.refreshWorktreeIntegrityWarnings()
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection { return nil }
+	manager.refreshWorktreeIntegrityWarnings()
+	assert.Contains(t, inst.WorktreeWarning(), "confirmed duplicate branch")
+	assert.Contains(t, inst.WorktreeWarning(), "could not be verified")
+}
+
+func TestPartialWorktreeScanCannotClearConfirmedWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "holder", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID, Warning: "DANGER: confirmed duplicate branch"}}
+	}
+	manager.refreshWorktreeIntegrityWarnings()
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID, CorrelationErr: assert.AnError}}
+	}
+	manager.refreshWorktreeIntegrityWarnings()
+	assert.Contains(t, inst.WorktreeWarning(), "confirmed duplicate branch")
+	assert.Contains(t, inst.WorktreeWarning(), "could not be verified")
+}
+
+func TestCompleteWorktreeScanCanClearConfirmedWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "holder", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	warning := "DANGER: confirmed duplicate branch"
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID, Warning: warning}}
+	}
+	manager.refreshWorktreeIntegrityWarnings()
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID}}
+	}
+	manager.refreshWorktreeIntegrityWarnings()
+	assert.Empty(t, inst.WorktreeWarning(), "only a complete clean scan may clear the last confirmed warning")
 }
 
 func TestSessionStatusProjectsWorktreeIntegrityWarning(t *testing.T) {
@@ -66,7 +151,7 @@ func TestSessionStatusProjectsWorktreeIntegrityWarning(t *testing.T) {
 	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
 	manager.mu.Unlock()
 
-	manager.worktreeInspector = func([]session.InstanceData) []session.SessionWorktreeInspection {
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
 		return []session.SessionWorktreeInspection{{
 			InstanceID: inst.ID,
 			Title:      inst.Title,
@@ -93,7 +178,7 @@ func TestStalledWorktreeScanDoesNotBlockPollRecovery(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enteredOnce sync.Once
-	manager.worktreeInspector = func([]session.InstanceData) []session.SessionWorktreeInspection {
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
 		enteredOnce.Do(func() { close(entered) })
 		<-release
 		return nil
@@ -129,5 +214,35 @@ func TestStalledWorktreeScanDoesNotBlockPollRecovery(t *testing.T) {
 			t.Fatal("poll loop did not reach Lost-session recovery while the diagnostic worktree scan was outstanding")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestWorktreeIntegrityLoopShutdownDoesNotWaitForScan(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	entered := make(chan struct{})
+	manager.worktreeInspector = func(ctx context.Context, _ []session.InstanceData) []session.SessionWorktreeInspection {
+		close(entered)
+		<-ctx.Done()
+		return nil
+	}
+
+	stopCh := make(chan struct{})
+	var loops sync.WaitGroup
+	startWorktreeIntegrityLoop(manager, time.Hour, stopCh, &loops)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("integrity scan never started")
+	}
+	close(stopCh)
+	done := make(chan struct{})
+	go func() {
+		loops.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("daemon shutdown waited for the outstanding integrity scan")
 	}
 }

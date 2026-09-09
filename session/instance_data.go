@@ -330,6 +330,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		worktreeWarning:          data.WorktreeWarning,
+		confirmedWorktreeWarning: data.WorktreeWarning,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
 		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
