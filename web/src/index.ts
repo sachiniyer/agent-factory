@@ -979,8 +979,10 @@ function openConfirm(
     if (refreshRootConsent(latest)) return;
     if (action === "restore" && pendingRestores.has(target.id)) return;
     const m = modal;
-    const requestGeneration = connectionGeneration;
+    const requestGeneration = action === "restore" ? connectionGeneration : 0;
     const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
+    const captureArchiveSuccess = action === "archive"
+      ? pendingRestores.captureArchiveSuccess(target.id) : null;
     if (action !== "restore" && !mutation) return;
     m.setBusy(true);
     if (mutation) {
@@ -1004,6 +1006,7 @@ function openConfirm(
         return;
       }
       if (mutation) {
+        captureArchiveSuccess?.();
         if (!optimisticSessions.succeed(mutation)) return;
         applySessions(optimisticSessions.project());
         requestResync();

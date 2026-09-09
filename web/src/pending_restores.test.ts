@@ -428,6 +428,38 @@ test("a delayed Snapshot cannot fake a daemon restart for a newer request", asyn
     "an older response cannot supersede the accepted daemon incarnation");
 });
 
+test("a confirmed later archive releases an uncertain restore for the same session", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  await assert.rejects(pending.run("session", async () => {
+    throw new ApiError(0, "lost reply");
+  }, true)!);
+  pending.observe([{ id: "session", restoreEligible: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(),
+  });
+  assert.equal(pending.has("session"), true,
+    "the live projection alone remains uncorrelated with the uncertain attempt");
+
+  const archiveSucceeded = pending.captureArchiveSuccess("session");
+  archiveSucceeded();
+  assert.equal(pending.has("session"), false,
+    "a successful later archive serialized after the restore and supersedes its fence");
+});
+
+test("an older archive response cannot release a newer restore ticket", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  await assert.rejects(pending.run("session", async () => {
+    throw new ApiError(0, "first lost reply");
+  }, true)!);
+  const firstArchiveSucceeded = pending.captureArchiveSuccess("session");
+  pending.observe([], { kind: "snapshot", generation: pending.beginSnapshot() });
+
+  await assert.rejects(pending.run("session", async () => {
+    throw new ApiError(0, "second lost reply");
+  }, true)!);
+  firstArchiveSucceeded();
+  assert.equal(pending.has("session"), true, "success is scoped to the ticket present at issuance");
+});
+
 test("an older-daemon Snapshot cannot release without daemon admission evidence", async () => {
   let now = 1_000;
   const rows = [{ id: "session", restoreEligible: true }];

@@ -53,6 +53,7 @@ for (const operation of ["kill", "archive"]) {
         return { el: { querySelector: () => card }, close: () => { doc.activeElement = doc.body; }, setBusy() {}, setError() {} };
       },
       optimisticSessions: { begin: () => ({}), project: () => [], reject: () => "reverted" },
+      pendingRestores: { has: () => false, captureArchiveSuccess: () => () => {} },
       applySessions: () => {
         projectionCount++;
         currentAction.isConnected = false;

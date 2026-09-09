@@ -72,6 +72,19 @@ export class PendingRestores {
     return this.tickets.has(id);
   }
 
+  /** Capture the current fence so a later archive response cannot clear its successor. */
+  captureArchiveSuccess(id: string): () => void {
+    const ticket = this.tickets.get(id);
+    return () => {
+      if (!ticket || this.tickets.get(id) !== ticket) return;
+      // The user can archive only the restored row projected after this ticket.
+      // A successful ArchiveSession then acquired the same operation lock and
+      // is positive evidence that this restore no longer owns the lifecycle.
+      this.release(id, ticket);
+      this.changed(new Set(this.tickets.keys()));
+    };
+  }
+
   run<T>(
     id: string,
     request: (daemonBootId: string | null) => Promise<T>,
