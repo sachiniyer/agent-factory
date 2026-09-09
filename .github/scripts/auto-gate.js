@@ -864,10 +864,10 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // it does not waive it. What is left is the mechanical part the gate already
   // performs for every other passing PR, so it performs it here too.
   const approval = degradedForUnavailableReviewer ? codex.maintainerApproval : null;
-  // Named once and read twice: here, and again where the manual path assembles its
-  // blockers. #3824 named it nowhere and pushed only into `reasons`, which the
-  // manual path never reads — so on a non-allowed author's PR the item was
-  // computed, dropped, and the decision published green (#3825).
+  // This variable owns the automatic degradation's two outcomes. The manual path
+  // derives its approval requirement directly from reviewerUnavailable below:
+  // another advisory can prevent degradation from activating without making the
+  // missing review safe to waive (#4091 Codex P1).
   const awaitingMaintainerReview = degradedForUnavailableReviewer && !approval;
   if (degradedForUnavailableReviewer) {
     const outage = await require("./codex-outage.js").gateNotice({
@@ -927,6 +927,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     );
   }
   const manualMergeRequired = manualMergeReasons.length > 0;
+  const manualAwaitingMaintainerReview =
+    Boolean(codex.reviewerUnavailable) && !codex.maintainerApproval;
   // The manual path exists so branch protection does not sit red on a PR this
   // gate will never merge itself. It was passing the required check for EVERY
   // blocker, which made "the author is external" waive a live Codex finding and
@@ -944,26 +946,25 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // The missing play-tested label remains a note as a separate policy choice;
   // #4091 is only about enforcing the review-verdict requirement.
   //
-  // An unreviewed usage-limit degradation passes that test, so it blocks here too
-  // (#3825). The maintainer clears it by posting the approval marker on this head,
-  // which needs nothing from the author — the same property that makes a finding
-  // safe to block on. #3824 recorded it in `reasons` alone, and since this list is
-  // what the manual conclusion is computed from, a non-allowed author's decision
-  // went green carrying the verbatim title #3819 opened with.
+  // A fresh reviewer-unavailable response passes that test too (#3825). The
+  // maintainer clears it by posting the approval marker on this head, which needs
+  // nothing from the author — the same property that makes a finding safe to
+  // block on. This is required even when another advisory keeps the automatic
+  // degradation from activating: otherwise the manual decision goes green with
+  // neither a verdict nor an approval (#4091 Codex P1).
   //
   // A proven reviewer-unavailable response suppresses the absent-verdict blocker
   // even when another requirement prevents the degradation from activating yet:
-  // asking again cannot produce the verdict this remedy promises. Once the other
-  // requirement clears, the existing approval-marker degradation is the exit.
-  // The awaiting-review blocker cannot coexist with a finding because degradation
-  // requires every other reason to be absent.
+  // asking again cannot produce the verdict this remedy promises. The approval
+  // blocker replaces it immediately and can coexist with any independent finding
+  // blocker; each item keeps its own maintainer-only exit.
   const manualMergeBlockers = manualMergeRequired
     ? [
         ...(codex.findingBlockers ?? []),
         ...(!codex.reviewerUnavailable && codex.verdictBlocker
           ? [codex.verdictBlocker]
           : []),
-        ...(awaitingMaintainerReview
+        ...(manualAwaitingMaintainerReview
           ? [
               {
                 reason: AWAITING_MAINTAINER_REVIEW_REASON,

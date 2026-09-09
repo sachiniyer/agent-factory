@@ -4808,23 +4808,41 @@ test("a usage-limited reviewer does not waive an unrelated blocker", async () =>
   assert.match(result.reasons.join("\n"), /usage-limited/);
 });
 
-// reviewerUnavailable is the suppression guard, not
-// degradedForUnavailableReviewer: an unrelated advisory can keep degradation
-// false on the current evaluation even though asking the unavailable reviewer
-// again still cannot produce a verdict.
-test("a reviewer-outage response never gets the absent-verdict remedy", async () => {
-  const result = await evaluateGate({
+// reviewerUnavailable is the switch, not degradedForUnavailableReviewer: an
+// unrelated advisory can keep degradation false on the current evaluation even
+// though asking the unavailable reviewer again still cannot produce a verdict.
+// The manual path must replace that impossible remedy with the approval blocker,
+// not drop both and turn green (#4091 Codex P1).
+test("a reviewer outage requires approval even before degradation activates", async () => {
+  const fixture = {
     author: "detail-app",
     files: ["app/termpane.go"],
     issueComments: [codexRateLimit()],
-  });
+  };
+  const result = await evaluateGate(fixture);
 
   assert.equal(result.manualMergeRequired, true);
   assert.equal(result.degradedForUnavailableReviewer, false);
-  assert.deepEqual(result.manualMergeBlockers, []);
+  assert.deepEqual(
+    result.manualMergeBlockers.map((blocker) => blocker.reason),
+    [__test.AWAITING_MAINTAINER_REVIEW_REASON],
+  );
+  assert.match(result.summary, /^BLOCKED:/);
   assert.doesNotMatch(result.summary, /@codex review/);
+  assert.match(result.summary, /post `## Review — approve` on this head/);
   assert.match(result.reasons.join("\n"), /missing the play-tested label/);
   assert.match(result.reasons.join("\n"), /latest Codex response was usage-limited/);
+
+  const approved = await evaluateGate({
+    ...fixture,
+    issueComments: [
+      ...fixture.issueComments,
+      prComment("sachiniyer", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ],
+  });
+  assert.equal(approved.degradedForUnavailableReviewer, false);
+  assert.deepEqual(approved.manualMergeBlockers, []);
+  assert.match(approved.summary, /^PASS:/);
 });
 
 // The TUI path gate asks whether a user could SEE the change, and answered it by

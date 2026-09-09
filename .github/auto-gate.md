@@ -57,10 +57,10 @@ but it has a different exit because another review request cannot produce a
 verdict. It takes the approval marker below. The absent-verdict blocker is
 suppressed whenever the latest exact-head Codex artifact proves the reviewer is
 unavailable, even if another unmet requirement temporarily prevents degradation
-from activating. Once those independent requirements clear, the approval-marker
-route applies. Its awaiting-review blocker cannot appear with a live finding:
-degradation fires only when nothing else is unmet, and a finding is something
-else unmet.
+from activating. The approval blocker replaces it immediately on the manual path,
+so an independent advisory cannot make the required decision green with neither
+a verdict nor an approval. It can appear beside a finding blocker; each item
+keeps its own maintainer-only exit.
 
 A degraded pass plus a **maintainer approval bound to the head** rides the
 ordinary update-and-merge loop instead (#3790): the review requirement is
