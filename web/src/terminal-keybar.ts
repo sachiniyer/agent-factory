@@ -42,10 +42,16 @@ export class StickyModifiers {
     // Xterm encodes hardware arrows before onData. Only decode exact user-arrow
     // sequences: parser replies on the terminal path must remain byte-for-byte
     // and keybar arrows have already been encoded and consumed at their source.
-    const arrow = source === "user" ? /^\x1b(\[|O)([ABCD])$/.exec(text) : null;
-    if (arrow) {
-      const keys: Record<string, string> = { A: "↑", B: "↓", C: "→", D: "←" };
-      return this.key(keys[arrow[2]], arrow[1] === "O");
+    const bareArrow = source === "user" ? /^\x1b(?:\[|O)([ABCD])$/.exec(text) : null;
+    const modifiedArrow = source === "user" ? /^\x1b\[1;(1[0-6]|[2-9])([ABCD])$/.exec(text) : null;
+    if (bareArrow || modifiedArrow) {
+      // Xterm's modifier parameter is 1 + a Shift/Alt/Ctrl/Meta bitmask.
+      // Preserve physical bits and merge only the sticky modifiers we own.
+      const existing = modifiedArrow ? Number(modifiedArrow[1]) - 1 : 0;
+      const combined = existing | (this.values.Alt !== "off" ? 2 : 0) | (this.values.Ctrl !== "off" ? 4 : 0);
+      const direction = modifiedArrow?.[2] ?? bareArrow![1];
+      this.consumeOnce();
+      return combined ? `\x1b[1;${combined + 1}${direction}` : text;
     }
     // Other user controls consume one-shots without rewriting their payload;
     // control-leading terminal replies remain exempt.

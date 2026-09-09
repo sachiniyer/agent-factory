@@ -70,6 +70,23 @@ test("hardware arrow input applies and consumes sticky modifiers", () => {
   }
 });
 
+test("sticky modifiers combine with xterm hardware arrow modifier bits", () => {
+  for (const [modifier, arrow, bytes] of [
+    ["Ctrl", "\x1b[1;2A", "\x1b[1;6A"],
+    ["Alt", "\x1b[1;5D", "\x1b[1;7D"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(modifier, 0);
+    assert.equal(state.input(arrow, "user"), bytes);
+    assert.equal(state.state(modifier), "off");
+  }
+
+  const reply = new StickyModifiers();
+  reply.tap("Ctrl", 0);
+  assert.equal(reply.input("\x1b[1;2A", "terminal"), "\x1b[1;2A");
+  assert.equal(reply.state("Ctrl"), "once");
+});
+
 test("pointerdown prevents focus transfer before acting", () => {
   let prevented = false;
   keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));

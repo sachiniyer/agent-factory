@@ -132,13 +132,14 @@ Safari-order boundary follows xterm in treating Shift, Ctrl, Alt, and keycode
 229 as continued IME input. The textarea-diff 229 Backspace sends DEL, consumes
 the armed one-shot as genuine user input, and leaves its following `a` plain.
 Stale recovery also covers a null-data `beforeinput` whose paired `input` owns
-the character. A connected hardware Ctrl+Up is encoded as `ESC[1;5A`, consumes
-the one-shot, and leaves the following `a` plain. The probe retains the keybar
-selection/scrollback and blur/refocus coverage.
+the character. A connected hardware Ctrl+Up is encoded as `ESC[1;5A`; sticky
+Ctrl plus physical Shift+Up preserves both modifier bitmasks as `ESC[1;6A`.
+Each consumes the one-shot and leaves the following `a` plain. The probe retains
+the keybar selection/scrollback and blur/refocus coverage.
 
 [Unit red](composition-unit-red.txt) shows the duplicate write before the fix;
 [unit green](composition-unit-green.txt) records the original lifecycle proof.
-Final validation has 879 passing web unit tests and the refreshed full container
+Final validation has 880 passing web unit tests and the refreshed full container
 web selftest passes [238/238](full-selftest-green.txt), including the null-data
 and empty-payload IME probes, split stale-input recovery, hardware-arrow
 modifiers, soft-control consumption, stale-input deletion, keybar effects, and

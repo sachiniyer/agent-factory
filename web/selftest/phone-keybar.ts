@@ -152,6 +152,13 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
   await expect(ctrl).toHaveAttribute("data-state", "off");
   await page.keyboard.insertText("a");
   await expect.poll(stream).toBe(before + "\x1b[1;5Aa");
+  before = stream();
+  await ctrl.click();
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect.poll(stream).toBe(before + "\x1b[1;6A");
+  await expect(ctrl).toHaveAttribute("data-state", "off");
+  await page.keyboard.insertText("a");
+  await expect.poll(stream).toBe(before + "\x1b[1;6Aa");
   // Navigation between rows is not a keypress and must retain the one-shot.
   for (const [modifier, arrow, bytes] of [
     ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],
