@@ -24,9 +24,9 @@ func TestHTTPRequestDrainJoinsDispatchedHandlerAndRefusesLaterRequest(t *testing
 	}()
 	<-entered
 
+	drain.closeAdmission()
 	drained := make(chan struct{})
 	go func() {
-		drain.closeAdmission()
 		drain.wait()
 		close(drained)
 	}()
