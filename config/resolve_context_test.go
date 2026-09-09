@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,4 +54,29 @@ func TestResolveConfigForRepoInspectionWithGlobalContextBoundsFileLoads(t *testi
 	require.NoError(t, <-writerDone)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, elapsed, 8*time.Second, "a stalled config read must return on the inspection deadline rather than wait for the filesystem")
+}
+
+func TestResolveConfigForRepoInspectionRequiresCompletePersonalLookup(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	_, err := SetProjectConfigValue(project.ID, "program_overrides.codex", "/personal/codex")
+	require.NoError(t, err)
+	repo, err := RepoFromPath(repoRoot)
+	require.NoError(t, err)
+	global := DefaultConfig()
+	global.ProgramOverrides["codex"] = "/global/codex"
+	resolved, err := ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	require.NoError(t, err)
+	require.Equal(t, "/personal/codex", ResolveProgram(&resolved.Config, "codex"))
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$3\" = rev-parse ] && [ \"$4\" = --git-common-dir ] && [ \"$#\" -eq 4 ]; then exit 7; fi\nexec %q \"$@\"\n", realGit)
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err = ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	require.Error(t, err, "command inspection must not cache a lower-precedence command when personal lookup fails")
+	require.Contains(t, err.Error(), "exit status 7")
 }

@@ -385,6 +385,9 @@ func rootSessionDisplayPath(inst session.InstanceData) string {
 }
 
 func rootSessionIsInert(inst session.InstanceData) bool {
+	if inst.UserKilled {
+		return true
+	}
 	switch session.EffectiveLiveness(inst) {
 	case session.LiveLost, session.LiveDead, session.LiveArchived:
 		return true

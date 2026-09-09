@@ -20,7 +20,8 @@ import (
 func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, workspace string, st *rootEnsureState, profile config.RootAgent, inst *session.Instance) {
 	evidence := inst.ObserveRuntimeProgram()
 	runningProgram := evidence.Program()
-	if strings.TrimSpace(runningProgram) == "" || inst.GetInFlightOp() != session.OpNone || inst.StartupStateUnknown() {
+	if strings.TrimSpace(runningProgram) == "" || inst.GetInFlightOp() != session.OpNone ||
+		inst.StartupStateUnknown() || inst.UserKilled() {
 		return
 	}
 	repoID := repo.ID

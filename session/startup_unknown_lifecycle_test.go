@@ -76,6 +76,25 @@ func TestStartupUnknownInvalidatesRuntimeProgramEvidence(t *testing.T) {
 	}
 }
 
+func TestUserKilledInvalidatesRuntimeProgramEvidence(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{
+		ID: "killed-evidence-id", TaskID: "task-killed-evidence", Title: "killed", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.setRuntimeProgram("claude")
+	evidence := inst.ObserveRuntimeProgram()
+	if !inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("fresh runtime evidence is not current")
+	}
+
+	inst.MarkUserKilled()
+	if inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("user-killed transition left prior runtime evidence current")
+	}
+}
+
 // TestTeardownInProgressOffersNoLifecycleActions is the #2500 regression.
 //
 // OpKilling and OpArchiving are teardown FENCES: while one is in flight, the

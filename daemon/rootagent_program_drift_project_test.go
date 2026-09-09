@@ -87,3 +87,41 @@ func TestAdoptedRootProgramDriftSkipsStartupUnknownRuntime(t *testing.T) {
 		t.Fatalf("startup-unknown runtime was compared and latched: latched=%v warnings=%s", latched, warnings.String())
 	}
 }
+
+func TestAdoptedRootProgramDriftSkipsUserKilledRuntime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, warnings := newManagerCapturingWarnings(t,
+		rootTestConfig(repoPath, config.RootAgentConfig{Program: "/opt/codex"}))
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := findRootInstance(t, manager, repoPath)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	root.MarkUserKilled()
+	profile := config.RootAgent{Enabled: true, Program: "/opt/codex"}
+	st := &rootEnsureState{
+		programDriftResolved:          true,
+		programDriftResolvedRepoID:    repo.ID,
+		programDriftResolvedWorkspace: repo.WorkspacePath(),
+		programDriftResolvedProfile:   profile,
+		programDriftConfiguredProgram: "/opt/codex",
+	}
+
+	manager.checkAdoptedRootProgramDrift(repo,
+		daemonInstanceKey(repo.ID, session.RootSessionTitle), repo.WorkspacePath(), st, profile, root)
+
+	manager.mu.Lock()
+	latched := st.programDriftLogged || manager.rootProgramDriftLogged[repo.ID]
+	manager.mu.Unlock()
+	if latched || strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("user-killed runtime was compared and latched: latched=%v warnings=%s", latched, warnings.String())
+	}
+}

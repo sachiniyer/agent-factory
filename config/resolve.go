@@ -115,10 +115,11 @@ func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) 
 	return resolveConfigForRepo(repo, suppressInRepoLoadObservation)
 }
 
-// ResolveConfigForRepoInspectionWithGlobal is the fully read-only inspection
-// path for callers that already loaded the global layer without migrations or
-// materialization. Passing that snapshot prevents a nested resolve from
-// re-entering LoadConfig while preserving the same repo/personal precedence.
+// ResolveConfigForRepoInspectionWithGlobal is the fully read-only, complete
+// inspection path for callers that already loaded the global layer without
+// migrations or materialization. Passing that snapshot prevents a nested
+// resolve from re-entering LoadConfig while preserving the same repo/personal
+// precedence. An unreadable personal lookup is unknown, never an empty layer.
 func ResolveConfigForRepoInspectionWithGlobal(repo *RepoContext, global *Config) (*ResolvedConfig, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("repo context is required")
@@ -132,7 +133,7 @@ func ResolveConfigForRepoInspectionWithGlobal(repo *RepoContext, global *Config)
 	}
 	resolved, err := resolveConfigRootsWithOptions(
 		repo.IdentityPath(), repo.WorkspacePath(), suppressInRepoLoadObservation,
-		resolveOptions{global: prepared},
+		resolveOptions{global: prepared, requirePersonalPolicy: true},
 	)
 	if err != nil {
 		return nil, err

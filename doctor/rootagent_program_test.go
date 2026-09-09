@@ -324,6 +324,26 @@ func TestRootAgentStartupUnknownIsIncomplete(t *testing.T) {
 	require.Contains(t, report.Incomplete, "root agent program")
 }
 
+func TestRootAgentUserKilledTombstoneIsNotCompared(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	body := "schema_version = 1\n[root_agents]\n\"" + repoPath + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	opts.sessionInventory = func() ([]session.InstanceData, error) {
+		instances, inventoryErr := rootAgentInventory(repoPath, "claude")()
+		instances[0].UserKilled = true
+		return instances, inventoryErr
+	}
+
+	report := runRootAgentProgramCheck(t, opts, cfg)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusPass, check.Status)
+	require.Contains(t, check.Detail, "no enabled live root sessions to compare")
+}
+
 func TestRootAgentDisabledProfileWithLiveSessionWarns(t *testing.T) {
 	opts := testOptions(t, false)
 	repoPath := filepath.Join(t.TempDir(), "repo")

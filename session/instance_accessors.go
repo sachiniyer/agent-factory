@@ -243,6 +243,10 @@ func (i *Instance) MarkUserKilled() {
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
 	if !i.userKilled {
+		// RuntimeProgram stops being proof of a current runtime once teardown is
+		// committed. Invalidate lock-free drift observers before publishing the
+		// tombstone, including when OpNone means noteStateChangeLocked is a no-op.
+		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
 		i.touchLocked()
 	}
@@ -264,6 +268,7 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	lv, op, resetAt := i.lifecycleStateLocked()
 	changed := false
 	if userKilled && !i.userKilled {
+		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
 		i.touchLocked()
 		if i.inFlightOp != OpKilling {
