@@ -9,6 +9,11 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
+type committedLimitRetryError struct{ message string }
+
+func (e committedLimitRetryError) Error() string         { return e.message }
+func (committedLimitRetryError) MutationCommitted() bool { return true }
+
 // TestSessionsRetryLimit_UsesSharedDaemonPath pins the surface-parity fix: the
 // CLI must hand the selected session to the existing ResumeFromLimit daemon
 // action, scoped exactly like the other title-addressed session mutations. The
@@ -60,5 +65,27 @@ func TestSessionsRetryLimit_SurfacesDaemonRejection(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not blocked on a usage limit") {
 		t.Fatalf("error = %v, want the daemon's rejection message", err)
+	}
+}
+
+func TestSessionsRetryLimit_PrintsCommittedSettlementWarningAsSuccess(t *testing.T) {
+	setupRepoForCmd(t)
+
+	prev := resumeFromLimitViaDaemon
+	resumeFromLimitViaDaemon = func(daemon.ResumeFromLimitRequest) error {
+		return committedLimitRetryError{message: "mission delivered; settlement pending"}
+	}
+	t.Cleanup(func() { resumeFromLimitViaDaemon = prev })
+
+	out, err := runCmdCaptureStdout(t, sessionsRetryLimitCmd, []string{"worker"})
+	if err != nil {
+		t.Fatalf("committed retry returned error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("output is not JSON (%q): %v", out, err)
+	}
+	if payload["ok"] != true || payload["warning"] != "mission delivered; settlement pending" {
+		t.Fatalf("JSON output = %v, want ok=true with committed warning", payload)
 	}
 }

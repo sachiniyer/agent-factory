@@ -343,6 +343,7 @@ func TestSaveInstances_KeepsPendingHandoffAlongsideStartedSibling(t *testing.T) 
 		Title: "pending-handoff", Path: repoPath, started: true,
 		liveness: LiveRunning, inFlightOp: OpReplacing,
 		pendingHandoffMission: "continue the exact inherited work",
+		handoffDeliveryStatus: PromptCouldNotConfirm,
 	}
 
 	storage, err := NewStorage(config.LoadState(), "")
@@ -366,6 +367,9 @@ func TestSaveInstances_KeepsPendingHandoffAlongsideStartedSibling(t *testing.T) 
 		if row.Title == pending.Title {
 			if row.PendingHandoffMission != pending.pendingHandoffMission {
 				t.Fatalf("pending handoff mission = %q, want %q", row.PendingHandoffMission, pending.pendingHandoffMission)
+			}
+			if row.HandoffDeliveryStatus != pending.handoffDeliveryStatus {
+				t.Fatalf("pending handoff delivery = %q, want %q", row.HandoffDeliveryStatus, pending.handoffDeliveryStatus)
 			}
 			return
 		}
