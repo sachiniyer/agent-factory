@@ -45,6 +45,7 @@ func TestScrubLogRecognizesPostWorktreeShellCommand(t *testing.T) {
 	command := "cd " + siblingLeakRepo + "${SUBDIR:+/$SUBDIR}"
 	lines := []string{
 		"running post-worktree hook in /tmp/worktree (output: /tmp/hook.log): " + command,
+		"running post-worktree hook in /tmp/worktree (output: /tmp/hook.log): " + strconv.Quote(command),
 		"post-worktree hook " + strconv.Quote(command) + " failed to start: exit status 1",
 	}
 	for _, line := range lines {
