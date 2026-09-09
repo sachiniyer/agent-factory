@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // limitRacePollBackend is a FakeBackend that reproduces the #2135 interleaving
@@ -221,5 +223,119 @@ func TestRefreshStatuses_OrdinaryPollUnaffectedByEpochGuard(t *testing.T) {
 	}
 	if got := persistedLiveness(t, repoID, "idle"); got != session.LiveReady {
 		t.Fatalf("persisted liveness = %v, want LiveReady", got)
+	}
+}
+
+// TestPersistPollChange_HandoffSwapFailureDuringWriteWindowIsNotPersistedAsSettled
+// is the regression for the poll/handoff persist race. persistPollChangeWithIdleEvidence
+// checked InFlightOp only BEFORE taking repoStartLock and never re-checked after the
+// under-lock re-read, so a handoff that started between that lock-free gate and the
+// re-read could have its mid-OpReplacing snapshot persisted: RecordHandoffSwap had
+// already rewritten Program to the incoming agent, the mission marker was not set
+// yet, and ForStorage strips the transient op axis — storing the incoming agent as
+// SETTLED with no delivery obligation. HandoffSession holds the per-(repo,title) and
+// op locks (neither is repoStartLock), so the poll could re-read that snapshot under
+// repoStartLock while the handoff was mid-transaction. The swapErr rollback reverts
+// memory only and persists nothing, so an unclean exit before the next durable write
+// would reload the incoming agent with no mission. The fix re-checks InFlightOp
+// under the lock and cedes to the op's executor.
+//
+// Deterministic via the testHookPollBeforePersistLock seam: the handoff is started
+// in a goroutine that parks inside SwapAgent (blockingNthSwapBackend) AFTER
+// RecordHandoffSwap rewrote Program, and the poll re-reads while it is parked. No
+// sleeps: channels order the poll goroutine against the handoff goroutine, and the
+// poll holds repoStartLock while the handoff holds lockTarget + opLockFor, so the
+// re-read provably lands inside the mid-OpReplacing window.
+func TestPersistPollChange_HandoffSwapFailureDuringWriteWindowIsNotPersistedAsSettled(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend(), swapErr: errors.New("account-scoped session refuses handoff")}
+	backend := &blockingNthSwapBackend{
+		handoffBackend: base,
+		blockAt:        1,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "handoff-poll-race", backend)
+
+	// The poll's own decision, made from current state: a liveness transition so
+	// durableChanged is true and the lock-free gate lets persistPollChange through
+	// to the hook. Project the outgoing (claude) row onto disk first so the
+	// assertion can tell "the poll wrote the incoming agent" apart from "nothing
+	// was seeded".
+	before := inst.GetLiveness()
+	beforeReset, _ := inst.LimitResetAt()
+	inst.SetLimitReached(time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC))
+	manager.persistInstance(repoID, inst)
+	if seed := recordFor(t, repoID, "handoff-poll-race"); seed == nil || seed.Program != tmux.ProgramClaude {
+		t.Fatalf("seed record = %+v, want the outgoing claude row the poll would overwrite", seed)
+	}
+
+	// The handoff lands in the poll's pre-lock window. It runs in a goroutine and
+	// parks inside SwapAgent AFTER RecordHandoffSwap rewrote Program to gemini, so
+	// the poll's under-lock re-read observes a mid-OpReplacing snapshot. The poll
+	// takes repoStartLock; the handoff holds lockTarget + opLockFor — different
+	// locks — so the poll can re-read while the handoff is parked.
+	prev := testHookPollBeforePersistLock
+	t.Cleanup(func() { testHookPollBeforePersistLock = prev })
+	handoffDone := make(chan error, 1)
+	once := false
+	testHookPollBeforePersistLock = func() {
+		if once {
+			return
+		}
+		once = true
+		go func() {
+			_, err := manager.HandoffSession(HandoffSessionRequest{
+				Title: "handoff-poll-race", RepoID: repoID, To: tmux.ProgramGemini,
+			})
+			handoffDone <- err
+		}()
+		<-backend.entered
+	}
+
+	manager.persistPollChange(repoID, inst, before, beforeReset, false)
+
+	// The handoff is still parked inside SwapAgent: the poll has just re-read the
+	// mid-OpReplacing snapshot. Prove the race window was actually reached, so the
+	// assertion below is not exercising a no-op.
+	if got := inst.AgentProgram(); got != tmux.ProgramGemini {
+		t.Fatalf("in-memory Program during the write window = %q, want %q: the handoff must have rewritten Program before the poll re-read (otherwise this test exercises nothing)", got, tmux.ProgramGemini)
+	}
+	if got := inst.GetInFlightOp(); got != session.OpReplacing {
+		t.Fatalf("in-memory InFlightOp during the write window = %v, want OpReplacing: the handoff's fence must be up when the poll re-reads", got)
+	}
+	// The fix: the poll must not persist a mid-transaction row. The on-disk record
+	// stays the outgoing claude row, NOT the incoming gemini snapshot ForStorage
+	// would have flattened to a settled swap with no mission.
+	mid := recordFor(t, repoID, "handoff-poll-race")
+	if mid == nil {
+		t.Fatal("no record on disk: the seed row vanished")
+	}
+	if mid.Program != tmux.ProgramClaude {
+		t.Fatalf("the poll persisted a mid-OpReplacing snapshot as settled: on-disk Program = %q, want %q. "+
+			"ForStorage strips InFlightOp to OpNone, so this row names the incoming agent with no delivery "+
+			"obligation — a state the session never legitimately reached, and the swapErr rollback persists "+
+			"nothing to repair it",
+			mid.Program, tmux.ProgramClaude)
+	}
+	if mid.PendingHandoffMission != "" {
+		t.Fatalf("on-disk PendingHandoffMission = %q, want empty: a mid-OpReplacing snapshot carries no mission yet", mid.PendingHandoffMission)
+	}
+
+	// Release the handoff; its SwapAgent returns the injected swapErr, so the
+	// rollback reverts Program in memory and lowers the fence WITHOUT persisting.
+	close(backend.release)
+	if err := <-handoffDone; err == nil {
+		t.Fatal("HandoffSession succeeded; want the injected swapErr so the rollback path is exercised")
+	}
+	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
+		t.Fatalf("in-memory Program after rollback = %q, want %q: RevertHandoff must restore the outgoing agent", got, tmux.ProgramClaude)
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("in-memory InFlightOp after rollback = %v, want OpNone: AbortHandoff must lower the fence", got)
+	}
+	// Disk and memory agree on the outgoing agent: the corruption window is closed.
+	if final := recordFor(t, repoID, "handoff-poll-race"); final == nil || final.Program != tmux.ProgramClaude {
+		t.Fatalf("on-disk Program after rollback = %+v, want %q: the disk must not diverge from the reverted in-memory agent", final, tmux.ProgramClaude)
 	}
 }
