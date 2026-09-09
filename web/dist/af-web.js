@@ -11974,10 +11974,19 @@ function rowTitle(s) {
   if (s.model_change) {
     title = "[model changed] " + title;
   }
+  if (worktreeWarningText(s) !== "") {
+    title = "[worktree unsafe] " + title;
+  }
   return title;
 }
 function archiveWarningText(s) {
   return s.archive_warning?.trim() ?? "";
+}
+function worktreeWarningText(s) {
+  return s.worktree_warning?.trim() ?? "";
+}
+function sessionWarningText(s) {
+  return [worktreeWarningText(s), archiveWarningText(s)].filter(Boolean).join("\n");
 }
 function rootRecreateNote(s) {
   switch (s.root_recreate_context) {
@@ -16666,7 +16675,7 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = chrome.head;
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
@@ -17068,7 +17077,7 @@ var AppShell = class {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -17291,7 +17300,7 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   row.setAttribute("aria-selected", selected ? "true" : "false");
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
-  const archiveWarning = archiveWarningText(s);
+  const archiveWarning = sessionWarningText(s);
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;

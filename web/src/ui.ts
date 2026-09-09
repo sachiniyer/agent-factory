@@ -37,7 +37,7 @@ import {
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
-  archiveWarningText,
+  sessionWarningText,
   canHandoff,
   compareSessionsForRail,
   isArchived,
@@ -2180,7 +2180,7 @@ export class AppShell {
     this.attachTabTouchDrag(tabBar);
 
     const head = chrome.head;
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
@@ -2718,7 +2718,7 @@ export class AppShell {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -3170,7 +3170,7 @@ function sessionRow(
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
-  const archiveWarning = archiveWarningText(s);
+  const archiveWarning = sessionWarningText(s);
   row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;

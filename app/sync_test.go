@@ -58,6 +58,20 @@ func TestSnapshotReconcilesArchiveWarningWithoutLivenessChange(t *testing.T) {
 	require.Empty(t, inst.ArchiveWarning())
 }
 
+func TestSnapshotReconcilesWorktreeWarningWithoutLivenessChange(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "worktree-warning")
+	data := inst.ToInstanceData()
+	data.WorktreeWarning = "DANGER: HEAD moved without a worktree-local reflog entry; do not commit"
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, data.WorktreeWarning, inst.WorktreeWarning())
+
+	data.WorktreeWarning = ""
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Empty(t, inst.WorktreeWarning())
+}
+
 func TestSnapshotReconcilesIdleEvidenceWithoutLivenessChange(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "idle-evidence")

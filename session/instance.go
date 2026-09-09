@@ -125,6 +125,8 @@ type Instance struct {
 	// archiveWarning retains a daemon snapshot's projection-only notice so thin
 	// client renderers do not drop incomplete-archive state during reconstruction.
 	archiveWarning string
+	// worktreeWarning retains the daemon's read-only #4092 safety projection.
+	worktreeWarning string
 	// Durable delivery and pane-churn evidence; never a semantic claim (#3168).
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus

@@ -3,6 +3,7 @@ package daemon
 import (
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -41,6 +42,10 @@ var nowFunc = time.Now
 //
 // A var so tests can shrink it; production never reassigns.
 var taskRunPollBackstop = 30 * time.Second
+
+// worktreeIntegrityInterval keeps the two read-only Git probes per live local
+// lane out of the ordinary sub-second status cadence.
+var worktreeIntegrityInterval = 10 * time.Second
 
 const (
 	statusPollIDPrefix    = "id:"
@@ -388,6 +393,7 @@ func (m *Manager) RefreshStatuses() {
 	// already has the instance map (#2595).
 	m.sweepDeferredTaskLifecycleLocked()
 	m.mu.Unlock()
+	m.refreshWorktreeIntegrityWarnings()
 
 	// Drop debounce state for sessions that are gone or replaced, colocated with
 	// the pass that creates it (#1794), and backstop timers for sessions no longer
@@ -397,6 +403,79 @@ func (m *Manager) RefreshStatuses() {
 
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
+	}
+}
+
+// refreshWorktreeIntegrityWarnings projects dangerous checkout evidence into
+// session status. It never writes Git state and deliberately preserves the last
+// definite warning when a later probe is unreadable: unknown is not clean.
+func (m *Manager) refreshWorktreeIntegrityWarnings() {
+	m.worktreeIntegrityMu.Lock()
+	defer m.worktreeIntegrityMu.Unlock()
+	if now := nowFunc(); now.Before(m.worktreeIntegrityNext) {
+		return
+	} else {
+		m.worktreeIntegrityNext = now.Add(worktreeIntegrityInterval)
+	}
+
+	m.mu.Lock()
+	instances := make(map[string]*session.Instance, len(m.instances))
+	repos := make(map[string]string, len(m.instances))
+	type worktreeEntry struct {
+		repoID   string
+		instance *session.Instance
+	}
+	entries := make([]worktreeEntry, 0, len(m.instances))
+	for key, instance := range m.instances {
+		if instance == nil {
+			continue
+		}
+		repoID, _ := splitDaemonInstanceKey(key)
+		entries = append(entries, worktreeEntry{repoID: repoID, instance: instance})
+	}
+	m.mu.Unlock()
+	rows := make([]session.InstanceData, 0, len(entries))
+	for _, entry := range entries {
+		row := entry.instance.ToInstanceData()
+		rows = append(rows, row)
+		instances[row.ID] = entry.instance
+		repos[row.ID] = entry.repoID
+	}
+
+	inspector := m.worktreeInspector
+	if inspector == nil {
+		inspector = session.InspectSessionWorktrees
+	}
+	inspections := inspector(rows)
+	seen := make(map[string]bool, len(inspections))
+	for _, inspection := range inspections {
+		seen[inspection.InstanceID] = true
+		if inspection.Err == nil {
+			if instance := instances[inspection.InstanceID]; instance != nil {
+				if instance.ReconcileWorktreeWarning(inspection.Warning) {
+					m.publishWorktreeIntegrityChange(repos[inspection.InstanceID], instance)
+				}
+			}
+		}
+	}
+	for id, instance := range instances {
+		if !seen[id] {
+			if instance.ReconcileWorktreeWarning("") {
+				m.publishWorktreeIntegrityChange(repos[id], instance)
+			}
+		}
+	}
+}
+
+func (m *Manager) publishWorktreeIntegrityChange(repoID string, instance *session.Instance) {
+	lock := m.startLockForRepo(repoID)
+	lock.Lock()
+	defer lock.Unlock()
+	m.mu.Lock()
+	owned := m.instances[daemonInstanceKey(repoID, instance.Title)] == instance
+	m.mu.Unlock()
+	if owned {
+		m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 	}
 }
 
