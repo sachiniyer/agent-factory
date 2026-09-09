@@ -15,6 +15,8 @@ import (
 // timed-out test can drain the flight before restoring the seam without racing.
 var hookProgressOpenLeaseFile = os.OpenFile
 
+var hookProgressCloseLeaseFile = func(file *os.File) error { return file.Close() }
+
 type hookProgressLeaseOpenFlight struct {
 	done     chan struct{}
 	file     *os.File
@@ -54,11 +56,10 @@ func boundedOpenHookProgressLease(path string, flags int, mode os.FileMode) (*os
 	hookProgressLeaseOpenFlights.Unlock()
 	go func() {
 		file, err := openFile(path, flags, mode)
+		var abandoned *os.File
 		hookProgressLeaseOpenFlights.Lock()
 		if flight.timedOut {
-			if file != nil {
-				_ = file.Close()
-			}
+			abandoned = file
 		} else {
 			flight.file, flight.err = file, err
 		}
@@ -67,6 +68,9 @@ func boundedOpenHookProgressLease(path string, flags int, mode os.FileMode) (*os
 		}
 		close(flight.done)
 		hookProgressLeaseOpenFlights.Unlock()
+		if abandoned != nil {
+			closeHookProgressFile(abandoned)
+		}
 	}()
 	return waitForHookProgressLeaseOpen(path, flight)
 }
@@ -101,7 +105,7 @@ func newHookProgressLease(dir string) (*os.File, error) {
 		return nil, err
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = file.Close()
+		closeHookProgressFile(file)
 		return nil, err
 	}
 	return file, nil
@@ -129,13 +133,20 @@ func withInactiveHookProgressLease(dir string, remove func() error) (bool, error
 	if err != nil {
 		return false, err
 	}
-	defer file.Close()
+	locked := false
+	defer func() {
+		if locked {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		}
+		closeHookProgressFile(file)
+	}()
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return false, nil
 		}
 		return false, err
 	}
+	locked = true
 	current, err := boundedHookProgressLeaseStat(file, leasePath)
 	if err != nil {
 		return false, err
@@ -148,6 +159,25 @@ func withInactiveHookProgressLease(dir string, remove func() error) (bool, error
 		return false, fmt.Errorf("hook runner lease was replaced: %s", leasePath)
 	}
 	return true, remove()
+}
+
+// Close may itself wait on remote storage. It never runs while a progress lock
+// or bounded-flight mutex is held; an explicit unlock first releases any lease
+// whose semantic lifetime has ended.
+func closeHookProgressFile(file *os.File) {
+	if file == nil {
+		return
+	}
+	closeFile := hookProgressCloseLeaseFile
+	go func() { _ = closeFile(file) }()
+}
+
+func unlockAndCloseHookProgressFile(file *os.File) {
+	if file == nil {
+		return
+	}
+	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	closeHookProgressFile(file)
 }
 
 func boundedHookProgressLeaseStat(file *os.File, path string) (os.FileInfo, error) {

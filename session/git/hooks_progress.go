@@ -74,6 +74,7 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	var candidates []keptProgress
 	var cleanups []hookProgressCleanup
 	var progress *hookProgress
+	var rollback *hookProgressPublicationRollback
 	err = withHookProgressLock(filepath.Dir(path), func(dir string, identity os.FileInfo) error {
 		if ownersErr == nil && dir != ownerSnapshot.hookDirectory {
 			ownersErr = fmt.Errorf("hook owner snapshot belongs to %s, not locked directory %s", ownerSnapshot.hookDirectory, dir)
@@ -82,9 +83,12 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 			candidates, ownersErr = collectHookProgressCandidatesLocked(dir, pruneNow, ownerSnapshot.owners, &cleanups)
 		}
 		var publishErr error
-		progress, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity, resumeDisabled)
+		progress, rollback, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity, resumeDisabled)
 		return publishErr
 	})
+	if rollback != nil {
+		err = errors.Join(err, rollback.cleanup())
+	}
 	if errors.Is(err, config.ErrLockTimeout) {
 		return nil, fmt.Errorf("hook journal lock held by another process; hooks could not start; retry once the holder releases it: %w", err)
 	}
@@ -120,7 +124,7 @@ func withHookProgressLock(dir string, fn func(string, os.FileInfo) error) error 
 	if !identity.IsDir() {
 		return fmt.Errorf("hook journal path is not a directory: %s", pinned)
 	}
-	return config.WithFileLockTimeout(filepath.Join(pinned, ".progress"), relocationIdentityTimeout, func() error {
+	return withBoundedHookProgressFileLock(filepath.Join(pinned, ".progress"), relocationIdentityTimeout, func() error {
 		hookProgressLockAcquired()
 		return fn(pinned, identity)
 	})
@@ -134,42 +138,35 @@ var previousHookProgressReadFile = BoundedReadFile
 
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
-func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*hookProgress, error) {
+func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*hookProgress, *hookProgressPublicationRollback, error) {
 	prepared, err := boundedPrepareHookProgress(run, commands, prefix, generation, path, worktreeIdentity, resumeDisabled)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	p := prepared.progress
-	published := false
-	renamed := false
-	defer func() {
-		if !published {
-			prepared.discard(path, renamed)
-		}
-	}()
+	rollback := &hookProgressPublicationRollback{prepared: prepared, path: path}
 	var previous hookProgress
 	if data, readErr := previousHookProgressReadFile(path); readErr == nil {
 		_ = json.Unmarshal(data, &previous)
 	}
 	currentParent, err := BoundedLstat(filepath.Dir(path))
 	if err != nil {
-		return nil, err
+		return nil, rollback, err
 	}
 	if !currentParent.IsDir() || !os.SameFile(parentIdentity, currentParent) {
-		return nil, fmt.Errorf("hook journal directory changed while publication lock was held")
+		return nil, rollback, fmt.Errorf("hook journal directory changed while publication lock was held")
 	}
 	if err := os.Rename(prepared.temporary, path); err != nil {
-		return nil, err
+		return nil, rollback, err
 	}
-	renamed = true
+	rollback.renamed = true
 	if err := boundedSyncHookProgressDirectory(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("sync published hook journal directory: %w", err)
+		return nil, rollback, fmt.Errorf("sync published hook journal directory: %w", err)
 	}
-	published = true
 	if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
 		p.supersededDirectory = previous.Directory
 	}
-	return p, nil
+	return p, nil, nil
 }
 
 func (p *hookProgress) receipt(index int) string {
@@ -237,23 +234,23 @@ func (p *hookProgress) finish() {
 func (p *hookProgress) releaseLease() {
 	if p.leaseMu == nil {
 		if p.lease != nil {
-			_ = p.lease.Close()
+			unlockAndCloseHookProgressFile(p.lease)
 			p.lease = nil
 		}
 		p.leaseHolds = 0
 		return
 	}
 	p.leaseMu.Lock()
-	defer p.leaseMu.Unlock()
 	if p.leaseHolds > 1 {
 		p.leaseHolds--
+		p.leaseMu.Unlock()
 		return
 	}
-	if p.lease != nil {
-		_ = p.lease.Close()
-		p.lease = nil
-	}
+	lease := p.lease
+	p.lease = nil
 	p.leaseHolds = 0
+	p.leaseMu.Unlock()
+	unlockAndCloseHookProgressFile(lease)
 }
 
 func (p *hookProgress) retainLease() bool {
@@ -271,7 +268,5 @@ func (p *hookProgress) retainLease() bool {
 
 // Callers that authorize teardown must observe failure to persist cancellation.
 func (p *hookProgress) markFinished() error {
-	return hookProgressMarkFinished(filepath.Join(p.Directory, "finished"), nil, 0600)
+	return boundedMarkHookProgressFinished(filepath.Join(p.Directory, "finished"))
 }
-
-var hookProgressMarkFinished = os.WriteFile

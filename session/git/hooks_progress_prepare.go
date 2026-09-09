@@ -12,8 +12,15 @@ import (
 )
 
 type preparedHookProgress struct {
-	progress  *hookProgress
-	temporary string
+	progress        *hookProgress
+	temporary       string
+	retainArtifacts bool
+}
+
+type hookProgressPublicationRollback struct {
+	prepared *preparedHookProgress
+	path     string
+	renamed  bool
 }
 
 type hookProgressPrepareFlight struct {
@@ -29,6 +36,66 @@ var hookProgressPrepareFlights = struct {
 }{byDirectory: make(map[string]*hookProgressPrepareFlight)}
 
 var hookProgressPrepare = prepareHookProgress
+
+var hookProgressDiscardPrepared = func(prepared *preparedHookProgress, journal string, renamed bool) {
+	prepared.discard(journal, renamed)
+}
+
+// Failed publication cleanup never runs in the callback that owns .progress.
+// If the shared journal name was reached, retire that name under a fresh lock,
+// then delete only its non-resumable name and unique receipts after releasing
+// the lock. An inconclusive retirement retains everything for pruning.
+func (r *hookProgressPublicationRollback) cleanup() error {
+	if r == nil || r.prepared == nil {
+		return nil
+	}
+	journal, renamed := r.path, r.renamed
+	var rollbackErr error
+	if renamed {
+		retainArtifacts := true
+		rollbackErr = withHookProgressLock(filepath.Dir(r.path), func(string, os.FileInfo) error {
+			current, readErr := readHookProgress(r.path)
+			if os.IsNotExist(readErr) {
+				renamed = false
+				retainArtifacts = false
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+			p := r.prepared.progress
+			if current.Directory != p.Directory || current.SessionID != p.SessionID || current.Generation != p.Generation {
+				renamed = false
+				retainArtifacts = false
+				return nil
+			}
+			journal = filepath.Join(filepath.Dir(r.path), "retired-"+filepath.Base(current.Directory)+".json")
+			return os.Rename(r.path, journal)
+		})
+		// Neither a failed directory barrier nor a second failed lock/rename can
+		// prove a namespace transition durable. Retain the journal and receipts;
+		// a later retention pass re-establishes the barrier before deletion.
+		r.prepared.retainArtifacts = retainArtifacts
+	}
+	return errors.Join(rollbackErr, boundedDiscardHookProgress(r.prepared, journal, renamed))
+}
+
+func boundedDiscardHookProgress(prepared *preparedHookProgress, journal string, renamed bool) error {
+	done := make(chan struct{})
+	discard := hookProgressDiscardPrepared
+	go func() {
+		discard(prepared, journal, renamed)
+		close(done)
+	}()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("hook journal rollback exceeded %s: %w", relocationIdentityTimeout, context.DeadlineExceeded)
+	}
+}
 
 // Preparing a journal touches only unique, unpublished names. It may therefore
 // finish and clean itself after a timeout without mutating shared state outside
@@ -130,8 +197,10 @@ func (p *preparedHookProgress) discard(journal string, renamed bool) {
 		return
 	}
 	if p.progress != nil && p.progress.lease != nil {
-		_ = p.progress.lease.Close()
-		p.progress.lease = nil
+		p.progress.releaseLease()
+	}
+	if p.retainArtifacts {
+		return
 	}
 	if renamed && journal != "" {
 		_ = os.Remove(journal)
