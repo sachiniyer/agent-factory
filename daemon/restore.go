@@ -345,12 +345,17 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			//
 			// The branch therefore has to be known already, and the guard below is what
 			// makes that a refusal rather than a default-branch clone.
-			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
-				return "", err
-			}
-			m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
-			break
+		if err := requireDurableSandboxBranch(repoID, instance); err != nil {
+			return "", err
 		}
+		m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
+		// The sandbox is being replaced: end the push-failure episode so that a
+		// later failure against the new sandbox earns a fresh budget rather than
+		// inheriting the old one's escalation — the same reset the non-forced arm
+		// applies after a successful preserve push.
+		m.resetPreserveBudget(repoID, instance)
+		break
+	}
 		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
 			return "", err
 		}
