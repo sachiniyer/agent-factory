@@ -180,18 +180,42 @@ func appendCredentialSpans(spans []redactionSpan, s string) []redactionSpan {
 }
 
 func (r *redactor) appendQuotedValueSpans(spans []redactionSpan, s string, legacyLog bool) []redactionSpan {
-	return appendGoQuotedSpans(spans, s, func(value string) string {
+	produce := func(value string) []redactionSpan {
 		inner := r.sensitiveTextSpans(value)
 		if legacyLog {
 			inner = appendLegacyTaskTitleSpans(inner, value)
 		}
-		return applyRedactionSpans(value, inner)
-	})
+		return inner
+	}
+	return appendNestedGoQuotedSpans(spans, s, produce, 0)
 }
 
 func (r *redactor) appendGenericQuotedValueSpans(spans []redactionSpan, s string) []redactionSpan {
+	return appendNestedGoQuotedSpans(spans, s, r.genericTextSpans, 0)
+}
+
+const maxGoQuotedTransformDepth = 64
+
+func appendNestedGoQuotedSpans(
+	spans []redactionSpan,
+	s string,
+	produce textSpanProducer,
+	depth int,
+) []redactionSpan {
 	return appendGoQuotedSpans(spans, s, func(value string) string {
-		return applyRedactionSpans(value, r.genericTextSpans(value))
+		inner := produce(value)
+		if depth < maxGoQuotedTransformDepth {
+			inner = appendNestedGoQuotedSpans(inner, value, produce, depth+1)
+		} else {
+			// Each accepted quote removes at least its two delimiter bytes, but an
+			// attacker-controlled log can still manufacture excessive nesting. At
+			// the depth budget, redact any further valid quoted value as one unknown
+			// logical unit rather than leaking it or recursing without a bound.
+			inner = appendGoQuotedSpans(inner, value, func(string) string {
+				return redactedMarker
+			})
+		}
+		return applyRedactionSpans(value, inner)
 	})
 }
 

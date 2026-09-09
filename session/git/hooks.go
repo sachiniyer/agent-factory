@@ -113,6 +113,10 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		defer close(done)
 		scopeRecorded := false
 		for index, cmdStr := range cmds {
+			// Preserve the command's shell-value structure for credential matching.
+			// Every log spelling below applies %q only to this already-safe copy;
+			// execution continues to receive the original command.
+			commandForLog := log.RedactCredentials(cmdStr)
 			select {
 			case <-ctx.Done():
 				log.InfoLog.Printf("post-worktree hooks cancelled for %s", run.worktreePath)
@@ -121,13 +125,13 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			}
 			outputFile, outputErr := hooklog.Open(hooklog.PostWorktree)
 			if outputErr != nil {
-				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", cmdStr, outputErr)
+				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", commandForLog, outputErr)
 				continue
 			}
 			outputPath := outputFile.Name()
 			// Keep an arbitrary multiline command in one grammar-delimited log field;
 			// bug-report redaction also recognizes the legacy raw %s spelling.
-			log.InfoLog.Print(postWorktreeHookStartMessage(run.worktreePath, outputPath, cmdStr))
+			log.InfoLog.Print(postWorktreeHookStartMessage(run.worktreePath, outputPath, commandForLog))
 
 			// The daemon-spawned hook enters a transient scope with NO edge to the
 			// daemon unit, so the operator's build is charged to its own cgroup and
@@ -157,7 +161,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			if err := cmd.Start(); err != nil {
 				_ = outputFile.Close()
-				log.ErrorLog.Printf("post-worktree hook %q failed to start (full output: %s): %v", cmdStr, outputPath, err)
+				log.ErrorLog.Printf("post-worktree hook %q failed to start (full output: %s): %v", commandForLog, outputPath, err)
 				continue
 			}
 			// Record the durable handle as soon as one scope exists, not when the
@@ -212,23 +216,23 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			}
 			outputTail, outputReadErr := hooklog.CloseAndReadTail(outputFile)
 			if outputReadErr != nil {
-				log.WarningLog.Printf("post-worktree hook %q output tail could not be read from %s: %v", cmdStr, outputPath, outputReadErr)
+				log.WarningLog.Printf("post-worktree hook %q output tail could not be read from %s: %v", commandForLog, outputPath, outputReadErr)
 			}
 
 			if ctx.Err() != nil {
 				if scopeStopErr == nil {
-					removeCompletedHookLog(cmdStr, outputPath, outputReadErr)
+					removeCompletedHookLog(commandForLog, outputPath, outputReadErr)
 				}
 				log.InfoLog.Printf("post-worktree hooks cancelled for %s", run.worktreePath)
 				return
 			}
 			if waitErr == nil {
 				if scopeStopErr == nil {
-					removeCompletedHookLog(cmdStr, outputPath, outputReadErr)
+					removeCompletedHookLog(commandForLog, outputPath, outputReadErr)
 				}
-				log.InfoLog.Printf("post-worktree hook %q completed successfully", cmdStr)
+				log.InfoLog.Printf("post-worktree hook %q completed successfully", commandForLog)
 			} else {
-				log.ErrorLog.Printf("post-worktree hook %q failed (full output: %s): %v\n%s", cmdStr, outputPath, waitErr, outputTail)
+				log.ErrorLog.Printf("post-worktree hook %q failed (full output: %s): %v\n%s", commandForLog, outputPath, waitErr, outputTail)
 			}
 		}
 	}()

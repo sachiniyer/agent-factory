@@ -43,7 +43,8 @@ func (w credentialRedactingWriter) Write(p []byte) (int, error) {
 
 // RedactCredentials applies the same credential policy used by every AF log
 // sink. Callers use it before applying a transport encoding that would hide the
-// value's original structure from the sink.
+// value's original structure from the sink. For example, post-worktree hook
+// commands pass through this function before %q escapes their shell quotes.
 func RedactCredentials(s string) string {
 	return agentproto.RedactAccessTokenText(credscrub.Scrub(s))
 }

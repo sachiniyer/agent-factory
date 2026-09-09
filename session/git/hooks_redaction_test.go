@@ -7,10 +7,11 @@ import (
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
-func TestPostWorktreeHookStartMessageRedactsCredentialBeforeQuoting(t *testing.T) {
+func TestPostWorktreeHookCommandIsRedactedBeforeQuoting(t *testing.T) {
 	const secret = "S3NT1NELVALUEDONOTLOG"
 	command := `api_key="` + secret + `"`
-	message := postWorktreeHookStartMessage("/tmp/worktree", "/tmp/hook.log", command)
+	commandForLog := aflog.RedactCredentials(command)
+	message := postWorktreeHookStartMessage("/tmp/worktree", "/tmp/hook.log", commandForLog)
 	got := aflog.RedactCredentials(message)
 
 	if strings.Contains(got, secret) {
