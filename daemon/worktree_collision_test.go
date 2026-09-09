@@ -61,6 +61,36 @@ func TestReserveCreateRefusesBranchHeldByNamedLiveLane(t *testing.T) {
 		"the refusal must tell the operator how to continue safely: %s", msg)
 }
 
+func TestReserveCreateInPlaceRefusesActualBranchHeldByLiveLane(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	actualBranch := "shared-in-place"
+	livePath := filepath.Join(t.TempDir(), "live")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-q", "-b", actualBranch, livePath).CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", repoPath, "checkout", "-q", "--ignore-other-worktrees", "-B", actualBranch, actualBranch).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	live := registerCollisionLane(t, manager, repoID, repoPath, livePath, "live-holder", actualBranch, session.Ready)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+
+	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "title-derived-branch-is-different",
+		Program:  "claude",
+		InPlace:  true,
+	})
+	if release != nil {
+		release()
+	}
+
+	require.Error(t, err, "--here must refuse before activating a second live lane on the target worktree's actual branch")
+	assert.Nil(t, renamed)
+	assert.Contains(t, err.Error(), actualBranch)
+	assert.Contains(t, err.Error(), live.Title, "the refusal must name the live lane holding the actual branch")
+	assert.NotContains(t, err.Error(), manager.branchForTitle("title-derived-branch-is-different"),
+		"an in-place admission must not derive its branch from the requested title")
+}
+
 func TestReserveCreateRefusesLiveHolderWhenArchivedHolderIsListedLast(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	branch := manager.branchForTitle("incoming")
