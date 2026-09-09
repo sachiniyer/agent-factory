@@ -226,6 +226,11 @@ type RestoreSessionRequest struct {
 	// actions send it so a restore queued for one row cannot resurrect a
 	// different session that reuses the title before dispatch.
 	ID string `json:"id"`
+	// ExpectedDaemonBootID pins a browser request to the daemon incarnation in
+	// the Snapshot that enabled it. A different process refuses before mutation,
+	// so its first Snapshot can safely retire the previous process's client fence.
+	// Empty preserves compatibility for the CLI and older browser clients.
+	ExpectedDaemonBootID string `json:"expected_daemon_boot_id,omitempty"`
 	// ForceReap replaces a REACHABLE sandbox without first pushing its work
 	// (#2923). Recovery refuses that by default, because a sandbox that still
 	// answers may hold commits nothing else has a copy of; this is the operator

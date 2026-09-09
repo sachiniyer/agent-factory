@@ -72,7 +72,11 @@ export class PendingRestores {
     return this.tickets.has(id);
   }
 
-  run<T>(id: string, request: () => Promise<T>, restoreEligible: RestoreRow["restoreEligible"]): Promise<T> | null {
+  run<T>(
+    id: string,
+    request: (daemonBootId: string | null) => Promise<T>,
+    restoreEligible: RestoreRow["restoreEligible"],
+  ): Promise<T> | null {
     if (this.has(id)) return null;
     const ticket = {
       settled: false,
@@ -91,7 +95,10 @@ export class PendingRestores {
     this.changed(new Set(this.tickets.keys()));
     return (async () => {
       try {
-        const result = await request();
+        // The request must carry the same daemon identity this ticket records.
+        // A later incarnation can then reject it before admission, making a
+        // boot-id transition positive evidence instead of a cached-row guess.
+        const result = await request(ticket.daemonBootId);
         if (this.tickets.get(id) === ticket) {
           ticket.settled = true;
           // Events can advance the row before the HTTP response arrives.

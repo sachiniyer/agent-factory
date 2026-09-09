@@ -397,7 +397,13 @@ test("a changed daemon incarnation releases a previous process's uncertain resto
     kind: "snapshot" as const, generation: pending.beginSnapshot(), daemonBootId,
   });
   pending.observe(rows, snapshot("daemon-a"));
-  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  let requestDaemonBootId: string | null | undefined;
+  await assert.rejects(pending.run("session", async daemonBootId => {
+    requestDaemonBootId = daemonBootId;
+    throw new ApiError(0, "lost reply");
+  }, true)!);
+  assert.equal(requestDaemonBootId, "daemon-a",
+    "the request must be admitted only by the daemon incarnation pinned to its ticket");
   pending.observe(rows, snapshot("daemon-a"));
   assert.equal(pending.has("session"), true, "the same daemon cannot clear its uncertain request");
 

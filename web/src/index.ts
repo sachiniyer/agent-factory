@@ -992,7 +992,9 @@ function openConfirm(
         ? killSession(target.id, target.title, tok)
         : action === "archive"
           ? archiveSession(target.id, target.title, tok)
-          : pendingRestores.run(target.id, () => restoreSession(target.id, target.title, tok),
+          : pendingRestores.run(target.id, daemonBootId => restoreSession(
+            target.id, target.title, tok, daemonBootId ?? undefined,
+          ),
             isActionableSession(session) && session.lifecycle_action === "restore");
     if (!run) return;
     void run.then(() => {

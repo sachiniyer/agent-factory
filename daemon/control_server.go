@@ -593,6 +593,14 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 }
 
 func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreSessionResponse) error {
+	if req.ExpectedDaemonBootID != "" {
+		if s.manager == nil || s.manager.lifecycle == nil {
+			return fmt.Errorf("cannot verify the daemon process for restore admission")
+		}
+		if actual := s.manager.lifecycle.snapshot().bootID; actual != req.ExpectedDaemonBootID {
+			return fmt.Errorf("daemon process changed before restore admission; refresh and retry")
+		}
+	}
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}

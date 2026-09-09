@@ -506,8 +506,15 @@ export async function archiveSession(id: string, title: string, token: string): 
  *  repo_id stays empty because the web is an all-project client; the daemon's
  *  id-first resolver supplies the canonical repo and title. The
  *  session.restored event triggers a rail resync. */
-export async function restoreSession(id: string, title: string, token: string): Promise<void> {
-  const result = await af<{ warning?: string }>("RestoreSession", { id, title, repo_id: "" }, token);
+export async function restoreSession(
+  id: string,
+  title: string,
+  token: string,
+  expectedDaemonBootId?: string,
+): Promise<void> {
+  const result = await af<{ warning?: string }>("RestoreSession", {
+    id, title, repo_id: "", expected_daemon_boot_id: expectedDaemonBootId,
+  }, token);
   if (result.warning) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }

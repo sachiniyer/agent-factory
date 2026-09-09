@@ -112,6 +112,20 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 		"the projected clock must be sampled during the Snapshot")
 }
 
+func TestHTTP_RestoreSessionRejectsDifferentDaemonBootIDBeforeAdmission(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/RestoreSession",
+		`{"id":"session","title":"worker","repo_id":"","expected_daemon_boot_id":"previous-daemon"}`)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	env := decodeEnvelope(t, rec)
+	require.NotNil(t, env.Error)
+	require.Contains(t, env.Error.Message, "daemon process changed before restore admission")
+}
+
 // The fixed browser palettes retired the last consumer of this renderer RPC.
 func TestHTTP_RetiredThemeRoute(t *testing.T) {
 	rec := doHTTP(&controlServer{}, http.MethodPost, "/v1/GetTheme", `{}`)
