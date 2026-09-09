@@ -122,7 +122,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 			"refusing to replace the sandbox for %q: its agent is gone but the sandbox still ANSWERS, "+
 				"and the push that would make its unpushed work durable failed (%w). "+
 				"Replacing it now would destroy any commits it holds. "+
-				"It stays recoverable and the daemon keeps retrying; if you know its work is expendable, force it with: %s",
+				"It stays recoverable; if you know its work is expendable, force it with: %s",
 			instance.Title, err, escapeSuggestion)
 	}
 	if branch == "" {
