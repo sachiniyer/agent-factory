@@ -8,7 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// worktreeIntegrityInterval keeps the two read-only Git probes per live local
+// worktreeIntegrityInterval keeps the three read-only Git probes per live local
 // lane out of the ordinary sub-second status cadence.
 var worktreeIntegrityInterval = 10 * time.Second
 

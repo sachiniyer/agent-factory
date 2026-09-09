@@ -42,7 +42,8 @@ func InspectWorktreeIntegrityContext(ctx context.Context, worktreePath string) (
 	if strings.TrimSpace(worktreePath) == "" {
 		return WorktreeIntegrity{}, fmt.Errorf("cannot inspect worktree integrity: path is empty")
 	}
-	status, err := runIntegrityGit(ctx, worktreePath, "status", "--porcelain=v2", "--branch", "--untracked-files=no")
+	statusArgs := []string{"status", "--porcelain=v2", "--branch", "--untracked-files=no"}
+	status, err := runIntegrityGit(ctx, worktreePath, statusArgs...)
 	if err != nil {
 		return WorktreeIntegrity{}, err
 	}
@@ -57,6 +58,13 @@ func InspectWorktreeIntegrityContext(ctx context.Context, worktreePath string) (
 	result.ReflogHeadSHA = strings.TrimSpace(reflog)
 	if result.ReflogHeadSHA == "" {
 		return WorktreeIntegrity{}, fmt.Errorf("git HEAD reflog in %s is empty; worktree safety is unknown", worktreePath)
+	}
+	confirmedStatus, err := runIntegrityGit(ctx, worktreePath, statusArgs...)
+	if err != nil {
+		return WorktreeIntegrity{}, err
+	}
+	if confirmedStatus != status {
+		return WorktreeIntegrity{}, fmt.Errorf("git status in %s changed during the worktree safety scan; worktree safety is unknown", worktreePath)
 	}
 	result.MassRevert = result.StagedPaths > massRevertPathThreshold && result.UnstagedPaths == 0
 	result.HeadMovedWithoutReflog = result.HeadSHA != result.ReflogHeadSHA

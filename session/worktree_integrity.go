@@ -212,7 +212,10 @@ func (i *Instance) ReconcileWorktreeInspection(warning string, incomplete error)
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.confirmedWorktreeWarning == "" && warning != "" {
+	// A warning is positive evidence even when repository-wide correlation was
+	// incomplete. Replace older danger text with the newest definite finding;
+	// retain the old finding only when the partial scan found nothing new.
+	if warning != "" {
 		i.confirmedWorktreeWarning = warning
 	}
 	rendered := incompleteWorktreeWarning(i.confirmedWorktreeWarning, incomplete)
