@@ -141,6 +141,42 @@ func TestScrubLogRedactsSiblingWhenTitleAppearsInRepoPath(t *testing.T) {
 	}
 }
 
+// A title can contain its registered repo root just as the repo root can contain
+// the title. No matcher may rewrite the shared bytes before the full title has
+// been considered, or the private remainder becomes unmatchable.
+func TestScrubbersRedactTitleContainingRepoRoot(t *testing.T) {
+	const (
+		repo  = "/srv/acme/repo"
+		title = "/srv/acme/repo is on fire SECRETWORD"
+	)
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Title: title,
+		Worktree: session.GitWorktreeData{
+			RepoPath: repo,
+		},
+	})
+
+	line := "session title: " + title
+	for _, tc := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.scrub(line)
+			if strings.Contains(got, "SECRETWORD") {
+				t.Fatalf("scrubber leaked the remainder of a title containing its repo root:\n%s", got)
+			}
+			if want := "session title: " + redactedMarker; got != want {
+				t.Errorf("scrubber output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestCollapseKnownRootsRecognizesFileURIPath(t *testing.T) {
 	r := &redactor{}
 	r.noteRepoRoot(siblingLeakRepo)

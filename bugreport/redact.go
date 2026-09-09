@@ -163,13 +163,11 @@ func addUserVariant(users []string, name string) []string {
 func (r *redactor) scrub(s string) string {
 	s = credscrub.Scrub(s)
 	s = r.collapseKnownRoots(s)
-	// Account labels are swept HERE, in the catch-all, rather than beside the
-	// title pass: a label reaches the bundle through two sections that share only
-	// this function. collectLog routes the daemon log tail through scrubLog, which
-	// ends by delegating here; collectConfig hands the global config file straight
-	// to scrub() and touches no other pass. A sweep added next to the title pass
-	// would cover the log and silently miss the config file that NAMES the default
-	// account (#3871).
+	// Account labels are swept HERE as well as in scrubLog's combined span pass.
+	// They reach the bundle through two otherwise separate sections: collectLog
+	// uses scrubLog, while collectConfig hands the global config file straight to
+	// scrub(). Removing the catch-all sweep would silently miss the config file
+	// that NAMES the default account (#3871).
 	//
 	// It runs before the username pass for the reason that pass runs longest-first
 	// within itself: a username that is a token-boundary prefix of a label would
@@ -178,6 +176,12 @@ func (r *redactor) scrub(s string) string {
 	// impossible — a label never matches inside a longer run of label characters —
 	// so this order is safe in both directions rather than a coin flip.
 	s = r.scrubAccountLabels(s)
+	return r.scrubUsernames(s)
+}
+
+// scrubUsernames is the final name pass for the general scrubber. Log and
+// diagnostic text include usernames in their original-input span resolution.
+func (r *redactor) scrubUsernames(s string) string {
 	// Blank bare username tokens with the SAME manual token boundary the title
 	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
 	// when the username ends in a non-word rune (an OS username like "test-"), so
@@ -223,8 +227,8 @@ func (r *redactor) scrubUnstructured(s string) string {
 // any bare session title the log prints, so the verbatim log blob can't leak the
 // session titles the structured sections already drop (#1584 — the exact #1533
 // class, reintroduced through the bundled log). Call this instead of scrub() for
-// the log section; it ends by delegating to scrub() for the usual
-// $HOME/username/secret pass.
+// the log section; it resolves the known values together, then applies the usual
+// credential and username defenses.
 func (r *redactor) scrubLog(s string) string {
 	// The incomplete-archive warning goes first, because it is the one pass here
 	// that reads the emitter's LITERAL PROSE, and every pass below rewrites text
@@ -237,45 +241,12 @@ func (r *redactor) scrubLog(s string) string {
 	// the rest of the name — and matching the whole quoted token makes that
 	// impossible in either order.
 	s = r.scrubArchiveWarningPaths(s)
-	// Contextual paths go before labels: a display title can itself be a component
-	// of the registered repo root, and scrubbing that component first would destroy
-	// the exact root/sibling match while leaving the on-disk title behind (#4099
-	// review). Collapse roots at the same point, before any label can mutate them.
-	s = r.scrubWorktreePathTitles(s)
-	s = r.collapseKnownRoots(s)
-	// Remove every known full display-title representation before a shape-based
-	// pass can consume only part of it. In particular, the legacy raw task-start
-	// matcher is line-oriented while a legal title may contain newlines; running
-	// that matcher first replaced line one and made the original full-title match
-	// impossible, leaking the remaining lines (#2249 late review).
-	s = r.scrubKnownLabels(s)
-	s = r.scrubTmuxNames(s)
-	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
-	// syntax is a safer boundary than a global punctuation matcher and also
-	// catches historical task-created titles no longer present in instances.json.
-	s = taskStartedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker)
-	s = taskParkedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker+`${3}`)
-	return r.scrub(s)
-}
-
-// scrubTmuxNames removes the free-text <title> from every af tmux session name
-// in s. It is shared by scrubLog and scrubDiagnostic rather than inlined in
-// either, because "a tmux name carries the title" is one fact: a diagnostic
-// string that quotes tmux would otherwise reintroduce, field by field, exactly
-// the #1584 leak the log pass closes.
-func (r *redactor) scrubTmuxNames(s string) string {
-	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
-	// so it catches current AND historical (archived/killed) sessions the live
-	// instance set no longer references.
-	s = afTmuxSessionName.ReplaceAllStringFunc(s, redactAFTmuxTitle)
-	// Non-repo-scoped names (af_<title>, no hash) don't match the shape above;
-	// redact those known names exactly.
-	for name := range r.tmuxNames {
-		if !afTmuxSessionName.MatchString(name) {
-			s = strings.ReplaceAll(s, name, tmuxPrefixMarker)
-		}
-	}
-	return s
+	// Resolve labels, contextual worktree titles, roots, and tmux shapes against
+	// the same unmodified text. Either a title or a root can contain the other;
+	// sequential passes let the first consume the second's evidence and strand a
+	// private suffix. Longest non-overlapping spans make both directions one rule.
+	s = r.scrubKnownLogValues(s)
+	return credscrub.Scrub(s)
 }
 
 // scrubDiagnostic sanitizes an af-AUTHORED diagnostic string that QUOTES an
@@ -290,14 +261,10 @@ func (r *redactor) scrubTmuxNames(s string) string {
 // names the same things the log does, and a second policy for it would drift
 // from the first (#3588).
 //
-// Contextual paths and roots go before labels for scrubLog's #4099 ordering
-// reason. Display titles still precede the shape-based tmux pass: a shape matcher
-// that consumes part of a name makes the exact full-title match impossible
-// afterwards.
+// Known labels, contextual paths, roots, and tmux shapes are resolved against
+// one original string for scrubLog's #4099 overlap reason.
 func (r *redactor) scrubDiagnostic(s string) string {
-	s = r.scrubWorktreePathTitles(s)
-	s = r.collapseKnownRoots(s)
-	return r.scrub(r.scrubTmuxNames(r.scrubKnownLabels(s)))
+	return credscrub.Scrub(r.scrubKnownDiagnosticValues(s))
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
