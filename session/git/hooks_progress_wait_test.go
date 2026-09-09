@@ -102,7 +102,7 @@ func TestHookProgressProbeOutageLogsOnceAndRecovers(t *testing.T) {
 	g.SetHookScopeSessionID("owner")
 	g.repoPath, g.worktreePath = linkedHookWorktree(t)
 	g.branchName = "hook-resume"
-	if _, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "owner"}, nil, "af-hook-owner", "test"); err != nil {
+	if _, err := newHookProgress(hookRun{repoPath: g.repoPath, worktreePath: g.worktreePath, scopeSessionID: "owner"}, nil, "af-hook-owner", "test"); err != nil {
 		t.Fatal(err)
 	}
 	counter := filepath.Join(t.TempDir(), "probes")

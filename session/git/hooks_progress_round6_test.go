@@ -80,7 +80,7 @@ func TestHookProgressAdoptsAcrossHomeAlias(t *testing.T) {
 	g.repoPath, g.worktreePath = linkedHookWorktree(t)
 	g.branchName = "hook-resume"
 	marker := filepath.Join(g.worktreePath, "ran")
-	p, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "owner"}, []string{"true", "echo second >> " + shellQuoteForShim(marker)}, "af-hook-owner", "test")
+	p, err := newHookProgress(hookRun{repoPath: g.repoPath, worktreePath: g.worktreePath, scopeSessionID: "owner"}, []string{"true", "echo second >> " + shellQuoteForShim(marker)}, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
 	}

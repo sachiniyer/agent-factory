@@ -277,6 +277,9 @@ type Instance struct {
 	tabRosterGeneration uint64
 	// gitWorktree is the git worktree for the instance.
 	gitWorktree *git.GitWorktree
+	// hookCreatePersistencePending bridges daemon create ownership across local
+	// worktree provisioning. Guarded by mu.
+	hookCreatePersistencePending bool
 
 	// agentSrv is the cached per-instance AgentServer (#1592 Phase 2 PR5). Cached
 	// rather than reconstructed per call because its data plane holds stateful

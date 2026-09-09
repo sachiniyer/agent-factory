@@ -1,14 +1,18 @@
 package git
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -21,6 +25,9 @@ import (
 // name, then deletes receipts; a retired name can never be adopted and is safe
 // to finish reclaiming after the shared liveness probes and lease check. Unknown
 // ownership, metadata, or manager liveness leaves all affected state in place.
+// The complete owner snapshot is loaded under one deadline before .progress is
+// acquired; every optional directory, journal, and receipt probe under that lock
+// uses the shared bounded filesystem helpers rather than raw sequential reads.
 // The age and count limits otherwise match #4045's hooklog retention policy.
 const (
 	keptProgressLimit = 20
@@ -37,19 +44,25 @@ type keptProgress struct {
 }
 
 func pruneHookProgress(dir string, now time.Time) {
-	err := withHookProgressLock(dir, func(pinned string, _ os.FileInfo) error { return pruneHookProgressLocked(pinned, now) })
+	ownerSnapshot, err := boundedHookProgressOwners()
+	if err != nil {
+		log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
+		return
+	}
+	err = withHookProgressLock(dir, func(pinned string, _ os.FileInfo) error {
+		if pinned != ownerSnapshot.hookDirectory {
+			return fmt.Errorf("hook owner snapshot belongs to %s, not locked directory %s", ownerSnapshot.hookDirectory, pinned)
+		}
+		return pruneHookProgressLocked(pinned, now, ownerSnapshot.owners)
+	})
 	if err != nil {
 		log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
 	}
 }
 
 // The caller owns .progress, whether pruning alone or just before publication.
-func pruneHookProgressLocked(dir string, now time.Time) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	owners, err := hookProgressOwners()
+func pruneHookProgressLocked(dir string, now time.Time, owners map[string]bool) error {
+	entries, err := BoundedReadDir(dir)
 	if err != nil {
 		return err
 	}
@@ -245,8 +258,8 @@ func hookProgressActivity(path string, p *hookProgress) (time.Time, bool, error)
 	return modified, !complete, nil
 }
 
-func hookProgressOwners() (map[string]bool, error) {
-	repos, skipped, err := config.LoadAllRepoInstancesReportingSkipDetails()
+func loadHookProgressOwners(load func() (map[string]json.RawMessage, []config.RepoInstancesSkip, error)) (map[string]bool, error) {
+	repos, skipped, err := load()
 	if err != nil {
 		return nil, err
 	}
@@ -272,4 +285,95 @@ func hookProgressOwners() (map[string]bool, error) {
 		}
 	}
 	return owners, nil
+}
+
+var hookProgressOwnerLoad = config.LoadAllRepoInstancesReportingSkipDetails
+
+type hookProgressOwnerFlight struct {
+	done     chan struct{}
+	snapshot hookProgressOwnerSnapshot
+	err      error
+	timedOut bool
+}
+
+type hookProgressOwnerSnapshot struct {
+	owners        map[string]bool
+	hookDirectory string
+}
+
+var hookProgressOwnerFlights = struct {
+	sync.Mutex
+	byHome map[string]*hookProgressOwnerFlight
+}{byHome: make(map[string]*hookProgressOwnerFlight)}
+
+// boundedHookProgressOwners gives the complete cross-repository scan one total
+// identity-probe deadline before any home-wide progress lock is acquired. A
+// stalled instances file therefore yields an unknown retention answer without
+// serially charging one timeout per repository or pinning hook publication.
+func boundedHookProgressOwners() (hookProgressOwnerSnapshot, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return hookProgressOwnerSnapshot{}, err
+	}
+	hookProgressOwnerFlights.Lock()
+	if active := hookProgressOwnerFlights.byHome[home]; active != nil {
+		if active.timedOut {
+			hookProgressOwnerFlights.Unlock()
+			return hookProgressOwnerSnapshot{}, fmt.Errorf("hook progress owner scan for %s is still running after an earlier deadline: %w", home, context.DeadlineExceeded)
+		}
+		hookProgressOwnerFlights.Unlock()
+		return waitForHookProgressOwners(home, active)
+	}
+	flight := &hookProgressOwnerFlight{done: make(chan struct{})}
+	hookProgressOwnerFlights.byHome[home] = flight
+	load := hookProgressOwnerLoad
+	hookProgressOwnerFlights.Unlock()
+	go func() {
+		// These raw probes are inside this flight's one total deadline. Keeping
+		// them here avoids paying a separate bounded-flight timeout per repo.
+		pinnedHome := pathutil.ResolveForCompare(home)
+		identity, identityErr := os.Lstat(pinnedHome)
+		if identityErr == nil {
+			flight.snapshot.owners, flight.err = loadHookProgressOwners(load)
+			if flight.err == nil {
+				current, currentErr := os.Lstat(pinnedHome)
+				if currentErr != nil {
+					flight.err = currentErr
+				} else if !os.SameFile(identity, current) {
+					flight.err = fmt.Errorf("AF home changed while hook owners were loaded")
+				} else {
+					flight.snapshot.hookDirectory = filepath.Join(pinnedHome, "logs", "hooks")
+				}
+			}
+		}
+		if identityErr != nil {
+			flight.err = identityErr
+		}
+		hookProgressOwnerFlights.Lock()
+		if hookProgressOwnerFlights.byHome[home] == flight {
+			delete(hookProgressOwnerFlights.byHome, home)
+		}
+		close(flight.done)
+		hookProgressOwnerFlights.Unlock()
+	}()
+	return waitForHookProgressOwners(home, flight)
+}
+
+func waitForHookProgressOwners(home string, flight *hookProgressOwnerFlight) (hookProgressOwnerSnapshot, error) {
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case <-flight.done:
+		return flight.snapshot, flight.err
+	case <-timer.C:
+		hookProgressOwnerFlights.Lock()
+		if hookProgressOwnerFlights.byHome[home] == flight {
+			flight.timedOut = true
+			hookProgressOwnerFlights.Unlock()
+			return hookProgressOwnerSnapshot{}, fmt.Errorf("timed out after %s while loading hook progress owners under %s: %w", relocationIdentityTimeout, home, context.DeadlineExceeded)
+		}
+		hookProgressOwnerFlights.Unlock()
+		<-flight.done
+		return flight.snapshot, flight.err
+	}
 }

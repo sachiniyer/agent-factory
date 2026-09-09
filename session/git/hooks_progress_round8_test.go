@@ -98,7 +98,7 @@ func TestHookProgressSameWorktreeBranchDriftResumes(t *testing.T) {
 			g.SetHookScopeSessionID("owner")
 			g.repoPath, g.worktreePath = linkedHookWorktree(t)
 			g.branchName = "hook-resume"
-			p, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "owner"}, []string{"true", "echo second >> ran"}, "af-hook-owner", "test")
+			p, err := newHookProgress(hookRun{repoPath: g.repoPath, worktreePath: g.worktreePath, scopeSessionID: "owner"}, []string{"true", "echo second >> ran"}, "af-hook-owner", "test")
 			if err != nil {
 				t.Fatal(err)
 			}

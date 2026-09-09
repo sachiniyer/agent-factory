@@ -10,19 +10,19 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// Resume requires the positive identity recorded from the original linked
-// worktree's .git pointer. Registration and bidirectional linkage prove that the
-// current occupant belongs to the repository; they cannot distinguish a newly
-// created linked worktree at the same path on their own.
+// Resume requires the positive random identity recorded in the original
+// checkout's Git administrative directory. Registration and bidirectional
+// linkage prove that the current occupant belongs to the repository; they
+// cannot distinguish a newly created worktree at the same path on their own.
 func verifyHookResumeWorktree(ctx context.Context, repoPath, worktreePath, branchName string, expected *hookWorktreeIdentity) error {
 	if expected == nil {
-		return fmt.Errorf("hook journal has no recorded linked-worktree identity")
+		return fmt.Errorf("hook journal has no recorded checkout identity")
 	}
 	current, err := readHookWorktreeIdentity(worktreePath)
 	if err != nil {
 		// Missing or unreadable identity is unknown. Recovery may make the path
 		// authoritative again, so only a successful, unequal read is mismatch proof.
-		return fmt.Errorf("cannot read linked-worktree identity: %w", err)
+		return fmt.Errorf("cannot read checkout identity: %w", err)
 	}
 	if !expected.same(current) {
 		return worktreeIdentityMismatchf("a different linked worktree occupies the recorded path")

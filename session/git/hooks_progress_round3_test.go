@@ -29,7 +29,7 @@ func TestHookProgressFailedLaunchNeverResumesBeforeLaterEntry(t *testing.T) {
 	g.repoPath, g.worktreePath = linkedHookWorktree(t)
 	g.branchName = "hook-resume"
 	first, second := filepath.Join(g.worktreePath, "first"), filepath.Join(g.worktreePath, "second")
-	p, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "owner"}, []string{"echo first >> " + shellQuoteForShim(first), "echo second >> " + shellQuoteForShim(second)}, "af-hook-owner", "test")
+	p, err := newHookProgress(hookRun{repoPath: g.repoPath, worktreePath: g.worktreePath, scopeSessionID: "owner"}, []string{"echo first >> " + shellQuoteForShim(first), "echo second >> " + shellQuoteForShim(second)}, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
 	}

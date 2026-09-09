@@ -19,7 +19,7 @@ func TestHookProgressExternalCannotAdoptOrStopOwner(t *testing.T) {
 	owner.SetHookScopeSessionID("owner")
 	owner.repoPath, owner.worktreePath = linkedHookWorktree(t)
 	owner.branchName = "hook-resume"
-	_, err := newHookProgress(hookRun{worktreePath: owner.worktreePath, scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
+	_, err := newHookProgress(hookRun{repoPath: owner.repoPath, worktreePath: owner.worktreePath, scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
 	}

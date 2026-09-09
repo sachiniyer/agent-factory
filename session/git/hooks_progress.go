@@ -31,10 +31,8 @@ type hookProgress struct {
 	Prefix              string   `json:"scope_prefix"`
 	Generation          string   `json:"generation"`
 	Directory           string   `json:"directory"`
-	// The checkout's .git node survives an ordinary rename but gets a new
-	// device/inode identity when a different checkout replaces it.
-	// Resume therefore requires this positive identity, not merely the absence
-	// of evidence that the path changed.
+	// The checkout's Git administrative directory carries a random identity
+	// that a later checkout at the same path cannot derive or inherit.
 	WorktreeIdentity *hookWorktreeIdentity `json:"worktree_identity,omitempty"`
 }
 
@@ -55,15 +53,26 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
+	// Identity recording and owner discovery happen before the home-wide lock.
+	// Both are optional recovery inputs: an unknown answer skips resume or GC,
+	// while publication still starts the operator-requested hooks.
+	checkoutIdentity, _ := boundedRecordHookWorktreeIdentity(run.repoPath, run.worktreePath)
+	ownerSnapshot, ownersErr := boundedHookProgressOwners()
 	var progress *hookProgress
 	err = withHookProgressLock(filepath.Dir(path), func(dir string, identity os.FileInfo) error {
 		// Share one acquisition budget for GC and publication; a contended home
 		// must not pay the timeout twice before reporting that hooks could not start.
-		if err := pruneHookProgressLocked(dir, time.Now()); err != nil {
-			log.WarningLog.Printf("cannot prune inactive hook journals: %v", err)
+		if ownersErr == nil && dir != ownerSnapshot.hookDirectory {
+			ownersErr = fmt.Errorf("hook owner snapshot belongs to %s, not locked directory %s", ownerSnapshot.hookDirectory, dir)
+		}
+		if ownersErr == nil {
+			ownersErr = pruneHookProgressLocked(dir, time.Now(), ownerSnapshot.owners)
+		}
+		if ownersErr != nil {
+			log.WarningLog.Printf("cannot prune inactive hook journals: %v", ownersErr)
 		}
 		var publishErr error
-		progress, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity)
+		progress, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity)
 		return publishErr
 	})
 	if errors.Is(err, config.ErrLockTimeout) {
@@ -103,7 +112,7 @@ var previousHookProgressReadFile = BoundedReadFile
 
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
-func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo) (*hookProgress, error) {
+func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity) (*hookProgress, error) {
 	dir, err := os.MkdirTemp(filepath.Dir(path), "entries-")
 	if err != nil {
 		return nil, err
@@ -127,11 +136,8 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	p := &hookProgress{
 		lease:     lease,
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
-		Prefix: prefix, Generation: generation, Directory: dir,
+		Prefix: prefix, Generation: generation, Directory: dir, WorktreeIdentity: worktreeIdentity,
 	}
-	// Identity protects a later resume; it must not veto the original hook run.
-	// A journal without one stays pending-unknown if this daemon exits.
-	p.WorktreeIdentity, _ = readHookWorktreeIdentity(run.worktreePath)
 	if lease != nil {
 		p.leaseMu = &sync.Mutex{}
 		p.leaseHolds = 1

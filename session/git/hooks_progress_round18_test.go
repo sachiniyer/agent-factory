@@ -282,7 +282,7 @@ func TestHookProgressSamePathReplacementStaysPending(t *testing.T) {
 	if output, err := exec.Command("git", "-C", repo, "worktree", "add", "-b", "hook-replacement", tree).CombinedOutput(); err != nil {
 		t.Fatalf("create replacement worktree: %v: %s", err, output)
 	}
-	replacementIdentity, err := readHookWorktreeIdentity(tree)
+	replacementIdentity, err := recordHookWorktreeIdentity(repo, tree)
 	if err != nil {
 		t.Fatal(err)
 	}

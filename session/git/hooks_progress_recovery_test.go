@@ -33,15 +33,30 @@ func TestHookProgressReplacementStaysPending(t *testing.T) {
 	g.SetHookScopeSessionID("owner")
 	g.repoPath, g.worktreePath, g.branchName = repo, tree, "hook-resume"
 	marker := filepath.Join(tree, "must-not-run")
-	p, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, []string{"touch " + shellQuoteForShim(marker)}, "af-hook-owner", "test")
+	p, err := newHookProgress(hookRun{repoPath: repo, worktreePath: tree, scopeSessionID: "owner"}, []string{"touch " + shellQuoteForShim(marker)}, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(tree, tree+"-original"); err != nil {
-		t.Fatal(err)
+	originalIdentity := p.WorktreeIdentity
+	if originalIdentity == nil {
+		t.Fatal("original journal has no checkout token")
 	}
-	if err := os.Mkdir(tree, 0700); err != nil {
-		t.Fatal(err)
+	if output, err := exec.Command("git", "-C", repo, "worktree", "remove", "--force", tree).CombinedOutput(); err != nil {
+		t.Fatalf("remove original worktree: %v: %s", err, output)
+	}
+	if output, err := exec.Command("git", "-C", repo, "worktree", "add", "-b", "hook-replacement", tree).CombinedOutput(); err != nil {
+		t.Fatalf("create replacement worktree: %v: %s", err, output)
+	}
+	replacementIdentity, err := recordHookWorktreeIdentity(repo, tree)
+	if err != nil {
+		t.Fatalf("record replacement identity: %v", err)
+	}
+	// Model the allocator reusing every old filesystem number. Tokens remain
+	// distinct because checkout creation never derives them from that allocator.
+	originalIdentity.Device, originalIdentity.Inode = 7, 11
+	replacementIdentity.Device, replacementIdentity.Inode = 7, 11
+	if originalIdentity.same(replacementIdentity) {
+		t.Fatal("replacement checkout reproduced the original identity through inode reuse")
 	}
 	AdoptRunningHooks([]*GitWorktree{g})
 	requireOpen(t, g.HooksDone(), "missing replacement identity was treated as completion")
@@ -67,7 +82,7 @@ func TestLegacyHookProgressWithoutIdentityStaysPending(t *testing.T) {
 	g.SetHookScopeSessionID("owner")
 	g.repoPath, g.worktreePath, g.branchName = repo, tree, "hook-resume"
 	marker := filepath.Join(tree, "must-not-run")
-	p, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, []string{
+	p, err := newHookProgress(hookRun{repoPath: repo, worktreePath: tree, scopeSessionID: "owner"}, []string{
 		"touch " + shellQuoteForShim(marker),
 	}, "af-hook-owner", "test")
 	if err != nil {
@@ -93,6 +108,43 @@ func TestLegacyHookProgressWithoutIdentityStaysPending(t *testing.T) {
 	}
 	g.hooksCancel()
 	waitForClosed(t, g.HooksDone(), 5*time.Second, "legacy journal watcher did not stop after cancellation")
+}
+
+func TestLegacyInodeHookProgressStaysPending(t *testing.T) {
+	claimDaemonProcess(t)
+	installScopeShim(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo, tree := linkedHookWorktree(t)
+	g := worktreeWithRecordedScope(t, "af-hook-owner")
+	g.SetHookScopeSessionID("owner")
+	g.repoPath, g.worktreePath, g.branchName = repo, tree, "hook-resume"
+	marker := filepath.Join(tree, "must-not-run")
+	p, err := newHookProgress(hookRun{repoPath: repo, worktreePath: tree, scopeSessionID: "owner"}, []string{
+		"touch " + shellQuoteForShim(marker),
+	}, "af-hook-owner", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.WorktreeIdentity = &hookWorktreeIdentity{Device: 7, Inode: 11}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := hookProgressPath(tree)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	AdoptRunningHooks([]*GitWorktree{g})
+	requireOpen(t, g.HooksDone(), "inode-only journal was authorized to resume")
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("inode-only journal ran without a non-reproducible checkout identity")
+	}
+	if p.claimed(0) || p.finished() {
+		t.Fatal("inode-only journal did not remain pending")
+	}
+	g.hooksCancel()
+	waitForClosed(t, g.HooksDone(), 5*time.Second, "inode-only journal watcher did not stop after cancellation")
 }
 
 func TestHookProgressPublicationFailureRemovesReceipts(t *testing.T) {

@@ -200,7 +200,7 @@ func TestHookProgressRelocationBlockedAdoptionRetriesAfterResolution(t *testing.
 	g.SetHookScopeSessionID("owner")
 	g.repoPath, g.worktreePath, g.branchName = repo, tree, "hook-resume"
 	marker := filepath.Join(tree, "ran")
-	p, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, []string{
+	p, err := newHookProgress(hookRun{repoPath: repo, worktreePath: tree, scopeSessionID: "owner"}, []string{
 		"touch " + shellQuoteForShim(marker),
 	}, "af-hook-owner", "test")
 	if err != nil {

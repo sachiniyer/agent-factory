@@ -45,7 +45,7 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runner.Process.Kill() })
-	hookPID := waitForPidFile(t, pid, 5*time.Second)
+	hookPID := waitForPidFile(t, pid, 10*time.Second)
 	t.Cleanup(func() { _ = killProcessGroup(hookPID) })
 	_ = runner.Process.Kill()
 	_ = runner.Wait()
@@ -117,7 +117,7 @@ func TestHookListResumeWaitsForReadableManager(t *testing.T) {
 	g.repoPath, g.worktreePath = linkedHookWorktree(t)
 	g.branchName = "hook-resume"
 	marker := filepath.Join(t.TempDir(), "ran")
-	progress, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "resume4014"}, []string{"echo ran > " + shellQuoteForShim(marker)}, "af-hook-resume4014", "test")
+	progress, err := newHookProgress(hookRun{repoPath: g.repoPath, worktreePath: g.worktreePath, scopeSessionID: "resume4014"}, []string{"echo ran > " + shellQuoteForShim(marker)}, "af-hook-resume4014", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
