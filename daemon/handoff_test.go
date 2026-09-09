@@ -46,6 +46,7 @@ type handoffBackend struct {
 	events          []string
 	noHandoff       bool
 	sendErr         error
+	deliveryStatus  session.PromptDeliveryStatus
 }
 
 func (b *handoffBackend) Capabilities() session.Capabilities {
@@ -100,6 +101,21 @@ func (b *handoffBackend) SendPromptCommand(_ *session.Instance, prompt string) e
 	}
 	b.sentPrompts = append(b.sentPrompts, prompt)
 	return nil
+}
+
+func (b *handoffBackend) SendPromptCommandWithStatus(
+	i *session.Instance, prompt string,
+) (session.PromptDeliveryStatus, error) {
+	err := b.SendPromptCommand(i, prompt)
+	if err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.deliveryStatus.Valid() {
+		return b.deliveryStatus, nil
+	}
+	return session.PromptDelivered, nil
 }
 
 func (b *handoffBackend) setSendErr(err error) {

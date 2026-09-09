@@ -32,6 +32,19 @@ func prepareHandoffDelivery(delivery handoffDelivery) handoffDelivery {
 	return delivery
 }
 
+// A handoff mission is complete only when the runtime reports PromptDelivered.
+// Every other verdict keeps the durable delivery obligation; a nil transport
+// error means the submission call returned, not that the mission landed.
+func handoffDeliveryResultError(status session.PromptDeliveryStatus, err error) error {
+	if err != nil {
+		return err
+	}
+	if status == session.PromptDelivered {
+		return nil
+	}
+	return fmt.Errorf("%w: prompt submission reported %s", task.ErrPromptDelivery, status)
+}
+
 func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 	settle := func(transition func() error, clearPending bool) error {
 		if err := transition(); err != nil {
@@ -60,7 +73,8 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		return perr
 	}
 
-	serr := task.WaitForReadyAndSendPrompt(context.Background(), delivery.instance, delivery.mission)
+	status, serr := task.WaitForReadyAndSendPromptWithStatus(context.Background(), delivery.instance, delivery.mission)
+	serr = handoffDeliveryResultError(status, serr)
 	if serr == nil {
 		if err := settle(func() error {
 			return delivery.instance.Transition(session.CommitHandoff())

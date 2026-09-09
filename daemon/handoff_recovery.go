@@ -110,7 +110,8 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	if !m.pendingHandoffRetryAllowed(entry.repoID, entry.instance) {
 		return nil
 	}
-	if err := task.WaitForReadyAndSendPrompt(context.Background(), entry.instance, mission); err != nil {
+	status, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), entry.instance, mission)
+	if err = handoffDeliveryResultError(status, err); err != nil {
 		var limitErr *task.LimitReachedError
 		if errors.As(err, &limitErr) {
 			entry.instance.SetPrompt(mission)

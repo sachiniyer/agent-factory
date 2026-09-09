@@ -18,7 +18,8 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 	// An outgoing wall is not evidence about the replacement identity. Its ledger
 	// observation remains durable, while the replacement is independently probed.
 	instance.ClearLimitReached()
-	err := task.WaitForReadyAndSendPrompt(context.Background(), instance, mission)
+	status, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), instance, mission)
+	err = handoffDeliveryResultError(status, err)
 	var limitErr *task.LimitReachedError
 	if errors.As(err, &limitErr) {
 		m.accountLimitMu.Lock()
@@ -35,11 +36,11 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 		return true, settleErr == nil, errors.Join(err, settleErr)
 	}
 	if errors.Is(err, task.ErrPromptDelivery) {
-		// SendPromptWithEvidence normalizes an error after submission to honest
-		// uncertainty. Bind that result to this transaction before the settlement
-		// write; later ordinary prompts update only the session-wide evidence.
+		// Bind the runtime's exact verdict to this transaction before the
+		// settlement write; later ordinary prompts update only session-wide
+		// evidence and cannot change this mission's retry policy.
 		missionErr := instance.RecordPendingManualAccountSwapMissionDelivery(
-			swap.from, swap.to, session.PromptCouldNotConfirm,
+			swap.from, swap.to, status,
 		)
 		return false, false, errors.Join(err, missionErr)
 	}

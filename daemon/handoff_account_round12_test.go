@@ -76,6 +76,41 @@ func (b *unconfirmedAccountDeliveryBackend) attemptCount() int {
 	return b.attempts
 }
 
+type unconfirmedNilAccountDeliveryBackend struct {
+	*accountReadinessBackend
+}
+
+func (b *unconfirmedNilAccountDeliveryBackend) SendPromptCommandWithStatus(
+	*session.Instance, string,
+) (session.PromptDeliveryStatus, error) {
+	return session.PromptCouldNotConfirm, nil
+}
+
+func TestHandoffAccount_UnconfirmedNilDeliveryKeepsPendingTransaction(t *testing.T) {
+	t.Cleanup(task.SetTrustPromptTimingForTest(time.Millisecond))
+	m, repo, inst, base := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.ClearLimitReached()
+	readiness := &accountReadinessBackend{
+		limitResumeBackend: base,
+		previewed:          make(chan struct{}),
+		release:            make(chan struct{}),
+	}
+	close(readiness.release)
+	inst.SetBackend(&unconfirmedNilAccountDeliveryBackend{accountReadinessBackend: readiness})
+
+	resp, err := m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, Account: "personal",
+	})
+	require.ErrorIs(t, err, task.ErrPromptDelivery)
+	require.True(t, isMutationCommitted(err))
+	require.Equal(t, "personal", resp.ToAccount)
+	require.NotNil(t, inst.ToInstanceData().PendingAccountSwap,
+		"a non-delivered verdict must not retire the in-memory transaction")
+	require.NotNil(t, persistedInstanceByTitle(t, repo, inst.Title).PendingAccountSwap,
+		"a non-delivered verdict must not retire the durable transaction")
+}
+
 func TestHandoffAccount_UnconfirmedDeliveryIsNotAutomaticallyRedelivered(t *testing.T) {
 	t.Cleanup(task.SetTrustPromptTimingForTest(time.Millisecond))
 	m, repo, inst, base := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
