@@ -91,6 +91,8 @@ test("a tab mutation Snapshot also settles a completed restore", async ({ page, 
     return route.fulfill({ json: { data: { name: "ledger-shell" } } });
   });
   await f.row(f.b).click(); await page.keyboard.press("Control+]"); await page.keyboard.press("t");
+  await page.getByRole("menu", { name: "Tab type", exact: true })
+    .getByRole("menuitem", { name: "Terminal", exact: true }).click();
   await expect.poll(() => creates).toBe(1);
   await expect(f.row(f.a)).not.toHaveAttribute("data-state", "lost");
   f.event("session.updated", f.a);
