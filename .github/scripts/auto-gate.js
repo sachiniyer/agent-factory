@@ -4342,14 +4342,22 @@ async function evaluateCodex({
     .filter(Boolean)
     .sort((left, right) => right.time - left.time);
   const verdict = matchingReviewArtifacts[0];
+  // The artifact's own time: the comment's for a prose line, the row's for a
+  // summary row. A matching artifact from before this head became current is not
+  // a covering verdict, so availability still has to be classified after it.
+  const verdictTime = verdict?.time || 0;
+  const verdictIsFresh =
+    Boolean(verdict) && headCurrentSince != null && verdictTime > headCurrentSince;
 
-  if (!verdict) {
+  if (!verdictIsFresh) {
     // Only the latest response decides availability: an older unavailable note
-    // that a later verdict superseded proves nothing about now. Conversely, a
-    // later Codex response that is neither a review, finding nor verdict remains
-    // reviewer-unavailable instead of silently withdrawing the degradation
-    // (#3985). A read failure throws out of retryRead rather than reaching here,
-    // so an unreadable list can never be mistaken for silence or availability.
+    // that a later FRESH verdict superseded proves nothing about now. Conversely,
+    // a later Codex response after a stale matching verdict can prove the reviewer
+    // unavailable on the restored head (#4091 Codex P1). A response that is
+    // neither a review, finding nor verdict remains reviewer-unavailable instead
+    // of silently withdrawing the degradation (#3985). A read failure throws out
+    // of retryRead rather than reaching here, so an unreadable list can never be
+    // mistaken for silence or availability.
     //
     // Latest across issue comments, reviews AND inline replies — already sorted
     // newest-first. Reading only issue comments would miss a review posted after
@@ -4392,13 +4400,15 @@ async function evaluateCodex({
         ? `; the latest Codex response was ${cause}${inlineSource}`
         : `; the latest Codex response was ${cause} but predates this head, so it is not ` +
           "evidence about this head";
-    // Split, because the two states need different actions from a reader: one
-    // says wait for or request a review, the other says a review ran and this
-    // gate could not read it — go look at the artifact, not at Codex.
-    const missingVerdictReason = summaryNamesHead(codexReviewArtifacts, sha) &&
-      summaryCorroboration(corroborationArtifacts, sha, headCurrentSince)
-      ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
-      : `Codex has not reviewed head ${sha} yet${suffix}`;
+    // Split, because the states need different actions from a reader: silence
+    // says request a review, an unparseable review says inspect the artifact, and
+    // a stale matching verdict says its review predates this head transition.
+    const missingVerdictReason = verdict
+      ? `Codex verdict for the head commit is older than the head commit timestamp${suffix}`
+      : summaryNamesHead(codexReviewArtifacts, sha) &&
+          summaryCorroboration(corroborationArtifacts, sha, headCurrentSince)
+        ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
+        : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
       reviewerUnavailableSince = new Date(rateLimitTime).toISOString();
@@ -4410,21 +4420,8 @@ async function evaluateCodex({
       remedy: CODEX_VERDICT_REMEDY,
     };
   } else {
-    // The artifact's own time: the comment's for a prose line, the row's for a
-    // summary row.
-    const verdictTime = verdict.time;
-    if (headCurrentSince == null || verdictTime === 0 || verdictTime <= headCurrentSince) {
-      const staleVerdictReason =
-        "Codex verdict for the head commit is older than the head commit timestamp";
-      reasons.push(staleVerdictReason);
-      verdictBlocker = {
-        reason: staleVerdictReason,
-        remedy: CODEX_VERDICT_REMEDY,
-      };
-    } else {
-      notes.push(`Codex verdict matches head ${sha}`);
-      notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
-    }
+    notes.push(`Codex verdict matches head ${sha}`);
+    notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
   }
 
   // Findings are read from artifacts BOUND to this head, which is a wider set

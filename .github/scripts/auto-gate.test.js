@@ -8801,6 +8801,40 @@ test("a stale verdict blocks the manual decision until Codex reviews the current
   assert.match(result.summary, /post `@codex review` on this head/);
 });
 
+test("a fresh outage after a stale verdict takes the maintainer-approval route", async () => {
+  const fixture = {
+    author: "detail-app",
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [
+      { createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } },
+    ],
+    issueComments: [
+      codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z"),
+      codexRateLimit("2026-07-09T02:10:00Z"),
+    ],
+  };
+  const result = await evaluateGate(fixture);
+
+  assert.equal(result.degradedForUnavailableReviewer, true);
+  assert.equal(result.reviewerUnavailableKind, "usage-limit");
+  assert.deepEqual(
+    result.manualMergeBlockers.map((blocker) => blocker.reason),
+    [__test.AWAITING_MAINTAINER_REVIEW_REASON],
+  );
+  assert.doesNotMatch(result.summary, /@codex review/);
+
+  const approved = await evaluateGate({
+    ...fixture,
+    issueComments: [
+      ...fixture.issueComments,
+      prComment("sachiniyer", "## Review — approve", "2026-07-09T02:20:00Z"),
+    ],
+  });
+  assert.equal(approved.degradedForUnavailableReviewer, true);
+  assert.deepEqual(approved.manualMergeBlockers, []);
+  assert.match(approved.summary, /^PASS:/);
+});
+
 test("a covered verdict restores the manual pass for a non-allowed author", async () => {
   const result = await evaluateGate({
     author: "detail-app",
