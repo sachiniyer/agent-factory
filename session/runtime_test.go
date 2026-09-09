@@ -216,4 +216,3 @@ func TestResolveBackendKind_Precedence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, BackendSSH, got)
 }
-
