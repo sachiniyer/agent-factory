@@ -301,26 +301,39 @@ func splitNUL(data []byte) []string {
 // only by the process owner (or root), so a foreign process reports false —
 // the honest unknown, which WorkingDir's caller handles as "cannot resolve".
 func readWorkingDir(pid int) (string, bool) {
-	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	procPath := fmt.Sprintf("/proc/%d/cwd", pid)
+	dir, err := os.Readlink(procPath)
 	if err != nil {
 		return "", false
 	}
-	return linuxWorkingDirPath(dir), true
+	if !strings.HasSuffix(dir, procDeletedSuffix) {
+		return dir, true
+	}
+	cwdInfo, err := os.Stat(procPath)
+	if err != nil {
+		return "", false
+	}
+	return linuxWorkingDirPath(dir, cwdInfo), true
 }
 
 const procDeletedSuffix = " (deleted)"
 
 // linuxWorkingDirPath removes procfs's annotation from an unlinked cwd. The
 // suffix is ambiguous because it is also legal in a real filename, so an
-// existing path is always returned byte-for-byte; only ENOENT proves the text
-// cannot name a currently existing literal path. When the literal directory
-// itself was unlinked, procfs appends a second suffix and this removes only the
-// kernel-owned one.
-func linuxWorkingDirPath(path string) string {
+// existing path is preserved only when it has the cwd's device/inode identity.
+// This matters when an unlinked "worktree" coexists with an unrelated real
+// "worktree (deleted)" sibling: existence alone would misidentify the latter as
+// the cwd. When a literal suffix-named directory is itself unlinked, procfs
+// appends a second suffix and this removes only the kernel-owned one.
+func linuxWorkingDirPath(path string, cwdInfo os.FileInfo) string {
 	if !strings.HasSuffix(path, procDeletedSuffix) {
 		return path
 	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+	pathInfo, err := os.Stat(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	if err == nil && os.SameFile(pathInfo, cwdInfo) {
 		return path
 	}
 	return strings.TrimSuffix(path, procDeletedSuffix)
@@ -336,5 +349,10 @@ func openWorkingDir(pid int) (*os.File, string, bool) {
 		_ = directory.Close()
 		return nil, "", false
 	}
-	return directory, linuxWorkingDirPath(path), true
+	cwdInfo, err := directory.Stat()
+	if err != nil {
+		_ = directory.Close()
+		return nil, "", false
+	}
+	return directory, linuxWorkingDirPath(path, cwdInfo), true
 }

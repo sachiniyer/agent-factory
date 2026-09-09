@@ -44,6 +44,20 @@ func TestWorkingDirPreservesRealDeletedSuffix(t *testing.T) {
 	require.Equal(t, dir, got)
 }
 
+func TestWorkingDirRejectsUnrelatedDeletedSuffixSibling(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "worktree")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Mkdir(dir+" (deleted)", 0o755))
+	pid := parkedProcessIn(t, dir)
+	require.NoError(t, os.Remove(dir))
+
+	got, ok := WorkingDir(pid)
+	require.True(t, ok)
+	require.Equal(t, dir, got,
+		"an unrelated suffix-named sibling must not make procfs's annotation look like the cwd")
+}
+
 // TestSnapshotSurvivesUnreadableBootTime is the subset=pid regression: a procfs
 // that serves /proc/<pid>/stat but hides /proc/uptime must still yield a
 // process table.
