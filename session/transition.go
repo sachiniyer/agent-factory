@@ -594,6 +594,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	}
 
 	to := spec.target(from, ev)
+	// The durable-push fence belongs to exactly one archive generation. Begin
+	// clears any historical value before the remote push starts; every settling
+	// edge clears it after checkpoint retention no longer needs the phase.
+	switch ev.kind {
+	case tkBeginArchive, tkCancelArchive, tkCommitArchive, tkAbortArchiveToLost:
+		i.archivePushCompleted = false
+	}
 	// Apply this transition's declared effect on the task run (#1892). The answer
 	// comes from the table, not from reading the resulting state — see runEffect.
 	//

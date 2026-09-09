@@ -26,21 +26,10 @@ package session
 //     disk row advanced past the snapshot's archive — not a stale row from a
 //     previous unrelated archive cycle.
 func reconcilePendingArchiveRows(group []InstanceData, inFlightArchive map[string]struct{}, onDisk []InstanceData) {
-	// Build a key→disk-row index for O(n) lookup.
-	diskIndex := make(map[string]InstanceData, len(onDisk))
-	for _, d := range onDisk {
-		k := d.ID
-		if k == "" {
-			k = d.Title
-		}
-		diskIndex[k] = d
-	}
+	diskIndex := newestArchiveRowsByKey(onDisk)
 
 	for i, row := range group {
-		key := row.ID
-		if key == "" {
-			key = row.Title
-		}
+		key := archiveRowKey(row)
 		_, tracked := inFlightArchive[key]
 		// For untracked rows, only reconcile sandbox-backend rows, which are
 		// the ones an archive operation would touch.
@@ -65,39 +54,71 @@ func reconcilePendingArchiveRows(group []InstanceData, inFlightArchive map[strin
 	}
 }
 
-// mergeCommittedArchiveRows appends to group any rows from onDisk that carry a
-// committed archive outcome (LiveArchived or LiveLost with a non-empty Branch)
-// but are absent from group. This handles the race where a sandbox row was
-// in the pre-push window (Branch still empty) when the checkpoint collected its
-// in-memory snapshot, was therefore dropped from the in-memory group, but a
-// targeted archive writer committed a durable row to disk before the file lock
-// was acquired. Without this merge the wholesale write would overwrite the
-// committed row with nothing (the row is absent from group), losing the only
-// af-side handle to the pushed branch.
-func mergeCommittedArchiveRows(group []InstanceData, onDisk []InstanceData) []InstanceData {
+// mergeCommittedArchiveRows appends a disk outcome only for a sandbox row that
+// this checkpoint dropped before its current push completed, and only when the
+// disk mutation is strictly newer than that dropped snapshot. The timestamp
+// fence prevents a previous archive cycle's stale row from becoming proof of the
+// current push merely because the current row is absent from group.
+func mergeCommittedArchiveRows(
+	group []InstanceData,
+	onDisk []InstanceData,
+	prePushArchive map[string]InstanceData,
+) []InstanceData {
+	if len(prePushArchive) == 0 {
+		return group
+	}
 	// Build a key set for rows already in the group.
 	inGroup := make(map[string]struct{}, len(group))
 	for _, row := range group {
-		k := row.ID
-		if k == "" {
-			k = row.Title
-		}
-		inGroup[k] = struct{}{}
+		inGroup[archiveRowKey(row)] = struct{}{}
 	}
+	diskIndex := newestArchiveRowsByKey(onDisk)
+	seen := make(map[string]struct{}, len(diskIndex))
 	for _, d := range onDisk {
+		k := archiveRowKey(d)
+		if _, done := seen[k]; done {
+			continue
+		}
+		seen[k] = struct{}{}
+		d = diskIndex[k]
 		if !committedArchiveOutcome(d) {
 			continue
 		}
-		k := d.ID
-		if k == "" {
-			k = d.Title
-		}
 		if _, present := inGroup[k]; present {
+			continue
+		}
+		prePush, tracked := prePushArchive[k]
+		if !tracked || !d.UpdatedAt.After(prePush.UpdatedAt) {
 			continue
 		}
 		group = append(group, d)
 	}
 	return group
+}
+
+func archiveRowKey(d InstanceData) string {
+	if d.ID != "" {
+		return d.ID
+	}
+	return d.Title
+}
+
+// newestArchiveRowsByKey collapses duplicate stable identities by mutation
+// time. Targeted writers update the first matching legacy duplicate, so array
+// order cannot decide which row carries the committed archive. On timestamp
+// ties, a committed outcome wins over a non-committed stale duplicate.
+func newestArchiveRowsByKey(rows []InstanceData) map[string]InstanceData {
+	index := make(map[string]InstanceData, len(rows))
+	for _, row := range rows {
+		key := archiveRowKey(row)
+		current, found := index[key]
+		if !found || row.UpdatedAt.After(current.UpdatedAt) ||
+			(row.UpdatedAt.Equal(current.UpdatedAt) && committedArchiveOutcome(row) &&
+				!committedArchiveOutcome(current)) {
+			index[key] = row
+		}
+	}
+	return index
 }
 
 // committedArchiveOutcome reports whether a disk row represents a durable,

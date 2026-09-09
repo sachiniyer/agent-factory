@@ -59,6 +59,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	}
 	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
+	data.archivePushCompleted = i.archivePushCompleted
 
 	if i.backend != nil {
 		data.BackendType = i.backend.Type()
