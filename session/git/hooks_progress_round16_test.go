@@ -181,11 +181,29 @@ func TestTerminalHookAbandonmentSharesRestoreBudget(t *testing.T) {
 		}
 		return originalRead(path)
 	}
+	originalBatchReadFinished := hookProgressBatchReadFinished
+	batchReadFinished := make(chan struct{}, len(candidates))
+	hookProgressBatchReadFinished = func() { batchReadFinished <- struct{}{} }
 	previousTimeout := relocationIdentityTimeout
 	relocationIdentityTimeout = 80 * time.Millisecond
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
+		for _, candidate := range candidates {
+			if candidate.worktree.hooksRetirementDone != nil {
+				waitForClosed(t, candidate.worktree.hooksRetirementDone, 5*time.Second, "terminal abandonment did not drain")
+			}
+		}
+		// The shared startup budget returns before its outstanding reads. Join
+		// those reads before restoring timeout and storage seams they consult.
+		for range candidates {
+			select {
+			case <-batchReadFinished:
+			case <-time.After(5 * time.Second):
+				t.Fatal("terminal restore journal reads did not drain")
+			}
+		}
 		hookProgressReadFile = originalRead
+		hookProgressBatchReadFinished = originalBatchReadFinished
 		relocationIdentityTimeout = previousTimeout
 	})
 	worktrees := make([]*GitWorktree, 0, len(candidates))

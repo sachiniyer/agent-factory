@@ -30,8 +30,8 @@ type hookProgress struct {
 	Prefix      string   `json:"scope_prefix"`
 	Generation  string   `json:"generation"`
 	Directory   string   `json:"directory"`
-	// The linked worktree's .git pointer file survives an ordinary rename but
-	// gets a new device/inode identity when a different worktree replaces it.
+	// The checkout's .git node survives an ordinary rename but gets a new
+	// device/inode identity when a different checkout replaces it.
 	// Resume therefore requires this positive identity, not merely the absence
 	// of evidence that the path changed.
 	WorktreeIdentity *hookWorktreeIdentity `json:"worktree_identity,omitempty"`
@@ -125,10 +125,9 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir,
 	}
-	p.WorktreeIdentity, err = readHookWorktreeIdentity(run.worktreePath)
-	if err != nil && run.repoPath != "" {
-		return nil, fmt.Errorf("record linked worktree identity for hook journal: %w", err)
-	}
+	// Identity protects a later resume; it must not veto the original hook run.
+	// A journal without one stays pending-unknown if this daemon exits.
+	p.WorktreeIdentity, _ = readHookWorktreeIdentity(run.worktreePath)
 	if lease != nil {
 		p.leaseMu = &sync.Mutex{}
 		p.leaseHolds = 1

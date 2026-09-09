@@ -14,6 +14,8 @@ type hookProgressAdoptionRead struct {
 	abandon   bool
 }
 
+var hookProgressBatchReadFinished = func() {}
+
 // Restore probes every journal concurrently and spends one identity deadline
 // across the batch. A read that misses the budget is installed as a pending
 // watcher before restore publishes the worktree; the watcher retries under the
@@ -36,6 +38,7 @@ func reconcileHookProgressBatch(worktrees, terminal []*GitWorktree) map[*GitWork
 		read := hookProgressAdoptionRead{worktree: g, path: g.worktreePath, sessionID: g.hookScopeSessionID, abandon: abandon}
 		pending[g] = read
 		go func() {
+			defer hookProgressBatchReadFinished()
 			if read.abandon {
 				read.progress, _, read.err = readOwnedHookProgress(read.path, read.sessionID)
 			} else {

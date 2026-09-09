@@ -6,9 +6,9 @@ import (
 	"syscall"
 )
 
-// hookWorktreeIdentity identifies the .git pointer file rather than its text.
-// Git can reuse the same registration pathname after deleting and recreating a
-// linked worktree, but the replacement pointer is a different filesystem node.
+// hookWorktreeIdentity identifies the checkout's .git filesystem node rather
+// than its contents. A linked worktree uses a pointer file and a main checkout
+// uses a directory; replacing either checkout creates a different node.
 type hookWorktreeIdentity struct {
 	Device uint64 `json:"device"`
 	Inode  uint64 `json:"inode"`
@@ -23,12 +23,12 @@ func readHookWorktreeIdentity(worktree string) (*hookWorktreeIdentity, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("linked worktree .git pointer is not a regular file")
+	if !info.Mode().IsRegular() && !info.IsDir() {
+		return nil, fmt.Errorf("worktree .git node is not a regular file or directory")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return nil, fmt.Errorf("linked worktree .git pointer has no filesystem identity")
+		return nil, fmt.Errorf("worktree .git node has no filesystem identity")
 	}
 	return &hookWorktreeIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
 }
