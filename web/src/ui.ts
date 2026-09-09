@@ -1,3 +1,4 @@
+import { sessionIdentity, patchSessionIdentity } from "./session-identity.js";
 import { renderMutationOutcome, recoveryScreen, scopeRecovery, type MutationOutcomeNotice } from "./recovery.js";
 // The view layer of the web client (#1592 Phase 5). It renders two views into
 // #app: the paste-token login (design §1.2) and the authed app — a left rail of
@@ -2138,7 +2139,7 @@ export class AppShell {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
     this.sessionFirst = sessionFirstComposition([
-      [chrome.title, this.header], [chrome.keyboard, this.header],
+      [chrome.titleBox, this.header], [chrome.keyboard, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
       [chrome.tabs, this.appControls.panel],
@@ -2658,6 +2659,7 @@ export class AppShell {
     this.headTitle.title = selected.title;
     this.headTitle.setAttribute("aria-label", selected.title);
     if (this.terminalChrome) {
+      patchSessionIdentity(this.terminalChrome.identity, selected);
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
@@ -3065,25 +3067,21 @@ function sessionRow(
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
-  const branchParts: Array<Node | string> = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-  ];
+  const branchParts: Array<Node | string> = [];
+  if (s.branch) {
+    branchParts.push(h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch));
+  }
   if (selected && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
-      idle.dataset.paneChurnAt = s.last_pane_churn_at;
-    }
+    if (s.last_pane_churn_at) idle.dataset.paneChurnAt = s.last_pane_churn_at;
     branchParts.push(idle);
   }
-  if (s.branch) {
-    branchParts.push(
-      " · ",
-      h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch),
-    );
-  }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h("div", { class: "af-row-main" }, title, branch);
+  const identity = h("div", { class: "af-row-identity", title: sessionIdentity(s) },
+    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
+    h("span", { class: "af-row-owner" }, sessionIdentity(s)));
+  const main = h("div", { class: "af-row-main" }, title, identity, branch);
 
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
     actionable ? "" : " af-row-inert"
@@ -3143,7 +3141,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       } as SessionData,
       now,
     );
-    idle.textContent = detail ? ` · ${detail}` : "";
+    idle.textContent = detail ?? "";
     const row = idle.closest(".af-row") as HTMLElement | null;
     if (row) {
       const reason = detail ? `; ${detail}` : "";

@@ -1,0 +1,55 @@
+{
+  "issue": 4065,
+  "baseline_commit": "1ed491b121931ad09a8c4185179b515e935d5217",
+  "browser_before_run": "1469631-7faebb",
+  "browser_after_run": "584473-0aeaf1",
+  "browser_fixture": "Real container browser and daemon; scripted stand-in agents; clock pinned by visual harness",
+  "browser_viewports": {
+    "desktop": [
+      1440,
+      900
+    ],
+    "phone": [
+      360,
+      812
+    ],
+    "critique_phone": [
+      375,
+      812
+    ]
+  },
+  "tui_fixture": "Accepted master TestDesignDriverScenes, pinned app-model Update/View; no TUI exemplar or paint change",
+  "tui_clock": "2026-09-06T12:00:00Z",
+  "capture_commands": [
+    "AF_UPDATE_GOLDENS=1 scripts/testbox.sh perf",
+    "scripts/testbox.sh perf",
+    "scripts/testbox.sh web-selftest",
+    "Temporary capture mount with AF_TUI_DESIGN_CAPTURE; scripts/testbox.sh test ./ui ./app -count=1. Capture helper removed from the final diff with the TUI exemplar."
+  ],
+  "reviewed_changed_goldens": {
+    "browser": 118,
+    "existing_tui": 0,
+    "new_tui": 0
+  },
+  "budgets": "Numeric performance budgets and visual tolerance unchanged. Desktop header geometry intentionally expands from <64px to <144px for two rows of identity and controls; phone remains 48px.",
+  "source_sha256": {
+    "design/tokens.json": "b2ff239143d4b23d8d5ad9c15e893e1d0d3b9a6ce3a25dcaed646c57fc1db693",
+    "design/style-guide.tmpl": "ef3de7e30751c263f8b49491d3d0c28b9934af71e7165d87819fd0252a496063",
+    "internal/designtokens/generate.go": "b4c4b57515dc3c62b2e62479d826ab2818201ef6bc59400cedd5307244e9942e",
+    "web/src/sessions-thesis.css": "50de2f6b7268fa6b4ed88425072df74209e172e2d2109e1ad2a1ac3db2d96d80",
+    "web/src/session-identity.ts": "07f5736bf5b5affd6ba9a2943fd279dda036d1c8a909463c876109a4fc4bb543",
+    "web/src/components.ts": "158cdfbc292c22648323b15a04e8613cd42ae8f5c8e94384a76ebf40b8f8a394",
+    "web/src/ui.ts": "d027cd0fe0bc9ae990319c1a231f286eb2c90a2fead05231f3fd59070df052a7"
+  },
+  "revision_before_commit": "0a47c3f080af8aab1343ba58d6fe174535c30876",
+  "revision_before_run": "2865088-77e8e3",
+  "browser_recovery_run": "2875028-b01af0",
+  "tui_equality_manifest": "tui-unchanged.json",
+  "revision_reviewed_goldens": {
+    "demo": 71,
+    "recovery": 28,
+    "tui_changed": 0,
+    "retained_from_previous_head": 17
+  },
+  "comparison_boards": "desktop-comparison.png and phone-comparison.png arrange the linked unmodified before/after captures with labels."
+}

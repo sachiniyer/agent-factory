@@ -6,6 +6,18 @@ two radii**. The six liveness bindings are fixed semantics, including the empty 
 glyph. The only user-facing theme choice is **Light / Dark / System**. These are internal
 product constants, not user-editable tokens, presets or a custom-palette API.
 
+## Beauty thesis · sessions exemplar
+
+The [beauty thesis](thesis.md) takes the accepted TUI as the in-house benchmark
+for expression with few means. Its exemplar changes only web Sessions: 28px
+focused desktop identity, a 20px fleet heading, 16px row names and 13px metadata.
+Agent/account and state are visible; repo/branch belong beside the focused work.
+Raised navigation/identity chrome separates the base terminal surface using the
+two existing fills. Semantic state colours carry attention alongside one accent.
+Phone keeps its 48px session-first header and 44px keybar. No animation is added.
+Shared CSS size changes do not change terminal cells or generated TUI paint.
+Other web component recipes await the sequenced Phase 2 slices.
+
 ## Rules applied
 
 Read the rule, then compare its light/dark web and TUI specimens with the current screen.
@@ -95,8 +107,7 @@ and remain lower-contrast than ink on both planes. A matching liveness colour ne
 a per-theme `sharesMuted` rationale in the source; running and archived share it
 intentionally in light only.
 Fonts, 400/600 weight, 1.5 web line height, 44px touch height and a 2px focus ring are
-fixed component rules, not more tokens. Indicators never animate. User-caused web
-disclosures may take at most 120ms; reduced motion and all TUI changes are immediate.
+fixed component rules, not more tokens. Indicators never animate. All disclosures and TUI changes are immediate; no animation is introduced.
 
 ## Capture coverage
 

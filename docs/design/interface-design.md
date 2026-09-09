@@ -344,11 +344,11 @@ fixed implementation rules, not more tokens or user configuration.
 
 | Type step | Web at default root size | Only use | TUI |
 | --- | --- | --- | --- |
-| type-caption | 12px | Secondary metadata | One ordinary row |
+| type-caption | 13px | Secondary metadata in the Sessions fleet and focused-session identity | One ordinary row |
 | type-body | 14px | Names, body, fields, buttons and instructions | One ordinary row; selected name bold |
 | type-heading | 16px | Section and pane headings | One bold row |
-| type-title | 20px | Dialog titles | One bold row |
-| type-display | 24px | Empty or unavailable full-screen condition | One bold row |
+| type-title | 20px | Sessions fleet heading and dialog titles | One bold row |
+| type-display | 28px | Focused web session identity and empty or unavailable full-screen conditions | One bold row |
 
 Use system UI fonts for chrome and system monospace for code and terminal
 examples. Weights are 400 for ordinary text and 600 for headings/selection;

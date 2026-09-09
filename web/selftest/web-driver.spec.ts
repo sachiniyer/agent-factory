@@ -52,11 +52,12 @@ import { decode, Op } from "../src/frame.js";
 import { openAfterInitialResync } from "./initial-resync.js";
 import { stopPolledRoutes } from "./polled-route.js";
 
-const surfaceTokens: { light: string; dark: string } = JSON.parse(
+const colorTokens: Record<"surface" | "surface-raised", { light: string; dark: string }> = JSON.parse(
   readFileSync(new URL("../../design/tokens.json", import.meta.url), "utf8"),
-).colors.surface;
-const surfaceRGB = (mode: "light" | "dark") =>
-  `rgb(${[1, 3, 5].map(i => parseInt(surfaceTokens[mode].slice(i, i + 2), 16)).join(", ")})`;
+).colors;
+const surfaceTokens = colorTokens.surface;
+const surfaceRGB = (mode: "light" | "dark", role: "surface" | "surface-raised" = "surface") =>
+  `rgb(${[1, 3, 5].map(i => parseInt(colorTokens[role][mode].slice(i, i + 2), 16)).join(", ")})`;
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -1506,8 +1507,8 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
   await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
-  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("Needs you · synth-probe-needs-you");
-  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("synth-probe-needs-you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("");
   await expect(row(p, "probe-no-branch").locator(".af-row-branch-name")).toHaveCount(0);
   await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
@@ -1697,7 +1698,7 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
 // unfixed code. The paired data-attribute assertions are the other half — they
 // prove the machinery still reports open, so this is a removal of the indicators
 // and not of the thing they indicated.
-test("#2458: no live indicator by the project selector, no live/branch meta by the title", REAL_FIXTURE, async () => {
+test("#2458: no transport indicator beside project or session identity", REAL_FIXTURE, async () => {
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
@@ -1715,10 +1716,9 @@ test("#2458: no live indicator by the project selector, no live/branch meta by t
   await expect(page.locator(".af-appbar")).not.toContainText("Connecting…");
   await expect(page.locator(".af-term-head")).not.toContainText("Live");
 
-  // The branch went with it: "Live · master" was one unit, and the head now carries
-  // the session title and its separator before the tab labels.
-  const head = await page.locator(".af-term-head-main").textContent();
-  expect(head?.trim()).toBe(`${SESSION_A} ·`);
+  // #4065 restores useful work identity, without restoring transport-status chrome.
+  await expect(page.locator(".af-term-title")).toHaveText(SESSION_A);
+  await expect(page.locator(".af-session-identity")).toContainText("Default account");
 });
 
 // The phone path is checked separately because the indicator was not merely
@@ -6513,9 +6513,9 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // Slice A uses the fixed generated surface in both modes.
-  expect(lightRail).toBe(surfaceRGB("light"));
-  expect(darkRail).toBe(surfaceRGB("dark"));
+  // #4065 uses the fixed raised surface for Sessions chrome in both modes.
+  expect(lightRail).toBe(surfaceRGB("light", "surface-raised"));
+  expect(darkRail).toBe(surfaceRGB("dark", "surface-raised"));
   expect(await bgColor(page, ".af-appbar")).toBe(lightRail);
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
 
@@ -8110,7 +8110,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               { root: mockRepo!, savedTheme: theme },
             );
             const p = await ctx.newPage();
-            const title = `title-row-${roster}-${width}-${theme}-with-a-useful-distinguishing-suffix`;
+            const title = `title-row-${roster}-${width}-${theme}-${"with-a-useful-distinguishing-suffix-".repeat(3)}`;
             await p.route("**/v1/Snapshot", async (route) => {
               const resp = await route.fetch();
               const body = await resp.json();
@@ -8150,7 +8150,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
             await expect(p.locator(".af-main.af-main-term")).toBeVisible();
 
             if (width <= 768) {
-              const titleNode = p.locator(".af-appbar > .af-term-title");
+              const titleNode = p.locator(".af-appbar .af-term-title");
               await expect(titleNode).toHaveText(title);
               await expect(titleNode).toHaveAttribute("title", title);
               await expect(titleNode).toHaveAttribute("aria-label", title);
@@ -8245,7 +8245,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
             });
             expect(layout.barParent).toContain("af-term-head");
             expect(layout.hostPrevious).toContain("af-term-head");
-            expect(layout.head.height, "phone separates title and tabs; desktop keeps one row").toBeLessThan(width <= 768 ? 170 : 64);
+            expect(layout.head.height, "identity and controls use two bounded desktop rows (#4065)").toBeLessThan(width <= 768 ? 170 : 144);
             expect(layout.bar.top).toBeGreaterThanOrEqual(layout.head.top);
             expect(layout.bar.bottom).toBeLessThanOrEqual(layout.head.bottom);
             expect(layout.host.top).toBeGreaterThanOrEqual(layout.head.bottom - 1);
@@ -8256,7 +8256,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               expect(layout.titleTextOverflow).toBe("ellipsis");
               expect(layout.host.top, "navigation and pane controls leave room for output").toBeLessThan(300);
             } else {
-              expect(Math.abs(layout.titleBox.centerY - layout.bar.centerY), "desktop title and tabs share a baseline row").toBeLessThanOrEqual(1);
+              expect(layout.bar.top, "desktop tabs sit below the session identity (#4065)").toBeGreaterThanOrEqual(layout.titleBox.bottom);
               expect(layout.titleBox.width, "the desktop title keeps a useful allocation").toBeGreaterThanOrEqual(120);
               expect(layout.titleClientWidth, "the readable desktop title never collapses to a token").toBeGreaterThanOrEqual(88);
               expect(layout.titleScrollWidth, "the long desktop title really needs truncation").toBeGreaterThan(layout.titleClientWidth);

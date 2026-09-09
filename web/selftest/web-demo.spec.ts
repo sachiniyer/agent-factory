@@ -491,7 +491,7 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   await expect(title).toBeVisible();
   await expect(title).toHaveAttribute("aria-label", await title.textContent() ?? "");
   const geometry = await page.evaluate(() => {
-    const title = document.querySelector<HTMLElement>(".af-appbar > .af-term-title")!;
+    const title = document.querySelector<HTMLElement>(".af-appbar .af-term-title")!;
     const original = title.textContent;
     title.textContent = "A long focused session title that must truncate with … on a phone";
     const truncates = title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === "ellipsis" && getComputedStyle(title).whiteSpace === "nowrap";
