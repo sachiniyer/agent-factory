@@ -317,6 +317,23 @@ func TestRedactInstancesJSONBlanksAnUnrecognizedArchiveWarning(t *testing.T) {
 	}
 }
 
+func TestRedactInstancesJSONBlanksWorktreeWarningNames(t *testing.T) {
+	out := redactOneInstance(t, &redactor{}, session.InstanceData{
+		ID:              "abc123",
+		Title:           "idle-lane",
+		WorktreeWarning: `DANGER: branch "private-client-pr" is also checked out by live lane "takeover-private-client"`,
+	})
+
+	for _, secret := range []string{"private-client-pr", "takeover-private-client"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("the worktree warning carried %q into the bundle:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, `"worktree_warning": "`+redactedMarker+`"`) {
+		t.Errorf("a worktree warning must retain its presence as the redaction marker:\n%s", out)
+	}
+}
+
 // TestRedactInstancesJSONScrubsLostRestoreFailureError covers register item
 // "LostRestoreFailure.Error". It is af-authored — daemon/lostrestore.go stores
 // the restore loop's terminal error — but it QUOTES whatever tmux and git

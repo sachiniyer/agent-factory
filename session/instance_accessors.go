@@ -176,6 +176,13 @@ func (i *Instance) ArchiveWarning() string {
 	return i.archiveWarning
 }
 
+// WorktreeWarning returns the live, projection-only checkout safety notice.
+func (i *Instance) WorktreeWarning() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.worktreeWarning
+}
+
 // SetRuntimeTeardownForTest installs the physical reap a sandbox runtime would
 // normally supply through ProvisionResult.Teardown.
 //

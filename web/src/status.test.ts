@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import type { IconName } from "./icon.js";
 import {
   archiveWarningText,
+  worktreeWarningText,
   canHandoff,
   type DotKind,
   idleReasonDetail,
@@ -24,6 +25,7 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  sessionWarningText,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -234,6 +236,16 @@ test("archive warning retains the daemon's source location for the persistent ba
   const warning = "restore completed with an incomplete archive: complete original tree retained at /retained/source";
   assert.equal(archiveWarningText(sess({ archive_warning: warning })), warning);
   assert.equal(archiveWarningText(sess({ archive_warning: "   " })), "");
+});
+
+test("worktree warning is visible independently of liveness", () => {
+  const warning = "DANGER: HEAD moved without a local reflog entry; do not commit";
+  assert.equal(worktreeWarningText(sess({ worktree_warning: warning })), warning);
+  assert.equal(rowTitle(sess({ title: "idle-lane", worktree_warning: warning })), "[worktree unsafe] idle-lane");
+  assert.equal(
+    sessionWarningText(sess({ worktree_warning: warning, archive_warning: "archive incomplete" })),
+    `${warning}\narchive incomplete`,
+  );
 });
 
 test("[fresh context] note mirrors session.RootRecreateContext.Note (#2629)", () => {

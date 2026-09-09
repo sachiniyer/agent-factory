@@ -684,6 +684,9 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
 		changed = true
 	}
+	if inst.ReconcileWorktreeWarning(d.WorktreeWarning) {
+		changed = true
+	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
 	// that durable terminal axis independently so an already-open TUI surfaces the
 	// reason immediately rather than only after cold-start materialization.

@@ -22,6 +22,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -95,6 +96,8 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		// opt back into the production grace period explicitly.
 		minProcessLeakAge: time.Nanosecond,
 		snapshot:          snapshotOf(t, pids...),
+		sessionInventory:  func() ([]session.InstanceData, error) { return nil, nil },
+		worktreeInventory: func() ([]session.InstanceData, error) { return nil, nil },
 		// No tasks by default, for the same reason: the automations check (#3623)
 		// would otherwise read whatever task store answers on the box. The tasks
 		// tests inject their own inventory.
