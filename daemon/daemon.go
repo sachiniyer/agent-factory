@@ -579,6 +579,11 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if !warnedRepos[repoID] {
 				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
 				warnedRepos[repoID] = true
+				// The live rows are still real, but the persisted cohort that used
+				// to accompany them is now unobservable. Preserve both facts: the
+				// instances stay addressable and no later scan may read the absent
+				// inventory as proof that a duplicate branch was repaired.
+				worktreeInventory.incompleteRepo[repoID] = fmt.Errorf("persisted session inventory for repository %s disappeared while live in-memory sessions remain", repoID)
 			}
 			next[key] = inst
 		}

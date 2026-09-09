@@ -34,11 +34,22 @@ func isolateGitCommandTree(cmd *exec.Cmd) {
 	}
 }
 
-func terminateGitCommandTree(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		reapGitDescendants(cmd.Process.Pid)
-		_ = cmd.Process.Kill()
+func terminateGitCommandTree(cmd *exec.Cmd, waitErr error) {
+	if cmd.Process == nil {
+		return
 	}
+	if errors.Is(waitErr, exec.ErrWaitDelay) {
+		// WaitDelay means Git's leader has already exited and been waited for,
+		// while a helper still holds an output pipe. That helper may already be
+		// reparented, so a fresh parent/child snapshot cannot find it through the
+		// dead leader. Setpgid preserved the other correlation: every unescaped
+		// helper remains in the process group whose id is the original leader PID.
+		// Kill that group before accepting Git's complete captured output.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return
+	}
+	reapGitDescendants(cmd.Process.Pid)
+	_ = cmd.Process.Kill()
 }
 
 func reapGitDescendants(rootPID int) {

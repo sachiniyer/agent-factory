@@ -245,3 +245,31 @@ wait "$child"
 	}, time.Second, 10*time.Millisecond,
 		"canceling an integrity probe must kill the helper process, not only the direct git child")
 }
+
+func TestIntegrityProbeReapsPipeHolderAfterGitExits(t *testing.T) {
+	binDir := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "child-pid")
+	fakeGit := filepath.Join(binDir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+(trap '' HUP; sleep 30) &
+child=$!
+printf '%%s' "$child" > %q
+printf '%%s\n' '# branch.oid 1111111111111111111111111111111111111111' '# branch.head shared'
+exit 0
+`, pidFile)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := runIntegrityGit(context.Background(), t.TempDir(), "status")
+	require.NoError(t, err, "a pipe holder after successful Git exit must not discard its complete output")
+	rawPID, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	require.Eventually(t, func() bool {
+		err := syscall.Kill(childPID, 0)
+		return errors.Is(err, syscall.ESRCH)
+	}, time.Second, 10*time.Millisecond,
+		"a helper that kept Git's output pipe open must not survive the bounded probe")
+}

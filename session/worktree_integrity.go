@@ -223,12 +223,31 @@ func observeWorktreeCohorts(
 			switch {
 			case !ok:
 				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q is absent from the repository-wide branch snapshot", rows[index].Worktree.WorktreePath))
-			case binding.Branch != inspections[index].Evidence.Branch || binding.HeadSHA != inspections[index].Evidence.HeadSHA:
+			case !resolveAmbiguousBranchHead(&inspections[index].Evidence, binding):
+				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q changed before repository-wide branch correlation", rows[index].Worktree.WorktreePath))
+			case binding.HeadSHA != inspections[index].Evidence.HeadSHA:
 				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q changed before repository-wide branch correlation", rows[index].Worktree.WorktreePath))
 			}
 		}
 	}
 	return errs
+}
+
+func resolveAmbiguousBranchHead(evidence *sessiongit.WorktreeIntegrity, binding sessiongit.WorktreeBranchBinding) bool {
+	if !evidence.BranchHeadAmbiguous {
+		return !binding.Detached && binding.Branch == evidence.Branch
+	}
+	switch {
+	case binding.Detached && binding.Branch == "":
+		evidence.Branch = ""
+		evidence.BranchHeadAmbiguous = false
+		return true
+	case !binding.Detached && binding.Branch == "(detached)":
+		evidence.BranchHeadAmbiguous = false
+		return true
+	default:
+		return false
+	}
 }
 
 func otherWorktreeLanes(inspections []SessionWorktreeInspection, group []int, self int) []string {

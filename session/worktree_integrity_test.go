@@ -72,6 +72,26 @@ func TestInspectSessionWorktreesIgnoresOrdinaryFullyStagedChange(t *testing.T) {
 	assert.Empty(t, got[0].Warning, "an ordinary fully staged commit must never be surfaced as a takeover danger")
 }
 
+func TestInspectSessionWorktreesDistinguishesBranchNamedDetached(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	worktreeScanGit(t, repo, "add", "--all")
+	worktreeScanGit(t, repo, "commit", "-q", "-m", "base")
+	worktreeScanGit(t, repo, "branch", "-m", "(detached)")
+
+	got := InspectSessionWorktrees([]InstanceData{{
+		ID: "legal-detached-name", Title: "legal-detached-name", Liveness: LiveReady, BackendType: "local",
+		Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: repo},
+	}})
+	require.Len(t, got, 1)
+	require.NoError(t, got[0].Err)
+	require.NoError(t, got[0].CorrelationErr,
+		"the repository-wide structural branch record must disambiguate the legal name from detached HEAD")
+	assert.Equal(t, "(detached)", got[0].Evidence.Branch)
+	assert.Empty(t, got[0].Warning)
+}
+
 func TestInspectSessionWorktreesReportsMissingLocalPath(t *testing.T) {
 	got := InspectSessionWorktrees([]InstanceData{{
 		ID: "missing", Title: "missing", Liveness: LiveReady, BackendType: "local",

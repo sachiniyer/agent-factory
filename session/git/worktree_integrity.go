@@ -22,6 +22,7 @@ var worktreeIntegrityTimeout = 10 * time.Second
 // WorktreeIntegrity is the read-only evidence collected from one checkout.
 type WorktreeIntegrity struct {
 	Branch                 string
+	BranchHeadAmbiguous    bool
 	HeadSHA                string
 	ReflogHeadSHA          string
 	StagedPaths            int
@@ -81,11 +82,14 @@ func parseIntegrityStatus(output string) (WorktreeIntegrity, error) {
 		case strings.HasPrefix(line, "# branch.head "):
 			branchObserved = true
 			result.Branch = strings.TrimSpace(strings.TrimPrefix(line, "# branch.head "))
-			if result.Branch == "(detached)" {
-				result.Branch = ""
-			} else if result.Branch == "" {
+			if result.Branch == "" {
 				return WorktreeIntegrity{}, fmt.Errorf("status contained an empty branch observation")
 			}
+			// Git uses this exact value both as porcelain-v2's detached-HEAD
+			// sentinel and as the spelling of the legal branch `(detached)`.
+			// Preserve the ambiguity until the repository-wide worktree record
+			// supplies the structural `detached` or `branch refs/heads/...` field.
+			result.BranchHeadAmbiguous = result.Branch == "(detached)"
 		case strings.HasPrefix(line, "1 "), strings.HasPrefix(line, "2 "), strings.HasPrefix(line, "u "):
 			if len(line) < 4 {
 				return WorktreeIntegrity{}, fmt.Errorf("truncated tracked-path record %q", line)
@@ -115,7 +119,7 @@ func runIntegrityGit(parent context.Context, worktreePath string, args ...string
 	isolateGitCommandTree(cmd)
 	cmd.WaitDelay = gitWaitDelay
 	output, err := cmd.Output()
-	terminateGitCommandTree(cmd)
+	terminateGitCommandTree(cmd, err)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("git %s in %s timed out after %s: %w", strings.Join(args, " "), worktreePath, worktreeIntegrityTimeout, ctx.Err())

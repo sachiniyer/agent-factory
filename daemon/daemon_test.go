@@ -770,7 +770,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 		t.Fatalf("remove missing repo dir: %v", err)
 	}
 
-	got, _, _, err := refreshDaemonInstances(existing)
+	got, _, worktreeInventory, err := refreshDaemonInstances(existing)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances returned error: %v", err)
 	}
@@ -783,6 +783,9 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 	}
 	if !strings.Contains(warnBuf.String(), missingRepoID) {
 		t.Fatalf("expected warning naming missing repo %q; got: %q", missingRepoID, warnBuf.String())
+	}
+	if inventoryErr := worktreeInventory.incompleteFor(missingRepoID); inventoryErr == nil {
+		t.Fatalf("preserving a live lane from missing repo %q must also preserve the safety observation gap", missingRepoID)
 	}
 }
 
