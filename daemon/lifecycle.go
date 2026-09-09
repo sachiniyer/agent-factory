@@ -258,6 +258,29 @@ func (l *daemonLifecycle) clearTCPBound() {
 	l.listeners.TCPBoundAddr = ""
 }
 
+// setTCPConfigured re-syncs the configured half of the TCP listener pair to the
+// address a *successful* live ApplyConfig just established. It is the configured
+// counterpart of setTCPBound/clearTCPBound: those track what the kernel returned,
+// this tracks what the operator asked for. Before #2480 PR2 the configured fields
+// were written only by newDaemonLifecycle and never again, which was correct while
+// no live rebind existed; the live rebind path updated the bound half on every
+// rebind but left the configured half frozen at the boot-time value, so a
+// successful `af config set network.listen_addr` that crossed the
+// configured↔unconfigured boundary left TCPConfigured/TCPListenAddr contradicting
+// TCPBound for the rest of the boot — exactly the stale snapshot `af daemon status`
+// keys on (`daemoncmd.go` checks TCPConfigured first) and `/v1/health` serialises.
+// Call this ONLY from the config-driven success branches of bindWebLocked: after a
+// successful bind (with the configured address, not the kernel-resolved one) and on
+// the addr=="" opt-out teardown. The unexpected-listener-death closure must NOT
+// call it — network.listen_addr is still set there, so the configured half must
+// stay so `af daemon status` renders "<addr> (not bound)" rather than "disabled".
+func (l *daemonLifecycle) setTCPConfigured(addr string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.TCPConfigured = addr != ""
+	l.listeners.TCPListenAddr = addr
+}
+
 func (l *daemonLifecycle) setPreviewBound(addr string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -270,6 +293,17 @@ func (l *daemonLifecycle) clearPreviewBound() {
 	defer l.mu.Unlock()
 	l.listeners.PreviewBound = false
 	l.listeners.PreviewBoundAddr = ""
+}
+
+// setPreviewConfigured is setTCPConfigured for the web-tab preview listener
+// (#1856): it re-syncs the configured half on a successful live preview_listen_addr
+// rebind. Same scoping as setTCPConfigured — called only from the config-driven
+// success branches of bindPreviewLocked, never from the listener-death closure.
+func (l *daemonLifecycle) setPreviewConfigured(addr string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.PreviewConfigured = addr != ""
+	l.listeners.PreviewListenAddr = addr
 }
 
 func (l *daemonLifecycle) clearHTTPListeners() {
