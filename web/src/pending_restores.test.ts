@@ -377,6 +377,20 @@ test("a never-admitted uncertain restore releases after the daemon admission bou
   assert.equal(pending.has("session"), false);
 });
 
+test("an older-daemon Snapshot without an admission bound still releases the ticket", async () => {
+  let now = 1_000;
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => now);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  assert.equal(pending.has("session"), true);
+
+  // Pre-projection daemons bounded manual restore admission at 30 seconds.
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), false, "version skew must not strand the restore fence");
+});
+
 test("deadline expiry uses Snapshot issuance time rather than delayed application time", async () => {
   let now = 1_000;
   const timer = fakeRestoreTimer();

@@ -8,6 +8,9 @@ export type RestoreEvidence =
 export const RESTORE_ADMISSION_MARGIN_MS = 1_000;
 export const RESTORE_RECONCILE_RETRY_MIN_MS = 2_000;
 const RESTORE_RECONCILE_RETRY_MAX_MS = 10_000;
+// Pre-projection daemons bounded manual restore admission at 30 seconds (#2700).
+// The margin above keeps this fallback beyond, never inside, their deadline.
+const LEGACY_OPERATION_LOCK_TIMEOUT_MS = 30_000;
 const SNAPSHOT_ISSUANCE_HISTORY = 128;
 
 type RestoreTimer = ReturnType<typeof globalThis.setTimeout>;
@@ -116,9 +119,10 @@ export class PendingRestores {
   observe(rows: ReadonlyArray<RestoreRow>, evidence?: RestoreEvidence): void {
     this.rows = rows;
     if (evidence?.kind === "snapshot") {
-      if (typeof evidence.operationLockTimeoutMs === "number" && evidence.operationLockTimeoutMs >= 0 &&
-        this.operationLockTimeoutMs !== evidence.operationLockTimeoutMs) {
-        this.operationLockTimeoutMs = evidence.operationLockTimeoutMs;
+      const operationLockTimeoutMs = typeof evidence.operationLockTimeoutMs === "number" &&
+        evidence.operationLockTimeoutMs >= 0 ? evidence.operationLockTimeoutMs : LEGACY_OPERATION_LOCK_TIMEOUT_MS;
+      if (this.operationLockTimeoutMs !== operationLockTimeoutMs) {
+        this.operationLockTimeoutMs = operationLockTimeoutMs;
         for (const ticket of this.tickets.values()) this.cancelTimer(ticket);
       }
       for (const [id, ticket] of this.tickets) this.armTimerForState(id, ticket);
