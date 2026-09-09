@@ -31,6 +31,28 @@ func TestParseConfigRootAgents(t *testing.T) {
 	assert.Equal(t, "claude --model opus", custom.Program)
 }
 
+func TestRootAgentProgramsNormalizeAtLoadBoundary(t *testing.T) {
+	global, err := parseConfigTOML([]byte(`
+[root_agent]
+enabled = true
+program = " codex "
+
+[root_agents."/repo"]
+program = " claude "
+`), "config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, "codex", global.RootAgent.Program)
+	assert.Equal(t, "claude", global.RootAgents["/repo"].Program)
+
+	personal, err := parseProjectConfig([]byte(`
+[root_agent]
+enabled = true
+program = " gemini "
+`), "project-config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, "gemini", personal.RootAgent.Program)
+}
+
 // TestDefaultConfigHasNoRootAgents pins the conservative default: nothing is
 // opted in until the user edits config.json.
 func TestDefaultConfigHasNoRootAgents(t *testing.T) {

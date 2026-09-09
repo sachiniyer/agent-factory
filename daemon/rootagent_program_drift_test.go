@@ -177,6 +177,50 @@ func TestAdoptedRootProgramDriftResolvesBareAgentOverride(t *testing.T) {
 	}
 }
 
+func TestCreatedRootWithPaddedBareProgramDoesNotReportDrift(t *testing.T) {
+	testguard.IsolateTmux(t)
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "codex")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nprintf 'ready\\n❯\\n›\\n> \\n╰\\n'\nwhile :; do sleep 1; done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	const padded = " codex "
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{Program: padded})
+	cfg.ProgramOverrides = map[string]string{"codex": shim}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t, loaded)
+	manager.ensureRootAgentsAndWait()
+	root := findRootInstance(t, manager, repoPath)
+	if root == nil {
+		t.Fatal("root was not created")
+	}
+	if got := root.RuntimeProgram(); got != shim {
+		t.Fatalf("real launch recorded RuntimeProgram %q, want the normalized label's override %q", got, shim)
+	}
+
+	manager.ensureRootAgentsAndWait()
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("ensure state was not created")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+	if strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("root created by AF reported drift against its own launch command:\n%s", warnings.String())
+	}
+}
+
 func TestAdoptedRootDefaultProfileMatchesChainedLaunchOverrides(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
