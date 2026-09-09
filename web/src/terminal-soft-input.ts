@@ -1,7 +1,12 @@
 interface CompositionRange {
   start?: number;
+  initialValue?: string;
   text: string;
   sawUpdate?: boolean;
+  textareaChanged?: boolean;
+  endValue?: string;
+  mayGrowAfterEnd?: boolean;
+  postEndInputSeen?: boolean;
   frozenText?: string;
   commitLength?: number;
   trailingLength?: number;
@@ -15,6 +20,15 @@ interface TrailingFlush {
   release?: ReturnType<typeof setTimeout>;
 }
 
+function insertedTextareaText(before: string, after: string): string {
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix &&
+    before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix += 1;
+  return after.slice(prefix, after.length - suffix);
+}
+
 /** Capture native phone input before xterm's stale-keydown fallback can drop it. */
 export class TerminalSoftInput {
   private active: CompositionRange | undefined;
@@ -24,10 +38,12 @@ export class TerminalSoftInput {
   private keyDownSeen = false;
   private staleKeydown = false;
   private staleBeforeInputSent = false;
+  private staleBeforeValue: string | undefined;
   private readonly onKeyDown = (event: Event): void => {
     this.keyDownSeen = true;
     this.staleKeydown = false;
     this.staleBeforeInputSent = false;
+    this.staleBeforeValue = undefined;
     const range = this.pending.at(-1);
     const keyCode = (event as KeyboardEvent).keyCode;
     // Xterm keeps IME ownership for its composition key and modifier keys.
@@ -37,6 +53,7 @@ export class TerminalSoftInput {
     this.keyDownSeen = false;
     this.staleKeydown = false;
     this.staleBeforeInputSent = false;
+    this.staleBeforeValue = undefined;
   };
   private readonly onBlur = (): void => { if (this.keyDownSeen) this.staleKeydown = true; };
   private readonly onCompositionStart = (): void => {
@@ -50,11 +67,12 @@ export class TerminalSoftInput {
       }
       this.queueTrailingFlush(range);
     }
-    this.active = { start: value?.length, text: "" };
+    this.active = { start: value?.length, initialValue: value, text: "" };
   };
   private readonly onCompositionUpdate = (event: Event): void => {
     const data = (event as CompositionEvent).data;
     if (this.active) {
+      this.observeCompositionValue(this.active);
       this.active.sawUpdate = true;
       if (typeof data === "string") this.active.text = data;
     }
@@ -62,10 +80,14 @@ export class TerminalSoftInput {
   private readonly onCompositionEnd = (event: Event): void => {
     this.active ??= { text: "" };
     const range = this.active;
+    this.observeCompositionValue(range);
     const data = (event as CompositionEvent).data;
     if (typeof data === "string") range.text = data;
     this.active = undefined;
     const value = this.textarea?.value;
+    range.endValue = value;
+    const endText = range.start !== undefined && value !== undefined ? value.substring(range.start) : undefined;
+    range.mayGrowAfterEnd = Boolean(range.text) && endText !== range.text;
     // Chrome mutates the textarea and emits its composing insertText before
     // compositionend. Freeze that browser-order boundary now so a later soft
     // character without keydown cannot be mistaken for the commit. Safari
@@ -73,9 +95,11 @@ export class TerminalSoftInput {
     // establishes the boundary in onInput instead.
     if (range.start !== undefined && value !== undefined && value.length > range.start)
       range.commitLength = value.length - range.start;
-    // A composition with no update lifecycle was canceled. An update with an
-    // empty payload can still precede Safari's nonempty final textarea mutation.
-    else if (!range.text && !range.sawUpdate) range.commitLength = 0;
+    // An empty composition that changed and returned to its starting textarea
+    // value is a rollback even if it emitted updates. Safari's empty pre-mutation
+    // lifecycle remains pending; the no-update case is the explicit cancel form.
+    else if (!range.text && ((range.textareaChanged && value === range.initialValue) || !range.sawUpdate))
+      range.commitLength = 0;
     this.pending.push(range);
     // Bound on the textarea AFTER xterm: its commit timer runs before this
     // release. Pending membership keeps that delayed send owned while Safari
@@ -87,12 +111,23 @@ export class TerminalSoftInput {
     const input = event as InputEvent;
     if (!this.enabled()) return;
     if (this.active || this.pending.length) {
+      if (this.active && input.type === "input" && input.inputType === "insertText")
+        this.observeCompositionValue(this.active);
       const range = this.pending.at(-1);
       if (range && input.inputType === "insertText" && input.type === "input" &&
         input.isComposing === false) {
         const value = this.textarea?.value;
         const mutationLength = value !== undefined && range.start !== undefined && value.length > range.start
           ? value.length - range.start : undefined;
+        const candidate = mutationLength !== undefined && range.start !== undefined ? value?.substring(range.start) : undefined;
+        const inserted = value !== undefined && range.endValue !== undefined
+          ? insertedTextareaText(range.endValue, value) : undefined;
+        const fallbackLength = input.data?.length;
+        const firstCommitGrowth = range.mayGrowAfterEnd && !range.postEndInputSeen && !range.keydownAfterEnd &&
+          range.commitLength !== undefined && (mutationLength ?? fallbackLength ?? 0) > range.commitLength &&
+          ((candidate !== undefined && (candidate === range.text || candidate === input.data)) ||
+            (inserted !== undefined && inserted === range.text) ||
+            (candidate === undefined && input.data === range.text));
         if (range.keydownAfterEnd) {
           range.trailingLength = mutationLength !== undefined
             ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0))
@@ -101,11 +136,17 @@ export class TerminalSoftInput {
           // The textarea mutation is the commit boundary. InputEvent.data is
           // nullable on real IMEs and is only a fallback when no value is exposed.
           range.commitLength = mutationLength ?? input.data?.length;
+        } else if (firstCommitGrowth) {
+          // The first post-end mutation completed a provisional commit. Prefer
+          // the live textarea boundary; nullable event data is only a fallback.
+          range.commitLength = mutationLength ?? fallbackLength;
         } else {
           range.trailingLength = mutationLength !== undefined
             ? Math.max(range.trailingLength ?? 0, mutationLength - range.commitLength)
             : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         }
+        range.postEndInputSeen = true;
+        if (value !== undefined) range.endValue = value;
       }
       // Preserve beforeinput's native mutation; CompositionHelper owns sending.
       if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
@@ -119,14 +160,20 @@ export class TerminalSoftInput {
       // so remember whether its paired beforeinput was already forwarded.
       if (input.type === "beforeinput") {
         this.staleBeforeInputSent = false;
+        this.staleBeforeValue = this.textarea?.value;
         if (!input.data) return;
         input.stopImmediatePropagation();
         this.staleBeforeInputSent = true;
         this.send(input.data);
       } else if (input.type === "input") {
         input.stopImmediatePropagation();
-        if (input.data && !this.staleBeforeInputSent) this.send(input.data);
+        const value = this.textarea?.value;
+        const observed = value !== undefined && this.staleBeforeValue !== undefined
+          ? insertedTextareaText(this.staleBeforeValue, value) : "";
+        const recovered = observed || input.data;
+        if (recovered && !this.staleBeforeInputSent) this.send(recovered);
         this.staleBeforeInputSent = false;
+        this.staleBeforeValue = undefined;
       }
       return;
     }
@@ -195,6 +242,11 @@ export class TerminalSoftInput {
     const index = this.pending.indexOf(range);
     if (index !== -1) this.pending.splice(index, 1);
     if (this.active === range) this.active = undefined;
+  }
+  private observeCompositionValue(range: CompositionRange): void {
+    const value = this.textarea?.value;
+    if (value !== undefined && range.initialValue !== undefined && value !== range.initialValue)
+      range.textareaChanged = true;
   }
   private queueTrailingFlush(range: CompositionRange): void {
     const trailingLength = range.trailingLength ?? 0;

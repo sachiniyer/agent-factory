@@ -99,20 +99,22 @@ export async function assertPhoneStaleRecovery(page: Page, stream: () => string)
     key("keydown", 17, "Control");
     input.blur();
     input.focus();
-    for (const letter of ["a", "b"]) {
+    for (const [letter, beforeData, inputData] of [
+      ["a", null, "a"], ["b", "b", "b"], ["字", null, null],
+    ] as const) {
       const beforeInput = new InputEvent("beforeinput", {
-        bubbles: true, cancelable: true, composed: true, data: letter === "a" ? null : letter,
+        bubbles: true, cancelable: true, composed: true, data: beforeData,
         inputType: "insertText", isComposing: true,
       });
       if (input.dispatchEvent(beforeInput)) input.value += letter;
       input.dispatchEvent(new InputEvent("input", {
-        bubbles: true, composed: true, data: letter, inputType: "insertText", isComposing: true,
+        bubbles: true, composed: true, data: inputData, inputType: "insertText", isComposing: true,
       }));
     }
     return input.value;
   });
-  expect(recovered).toBe("ab");
-  await expect.poll(stream).toBe(before + "ab");
+  expect(recovered).toBe("ab字");
+  await expect.poll(stream).toBe(before + "ab字");
 
   await ctrl.click();
   await expect(ctrl).toHaveAttribute("data-state", "once");
@@ -128,10 +130,10 @@ export async function assertPhoneStaleRecovery(page: Page, stream: () => string)
     await new Promise(resolve => setTimeout(resolve, 0));
     key("keyup", 229, "Unidentified");
   });
-  await expect.poll(stream).toBe(before + "ab\x7f");
+  await expect.poll(stream).toBe(before + "ab字\x7f");
   await expect(ctrl).toHaveAttribute("data-state", "off");
   await page.keyboard.insertText("a");
-  await expect.poll(stream).toBe(before + "ab\x7fa");
+  await expect.poll(stream).toBe(before + "ab字\x7fa");
 }
 
 /** The focused regression also runs with the ordinary selftest cat fixture. */
@@ -167,6 +169,19 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
   await expect(alt).toHaveAttribute("data-state", "off");
   await page.keyboard.insertText("a");
   await expect.poll(stream).toBe(before + "\x1b\x1ba");
+  for (const [modifier, key, bytes] of [
+    ["Ctrl", "Home", "\x1b[1;5H"],
+    ["Alt", "End", "\x1b[1;3F"],
+    ["Ctrl", "Delete", "\x1b[3;5~"],
+    ["Alt", "F1", "\x1b[1;3P"],
+  ] as const) {
+    before = stream();
+    const button = bar.getByRole("button", { name: modifier, exact: true });
+    await button.click();
+    await page.keyboard.press(key);
+    await expect.poll(stream).toBe(before + bytes);
+    await expect(button).toHaveAttribute("data-state", "off");
+  }
   // Navigation between rows is not a keypress and must retain the one-shot.
   for (const [modifier, arrow, bytes] of [
     ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],

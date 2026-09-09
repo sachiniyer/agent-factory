@@ -137,25 +137,46 @@ parser reply can arrive first without being reclassified or consuming the
 one-shot. If a new composition starts before the prior commit timer, ordinary
 trailing input between the two compositions is forwarded exactly once.
 Stale recovery also covers a null-data `beforeinput` whose paired `input` owns
-the character. A connected hardware Ctrl+Up is encoded as `ESC[1;5A`; sticky
+the character, including the case where both event payloads are null and only
+the textarea mutation exposes the inserted text. A connected hardware Ctrl+Up
+is encoded as `ESC[1;5A`; sticky
 Ctrl plus physical Shift+Up preserves both modifier bitmasks as `ESC[1;6A`.
 Each consumes the one-shot and leaves the following `a` plain. The probe retains
 the keybar selection/scrollback and blur/refocus coverage.
 
-User-origin controls now pass through one inverse table generated from every
-actionable entry in `KEYBAR_ROWS`: `Esc`, `Tab`, `^C`, and all four arrows.
-Those are exactly the entries that `keyBytes` can emit; `Ctrl`/`Alt` are state
-buttons and `Arrows`/`More keys` only navigate the bar. The table includes both
-bare cursor modes, every xterm cursor modifier bitmask, and every Ctrl/Alt
-encoding of the non-arrow keys. Its round-trip test derives the same key set
-from `KEYBAR_ROWS`, so a future emitting key cannot silently skip decoding.
-Terminal-origin replies remain byte-for-byte and do not consume one-shots.
+User-origin keyboard escape sequences are now classified by syntax rather than
+by a list of key names. A CSI sequence with numeric/semicolon parameters and a
+letter or `~` final merges the sticky Ctrl/Alt bits into its second parameter,
+defaulting absent parameters to 1 and preserving physical Shift/Alt/Ctrl/Meta
+bits already present. An SS3 sequence with any final byte from `0x40` through
+`0x7e` remains SS3 when no sticky modifier is armed and becomes the equivalent
+CSI `1;<modifier><final>` form when one is. This one rule covers arrows,
+Home/End, Insert/Delete, Page Up/Down, function keys, and the other xterm
+letter-final keyboard forms without enumerating those keys.
+
+The small inverse table that remains is only for non-sequence keybar controls:
+`Esc`, `Tab`, and `^C`, whose Alt form is an ESC prefix. The round-trip test
+still derives every emitting key from `KEYBAR_ROWS`, while table-driven shape
+tests cover CSI defaults, `~` keys, letter finals, SS3 conversion, and merging
+pre-existing modifier bits. Keybar buttons remain encoded and consumed at
+source. Terminal-origin replies remain byte-for-byte and do not consume
+one-shots; unrecognized user controls retain the consume-and-pass-through
+fallback.
+
+For IME lifecycle decisions, the live textarea and its mutation diff are the
+authoritative source; nullable event payloads are fallbacks. The browser proof
+includes a provisional `a` growing to committed `ab` after `compositionend`,
+an updated composition rolling back before an ordinary character, and stale
+recovery where both `beforeinput.data` and `input.data` are null. The complete
+commit stays unmodified, cancellation cannot claim the next character, and the
+recovered textarea insertion is delivered exactly once.
 
 [Unit red](composition-unit-red.txt) shows the duplicate write before the fix;
 [unit green](composition-unit-green.txt) records the original lifecycle proof.
-Final validation has 885 passing web unit tests and the refreshed full container
+Final validation has 891 passing web unit tests and the refreshed full container
 web selftest passes [238/238](full-selftest-green.txt), including the null-data
-and empty-payload IME probes, split stale-input recovery, hardware-arrow
+and empty-payload IME probes, provisional commit growth, updated rollback,
+both-null and split stale-input recovery, shape-based hardware CSI/SS3
 modifiers, the complete keybar-byte round trip, deferred 229 source isolation,
 interstitial input forwarding, soft-control consumption, stale-input deletion,
 keybar effects, and the previously reported terminal READY marker cases.

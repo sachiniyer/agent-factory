@@ -116,6 +116,34 @@ test("every keybar input round-trips hardware bytes through sticky encoding", ()
   }
 });
 
+test("sticky modifiers merge into recognized user CSI and SS3 sequence shapes", () => {
+  for (const [modifier, input, expected] of [
+    ["Ctrl", "\x1b[H", "\x1b[1;5H"],
+    ["Ctrl", "\x1b[F", "\x1b[1;5F"],
+    ["Ctrl", "\x1b[3~", "\x1b[3;5~"],
+    ["Alt", "\x1b[2~", "\x1b[2;3~"],
+    ["Ctrl", "\x1b[5~", "\x1b[5;5~"],
+    ["Alt", "\x1b[6~", "\x1b[6;3~"],
+    ["Ctrl", "\x1bOP", "\x1b[1;5P"],
+    ["Alt", "\x1b[15~", "\x1b[15;3~"],
+    ["Ctrl", "\x1b[1;10H", "\x1b[1;14H"],
+  ] as const) {
+    const bare = new StickyModifiers();
+    assert.equal(bare.input(input, "user"), input);
+    const armed = new StickyModifiers();
+    armed.tap(modifier, 0);
+    assert.equal(armed.input(input, "user"), expected, JSON.stringify(input));
+    assert.equal(armed.state(modifier), "off");
+  }
+});
+
+test("terminal-origin CSI replies bypass sequence rewriting", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0);
+  assert.equal(state.input("\x1b[1;2H", "terminal"), "\x1b[1;2H");
+  assert.equal(state.state("Ctrl"), "once");
+});
+
 test("a deferred 229 marker ignores parser replies before its textarea diff", () => {
   const modifiers = new StickyModifiers();
   modifiers.tap("Ctrl", 0);

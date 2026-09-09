@@ -65,6 +65,34 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
     await expect(ctrl).toHaveAttribute("data-state", "off");
   }
 
+  // A post-end textarea mutation can finish a provisional commit. Its live
+  // boundary, not nullable InputEvent data, owns the complete composition.
+  {
+    const before = stream();
+    await ctrl.click();
+    await textarea.evaluate(async el => {
+      const input = el as HTMLTextAreaElement;
+      const start = input.value.length;
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "ab" }));
+      input.value = input.value.substring(0, start) + "a";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "a", inputType: "insertText", isComposing: true,
+      }));
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "ab" }));
+      input.value = input.value.substring(0, start) + "ab";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: null, inputType: "insertText", isComposing: false,
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    await expect.poll(stream).toBe(before + "ab");
+    await expect(ctrl).toHaveAttribute("data-state", "once");
+    await page.keyboard.insertText("x");
+    await expect.poll(stream).toBe(before + "ab\x18");
+    await expect(ctrl).toHaveAttribute("data-state", "off");
+  }
+
   // A canceled IME owns no prefix; no-keydown x still consumes Ctrl.
   {
     const before = stream();
@@ -79,6 +107,34 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
       input.value += "x";
       input.dispatchEvent(new InputEvent("input", {
         bubbles: true, composed: true, data: "x", inputType: "insertText",
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    await expect.poll(stream).toBe(before + "\x18");
+    await expect(ctrl).toHaveAttribute("data-state", "off");
+  }
+
+  // Cancellation is a textarea rollback even after composition updates.
+  {
+    const before = stream();
+    await ctrl.click();
+    await textarea.evaluate(async el => {
+      const input = el as HTMLTextAreaElement;
+      const start = input.value.length;
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "字" }));
+      input.value = input.value.substring(0, start) + "字";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "字", inputType: "insertText", isComposing: true,
+      }));
+      input.value = input.value.substring(0, start);
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" }));
+      input.dispatchEvent(new InputEvent("beforeinput", {
+        bubbles: true, cancelable: true, composed: true, data: "x", inputType: "insertText",
+      }));
+      input.value += "x";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "x", inputType: "insertText", isComposing: false,
       }));
       await new Promise(resolve => setTimeout(resolve, 0));
     });

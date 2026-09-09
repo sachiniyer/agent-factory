@@ -20,34 +20,48 @@ export function keyBytes(key: string, ctrl = false, alt = false, applicationCurs
 
 export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
 
-interface DecodedKeybarInput {
+interface DecodedKeybarControl {
   key: string;
   modifierBits: number;
-  applicationCursor: boolean;
-  arrowSuffix?: string;
 }
 
-// This is the inverse of keyBytes for every actionable key in KEYBAR_ROWS.
-// State and navigation buttons are the only entries that do not emit input.
-const decodedKeybarInput = new Map<string, DecodedKeybarInput>();
+interface UserSequence {
+  kind: "CSI" | "SS3";
+  parameters: string;
+  final: string;
+}
+
+function userSequence(text: string): UserSequence | undefined {
+  const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
+  if (csi) return { kind: "CSI", parameters: csi[1], final: csi[2] };
+  const ss3 = /^\x1bO([\x40-\x7e])$/.exec(text);
+  if (ss3) return { kind: "SS3", parameters: "", final: ss3[1] };
+  return undefined;
+}
+
+function encodeSequence(sequence: UserSequence, modifierBits: number, original: string): string {
+  if (!modifierBits) return original;
+  if (sequence.kind === "SS3") return `\x1b[1;${modifierBits + 1}${sequence.final}`;
+  const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+  parameters[0] ||= "1";
+  const encoded = Number(parameters[1] || "1");
+  const existingBits = Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+  parameters[1] = String((existingBits | modifierBits) + 1);
+  return `\x1b[${parameters.join(";")}${sequence.final}`;
+}
+
+// Non-sequence keybar controls still need an inverse because Alt is an ESC
+// prefix. CSI and SS3 emissions are handled by their shapes, not by key names.
+const decodedKeybarControl = new Map<string, DecodedKeybarControl>();
 const nonInputKeys = new Set(["Ctrl", "Alt", "Arrows", "More keys"]);
-const arrowSuffixes: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
 for (const key of KEYBAR_ROWS.flat().filter(value => !nonInputKeys.has(value))) {
-  const arrowSuffix = arrowSuffixes[key];
-  if (arrowSuffix) {
-    decodedKeybarInput.set(keyBytes(key), { key, modifierBits: 0, applicationCursor: false, arrowSuffix });
-    decodedKeybarInput.set(keyBytes(key, false, false, true), { key, modifierBits: 0, applicationCursor: true, arrowSuffix });
-    for (let modifierBits = 1; modifierBits <= 15; modifierBits++) {
-      decodedKeybarInput.set(`\x1b[1;${modifierBits + 1}${arrowSuffix}`,
-        { key, modifierBits, applicationCursor: false, arrowSuffix });
-    }
-    continue;
-  }
   for (const ctrl of [false, true]) {
     for (const alt of [false, true]) {
-      const bytes = keyBytes(key, ctrl, alt);
-      if (!decodedKeybarInput.has(bytes))
-        decodedKeybarInput.set(bytes, { key, modifierBits: (ctrl ? 4 : 0) | (alt ? 2 : 0), applicationCursor: false });
+      for (const applicationCursor of [false, true]) {
+        const bytes = keyBytes(key, ctrl, alt, applicationCursor);
+        if (!userSequence(bytes) && !decodedKeybarControl.has(bytes))
+          decodedKeybarControl.set(bytes, { key, modifierBits: (ctrl ? 4 : 0) | (alt ? 2 : 0) });
+      }
     }
   }
 }
@@ -73,16 +87,20 @@ export class StickyModifiers {
     return result;
   }
   input(text: string, source: "terminal" | "user" = "terminal"): string {
-    // Decode only genuine user emissions from keybar's complete input vocabulary.
-    // Parser replies remain byte-for-byte, while bar and hardware origins converge.
-    const decoded = source === "user" ? decodedKeybarInput.get(text) : undefined;
+    // Xterm's keyboard CSI/SS3 sequences share one modifier-parameter rule.
+    // Terminal replies never enter it; physical and Meta bits are preserved.
+    const sequence = source === "user" ? userSequence(text) : undefined;
+    if (sequence) {
+      const stickyBits = (this.values.Alt !== "off" ? 2 : 0) | (this.values.Ctrl !== "off" ? 4 : 0);
+      const result = encodeSequence(sequence, stickyBits, text);
+      this.consumeOnce();
+      return result;
+    }
+    const decoded = source === "user" ? decodedKeybarControl.get(text) : undefined;
     if (decoded) {
       const combined = decoded.modifierBits |
         (this.values.Alt !== "off" ? 2 : 0) | (this.values.Ctrl !== "off" ? 4 : 0);
-      const result = decoded.arrowSuffix
-        ? combined ? `\x1b[1;${combined + 1}${decoded.arrowSuffix}`
-          : keyBytes(decoded.key, false, false, decoded.applicationCursor)
-        : keyBytes(decoded.key, (combined & 4) !== 0, (combined & 2) !== 0);
+      const result = keyBytes(decoded.key, (combined & 4) !== 0, (combined & 2) !== 0);
       this.consumeOnce();
       return result;
     }

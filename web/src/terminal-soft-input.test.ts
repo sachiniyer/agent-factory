@@ -120,6 +120,47 @@ test("null-data Safari commit freezes the mutated textarea boundary", t => {
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
+test("post-end textarea growth extends a provisional composition commit", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionupdate", "ab"));
+  textarea.value = "a";
+  host.dispatchEvent(insertText("a", "input", true));
+  textarea.dispatchEvent(composition("compositionend", "ab"));
+  textarea.value = "ab";
+  host.dispatchEvent(insertText(null));
+
+  assert.equal(soft.transform("ab", value => modifiers.input(value)), "ab");
+  assert.equal(modifiers.state("Ctrl"), "once");
+  assert.equal(soft.transform("x", value => modifiers.input(value)), "\x18");
+});
+
+test("a complete Chrome commit does not absorb a same-character ordinary key", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "x";
+  textarea.dispatchEvent(composition("compositionend", "x"));
+  textarea.value = "xx";
+  host.dispatchEvent(insertText("x"));
+
+  assert.equal(soft.transform("xx", value => modifiers.input(value)), "x\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 test("canceled composition gives no-keydown ordinary input a zero-length commit boundary", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
@@ -160,6 +201,28 @@ test("empty Safari composition payload defers to its final textarea mutation", t
   host.dispatchEvent(insertText("x"));
 
   assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("updated composition rollback leaves the next no-keydown input ordinary", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionupdate", "字"));
+  textarea.value = "字";
+  host.dispatchEvent(insertText("字", "input", true));
+  textarea.value = "";
+  textarea.dispatchEvent(composition("compositionend", ""));
+  textarea.value = "x";
+  host.dispatchEvent(insertText("x"));
+
+  assert.equal(soft.transform("x", value => modifiers.input(value)), "\x18");
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
@@ -646,6 +709,25 @@ test("stale recovery falls back to input data when beforeinput data is null", ()
 
   assert.equal(textarea.value, "a");
   assert.deepEqual(writes, ["a"]);
+  soft.dispose();
+});
+
+test("stale recovery derives both-null insertText data from the textarea", () => {
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "old" });
+  const writes: string[] = [];
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, text => writes.push(text), () => false);
+  textarea.dispatchEvent(new Event("keydown"));
+  textarea.dispatchEvent(new Event("blur"));
+
+  const before = insertText(null, "beforeinput", true);
+  host.dispatchEvent(before);
+  assert.equal(before.defaultPrevented, false);
+  textarea.value = "old字";
+  host.dispatchEvent(insertText(null, "input", true));
+
+  assert.equal(textarea.value, "old字");
+  assert.deepEqual(writes, ["字"]);
   soft.dispose();
 });
 
