@@ -588,7 +588,11 @@ func TestAdoptedRootProgramDriftRedactsCommandPayloads(t *testing.T) {
 func TestAdoptedSingletonBareWorktreeUsesCheckoutCommandLayers(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
-	base := t.TempDir()
+	resolvedBase := t.TempDir()
+	base := filepath.Join(t.TempDir(), "temp-root")
+	if err := os.Symlink(resolvedBase, base); err != nil {
+		t.Fatal(err)
+	}
 	seedPath := filepath.Join(base, "seed")
 	barePath := filepath.Join(base, "identity.git")
 	worktreePath := filepath.Join(base, "checkout")
@@ -609,6 +613,13 @@ func TestAdoptedSingletonBareWorktreeUsesCheckoutCommandLayers(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := registerTestProject(t, worktreePath)
+	// worktreePath keeps the caller's symlink spelling. Registration resolves
+	// it before recording Project.Root, which is also the singleton snapshot's
+	// command-resolution path and ensure-state key.
+	registeredWorktreePath := project.Root
+	if registeredWorktreePath == worktreePath {
+		t.Fatal("symlinked fixture path unexpectedly matched the registry-resolved root")
+	}
 	projectConfig, err := config.ProjectConfigTomlPath(project.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -618,15 +629,15 @@ func TestAdoptedSingletonBareWorktreeUsesCheckoutCommandLayers(t *testing.T) {
 	}
 	manager, warnings := newManagerCapturingWarnings(t, config.DefaultConfig())
 	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
-		Title: session.RootSessionTitle, RepoPath: worktreePath, Program: "claude", InPlace: true, allowReserved: true,
+		Title: session.RootSessionTitle, RepoPath: registeredWorktreePath, Program: "claude", InPlace: true, allowReserved: true,
 	}); err != nil {
 		t.Fatalf("create pre-existing root: %v", err)
 	}
-	findRootInstance(t, manager, worktreePath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/personal/codex"))
+	findRootInstance(t, manager, registeredWorktreePath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/personal/codex"))
 
 	manager.ensureRootAgentsAndWait()
 	manager.mu.Lock()
-	st := manager.rootEnsureStates[worktreePath]
+	st := manager.rootEnsureStates[registeredWorktreePath]
 	manager.mu.Unlock()
 	if st == nil {
 		t.Fatal("singleton ensure state was not created")
