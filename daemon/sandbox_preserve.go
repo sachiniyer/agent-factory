@@ -113,7 +113,11 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
 		// push fails. The session stays Lost and the retry loop keeps trying, which
-		// is what makes this recoverable rather than terminal.
+		// is what makes this recoverable rather than terminal — up to the bounded
+		// give-up budget (#3347): after lostRestoreMaxAttempts persistent push
+		// failures the loop publishes a durable LostRestoreFailure and stops, while
+		// the sandbox stays intact and --force-reap remains the off-ramp. Give-up
+		// ends the forever-retry, not the recoverability.
 		return fmt.Errorf(
 			"refusing to replace the sandbox for %q: its agent is gone but the sandbox still ANSWERS, "+
 				"and the push that would make its unpushed work durable failed (%w). "+

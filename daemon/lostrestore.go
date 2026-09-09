@@ -144,6 +144,21 @@ type lostRestoreState struct {
 	// actual Recover failures. An unanswered liveness check did not attempt a
 	// restore and must not inflate the restore failure/escalation diagnostics.
 	remoteUnknownAttempts int
+	// preserveFailureAttempts bounds repeated pre-reap preserve-push failures in
+	// the probeAnsweredDead arm, on its OWN budget. It is deliberately separate
+	// from remoteUnknownAttempts (which backs off the probeUnknown
+	// can't-license-replacement refusal — that one has no give-up by design, since
+	// the conservative hold IS the safety property) and from consecutiveFailures
+	// (the Recover-flap budget), so a push-failure episode neither precharges nor
+	// burns the Recover budget. A persistent, actionable push failure — revoked
+	// origin auth, an archive endpoint that durably rejects this repo — escalates
+	// to #3347's give-up contract after lostRestoreMaxAttempts: a durable
+	// LostRestoreFailure, an ERROR line, and — via canAutoRestoreLostSession —
+	// release of the #1892 watch-task slot. #3347 applied that contract to the
+	// Recover branch it rewrote but left this pre-#3347 arm (written by #2967 with
+	// the old retry-forever contract) unrevisited, so a persistent push failure
+	// retried forever at the backoff cap while the slot stayed held.
+	preserveFailureAttempts int
 	// vanishedWorktreesLogged dedupes the high-visibility #1303 diagnostic to
 	// one ERROR per distinct missing worktree path during a Lost episode.
 	vanishedWorktreesLogged map[string]struct{}
@@ -477,8 +492,28 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			// surfaced the real reason it was not recovering.
 			logIt := !st.preserveFailureLogged
 			st.preserveFailureLogged = true
-			st.remoteUnknownAttempts++
-			st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
+			// Its OWN bounded budget — neither remoteUnknownAttempts (the probeUnknown
+			// safety-probe exemption, ceiling-less by design because the conservative
+			// hold is the point) nor consecutiveFailures (the Recover-flap budget) — so
+			// push-failure episodes do not precharge or burn the Recover budget. A
+			// persistent, actionable push failure escalates to #3347's give-up here:
+			// a durable LostRestoreFailure, an ERROR line, and — via
+			// canAutoRestoreLostSession — release of the #1892 watch-task slot, the
+			// "release capacity at terminal give-up" contract #3347 applied to the
+			// Recover branch but never reached this pre-#3347 arm.
+			st.preserveFailureAttempts++
+			attempts := st.preserveFailureAttempts
+			if attempts >= lostRestoreMaxAttempts {
+				st.nextAttempt = time.Time{}
+				m.mu.Unlock()
+				inst.SetLostRestoreFailure(attempts, err)
+				m.err().Printf("restore of lost session %q (repo %s): giving up after %d preserve-push failures: %v", inst.Title, repoID, attempts, err)
+				if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
+					m.warn().Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
+				}
+				return
+			}
+			st.nextAttempt = time.Now().Add(lostRestoreBackoff(attempts))
 			m.mu.Unlock()
 			if logIt {
 				m.warn().Printf("%v", err)
@@ -486,6 +521,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			return
 		}
 		m.mu.Lock()
+		// The push landed, so this push-failure episode is over: a later blip earns
+		// a fresh budget rather than inheriting this one's escalation, the same
+		// episode separation lostRestoreFailed gives the Recover branch.
+		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
