@@ -292,23 +292,40 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	return callDaemonNoEnsureUntil(method, req, resp, time.Time{})
 }
 
+type daemonCallAttempt struct {
+	err            error
+	requestStarted bool
+}
+
 // callDaemonNoEnsureUntil bounds only the retry dial. Once a daemon accepts the
 // RPC, handler execution keeps its historical method-specific lifetime: session
 // creation and other legitimate operations may outlive the admission window.
 func callDaemonNoEnsureUntil(method string, req any, resp any, deadline time.Time) error {
-	return callDaemonNoEnsureBefore(method, req, resp, deadline, false)
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, false).err
 }
 
 func callDaemonNoEnsureBefore(method string, req any, resp any, deadline time.Time, boundRPC bool) error {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, boundRPC).err
+}
+
+// callDaemonNoEnsureAttemptUntil retains whether net/rpc started the request.
+// A failed dial proves that the handler never ran and is therefore the only
+// transport failure callDaemon may replay. Once Client.Call starts, a lost
+// response is ambiguous: the handler may already have committed its mutation.
+func callDaemonNoEnsureAttemptUntil(method string, req any, resp any, deadline time.Time) daemonCallAttempt {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, false)
+}
+
+func callDaemonNoEnsureAttemptBefore(method string, req any, resp any, deadline time.Time, boundRPC bool) daemonCallAttempt {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
-		return err
+		return daemonCallAttempt{err: err}
 	}
 	dialTimeout := daemonDialTimeout
 	if !deadline.IsZero() {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return daemonAdmissionDeadlineError()
+			return daemonCallAttempt{err: daemonAdmissionDeadlineError()}
 		}
 		if remaining < dialTimeout {
 			dialTimeout = remaining
@@ -316,12 +333,12 @@ func callDaemonNoEnsureBefore(method string, req any, resp any, deadline time.Ti
 	}
 	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
 	if err != nil {
-		return err
+		return daemonCallAttempt{err: err}
 	}
 	if boundRPC && !deadline.IsZero() {
 		if err := conn.SetDeadline(deadline); err != nil {
 			_ = conn.Close()
-			return err
+			return daemonCallAttempt{err: err}
 		}
 	}
 	client := rpc.NewClient(conn)
@@ -333,9 +350,9 @@ func callDaemonNoEnsureBefore(method string, req any, resp any, deadline time.Ti
 		// new CLI does not read "failed" and retry a durable task change into a
 		// duplicate. Skew-only; see committedFromLegacyRPCError.
 		if committed := committedFromLegacyRPCError(err); committed != nil {
-			return committed
+			return daemonCallAttempt{err: committed, requestStarted: true}
 		}
-		return err
+		return daemonCallAttempt{err: err, requestStarted: true}
 	}
 	// A committed mutation answers OK and reports itself in the response
 	// envelope: net/rpc reduces a concrete error to rpc.ServerError and keeps
@@ -346,10 +363,13 @@ func callDaemonNoEnsureBefore(method string, req any, resp any, deadline time.Ti
 		CommittedOutcome() (bool, string)
 	}); ok {
 		if committed, warning := carrier.CommittedOutcome(); committed {
-			return &rpcMutationCommittedError{err: errors.New(warning)}
+			return daemonCallAttempt{
+				err:            &rpcMutationCommittedError{err: errors.New(warning)},
+				requestStarted: true,
+			}
 		}
 	}
-	return nil
+	return daemonCallAttempt{requestStarted: true}
 }
 
 // committedPrefixes are the wire strings a pre-#3036 daemon uses to mark a

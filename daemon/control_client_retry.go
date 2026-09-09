@@ -13,34 +13,41 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 )
 
-// daemonAdmissionRetryWait bounds the complete retry phase after the initial
-// EnsureDaemon succeeds. Every retry sleep, RPC, and re-ensure receives this
-// same absolute deadline; an inner gate/readiness timeout may shorten it but
-// may never extend it. daemonAdmissionRetryPoll is the retry cadence.
+// daemonAdmissionRetryWait bounds the complete admission phase, including the
+// initial EnsureDaemon gate check. Every retry sleep, dial, and re-ensure
+// receives this same absolute deadline; an inner gate/readiness timeout may
+// shorten it but may never extend it. daemonAdmissionRetryPoll is the cadence.
 const (
 	daemonAdmissionRetryWait = daemonReadyTimeout
 	daemonAdmissionRetryPoll = 100 * time.Millisecond
 )
 
 // callDaemon retries exactly two kinds of transient failure: lifecycle
-// admission refusals, and narrowly classified connection loss during a proven
-// upgrade hand-off. The proof is either a quiescing response or the typed live
-// upgrade-gate result returned by the deadline-bounded re-ensure. In
-// particular, rpc.ServerError is never connection loss, so an application
-// error after quiescing remains final and the mutation is not replayed.
+// admission refusals, and failed dials during a proven upgrade hand-off. The
+// proof is either a quiescing response or a typed live upgrade-gate result.
+// Once net/rpc starts a request, every connection loss remains final even with
+// that proof: the handler may have committed before its response disappeared.
 func callDaemon(method string, req any, resp any) error {
-	if err := EnsureDaemon(); err != nil {
-		return err
-	}
-
 	deadline := time.Now().Add(daemonAdmissionRetryWait)
-	err := callDaemonNoEnsureUntil(method, req, resp, deadline)
 	var (
 		handoffSeen bool
 		fallbackErr error
 	)
+	ensureErr := ensureDaemonWithLauncherUntil(launchDaemonProcessFn, deadline)
+	var attempt daemonCallAttempt
+	if ensureErr != nil {
+		if !isLiveUpgradeGateErr(ensureErr) {
+			return ensureErr
+		}
+		handoffSeen = true
+		fallbackErr = ensureErr
+		attempt.err = ensureErr
+	} else {
+		attempt = callDaemonNoEnsureAttemptUntil(method, req, resp, deadline)
+	}
 
-	for err != nil {
+	for attempt.err != nil {
+		err := attempt.err
 		if IsDaemonQuiescingErr(err) {
 			handoffSeen = true
 			if fallbackErr == nil {
@@ -50,21 +57,29 @@ func callDaemon(method string, req any, resp any) error {
 
 		admissionErr := IsDaemonAdmissionRetryable(err)
 		connectionLoss := isDaemonHandoffConnectionErr(err)
-		if !admissionErr && !connectionLoss {
+		dialTimeout := !attempt.requestStarted && isDaemonConnectionTimeout(err)
+		retryableDial := !attempt.requestStarted && (connectionLoss || dialTimeout)
+		liveGateErr := isLiveUpgradeGateErr(err)
+		if !admissionErr && !retryableDial && !liveGateErr {
 			return err
 		}
 
-		if connectionLoss {
+		if retryableDial {
+			// A timeout does not prove that the listener is gone: a healthy
+			// daemon's accept backlog can be saturated. Never enter the reclaiming
+			// EnsureDaemon path on that observation alone.
+			if dialTimeout && !handoffSeen {
+				return err
+			}
 			if admissionDeadlineExpired(deadline) {
 				break
 			}
 			ensureErr := ensureDaemonWithLauncherUntil(launchDaemonProcessFn, deadline)
 			switch {
 			case ensureErr == nil:
-				// An absent dial proves the request was never delivered, so one
-				// retry is safe once EnsureDaemon has made a daemon reachable. An
-				// established connection loss needs positive hand-off proof: its
-				// handler may have committed before the response disappeared.
+				// A failed dial proves the request was never delivered, so one
+				// retry is safe once EnsureDaemon has made a daemon reachable. A
+				// non-absence dial failure still needs positive hand-off proof.
 				if !handoffSeen && !isDaemonAbsentErr(err) {
 					return err
 				}
@@ -89,20 +104,19 @@ func callDaemon(method string, req any, resp any) error {
 		if !waitUntilAdmissionDeadline(deadline, daemonAdmissionRetryPoll) {
 			break
 		}
-		err = callDaemonNoEnsureUntil(method, req, resp, deadline)
+		attempt = callDaemonNoEnsureAttemptUntil(method, req, resp, deadline)
 	}
 
-	if err != nil && fallbackErr != nil &&
-		(isDaemonHandoffConnectionErr(err) || admissionDeadlineExpired(deadline)) {
+	if attempt.err != nil && fallbackErr != nil && admissionDeadlineExpired(deadline) {
 		return fallbackErr
 	}
-	return err
+	return attempt.err
 }
 
-// isDaemonHandoffConnectionErr recognizes only failures that mean a dial or
-// established RPC connection disappeared. It deliberately starts by excluding
-// rpc.ServerError, the net/rpc representation of an application handler error;
-// replaying those mutations after quiescing could duplicate committed work.
+// isDaemonHandoffConnectionErr recognizes only definite connection loss. It
+// deliberately excludes rpc.ServerError (an application handler error) and
+// generic timeouts (a live listener may merely have a saturated backlog).
+// callDaemon separately requires a failed dial before replaying any match.
 func isDaemonHandoffConnectionErr(err error) bool {
 	if err == nil {
 		return false
@@ -121,6 +135,17 @@ func isDaemonHandoffConnectionErr(err error) bool {
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) ||
 		errors.Is(err, syscall.EPIPE) {
 		return true
+	}
+	return false
+}
+
+func isDaemonConnectionTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	var serverErr rpc.ServerError
+	if errors.As(err, &serverErr) {
+		return false
 	}
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
