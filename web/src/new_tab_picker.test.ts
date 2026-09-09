@@ -2,6 +2,23 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AppShell } from "./ui.js";
 
+test("a no-op responsive pass discards its event-scoped picker state", () => {
+  const captured = { trigger: {}, open: true };
+  const shell = {
+    phone: { matches: true },
+    terminalSelected: false,
+    el: { classList: { contains: () => false } },
+    responsiveNewTabState: captured,
+  };
+  const syncPhone = (AppShell.prototype as unknown as {
+    syncPhone(this: typeof shell): void;
+  }).syncPhone;
+
+  syncPhone.call(shell);
+
+  assert.equal(shell.responsiveNewTabState, null);
+});
+
 // Exercise the real picker entry point without constructing terminals or browser
 // chrome. Ownership is the DOM contains() question, independent of viewport width.
 for (const [owned, hidden] of [[true, true], [true, false], [false, true]]) {

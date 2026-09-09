@@ -30,9 +30,10 @@ The manual workflow uses the base repository's built-in Actions token. It does
 not require a PAT, custom GitHub App, or ruleset bypass.
 
 Auto Gate never auto-merges fork heads. For a non-allowlisted author, however,
-the required decision passes as manual-only and lists any unmet automatic-merge
-requirements in its summary, restoring the normal maintainer-review path for
-external contributions.
+the required decision uses the manual-only path and lists any unmet
+automatic-merge requirements in its summary, restoring the normal
+maintainer-review path for external contributions once its answerable blockers
+are cleared.
 
 **Live Codex findings are the exception, and they block that pass** (#3558). A
 finding is a claim about the code; it is no less true because of who opened the
@@ -44,14 +45,22 @@ blocker: an unanswered finding takes a threaded `RESOLVED`, `ACCEPTED` or
 after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
 `RESOLVED` cannot clear that one.
 
-**An unreviewed usage-limit degradation blocks that pass too** (#3825). The test
-is not "is it a finding" but "can a maintainer answer it per item, without the
-author iterating" — a finding takes a threaded reply, and a degradation takes the
-approval marker below, so both leave an exit. A missing play-tested label or a
-merely absent verdict has no such answer, so those stay advisory notes, and
-promoting them would make every external PR unmergeable. The two blockers never
-appear together: the degradation fires only when nothing else is unmet, and a live
-finding is something else unmet.
+**An absent or stale verdict blocks that pass too** (#4091). The test is not "is
+it a finding" but "can a maintainer answer it per item, without the author
+iterating": post `@codex review` on the current head, and the blocker clears when
+Codex returns a fresh covering verdict. The missing play-tested label remains an
+advisory note as a separate policy choice; #4091 changes only the review-verdict
+requirement.
+
+**An unreviewed reviewer-unavailable degradation also blocks that pass** (#3825),
+but it has a different exit because another review request cannot produce a
+verdict. It takes the approval marker below. The absent-verdict blocker is
+suppressed whenever the latest exact-head Codex artifact proves the reviewer is
+unavailable, even if another unmet requirement temporarily prevents degradation
+from activating. The approval blocker replaces it immediately on the manual path,
+so an independent advisory cannot make the required decision green with neither
+a verdict nor an approval. It can appear beside a finding blocker; each item
+keeps its own maintainer-only exit.
 
 A degraded pass plus a **maintainer approval bound to the head** rides the
 ordinary update-and-merge loop instead (#3790): the review requirement is
