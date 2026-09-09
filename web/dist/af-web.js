@@ -14750,9 +14750,12 @@ var AppShell = class {
       this.syncPhone();
     });
   };
-  syncPhone = () => {
+  syncPhone() {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) return;
+    if (this.el.classList.contains("af-session-first") === active) {
+      this.responsiveNewTabState = null;
+      return;
+    }
     const focus = document.activeElement;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
     const responsiveState = this.responsiveNewTabState;
@@ -14775,7 +14778,7 @@ var AppShell = class {
       else this.appControls.trigger.focus();
     }
     this.actions.layoutChanged();
-  };
+  }
   appControls;
   themeOpts = /* @__PURE__ */ new Map();
   lastThemeChoice = null;

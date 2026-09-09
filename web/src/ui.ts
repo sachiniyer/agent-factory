@@ -763,9 +763,15 @@ export class AppShell {
       this.syncPhone();
     });
   };
-  private readonly syncPhone = (): void => {
+  private syncPhone(): void {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) return;
+    if (this.el.classList.contains("af-session-first") === active) {
+      // The capture belongs only to this media-change transaction. A Web/VS Code
+      // tab needs no responsive reparent, so retaining its snapshot would let a
+      // later terminal selection consume stale picker-open state.
+      this.responsiveNewTabState = null;
+      return;
+    }
     const focus = document.activeElement as HTMLElement | null;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
     // appbarControls captures this before its media listener closes the phone
@@ -802,7 +808,7 @@ export class AppShell {
       else this.appControls.trigger.focus();
     }
     this.actions.layoutChanged();
-  };
+  }
   private readonly appControls: ReturnType<typeof appbarControls>;
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
   private lastThemeChoice: ThemeChoice | null = null;
