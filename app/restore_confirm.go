@@ -15,6 +15,14 @@ import (
 // op), so a live, tearing-down, id-less, or startup-unknown row returns false and
 // falls through to the guard's own message unchanged.
 //
+// Taken rows are NOT subclassed by op: lifecycleActionFor returns Restore for
+// LiveLost/LiveDead/LiveArchived regardless of an in-flight restore, so a row
+// already mid-restore (OpRestoring) still reports LifecycleActionRestore and would
+// otherwise share the destructive branch with an OpNone row. It can neither be
+// re-restored nor re-confirmed, so it bails here and falls through to
+// interactiveGuard's "is being restored" notice — the same surface `r`
+// (handleRestore) and the safe local/archived path already produce.
+//
 // A restore is dispatched IMMEDIATELY (no confirmation) only where it is provably
 // safe: a local session re-spawns its tmux in place, and an archived session
 // restores from the branch the archive already pushed. But a Lost/Dead REMOTE
@@ -30,6 +38,15 @@ import (
 // the guard message; `o` and Enter agree there too (both error).
 func (m *home) restoreIfResting(selected *session.Instance) (tea.Cmd, bool) {
 	if selected == nil || selected.LifecycleAction() != session.LifecycleActionRestore {
+		return nil, false
+	}
+	if selected.GetInFlightOp() == session.OpRestoring {
+		// A restore is already in flight: interactiveGuard's "is being
+		// restored" notice names the real state — the same surface `r`
+		// (handleRestore) and the safe local/archived path already produce.
+		// Do not re-open the reprovisioning confirm: it would show misleading
+		// data-loss copy for a row whose restore is already running, and its
+		// confirm-callback re-check would no-op silently.
 		return nil, false
 	}
 	if selected.RestoreWouldDiscardUnpushedWork() {

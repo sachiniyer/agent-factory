@@ -361,3 +361,73 @@ func TestInteractiveGuardSeverity(t *testing.T) {
 			"the user still gets the specific message")
 	})
 }
+
+// TestHandleEnter_RemoteRestoringLostRowShowsBeingRestoredNotice pins the fix for
+// the OpRestoring gap in restoreIfResting: Enter on a REMOTE Lost/Dead row whose
+// restore is ALREADY in flight must NOT re-open the "never-pushed changes are
+// lost" reprovisioning confirm. An in-flight restore is a wait-it-out state — the
+// row already carries the optimistic OpRestoring and the daemon RPC is parked — so
+// the row falls through to interactiveGuard's benign "is being restored" notice,
+// the SAME surface `r` (handleRestore) and the safe local/archived path produce.
+// The bug: lifecycleActionFor returns Restore for LiveLost/LiveDead regardless of
+// OpRestoring, so a remote row mid-restore still matched restoreIfResting, took the
+// destructive branch (RestoreWouldDiscardUnpushedWork stays true), and opened the
+// data-loss confirm whose callback no-ops — a misleading dialog the user reacts to.
+func TestHandleEnter_RemoteRestoringLostRowShowsBeingRestoredNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{"lost", session.Lost},
+		{"dead", session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := newDeadInstance(t, "remote-restoring", tc.status)
+			inst.SetBackend(&reprovisioningBackend{FakeBackend: session.NewFakeBackend()})
+			inst.SetInFlightOpForTest(session.OpRestoring)
+			require.True(t, inst.RestoreWouldDiscardUnpushedWork(),
+				"precondition: a remote Lost/Dead row is still on the destructive branch")
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+
+			called := false
+			prev := restoreSessionThroughDaemon
+			restoreSessionThroughDaemon = func(daemon.RestoreSessionRequest) (string, error) {
+				called = true
+				return "/p", nil
+			}
+			t.Cleanup(func() { restoreSessionThroughDaemon = prev })
+
+			model, cmd := h.handleEnter()
+			h = model.(*home)
+
+			// The dialog must NOT open: an in-flight restore cannot be
+			// re-confirmed, and the misleading data-loss copy must not surface.
+			require.Equal(t, stateDefault, h.state,
+				"Enter on an already-restoring remote row must not open the reprovisioning confirm")
+			require.Nil(t, h.confirmationOverlay, "no confirmation overlay for an in-flight restore")
+			require.Nil(t, h.pendingConfirmMsg, "confirm never ran, so no startRestoreMsg is staged")
+
+			// The guard's benign notice names the real state — matching `r` and
+			// the safe path. It must not carry the reprovisioning data-loss copy.
+			h.errBox.SetSize(200, 1)
+			require.Contains(t, h.errBox.String(), "is being restored",
+				"the in-flight-restore notice must surface (the guard's wait-it-out message)")
+			require.NotContains(t, h.errBox.String(), "never-pushed",
+				"the reprovisioning data-loss copy must not surface on an in-flight restore")
+
+			// Nothing mutates: the optimistic op stays (no second restore raised),
+			// and the restore RPC never fires a second time.
+			require.Equal(t, session.OpRestoring, inst.GetInFlightOp(),
+				"op must stay OpRestoring — Enter must neither raise a second restore nor clear it")
+			require.False(t, called, "Enter must not dispatch a second restore RPC")
+			require.NotNil(t, cmd, "the notice returns the hide timer command, not a silent nil")
+
+			// The SAME row, read through interactiveGuard, names the real state —
+			// the fix simply routes Enter back to that guard instead of past it.
+			require.Contains(t, interactiveGuard(inst).Error(), "is being restored",
+				"interactiveGuard fences this row; restoreIfResting must agree with it")
+		})
+	}
+}
