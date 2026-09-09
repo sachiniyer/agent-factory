@@ -36,12 +36,16 @@ func AccountLimitEvidenceFromData(data InstanceData) (string, []AccountLimitObse
 // durable observation that matches the current account and reset; only older
 // rows without that evidence fall back to their recorded program.
 func limitAgentFromData(data InstanceData, account string, observations []AccountLimitObservationData) string {
-	if data.LimitAgent != "" || EffectiveLiveness(data) != LiveLimitReached {
+	if EffectiveLiveness(data) != LiveLimitReached {
+		return ""
+	}
+	if tmux.IsSupportedProgram(data.LimitAgent) {
 		return data.LimitAgent
 	}
 	matched := ""
 	for _, observation := range observations {
-		if observation.Account != account || !observation.ResetAt.Equal(data.LimitResetAt) {
+		if !tmux.IsSupportedProgram(observation.Agent) || observation.Account != account ||
+			!observation.ResetAt.Equal(data.LimitResetAt) {
 			continue
 		}
 		if matched != "" && matched != observation.Agent {

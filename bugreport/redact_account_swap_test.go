@@ -25,6 +25,7 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 		Program:      "claude",
 		Status:       session.Status(1),
 		Account:      "acme-prod",
+		LimitAgent:   "codex",
 		LimitAccount: "acme-prod",
 		PendingAccountSwap: &session.AccountSwapData{
 			From:           "acme-prod",
@@ -64,6 +65,10 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 		t.Errorf("agent enum redacted; it is bounded and load-bearing for triage: %q",
 			d.AccountLimitObservations[0].Agent)
 	}
+	if d.LimitAgent != "codex" {
+		t.Errorf("limit agent enum redacted; it is bounded and identifies the quota provider: %q",
+			d.LimitAgent)
+	}
 	if !d.AccountLimitObservations[0].ResetAt.Equal(reset) {
 		t.Errorf("reset time mutated: %v", d.AccountLimitObservations[0].ResetAt)
 	}
@@ -79,7 +84,7 @@ func TestRedactInstancesFallbackRedactsAccountSwapLabels(t *testing.T) {
 	r := &redactor{}
 	raw := json.RawMessage(`[{
 		"id":"leg-1","status":"legacy-string-status","program":"claude",
-		"limit_account":"acme-prod",
+		"limit_agent":"codex","limit_account":"acme-prod",
 		"pending_account_swap":{"from":"acme-prod","to":"acme-staging","conversation_id":"8f466d20-784b"},
 		"account_limit_observations":[{"agent":"claude","account":"acme-prod"}]
 	}]`)
@@ -99,5 +104,8 @@ func TestRedactInstancesFallbackRedactsAccountSwapLabels(t *testing.T) {
 	// The bounded agent enum is not a label and is not redacted on this path either.
 	if !strings.Contains(out, `"claude"`) {
 		t.Errorf("fallback path redacted the agent enum:\n%s", out)
+	}
+	if !strings.Contains(out, `"limit_agent": "codex"`) {
+		t.Errorf("fallback path redacted the bounded limit agent enum:\n%s", out)
 	}
 }

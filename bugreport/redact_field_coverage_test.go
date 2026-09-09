@@ -88,6 +88,7 @@ var verbatimInstanceFields = map[string]string{
 
 	"BackendType":  "bounded backend discriminator (\"local\", \"remote\", \"\")",
 	"CurrentAgent": "agent enum name (tmux.SupportedPrograms), not user text",
+	"LimitAgent":   "agent enum name (tmux.SupportedPrograms), constrained on live writes and persisted restore; the account label beside it is redacted",
 
 	"Branch":                 "the username segment collapses via scrub; the branch SUFFIX is deliberately retained — see TestScrubRedactsUsernameEndingInNonWordChar, which asserts \"[user]/fix-login-bug\"",
 	"Worktree.BranchName":    "same branch-name policy as Branch above",

@@ -46,6 +46,19 @@ func TestSetLimitReachedAttributesWallToAccountThatProducedIt(t *testing.T) {
 	require.Equal(t, "work", account)
 }
 
+func TestLimitAgentFromDataRejectsArbitraryText(t *testing.T) {
+	data := InstanceData{
+		ID: "limited", Program: tmux.ProgramClaude, Account: "work",
+		Liveness: LiveLimitReached, LimitAgent: "client-chosen-text", LimitAccount: "work",
+	}
+	account, observations := AccountLimitEvidenceFromData(data)
+
+	agent := limitAgentFromData(data, account, observations)
+	require.Equal(t, tmux.ProgramClaude, agent)
+	require.Equal(t, "work", account)
+	require.NotEqual(t, "client-chosen-text", agent)
+}
+
 func TestAccountLimitObservationSurvivesClearAndStorage(t *testing.T) {
 	reset := time.Date(2026, 8, 10, 17, 0, 0, 0, time.UTC)
 	i := &Instance{
