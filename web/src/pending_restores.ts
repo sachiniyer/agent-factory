@@ -136,18 +136,23 @@ export class PendingRestores {
       const causalUncertainSnapshot = evidence?.kind === "snapshot" &&
         evidence.generation > ticket.uncertainAt;
       const issuedAt = evidence?.kind === "snapshot" ? this.snapshotIssuedAt.get(evidence.generation) : undefined;
+      const admissionDeadline = this.operationLockTimeoutMs === null ? null :
+        ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
+      const issuedAfterAdmission = admissionDeadline !== null && issuedAt !== undefined &&
+        issuedAt > admissionDeadline;
       let uncertainCompleted = false;
       if (ticket.uncertain && authoritative && causalUncertainSnapshot) {
         if (!eligibility.has(id)) {
           uncertainCompleted = true;
         } else if (row?.restoreSettled) {
-          uncertainCompleted = true;
+          // The projection has no attempt id. A predecessor can settle after B
+          // is queued but before B acquires the daemon operation lock, so only a
+          // Snapshot beyond B's admission bound can release its fence.
+          uncertainCompleted = issuedAfterAdmission;
         } else if (row?.restoreEligible) {
           // A reconnect can hold these captured rows behind slower task/project
           // loads. Processing time cannot turn a pre-deadline Snapshot into proof.
-          const deadline = this.operationLockTimeoutMs === null ? null :
-            ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
-          uncertainCompleted = deadline !== null && issuedAt !== undefined && issuedAt > deadline;
+          uncertainCompleted = issuedAfterAdmission;
         } else {
           // LifecycleActionNone covers every operation fence and several unsettled
           // states. It carries no attempt identity, so it cannot make a later
