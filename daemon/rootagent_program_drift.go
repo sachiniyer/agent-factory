@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -13,11 +12,11 @@ import (
 // checkAdoptedRootProgramDrift compares a live adopted root with the command
 // its frozen profile produces. Bare agent names and the empty/default form need
 // repository config resolution, so that work is single-flighted off the
-// one-second ensure sweep. The expensive result is cached by repository,
-// workspace, profile, ApplyConfig epoch, and the checked-in config content that
-// contributed to it. The last dependency is periodically revalidated
-// asynchronously because a branch switch has no ApplyConfig boundary, and the
-// cached command is not compared until that validation succeeds.
+// one-second ensure sweep. The result is cached by repository, workspace,
+// profile, and ApplyConfig epoch, then the complete read-only repository config
+// resolution is periodically rerun because checked-in and personal files can
+// change without advancing that epoch. A cached command is never compared until
+// that refresh succeeds.
 func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, workspace string, st *rootEnsureState, profile config.RootAgent, inst *session.Instance) {
 	evidence := inst.ObserveRuntimeProgram()
 	runningProgram := evidence.Program()
@@ -48,11 +47,10 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		}
 		st.programDriftResolving = true
 		st.programDriftResolvingEpoch = resolutionEpoch
-		cachedFingerprint := st.programDriftInRepoFingerprint
 		global := m.Config()
 		m.mu.Unlock()
-		go m.revalidateAdoptedRootProgram(repo, repoID, key, workspace, st, profile,
-			resolutionEpoch, configuredProgram, cachedFingerprint, global, inst, evidence)
+		go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile,
+			resolutionEpoch, global, inst, evidence)
 		return
 	}
 	if st.programDriftResolving {
@@ -69,11 +67,8 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		return
 	}
 	global := m.Config()
-	go func() {
-		configuredProgram, fingerprint, err := resolveAdoptedRootProgram(repo, profile, global)
-		m.finishAdoptedRootProgramDriftWithFingerprint(repoID, key, workspace, st, profile,
-			resolutionEpoch, configuredProgram, fingerprint, err, inst, evidence)
-	}()
+	go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile,
+		resolutionEpoch, global, inst, evidence)
 }
 
 func rootProgramDriftCacheMatches(st *rootEnsureState, epoch uint64, repoID, workspace string, profile config.RootAgent) bool {
@@ -84,54 +79,25 @@ func rootProgramDriftCacheMatches(st *rootEnsureState, epoch uint64, repoID, wor
 		st.programDriftResolvedProfile == profile
 }
 
-func resolveAdoptedRootProgram(repo *config.RepoContext, profile config.RootAgent, global *config.Config) (string, string, error) {
-	fingerprint := ""
-	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-		resolved, err := config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
-		if err == nil {
-			fingerprint = resolved.InRepoConfigFingerprint
-		}
-		return resolved, err
-	}
-	configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
-	if err != nil {
-		return "", "", err
-	}
-	currentFingerprint, err := config.InRepoConfigFingerprint(repo.WorkspacePath())
-	if err != nil {
-		return "", "", err
-	}
-	if currentFingerprint != fingerprint {
-		return "", "", fmt.Errorf("checked-in config changed while resolving the root-agent command")
-	}
-	return configuredProgram, fingerprint, nil
-}
-
-func (m *Manager) revalidateAdoptedRootProgram(
+func (m *Manager) resolveAndFinishAdoptedRootProgram(
 	repo *config.RepoContext,
 	repoID, key, workspace string,
 	st *rootEnsureState,
 	profile config.RootAgent,
 	resolutionEpoch uint64,
-	configuredProgram, cachedFingerprint string,
 	global *config.Config,
 	inst *session.Instance,
 	evidence session.RuntimeProgramEvidence,
 ) {
-	currentFingerprint, err := config.InRepoConfigFingerprint(repo.WorkspacePath())
-	if err == nil && currentFingerprint != cachedFingerprint {
-		configuredProgram, currentFingerprint, err = resolveAdoptedRootProgram(repo, profile, global)
+	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
+		return config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
 	}
-	m.finishAdoptedRootProgramDriftWithFingerprint(repoID, key, workspace, st, profile,
-		resolutionEpoch, configuredProgram, currentFingerprint, err, inst, evidence)
+	configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
+	m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
+		resolutionEpoch, configuredProgram, err, inst, evidence)
 }
 
 func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, resolveErr error, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
-	m.finishAdoptedRootProgramDriftWithFingerprint(repoID, key, workspace, st, profile,
-		resolutionEpoch, configuredProgram, "", resolveErr, inst, evidence)
-}
-
-func (m *Manager) finishAdoptedRootProgramDriftWithFingerprint(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram, fingerprint string, resolveErr error, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
 	m.mu.Lock()
 	if resolutionEpoch != m.rootProgramDriftConfigEpoch || st.programDriftResolvingEpoch != resolutionEpoch {
 		m.mu.Unlock()
@@ -148,7 +114,6 @@ func (m *Manager) finishAdoptedRootProgramDriftWithFingerprint(repoID, key, work
 	st.programDriftResolvedWorkspace = workspace
 	st.programDriftResolvedProfile = profile
 	st.programDriftConfiguredProgram = configuredProgram
-	st.programDriftInRepoFingerprint = fingerprint
 	st.programDriftNextConfigCheck = time.Time{}
 	if RootAgentProfileNeedsRepoConfig(profile) {
 		st.programDriftNextConfigCheck = time.Now().Add(rootProgramDriftConfigInspectionInterval)
@@ -199,10 +164,11 @@ func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st
 
 // invalidateRootProgramDriftResolutions is the ApplyConfig rebuild hook for the
 // only root-program cache that reads applied-live config. It runs on every apply,
-// not only when the global program_overrides map differs: a project-scoped save
-// reaches the same ApplyConfig boundary while leaving the global diff unchanged.
-// The epoch also rejects an older asynchronous resolver that finishes after the
-// invalidation, so it cannot repopulate the cache with the superseded snapshot.
+// not only when the global program_overrides map differs. Personal project
+// writes bypass ApplyConfig and are covered by the periodic complete resolution
+// above. The epoch also rejects an older asynchronous resolver that finishes
+// after invalidation, so it cannot repopulate the cache with a superseded global
+// snapshot.
 func (m *Manager) invalidateRootProgramDriftResolutions() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -216,7 +182,6 @@ func (m *Manager) invalidateRootProgramDriftResolutions() {
 		st.programDriftResolvedWorkspace = ""
 		st.programDriftResolvedProfile = config.RootAgent{}
 		st.programDriftConfiguredProgram = ""
-		st.programDriftInRepoFingerprint = ""
 		st.programDriftNextConfigCheck = time.Time{}
 	}
 }

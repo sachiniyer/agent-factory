@@ -53,9 +53,8 @@ const rootEnsureEscalationThreshold = 6
 var (
 	rootEnsureBackoffBase = 10 * time.Second
 	rootEnsureBackoffMax  = 5 * time.Minute
-	// Checked-in configuration changes outside ApplyConfig (for example, on a
-	// branch switch). Revalidate its content identity off the poll goroutine on
-	// this cadence; the expensive command resolution reruns only when it changed.
+	// Checked-in and personal project configuration can change outside
+	// ApplyConfig. Re-resolve the command off the poll goroutine on this cadence.
 	rootProgramDriftConfigInspectionInterval = 30 * time.Second
 	// A transcript creation or removal can lag one poll without affecting the
 	// live root. Bound the directory scan instead of statting every historical
@@ -131,10 +130,11 @@ type rootEnsureState struct {
 	programDriftLoggedRepoID string
 	// The default root command and bare agent names require repository/config
 	// resolution. Cache that answer after resolving it off the ensure sweep; the
-	// key covers the frozen profile, ApplyConfig epoch, repository identity,
-	// workspace, and checked-in config content. The last input is periodically
-	// revalidated off the poll goroutine because a branch switch has no
-	// ApplyConfig boundary; a stale cache is never compared before that probe.
+	// key covers the frozen profile, ApplyConfig epoch, repository identity, and
+	// workspace. The complete repository config stack is periodically re-resolved
+	// off the poll goroutine because checked-in and personal project files can
+	// change without that epoch advancing; a cached command is never compared
+	// before the refresh.
 	programDriftResolving         bool
 	programDriftResolvingEpoch    uint64
 	programDriftResolved          bool
@@ -143,7 +143,6 @@ type rootEnsureState struct {
 	programDriftResolvedWorkspace string
 	programDriftResolvedProfile   config.RootAgent
 	programDriftConfiguredProgram string
-	programDriftInRepoFingerprint string
 	programDriftNextConfigCheck   time.Time
 	// Test seam between the latch's two runtime-evidence validations.
 	programDriftBeforeLatchForTest func()

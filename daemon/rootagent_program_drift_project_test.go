@@ -1,0 +1,58 @@
+package daemon
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+func TestAdoptedRootProgramCacheRevalidatesProjectOverride(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	previousInterval := rootProgramDriftConfigInspectionInterval
+	rootProgramDriftConfigInspectionInterval = 0
+	t.Cleanup(func() { rootProgramDriftConfigInspectionInterval = previousInterval })
+
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	if _, err := config.SetProjectConfigValue(project.ID, "program_overrides.codex", "/old/codex"); err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t,
+		rootTestConfig(repoPath, config.RootAgentConfig{Program: "codex"}))
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	findRootInstance(t, manager, repoPath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/old/codex"))
+
+	manager.ensureRootAgentsAndWait()
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("ensure state was not created")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+
+	if _, err := config.SetProjectConfigValue(project.ID, "program_overrides.codex", "/new/codex"); err != nil {
+		t.Fatal(err)
+	}
+	manager.ensureRootAgentsAndWait()
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	configured := st.programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if configured != "/new/codex" {
+		t.Fatalf("configured command after project override write = %q, want /new/codex", configured)
+	}
+	if !strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("project-local override drift was hidden by the stale cache:\n%s", warnings.String())
+	}
+}
