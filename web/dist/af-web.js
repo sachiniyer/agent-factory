@@ -14752,26 +14752,30 @@ var AppShell = class {
   };
   syncPhone() {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) {
-      this.responsiveNewTabState = null;
-      return;
-    }
-    const focus = document.activeElement;
+    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
     const responsiveState = this.responsiveNewTabState;
     this.responsiveNewTabState = null;
     const pickerOpen = responsiveState?.trigger === pickerTrigger ? responsiveState.open : pickerTrigger?.getAttribute("aria-expanded") === "true";
     const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ?? (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : void 0) : void 0;
+    const reopenPicker = () => {
+      this.openNewTabPicker();
+      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
+        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
+      }
+    };
+    if (!compositionChanged) {
+      if (responsiveState?.trigger === pickerTrigger && responsiveState.open && pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
+      return;
+    }
+    const focus = document.activeElement;
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
     if (pickerOpen) {
-      this.openNewTabPicker();
-      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
-        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
-      }
+      reopenPicker();
     }
     if (!pickerOpen && focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();

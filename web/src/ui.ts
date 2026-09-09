@@ -765,14 +765,7 @@ export class AppShell {
   };
   private syncPhone(): void {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) {
-      // The capture belongs only to this media-change transaction. A Web/VS Code
-      // tab needs no responsive reparent, so retaining its snapshot would let a
-      // later terminal selection consume stale picker-open state.
-      this.responsiveNewTabState = null;
-      return;
-    }
-    const focus = document.activeElement as HTMLElement | null;
+    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
     // appbarControls captures this before its media listener closes the phone
     // disclosure. The composition pass is deliberately deferred until every
@@ -785,6 +778,23 @@ export class AppShell {
       : pickerTrigger?.getAttribute("aria-expanded") === "true";
     const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
       (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : undefined) : undefined;
+    const reopenPicker = (): void => {
+      this.openNewTabPicker();
+      // Closing the old owner can synchronously close the picker and clear its
+      // return. Preserve a shortcut transaction across this intentional reparent.
+      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
+        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
+      }
+    };
+    if (!compositionChanged) {
+      // A store update can observe the new media-query value and recompose before
+      // the query's change listeners run. The owner listener then closes the picker,
+      // leaving this deferred pass with no composition work but a real open capture.
+      if (responsiveState?.trigger === pickerTrigger && responsiveState.open &&
+          pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
+      return;
+    }
+    const focus = document.activeElement as HTMLElement | null;
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
@@ -793,12 +803,7 @@ export class AppShell {
     // Reparenting closes the old enclosing disclosure. Reopen through the new
     // owner and capture its return state before restoring the focused item.
     if (pickerOpen) {
-      this.openNewTabPicker();
-      // Closing the old owner can synchronously close the picker and clear its
-      // return. Preserve a shortcut transaction across this intentional reparent.
-      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
-        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
-      }
+      reopenPicker();
     }
     // openNewTabPicker has restored focus to its first item. Do not overwrite it
     // with the app-controls trigger focused by the preceding media listener: that
