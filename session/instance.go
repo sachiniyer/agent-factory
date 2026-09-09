@@ -323,6 +323,12 @@ type Instance struct {
 	// when the archive transition settles. Branch is historical restore state and
 	// therefore cannot answer whether the current push completed.
 	archivePushCompleted bool
+	// archiveCheckpointSealed is raised by the daemon's terminal checkpoint.
+	// Once raised, no later archive generation may begin. archiveSettled is the
+	// current generation's settlement fence: the checkpoint waits for it before
+	// taking the snapshot that will survive process exit.
+	archiveCheckpointSealed bool
+	archiveSettled          chan struct{}
 	// runtimeCleanupStateUnknown is the durable third outcome of a sandbox reap:
 	// teardown neither confirmed success nor reported a completed failure, so the
 	// exact runtime identity above must survive storage and be retried before any

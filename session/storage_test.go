@@ -21,6 +21,10 @@ import (
 type mockInstanceStorage struct {
 	mu   sync.Mutex
 	data map[string]json.RawMessage
+	// beforeSave runs once immediately before a checkpoint reaches durable
+	// storage. Tests use it to exercise mutations after the final snapshot.
+	beforeSave func()
+	saveOnce   sync.Once
 	// readErr, when non-nil, makes GetInstances fail to simulate a transient
 	// read failure (permission denied, I/O error) on instances.json.
 	readErr error
@@ -34,6 +38,9 @@ func newMockStorage() *mockInstanceStorage {
 }
 
 func (m *mockInstanceStorage) SaveInstances(repoID string, instancesJSON json.RawMessage) error {
+	if m.beforeSave != nil {
+		m.saveOnce.Do(m.beforeSave)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.data[repoID] = instancesJSON

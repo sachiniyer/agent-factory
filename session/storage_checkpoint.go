@@ -1,5 +1,15 @@
 package session
 
+// sealArchiveCheckpoint prevents any later BeginArchive and returns the current
+// archive generation's settlement fence, if one is already in flight. The seal
+// and BeginArchive both use i.mu, so there is no admission gap between them.
+func (i *Instance) sealArchiveCheckpoint() <-chan struct{} {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.archiveCheckpointSealed = true
+	return i.archiveSettled
+}
+
 // checkpointSnapshot is one repo's storage projection plus the archive rows
 // that require a disk reconciliation while the repo file lock is held.
 type checkpointSnapshot struct {

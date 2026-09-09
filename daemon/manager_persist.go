@@ -756,11 +756,17 @@ func deleteLateGhostSessionRecord(
 // the normal editor fence may remove it.
 func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string, lateResult <-chan error) {
 	m.lateGhostCleanupWG.Add(1)
-	go func() {
+	if !m.launchBackgroundMutation(func(stop <-chan struct{}) {
 		defer m.lateGhostCleanupWG.Done()
-		if err := <-lateResult; err != nil {
+		var lateErr error
+		select {
+		case <-stop:
+			return
+		case lateErr = <-lateResult:
+		}
+		if lateErr != nil {
 			m.clearGhostCleanupStall(key, stableID)
-			m.warn().Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
+			m.warn().Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, lateErr)
 			return
 		}
 		for {
@@ -781,9 +787,18 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 			}
 			m.warn().Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
 			timer := time.NewTimer(lateGhostCleanupRetryInterval)
-			<-timer.C
+			select {
+			case <-stop:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
 		}
-	}()
+	}) {
+		m.lateGhostCleanupWG.Done()
+	}
 }
 
 // reconcileSettledGhostCleanup gives a synchronous descriptor success the same

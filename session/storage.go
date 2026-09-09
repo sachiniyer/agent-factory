@@ -758,6 +758,24 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	return nil
 }
 
+// SaveInstancesForShutdown writes the daemon's terminal checkpoint. Sealing
+// every instance first closes the post-snapshot admission race: an archive that
+// has not begun is refused, while an archive already behind its BeginArchive
+// fence is joined through its settling transition. The final snapshot therefore
+// cannot precede an archive that the terminating process allowed to commit.
+func (s *Storage) SaveInstancesForShutdown(instances []*Instance) error {
+	settled := make([]<-chan struct{}, 0, len(instances))
+	for _, inst := range instances {
+		if archiveSettled := inst.sealArchiveCheckpoint(); archiveSettled != nil {
+			settled = append(settled, archiveSettled)
+		}
+	}
+	for _, archiveSettled := range settled {
+		<-archiveSettled
+	}
+	return s.SaveInstances(instances)
+}
+
 // LoadInstances loads the list of instances from disk.
 func (s *Storage) LoadInstances() ([]*Instance, error) {
 	var allJSON map[string]json.RawMessage

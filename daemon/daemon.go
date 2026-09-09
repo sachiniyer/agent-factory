@@ -203,7 +203,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
 		return nil
 	}
+	controlClosed := false
 	defer func() {
+		if controlClosed {
+			return
+		}
 		if err := closeControl(); err != nil {
 			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
 		}
@@ -215,10 +219,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// point, so no extra spawn race applies. A bind failure is logged but never
 	// fatal: HTTP is auxiliary — the gob control plane every existing client
 	// depends on must not regress if the HTTP socket cannot bind.
-	if closeHTTP, err := startHTTPServer(manager, scheduler, watchers); err != nil {
+	var closeHTTP func() error
+	httpClosed := false
+	if closeCandidate, err := startHTTPServer(manager, scheduler, watchers); err != nil {
 		log.WarningLog.Printf("failed to start daemon HTTP server: %v", err)
 	} else {
+		closeHTTP = closeCandidate
 		defer func() {
+			if httpClosed {
+				return
+			}
 			if err := closeHTTP(); err != nil {
 				log.WarningLog.Printf("failed to close daemon HTTP server: %v", err)
 			}
@@ -398,7 +408,28 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
 	}
 
-	// Stop the goroutines so we don't race.
+	// Close mutation admission, then close and JOIN both externally reachable
+	// control planes before taking the terminal snapshot. Closing only their
+	// listeners is insufficient: an ArchiveSession (or any other writer) that
+	// already passed admission can still mutate memory and block its targeted
+	// persist behind SaveInstances' repo flock. The transport cleanup functions
+	// wait for those dispatched handlers, so nothing user-driven can begin or
+	// remain in flight across the checkpoint.
+	manager.lifecycle.markQuiescing()
+	if closeHTTP != nil {
+		httpClosed = true
+		if err := closeHTTP(); err != nil {
+			log.WarningLog.Printf("failed to drain daemon HTTP server: %v", err)
+		}
+	}
+	controlClosed = true
+	if err := closeControl(); err != nil {
+		log.WarningLog.Printf("failed to drain daemon control server: %v", err)
+	}
+
+	// Stop and join daemon-owned writers too. The lifecycle gate above also
+	// refuses any scheduler/watcher delivery that reaches the closed transports
+	// during their deferred teardown.
 	close(stopCh)
 	wg.Wait()
 	// The poll loop is out, so no further root-agent create can be launched; wait
@@ -409,6 +440,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// it. This is also what the poll goroutine's own wg.Wait did while the create
 	// still ran on it.
 	manager.waitRootAgentCreatesForShutdown()
+	// RPCs and the poll are gone, and root creates (which can launch a final
+	// conversation capture) are joined. No detached durable writer may now be
+	// admitted; cancel those still waiting before destructive work and join any
+	// one already mutating through its targeted persist.
+	manager.stopAndWaitBackgroundMutationsForShutdown()
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
@@ -418,7 +454,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return nil
 	}
 
-	if err := manager.SaveInstances(); err != nil {
+	if err := manager.SaveInstancesForShutdown(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil

@@ -380,6 +380,15 @@ type Manager struct {
 	// seams. Launchers must return before waiting so every Add precedes Wait;
 	// the production kill path never waits for these retrying workers.
 	lateGhostCleanupWG sync.WaitGroup
+	// backgroundMutationWG owns detached writers spawned by otherwise-synchronous
+	// control/poll paths: conversation capture, task on-complete teardown, and
+	// late ghost cleanup. backgroundMutationMu makes launch-vs-shutdown admission
+	// atomic, so the terminal checkpoint can close the gate and join every writer
+	// without racing a WaitGroup.Add.
+	backgroundMutationMu       sync.Mutex
+	backgroundMutationWG       sync.WaitGroup
+	backgroundMutationStop     chan struct{}
+	backgroundMutationsStopped bool
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
@@ -714,6 +723,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		killsInFlight:             make(map[string]struct{}),
 		killRetries:               make(map[string]*session.CleanupRetry),
 		ghostCleanupStalls:        make(map[string]string),
+		backgroundMutationStop:    make(chan struct{}),
 		restoresInFlight:          make(map[string]struct{}),
 		lostRestoreStates:         make(map[string]*lostRestoreState),
 		limitResumeStates:         make(map[string]*limitResumeState),
@@ -815,22 +825,6 @@ func (m *Manager) Ready() bool {
 	default:
 		return false
 	}
-}
-
-func (m *Manager) RefreshInstances() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.refreshLocked()
-}
-
-func (m *Manager) InstancesSnapshot() []*session.Instance {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return daemonInstances(m.instances)
-}
-
-func (m *Manager) SaveInstances() error {
-	return m.storage.SaveInstances(m.InstancesSnapshot())
 }
 
 // dockerReapProtectedSlugs returns the af.session label slugs of every session
