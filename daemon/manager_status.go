@@ -434,12 +434,14 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 	m.mu.Unlock()
 	rows := make([]session.InstanceData, 0, len(entries))
 	applicable := make(map[string]bool, len(entries))
+	snapshots := make(map[string]session.InstanceData, len(entries))
 	for _, entry := range entries {
 		row := entry.instance.ToInstanceData()
 		rows = append(rows, row)
 		instances[row.ID] = entry.instance
 		repos[row.ID] = entry.repoID
 		applicable[row.ID] = session.NeedsWorktreeIntegrityInspection(row)
+		snapshots[row.ID] = row
 	}
 
 	inspector := m.worktreeInspector
@@ -450,6 +452,9 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 	if ctx.Err() != nil || !m.worktreeInspectionSnapshotCurrent(entries, rows) {
 		return
 	}
+	if m.worktreeBeforeReconcile != nil {
+		m.worktreeBeforeReconcile()
+	}
 	seen := make(map[string]bool, len(inspections))
 	for _, inspection := range inspections {
 		instance := instances[inspection.InstanceID]
@@ -457,7 +462,9 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 			continue
 		}
 		seen[inspection.InstanceID] = true
-		if instance.ReconcileWorktreeInspection(inspection.Warning, inspection.IncompleteError()) {
+		changed, applied := instance.ReconcileWorktreeInspectionIfCurrent(
+			snapshots[inspection.InstanceID], inspection.Warning, inspection.IncompleteError())
+		if applied && changed {
 			m.publishWorktreeIntegrityChange(repos[inspection.InstanceID], instance)
 		}
 	}
@@ -467,11 +474,13 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 		}
 		if applicable[id] {
 			incomplete := fmt.Errorf("worktree safety inspector returned no result for live local lane %q", instance.Title)
-			if instance.ReconcileWorktreeInspection("", incomplete) {
+			changed, applied := instance.ReconcileWorktreeInspectionIfCurrent(snapshots[id], "", incomplete)
+			if applied && changed {
 				m.publishWorktreeIntegrityChange(repos[id], instance)
 			}
 		} else {
-			if instance.ReconcileWorktreeWarning("") {
+			changed, applied := instance.ReconcileWorktreeInspectionIfCurrent(snapshots[id], "", nil)
+			if applied && changed {
 				m.publishWorktreeIntegrityChange(repos[id], instance)
 			}
 		}

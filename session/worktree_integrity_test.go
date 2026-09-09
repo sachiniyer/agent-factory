@@ -146,3 +146,17 @@ func TestIncompleteWorktreeScanReplacesStaleWarningWithNewDanger(t *testing.T) {
 	assert.NotContains(t, warning, "old branch held by old-lane")
 	assert.Contains(t, warning, "could not be verified", "the correlation gap must remain visible")
 }
+
+func TestWorktreeInspectionCompareAndSetRejectsRestoredLane(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "holder", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	require.True(t, inst.ReconcileWorktreeInspection("DANGER: confirmed duplicate branch", nil))
+	inst.SetStatusForTest(Archived)
+	archivedSnapshot := inst.ToInstanceData()
+	inst.SetStatusForTest(Ready)
+
+	changed, applied := inst.ReconcileWorktreeInspectionIfCurrent(archivedSnapshot, "", nil)
+	assert.False(t, applied, "a restored lane no longer matches its archived scan snapshot")
+	assert.False(t, changed)
+	assert.Contains(t, inst.WorktreeWarning(), "confirmed duplicate branch")
+}
