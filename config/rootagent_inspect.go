@@ -245,7 +245,7 @@ func assembleRootAgentInspectionInputsFromConfigWithContext(ctx context.Context,
 			if bounded && ctx.Err() != nil {
 				return rootAgentInspectionAssembly{}, err
 			}
-			if strictProjectLookup {
+			if strictProjectLookup || !isProjectRegistryReadError(err) {
 				return rootAgentInspectionAssembly{}, err
 			}
 			// Fail CLOSED, like the daemon (#3247): an unlistable registry means

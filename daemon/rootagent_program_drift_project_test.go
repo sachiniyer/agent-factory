@@ -56,3 +56,34 @@ func TestAdoptedRootProgramCacheRevalidatesProjectOverride(t *testing.T) {
 		t.Fatalf("project-local override drift was hidden by the stale cache:\n%s", warnings.String())
 	}
 }
+
+func TestAdoptedRootProgramDriftSkipsStartupUnknownRuntime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, warnings := newManagerCapturingWarnings(t,
+		rootTestConfig(repoPath, config.RootAgentConfig{Program: "codex"}))
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	root := findRootInstance(t, manager, repoPath)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	root.MarkStartupStateUnknown()
+
+	manager.ensureRootAgentsAndWait()
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("ensure state was not created")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	latched := st.programDriftLogged || manager.rootProgramDriftLogged[config.RepoIDFromRoot(repoPath)]
+	manager.mu.Unlock()
+	if latched || strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("startup-unknown runtime was compared and latched: latched=%v warnings=%s", latched, warnings.String())
+	}
+}

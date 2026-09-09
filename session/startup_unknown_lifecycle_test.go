@@ -57,6 +57,25 @@ func TestStartupUnknownIsTerminalAndKillableButHasNoLifecycleAction(t *testing.T
 	}
 }
 
+func TestStartupUnknownInvalidatesRuntimeProgramEvidence(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{
+		ID: "unknown-evidence-id", TaskID: "task-unknown-evidence", Title: "uncertain", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.setRuntimeProgram("claude")
+	evidence := inst.ObserveRuntimeProgram()
+	if !inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("fresh runtime evidence is not current")
+	}
+
+	inst.MarkStartupStateUnknown()
+	if inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("startup-unknown transition left prior runtime evidence current")
+	}
+}
+
 // TestTeardownInProgressOffersNoLifecycleActions is the #2500 regression.
 //
 // OpKilling and OpArchiving are teardown FENCES: while one is in flight, the

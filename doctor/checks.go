@@ -323,7 +323,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("could not compare the root agent program for %s because its resolved runtime command was not recorded", rootSessionDisplayPath(inst)),
-				"kill the root, then restart the daemon to record a fresh launch command", false)
+				"restart the daemon, then kill the root to record a fresh launch command", false)
 			report.markIncomplete("root agent program")
 			continue
 		}
@@ -364,7 +364,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		drifted++
 		report.Warn(sectionDaemon, "root agent program",
 			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", commandPath, configuredProgram, runningProgram),
-			"kill the root, then restart the daemon", true)
+			"restart the daemon, then kill the root", true)
 	}
 	if drifted == 0 && unresolved == 0 {
 		detail := "no enabled live root sessions to compare"

@@ -58,8 +58,7 @@ func TestAfUsageReferenceRootAgentConfigCopy(t *testing.T) {
 				"changing its program",
 				"disabling it",
 				"removing its enabling entry",
-				"also requires killing that session",
-				"restart the daemon to apply the frozen configuration",
+				"restart the daemon first and then kill that session",
 			} {
 				if !strings.Contains(reference, want) {
 					t.Errorf("root-agent config guidance missing %q", want)

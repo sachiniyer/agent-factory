@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +58,30 @@ func TestCheckoutMarkerCompletedFailureWinsOverExpiredContext(t *testing.T) {
 	cancel()
 
 	err := checkoutMarkerProbeFailure(parent, t.TempDir(), completed)
-	require.NoError(t, err, "a completed nonzero Git exit is an answer even if the caller deadline lands before classification")
+	require.Error(t, err, "a completed nonzero Git exit did not establish checkout-marker absence")
+	require.NotErrorIs(t, err, context.Canceled,
+		"the completed Git result must still win when the caller deadline lands before classification")
+	require.Contains(t, err.Error(), "exit status 7")
+}
+
+func TestRootAgentInspectionPropagatesCompletedCheckoutProbeFailure(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$3\" = rev-parse ] && [ \"$4\" = --git-common-dir ] && [ \"$#\" -eq 4 ]; then exit 7; fi\nexec %q \"$@\"\n", realGit)
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = ResolveRootAgentForInspectionWithConfigContext(ctx, cfg, repoRoot, false)
+	require.Error(t, err, "a failed checkout probe must not read as an absent personal layer")
+	require.Contains(t, err.Error(), "exit status 7")
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestLoadProjectConfigAbsentIsNoLayer(t *testing.T) {

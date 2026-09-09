@@ -261,6 +261,21 @@ func projectForRepoContext(ctx context.Context, repo *RepoContext) (Project, boo
 	return projectForWorkspaceContext(ctx, repo.WorkspacePath())
 }
 
+// projectRegistryReadError distinguishes an unreadable registry (which ordinary
+// config resolution may degrade for compatibility) from a checkout-identity
+// probe that failed. The latter is an unknown answer and must propagate.
+type projectRegistryReadError struct {
+	err error
+}
+
+func (e *projectRegistryReadError) Error() string { return "read project registry: " + e.err.Error() }
+func (e *projectRegistryReadError) Unwrap() error { return e.err }
+
+func isProjectRegistryReadError(err error) bool {
+	var target *projectRegistryReadError
+	return errors.As(err, &target)
+}
+
 func projectForWorkspace(root string) (Project, bool, error) {
 	return projectForWorkspaceContext(context.Background(), root)
 }
@@ -271,7 +286,7 @@ func projectForWorkspaceContext(parent context.Context, root string) (Project, b
 	}
 	projects, err := listProjectsWithoutRootProbes()
 	if err != nil {
-		return Project{}, false, err
+		return Project{}, false, &projectRegistryReadError{err: err}
 	}
 	ctx, cancel := context.WithTimeout(parent, registeredProjectScanTimeout)
 	defer cancel()
@@ -363,9 +378,6 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 
 func checkoutMarkerProbeFailure(ctx context.Context, root string, err error) error {
 	classified := markUnansweredProbe(ctx, err)
-	if !RepoProbeUnanswered(classified) {
-		return nil
-	}
 	return fmt.Errorf("inspect checkout marker location for %s: %w", root, classified)
 }
 

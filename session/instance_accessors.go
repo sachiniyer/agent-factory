@@ -291,6 +291,10 @@ func (i *Instance) MarkStartupStateUnknown() {
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
 	if !i.startupStateUnknown {
+		// RuntimeProgram stops being proof of a current runtime at this edge.
+		// Advance the lock-free evidence generation before publishing the fence so
+		// an asynchronous drift check cannot latch the previously known command.
+		i.runtimeEvidenceGeneration.Add(1)
 		i.startupStateUnknown = true
 		i.touchLocked()
 	}

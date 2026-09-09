@@ -73,7 +73,7 @@ func TestRootAgentDottedDisableNamesAdoptedSessionRemedy(t *testing.T) {
 	cmd.SetOut(&out)
 	require.NoError(t, configSetCmd.RunE(cmd, []string{"root_agent.enabled", "false"}))
 	require.Contains(t, out.String(), "disabling it")
-	require.Contains(t, out.String(), "requires killing that session")
+	require.Contains(t, out.String(), "restart the daemon first and then kill that session")
 }
 
 func TestRootAgentsWholeTableRemovalNamesAdoptedSessionRemedy(t *testing.T) {
@@ -89,5 +89,5 @@ func TestRootAgentsWholeTableRemovalNamesAdoptedSessionRemedy(t *testing.T) {
 	cmd.SetOut(&out)
 	require.NoError(t, configSetCmd.RunE(cmd, []string{"root_agents", "{}"}))
 	require.Contains(t, out.String(), "removing its enabling entry")
-	require.Contains(t, out.String(), "requires killing that session")
+	require.Contains(t, out.String(), "restart the daemon first and then kill that session")
 }

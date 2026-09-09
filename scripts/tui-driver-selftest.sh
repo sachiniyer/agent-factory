@@ -1369,7 +1369,7 @@ _expect_config_editor_rejects() {
 # shellcheck disable=SC2317
 _expect_root_agent_config_set_copy() {
     local enabled_out program_out notice
-    notice='Saved — this setting takes effect on the next daemon start. · An already-running root session is adopted as-is, so changing its program, disabling it, or removing its enabling entry also requires killing that session.'
+    notice='Saved — this setting takes effect on the next daemon start. · An already-running root session is adopted as-is, so after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session.'
 
     enabled_out="$(af config set root_agent.enabled false 2>&1)" || {
         printf '%s\n' "$enabled_out" >&2

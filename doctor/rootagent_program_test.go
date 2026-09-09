@@ -55,7 +55,7 @@ func TestRootAgentProgramDriftNamesBothCommandsAndRemedy(t *testing.T) {
 	require.Contains(t, check.Detail, repoPath)
 	require.Contains(t, check.Detail, `configured command "codex"`)
 	require.Contains(t, check.Detail, `running command "claude"`)
-	require.Contains(t, check.Remediation, "kill the root, then restart the daemon")
+	require.Contains(t, check.Remediation, "restart the daemon, then kill the root")
 	require.True(t, check.Problem)
 }
 

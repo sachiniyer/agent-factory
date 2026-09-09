@@ -44,7 +44,7 @@ func TestEnsureRootAgentsWarnsOnceForAdoptedProgramDrift(t *testing.T) {
 	waitForRootProgramWarning(t, warnings)
 
 	got := warnings.String()
-	for _, want := range []string{repoPath, `configured command "codex"`, `running command "claude"`, "kill the root, then restart the daemon"} {
+	for _, want := range []string{repoPath, `configured command "codex"`, `running command "claude"`, "restart the daemon, then kill the root"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("program-drift warning missing %q:\n%s", want, got)
 		}

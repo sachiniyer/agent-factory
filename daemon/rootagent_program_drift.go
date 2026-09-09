@@ -20,7 +20,7 @@ import (
 func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, workspace string, st *rootEnsureState, profile config.RootAgent, inst *session.Instance) {
 	evidence := inst.ObserveRuntimeProgram()
 	runningProgram := evidence.Program()
-	if strings.TrimSpace(runningProgram) == "" || inst.GetInFlightOp() != session.OpNone {
+	if strings.TrimSpace(runningProgram) == "" || inst.GetInFlightOp() != session.OpNone || inst.StartupStateUnknown() {
 		return
 	}
 	repoID := repo.ID
@@ -187,5 +187,5 @@ func (m *Manager) invalidateRootProgramDriftResolutions() {
 }
 
 func (m *Manager) logAdoptedRootProgramDrift(workspace, configuredProgram, runningProgram string) {
-	m.warn().Printf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is; kill the root, then restart the daemon", workspace, programprivacy.Redact(configuredProgram), programprivacy.Redact(runningProgram))
+	m.warn().Printf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is; restart the daemon, then kill the root", workspace, programprivacy.Redact(configuredProgram), programprivacy.Redact(runningProgram))
 }
