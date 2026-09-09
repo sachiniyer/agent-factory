@@ -106,7 +106,7 @@ func DaemonSocketPath() (string, error) {
 
 // EnsureDaemon starts the daemon if the control socket is not already serving.
 func EnsureDaemon() error {
-	return ensureDaemonWithLauncher(launchDaemonProcessFn)
+	return ensureDaemonWithLauncherUntil(launchDaemonProcessFn, time.Time{})
 }
 
 var launchDaemonProcessAtFn = launchDaemonProcessAt
@@ -117,21 +117,30 @@ var launchDaemonProcessAtFn = launchDaemonProcessAt
 // still-running old process for os.Executable can resolve to a deleted inode,
 // while execPath is the freshly written binary path the new daemon must run.
 func EnsureDaemonFromPath(execPath string) error {
-	return ensureDaemonWithPolicy(func() error {
+	return ensureDaemonWithPolicyUntil(func() error {
 		return launchDaemonProcessAtFn(execPath)
-	}, false)
+	}, false, time.Time{})
 }
 
 func ensureDaemonWithLauncher(launch func() error) error {
-	return ensureDaemonWithPolicy(launch, true)
+	return ensureDaemonWithLauncherUntil(launch, time.Time{})
 }
 
-func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
-	ensureDaemonMu.Lock()
+func ensureDaemonWithLauncherUntil(launch func() error, deadline time.Time) error {
+	return ensureDaemonWithPolicyUntil(launch, true, deadline)
+}
+
+func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline time.Time) error {
+	if !lockEnsureDaemonUntil(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	defer ensureDaemonMu.Unlock()
 
-	if err := pingDaemon(); err == nil {
+	if err := pingDaemonUntil(deadline); err == nil {
 		return nil
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 	// #2212 R1: before spawning a daemon, defer to an in-progress upgrade rather
 	// than racing its recovery actor with a rival daemon. A client defers to BOTH
@@ -142,10 +151,13 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 	// bounded, so a bad journal can never wedge this launch path (which fronts
 	// every af invocation).
 	if homeDir, ok := configHomeDir(); ok {
-		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		switch decision, gateErr := checkUpgradeGateUntil(homeDir, false, deadline); decision {
 		case upgradeGateInProgress, upgradeGateRestoringPrevious:
 			return gateErr
 		}
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 	if preferUnit {
 		configDir, configErr := config.GetConfigDir()
@@ -157,15 +169,19 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 			case ownerErr != nil:
 				log.WarningLog.Printf("could not determine daemon supervision owner; using ad-hoc launch: %v", ownerErr)
 			case owner == OwnerUnit:
-				return ensureDaemonThroughUnit(launch)
+				return ensureDaemonThroughUnitUntil(launch, deadline)
 			}
 		}
 	}
-	return ensureDaemonAdHoc(launch)
+	return ensureDaemonAdHocUntil(launch, deadline)
 }
 
 func ensureDaemonThroughUnit(launch func() error) error {
-	unitDeadline := time.Now().Add(ensureUnitStartTimeout)
+	return ensureDaemonThroughUnitUntil(launch, time.Time{})
+}
+
+func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error {
+	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
 
 	unitErr := runEnsureUnitStartCommand(unitDeadline)
 	if unitErr == nil {
@@ -174,8 +190,11 @@ func ensureDaemonThroughUnit(launch func() error) error {
 			return nil
 		}
 	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	log.WarningLog.Printf("failed to start daemon through its installed service; falling back to an ad-hoc daemon: %v", unitErr)
-	if err := ensureDaemonAdHoc(launch); err != nil {
+	if err := ensureDaemonAdHocUntil(launch, deadline); err != nil {
 		return fmt.Errorf("installed daemon service failed: %v; ad-hoc fallback failed: %w", unitErr, err)
 	}
 	// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's contract is
@@ -190,6 +209,13 @@ func ensureDaemonThroughUnit(launch func() error) error {
 }
 
 func ensureDaemonAdHoc(launch func() error) error {
+	return ensureDaemonAdHocUntil(launch, time.Time{})
+}
+
+func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
 	// scheduler and session-monitor loops. StopDaemon is also how an
@@ -201,8 +227,11 @@ func ensureDaemonAdHoc(launch func() error) error {
 	// once the previous one is gone. A spurious spawn that races a still-live
 	// holder can never become a second daemon: the child fails fast on the
 	// exclusive startup lock (see RunDaemon / acquireHomeLock).
-	if _, err := StopDaemon(); err != nil {
+	if _, err := stopDaemonUntil(deadline); err != nil {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 
 	// No auth-posture pre-flight here any more (#2168 Phase 0). This used to load
@@ -222,19 +251,24 @@ func ensureDaemonAdHoc(launch func() error) error {
 	if err := launch(); err != nil {
 		return err
 	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 
-	return waitForDaemonReady(time.Now().Add(daemonReadyTimeout))
+	return waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
 }
 
 func waitForDaemonReady(deadline time.Time) error {
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := pingDaemon(); err == nil {
+		if err := pingDaemonUntil(deadline); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
-		time.Sleep(50 * time.Millisecond)
+		if !waitUntilAdmissionDeadline(deadline, 50*time.Millisecond) {
+			break
+		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("readiness deadline elapsed before the daemon could be probed")
@@ -247,6 +281,11 @@ func pingDaemon() error {
 	return err
 }
 
+func pingDaemonUntil(deadline time.Time) error {
+	var resp PingResponse
+	return callDaemonNoEnsureUntil("Ping", PingRequest{}, &resp, deadline)
+}
+
 // pingDaemonResponse pings the daemon and returns its full reply, so callers
 // that need the reported version (`af doctor`'s skew check) read it from the
 // same probe that establishes liveness. Never ensures a daemon: doctor is
@@ -257,84 +296,34 @@ func pingDaemonResponse() (PingResponse, error) {
 	return resp, err
 }
 
-// daemonAdmissionRetryWait bounds how long RPC clients wait for a transient
-// lifecycle admission refusal before surfacing it. It mirrors
-// daemonReadyTimeout, the wait callers already tolerated pre-#829 when
-// EnsureDaemon polled for the socket: a local restore or probation release
-// completes inside this window so calls just work, while a stuck transition
-// fails fast with its actionable message instead of hanging the caller.
-// daemonAdmissionRetryPoll is the retry cadence.
-const (
-	daemonAdmissionRetryWait = daemonReadyTimeout
-	daemonAdmissionRetryPoll = 100 * time.Millisecond
-)
-
-func callDaemon(method string, req any, resp any) error {
-	if err := EnsureDaemon(); err != nil {
-		return err
-	}
-	err := callDaemonNoEnsure(method, req, resp)
-	// A warming daemon rejects state-dependent RPCs until restore completes;
-	// an upgrade candidate rejects mutations until its validator releases
-	// probation. Both are alive and retryable, so callers share one bounded
-	// retry rather than growing per-call-site lifecycle logic.
-	//
-	// The quiescing admission is the one refusal whose retryable response is
-	// followed by the daemon FREEING the control socket mid-loop (#2212 R2b
-	// upgrade hand-off): after returning errDaemonQuiescing it exits and
-	// unlinks the socket before the candidate binds, so a subsequent
-	// callDaemonNoEnsure re-dial lands in that dead window with a bare dial
-	// error (ECONNREFUSED / fs.ErrNotExist) that IsDaemonAdmissionRetryable
-	// does NOT classify as retryable. Without handling this, the loop would
-	// terminate on the first re-dial in the window and surface the bare dial
-	// error, violating the errDaemonQuiescing contract that the client reach
-	// the new daemon that takes over.
-	//
-	// Treat that dial error as retryable ONLY after the loop has already
-	// observed a quiescing admission refusal (seenQuiescing): the guard keeps
-	// a genuine cold no-daemon dial failure non-retryable, preserving the
-	// existing fail-open behavior for non-hand-off errors. On the absent
-	// error re-run EnsureDaemon so the upgrade gate — provably live
-	// throughout the dead window (RecoveryActorLive) — can wait for the
-	// candidate to bind and surface its typed UpgradeInProgressError rather
-	// than leaving the loop to spin on bare dials. This restores parity with
-	// withDaemonHTTP's IsTransportError arm.
-	// fallbackErr holds the most recent typed gate error (UpgradeInProgressError)
-	// returned by EnsureDaemon during the dead window. It is kept separate from
-	// err so that assigning it never terminates the loop: err is the dial result
-	// that drives the loop condition, while fallbackErr is surfaced to the caller
-	// only when the loop exits with a bare socket error. This satisfies both P1
-	// (loop must keep polling after a live upgrade-gate rejection) and P2 (caller
-	// must see the actionable typed error, not a bare ENOENT/ECONNREFUSED).
-	var seenQuiescing bool
-	var fallbackErr error
-	deadline := time.Now().Add(daemonAdmissionRetryWait)
-	for (IsDaemonAdmissionRetryable(err) || (seenQuiescing && isDaemonAbsentErr(err))) && time.Now().Before(deadline) {
-		if IsDaemonQuiescingErr(err) {
-			seenQuiescing = true
-		}
-		time.Sleep(daemonAdmissionRetryPoll)
-		if isDaemonAbsentErr(err) {
-			if gateErr := EnsureDaemon(); gateErr != nil {
-				fallbackErr = gateErr
-			}
-		}
-		err = callDaemonNoEnsure(method, req, resp)
-	}
-	if err != nil && isDaemonAbsentErr(err) && fallbackErr != nil {
-		return fallbackErr
-	}
-	return err
+func callDaemonNoEnsure(method string, req any, resp any) error {
+	return callDaemonNoEnsureUntil(method, req, resp, time.Time{})
 }
 
-func callDaemonNoEnsure(method string, req any, resp any) error {
+func callDaemonNoEnsureUntil(method string, req any, resp any, deadline time.Time) error {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialTimeout("unix", socketPath, daemonDialTimeout)
+	dialTimeout := daemonDialTimeout
+	if !deadline.IsZero() {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return daemonAdmissionDeadlineError()
+		}
+		if remaining < dialTimeout {
+			dialTimeout = remaining
+		}
+	}
+	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
 	if err != nil {
 		return err
+	}
+	if !deadline.IsZero() {
+		if err := conn.SetDeadline(deadline); err != nil {
+			_ = conn.Close()
+			return err
+		}
 	}
 	client := rpc.NewClient(conn)
 	defer client.Close()

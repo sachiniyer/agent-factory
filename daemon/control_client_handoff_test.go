@@ -257,24 +257,21 @@ func (c *startingThenGoneControl) StartingMutation(_ struct{}, _ *struct{}) erro
 	return errDaemonStarting()
 }
 
-// TestCallDaemon_AbsentDialWithoutQuiescingBailsFast locks in the seenQuiescing
-// narrowing: a dial that goes absent without a preceding quiescing admission
-// is NOT made retryable, preserving the existing fail-open behavior for
-// non-hand-off failures (the #2212 R1 gate proceeds when the journal is
-// stale/corrupt/absent, and a genuine no-daemon dial must not spin the retry
-// budget). If a future change folded isDaemonAbsentErr into
-// IsDaemonAdmissionRetryable unconditionally, this loop would ride the full
-// daemonAdmissionRetryWait instead of bailing on the first absent re-dial, and
-// this test would catch it.
+// TestCallDaemon_AbsentDialWithoutQuiescingBailsFast locks in the live-proof
+// narrowing: an absent dial without either a preceding quiescing admission or
+// a live upgrade gate is NOT allowed to ride the retry window. If a future
+// change folded isDaemonAbsentErr into IsDaemonAdmissionRetryable
+// unconditionally, this loop would spend the full daemonAdmissionRetryWait
+// instead of bailing after the failed bounded re-ensure, and this test would
+// catch it.
 func TestCallDaemon_AbsentDialWithoutQuiescingBailsFast(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	withAutostartTestEnv(t, runtime.GOOS)
 
 	// Defense in depth: EnsureDaemon's launch path must not spawn a real
 	// daemon. The initial EnsureDaemon succeeds via its ping against the fake
-	// server, and the seenQuiescing guard keeps the loop from re-running
-	// EnsureDaemon on the absent dial, so this stub does not fire in the
-	// fixed code.
+	// server. The bounded re-ensure after the absent dial reaches this stub;
+	// without a live gate, that failure must end the attempted hand-off proof.
 	prevLaunch := launchDaemonProcessFn
 	launchDaemonProcessFn = func() error { return errors.New("test: must not launch a real daemon") }
 	t.Cleanup(func() { launchDaemonProcessFn = prevLaunch })
@@ -303,10 +300,9 @@ func TestCallDaemon_AbsentDialWithoutQuiescingBailsFast(t *testing.T) {
 	if !isDaemonAbsentErr(err) {
 		t.Fatalf("expected a daemon-absent dial error after the socket was freed; got: %v", err)
 	}
-	// The seenQuiescing guard makes the absent dial non-retryable here, so the
-	// loop bails on the first absent re-dial (one ~100ms poll) instead of
-	// riding the full daemonAdmissionRetryWait budget. A bail is comfortably
-	// under the budget; an accidental ride approaches it and fails.
+	// With no quiescing observation or live gate, the absent dial cannot ride
+	// the full daemonAdmissionRetryWait budget. A bail is comfortably under the
+	// budget; an accidental ride approaches it and fails.
 	if elapsed >= daemonAdmissionRetryWait {
 		t.Fatalf("absent dial without a quiescing admission rode the %s retry budget; the seenQuiescing guard is missing", elapsed)
 	}
