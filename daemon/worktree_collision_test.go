@@ -4,7 +4,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -81,4 +83,51 @@ func TestSessionStatusProjectsWorktreeIntegrityWarning(t *testing.T) {
 	event := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
 	assert.Equal(t, rows[0].WorktreeWarning, event.WorktreeWarning,
 		"the events client must receive the safety projection without waiting for another status change")
+}
+
+func TestStalledWorktreeScanDoesNotBlockPollRecovery(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &deadButRecoverableBackend{FakeBackend: session.NewFakeBackend()}
+	registerStarted(t, manager, repoID, repoPath, "stranded", backend, true, session.Running)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	manager.worktreeInspector = func([]session.InstanceData) []session.SessionWorktreeInspection {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+		return nil
+	}
+
+	stopCh := make(chan struct{})
+	var loops sync.WaitGroup
+	loops.Add(1)
+	go func() {
+		defer loops.Done()
+		manager.refreshWorktreeIntegrityWarnings()
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("integrity scan never entered the stalled inspector")
+	}
+	startInstancePollLoop(manager, 50*time.Millisecond, stopCh, &loops)
+	t.Cleanup(func() {
+		close(release)
+		close(stopCh)
+		loops.Wait()
+		manager.waitRootAgentCreates()
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, recovers := backend.counts()
+		if recovers > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("poll loop did not reach Lost-session recovery while the diagnostic worktree scan was outstanding")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }

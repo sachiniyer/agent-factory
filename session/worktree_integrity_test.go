@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +47,29 @@ func TestInspectSessionWorktreesNamesTheOtherLiveLane(t *testing.T) {
 	got = InspectSessionWorktrees(rows)
 	require.Len(t, got, 1, "an archived worktree retains its ref but is not a live collision")
 	assert.Empty(t, got[0].Warning)
+}
+
+func TestInspectSessionWorktreesIgnoresOrdinaryFullyStagedChange(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	for i := 0; i < 25; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(repo, fmt.Sprintf("file-%02d.txt", i)), []byte("base\n"), 0o644))
+	}
+	worktreeScanGit(t, repo, "add", "--all")
+	worktreeScanGit(t, repo, "commit", "-q", "-m", "base")
+	for i := 0; i < 25; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(repo, fmt.Sprintf("file-%02d.txt", i)), []byte("intentional edit\n"), 0o644))
+	}
+	worktreeScanGit(t, repo, "add", "--all")
+
+	got := InspectSessionWorktrees([]InstanceData{{
+		ID: "editor-id", Title: "editor", Liveness: LiveReady, BackendType: "local",
+		Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: repo},
+	}})
+	require.Len(t, got, 1)
+	assert.True(t, got[0].Evidence.MassRevert, "the raw index shape is present")
+	assert.False(t, got[0].Evidence.HeadMovedWithoutReflog, "HEAD still agrees with this worktree's reflog")
+	assert.Empty(t, got[0].Warning, "an ordinary fully staged commit must never be surfaced as a takeover danger")
 }
 
 func TestWorktreeWarningIsProjectionOnly(t *testing.T) {
