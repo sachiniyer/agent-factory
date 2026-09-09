@@ -305,7 +305,25 @@ func readWorkingDir(pid int) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return dir, true
+	return linuxWorkingDirPath(dir), true
+}
+
+const procDeletedSuffix = " (deleted)"
+
+// linuxWorkingDirPath removes procfs's annotation from an unlinked cwd. The
+// suffix is ambiguous because it is also legal in a real filename, so an
+// existing path is always returned byte-for-byte; only ENOENT proves the text
+// cannot name a currently existing literal path. When the literal directory
+// itself was unlinked, procfs appends a second suffix and this removes only the
+// kernel-owned one.
+func linuxWorkingDirPath(path string) string {
+	if !strings.HasSuffix(path, procDeletedSuffix) {
+		return path
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	return strings.TrimSuffix(path, procDeletedSuffix)
 }
 
 func openWorkingDir(pid int) (*os.File, string, bool) {
@@ -318,5 +336,5 @@ func openWorkingDir(pid int) (*os.File, string, bool) {
 		_ = directory.Close()
 		return nil, "", false
 	}
-	return directory, path, true
+	return directory, linuxWorkingDirPath(path), true
 }
