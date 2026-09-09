@@ -12,7 +12,7 @@ for (const [owned, hidden] of [[true, true], [true, false], [false, true]]) {
       ? trigger : { focus: () => calls.push("focus") } };
     const returns = new WeakMap<object, () => void>();
     const shell = {
-      newTabDisclosureReturn: returns,
+      newTabCancelReturn: returns,
       terminalChrome: { newTabSlot: slot, menu: { open: () => calls.push("session") } },
       appControls: {
         panel: { hidden, contains: (node: unknown) => { assert.equal(node, slot); return owned; } },
@@ -36,7 +36,7 @@ test("phone picker return follows its current desktop owner", () => {
   const slot = { querySelector: (selector: string) => selector === ".af-tab-new" ? trigger : { focus: () => {} } };
   const returns = new WeakMap<object, () => void>();
   const shell = {
-    newTabDisclosureReturn: returns,
+    newTabCancelReturn: returns,
     terminalChrome: { newTabSlot: slot, menu: { open: () => calls.push("session") } },
     appControls: {
       panel: { hidden: true, contains: () => owned },

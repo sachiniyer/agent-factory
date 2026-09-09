@@ -852,9 +852,9 @@ export class AppShell {
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
   // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
-  private readonly newTabDisclosureReturn = new WeakMap<HTMLElement, () => void>();
-  // Keyboard opens return to navigation; pointer opens retain disclosure focus.
-  private readonly newTabShortcutReturn = new WeakMap<HTMLElement, () => void>();
+  // Escape restores every enclosing disclosure a keyboard open changed before
+  // returning to navigation. Pointer opens have no entry and return to the button.
+  private readonly newTabCancelReturn = new WeakMap<HTMLElement, () => void>();
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -1766,12 +1766,25 @@ export class AppShell {
     const slot = this.terminalChrome?.newTabSlot;
     const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
     if (!trigger || !slot) return;
+    // Capture the whole pre-shortcut state before exposing either nested control.
+    // Responsive recomposition calls this method again without a return callback;
+    // keep the original record until the picker itself closes.
+    if (shortcutReturn && !this.newTabCancelReturn.has(trigger)) {
+      const appControlsWasHidden = this.appControls.panel.hidden;
+      const sessionActionsWasHidden = this.terminalChrome?.menu.panel.hidden ?? false;
+      this.newTabCancelReturn.set(trigger, () => {
+        // Close inside-out before restoring focus outside either disclosure.
+        if (sessionActionsWasHidden) this.terminalChrome?.menu.close();
+        if (appControlsWasHidden) this.appControls.close();
+        shortcutReturn();
+      });
+    }
     // Phone composition moves these controls into the app-controls disclosure.
     // Ask the DOM owner, rather than guessing from viewport width.
     if (this.appControls.panel.contains(slot)) {
-      if (!this.newTabDisclosureReturn.has(trigger)) {
+      if (!this.newTabCancelReturn.has(trigger)) {
         const wasHidden = this.appControls.panel.hidden;
-        this.newTabDisclosureReturn.set(trigger, () => {
+        this.newTabCancelReturn.set(trigger, () => {
           // Recomposition can move the slot home and close its desktop disclosure.
           if (!this.appControls.panel.contains(slot)) {
             this.terminalChrome?.menu.open();
@@ -1783,8 +1796,6 @@ export class AppShell {
         });
       }
       this.appControls.open();
-    } else if (shortcutReturn) {
-      this.newTabShortcutReturn.set(trigger, shortcutReturn);
     }
     this.terminalChrome?.menu.open();
     if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
@@ -1836,8 +1847,7 @@ export class AppShell {
     };
     const close = (): void => {
       menu.hidden = true;
-      this.newTabDisclosureReturn.delete(trigger);
-      this.newTabShortcutReturn.delete(trigger);
+      this.newTabCancelReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       window.removeEventListener("keydown", onKeyDown, true);
@@ -1877,11 +1887,9 @@ export class AppShell {
       e.preventDefault();
       e.stopPropagation();
       if (e.key === "Escape") {
-        const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
-        const returnToShortcut = this.newTabShortcutReturn.get(trigger);
+        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
         close();
-        if (returnToDisclosure) returnToDisclosure();
-        else if (returnToShortcut) returnToShortcut();
+        if (returnAfterCancel) returnAfterCancel();
         else trigger.focus();
         return;
       }

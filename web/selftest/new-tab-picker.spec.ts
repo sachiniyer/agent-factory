@@ -19,6 +19,7 @@ for (const width of [1280, 390]) {
     await page.keyboard.press("Control+]");
     const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true, includeHidden: true });
     const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+    const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
     const tabs = await page.locator(".af-tabbar .af-tab").count();
     await page.keyboard.press("t");
     await expect(menu).toBeVisible();
@@ -32,7 +33,13 @@ for (const width of [1280, 390]) {
     if (width <= 768) {
       const controls = page.getByRole("button", { name: "More app controls", exact: true });
       await expect(controls).toHaveAttribute("aria-expanded", "false");
-      await expect(controls).toBeFocused();
+      // A shortcut-opened picker restores navigation, even when it had to open
+      // both enclosing phone disclosures to make the picker reachable.
+      await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+      await page.keyboard.press("t");
+      await expect(menu).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(controls).toHaveAttribute("aria-expanded", "false");
       await controls.click();
       // If the disclosure was already open, canceling the nested picker preserves it.
       await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
@@ -43,9 +50,11 @@ for (const width of [1280, 390]) {
       // is open. Escape ends the keyboard picker without hiding that prior view.
       await expect(trigger).toHaveAttribute("aria-expanded", "false");
       await expect(controls).toHaveAttribute("aria-expanded", "true");
-      await expect(controls).toBeFocused();
+      await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+      await page.keyboard.press("t");
     }
     if (width > 768) {
+      await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
       await page.keyboard.press("t");
     }
     expect(creates).toBe(0);
@@ -129,6 +138,7 @@ test("desktop shortcut cancel restores navigation while click cancel returns to 
   await page.keyboard.press("Control+]");
   const menu = page.getByRole("menu", { name: "Tab type", exact: true });
   const trigger = page.getByRole("button", { name: "New tab · Terminal or VS Code", exact: true });
+  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true });
 
   await page.keyboard.press("t");
   await expect(menu).toBeVisible();
@@ -137,12 +147,36 @@ test("desktop shortcut cancel restores navigation while click cancel returns to 
   await page.keyboard.press("t");
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
 
+  await sessionActions.click();
   await trigger.click();
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
   await expect(trigger).toBeFocused();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+});
+
+test("shortcut cancel preserves a Session actions disclosure the user opened", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  await page.keyboard.press("Control+]");
+  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true });
+  const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+
+  await sessionActions.click();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
 });
 
 

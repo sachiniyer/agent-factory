@@ -14832,9 +14832,9 @@ var AppShell = class {
   // nothing is selected (the empty state has no tabs).
   tabBar = null;
   // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
-  newTabDisclosureReturn = /* @__PURE__ */ new WeakMap();
-  // Keyboard opens return to navigation; pointer opens retain disclosure focus.
-  newTabShortcutReturn = /* @__PURE__ */ new WeakMap();
+  // Escape restores every enclosing disclosure a keyboard open changed before
+  // returning to navigation. Pointer opens have no entry and return to the button.
+  newTabCancelReturn = /* @__PURE__ */ new WeakMap();
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -15408,10 +15408,19 @@ var AppShell = class {
     const slot = this.terminalChrome?.newTabSlot;
     const trigger = slot?.querySelector(".af-tab-new");
     if (!trigger || !slot) return;
+    if (shortcutReturn && !this.newTabCancelReturn.has(trigger)) {
+      const appControlsWasHidden = this.appControls.panel.hidden;
+      const sessionActionsWasHidden = this.terminalChrome?.menu.panel.hidden ?? false;
+      this.newTabCancelReturn.set(trigger, () => {
+        if (sessionActionsWasHidden) this.terminalChrome?.menu.close();
+        if (appControlsWasHidden) this.appControls.close();
+        shortcutReturn();
+      });
+    }
     if (this.appControls.panel.contains(slot)) {
-      if (!this.newTabDisclosureReturn.has(trigger)) {
+      if (!this.newTabCancelReturn.has(trigger)) {
         const wasHidden = this.appControls.panel.hidden;
-        this.newTabDisclosureReturn.set(trigger, () => {
+        this.newTabCancelReturn.set(trigger, () => {
           if (!this.appControls.panel.contains(slot)) {
             this.terminalChrome?.menu.open();
             trigger.focus();
@@ -15422,8 +15431,6 @@ var AppShell = class {
         });
       }
       this.appControls.open();
-    } else if (shortcutReturn) {
-      this.newTabShortcutReturn.set(trigger, shortcutReturn);
     }
     this.terminalChrome?.menu.open();
     if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
@@ -15471,8 +15478,7 @@ var AppShell = class {
     };
     const close = () => {
       menu.hidden = true;
-      this.newTabDisclosureReturn.delete(trigger);
-      this.newTabShortcutReturn.delete(trigger);
+      this.newTabCancelReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       window.removeEventListener("keydown", onKeyDown, true);
@@ -15503,11 +15509,9 @@ var AppShell = class {
       e.preventDefault();
       e.stopPropagation();
       if (e.key === "Escape") {
-        const returnToDisclosure = this.newTabDisclosureReturn.get(trigger);
-        const returnToShortcut = this.newTabShortcutReturn.get(trigger);
+        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
         close();
-        if (returnToDisclosure) returnToDisclosure();
-        else if (returnToShortcut) returnToShortcut();
+        if (returnAfterCancel) returnAfterCancel();
         else trigger.focus();
         return;
       }
