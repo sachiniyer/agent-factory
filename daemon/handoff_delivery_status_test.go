@@ -25,9 +25,9 @@ func TestHandoffSession_NonDeliveryVerdictKeepsPendingMission(t *testing.T) {
 		"the target runtime was already installed before delivery became ambiguous")
 	require.Equal(t, tmux.ProgramClaude, resp.From)
 	require.Equal(t, tmux.ProgramGemini, resp.To)
-	handoff, ok := inst.LastHandoff()
-	require.True(t, ok)
-	require.Equal(t, handoff.HeadSHA, resp.HeadSHA,
+	handoffs := inst.Handoffs()
+	require.NotEmpty(t, handoffs)
+	require.Equal(t, handoffs[len(handoffs)-1].HeadSHA, resp.HeadSHA,
 		"the response must carry the recorded boundary; an unborn or unbound fixture may have no HEAD")
 	require.NotEmpty(t, inst.PendingHandoffMission(),
 		"an ambiguous delivery must retain the in-memory mission obligation")

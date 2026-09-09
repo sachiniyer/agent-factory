@@ -118,8 +118,10 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	}
 	fromAgent := agent
 	if manual {
-		if handoff, ok := instance.LastHandoff(); ok && strings.TrimSpace(handoff.From.Agent) != "" {
-			fromAgent = handoff.From.Agent
+		if handoffs := instance.Handoffs(); len(handoffs) > 0 {
+			if last := handoffs[len(handoffs)-1]; strings.TrimSpace(last.From.Agent) != "" {
+				fromAgent = last.From.Agent
+			}
 		}
 	}
 	return &autoAccountSwap{
