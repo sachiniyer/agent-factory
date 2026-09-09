@@ -121,6 +121,28 @@ test("null-data Safari commit freezes the mutated textarea boundary", t => {
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
+test("Safari insertCompositionText after compositionend freezes the commit boundary", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字";
+  host.dispatchEvent(Object.assign(new Event("input"), {
+    data: "字", inputType: "insertCompositionText", isComposing: false,
+  }));
+  textarea.value += "x";
+  host.dispatchEvent(insertText("x"));
+
+  assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 test("post-end textarea growth extends a provisional composition commit", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();

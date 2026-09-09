@@ -120,7 +120,8 @@ export class TerminalSoftInput {
       if (this.active && input.type === "input")
         this.observeCompositionValue(this.active);
       const range = this.pending.at(-1);
-      if (range && input.inputType === "insertText" && input.type === "input" &&
+      const postCompositionText = input.inputType === "insertText" || input.inputType === "insertCompositionText";
+      if (range && postCompositionText && input.type === "input" &&
         input.isComposing === false) {
         const value = this.textarea?.value;
         const mutationLength = value !== undefined && range.start !== undefined && value.length > range.start
