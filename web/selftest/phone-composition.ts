@@ -86,6 +86,36 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
     await expect(ctrl).toHaveAttribute("data-state", "off");
   }
 
+  // A no-keydown soft character between A and still-active B must not be lost
+  // when xterm finalizes A only through its copied end offset.
+  {
+    const before = stream();
+    await ctrl.click();
+    await textarea.evaluate(async el => {
+      const input = el as HTMLTextAreaElement;
+      const composition = (type: string, data: string) =>
+        input.dispatchEvent(new CompositionEvent(type, { bubbles: true, data }));
+      const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+      composition("compositionstart", "");
+      composition("compositionupdate", "字");
+      input.value += "字";
+      await tick();
+      composition("compositionend", "字");
+      input.value += "x";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "x", inputType: "insertText", isComposing: false,
+      }));
+      composition("compositionstart", "");
+      composition("compositionupdate", "文");
+      input.value += "文";
+      await tick();
+      composition("compositionend", "文");
+      await tick();
+    });
+    await expect.poll(stream).toBe(before + "字\x18文");
+    await expect(ctrl).toHaveAttribute("data-state", "off");
+  }
+
   const before = stream();
   await ctrl.click();
   await expect(ctrl).toHaveAttribute("data-state", "once");

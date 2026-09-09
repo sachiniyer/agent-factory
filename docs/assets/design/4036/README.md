@@ -21,7 +21,8 @@ The browser observes actual outgoing binary Op.Input frames via the existing
 `phoneInputStream` seam. Ctrl → Up → soft-keyboard `ls` must send exactly
 `ESC[1;5Als`; Alt → Left → `ls` must send exactly `ESC[1;3Dls`.
 Both one-shots clear their state and armed accessibility description.
-The focused flow also verifies locked Ctrl + Up and one-shot Alt + Tab + `z`.
+The focused flow also verifies locked Ctrl + Up, one-shot Alt + Tab + `z`,
+and one-shot Alt + hardware Escape followed by an unmodified `a`.
 The demo’s existing full phone flow reuses these assertions and retains its
 coverage of plain arrows, interrupt, composition, physical keypresses, focus,
 and viewport resizing.
@@ -131,20 +132,35 @@ sends CR, consumes the one-shot, and leaves the following `a` unmodified. The
 Safari-order boundary follows xterm in treating Shift, Ctrl, Alt, and keycode
 229 as continued IME input. The textarea-diff 229 Backspace sends DEL, consumes
 the armed one-shot as genuine user input, and leaves its following `a` plain.
+That deferred 229 marker is matched to xterm's exact textarea diff; an unrelated
+parser reply can arrive first without being reclassified or consuming the
+one-shot. If a new composition starts before the prior commit timer, ordinary
+trailing input between the two compositions is forwarded exactly once.
 Stale recovery also covers a null-data `beforeinput` whose paired `input` owns
 the character. A connected hardware Ctrl+Up is encoded as `ESC[1;5A`; sticky
 Ctrl plus physical Shift+Up preserves both modifier bitmasks as `ESC[1;6A`.
 Each consumes the one-shot and leaves the following `a` plain. The probe retains
 the keybar selection/scrollback and blur/refocus coverage.
 
+User-origin controls now pass through one inverse table generated from every
+actionable entry in `KEYBAR_ROWS`: `Esc`, `Tab`, `^C`, and all four arrows.
+Those are exactly the entries that `keyBytes` can emit; `Ctrl`/`Alt` are state
+buttons and `Arrows`/`More keys` only navigate the bar. The table includes both
+bare cursor modes, every xterm cursor modifier bitmask, and every Ctrl/Alt
+encoding of the non-arrow keys. Its round-trip test derives the same key set
+from `KEYBAR_ROWS`, so a future emitting key cannot silently skip decoding.
+Terminal-origin replies remain byte-for-byte and do not consume one-shots.
+
 [Unit red](composition-unit-red.txt) shows the duplicate write before the fix;
 [unit green](composition-unit-green.txt) records the original lifecycle proof.
-Final validation has 880 passing web unit tests and the refreshed full container
+Final validation has 885 passing web unit tests and the refreshed full container
 web selftest passes [238/238](full-selftest-green.txt), including the null-data
 and empty-payload IME probes, split stale-input recovery, hardware-arrow
-modifiers, soft-control consumption, stale-input deletion, keybar effects, and
-the previously reported terminal READY marker cases. Typecheck, regenerated
-bundle, Go build/vet, fast lint, and file-length checks pass.
+modifiers, the complete keybar-byte round trip, deferred 229 source isolation,
+interstitial input forwarding, soft-control consumption, stale-input deletion,
+keybar effects, and the previously reported terminal READY marker cases.
+Typecheck, regenerated bundle, Go build/vet, fast lint, and file-length checks
+pass.
 
 The full `make perf-container` also passes: all five visual tests (including
 `web chrome · both themes`), three web measurements, and all web/TUI budgets.

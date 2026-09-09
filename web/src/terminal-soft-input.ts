@@ -6,6 +6,12 @@ interface CompositionRange {
   commitLength?: number;
   trailingLength?: number;
   keydownAfterEnd?: boolean;
+  trailingFlush?: TrailingFlush;
+  release?: ReturnType<typeof setTimeout>;
+}
+
+interface TrailingFlush {
+  text: string;
   release?: ReturnType<typeof setTimeout>;
 }
 
@@ -13,6 +19,8 @@ interface CompositionRange {
 export class TerminalSoftInput {
   private active: CompositionRange | undefined;
   private readonly pending: CompositionRange[] = [];
+  private readonly trailingFlushes = new Set<TrailingFlush>();
+  private forwardingTrailing: string | undefined;
   private keyDownSeen = false;
   private staleKeydown = false;
   private staleBeforeInputSent = false;
@@ -40,6 +48,7 @@ export class TerminalSoftInput {
       if (range.frozenText === undefined && range.start !== undefined && value !== undefined) {
         range.frozenText = value.substring(range.start);
       }
+      this.queueTrailingFlush(range);
     }
     this.active = { start: value?.length, text: "" };
   };
@@ -146,6 +155,9 @@ export class TerminalSoftInput {
   }
 
   transform(text: string, applyModifiers: (text: string) => string): string {
+    // A rescued A→B interstitial is ordinary input even when it happens to
+    // equal B's current composition prefix.
+    if (this.forwardingTrailing === text) return applyModifiers(text);
     // Oldest finalized commit first; the active composition has separate state.
     const ranges = this.active ? [...this.pending, this.active] : [...this.pending];
     let rest = text, prefix = "";
@@ -163,9 +175,16 @@ export class TerminalSoftInput {
         length += character.length;
       }
       if (!length) continue;
-      this.remove(range);
       prefix += rest.slice(0, length);
       rest = rest.slice(length);
+      const flush = range.trailingFlush;
+      if (flush && rest.startsWith(flush.text)) {
+        this.cancelTrailingFlush(flush);
+        range.trailingFlush = undefined;
+        prefix += applyModifiers(flush.text);
+        rest = rest.slice(flush.text.length);
+      }
+      this.remove(range);
       if (!rest) break;
     }
     return prefix + (rest ? applyModifiers(rest) : "");
@@ -177,8 +196,28 @@ export class TerminalSoftInput {
     if (index !== -1) this.pending.splice(index, 1);
     if (this.active === range) this.active = undefined;
   }
+  private queueTrailingFlush(range: CompositionRange): void {
+    const trailingLength = range.trailingLength ?? 0;
+    if (!trailingLength || !range.frozenText || range.trailingFlush) return;
+    const text = range.frozenText.slice(-trailingLength);
+    const flush: TrailingFlush = { text };
+    range.trailingFlush = flush;
+    this.trailingFlushes.add(flush);
+    flush.release = setTimeout(() => {
+      this.trailingFlushes.delete(flush);
+      if (range.trailingFlush === flush) range.trailingFlush = undefined;
+      this.forwardingTrailing = text;
+      try { this.send(text); } finally { this.forwardingTrailing = undefined; }
+    }, 0);
+  }
+  private cancelTrailingFlush(flush: TrailingFlush): void {
+    if (flush.release !== undefined) clearTimeout(flush.release);
+    this.trailingFlushes.delete(flush);
+  }
   reset(): void {
     for (const range of this.pending) if (range.release !== undefined) clearTimeout(range.release);
+    for (const flush of this.trailingFlushes) if (flush.release !== undefined) clearTimeout(flush.release);
+    this.trailingFlushes.clear();
     this.pending.length = 0;
     this.active = undefined;
   }

@@ -230,6 +230,57 @@ test("old release leaves the new composition owned; reset and disposal clear all
   assert.equal(soft.transform("x", () => "modified"), "modified");
 });
 
+test("trailing soft input is forwarded before a new composition commit", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  textarea.addEventListener("compositionend", event => {
+    if ((event as CompositionEvent).data === "字") setTimeout(() => send("字"), 0);
+  });
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x"));
+  textarea.dispatchEvent(new Event("compositionstart"));
+  t.mock.timers.tick(0);
+
+  assert.deepEqual(writes, ["字", "\x18"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("forwarded trailing input is not mistaken for the new composition prefix", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x"));
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字xx";
+  textarea.dispatchEvent(composition("compositionupdate", "x"));
+  t.mock.timers.tick(0);
+
+  assert.deepEqual(writes, ["\x18"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 for (const [payload, expected, state] of [
   ["字x", "字\x18", "off"],
   ["字", "字", "once"],

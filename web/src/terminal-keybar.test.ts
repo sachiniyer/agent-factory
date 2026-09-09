@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { keyBytes, StickyModifiers, keybarPointerDown } from "./terminal-keybar.js";
+import { KEYBAR_ROWS, keyBytes, StickyModifiers, TerminalKeybar, keybarPointerDown } from "./terminal-keybar.js";
 
 test("terminal key bytes match physical keys", () => {
   for (const [key, bytes] of Object.entries({ Esc: "\x1b", Tab: "\t", "←": "\x1b[D", "↑": "\x1b[A", "↓": "\x1b[B", "→": "\x1b[C", "^C": "\x03" })) {
@@ -85,6 +85,54 @@ test("sticky modifiers combine with xterm hardware arrow modifier bits", () => {
   reply.tap("Ctrl", 0);
   assert.equal(reply.input("\x1b[1;2A", "terminal"), "\x1b[1;2A");
   assert.equal(reply.state("Ctrl"), "once");
+});
+
+test("sticky Alt prefixes user-origin hardware controls", () => {
+  for (const control of ["\t", "\x1b"] as const) {
+    const state = new StickyModifiers();
+    state.tap("Alt", 0);
+    assert.equal(state.input(control, "user"), "\x1b" + control);
+    assert.equal(state.state("Alt"), "off");
+  }
+});
+
+test("every keybar input round-trips hardware bytes through sticky encoding", () => {
+  const controls = new Set(["Ctrl", "Alt", "Arrows", "More keys"]);
+  const keys = KEYBAR_ROWS.flat().filter(key => !controls.has(key));
+  for (const key of keys) {
+    const cursorModes = [false, ...(key in { "←": 1, "↑": 1, "↓": 1, "→": 1 } ? [true] : [])];
+    for (const applicationCursor of cursorModes) {
+      for (const [inputCtrl, inputAlt] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+        const hardware = keyBytes(key, inputCtrl, inputAlt, applicationCursor);
+        for (const [stickyCtrl, stickyAlt] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+          const state = new StickyModifiers();
+          if (stickyCtrl) state.tap("Ctrl", 0);
+          if (stickyAlt) state.tap("Alt", 0);
+          assert.equal(state.input(hardware, "user"),
+            keyBytes(key, inputCtrl || stickyCtrl, inputAlt || stickyAlt, applicationCursor), key);
+        }
+      }
+    }
+  }
+});
+
+test("a deferred 229 marker ignores parser replies before its textarea diff", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const textarea = { value: "ab" };
+  const keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: false, inputSource: "terminal", userInputGeneration: 0,
+    deferred229Generation: 0,
+    softInput: { transform: (text: string, apply: (value: string) => string) => apply(text) },
+  }) as unknown as Pick<TerminalKeybar, "markUserInput" | "transform">;
+
+  keybar.markUserInput(true);
+  textarea.value = "a";
+  assert.equal(keybar.transform("\x1b[?1;2c"), "\x1b[?1;2c");
+  assert.equal(modifiers.state("Ctrl"), "once");
+  assert.equal(keybar.transform("\x7f"), "\x7f");
+  assert.equal(modifiers.state("Ctrl"), "off");
 });
 
 test("pointerdown prevents focus transfer before acting", () => {

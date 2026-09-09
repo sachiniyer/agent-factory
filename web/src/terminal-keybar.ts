@@ -18,6 +18,40 @@ export function keyBytes(key: string, ctrl = false, alt = false, applicationCurs
   return (alt ? "\x1b" : "") + text;
 }
 
+export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
+
+interface DecodedKeybarInput {
+  key: string;
+  modifierBits: number;
+  applicationCursor: boolean;
+  arrowSuffix?: string;
+}
+
+// This is the inverse of keyBytes for every actionable key in KEYBAR_ROWS.
+// State and navigation buttons are the only entries that do not emit input.
+const decodedKeybarInput = new Map<string, DecodedKeybarInput>();
+const nonInputKeys = new Set(["Ctrl", "Alt", "Arrows", "More keys"]);
+const arrowSuffixes: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
+for (const key of KEYBAR_ROWS.flat().filter(value => !nonInputKeys.has(value))) {
+  const arrowSuffix = arrowSuffixes[key];
+  if (arrowSuffix) {
+    decodedKeybarInput.set(keyBytes(key), { key, modifierBits: 0, applicationCursor: false, arrowSuffix });
+    decodedKeybarInput.set(keyBytes(key, false, false, true), { key, modifierBits: 0, applicationCursor: true, arrowSuffix });
+    for (let modifierBits = 1; modifierBits <= 15; modifierBits++) {
+      decodedKeybarInput.set(`\x1b[1;${modifierBits + 1}${arrowSuffix}`,
+        { key, modifierBits, applicationCursor: false, arrowSuffix });
+    }
+    continue;
+  }
+  for (const ctrl of [false, true]) {
+    for (const alt of [false, true]) {
+      const bytes = keyBytes(key, ctrl, alt);
+      if (!decodedKeybarInput.has(bytes))
+        decodedKeybarInput.set(bytes, { key, modifierBits: (ctrl ? 4 : 0) | (alt ? 2 : 0), applicationCursor: false });
+    }
+  }
+}
+
 type Modifier = "Ctrl" | "Alt";
 type State = "off" | "once" | "locked";
 export class StickyModifiers {
@@ -39,22 +73,20 @@ export class StickyModifiers {
     return result;
   }
   input(text: string, source: "terminal" | "user" = "terminal"): string {
-    // Xterm encodes hardware arrows before onData. Only decode exact user-arrow
-    // sequences: parser replies on the terminal path must remain byte-for-byte
-    // and keybar arrows have already been encoded and consumed at their source.
-    const bareArrow = source === "user" ? /^\x1b(?:\[|O)([ABCD])$/.exec(text) : null;
-    const modifiedArrow = source === "user" ? /^\x1b\[1;(1[0-6]|[2-9])([ABCD])$/.exec(text) : null;
-    if (bareArrow || modifiedArrow) {
-      // Xterm's modifier parameter is 1 + a Shift/Alt/Ctrl/Meta bitmask.
-      // Preserve physical bits and merge only the sticky modifiers we own.
-      const existing = modifiedArrow ? Number(modifiedArrow[1]) - 1 : 0;
-      const combined = existing | (this.values.Alt !== "off" ? 2 : 0) | (this.values.Ctrl !== "off" ? 4 : 0);
-      const direction = modifiedArrow?.[2] ?? bareArrow![1];
+    // Decode only genuine user emissions from keybar's complete input vocabulary.
+    // Parser replies remain byte-for-byte, while bar and hardware origins converge.
+    const decoded = source === "user" ? decodedKeybarInput.get(text) : undefined;
+    if (decoded) {
+      const combined = decoded.modifierBits |
+        (this.values.Alt !== "off" ? 2 : 0) | (this.values.Ctrl !== "off" ? 4 : 0);
+      const result = decoded.arrowSuffix
+        ? combined ? `\x1b[1;${combined + 1}${decoded.arrowSuffix}`
+          : keyBytes(decoded.key, false, false, decoded.applicationCursor)
+        : keyBytes(decoded.key, (combined & 4) !== 0, (combined & 2) !== 0);
       this.consumeOnce();
-      return combined ? `\x1b[1;${combined + 1}${direction}` : text;
+      return result;
     }
-    // Other user controls consume one-shots without rewriting their payload;
-    // control-leading terminal replies remain exempt.
+    // Unrecognized user controls retain the consume-and-pass-through fallback.
     if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) {
       if (text && source === "user") this.consumeOnce();
       return text;
@@ -71,8 +103,6 @@ export function keybarPointerDown(event: Pick<Event, "preventDefault">, act: () 
   act();
 }
 
-export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
-
 export class TerminalKeybar {
   private arrows = false;
   private readonly rows: HTMLElement[] = [];
@@ -82,6 +112,7 @@ export class TerminalKeybar {
   private readonly phone = window.matchMedia("(max-width: 768px)");
   private readonly viewport = window.visualViewport;
   private readonly observer: ResizeObserver;
+  private readonly textarea: (EventTarget & { value?: string }) | null;
   private focused = false;
   private physicalInput = false;
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -96,10 +127,13 @@ export class TerminalKeybar {
   private readonly originalMaxHeight: string;
   private userInput = false;
   private userInputGeneration = 0;
+  private deferred229: { before: string; generation: number } | undefined;
+  private deferred229Generation = 0;
 
   constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
     private readonly refit: () => void, private readonly applicationCursor: () => boolean) {
     this.originalMaxHeight = host.style.maxHeight;
+    this.textarea = host.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
     this.bar.setAttribute("role", "group");
     this.bar.setAttribute("aria-label", "Terminal keys");
@@ -139,7 +173,7 @@ export class TerminalKeybar {
     window.addEventListener("resize", this.layout);
     host.addEventListener("keydown", this.onKeyDown, true);
     host.addEventListener("keyup", this.onKeyUp, true);
-    this.softInput = new TerminalSoftInput(host, host.querySelector(".xterm-helper-textarea"),
+    this.softInput = new TerminalSoftInput(host, this.textarea,
       () => this.focused && this.phone.matches, () => this.physicalInput, data => this.sendUserInput(data),
       () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off");
     this.paint();
@@ -147,12 +181,15 @@ export class TerminalKeybar {
 
   setFocused(focused: boolean): void {
     this.focused = focused;
-    if (!focused) { this.modifiers.reset(); this.softInput.reset(); this.physicalInput = false; this.arrows = false; }
+    if (!focused) {
+      this.modifiers.reset(); this.softInput.reset(); this.physicalInput = false; this.arrows = false;
+      this.deferred229 = undefined; this.deferred229Generation += 1;
+    }
     this.paint();
     this.layout();
   }
   transform(text: string): string {
-    const source = this.userInput ? "user" : "terminal";
+    const source = this.userInput || this.takeDeferred229(text) ? "user" : "terminal";
     this.userInput = false;
     this.userInputGeneration += 1;
     const output = this.softInput.transform(text, value =>
@@ -160,17 +197,40 @@ export class TerminalKeybar {
     this.paint();
     return output;
   }
-  /** Mark xterm's next onData emission as genuine user input. */
+  /** Mark xterm's synchronous emission, or its matching 229 textarea diff, as user input. */
   markUserInput(deferred = false): void {
+    if (deferred) {
+      const before = this.textarea?.value;
+      if (before === undefined) return;
+      const generation = ++this.deferred229Generation;
+      this.deferred229 = { before, generation };
+      // Queue expiry behind CompositionHelper's setTimeout(0), but do not mark
+      // an unrelated parser reply as user input while that callback is pending.
+      queueMicrotask(() => setTimeout(() => {
+        if (this.deferred229?.generation === generation) this.deferred229 = undefined;
+      }, 0));
+      return;
+    }
     const generation = ++this.userInputGeneration;
     this.userInput = true;
     const clear = () => {
       if (this.userInputGeneration === generation) this.userInput = false;
     };
-    // For keycode 229, queue cleanup behind CompositionHelper's setTimeout(0).
-    // Synchronous onKey and term.input paths only need the current event turn.
-    if (deferred) queueMicrotask(() => setTimeout(clear, 0));
-    else queueMicrotask(clear);
+    // Synchronous onKey and term.input paths own only the current event turn.
+    queueMicrotask(clear);
+  }
+  private takeDeferred229(text: string): boolean {
+    const pending = this.deferred229;
+    const value = this.textarea?.value;
+    if (!pending || value === undefined) return false;
+    const diff = value.replace(pending.before, "");
+    const expected = value.length > pending.before.length ? diff
+      : value.length < pending.before.length ? "\x7f"
+        : value !== pending.before ? value : undefined;
+    if (text !== expected) return false;
+    this.deferred229 = undefined;
+    this.deferred229Generation += 1;
+    return true;
   }
   private sendUserInput(data: string): void {
     this.markUserInput();
