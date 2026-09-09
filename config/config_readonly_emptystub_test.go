@@ -58,11 +58,11 @@ func TestLoadConfigReadOnly_EmptyStubAgreesWithStartup(t *testing.T) {
 			homeRO := seedHome(t, content)
 			tomlPath := filepath.Join(homeRO, TomlConfigFileName)
 			loaded, roErr := LoadConfigReadOnly()
-		require.NoError(t, roErr, "read-only diagnostic must not fail a state startup self-heals")
-		assert.True(t, loaded.EmptyStub, "an effectively-empty stub with no config.json must surface as EmptyStub")
-		assert.False(t, loaded.Missing, "a present stub is not Missing")
-		assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
-		assert.Equal(t, tomlPath, loaded.Path)
+			require.NoError(t, roErr, "read-only diagnostic must not fail a state startup self-heals")
+			assert.True(t, loaded.EmptyStub, "an effectively-empty stub with no config.json must surface as EmptyStub")
+			assert.False(t, loaded.Missing, "a present stub is not Missing")
+			assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
+			assert.Equal(t, tomlPath, loaded.Path)
 
 			// No-write contract: the stub is intact and nothing was created.
 			got, err := os.ReadFile(tomlPath)
