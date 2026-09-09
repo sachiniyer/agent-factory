@@ -816,41 +816,16 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		}
 		inFlightArchive := pendingArchiveIDs[rid]
 		if err := config.WithFileLock(path, func() error {
-			// If any row was snapshotted while its archive was in flight, a
-			// targeted writer (persistInstanceData / CommitArchive) may have
-			// already committed the correct Archived state between the snapshot
-			// and this lock. Re-read those rows from disk and prefer the durable
-			// committed version so the wholesale overwrite never regresses a
+			// For any row snapshotted while its archive was in flight, a targeted
+			// writer (CommitArchive / persistInstanceData) may have already
+			// committed the correct Archived state before this lock. Reconcile
+			// those rows with disk so the wholesale overwrite never regresses a
 			// finished archive back to a pre-Branch snapshot.
 			if len(inFlightArchive) > 0 {
 				if raw, readErr := s.state.GetInstances(rid); readErr == nil && len(raw) > 0 {
 					var onDisk []InstanceData
 					if jsonErr := json.Unmarshal(raw, &onDisk); jsonErr == nil {
-						for i, row := range group {
-							key := row.ID
-							if key == "" {
-								key = row.Title
-							}
-							if _, tracked := inFlightArchive[key]; !tracked {
-								continue
-							}
-							// Prefer the disk row if it has advanced beyond the
-							// in-flight archive window (i.e. the targeted writer
-							// committed LiveArchived before we grabbed the lock).
-							for _, d := range onDisk {
-								diskKey := d.ID
-								if diskKey == "" {
-									diskKey = d.Title
-								}
-								if diskKey != key {
-									continue
-								}
-								if d.Liveness == LiveArchived {
-									group[i] = d
-								}
-								break
-							}
-						}
+						reconcilePendingArchiveRows(group, inFlightArchive, onDisk)
 					}
 				}
 			}
