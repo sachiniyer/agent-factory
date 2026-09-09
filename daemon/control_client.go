@@ -306,10 +306,14 @@ func callDaemon(method string, req any, resp any) error {
 			seenQuiescing = true
 		}
 		time.Sleep(daemonAdmissionRetryPoll)
+		var gateErr error
 		if isDaemonAbsentErr(err) {
-			_ = EnsureDaemon()
+			gateErr = EnsureDaemon()
 		}
 		err = callDaemonNoEnsure(method, req, resp)
+		if err != nil && isDaemonAbsentErr(err) && gateErr != nil {
+			err = gateErr
+		}
 	}
 	return err
 }
