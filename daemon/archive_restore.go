@@ -163,15 +163,6 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		// route below is the one with a worktree relocate in front of its re-spawn.
 		return m.restoreRemoteSession(repoID, instance, req.Title)
 	}
-	// Restoring relocates an already-registered worktree, so Git performs no
-	// checkout and cannot enforce its usual one-worktree-per-branch guard. Check
-	// every holder before raising the restore fence or moving anything; in the
-	// corrupted multiply-bound state, finding the archived lane among the holders
-	// is not enough when any live lane is there too.
-	if err := m.refuseLiveHeldBranchRestore(repoID, req.Title, instance); err != nil {
-		return "", err
-	}
-
 	// Raise the fence HERE, at the top of the LOCAL route, so it is coextensive with
 	// the claim above (#3596 — the archived half of #3586).
 	//
@@ -223,6 +214,19 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		claimTransferred = repoGone
 		return "", err
 	}
+	// Moving a registered worktree performs no checkout, so Git cannot enforce
+	// one-worktree-per-branch here. Resolve the branch from Git (the archived
+	// record may be stale), revalidate it under a repo/branch reservation, and
+	// hold that reservation until RestoreFromArchive makes the lane live. This is
+	// intentionally after the repo-gone authorization above: cleanup recovery for
+	// a vanished origin must retain its established durable semantics.
+	releaseBranch, err := m.reserveLocalRestoreBranch(
+		repoID, req.Title, instance, true, relocationClaim.Path, relocationClaim.AlternatePath,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer releaseBranch()
 	// Honor the configured worktree_root placement, exactly as session creation
 	// does (#1540): a subdirectory user's worktree is restored under
 	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is

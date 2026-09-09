@@ -130,6 +130,10 @@ func TestInspectSessionWorktreesRejectsBranchObservationThatChangedAfterPeerScan
 	fakeGit := filepath.Join(binDir, "git")
 	oid := "1111111111111111111111111111111111111111"
 	script := fmt.Sprintf(`#!/bin/sh
+	if [ "$3" = "worktree" ]; then
+		printf 'worktree %%s\0HEAD %%s\0branch refs/heads/shared\0\0worktree %%s\0HEAD %%s\0branch refs/heads/shared\0\0' %q %s %q %s
+		exit 0
+	fi
 if [ "$3" = "log" ]; then
 	printf '%%s\n' %s
 	exit 0
@@ -148,7 +152,7 @@ if [ "$2" = %q ]; then
 	fi
 fi
 printf '%%s\n' '# branch.oid %s' "# branch.head $branch"
-`, oid, peer, peerFirstStatus, peerFirstStatus, peerSecondStatus, peerSecondStatus, oid)
+`, holder, oid, peer, oid, oid, peer, peerFirstStatus, peerFirstStatus, peerSecondStatus, peerSecondStatus, oid)
 	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -159,7 +163,8 @@ printf '%%s\n' '# branch.oid %s' "# branch.head $branch"
 	require.Len(t, got, 2)
 	require.Error(t, got[0].CorrelationErr,
 		"a clean correlation must be rejected when a peer's Git observation changed after its local probe")
-	require.Error(t, got[1].Err, "the peer whose own Git evidence changed must be unreadable, not clean")
+	require.Error(t, got[1].CorrelationErr,
+		"the common repository snapshot invalidates every result in the correlated cohort")
 }
 
 func TestInspectSessionWorktreesSkipsOnlyPositivelyInapplicableRows(t *testing.T) {

@@ -429,6 +429,17 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	if killing || current != inst || inst.ValidateRuntimeAction(session.RuntimeActionRecoverLost) != nil {
 		return
 	}
+	if inst.Capabilities().Workspace == session.WorkspaceLocalWorktree && inst.GetWorktreePath() != "" {
+		releaseBranch, err := m.reserveLocalRestoreBranch(repoID, inst.Title, inst, false)
+		if err != nil {
+			m.mu.Lock()
+			st.nextAttempt = time.Now().Add(lostRestoreBackoff(max(st.consecutiveFailures+1, 1)))
+			m.mu.Unlock()
+			m.warn().Printf("not restoring lost local session %q: %v", inst.Title, err)
+			return
+		}
+		defer releaseBranch()
+	}
 
 	// Last gate before an IRREVERSIBLE step (#1794). A remote session's Recover
 	// is not a reconnect — recoverSandbox provisions a BRAND-NEW sandbox and

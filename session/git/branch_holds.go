@@ -20,7 +20,9 @@ import (
 var worktreeListTimeout = 10 * time.Second
 
 // WorktreeBranchBinding is one registered worktree's branch observation.
-// Detached is structural because "(detached)" is also a legal branch name.
+// Path is kept exactly as Git reports it for diagnostics; callers resolving
+// identity across symlinked roots must normalize only for comparison. Detached
+// is structural because "(detached)" is also a legal branch name.
 type WorktreeBranchBinding struct {
 	Path     string
 	Branch   string
@@ -68,10 +70,16 @@ func BranchesHeldByWorktrees(repoRoot string) (map[string][]string, error) {
 // WorktreeBranchBindings reads path, branch, HEAD, and detached state for every
 // registered worktree in one bounded Git invocation.
 func WorktreeBranchBindings(repoRoot string) ([]WorktreeBranchBinding, error) {
+	return WorktreeBranchBindingsContext(context.Background(), repoRoot)
+}
+
+// WorktreeBranchBindingsContext is WorktreeBranchBindings with caller
+// cancellation for shutdown-aware integrity scans.
+func WorktreeBranchBindingsContext(parent context.Context, repoRoot string) ([]WorktreeBranchBinding, error) {
 	if strings.TrimSpace(repoRoot) == "" {
 		return nil, fmt.Errorf("cannot list worktrees: repo path is empty")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), worktreeListTimeout)
+	ctx, cancel := context.WithTimeout(parent, worktreeListTimeout)
 	defer cancel()
 
 	// -z: NUL-delimited records (#3524). A newline is legal in a POSIX path and

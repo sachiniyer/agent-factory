@@ -16417,7 +16417,8 @@ var AppShell = class {
       const preserveAppControls = this.appControls.panel.contains(slot) && this.appControls.trigger.getAttribute("aria-expanded") === "true";
       const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
       this.newTabCancelReturn.set(trigger, () => {
-        if (!preserveSessionActions) this.terminalChrome?.menu.close();
+        if (preserveSessionActions) this.terminalChrome?.menu.open();
+        else this.terminalChrome?.menu.close();
         if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
         shortcutReturn();
       });

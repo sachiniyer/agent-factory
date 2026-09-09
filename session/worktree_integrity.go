@@ -103,38 +103,28 @@ func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []
 	}
 	wg.Wait()
 
-	// Each checkout's first pass is internally stable, but branch duplication is
-	// a cohort correlation: an early lane may change after its own final status
-	// read and before a later peer is observed. Re-read every successful Git
-	// observation after the first pass completes. Any change or failed re-read is
-	// unknown for the entire repository, never a clean correlation.
-	revalidate := make([]int, 0, len(inspectable))
+	// Branch correlation is a repository-wide observation, so its validation must
+	// be repository-wide too. One `git worktree list` reads every registered
+	// path/branch/HEAD relation at a common command boundary. Matching each local
+	// status result against that snapshot rejects a checkout that changed after
+	// its own probe; unlike independent second passes, it cannot validate peer B
+	// and then validate A against a stale view of B.
+	repoIndices := make(map[string][]int)
+	repoPaths := make(map[string]string)
 	for _, index := range inspectable {
-		if inspections[index].Err == nil {
-			revalidate = append(revalidate, index)
+		key := repoKeys[index]
+		if key == "" {
+			continue
+		}
+		repoIndices[key] = append(repoIndices[key], index)
+		if repoPaths[key] == "" {
+			repoPaths[key] = eligible[index].Worktree.RepoPath
 		}
 	}
-	workers = min(maxConcurrentWorktreeInspections, len(revalidate))
-	jobs = make(chan int, len(revalidate))
-	for _, index := range revalidate {
-		jobs <- index
-	}
-	close(jobs)
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for index := range jobs {
-				inspections[index].Err = sessiongit.RevalidateWorktreeIntegrityContext(
-					ctx, eligible[index].Worktree.WorktreePath, inspections[index].Evidence,
-				)
-			}
-		}()
-	}
-	wg.Wait()
+	repoErrors := observeWorktreeCohorts(ctx, repoIndices, repoPaths, eligible, inspections)
 
-	// Correlation is a repository-wide observation. One unreadable lane makes an
-	// absent sibling in the readable subset unknown, never clean.
+	// One unreadable lane or repository snapshot makes an absent sibling in the
+	// readable subset unknown, never clean.
 	incompleteRepos := make(map[string]bool)
 	unknownRepo := false
 	for index, inspection := range inspections {
@@ -147,6 +137,11 @@ func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []
 			incompleteRepos[repoKeys[index]] = true
 		}
 	}
+	for repoKey, err := range repoErrors {
+		if err != nil {
+			incompleteRepos[repoKey] = true
+		}
+	}
 	for index := range inspections {
 		if inspections[index].Err != nil {
 			continue
@@ -156,7 +151,12 @@ func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []
 			correlationErrors = append(correlationErrors, fmt.Errorf("cannot safely correlate live branch bindings because another live lane has no repository identity"))
 		}
 		if incompleteRepos[repoKeys[index]] {
-			correlationErrors = append(correlationErrors, fmt.Errorf("cannot safely correlate live branch bindings because another worktree in this repository could not be inspected"))
+			cause := repoErrors[repoKeys[index]]
+			if cause != nil {
+				correlationErrors = append(correlationErrors, fmt.Errorf("cannot safely correlate live branch bindings because the repository cohort could not be completely observed: %w", cause))
+			} else {
+				correlationErrors = append(correlationErrors, fmt.Errorf("cannot safely correlate live branch bindings because another worktree in this repository could not be inspected"))
+			}
 		}
 		inspections[index].CorrelationErr = errors.Join(correlationErrors...)
 	}
@@ -195,6 +195,40 @@ func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []
 		}
 	}
 	return inspections
+}
+
+func observeWorktreeCohorts(
+	ctx context.Context,
+	repoIndices map[string][]int,
+	repoPaths map[string]string,
+	rows []InstanceData,
+	inspections []SessionWorktreeInspection,
+) map[string]error {
+	errs := make(map[string]error)
+	for repoKey, indices := range repoIndices {
+		bindings, err := sessiongit.WorktreeBranchBindingsContext(ctx, repoPaths[repoKey])
+		if err != nil {
+			errs[repoKey] = err
+			continue
+		}
+		byPath := make(map[string]sessiongit.WorktreeBranchBinding, len(bindings))
+		for _, binding := range bindings {
+			byPath[pathutil.ResolveForCompare(binding.Path)] = binding
+		}
+		for _, index := range indices {
+			if inspections[index].Err != nil {
+				continue
+			}
+			binding, ok := byPath[pathutil.ResolveForCompare(rows[index].Worktree.WorktreePath)]
+			switch {
+			case !ok:
+				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q is absent from the repository-wide branch snapshot", rows[index].Worktree.WorktreePath))
+			case binding.Branch != inspections[index].Evidence.Branch || binding.HeadSHA != inspections[index].Evidence.HeadSHA:
+				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q changed before repository-wide branch correlation", rows[index].Worktree.WorktreePath))
+			}
+		}
+	}
+	return errs
 }
 
 func otherWorktreeLanes(inspections []SessionWorktreeInspection, group []int, self int) []string {

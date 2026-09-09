@@ -93,3 +93,35 @@ test("phone picker return follows its current desktop owner", () => {
   returns.get(trigger)!();
   assert.deepEqual(calls, ["session", "new-tab"]);
 });
+
+test("shortcut cancel reasserts a user-opened Session actions disclosure", () => {
+  const calls: string[] = [];
+  const trigger = { getAttribute: () => "false", click: () => calls.push("picker") };
+  const slot = { querySelector: (selector: string) => selector === ".af-tab-new"
+    ? trigger : { focus: () => calls.push("focus") } };
+  const returns = new WeakMap<object, () => void>();
+  const shell = {
+    newTabCancelReturn: returns,
+    terminalChrome: {
+      newTabSlot: slot,
+      menu: {
+        trigger: { getAttribute: () => "true" },
+        open: () => calls.push("session-open"),
+        close: () => calls.push("session-close"),
+      },
+    },
+    appControls: {
+      panel: { contains: () => false },
+      trigger: { getAttribute: () => "false" },
+      open: () => calls.push("app-open"),
+      close: () => calls.push("app-close"),
+    },
+  } as unknown as AppShell;
+
+  AppShell.prototype.openNewTabPicker.call(shell, () => calls.push("return"));
+  calls.length = 0;
+  returns.get(trigger)!();
+
+  assert.deepEqual(calls, ["session-open", "return"],
+    "a resync/media pass may close the disclosure while the picker owns focus; cancel restores the state captured at shortcut entry");
+});

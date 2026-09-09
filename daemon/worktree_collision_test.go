@@ -98,8 +98,17 @@ func TestReserveCreateRefusesLiveHolderWhenArchivedHolderIsListedLast(t *testing
 	for _, holder := range holds[branch] {
 		resolvedHolders = append(resolvedHolders, resolvedPath(t, holder))
 	}
-	assert.Equal(t, []string{resolvedPath(t, livePath), resolvedPath(t, archived.GetWorktreePath())}, resolvedHolders,
-		"precondition: both holders must survive even when the archived holder is listed last")
+	assert.ElementsMatch(t, []string{resolvedPath(t, livePath), resolvedPath(t, archived.GetWorktreePath())}, resolvedHolders,
+		"precondition: both holders must survive; Git does not promise worktree-list ordering across platforms")
+	originalBindings := branchesHeldByWorktrees
+	branchesHeldByWorktrees = func(path string) (map[string][]string, error) {
+		held, err := originalBindings(path)
+		if err == nil && len(held[branch]) == 2 {
+			held[branch] = []string{livePath, archived.GetWorktreePath()}
+		}
+		return held, err
+	}
+	t.Cleanup(func() { branchesHeldByWorktrees = originalBindings })
 
 	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{
 		RepoPath: repoPath,
@@ -434,4 +443,122 @@ func TestWorktreeIntegrityLoopShutdownDoesNotWaitForScan(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("daemon shutdown waited for the outstanding integrity scan")
 	}
+}
+
+func TestArchivedRestoreAdmissionUsesWorktreeActualBranch(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "actual-branch")
+	actualBranch := "manually-selected"
+	out, err := exec.Command("git", "-C", archived.GetWorktreePath(), "checkout", "-q", "-b", actualBranch).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	livePath := filepath.Join(t.TempDir(), "live")
+	out, err = exec.Command("git", "-C", repoPath, "worktree", "add", "-q", "-b", "live-staging", livePath).CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", livePath, "checkout", "-q", "--ignore-other-worktrees", "-B", actualBranch, actualBranch).CombinedOutput()
+	require.NoError(t, err, string(out))
+	live := registerCollisionLane(t, manager, repoID, repoPath, livePath, "live-holder", actualBranch, session.Ready)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+
+	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), actualBranch)
+	assert.Contains(t, err.Error(), live.Title)
+	assert.NotContains(t, err.Error(), manager.branchForTitle(archived.Title),
+		"the cached archived branch must not decide admission after a manual checkout")
+}
+
+func TestLostRecoveryRefusesLiveBranchPeer(t *testing.T) {
+	for _, automatic := range []bool{false, true} {
+		t.Run(map[bool]string{false: "manual", true: "automatic"}[automatic], func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			subject, _ := seedArchivedSession(t, manager, repoID, repoPath, "lost", "lost-collision")
+			branch := manager.branchForTitle(subject.Title)
+			peerPath := filepath.Join(t.TempDir(), "peer")
+			out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-q", "-b", "peer-staging", peerPath).CombinedOutput()
+			require.NoError(t, err, string(out))
+			out, err = exec.Command("git", "-C", peerPath, "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
+			require.NoError(t, err, string(out))
+			registerCollisionLane(t, manager, repoID, repoPath, peerPath, "peer", branch, session.Ready)
+
+			backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+			subject.SetBackend(backend)
+			subject.SetStartedForTest(true)
+			subject.SetStatusForTest(session.Lost)
+			if automatic {
+				manager.restoreLostSession(daemonInstanceKey(repoID, subject.Title), repoID, subject)
+			} else {
+				_, err = manager.restoreLostOrDeadSession(repoID, subject.Title, subject, false)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "peer")
+			}
+			assert.Zero(t, backend.recoverCalls(), "branch admission must refuse before Recover starts")
+		})
+	}
+}
+
+func TestArchivedRestoreAdmissionSerializesMultiplyBoundPeers(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	first, _ := seedArchivedSession(t, manager, repoID, repoPath, "first", "restore-first")
+	second, _ := seedArchivedSession(t, manager, repoID, repoPath, "second", "restore-second")
+	branch := manager.branchForTitle(first.Title)
+	out, err := exec.Command("git", "-C", second.GetWorktreePath(), "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	releaseFirst, err := manager.reserveLocalRestoreBranch(repoID, first.Title, first, true)
+	require.NoError(t, err)
+	releasedFirst := false
+	t.Cleanup(func() {
+		if !releasedFirst {
+			releaseFirst()
+		}
+	})
+
+	type result struct {
+		release func()
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		release, reserveErr := manager.reserveLocalRestoreBranch(repoID, second.Title, second, true)
+		done <- result{release: release, err: reserveErr}
+	}()
+	select {
+	case got := <-done:
+		if got.release != nil {
+			got.release()
+		}
+		t.Fatal("second restore admission did not wait for the shared branch reservation")
+	case <-time.After(100 * time.Millisecond):
+	}
+	first.SetStatusForTest(session.Ready)
+	releaseFirst()
+	releasedFirst = true
+	got := <-done
+	if got.release != nil {
+		got.release()
+	}
+	require.Error(t, got.err)
+	assert.Contains(t, got.err.Error(), first.Title,
+		"the waiter must revalidate after the reservation and see the first lane become live")
+}
+
+func registerCollisionLane(t *testing.T, manager *Manager, repoID, repoPath, worktreePath, title, branch string, status session.Status) *session.Instance {
+	t.Helper()
+	worktree, err := sessiongit.NewGitWorktreeFromStorage(repoPath, worktreePath, title, branch, "", false, true)
+	require.NoError(t, err)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetGitWorktreeForTest(worktree)
+	inst.Branch = branch
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(status)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, title)] = inst
+	manager.mu.Unlock()
+	return inst
 }

@@ -108,6 +108,17 @@ func TestParseWorktreeBranchBindingsDistinguishesDetachedFromBranchName(t *testi
 	}, bindings)
 }
 
+func TestParseWorktreeBranchBindingsPreservesCommonObservation(t *testing.T) {
+	bindings, err := parseWorktreeBranchBindings(
+		"worktree /repo/live\x00HEAD abc\x00branch refs/heads/shared\x00\x00" +
+			"worktree /repo/detached\x00HEAD def\x00detached\x00\x00")
+	require.NoError(t, err)
+	assert.Equal(t, []WorktreeBranchBinding{
+		{Path: "/repo/live", Branch: "shared", HeadSHA: "abc"},
+		{Path: "/repo/detached", HeadSHA: "def", Detached: true},
+	}, bindings, "path, branch, and HEAD must come from one repository-wide listing")
+}
+
 func TestBranchesHeldByWorktreesKeepsGitRecordedPathAcrossSymlinkRoot(t *testing.T) {
 	root := t.TempDir()
 	realRoot := filepath.Join(root, "real")

@@ -275,6 +275,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// it is: Kill would be refused at the admission gate. The release announces the
 	// settled, killable row once, at the end, when that is true.
 	fenceRaised = true
+	if instance.Capabilities().Workspace == session.WorkspaceLocalWorktree && instance.GetWorktreePath() != "" {
+		releaseBranch, err := m.reserveLocalRestoreBranch(repoID, title, instance, false)
+		if err != nil {
+			return "", err
+		}
+		defer releaseBranch()
+	}
 
 	// The same live recheck the automatic loop runs before re-provisioning
 	// (lostrestore.go), for the same reason: a remote Recover is not a reconnect
