@@ -352,6 +352,19 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// Reject a program that runs no recognized agent BEFORE the create proceeds —
+	// the one boundary a raw RPC caller (token-holding automation over the
+	// listener, any local process over the unix socket) can reach without the
+	// upstream enum validation every shipped client applies (CLI, TUI, task
+	// runner, config loader). See validateCreateProgram for why the check is
+	// DetectAgentFromCommand and why it lives HERE (the RPC boundary) rather than
+	// in Manager.CreateSession: the daemon's own root-agent ensure loop calls
+	// Manager.CreateSession directly with fully-resolved command strings (some
+	// not agent-named, e.g. "/opt/bare-root") that must NOT be rejected, so the
+	// gate is on the external-RPC path only.
+	if err := validateCreateProgram(req.Program); err != nil {
+		return err
+	}
 	data, err := s.manager.CreateSession(ctx, req)
 	// A committed retained create (#3233) lands in the envelope with the
 	// retained projection in Instance; a genuine failure returns unchanged.
