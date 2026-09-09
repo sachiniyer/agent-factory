@@ -199,6 +199,64 @@ func TestCollapseKnownRootsRecognizesFileURIPath(t *testing.T) {
 	}
 }
 
+// URI query and fragment separators end the URI path even though both bytes
+// are legal inside a Unix filename. The distinction must come from URI syntax:
+// treating either byte as a global text delimiter would collapse an unrelated
+// filesystem sibling whose basename merely starts with the registered root.
+func TestScrubbersRedactPathsAtURIQueryAndFragmentBoundary(t *testing.T) {
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Title: siblingLeakTitle,
+		Worktree: session.GitWorktreeData{
+			RepoPath: siblingLeakRepo,
+		},
+	})
+
+	for _, scrubber := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		for _, tc := range []struct {
+			name string
+			in   string
+			want string
+		}{
+			{
+				name: "query after registered root",
+				in:   "editor target file://" + siblingLeakRepo + "?window=1",
+				want: "editor target file://[repo:1]?window=1",
+			},
+			{
+				name: "fragment after sibling worktree",
+				in:   "editor target file://" + siblingLeakAlternate + "#L10",
+				want: "editor target file://[repo:1]-" + redactedMarker + "#L10",
+			},
+		} {
+			t.Run(scrubber.name+"/"+tc.name, func(t *testing.T) {
+				got := scrubber.scrub(tc.in)
+				if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, siblingLeakDiskTitle) {
+					t.Fatalf("URI path survived before its query or fragment boundary:\n%s", got)
+				}
+				if got != tc.want {
+					t.Errorf("scrubber output = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	}
+
+	ordinaryRoot := "filesystem sibling " + siblingLeakRepo + "?window=1"
+	if got := r.collapseKnownRoots(ordinaryRoot); got != ordinaryRoot {
+		t.Errorf("non-URI root sibling was rewritten:\n got: %s\nwant: %s", got, ordinaryRoot)
+	}
+	ordinaryWorktree := "filesystem sibling " + siblingLeakAlternate + "#L10"
+	if got := r.scrubWorktreePathTitles(ordinaryWorktree); got != ordinaryWorktree {
+		t.Errorf("non-URI worktree sibling was rewritten:\n got: %s\nwant: %s", got, ordinaryWorktree)
+	}
+}
+
 func TestRejectedRecordsKeepWorktreeTitlePairOwnership(t *testing.T) {
 	r := &redactor{}
 	raw := json.RawMessage(`[

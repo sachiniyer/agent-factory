@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -251,7 +252,7 @@ func derivedWorktreePathBoundary(s string, start, end int) bool {
 	if !pathStartsAt(s, start) {
 		return false
 	}
-	if pathEndsAt(s, end) {
+	if pathEndsAt(s, start, end) {
 		return true
 	}
 	if end >= len(s) || s[end] != '-' {
@@ -265,15 +266,15 @@ func derivedWorktreePathBoundary(s string, start, end int) bool {
 	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
 		end++
 	}
-	return end > digits && pathEndsAt(s, end)
+	return end > digits && pathEndsAt(s, start, end)
 }
 
-func pathEndsAt(s string, end int) bool {
+func pathEndsAt(s string, start, end int) bool {
 	if end == len(s) || s[end] == byte(filepath.Separator) {
 		return true
 	}
-	after, _ := utf8.DecodeRuneInString(s[end:])
-	return isPathTextDelimiter(after)
+	after, size := utf8.DecodeRuneInString(s[end:])
+	return isPathTextDelimiter(after) || uriPathEndsAt(s, start, end, size)
 }
 
 func replaceKnownRoot(s, root, token string) string {
@@ -308,7 +309,7 @@ func knownRootTextBoundary(s string, start, end int) bool {
 	if !pathStartsAt(s, start) {
 		return false
 	}
-	if end == len(s) || s[end] == byte(filepath.Separator) {
+	if pathEndsAt(s, start, end) {
 		return true
 	}
 	// This is the one safe non-separator sibling: an earlier structured or
@@ -318,8 +319,7 @@ func knownRootTextBoundary(s string, start, end int) bool {
 	if strings.HasPrefix(s[end:], "-"+redactedMarker) {
 		return true
 	}
-	after, _ := utf8.DecodeRuneInString(s[end:])
-	return isPathTextDelimiter(after)
+	return false
 }
 
 func pathStartsAt(s string, start int) bool {
@@ -335,9 +335,49 @@ func pathStartsAt(s string, start int) bool {
 	// delimiter (`file:///srv/repo`, `vscode://file/srv/repo`). Accept only that
 	// FIRST URI path component: a slash already present after "://" means this
 	// root is merely a suffix of a longer URI path and must not be rewritten.
+	_, ok := uriStartForPath(s, start)
+	return ok
+}
+
+// uriPathEndsAt asks the URI parser whether the matched bytes are the complete
+// path once the next rune is included. That recognizes query and fragment
+// syntax without declaring '?' or '#' to be filesystem delimiters. Both bytes
+// are legal Unix filename bytes; outside a URI they may continue a sibling name
+// and must not make a registered-root prefix eligible for collapse.
+func uriPathEndsAt(s string, start, end, nextRuneSize int) bool {
+	uriStart, ok := uriStartForPath(s, start)
+	if !ok {
+		return false
+	}
+	parsed, err := url.Parse(s[uriStart : end+nextRuneSize])
+	return err == nil && parsed.Path == s[start:end]
+}
+
+// uriStartForPath locates a syntactically valid scheme whose first path slash
+// is the match at start. A slash already present after :// means the match is a
+// suffix inside a longer URI path, never a root boundary.
+func uriStartForPath(s string, start int) (int, bool) {
 	prefix := s[:start]
-	scheme := strings.LastIndex(prefix, "://")
-	return scheme >= 0 && !strings.Contains(prefix[scheme+3:], "/")
+	schemeEnd := strings.LastIndex(prefix, "://")
+	if schemeEnd < 0 || strings.Contains(prefix[schemeEnd+3:], "/") {
+		return 0, false
+	}
+	schemeStart := schemeEnd
+	for schemeStart > 0 && isURISchemeByte(prefix[schemeStart-1]) {
+		schemeStart--
+	}
+	if schemeStart == schemeEnd || !isASCIIAlpha(prefix[schemeStart]) {
+		return 0, false
+	}
+	return schemeStart, true
+}
+
+func isURISchemeByte(b byte) bool {
+	return isASCIIAlpha(b) || b >= '0' && b <= '9' || b == '+' || b == '-' || b == '.'
+}
+
+func isASCIIAlpha(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
 // isPathTextDelimiter names punctuation and whitespace used by renderers around
