@@ -485,13 +485,14 @@ var sensitiveJSONKeys = map[string]bool{
 	//     (kind_name/status_name/liveness_name) and branch_name are DIFFERENT
 	//     keys, matched exactly, so they still survive.
 	//   - account is the user-chosen credential-account label.
-	//   - program is an arbitrary command line. It was listed as structural here
-	//     until #3588 established it is not.
+	//   - program and runtime_program are arbitrary command lines. Program was
+	//     listed as structural here until #3588 established it is not;
+	//     runtime_program is the override-resolved form of the same value.
 	//   - error is af-authored diagnostic text that quotes tmux and git, so it
 	//     names titles and worktrees; the typed path scrubs it, and scrubbing
 	//     needs the typed record's titles.
 	"alternate_path": true, "archive_warning": true,
-	"name": true, "account": true, "program": true, "error": true,
+	"name": true, "account": true, "program": true, "runtime_program": true, "error": true,
 	// The usage-limit swap's account labels (#3127), mirrored here for the reason
 	// every entry above is: a record the typed decode REJECTS must never be less
 	// private than one it accepts. "account" already covers the label nested in
@@ -605,7 +606,8 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Title != "" {
 		d.Title = redactedMarker
 	}
-	// Program is the session-level analogue of TabData.Command, which
+	// Program and RuntimeProgram are the session-level analogues of
+	// TabData.Command, which
 	// redactTabData drops wholesale as user-supplied — and it is user-supplied in
 	// exactly the same way: a program_overrides entry or `--program` is an
 	// arbitrary command line, path and flags included (the root session on the
@@ -621,6 +623,7 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// A command it cannot resolve to an agent has no safe part to keep, so it
 	// takes Command's trade after all.
 	d.Program = redactProgram(d.Program)
+	d.RuntimeProgram = redactProgram(d.RuntimeProgram)
 	// Account is the credential-account label a user picks (`--account work`),
 	// free text that may name an employer or a client (#3051). Nothing else in
 	// the pipeline touched it. The marker keeps the triage-relevant fact — an
