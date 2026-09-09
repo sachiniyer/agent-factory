@@ -1482,6 +1482,14 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
       synth("probe-lost", 3, "process-exited"),
       synth("probe-dead", 4, "process-exited"),
       synth("probe-limit", 6, "usage-limit"),
+      {
+        ...synth("probe-handoff-retry", 1),
+        pending_account_swap: {
+          manual: true,
+          replacement_panes_started: true,
+          mission_delivery_status: "could-not-confirm",
+        },
+      },
     );
     if (snap) {
       snap.instances = list;
@@ -1536,6 +1544,12 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   // ordinary waiting row withdraws it. The rail move must not displace this path.
   await row(p, "probe-limit").click();
   const retry = p.locator(".af-term-head").getByRole("button", { name: "Retry limit", exact: true });
+  await expect(retry).toBeVisible();
+  await row(p, "probe-handoff-retry").click();
+  const handoffRetry = p.locator(".af-term-head").getByRole("button", { name: "Retry handoff", exact: true });
+  await expect(handoffRetry).toBeVisible();
+  await expect(handoffRetry).toHaveAttribute("title", "Retry the handoff after inspecting the pane");
+  await row(p, "probe-limit").click();
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
   const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");

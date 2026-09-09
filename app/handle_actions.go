@@ -483,13 +483,11 @@ type limitRetriedMsg struct {
 	err    error
 }
 
-// handleLimitRetry is the usage-limit manual-retry verb (#1146, `c`): on a
-// session blocked at a usage-limit wall it asks the daemon to re-spawn (if the
-// agent exited) and re-deliver the pending prompt, un-stalling the work. It is a
-// no-op with an explanatory message on any non-limit row. The daemon RPC re-
-// delivers a prompt (SendPromptCommand sleeps to let control sequences drain, and
-// a respawn can take a beat), so it runs OFF the event loop like the kill/archive
-// cmds rather than freezing the TUI.
+// handleLimitRetry is the explicit retry verb (#1146, `c`). It resumes a usage-
+// limited session or, after the operator inspects its pane, retries a manual
+// handoff whose first mission submission could not be confirmed. The daemon RPC
+// may re-spawn and delivers a prompt, so it runs off the event loop like the
+// kill/archive commands rather than freezing the TUI.
 func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil {
@@ -498,7 +496,7 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
-	if !selected.LimitReached() {
+	if !selected.LimitReached() && !selected.PendingManualAccountSwapDeliveryUnconfirmed() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)

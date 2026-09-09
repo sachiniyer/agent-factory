@@ -826,7 +826,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	readinessSettlementAttempted := false
 	readinessSettled := false
 	if manual {
-		readinessSettlementAttempted, readinessSettled, serr = m.deliverManualAccountMission(repoID, key, instance, prompt)
+		readinessSettlementAttempted, readinessSettled, serr = m.deliverManualAccountMission(repoID, key, instance, accountSwap, prompt)
 	} else {
 		_, serr = instance.SendPromptWithEvidence(prompt, nowFunc)
 	}

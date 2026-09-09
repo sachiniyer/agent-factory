@@ -408,6 +408,14 @@ new account starts a fresh conversation. Use `--brief` to replace the prompt,
 or combine `--to claude --account work` to change both agent and account.
 The recorded handoff includes the outgoing and incoming accounts and branch tip.
 
+If an account handoff starts its replacement but cannot confirm whether the
+mission was submitted, af suppresses automatic redelivery because the first
+submission may already have landed. Inspect the replacement pane, then choose
+the explicit override when it is needed: press **`c`** in the TUI (shown as
+**Retry**), click **Retry handoff** in the web pane header, or run
+`af sessions retry-limit <title>`. The retry verdict is attached to that pending
+handoff mission; sending another prompt does not make the daemon resend it.
+
 This is an operator-chosen account swap: the target must be registered for the
 incoming agent and have no current limit observation in the daemon's ledger.
 An unregistered or currently limited target is refused before stopping the old

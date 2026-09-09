@@ -28,9 +28,10 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 		LimitAgent:   "codex",
 		LimitAccount: "acme-prod",
 		PendingAccountSwap: &session.AccountSwapData{
-			From:           "acme-prod",
-			To:             "acme-staging",
-			ConversationID: "8f466d20-784b-4b02-a916-c80a0f6983e3",
+			From:                  "acme-prod",
+			To:                    "acme-staging",
+			ConversationID:        "8f466d20-784b-4b02-a916-c80a0f6983e3",
+			MissionDeliveryStatus: session.PromptCouldNotConfirm,
 		},
 		AccountLimitObservations: []session.AccountLimitObservationData{
 			{Agent: "claude", Account: "acme-prod", ResetAt: reset},
@@ -68,6 +69,10 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 	if d.LimitAgent != "codex" {
 		t.Errorf("limit agent enum redacted; it is bounded and identifies the quota provider: %q",
 			d.LimitAgent)
+	}
+	if d.PendingAccountSwap.MissionDeliveryStatus != session.PromptCouldNotConfirm {
+		t.Errorf("mission delivery enum redacted; it is bounded and explains the retry fence: %q",
+			d.PendingAccountSwap.MissionDeliveryStatus)
 	}
 	if !d.AccountLimitObservations[0].ResetAt.Equal(reset) {
 		t.Errorf("reset time mutated: %v", d.AccountLimitObservations[0].ResetAt)

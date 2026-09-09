@@ -52,18 +52,42 @@ func (i *Instance) PendingManualAccountSwap() (bool, string) {
 	return i.pendingAccountSwap.Manual, i.pendingAccountSwap.Mission
 }
 
+// RecordPendingManualAccountSwapMissionDelivery records a prompt verdict on the
+// exact committed transaction whose mission was attempted. The pair check keeps
+// a stale delivery return from changing a newer handoff's retry policy.
+func (i *Instance) RecordPendingManualAccountSwapMissionDelivery(from, to string, status PromptDeliveryStatus) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
+		return fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return fmt.Errorf("manual account swap from %q to %q has no replacement panes", from, to)
+	}
+	if !status.Valid() {
+		status = PromptCouldNotConfirm
+	}
+	if pending.MissionDeliveryStatus != status {
+		pending.MissionDeliveryStatus = status
+		i.touchLocked()
+	}
+	return nil
+}
+
 // PendingManualAccountSwapDeliveryUnconfirmed reports whether the replacement
-// runtime may already have received its pending mission. Only a positive
-// PromptNotDelivered observation can authorize automatic redelivery; an
-// operator may still inspect the pane and explicitly retry.
+// runtime may already have received its pending mission. The verdict lives on
+// the transaction rather than the session-wide latest prompt, so an unrelated
+// prompt cannot authorize redelivery. An operator may inspect the pane and use
+// the explicit retry even when automatic recovery stays suppressed.
 func (i *Instance) PendingManualAccountSwapDeliveryUnconfirmed() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual ||
-		!i.pendingAccountSwap.ReplacementPanesStarted || i.lastPromptAttemptAt.IsZero() {
+		!i.pendingAccountSwap.ReplacementPanesStarted || i.pendingAccountSwap.MissionDeliveryStatus == "" {
 		return false
 	}
-	return i.lastPromptDeliveryStatus != PromptNotDelivered
+	return i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered
 }
 
 // ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement
@@ -83,6 +107,13 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	}
 	if i.limitAccount != i.Account {
 		i.limitAccount = i.Account
+		i.touchLocked()
+	}
+	// Readiness found the incoming identity's wall before mission submission,
+	// which is positive non-delivery evidence for this transaction. Replace any
+	// earlier ambiguity so the scheduler may resume it after the recorded reset.
+	if i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered {
+		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)

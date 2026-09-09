@@ -55,7 +55,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected account handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -1608,7 +1608,7 @@ af sessions
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected account handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -2022,17 +2022,21 @@ af sessions restore <title> [flags]
 
 ## af sessions retry-limit
 
-Retry a session blocked at a usage limit
+Retry a usage-limit resume or inspected account handoff
 
-Retry a session that is parked at a provider usage-limit wall.
+Retry a session parked at a provider usage-limit wall, or explicitly retry
+an account handoff whose mission delivery could not be confirmed.
 
 The daemon runs the same recovery action as the TUI's c key and the web's Retry
 button: it re-spawns an exited agent when necessary, re-delivers the pending
 prompt (or "continue" for an interactive session with no stored prompt), and
 clears the limit state after delivery succeeds.
 
-The command fails if the session is not currently blocked on a usage limit.
-Use 'af sessions list' to find sessions carrying the [limit] badge.
+Before retrying an unconfirmed handoff, inspect its pane: the first submission
+may already have landed, and this command is the operator's explicit decision to
+send the pending mission again. The command fails when neither recovery
+obligation exists. Use 'af sessions list' to find sessions carrying the [limit]
+badge; the TUI and web expose Retry handoff for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth

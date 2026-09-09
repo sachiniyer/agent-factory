@@ -81,6 +81,15 @@ export interface LostRestoreFailure {
   error: string;
 }
 
+export type PromptDeliveryStatus = "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm";
+
+/** Durable identity transaction retained until its replacement mission settles. */
+export interface AccountSwapData {
+  manual?: boolean;
+  replacement_panes_started?: boolean;
+  mission_delivery_status?: PromptDeliveryStatus;
+}
+
 /** session.Status (session/instance.go) — the legacy single-axis int, read ONLY
  *  as a defensive fallback when a projection somehow omits `liveness` (never
  *  expected from the daemon's live Snapshot, which always emits it). */
@@ -158,7 +167,7 @@ export interface SessionData {
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
-  last_prompt_delivery_status?: "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm";
+  last_prompt_delivery_status?: PromptDeliveryStatus;
   /** RFC3339 time when the daemon most recently observed pane bytes change. */
   last_pane_churn_at?: string;
   /** One-shot note on a re-created root agent that did not demonstrably come back
@@ -170,6 +179,8 @@ export interface SessionData {
   root_recreate_context?: "fresh" | "unknown";
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */
   limit_reset_at?: string;
+  /** Present while a committed identity change still owes its replacement mission. */
+  pending_account_swap?: AccountSwapData;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
   backend_type?: string;
   /** The daemon's OWN answer, per tab kind, to "may this session gain one of

@@ -17,6 +17,7 @@ import {
   isArchived,
   isCreating,
   isLimitReached,
+  isPendingManualHandoffDeliveryUnconfirmed,
   isWorking,
   type OperatorKind,
   operatorKind,
@@ -309,6 +310,38 @@ test("isLimitReached ignores limit_reset_at, which outlives the state it describ
     isLimitReached(sess({ liveness: Liveness.Ready, limit_reset_at: "2026-07-18T15:04:00Z" })),
     false,
     "a resumed session carrying a stale reset time must not offer Retry",
+  );
+});
+
+test("pending manual handoff retry reads mission-scoped delivery evidence", () => {
+  const pending = {
+    manual: true,
+    replacement_panes_started: true,
+    mission_delivery_status: "could-not-confirm" as const,
+  };
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      pending_account_swap: pending,
+      last_prompt_delivery_status: "not-delivered",
+    })),
+    true,
+    "an unrelated prompt verdict must not withdraw the handoff retry",
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: { ...pending, mission_delivery_status: "not-delivered" },
+    })),
+    false,
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: { manual: true, replacement_panes_started: true },
+    })),
+    false,
+    "an unattempted mission stays on the automatic recovery path",
   );
 });
 

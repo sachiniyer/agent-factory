@@ -14,7 +14,7 @@ import (
 // retries re-enter this same path, including after a daemon restart.
 // The booleans report whether this function owned the readiness settlement and
 // whether that write landed, so the caller neither repeats nor masks it.
-func (m *Manager) deliverManualAccountMission(repoID, key string, instance *session.Instance, mission string) (bool, bool, error) {
+func (m *Manager) deliverManualAccountMission(repoID, key string, instance *session.Instance, swap *autoAccountSwap, mission string) (bool, bool, error) {
 	// An outgoing wall is not evidence about the replacement identity. Its ledger
 	// observation remains durable, while the replacement is independently probed.
 	instance.ClearLimitReached()
@@ -33,6 +33,15 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 		instance.MarkStartupStateUnknown()
 		settleErr := m.persistSettlement(repoID, key, instance)
 		return true, settleErr == nil, errors.Join(err, settleErr)
+	}
+	if errors.Is(err, task.ErrPromptDelivery) {
+		// SendPromptWithEvidence normalizes an error after submission to honest
+		// uncertainty. Bind that result to this transaction before the settlement
+		// write; later ordinary prompts update only the session-wide evidence.
+		missionErr := instance.RecordPendingManualAccountSwapMissionDelivery(
+			swap.from, swap.to, session.PromptCouldNotConfirm,
+		)
+		return false, false, errors.Join(err, missionErr)
 	}
 	return false, false, err
 }

@@ -271,6 +271,23 @@ export function isLimitReached(s: SessionData): boolean {
   );
 }
 
+/** True when an operator must inspect the pane before explicitly retrying a
+ * manual handoff mission whose first submission may already have landed. The
+ * verdict is transaction-scoped; session-wide prompt evidence may describe a
+ * later, unrelated delivery. */
+export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boolean {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (
+    (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None &&
+    (liveness === Liveness.Running || liveness === Liveness.Ready) &&
+    pending?.manual === true &&
+    pending.replacement_panes_started === true &&
+    pending.mission_delivery_status !== undefined &&
+    pending.mission_delivery_status !== "not-delivered"
+  );
+}
+
 /** True when this session's agent can be handed off to a different one in place
  *  (#2013) — the state that gates the Handoff action, mirroring the TUI, which
  *  advertises `F` only for a handoff-capable selection (app/handle_handoff.go) and

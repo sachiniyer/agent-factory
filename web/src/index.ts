@@ -1972,8 +1972,9 @@ function doTriggerTask(task: TaskData): void {
  * the projection ahead of the daemon and show a resumed session that, if the
  * resume failed downstream, is still parked.
  *
- * The daemon refuses a session that is not actually limit-blocked, so a click that
- * races the limit clearing itself surfaces an error rather than an unwanted prompt.
+ * The same endpoint explicitly retries an inspected, delivery-unconfirmed manual
+ * handoff. The daemon still refuses a row with neither recovery obligation, so a
+ * click that races settlement surfaces an error rather than an unwanted prompt.
  */
 function doRetryLimit(): void {
   const sel = selectedSession();

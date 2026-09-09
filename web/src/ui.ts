@@ -44,6 +44,7 @@ import {
   isCreating,
   idleReasonDetail,
   isLimitReached,
+  isPendingManualHandoffDeliveryUnconfirmed,
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
@@ -96,6 +97,36 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
     s.id !== "" &&
     (s.lifecycle_action === "archive" || s.lifecycle_action === "restore")
   );
+}
+
+export type RetryActionPresentation = {
+  kind: "limit" | "handoff";
+  label: string;
+  title: string;
+};
+
+/** The selected row's explicit recovery action. A delivery-unconfirmed handoff
+ * keeps a distinct label so Retry never looks like an unrelated quota control. */
+export function retryActionForSession(s: SessionData): RetryActionPresentation | null {
+  if (isPendingManualHandoffDeliveryUnconfirmed(s)) {
+    return {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    };
+  }
+  if (isLimitReached(s)) {
+    return { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" };
+  }
+  return null;
+}
+
+function patchRetryButton(button: HTMLElement, action: RetryActionPresentation | null): void {
+  button.hidden = action === null;
+  if (action) {
+    button.textContent = action.label;
+    button.title = action.title;
+  }
 }
 
 /** Fail-closed narrowing for the daemon's independent teardown capability. */
@@ -882,7 +913,7 @@ export class AppShell {
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   private retryBtn: HTMLElement | null = null;
-  private retryVisible = false;
+  private retryKind: RetryActionPresentation["kind"] | null = null;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -2071,7 +2102,7 @@ export class AppShell {
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
-      this.retryVisible = false;
+      this.retryKind = null;
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
@@ -2104,8 +2135,9 @@ export class AppShell {
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
     this.retryBtn = chrome.retry;
-    this.retryVisible = isLimitReached(selected);
-    chrome.retry.hidden = !this.retryVisible;
+    const retryAction = retryActionForSession(selected);
+    this.retryKind = retryAction?.kind ?? null;
+    patchRetryButton(chrome.retry, retryAction);
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -2701,16 +2733,14 @@ export class AppShell {
       this.lifecycleAction = nowAction;
     }
 
-    // Show/hide Retry as the selected session enters or leaves the usage-limit wall
-    // (#1934). This is the load-bearing half of the button: a session almost always
-    // hits the limit while it is the one you are watching, and that is not a
-    // selection change, so renderMain never runs. Deciding visibility only at build
-    // time would leave a limit-blocked session with no way out until the user
-    // clicked away and back.
-    const nowLimited = isLimitReached(selected);
-    if (this.retryBtn && nowLimited !== this.retryVisible) {
-      this.retryVisible = nowLimited;
-      this.retryBtn.hidden = !nowLimited;
+    // Patch Retry as the selected session enters/leaves a limit wall or retains an
+    // ambiguous handoff mission. Either transition can happen without a selection
+    // change, so deciding once in renderMain would strand the recovery action.
+    const retryAction = retryActionForSession(selected);
+    const retryKind = retryAction?.kind ?? null;
+    if (this.retryBtn && retryKind !== this.retryKind) {
+      this.retryKind = retryKind;
+      patchRetryButton(this.retryBtn, retryAction);
     }
 
     // Show/hide Handoff as the selected session becomes (or stops being)

@@ -98,11 +98,21 @@ func TestHandoffAccount_UnconfirmedDeliveryIsNotAutomaticallyRedelivered(t *test
 	require.True(t, isMutationCommitted(err))
 	require.Equal(t, 1, backend.attemptCount())
 	require.NotNil(t, inst.ToInstanceData().PendingAccountSwap)
+	// A later, unrelated prompt attempt is session-wide evidence. It must not
+	// change the retry verdict for this pending handoff mission.
+	require.True(t, inst.RecordPromptAttempt(session.PromptNotDelivered, time.Now().Add(time.Second)))
 
 	m.ResumeLimitedSessions()
 
 	require.Equal(t, 1, backend.attemptCount(),
 		"could-not-confirm may have submitted the mission and must never authorize automatic redelivery")
+
+	require.NoError(t, inst.RecordPendingManualAccountSwapMissionDelivery(
+		"", "personal", session.PromptNotDelivered,
+	))
+	m.ResumeLimitedSessions()
+	require.Equal(t, 2, backend.attemptCount(),
+		"positive non-delivery evidence for the pending mission must authorize recovery")
 }
 
 func TestHandoffSession_PinnedAccountRequiresTargetAccount(t *testing.T) {

@@ -263,6 +263,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
 	data = data.RestoreAccountSwapRollbackFence()
+	data = data.restoreLegacyAccountSwapMissionEvidence()
 	id := data.ID
 	if id == "" {
 		// Legacy records predate stable session identity. Materialized instances

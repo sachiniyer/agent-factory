@@ -14,16 +14,20 @@ var resumeFromLimitViaDaemon = daemon.ResumeFromLimit
 
 var sessionsRetryLimitCmd = &cobra.Command{
 	Use:   "retry-limit <title>",
-	Short: "Retry a session blocked at a usage limit",
-	Long: `Retry a session that is parked at a provider usage-limit wall.
+	Short: "Retry a usage-limit resume or inspected account handoff",
+	Long: `Retry a session parked at a provider usage-limit wall, or explicitly retry
+an account handoff whose mission delivery could not be confirmed.
 
 The daemon runs the same recovery action as the TUI's c key and the web's Retry
 button: it re-spawns an exited agent when necessary, re-delivers the pending
 prompt (or "continue" for an interactive session with no stored prompt), and
 clears the limit state after delivery succeeds.
 
-The command fails if the session is not currently blocked on a usage limit.
-Use 'af sessions list' to find sessions carrying the [limit] badge.
+Before retrying an unconfirmed handoff, inspect its pane: the first submission
+may already have landed, and this command is the operator's explicit decision to
+send the pending mission again. The command fails when neither recovery
+obligation exists. Use 'af sessions list' to find sessions carrying the [limit]
+badge; the TUI and web expose Retry handoff for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth`,

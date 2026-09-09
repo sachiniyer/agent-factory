@@ -6,12 +6,13 @@ import "time"
 // From may be empty for the ambient identity; the pointer's presence, rather
 // than either string, is the recovery obligation.
 type AccountSwapData struct {
-	Manual                  bool   `json:"manual,omitempty"`
-	Mission                 string `json:"mission,omitempty"`
-	From                    string `json:"from,omitempty"`
-	To                      string `json:"to"`
-	ConversationID          string `json:"conversation_id,omitempty"`
-	ReplacementPanesStarted bool   `json:"replacement_panes_started,omitempty"`
+	Manual                  bool                 `json:"manual,omitempty"`
+	Mission                 string               `json:"mission,omitempty"`
+	From                    string               `json:"from,omitempty"`
+	To                      string               `json:"to"`
+	ConversationID          string               `json:"conversation_id,omitempty"`
+	ReplacementPanesStarted bool                 `json:"replacement_panes_started,omitempty"`
+	MissionDeliveryStatus   PromptDeliveryStatus `json:"mission_delivery_status,omitempty"`
 	// OriginalStartupStateUnknown preserves the real lifecycle value while
 	// ForStorage projects a pending replacement through the startup-unknown
 	// fence understood by the immediately previous release. A current reader

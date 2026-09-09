@@ -32,3 +32,19 @@ func (d InstanceData) RestoreAccountSwapRollbackFence() InstanceData {
 	d.PendingAccountSwap = pending
 	return d
 }
+
+// restoreLegacyAccountSwapMissionEvidence fails closed for a pending manual
+// transaction written before MissionDeliveryStatus existed. Its session-wide
+// prompt verdict may describe an unrelated prompt, so it cannot prove that this
+// mission missed; a current delivery writes transaction-scoped evidence instead.
+func (d InstanceData) restoreLegacyAccountSwapMissionEvidence() InstanceData {
+	pending := d.PendingAccountSwap
+	if pending == nil || !pending.Manual || !pending.ReplacementPanesStarted ||
+		pending.MissionDeliveryStatus != "" || d.LastPromptAttemptAt.IsZero() {
+		return d
+	}
+	pending = cloneAccountSwapData(pending)
+	pending.MissionDeliveryStatus = PromptCouldNotConfirm
+	d.PendingAccountSwap = pending
+	return d
+}
