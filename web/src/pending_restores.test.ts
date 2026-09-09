@@ -229,7 +229,7 @@ for (const [name, error] of [
   ["committed warning", new ApiError(200, "committed", "mutation_committed")],
   ["transport failure", new ApiError(0, "connection lost")],
 ] as const) {
-  test(`${name} retains the restore fence until the row advances`, async () => {
+  test(`${name} retains the restore fence until a positively settled row`, async () => {
     const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
     await assert.rejects(pending.run("session", async () => { throw error; }, true)!, error);
     assert.equal(pending.has("session"), true);
@@ -240,6 +240,10 @@ for (const [name, error] of [
     });
     assert.equal(pending.has("session"), true);
     pending.observe([{ id: "session", restoreEligible: true }], {
+      kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+    });
+    assert.equal(pending.has("session"), true, "a busy-to-restorable cycle may belong to another attempt");
+    pending.observe([{ id: "session", restoreEligible: false, restoreSettled: true }], {
       kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
     });
     assert.equal(pending.has("session"), false);
@@ -260,7 +264,8 @@ for (const status of ["lost", "dead"]) {
 }
 
 test("Dead to Lost normalization does not settle an uncertain restore", async () => {
-  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  let now = 1_000;
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => now);
   let reject!: (error: unknown) => void;
   const request = pending.run("session", () => new Promise<void>((_, fail) => { reject = fail; }), true);
   pending.observe([{ id: "session", restoreEligible: true }]);
@@ -274,10 +279,15 @@ test("Dead to Lost normalization does not settle an uncertain restore", async ()
   pending.observe([{ id: "session", restoreEligible: true }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
+  assert.equal(pending.has("session"), true);
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  pending.observe([{ id: "session", restoreEligible: true }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("session"), false);
 });
 
-test("a queued uncertain restore ignores an eligible Snapshot until busy then restorable", async () => {
+test("a queued uncertain restore ignores busy-to-restorable projections until its admission deadline", async () => {
   let now = 1_000;
   const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => now);
   await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
@@ -294,7 +304,32 @@ test("a queued uncertain restore ignores an eligible Snapshot until busy then re
   pending.observe([{ id: "session", restoreEligible: true }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
+  assert.equal(pending.has("session"), true, "an uncorrelated busy cycle cannot shorten B's deadline");
+  now += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  pending.observe([{ id: "session", restoreEligible: true }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
   assert.equal(pending.has("session"), false);
+});
+
+test("a competing restore's busy gap cannot release the current uncertain attempt", async () => {
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain, () => false, () => 1_000);
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost B reply"); }, true)!);
+
+  // Attempt A owns the daemon lock while this browser's attempt B is queued.
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  // Capture A's brief restorable projection after A fails, but hold its delivery.
+  const gapSnapshot = pending.beginSnapshot();
+  // B then raises its own fence. The delayed A projection cannot describe B.
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
+  });
+  pending.observe([{ id: "session", restoreEligible: true }], {
+    kind: "snapshot", generation: gapSnapshot, operationLockTimeoutMs: 30_000,
+  });
+  assert.equal(pending.has("session"), true, "another attempt's busy cycle cannot release B's fence");
 });
 
 test("a never-admitted uncertain restore releases after the daemon admission bound", async () => {
@@ -483,10 +518,9 @@ test("early release and reset cancel an uncertain ticket's reconciliation timer"
   pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
   await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
   assert.equal(timer.armed(), true);
-  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: false }], {
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: true }], {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
-  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000 });
   assert.equal(pending.has("session"), false);
   assert.equal(timer.armed(), false);
   assert.equal(timer.cancellations(), 1);

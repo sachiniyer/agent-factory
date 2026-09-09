@@ -17,7 +17,6 @@ type RestoreTicket = {
   succeededAt: number | null;
   uncertainAt: number;
   uncertainSince: number;
-  sawBusy: boolean;
   timer: RestoreTimer | null;
   retryDelayMs: number;
   reconcileGeneration: number;
@@ -62,7 +61,6 @@ export class PendingRestores {
       succeededAt: null as number | null,
       uncertainAt: this.snapshotGeneration,
       uncertainSince: 0,
-      sawBusy: false,
       timer: null,
       retryDelayMs: RESTORE_RECONCILE_RETRY_MIN_MS,
       reconcileGeneration: 0,
@@ -87,7 +85,6 @@ export class PendingRestores {
             ticket.uncertain = true;
             ticket.uncertainAt = this.snapshotGeneration;
             ticket.uncertainSince = this.now();
-            ticket.sawBusy = false;
             ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
             this.armUncertainTimer(id, ticket);
             if (this.committedOnError(error)) {
@@ -150,11 +147,12 @@ export class PendingRestores {
           // loads. Processing time cannot turn a pre-deadline Snapshot into proof.
           const deadline = this.operationLockTimeoutMs === null ? null :
             ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
-          uncertainCompleted = ticket.sawBusy || (deadline !== null && issuedAt !== undefined && issuedAt > deadline);
+          uncertainCompleted = deadline !== null && issuedAt !== undefined && issuedAt > deadline;
         } else {
           // LifecycleActionNone covers every operation fence and several unsettled
-          // states. Only a positive Archive capability proves restore completion.
-          ticket.sawBusy = true;
+          // states. It carries no attempt identity, so it cannot make a later
+          // restorable projection conclusive for this ticket.
+          uncertainCompleted = false;
         }
       }
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
