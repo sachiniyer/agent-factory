@@ -119,10 +119,11 @@ export class TerminalSoftInput {
     // establishes the boundary in onInput instead.
     if (range.start !== undefined && value !== undefined && value.length > range.start)
       range.commitLength = value.length - range.start;
-    // An empty composition that changed and returned to its starting textarea
-    // value is a rollback even if it emitted updates. Safari's empty pre-mutation
-    // lifecycle remains pending; the no-update case is the explicit cancel form.
-    else if (!range.text && ((range.textareaChanged && value === range.initialValue) || !range.sawUpdate))
+    // A composition that changed and returned to its starting textarea value is
+    // a rollback even when compositionend.data is stale and nonempty. Safari's
+    // untouched pre-mutation lifecycle remains pending unless it is the explicit
+    // empty, no-update cancel form.
+    else if ((range.textareaChanged && value === range.initialValue) || (!range.text && !range.sawUpdate))
       range.commitLength = 0;
     this.pending.push(range);
     // Bound on the textarea AFTER xterm: its commit timer runs before this

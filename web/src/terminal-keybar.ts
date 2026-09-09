@@ -406,6 +406,10 @@ export class TerminalKeybar {
       this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
     this.emitUserInput(data, options);
   }
+  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  sendCustomUserInput(data: string, physical: PhysicalKeyInput): void {
+    this.sendUserInput(data, { physical, afterComposition: true });
+  }
   private emitUserInput(data: string, options: UserInputOptions): void {
     this.markUserInput(options.physical, options.keybar);
     this.input(data);

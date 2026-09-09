@@ -8159,7 +8159,7 @@ var TerminalSoftInput = class {
     range.provisionalAtEnd = endText !== void 0 && endText.length > 0 && range.updateText !== void 0 && range.updateText.length > endText.length && range.updateText.startsWith(endText);
     if (range.start !== void 0 && value !== void 0 && value.length > range.start)
       range.commitLength = value.length - range.start;
-    else if (!range.text && (range.textareaChanged && value === range.initialValue || !range.sawUpdate))
+    else if (range.textareaChanged && value === range.initialValue || !range.text && !range.sawUpdate)
       range.commitLength = 0;
     this.pending.push(range);
     range.release = setTimeout(() => this.release(range), 0);
@@ -8730,6 +8730,10 @@ var TerminalKeybar = class {
   sendUserInput(data, options = {}) {
     if (options.afterComposition && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
     this.emitUserInput(data, options);
+  }
+  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  sendCustomUserInput(data, physical) {
+    this.sendUserInput(data, { physical, afterComposition: true });
   }
   emitUserInput(data, options) {
     this.markUserInput(options.physical, options.keybar);
@@ -9306,13 +9310,10 @@ var AttachTerminal = class {
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.keybar.sendUserInput(text, { physical: ev }),
+        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.keybar.sendUserInput(text, {
-          physical: ev,
-          afterComposition: true
-        })
+        sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev)
       });
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
       return accepted;

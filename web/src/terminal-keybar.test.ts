@@ -400,7 +400,7 @@ test("custom hardware input carries physical identity into its matching onData",
   assert.equal(modifiers.state("Alt"), "off", "sticky Alt participated in the interrupt emission");
 });
 
-test("custom Shift+Enter waits behind a pending composition commit", t => {
+test("custom suppressed input waits behind a pending composition commit", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
@@ -421,13 +421,12 @@ test("custom Shift+Enter waits behind a pending composition commit", t => {
   textarea.dispatchEvent(new Event("compositionstart"));
   textarea.value = "字";
   textarea.dispatchEvent(Object.assign(new Event("compositionend"), { data: "字" }));
-  keybar.sendUserInput("\n", {
-    physical: { key: "Enter", shiftKey: true, altKey: false, ctrlKey: false, metaKey: false },
-    afterComposition: true,
+  keybar.sendCustomUserInput("\x03", {
+    key: "c", shiftKey: false, altKey: false, ctrlKey: true, metaKey: false,
   });
-  assert.deepEqual(writes, [], "the custom newline must not overtake xterm's finalizer");
+  assert.deepEqual(writes, [], "the custom interrupt must not overtake xterm's finalizer");
   t.mock.timers.tick(0);
-  assert.deepEqual(writes, ["字", "\n"]);
+  assert.deepEqual(writes, ["字", "\x03"]);
 });
 
 test("pointerdown prevents focus transfer before acting", () => {

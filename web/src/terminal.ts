@@ -635,12 +635,10 @@ export class AttachTerminal {
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.keybar.sendUserInput(text, { physical: ev }),
+        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.keybar.sendUserInput(text, {
-          physical: ev, afterComposition: true,
-        }),
+        sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev),
       });
       // Xterm runs this handler before CompositionHelper.keydown. Its later
       // capture listener must not infer that a rejected key finalized the IME.
