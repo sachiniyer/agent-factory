@@ -38,10 +38,11 @@ func TestRootAgentProgramDriftNamesBothCommandsAndRemedy(t *testing.T) {
 	}
 	opts.sessionInventory = func() ([]session.InstanceData, error) {
 		return []session.InstanceData{{
-			Title:    "Root", // reserved-root identity is intentionally case-insensitive
-			Program:  "claude",
-			Liveness: session.LiveReady,
-			Worktree: session.GitWorktreeData{RepoPath: repoPath, WorktreePath: repoPath},
+			Title:          "Root", // reserved-root identity is intentionally case-insensitive
+			Program:        "claude",
+			RuntimeProgram: "claude",
+			Liveness:       session.LiveReady,
+			Worktree:       session.GitWorktreeData{RepoPath: repoPath, WorktreePath: repoPath},
 		}}, nil
 	}
 
@@ -79,10 +80,11 @@ func TestRootAgentProgramDriftResolvesFromLiveWorktreePath(t *testing.T) {
 	opts.daemonHealth = rootAgentDoctorHealth
 	opts.sessionInventory = func() ([]session.InstanceData, error) {
 		return []session.InstanceData{{
-			Title:    session.RootSessionTitle,
-			Program:  "codex",
-			Liveness: session.LiveReady,
-			Worktree: session.GitWorktreeData{RepoPath: barePath, WorktreePath: worktreePath},
+			Title:          session.RootSessionTitle,
+			Program:        "codex",
+			RuntimeProgram: "codex",
+			Liveness:       session.LiveReady,
+			Worktree:       session.GitWorktreeData{RepoPath: barePath, WorktreePath: worktreePath},
 		}}, nil
 	}
 
@@ -209,6 +211,45 @@ func TestRootAgentStartupUnknownIsIncomplete(t *testing.T) {
 	require.Contains(t, report.Incomplete, "root agent program")
 }
 
+func TestRootAgentDisabledProfileWithLiveSessionWarns(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
+		[]byte("schema_version = 1\n"), 0o600))
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	opts.sessionInventory = rootAgentInventory(repoPath, "claude")
+
+	report := runRootAgentProgramCheck(t, opts, cfg)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "disabled")
+	require.Contains(t, check.Remediation, "kill the root")
+	require.True(t, check.Problem)
+}
+
+func TestRootAgentPendingCreateIsIncomplete(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	body := "schema_version = 1\n[root_agents]\n\"" + repoPath + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	opts.sessionInventory = func() ([]session.InstanceData, error) {
+		instances, inventoryErr := rootAgentInventory(repoPath, "codex")()
+		instances[0].InFlightOp = session.OpCreating
+		return instances, inventoryErr
+	}
+
+	report := runRootAgentProgramCheck(t, opts, cfg)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "in-flight")
+	require.Contains(t, report.Incomplete, "root agent program")
+}
+
 func TestRootAgentMissingRepositoryPathIsIncomplete(t *testing.T) {
 	opts := testOptions(t, false)
 	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
@@ -231,7 +272,7 @@ func TestRootAgentMissingRepositoryPathIsIncomplete(t *testing.T) {
 func rootAgentInventory(repoPath, program string) func() ([]session.InstanceData, error) {
 	return func() ([]session.InstanceData, error) {
 		return []session.InstanceData{{
-			Title: session.RootSessionTitle, Program: program, Liveness: session.LiveReady,
+			Title: session.RootSessionTitle, Program: program, RuntimeProgram: program, Liveness: session.LiveReady,
 			Path: repoPath, Worktree: session.GitWorktreeData{RepoPath: repoPath, WorktreePath: repoPath},
 		}}, nil
 	}

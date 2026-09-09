@@ -123,12 +123,16 @@ type rootEnsureState struct {
 	// programDriftLogged dedupes the adopted-root command warning for this
 	// ensure-state. A healthy adopt is revisited every sweep tick, so the bit is
 	// deliberately not reset by rootEnsureSucceeded.
-	programDriftLogged bool
-	// The default root command requires repository/config resolution. Cache that
-	// answer after resolving it off the ensure sweep; the frozen profile makes it
-	// stable, while the running program remains cheap to compare every tick.
+	programDriftLogged       bool
+	programDriftLoggedRepoID string
+	// The default root command and bare agent names require repository/config
+	// resolution. Cache that answer after resolving it off the ensure sweep; the
+	// frozen profile makes it stable, while the running program remains cheap to
+	// compare every tick. Repository identity is part of the discriminator because
+	// a legacy configured path can be repointed without changing the state key.
 	programDriftResolving         bool
 	programDriftResolved          bool
+	programDriftResolvedRepoID    string
 	programDriftResolvedWorkspace string
 	programDriftResolvedProfile   config.RootAgent
 	programDriftConfiguredProgram string
@@ -534,7 +538,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
-			m.checkAdoptedRootProgramDrift(repo.ID, key, workspace, st, resolution.RootAgent, inst)
+			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
@@ -837,11 +841,11 @@ func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
 }
 
 // rootAgentProgramForProfile resolves the command the root agent runs from a
-// resolved root-agent profile. An explicit program wins verbatim (an agent enum
-// name still resolves through program_overrides downstream, exactly like any
-// session program). The default profile — an empty program — is the repo's
-// resolved claude command with --dangerously-skip-permissions ensured, the root
-// agent's whole purpose being autonomous operation (#1106).
+// resolved root-agent profile. An explicit program wins verbatim (a bare agent
+// name resolves through program_overrides downstream, exactly like any session
+// program). The default profile — an empty program — is the repo's resolved
+// claude command with --dangerously-skip-permissions ensured, the root agent's
+// whole purpose being autonomous operation (#1106).
 func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 	if strings.TrimSpace(ra.Program) != "" {
 		return ra.Program
@@ -859,17 +863,29 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 }
 
 func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAgent, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
-	if strings.TrimSpace(ra.Program) != "" {
+	requested := strings.TrimSpace(ra.Program)
+	if requested != "" && !tmux.IsSupportedProgram(requested) {
 		return ra.Program, nil
 	}
 	if repo == nil {
-		return "", fmt.Errorf("repo context is required for the default root-agent program")
+		return "", fmt.Errorf("repo context is required to resolve root-agent program %q", requested)
 	}
 	resolved, err := resolve(repo)
 	if err != nil {
 		return "", err
 	}
+	if requested != "" {
+		return config.ResolveProgram(&resolved.Config, requested), nil
+	}
 	return finishRootAgentProgram(config.ResolveProgram(&resolved.Config, "claude")), nil
+}
+
+// RootAgentProfileNeedsRepoConfig reports whether interpreting a root profile
+// depends on repository-scoped program_overrides. Diagnostics use the same
+// predicate so a free-form command does not acquire an unrelated Git failure.
+func RootAgentProfileNeedsRepoConfig(ra config.RootAgent) bool {
+	program := strings.TrimSpace(ra.Program)
+	return program == "" || tmux.IsSupportedProgram(program)
 }
 
 func finishRootAgentProgram(program string) string {

@@ -530,12 +530,40 @@ func (i *Instance) ResolvedPaneProgram() string {
 	return ts.Program()
 }
 
+// RuntimeProgram returns durable evidence of the override-resolved base command
+// used by the last positively established agent runtime. It is intentionally
+// empty for legacy or uncertain records; Program is intent, not runtime proof.
+func (i *Instance) RuntimeProgram() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.runtimeProgram
+}
+
+// setRuntimeProgram records a command only after a launch boundary positively
+// established the replacement runtime. The surrounding lifecycle transition
+// owns UpdatedAt and the durable checkpoint; touching here would count one
+// runtime replacement twice.
+func (i *Instance) setRuntimeProgram(program string) {
+	if strings.TrimSpace(program) == "" {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.runtimeProgram = program
+}
+
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,
 // materializing the single Agent tab if needed.
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.setTmuxLocked(session)
+	// This method exists only for tests. Installing a concrete test pane is their
+	// positive launch boundary, so carry the same runtime evidence production
+	// launch paths record after Start/Restore succeeds.
+	if session != nil && strings.TrimSpace(session.Program()) != "" {
+		i.runtimeProgram = session.Program()
+	}
 }
 
 // SetStartedForTest toggles the started flag for testing purposes. Prefer

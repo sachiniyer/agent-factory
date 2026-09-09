@@ -274,7 +274,10 @@ func projectForWorkspaceContext(parent context.Context, root string) (Project, b
 	}
 	ctx, cancel := context.WithTimeout(parent, registeredProjectScanTimeout)
 	defer cancel()
-	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
+	checkoutID, ok, err := checkoutIDForWorkspaceContext(ctx, root)
+	if err != nil {
+		return Project{}, false, err
+	}
 	if !ok {
 		return Project{}, false, nil
 	}
@@ -310,7 +313,7 @@ func listProjectsWithoutRootProbes() ([]Project, error) {
 	return projects, nil
 }
 
-func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool) {
+func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-common-dir")
@@ -320,18 +323,21 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", false
+		if ctx.Err() != nil {
+			return "", false, fmt.Errorf("inspect checkout marker location for %s: %w", root, ctx.Err())
+		}
+		return "", false, nil
 	}
 	commonDir := trimGitOutputLine(out)
 	if commonDir == "" || strings.Contains(commonDir, "\n") {
-		return "", false
+		return "", false, nil
 	}
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Join(root, commonDir)
 	}
 	markerName, err := checkoutMarkerName()
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	type markerResult struct {
 		id     string
@@ -345,9 +351,12 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	}()
 	select {
 	case marker := <-result:
-		return marker.id, marker.exists && marker.err == nil
+		if marker.err != nil {
+			return "", false, marker.err
+		}
+		return marker.id, marker.exists, nil
 	case <-ctx.Done():
-		return "", false
+		return "", false, fmt.Errorf("read checkout marker for %s: %w", root, ctx.Err())
 	}
 }
 
@@ -373,7 +382,10 @@ func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (st
 	if filepath.Clean(repo.WorkspacePath()) != filepath.Clean(root) {
 		return "", false
 	}
-	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
+	checkoutID, ok, err := checkoutIDForWorkspaceContext(ctx, root)
+	if err != nil {
+		return "", false
+	}
 	if !ok || checkoutID != project.CheckoutID {
 		return "", false
 	}

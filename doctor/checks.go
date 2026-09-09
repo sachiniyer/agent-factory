@@ -244,6 +244,14 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
 			continue
 		}
+		if inst.InFlightOp != session.OpNone || inst.Status == session.Loading || inst.Status == session.Deleting {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because a lifecycle operation is in-flight", rootSessionDisplayPath(inst)),
+				"wait for the operation to settle, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
 		if inst.StartupStateUnknown {
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
@@ -294,6 +302,19 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			continue
 		}
 		if !profile.Enabled {
+			drifted++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("live root at %s remains running although its configured profile is disabled · the live root was adopted as-is", identityPath),
+				"kill the root; restarting the daemon does not stop an adopted live root", true)
+			continue
+		}
+		runningProgram := strings.TrimSpace(inst.RuntimeProgram)
+		if runningProgram == "" {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because its resolved runtime command was not recorded", rootSessionDisplayPath(inst)),
+				"kill the root, then restart the daemon to record a fresh launch command", false)
+			report.markIncomplete("root agent program")
 			continue
 		}
 		commandPath := inst.Worktree.WorktreePath
@@ -304,7 +325,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			commandPath = identityPath
 		}
 		var commandRepo *config.RepoContext
-		if strings.TrimSpace(profile.Program) == "" {
+		if daemon.RootAgentProfileNeedsRepoConfig(profile) {
 			commandRepo, resolveErr = config.RepoFromPathContext(probeCtx, commandPath)
 			if resolveErr != nil {
 				unresolved++
@@ -325,12 +346,12 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			continue
 		}
 		compared++
-		if configuredProgram == inst.Program {
+		if configuredProgram == runningProgram {
 			continue
 		}
 		drifted++
 		report.Warn(sectionDaemon, "root agent program",
-			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", commandPath, configuredProgram, inst.Program),
+			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", commandPath, configuredProgram, runningProgram),
 			"kill the root, then restart the daemon", true)
 	}
 	if drifted == 0 && unresolved == 0 {

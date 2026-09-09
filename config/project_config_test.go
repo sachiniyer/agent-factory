@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -241,6 +242,22 @@ func TestResolveProjectSelectorNonGitPath(t *testing.T) {
 	_, err := ResolveProjectSelector(plain)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not inside a git repository")
+}
+
+func TestProjectLookupMarkerProbeTimeoutIsUnknown(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	script := "#!/bin/sh\nsleep 1\nexec \"" + realGit + "\" \"$@\"\n"
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, found, err := projectForWorkspaceContext(context.Background(), repoRoot)
+	require.Error(t, err, "a timed-out checkout-marker probe is unknown, not unregistered")
+	require.False(t, found)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestProjectForRootMatchesRegisteredRoot(t *testing.T) {

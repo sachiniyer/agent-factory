@@ -36,6 +36,7 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	}
 	plan := CreateLaunchPlan{
 		program:      program,
+		baseProgram:  resolved,
 		accountProof: proof,
 		workDir:      workDir,
 		conversation: conversation,
