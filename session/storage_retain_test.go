@@ -485,6 +485,166 @@ func TestSaveInstances_KeepsLostSandboxRowAlongsideStartedSibling(t *testing.T) 
 	}
 }
 
+// TestSaveInstances_KeepsMidArchiveSandboxRowAlongsideStartedSibling is the
+// off-box mid-archive wholesale-checkpoint gap: an off-box session (docker/ssh/
+// sandbox/hook) caught mid-archive at the daemon shutdown checkpoint has
+// already pushed its branch to origin and recorded it on i.Branch, but
+// BeginArchive raised OpArchiving while leaving liveness LiveRunning until
+// CommitArchive committed the archive (composeStatus(LiveRunning, OpArchiving)
+// is Deleting). The off-box row has no daemon-side gitWorktree, so the LOCAL
+// mid-archive retention claim (archiveReportPending, sourced only from a live
+// worktree's ProjectionSnapshot) never fires for it; lostSandbox requires
+// LiveLost and a mid-archive row is still LiveRunning. The (Loading/Deleting)
+// skip then silently drops the row, and with an alive same-repo sibling the
+// per-repo OVERWRITE erases its only af-side handle to the pushed branch —
+// the exact obligation lostSandboxRecord exists for (#3422), reached at a
+// different op. With the pendingArchiveSandbox claim the mid-archive row is
+// retained: the next restart restores from the pushed branch instead of
+// stranding the work on origin behind a lost handle.
+//
+// The started sibling is load-bearing: without it the repo has no rows to save
+// and the checkpoint is a no-op, so the bug never fires.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the mid-archive sandbox row is absent
+// after the save for docker/ssh/sandbox/remote.
+func TestSaveInstances_KeepsMidArchiveSandboxRowAlongsideStartedSibling(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			alive := makeAliveInstance("alive", repoPath)
+			// The exact mid-archive off-box shape: branch pushed and recorded on
+			// i.Branch, OpArchiving raised, liveness still LiveRunning, CommitArchive
+			// not yet run. started=true because step 4 of ArchiveSandbox (the
+			// started=false flip) runs AFTER as.Kill returns, which is the second
+			// half of the window; this captures the first half, where the daemon
+			// has not even reaped the sandbox yet. The inert sandbox backend is
+			// only a Type()/Capabilities() carrier — its runtime has no live handle
+			// on the daemon side, exactly like the loaded lost-sandbox shape.
+			midArchive := &Instance{
+				ID:         "mid-archive-id",
+				Title:      "mid-archive",
+				Path:       repoPath,
+				Branch:     "af/mid-archive",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+			}
+			if got := midArchive.backend.Type(); got != backendType {
+				t.Fatalf("mid-archive backend Type() = %q, want %q", got, backendType)
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				if row.Branch != "af/mid-archive" {
+					t.Fatalf("retained mid-archive %s row lost its pushed-branch pointer: %q (without it the next restore re-clones the repo DEFAULT branch)", backendType, row.Branch)
+				}
+				if row.BackendType != backendType {
+					t.Fatalf("retained mid-archive row backend type = %q, want %q", row.BackendType, backendType)
+				}
+				return
+			}
+			t.Fatalf("daemon checkpoint dropped the mid-archive %s session and "+
+				"erased the only af-side handle to its pushed origin branch (its record "+
+				"was the only pointer, exactly the obligation lostSandboxRecord exists for)",
+				backendType)
+		})
+	}
+}
+
+// TestSaveInstances_NoSibling_KeepsMidArchiveRowReplacingStale documents the
+// no-sibling failure mode of the off-box mid-archive gap covered by the
+// pendingArchiveSandbox retention claim. When the mid-archive session is the
+// ONLY in-memory row for its repo, the wholesale checkpoint leaves the repo's
+// instances.json UNREWRITTEN without the claim (grouped[rid] is built AFTER the
+// Loading/Deleting skip's continue fires), so a stale pre-archive on-disk row
+// the daemon held BEFORE the branch push returns survives untouched —
+// typically with Branch="" (the daemon's i.Branch is empty until
+// ArchiveSandbox records the pushed branch). On restart the dead sandbox
+// resolves Lost and the Lost re-provision fetches the repo DEFAULT branch
+// because RestoreBranch is empty, a "successful" recovery that silently
+// strands the pushed work onto the wrong branch (session/archive_sandbox.go).
+// With the pendingArchiveSandbox claim the mid-archive row becomes the
+// retained row and the per-repo overwrite REPLACES the stale row with the
+// pushed-branch pointer.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the stale pre-archive row survives and the
+// mid-archive row with its pushed branch is absent after the save.
+func TestSaveInstances_NoSibling_KeepsMidArchiveRowReplacingStale(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+			// The stale pre-archive on-disk row: LiveRunning with an empty Branch
+			// pointer, the state the daemon snapshot persisted before the push
+			// returned. After a restart that loses the in-memory mid-archive row,
+			// restore re-provisions from this empty Branch — i.e. from the repo
+			// DEFAULT branch — and silently strands the pushed work.
+			seedDisk(t, state, repoPath, []InstanceData{{
+				Title:       "mid-archive",
+				Path:        repoPath,
+				Branch:      "",
+				Program:     "claude",
+				Status:      Running,
+				Liveness:    LiveRunning,
+				BackendType: backendType,
+			}})
+
+			// The in-memory row now in the mid-archive window: branch pushed and
+			// recorded, OpArchiving raised, CommitArchive not yet run.
+			midArchive := &Instance{
+				ID:         "mid-archive-id",
+				Title:      "mid-archive",
+				Path:       repoPath,
+				Branch:     "af/mid-archive",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			rows := readDisk(t, state, repoPath)
+			if len(rows) != 1 {
+				t.Fatalf("checkpoint persisted %d rows, want the mid-archive row replacing the stale pre-archive row (no stale Branch=\"\" survivor)", len(rows))
+			}
+			row := rows[0]
+			if row.Title != midArchive.Title {
+				t.Fatalf("persisted row title = %q, want %q (the stale pre-archive row survived untouched instead of being overwritten)", row.Title, midArchive.Title)
+			}
+			if row.Branch != "af/mid-archive" {
+				t.Fatalf("mid-archive %s row persisted with stale Branch %q; want the pushed %q (the disaster case is the empty Branch the daemon held before the push that re-provisions onto the repo DEFAULT branch after restart)", backendType, row.Branch, "af/mid-archive")
+			}
+			if row.BackendType != backendType {
+				t.Fatalf("retained mid-archive row backend type = %q, want %q", row.BackendType, backendType)
+			}
+		})
+	}
+}
+
 // TestSaveInstances_StillPrunesDisposableSandboxRows is the other half of #3422:
 // making a lost sandbox durable must not degrade into "never prune anything".
 // Both rows below are sandbox-backed and !Started, and both must still be

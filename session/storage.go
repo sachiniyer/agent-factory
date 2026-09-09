@@ -715,9 +715,25 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
 		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
 		archiveReportPending := data.archiveReportPending
+		// An off-box sandbox (docker/ssh/sandbox/hook) caught mid-archive at the
+		// checkpoint has already pushed its branch to origin — durable there — and
+		// recorded that branch on i.Branch (session/archive_sandbox.go). BeginArchive
+		// raised OpArchiving and left liveness LiveRunning until CommitArchive lands,
+		// so composeStatus(LiveRunning, OpArchiving) is Deleting and the row hits the
+		// (Loading/Deleting) skip below WITHOUT this claim: dropping it erases (the
+		// sibling case) or strands (the no-sibling stale case) the only af-side handle
+		// to the pushed branch, exactly the obligation lostSandboxRecord exists for —
+		// but lostSandbox requires LiveLost and a mid-archive row is still LiveRunning.
+		// An off-box session has no daemon-side gitWorktree, so archiveReportPending
+		// (the LOCAL mid-archive claim) never becomes true for it; this is its
+		// analogue. Scoped to OpArchiving (an in-flight KILL still wins below) and to
+		// LiveArchived-on-the-disk state never happening under an in-flight op anyway;
+		// the != LiveArchived guard keeps the claim inside the mid-archive window.
+		pendingArchiveSandbox := isSandboxBackendType(data.BackendType) &&
+			data.InFlightOp == OpArchiving && data.Liveness != LiveArchived
 		pendingTabs := len(data.PendingTabs) > 0
 		durableRetention := pendingHandoff || unknownRuntimeCleanup ||
-			unresolvedRelocation || archiveReportPending
+			unresolvedRelocation || archiveReportPending || pendingArchiveSandbox
 		// A lost sandbox row loads inert (started=false) by design, and its record is
 		// the only pointer to the branch it pushed to origin — a durable retention claim
 		// of its own (#3422; see lostSandboxRecord). Deliberately NOT folded into
