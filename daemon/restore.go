@@ -354,6 +354,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
 			return "", err
 		}
+		// The push landed: reset the push-failure episode budget so that a later
+		// blip earns a fresh counter rather than inheriting this episode's
+		// escalation — the same reset the automatic probeAnsweredDead path applies.
+		m.resetPreserveBudget(repoID, instance)
 	}
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that

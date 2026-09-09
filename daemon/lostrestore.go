@@ -657,6 +657,22 @@ func (m *Manager) confirmedAliveSinceSpawnLocked(repoID string, inst *session.In
 	return m.observationsSinceSpawnLocked(repoID, inst, st) >= lostRestoreConfirmObservations
 }
 
+// resetPreserveBudget clears the push-failure episode counter for the session
+// identified by repoID and inst after a successful preserve. This mirrors what
+// the automatic probeAnsweredDead path does in-line, so that the manual restore
+// path also resets the budget when its own preserveSandboxBeforeReap lands — a
+// successful push ends the episode regardless of which path ran it.
+func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
+	stateKey := stableSessionKey(repoID, inst)
+	m.mu.Lock()
+	if st := m.lostRestoreStates[stateKey]; st != nil {
+		st.preserveFailureAttempts = 0
+		st.remoteUnknownAttempts = 0
+		st.nextAttempt = time.Time{}
+	}
+	m.mu.Unlock()
+}
+
 // lostRestoreFailed records a failed restore attempt, backing off until the
 // bounded attempt budget is exhausted. The terminal outcome is a durable session
 // fact as well as an ERROR log, so daemon restart and every client retain the
