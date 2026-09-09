@@ -38,7 +38,7 @@ func TestHTTPRequestDrainJoinsDispatchedHandlerAndRefusesLaterRequest(t *testing
 
 	rejected := httptest.NewRecorder()
 	handler(rejected, httptest.NewRequest(http.MethodPost, "/v1/Test", nil))
-	if rejected.Code != http.StatusServiceUnavailable || !strings.Contains(rejected.Body.String(), "quiescing") {
+	if rejected.Code != http.StatusServiceUnavailable || !strings.Contains(rejected.Body.String(), daemonQuiescingErrText) {
 		t.Fatalf("request admitted after the HTTP drain closed: status=%d body=%q", rejected.Code, rejected.Body.String())
 	}
 	close(release)
