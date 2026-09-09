@@ -763,18 +763,28 @@ export class AppShell {
       this.syncPhone();
     });
   };
-  private readonly syncPhone = (): void => {
+  private syncPhone(): void {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) return;
+    if (this.el.classList.contains("af-session-first") === active) {
+      // The capture belongs only to this media-change transaction. A Web/VS Code
+      // tab needs no responsive reparent, so retaining its snapshot would let a
+      // later terminal selection consume stale picker-open state.
+      this.responsiveNewTabState = null;
+      return;
+    }
     const focus = document.activeElement as HTMLElement | null;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
-    const pickerOpen = pickerTrigger?.getAttribute("aria-expanded") === "true";
-    // A shortcut transaction follows the picker through either responsive owner.
-    // The callback decides what to close from the layout that exists on Escape.
-    const responsiveReturn = this.responsiveNewTabCancelReturn;
-    this.responsiveNewTabCancelReturn = null;
+    // appbarControls captures this before its media listener closes the phone
+    // disclosure. The composition pass is deliberately deferred until every
+    // owner-specific listener has run, so neither picker state nor its shortcut
+    // return may be sampled from the already-mutated DOM here.
+    const responsiveState = this.responsiveNewTabState;
+    this.responsiveNewTabState = null;
+    const pickerOpen = responsiveState?.trigger === pickerTrigger
+      ? responsiveState.open
+      : pickerTrigger?.getAttribute("aria-expanded") === "true";
     const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
-      (responsiveReturn?.trigger === pickerTrigger ? responsiveReturn.cancel : undefined) : undefined;
+      (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : undefined) : undefined;
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
@@ -790,12 +800,15 @@ export class AppShell {
         this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
       }
     }
-    if (focus && focus !== document.activeElement) {
+    // openNewTabPicker has restored focus to its first item. Do not overwrite it
+    // with the app-controls trigger focused by the preceding media listener: that
+    // focusout would immediately close the picker we just reopened.
+    if (!pickerOpen && focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
     }
     this.actions.layoutChanged();
-  };
+  }
   private readonly appControls: ReturnType<typeof appbarControls>;
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
   private lastThemeChoice: ThemeChoice | null = null;
@@ -878,11 +891,18 @@ export class AppShell {
   // Escape restores every enclosing disclosure a keyboard open changed before
   // returning to navigation. Pointer opens have no entry and return to the button.
   private readonly newTabCancelReturn = new WeakMap<HTMLElement, () => void>();
-  private responsiveNewTabCancelReturn: { trigger: HTMLElement; cancel: () => void } | null = null;
+  private responsiveNewTabState: {
+    trigger: HTMLElement;
+    cancel?: () => void;
+    open: boolean;
+  } | null = null;
   private readonly captureNewTabCancelReturn = (): void => {
     const trigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
-    const cancel = trigger ? this.newTabCancelReturn.get(trigger) : undefined;
-    this.responsiveNewTabCancelReturn = trigger && cancel ? { trigger, cancel } : null;
+    this.responsiveNewTabState = trigger ? {
+      trigger,
+      cancel: this.newTabCancelReturn.get(trigger),
+      open: trigger.getAttribute("aria-expanded") === "true",
+    } : null;
   };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag

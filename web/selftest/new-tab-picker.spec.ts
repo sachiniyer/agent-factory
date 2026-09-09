@@ -147,6 +147,7 @@ test("desktop shortcut cancel restores navigation while click cancel returns to 
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
+  await expect(page.locator(".af-rail")).toBeFocused();
   await page.keyboard.press("t");
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");

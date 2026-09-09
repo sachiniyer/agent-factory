@@ -14750,15 +14750,18 @@ var AppShell = class {
       this.syncPhone();
     });
   };
-  syncPhone = () => {
+  syncPhone() {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) return;
+    if (this.el.classList.contains("af-session-first") === active) {
+      this.responsiveNewTabState = null;
+      return;
+    }
     const focus = document.activeElement;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
-    const pickerOpen = pickerTrigger?.getAttribute("aria-expanded") === "true";
-    const responsiveReturn = this.responsiveNewTabCancelReturn;
-    this.responsiveNewTabCancelReturn = null;
-    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ?? (responsiveReturn?.trigger === pickerTrigger ? responsiveReturn.cancel : void 0) : void 0;
+    const responsiveState = this.responsiveNewTabState;
+    this.responsiveNewTabState = null;
+    const pickerOpen = responsiveState?.trigger === pickerTrigger ? responsiveState.open : pickerTrigger?.getAttribute("aria-expanded") === "true";
+    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ?? (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : void 0) : void 0;
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
@@ -14770,12 +14773,12 @@ var AppShell = class {
         this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
       }
     }
-    if (focus && focus !== document.activeElement) {
+    if (!pickerOpen && focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
     }
     this.actions.layoutChanged();
-  };
+  }
   appControls;
   themeOpts = /* @__PURE__ */ new Map();
   lastThemeChoice = null;
@@ -14855,11 +14858,14 @@ var AppShell = class {
   // Escape restores every enclosing disclosure a keyboard open changed before
   // returning to navigation. Pointer opens have no entry and return to the button.
   newTabCancelReturn = /* @__PURE__ */ new WeakMap();
-  responsiveNewTabCancelReturn = null;
+  responsiveNewTabState = null;
   captureNewTabCancelReturn = () => {
     const trigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
-    const cancel = trigger ? this.newTabCancelReturn.get(trigger) : void 0;
-    this.responsiveNewTabCancelReturn = trigger && cancel ? { trigger, cancel } : null;
+    this.responsiveNewTabState = trigger ? {
+      trigger,
+      cancel: this.newTabCancelReturn.get(trigger),
+      open: trigger.getAttribute("aria-expanded") === "true"
+    } : null;
   };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
@@ -17795,8 +17801,18 @@ function onKeydown(e) {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shell?.openNewTabPicker(() => {
         focusRail();
-        if (navigationTarget?.isConnected) navigationTarget.focus({ preventScroll: true });
-        else document.activeElement?.blur();
+        if (navigationTarget?.isConnected && navigationTarget !== document.body) {
+          navigationTarget.focus({ preventScroll: true });
+        }
+        if (document.activeElement !== navigationTarget || navigationTarget === document.body) {
+          const rail = root?.querySelector(".af-rail");
+          if (rail) {
+            rail.tabIndex = -1;
+            rail.focus({ preventScroll: true });
+          } else {
+            document.activeElement?.blur();
+          }
+        }
       });
       break;
     }
