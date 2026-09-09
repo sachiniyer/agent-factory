@@ -342,7 +342,7 @@ const AWAITING_MAINTAINER_REVIEW_REMEDY =
   "an allowed author posts that marker as the whole first line of a PR comment, or leaves an " +
   "APPROVED review — neither needs anything from the author; it binds to this head, so a push " +
   "after it needs a fresh one, and on this path it restores the manual pass";
-const ABSENT_CODEX_VERDICT_REMEDY =
+const CODEX_VERDICT_REMEDY =
   "post `@codex review` on this head in a PR comment; requesting the review needs nothing from " +
   "the author, and the blocker clears when Codex returns a covering verdict";
 const RETRY_DELAYS_MS = [250, 1000];
@@ -938,8 +938,9 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   //
   // The test is PER-ITEM ANSWERABLE BY A MAINTAINER, not "is it a finding". A
   // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack]
-  // reply, and an absent verdict is cleared by posting `@codex review` on this
-  // head. Neither action needs the author, so both leave an exit and both block.
+  // reply, and an absent or stale verdict is cleared by posting `@codex review`
+  // on this head. Neither action needs the author, so both leave an exit and
+  // both block.
   // The missing play-tested label remains a note as a separate policy choice;
   // #4091 is only about enforcing the review-verdict requirement.
   //
@@ -959,8 +960,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const manualMergeBlockers = manualMergeRequired
     ? [
         ...(codex.findingBlockers ?? []),
-        ...(!codex.reviewerUnavailable && codex.absentVerdictBlocker
-          ? [codex.absentVerdictBlocker]
+        ...(!codex.reviewerUnavailable && codex.verdictBlocker
+          ? [codex.verdictBlocker]
           : []),
         ...(awaitingMaintainerReview
           ? [
@@ -4232,7 +4233,7 @@ async function evaluateCodex({
   let reviewerUnavailableSince = null;
   let reviewerUnavailableKind = null;
   let reviewerUnavailableReason = "";
-  let absentVerdictBlocker = null;
+  let verdictBlocker = null;
   const { owner, repo } = context.repo;
   // Two anchors, because the rules below ask two different questions and one
   // value cannot answer both (#3380).
@@ -4403,16 +4404,22 @@ async function evaluateCodex({
       reviewerUnavailableKind = unavailable.kind;
     }
     reasons.push(missingVerdictReason);
-    absentVerdictBlocker = {
+    verdictBlocker = {
       reason: missingVerdictReason,
-      remedy: ABSENT_CODEX_VERDICT_REMEDY,
+      remedy: CODEX_VERDICT_REMEDY,
     };
   } else {
     // The artifact's own time: the comment's for a prose line, the row's for a
     // summary row.
     const verdictTime = verdict.time;
     if (headCurrentSince == null || verdictTime === 0 || verdictTime <= headCurrentSince) {
-      reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
+      const staleVerdictReason =
+        "Codex verdict for the head commit is older than the head commit timestamp";
+      reasons.push(staleVerdictReason);
+      verdictBlocker = {
+        reason: staleVerdictReason,
+        remedy: CODEX_VERDICT_REMEDY,
+      };
     } else {
       notes.push(`Codex verdict matches head ${sha}`);
       notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
@@ -4655,7 +4662,7 @@ async function evaluateCodex({
     reviewerUnavailableReason,
     reviewerUnavailableSince,
     reviewerUnavailableKind,
-    absentVerdictBlocker,
+    verdictBlocker,
     findingBlockers,
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.

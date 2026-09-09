@@ -8764,6 +8764,25 @@ test("an absent verdict keeps the required manual decision red for a non-allowed
   assert.equal(transaction.aggregate.ok, false, "the required aggregate must stay red");
 });
 
+test("a stale verdict blocks the manual decision until Codex reviews the current head", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    headForcePushes: [
+      { createdAt: "2026-07-09T02:00:00Z", afterCommit: { oid: HEAD_SHA } },
+    ],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.match(
+    result.manualMergeBlockers.map((blocker) => blocker.reason).join("\n"),
+    /Codex verdict for the head commit is older than the head/,
+  );
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.summary, /post `@codex review` on this head/);
+});
+
 test("a covered verdict restores the manual pass for a non-allowed author", async () => {
   const result = await evaluateGate({
     author: "detail-app",

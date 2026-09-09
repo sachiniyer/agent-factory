@@ -45,11 +45,11 @@ blocker: an unanswered finding takes a threaded `RESOLVED`, `ACCEPTED` or
 after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
 `RESOLVED` cannot clear that one.
 
-**An absent verdict blocks that pass too** (#4091). The test is not "is it a
-finding" but "can a maintainer answer it per item, without the author iterating":
-post `@codex review` on the current head, and the blocker clears when Codex
-returns a covering verdict. The missing play-tested label remains an advisory
-note as a separate policy choice; #4091 changes only the review-verdict
+**An absent or stale verdict blocks that pass too** (#4091). The test is not "is
+it a finding" but "can a maintainer answer it per item, without the author
+iterating": post `@codex review` on the current head, and the blocker clears when
+Codex returns a fresh covering verdict. The missing play-tested label remains an
+advisory note as a separate policy choice; #4091 changes only the review-verdict
 requirement.
 
 **An unreviewed reviewer-unavailable degradation also blocks that pass** (#3825),
