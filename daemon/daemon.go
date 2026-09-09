@@ -801,9 +801,9 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 	// the os.ErrProcessDone surface.
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		if errIsProcessGone(err) {
-			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
-			cleanupDaemonRuntimeFiles(pidFile)
-			return true, nil
+		log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
+		cleanupDaemonRuntimeFiles(pidFile, deadline)
+		return true, nil
 		}
 		return false, fmt.Errorf("failed to signal daemon process: %w", err)
 	}
@@ -832,7 +832,7 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		}
 	}
 
-	cleanupDaemonRuntimeFiles(pidFile)
+	cleanupDaemonRuntimeFiles(pidFile, deadline)
 	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
 	return true, nil
 }
@@ -854,8 +854,8 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 // died with the process. The worst false positive (a ping answered by a
 // process still mid-SIGKILL) merely leaves a stale socket behind, which the
 // next spawn's bind path replaces.
-func cleanupDaemonRuntimeFiles(pidFile string) {
-	if err := pingDaemon(); err == nil {
+func cleanupDaemonRuntimeFiles(pidFile string, deadline time.Time) {
+	if err := pingDaemonUntil(deadline); err == nil {
 		log.InfoLog.Printf("a live daemon answered on the control socket after stop; leaving its runtime files in place")
 		return
 	}
