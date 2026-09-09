@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -125,7 +126,15 @@ func TestLegacyInodeHookProgressStaysPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.WorktreeIdentity = &hookWorktreeIdentity{Device: 7, Inode: 11}
+	info, err := os.Lstat(filepath.Join(tree, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("fixture .git file has no legacy filesystem identity")
+	}
+	p.WorktreeIdentity = &hookWorktreeIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}
 	data, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
