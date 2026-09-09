@@ -317,6 +317,26 @@ test("physical Insert keeps xterm's bare encoding while consuming sticky modifie
   }
 });
 
+test("physical PageUp and PageDown keep xterm's Alt-only form and encode Ctrl", () => {
+  for (const [key, input, ctrlInput] of [
+    ["PageUp", "\x1b[5~", "\x1b[5;5~"], ["PageDown", "\x1b[6~", "\x1b[6;5~"],
+  ] as const) {
+    const physical = { key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false };
+    const alt = new StickyModifiers();
+    alt.tap("Alt", 0);
+    assert.equal(alt.input(input, "user", physical), input);
+    assert.equal(alt.state("Alt"), "off");
+    assert.equal(alt.input("a", "user"), "a");
+
+    const ctrl = new StickyModifiers();
+    ctrl.tap("Ctrl", 0);
+    assert.equal(ctrl.input(input, "user", {
+      key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+    }), ctrlInput);
+    assert.equal(ctrl.state("Ctrl"), "off");
+  }
+});
+
 test("a deferred 229 marker ignores parser replies before its textarea diff", () => {
   const modifiers = new StickyModifiers();
   modifiers.tap("Ctrl", 0);

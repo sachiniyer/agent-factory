@@ -8484,6 +8484,7 @@ function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
   const alt = physical.altKey || stickyAlt;
   const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
   if (physical.key === "Insert") return text;
+  if ((physical.key === "PageUp" || physical.key === "PageDown") && !ctrl) return text;
   const sequence = userSequence(text);
   if (sequence) {
     if (sequence.kind === "CSI" && sequence.final === "Z") return text;

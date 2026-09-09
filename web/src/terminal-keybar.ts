@@ -153,6 +153,9 @@ function mergePhysicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyC
   // otherwise emits Insert only as bare CSI 2~, ignoring Alt. Preserve that
   // contract; the caller still consumes a sticky modifier consulted here.
   if (physical.key === "Insert") return text;
+  // PageUp/PageDown gain a modifier parameter only when Ctrl is effective in
+  // xterm 5.5; Alt and Meta alone deliberately retain the bare CSI 5~/6~ form.
+  if ((physical.key === "PageUp" || physical.key === "PageDown") && !ctrl) return text;
   const sequence = userSequence(text);
   if (sequence) {
     // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held.
