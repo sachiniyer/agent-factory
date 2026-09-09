@@ -100,16 +100,6 @@ func (i *Instance) Handoffs() []AgentHandoff {
 	return out
 }
 
-// LastHandoff returns the most recent ledger entry, if any.
-func (i *Instance) LastHandoff() (AgentHandoff, bool) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	if len(i.Tabs) == 0 || len(i.Tabs[0].Handoffs) == 0 {
-		return AgentHandoff{}, false
-	}
-	return i.Tabs[0].Handoffs[len(i.Tabs[0].Handoffs)-1], true
-}
-
 // ValidateHandoffTarget checks that target is a usable handoff destination for
 // this instance, without mutating anything. It is the shared precondition for
 // the CLI, the RPC, and the TUI so all three refuse the same inputs with the
