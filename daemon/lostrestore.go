@@ -483,7 +483,17 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// never pushed is still there — and recovery re-clones from origin, which
 		// would destroy it. Push first, and refuse to replace anything if that push
 		// does not land, exactly as ArchiveSandbox refuses via AbortArchiveToLost.
-		if err := m.preserveSandboxBeforeReap(repoID, key, inst, forceReapSuggestionFor(inst)); err != nil {
+		//
+		// Off-ramp selection: if no archive has ever landed (empty branch), --force-reap
+		// cannot execute — requireDurableSandboxBranch rejects an empty persisted
+		// branch, making that suggestion a dead end at give-up. The kill/recreate
+		// path is the only one that can actually clear the terminal state, so name it
+		// instead. A session with a non-empty branch keeps --force-reap as its off-ramp.
+		preserveSuggestion := forceReapSuggestionFor(inst)
+		if inst.GetBranch() == "" {
+			preserveSuggestion = killSuggestionFor(inst)
+		}
+		if err := m.preserveSandboxBeforeReap(repoID, key, inst, preserveSuggestion); err != nil {
 			m.mu.Lock()
 			// Its OWN dedupe flag. remoteUnknownLogged is set by the unknown arm and
 			// never reset, so sharing it meant a sandbox that first went unreachable and

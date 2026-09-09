@@ -118,21 +118,12 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 		// failures the loop publishes a durable LostRestoreFailure and stops, while
 		// the sandbox stays intact and --force-reap remains the off-ramp. Give-up
 		// ends the forever-retry, not the recoverability.
-		//
-		// Exception: if no archive has ever landed (no branch recorded), --force-reap
-		// cannot execute — requireDurableSandboxBranch rejects an empty branch, so
-		// that suggestion is a dead end. Use the kill/recreate off-ramp instead,
-		// which is what the empty-branch success case below already does.
-		offRamp := escapeSuggestion
-		if strings.TrimSpace(instance.GetBranch()) == "" {
-			offRamp = killSuggestionFor(instance)
-		}
 		return fmt.Errorf(
 			"refusing to replace the sandbox for %q: its agent is gone but the sandbox still ANSWERS, "+
 				"and the push that would make its unpushed work durable failed (%w). "+
 				"Replacing it now would destroy any commits it holds. "+
 				"It stays recoverable; if you know its work is expendable, force it with: %s",
-			instance.Title, err, offRamp)
+			instance.Title, err, escapeSuggestion)
 	}
 	if branch == "" {
 		// A push that reports no branch leaves recovery with the empty RestoreBranch
