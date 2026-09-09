@@ -31,9 +31,11 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -237,7 +239,7 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// and creating it would fail with "tmux session already exists" for a login
 	// that is sitting there waiting for its human. The name is derived from the
 	// account, so an existing one under it IS this account's flow.
-	if existing := s.adopt(req.Agent, req.Name, pane); existing != nil {
+	if existing := s.adopt(req.Home, req.Agent, req.Name, pane); existing != nil {
 		out := base
 		out.Reused = true
 		out.TmuxName = existing.SanitizedName()
@@ -336,12 +338,31 @@ func (s *Supervisor) live(agent, name string) *tmux.TmuxSession {
 // tmux's determinate "this session exists" — ProbeSession's unknown answer means
 // the server did not answer, which is not evidence either way, and adopting on
 // it would hand a caller a name nothing is running behind.
-func (s *Supervisor) adopt(agent, name string, candidate *tmux.TmuxSession) *tmux.TmuxSession {
+//
+// A same-named pane is adopted only when its AF_HOME session-environment marker
+// names THIS home. The login-pane name is derived from {agent, name} and carries
+// no home component, so on the per-user (shared) tmux server two agent-factory
+// homes with the same {agent, name} both target one tmux session name. Reusing a
+// pane that belongs to another home would silently no-op this home's login — the
+// foreign flow keeps writing to its owner's account dir while THIS home reports
+// Reused — and let this home's Stop/Reap kill a pane it does not own, the
+// cross-home hazard CleanupSessions is already hardened against at
+// session/tmux/cleanup.go:658-702. The marker is the same ownership primitive
+// teardown uses; an absent or unresolvable marker means the pane's heritage
+// cannot be proven to be this home's, so it is left untouched — do not reuse
+// what you cannot prove you own. account-login itself refuses to spawn on tmux
+// < 3.2, so any pane this path creates carries a marker; an absent one is a pane
+// this home did not create.
+func (s *Supervisor) adopt(home, agent, name string, candidate *tmux.TmuxSession) *tmux.TmuxSession {
 	if existing := s.live(agent, name); existing != nil {
 		return existing
 	}
 	exists, known := candidate.ProbeSession()
 	if !known || !exists {
+		return nil
+	}
+	owner, present, err := tmux.SessionHomeMarker(cmd.MakeExecutor(), candidate.SanitizedName())
+	if err != nil || !present || filepath.Clean(owner) != filepath.Clean(home) {
 		return nil
 	}
 	if !s.track(agent, name, candidate) {
