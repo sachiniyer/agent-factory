@@ -120,7 +120,7 @@ func runPostWorktreeRestartHelper(t *testing.T) {
 func restartProbeCommand(pidFile, releaseFile, statusFile, writer string) string {
 	return fmt.Sprintf(
 		"printf '%%s\\n' \"$$\" > %q; %s; %q; status=$?; printf '%%s\\n' \"$status\" > %q; exit \"$status\"",
-		pidFile, boundedFileGate(releaseFile, gatedHookPollLimit, gatedHookPollInterval), writer, statusFile,
+		pidFile, boundedFileGate(releaseFile, "", gatedHookPollLimit, gatedHookPollInterval), writer, statusFile,
 	)
 }
 
