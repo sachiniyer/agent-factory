@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -126,7 +127,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			outputPath := outputFile.Name()
 			// Keep an arbitrary multiline command in one grammar-delimited log field;
 			// bug-report redaction also recognizes the legacy raw %s spelling.
-			log.InfoLog.Printf("running post-worktree hook in %s (output: %s): %q", run.worktreePath, outputPath, cmdStr)
+			log.InfoLog.Print(postWorktreeHookStartMessage(run.worktreePath, outputPath, cmdStr))
 
 			// The daemon-spawned hook enters a transient scope with NO edge to the
 			// daemon unit, so the operator's build is charged to its own cgroup and
@@ -232,6 +233,10 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		}
 	}()
 	return done
+}
+
+func postWorktreeHookStartMessage(worktreePath, outputPath, command string) string {
+	return fmt.Sprintf("running post-worktree hook in %s (output: %s): %q", worktreePath, outputPath, command)
 }
 
 // Successful and deliberately cancelled hooks historically retained no output.

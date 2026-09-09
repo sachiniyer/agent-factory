@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -82,6 +83,38 @@ func TestScrubbersResumeAfterMalformedGoQuotedText(t *testing.T) {
 			}
 			if want := `recover_error="recovery location: [repo:1]-[redacted]"`; !strings.Contains(got, want) {
 				t.Errorf("scrubber output omitted %q: %s", want, got)
+			}
+		})
+	}
+}
+
+func TestScrubbersRecurseThroughNestedGoQuotedValues(t *testing.T) {
+	const repo = `/srv/client"name/repo`
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Title:    "fix bug",
+		Worktree: session.GitWorktreeData{RepoPath: repo},
+	})
+	inner := fmt.Sprintf("cannot check worktree path %q: permission denied", repo+"-fix-bug")
+	input := "recover_error=" + strconv.Quote(inner)
+	want := "recover_error=" + strconv.Quote(
+		`cannot check worktree path "[repo:1]-[redacted]": permission denied`,
+	)
+
+	for _, scrubber := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		t.Run(scrubber.name, func(t *testing.T) {
+			got := scrubber.scrub(input)
+			if strings.Contains(got, "client") || strings.Contains(got, "fix-bug") {
+				t.Fatalf("nested Go-quoted recovery path leaked its private value: %s", got)
+			}
+			if got != want {
+				t.Errorf("scrubber output = %q, want %q", got, want)
 			}
 		})
 	}
