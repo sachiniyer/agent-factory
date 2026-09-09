@@ -108,6 +108,22 @@ test("hardware modifier identity survives xterm arrow aliases", () => {
   }
 });
 
+test("physical modifier merging preserves xterm's emitted control bytes", () => {
+  for (const [sticky, bytes, physical, expected] of [
+    ["Alt", "\x00", { key: " ", ctrlKey: true }, "\x1b\x00"],
+    ["Alt", "\x1b", { key: "3", ctrlKey: true }, "\x1b\x1b"],
+    ["Alt", "\x7f", { key: "8", ctrlKey: true }, "\x1b\x7f"],
+    ["Ctrl", "\x1b ", { key: " ", altKey: true }, "\x1b\x00"],
+    ["Ctrl", "z", { key: "x" }, "\x1a"], // Emitted/layout text wins over the DOM key label.
+  ] as const) {
+    const event = Object.assign({ shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }, physical);
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input(bytes, "user", event), expected);
+    assert.equal(state.state(sticky), "off");
+  }
+});
+
 test("sticky Alt prefixes user-origin hardware controls", () => {
   for (const control of ["\t", "\x1b"] as const) {
     const state = new StickyModifiers();

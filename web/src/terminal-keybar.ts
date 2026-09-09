@@ -118,8 +118,24 @@ export function decodeKeyBytes(text: string): DecodedKeyBytes | undefined {
   return { key: character, ctrl: false, alt, applicationCursor: false };
 }
 
-function physicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
-  stickyAlt: boolean): string | undefined {
+function ctrlModifiedEmission(text: string): string | undefined {
+  if (text.length !== 1) return undefined;
+  const code = text.charCodeAt(0);
+  if (code <= 31) return text;
+  if (code === 127) return "\x08";
+  if (text === " ") return "\x00";
+  const upper = text.toUpperCase();
+  if (upper.length === 1) {
+    const upperCode = upper.charCodeAt(0);
+    if (upperCode >= 64 && upperCode <= 95) return String.fromCharCode(upperCode & 31);
+  }
+  if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
+  if (code === 56) return "\x7f";
+  return undefined;
+}
+
+function mergePhysicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
+  stickyAlt: boolean): string {
   const ctrl = physical.ctrlKey || stickyCtrl;
   const alt = physical.altKey || stickyAlt;
   const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) |
@@ -127,24 +143,24 @@ function physicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyCtrl: 
   const sequence = userSequence(text);
   if (sequence) {
     // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held.
-    if (sequence.kind === "CSI" && sequence.final === "Z") return undefined;
+    if (sequence.kind === "CSI" && sequence.final === "Z") return text;
     // The DOM event is authoritative here. Xterm aliases Alt-only arrows to
     // Ctrl-looking bytes, so the sequence parameter cannot identify the chord.
     return encodeSequence(sequence, modifierBits, text, true);
   }
-  const arrow = ({ ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→" } as const)
+  const arrow = ({ ArrowLeft: "D", ArrowUp: "A", ArrowDown: "B", ArrowRight: "C" } as const)
     [physical.key as "ArrowLeft" | "ArrowUp" | "ArrowDown" | "ArrowRight"];
-  // macOS aliases Alt+Left/Right to ESC b/f, so recover arrow identity from key.
-  if (arrow) return keyBytes(arrow, ctrl, alt);
-  const named = physical.key === "Escape" ? "Esc" : physical.key === "Tab" ? "Tab" : undefined;
-  if (named) return keyBytes(named, ctrl, alt);
-  if (physical.key === "Backspace") return keyBytes("\x7f", ctrl, alt);
-  if (physical.key === "Enter") return keyBytes("\r", ctrl, alt);
-  const codePoint = physical.key.codePointAt(0);
-  if (codePoint !== undefined && physical.key.length === (codePoint > 0xffff ? 2 : 1))
-    return keyBytes(physical.key, ctrl, alt);
-  const decoded = decodeKeyBytes(text);
-  return decoded ? keyBytes(decoded.key, ctrl, alt, decoded.applicationCursor) : undefined;
+  // macOS aliases Alt+Left/Right to ESC b/f. Those bytes have no cursor
+  // direction to merge into, so this is the one physical-identity recovery.
+  if (arrow && physical.altKey && (text === "\x1bb" || text === "\x1bf"))
+    return `\x1b[1;${modifierBits + 1}${arrow}`;
+
+  // Xterm has already evaluated named, scalar, and control keys. Retain that
+  // payload and apply only a missing sticky modifier to it.
+  const physicalAltPrefix = physical.altKey && text.length > 1 && text.charCodeAt(0) === 27;
+  let payload = physicalAltPrefix ? text.slice(1) : text;
+  if (stickyCtrl && !physical.ctrlKey) payload = ctrlModifiedEmission(payload) ?? payload;
+  return (physicalAltPrefix || (stickyAlt && !physical.altKey) ? "\x1b" : "") + payload;
 }
 
 type Modifier = "Ctrl" | "Alt";
@@ -172,9 +188,9 @@ export class StickyModifiers {
     const stickyCtrl = this.values.Ctrl !== "off";
     const stickyAlt = this.values.Alt !== "off";
     if (physical && (stickyCtrl || stickyAlt)) {
-      const result = physicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
+      const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
       this.consumeOnce();
-      return result ?? text;
+      return result;
     }
     // Soft and deferred textarea input have no physical modifier identity. Their
     // byte shapes are unambiguous here, so the encoder inverse remains a fallback.

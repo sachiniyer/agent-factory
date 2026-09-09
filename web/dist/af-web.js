@@ -8375,26 +8375,37 @@ function decodeKeyBytes(text) {
     return { key: String.fromCharCode(codePoint + 64), ctrl: true, alt, applicationCursor: false };
   return { key: character, ctrl: false, alt, applicationCursor: false };
 }
-function physicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
+function ctrlModifiedEmission(text) {
+  if (text.length !== 1) return void 0;
+  const code = text.charCodeAt(0);
+  if (code <= 31) return text;
+  if (code === 127) return "\b";
+  if (text === " ") return "\0";
+  const upper = text.toUpperCase();
+  if (upper.length === 1) {
+    const upperCode = upper.charCodeAt(0);
+    if (upperCode >= 64 && upperCode <= 95) return String.fromCharCode(upperCode & 31);
+  }
+  if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
+  if (code === 56) return "\x7F";
+  return void 0;
+}
+function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
   const ctrl = physical.ctrlKey || stickyCtrl;
   const alt = physical.altKey || stickyAlt;
   const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
   const sequence = userSequence(text);
   if (sequence) {
-    if (sequence.kind === "CSI" && sequence.final === "Z") return void 0;
+    if (sequence.kind === "CSI" && sequence.final === "Z") return text;
     return encodeSequence(sequence, modifierBits, text, true);
   }
-  const arrow = { ArrowLeft: "\u2190", ArrowUp: "\u2191", ArrowDown: "\u2193", ArrowRight: "\u2192" }[physical.key];
-  if (arrow) return keyBytes(arrow, ctrl, alt);
-  const named = physical.key === "Escape" ? "Esc" : physical.key === "Tab" ? "Tab" : void 0;
-  if (named) return keyBytes(named, ctrl, alt);
-  if (physical.key === "Backspace") return keyBytes("\x7F", ctrl, alt);
-  if (physical.key === "Enter") return keyBytes("\r", ctrl, alt);
-  const codePoint = physical.key.codePointAt(0);
-  if (codePoint !== void 0 && physical.key.length === (codePoint > 65535 ? 2 : 1))
-    return keyBytes(physical.key, ctrl, alt);
-  const decoded = decodeKeyBytes(text);
-  return decoded ? keyBytes(decoded.key, ctrl, alt, decoded.applicationCursor) : void 0;
+  const arrow = { ArrowLeft: "D", ArrowUp: "A", ArrowDown: "B", ArrowRight: "C" }[physical.key];
+  if (arrow && physical.altKey && (text === "\x1Bb" || text === "\x1Bf"))
+    return `\x1B[1;${modifierBits + 1}${arrow}`;
+  const physicalAltPrefix = physical.altKey && text.length > 1 && text.charCodeAt(0) === 27;
+  let payload = physicalAltPrefix ? text.slice(1) : text;
+  if (stickyCtrl && !physical.ctrlKey) payload = ctrlModifiedEmission(payload) ?? payload;
+  return (physicalAltPrefix || stickyAlt && !physical.altKey ? "\x1B" : "") + payload;
 }
 var StickyModifiers = class {
   values = { Ctrl: "off", Alt: "off" };
@@ -8420,9 +8431,9 @@ var StickyModifiers = class {
     const stickyCtrl = this.values.Ctrl !== "off";
     const stickyAlt = this.values.Alt !== "off";
     if (physical && (stickyCtrl || stickyAlt)) {
-      const result = physicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
+      const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
       this.consumeOnce();
-      return result ?? text;
+      return result;
     }
     const decoded = decodeKeyBytes(text);
     if (decoded) {
