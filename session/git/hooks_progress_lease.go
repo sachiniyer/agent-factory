@@ -22,10 +22,21 @@ type hookProgressLeaseOpenFlight struct {
 	timedOut bool
 }
 
+type hookProgressLeaseStatFlight struct {
+	done chan struct{}
+	info os.FileInfo
+	err  error
+}
+
 var hookProgressLeaseOpenFlights = struct {
 	sync.Mutex
 	byPath map[string]*hookProgressLeaseOpenFlight
 }{byPath: make(map[string]*hookProgressLeaseOpenFlight)}
+
+var hookProgressLeaseStatFlights = struct {
+	sync.Mutex
+	byPath map[string]*hookProgressLeaseStatFlight
+}{byPath: make(map[string]*hookProgressLeaseStatFlight)}
 
 // Lease lookup is metadata I/O on the same potentially remote filesystem as
 // the journal. A timed-out worker performs no journal mutation; if its open
@@ -125,7 +136,7 @@ func withInactiveHookProgressLease(dir string, remove func() error) (bool, error
 		}
 		return false, err
 	}
-	current, err := file.Stat()
+	current, err := boundedHookProgressLeaseStat(file, leasePath)
 	if err != nil {
 		return false, err
 	}
@@ -137,4 +148,46 @@ func withInactiveHookProgressLease(dir string, remove func() error) (bool, error
 		return false, fmt.Errorf("hook runner lease was replaced: %s", leasePath)
 	}
 	return true, remove()
+}
+
+func boundedHookProgressLeaseStat(file *os.File, path string) (os.FileInfo, error) {
+	duplicateFD, err := syscall.Dup(int(file.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	duplicate := os.NewFile(uintptr(duplicateFD), path)
+	hookProgressLeaseStatFlights.Lock()
+	if hookProgressLeaseStatFlights.byPath[path] != nil {
+		hookProgressLeaseStatFlights.Unlock()
+		_ = duplicate.Close()
+		return nil, fmt.Errorf("hook runner lease inspection for %s is still running after an earlier deadline: %w", path, context.DeadlineExceeded)
+	}
+	flight := &hookProgressLeaseStatFlight{done: make(chan struct{})}
+	hookProgressLeaseStatFlights.byPath[path] = flight
+	hookProgressLeaseStatFlights.Unlock()
+	go func() {
+		flight.info, flight.err = duplicate.Stat()
+		flight.err = errors.Join(flight.err, duplicate.Close())
+		hookProgressLeaseStatFlights.Lock()
+		if hookProgressLeaseStatFlights.byPath[path] == flight {
+			delete(hookProgressLeaseStatFlights.byPath, path)
+		}
+		close(flight.done)
+		hookProgressLeaseStatFlights.Unlock()
+	}()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case <-flight.done:
+		return flight.info, flight.err
+	case <-timer.C:
+		hookProgressLeaseStatFlights.Lock()
+		if hookProgressLeaseStatFlights.byPath[path] == flight {
+			hookProgressLeaseStatFlights.Unlock()
+			return nil, fmt.Errorf("timed out after %s while inspecting hook runner lease %s: %w", relocationIdentityTimeout, path, context.DeadlineExceeded)
+		}
+		hookProgressLeaseStatFlights.Unlock()
+		<-flight.done
+		return flight.info, flight.err
+	}
 }

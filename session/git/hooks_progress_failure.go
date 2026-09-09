@@ -69,7 +69,7 @@ func (p *hookProgress) waitForFailedClaimSync(ctx context.Context, index int) bo
 	defer ticker.Stop()
 	var lastError string
 	for {
-		if err := hookProgressSyncDirectory(p.Directory); err == nil {
+		if err := boundedSyncHookProgressDirectory(p.Directory); err == nil {
 			if lastError != "" {
 				log.InfoLog.Printf("failed post-worktree hook entry %d durability sync recovered", index)
 			}

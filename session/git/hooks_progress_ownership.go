@@ -224,7 +224,7 @@ func retireHookProgressName(path string, p *hookProgress) (string, error) {
 	// The non-resumable name must survive a successful-return boundary before
 	// receipts are removed. Otherwise a crash can restore the old resumable name
 	// after its terminal evidence has already been deleted.
-	if err := hookProgressSyncDirectory(filepath.Dir(retired)); err != nil {
+	if err := boundedSyncHookProgressDirectory(filepath.Dir(retired)); err != nil {
 		return retired, fmt.Errorf("sync retired hook journal directory: %w", err)
 	}
 	return retired, nil

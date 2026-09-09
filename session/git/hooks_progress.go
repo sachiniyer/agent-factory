@@ -103,7 +103,11 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 }
 
 // Publication and standalone pruning share the existing identity-probe budget.
-// Teardown remains nonblocking through TryWithFileLock in the retirement path.
+// Journal construction, optional reads, lease inspection, and directory
+// durability barriers reached by the callback are bounded. Atomic namespace
+// mutations remain synchronous: abandoning one in a worker could publish after
+// the caller had released this lock and rejected the transaction. Teardown
+// remains nonblocking through TryWithFileLock in the retirement path.
 func withHookProgressLock(dir string, fn func(string, os.FileInfo) error) error {
 	pinned, err := boundedResolveForCompare(dir)
 	if err != nil {
@@ -128,76 +132,21 @@ var hookProgressLockAcquired = func() {}
 // superseded receipt directory without changing the journal being published.
 var previousHookProgressReadFile = BoundedReadFile
 
-// Test seam for the crash-durability barrier after journal publication.
-var hookProgressSyncDirectory = syncHookProgressDirectory
-
-func syncHookProgressDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	if err := directory.Sync(); err != nil {
-		_ = directory.Close()
-		return err
-	}
-	return directory.Close()
-}
-
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
 func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*hookProgress, error) {
-	dir, err := os.MkdirTemp(filepath.Dir(path), "entries-")
+	prepared, err := boundedPrepareHookProgress(run, commands, prefix, generation, path, worktreeIdentity, resumeDisabled)
 	if err != nil {
 		return nil, err
 	}
-	var lease *os.File
+	p := prepared.progress
 	published := false
 	renamed := false
 	defer func() {
 		if !published {
-			if lease != nil {
-				_ = lease.Close()
-			}
-			if renamed {
-				_ = os.Remove(path)
-			}
-			_ = os.RemoveAll(dir)
+			prepared.discard(path, renamed)
 		}
 	}()
-	if run.leaseProgress {
-		lease, err = newHookProgressLease(dir)
-		if err != nil {
-			return nil, err
-		}
-	}
-	p := &hookProgress{
-		lease:     lease,
-		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
-		Prefix: prefix, Generation: generation, Directory: dir, WorktreeIdentity: worktreeIdentity, ResumeDisabled: resumeDisabled,
-	}
-	if lease != nil {
-		p.leaseMu = &sync.Mutex{}
-		p.leaseHolds = 1
-	}
-	data, err := json.Marshal(p)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".progress-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(data); err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		return nil, err
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
 	var previous hookProgress
 	if data, readErr := previousHookProgressReadFile(path); readErr == nil {
 		_ = json.Unmarshal(data, &previous)
@@ -209,11 +158,11 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	if !currentParent.IsDir() || !os.SameFile(parentIdentity, currentParent) {
 		return nil, fmt.Errorf("hook journal directory changed while publication lock was held")
 	}
-	if err := os.Rename(f.Name(), path); err != nil {
+	if err := os.Rename(prepared.temporary, path); err != nil {
 		return nil, err
 	}
 	renamed = true
-	if err := hookProgressSyncDirectory(filepath.Dir(path)); err != nil {
+	if err := boundedSyncHookProgressDirectory(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("sync published hook journal directory: %w", err)
 	}
 	published = true
