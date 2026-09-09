@@ -13,8 +13,8 @@ export type RestoreEvidence =
   }
   | { kind: "updated" | "restored"; id: string };
 
-// Network delivery and handler scheduling get a small margin after the daemon's
-// own admission deadline before an unchanged row proves no restore is queued.
+// Delay the first post-admission reconciliation slightly beyond the daemon's
+// own wait bound. This only controls polling cadence; it never proves outcome.
 export const RESTORE_ADMISSION_MARGIN_MS = 1_000;
 export const RESTORE_RECONCILE_RETRY_MIN_MS = 2_000;
 const RESTORE_RECONCILE_RETRY_MAX_MS = 10_000;
@@ -37,7 +37,7 @@ type RestoreTicket = {
   restoreEligible: RestoreRow["restoreEligible"];
 };
 
-/** Request fences outlive dialogs and remain until a successful restore is visible. */
+/** Request fences outlive dialogs; uncertain outcomes require correlated evidence. */
 export class PendingRestores {
   private readonly tickets = new Map<string, RestoreTicket>();
   private snapshotGeneration = 0;
@@ -49,8 +49,8 @@ export class PendingRestores {
     private readonly changed: (ids: ReadonlySet<string>) => void,
     private readonly retainOnError: (error: unknown) => boolean = () => false,
     private readonly committedOnError: (error: unknown) => boolean = () => false,
-    // Local time only schedules probes. It never proves a daemon-side deadline;
-    // current-daemon expiry uses the daemon's own monotonic readings.
+    // Local and daemon clocks only schedule probes. Neither clock identifies
+    // when this request reached daemon admission or proves its outcome.
     private readonly now: () => number = () => globalThis.performance.now(),
     private readonly requestReconcile: () => void | Promise<void> = () => {},
     private readonly schedule: (callback: () => void, delayMs: number) => RestoreTimer =
@@ -146,10 +146,6 @@ export class PendingRestores {
     const eligibility = new Map(rows.map(row => [row.id, row.restoreEligible]));
     let changed = false;
     for (const [id, ticket] of this.tickets) {
-      const row = rows.find(candidate => candidate.id === id);
-      // Absence is unknown, not an inferred release. Only current daemons can
-      // provide the explicit negative fact needed by the admission proof.
-      const operationLockKnownFree = row?.operationLockHeld === false;
       const authoritative = evidence?.kind === "updated" || evidence?.kind === "restored" || evidence?.kind === "snapshot";
       // A delayed recover-fence update may arrive after HTTP success. Only a
       // Snapshot issued afterward proves completion. Identity-only restored events
@@ -158,42 +154,19 @@ export class PendingRestores {
         evidence.generation > ticket.succeededAt;
       const causalUncertainSnapshot = evidence?.kind === "snapshot" &&
         evidence.generation > ticket.uncertainAt;
-      let daemonAdmissionExpired = false;
       if (causalUncertainSnapshot && this.operationLockTimeoutMs !== null && this.operationClockMs !== null) {
         if (ticket.admissionClockStartedAt === null || this.operationClockMs < ticket.admissionClockStartedAt) {
-          // Start from the first post-error daemon reading. A pre-request
-          // reading could expire before the queued restore's own lock wait.
+          // This only paces reconciliation. The handler may not have reached its
+          // lock wait yet, so the reading cannot prove admission or completion.
           ticket.admissionClockStartedAt = this.operationClockMs;
-        } else {
-          daemonAdmissionExpired = this.operationClockMs >
-            ticket.admissionClockStartedAt + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
         }
       }
-      // This is the sole off-ramp for an unchanged uncertain row: both facts
-      // must be explicitly reported by the same current-daemon Snapshot.
-      const daemonReleaseProven = daemonAdmissionExpired && operationLockKnownFree;
-      let uncertainCompleted = false;
-      if (ticket.uncertain && authoritative && causalUncertainSnapshot) {
-        if (!eligibility.has(id)) {
-          uncertainCompleted = true;
-        } else if (row?.restoreSettled) {
-          // The projection has no attempt id. A predecessor can settle after B
-          // is queued but before B acquires the daemon operation lock, so only a
-          // Snapshot beyond B's admission bound can release its fence.
-          uncertainCompleted = daemonReleaseProven;
-        } else if (row?.restoreEligible) {
-          // A reconnect can hold these captured rows behind slower task/project
-          // loads. Processing time cannot turn a pre-deadline Snapshot into proof.
-          // The elapsed bound proves a waiter cannot still be queued, but an
-          // admitted restore may own the lock before OpRestoring is projected.
-          uncertainCompleted = daemonReleaseProven;
-        } else {
-          // LifecycleActionNone covers every operation fence and several unsettled
-          // states. It carries no attempt identity, so it cannot make a later
-          // restorable projection conclusive for this ticket.
-          uncertainCompleted = false;
-        }
-      }
+      // A transport-uncertain request has no attempt id in the projection. No
+      // state of an extant row (eligible, busy, settled, or lock-free) can prove
+      // that this request did not start later or distinguish it from a competing
+      // attempt. Only authoritative identity disappearance is conclusive.
+      const uncertainCompleted = ticket.uncertain && authoritative &&
+        causalUncertainSnapshot && !eligibility.has(id);
       if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
         this.release(id, ticket);
         changed = true;
