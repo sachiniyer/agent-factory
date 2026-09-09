@@ -162,9 +162,10 @@ type ReadOnlyConfigLoad struct {
 	// disk, so it returns this verdict instead of the loud "config is empty"
 	// error parseConfigTOML raises. That keeps `af doctor` and `af config
 	// validate` aligned with the startup they claim to mirror (the shadow and
-	// symlink-stub cases stay loud errors, matching loadConfig). Config is nil:
-	// the effective config is the defaults startup will materialize on the
-	// next start, not something this no-write check can produce.
+	// symlink-stub cases stay loud errors, matching loadConfig). Config is
+	// DefaultConfig(): the effective configuration startup will materialize on
+	// the next start, so downstream diagnostics can evaluate the real next-start
+	// posture without writing anything.
 	EmptyStub bool
 }
 
@@ -212,7 +213,17 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 		jsonExists := fileExists(configPath)
 		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
 			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
-				return ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true}, nil
+				// Startup's self-heal calls os.Remove(tomlPath), which requires write
+				// permission on configDir. If the directory is not writable the
+				// diagnostic's "healthy" verdict would disagree with startup's error.
+				// Test removability before claiming the stub is a self-healing state.
+				if tmp, terr := os.CreateTemp(configDir, ".af-stub-check-*"); terr != nil {
+					return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("failed to remove empty config file %s: %w", prettyTomlPath, terr)
+				} else {
+					_ = tmp.Close()
+					_ = os.Remove(tmp.Name())
+				}
+				return ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true, Config: DefaultConfig()}, nil
 			}
 		}
 		cfg, err := parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)

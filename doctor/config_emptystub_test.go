@@ -72,7 +72,7 @@ func TestCheckConfigAndStorage_EmptyStubIsHealthy(t *testing.T) {
 
 	report := &Report{}
 	cfg := checkConfigAndStorage(&scanContext{opts: Options{ConfigDir: home}}, report)
-	require.Nil(t, cfg, "EmptyStub surfaces no Config; defaults are implied and materialized on the next start")
+	require.NotNil(t, cfg, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
 
 	row := findCheck(t, report, "config")
 	require.Equal(t, StatusWarn, row.Status)

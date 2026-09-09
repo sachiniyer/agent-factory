@@ -58,11 +58,11 @@ func TestLoadConfigReadOnly_EmptyStubAgreesWithStartup(t *testing.T) {
 			homeRO := seedHome(t, content)
 			tomlPath := filepath.Join(homeRO, TomlConfigFileName)
 			loaded, roErr := LoadConfigReadOnly()
-			require.NoError(t, roErr, "read-only diagnostic must not fail a state startup self-heals")
-			assert.True(t, loaded.EmptyStub, "an effectively-empty stub with no config.json must surface as EmptyStub")
-			assert.False(t, loaded.Missing, "a present stub is not Missing")
-			assert.Nil(t, loaded.Config, "EmptyStub does not synthesize a Config; defaults are implied and materialized on the next start")
-			assert.Equal(t, tomlPath, loaded.Path)
+		require.NoError(t, roErr, "read-only diagnostic must not fail a state startup self-heals")
+		assert.True(t, loaded.EmptyStub, "an effectively-empty stub with no config.json must surface as EmptyStub")
+		assert.False(t, loaded.Missing, "a present stub is not Missing")
+		assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
+		assert.Equal(t, tomlPath, loaded.Path)
 
 			// No-write contract: the stub is intact and nothing was created.
 			got, err := os.ReadFile(tomlPath)
@@ -142,6 +142,34 @@ func TestLoadConfigReadOnly_EmptyStubWithShadowStaysLoudError(t *testing.T) {
 	stub, err := os.ReadFile(tomlPath)
 	require.NoError(t, err)
 	assert.Equal(t, "# oops, empty\n", string(stub), "the empty toml stub must be left intact")
+}
+
+// TestLoadConfigReadOnly_EmptyStubUnremovableDirIsError pins the case where
+// config.toml is readable but the containing directory is not writable, so
+// startup's os.Remove(tomlPath) would fail. The diagnostic must NOT return
+// EmptyStub (which implies "af will self-heal") when self-heal is impossible;
+// it must return the same error startup would, so the two agree.
+func TestLoadConfigReadOnly_EmptyStubUnremovableDirIsError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a read-only directory cannot be staged here")
+	}
+	// Place the config inside a custom home whose parent is not writable.
+	outer := t.TempDir()
+	home := filepath.Join(outer, "af-home")
+	require.NoError(t, os.Mkdir(home, 0o755))
+	tomlPath := filepath.Join(home, TomlConfigFileName)
+	require.NoError(t, os.WriteFile(tomlPath, []byte("# placeholder\n"), 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// Make the home directory read+execute only so os.Remove(tomlPath) would
+	// fail (remove requires write permission on the containing directory).
+	require.NoError(t, os.Chmod(home, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(home, 0o755) })
+
+	loaded, roErr := LoadConfigReadOnly()
+	require.Error(t, roErr, "an empty stub in a non-writable home must be a loud error, not EmptyStub")
+	assert.False(t, loaded.EmptyStub, "EmptyStub must not be set when the home is not writable (self-heal would fail)")
+	assert.Contains(t, roErr.Error(), "failed to remove empty config file")
 }
 
 // TestLoadConfigReadOnly_EmptySymlinkStubStaysLoudError mirrors loadConfig: a
