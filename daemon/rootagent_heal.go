@@ -44,76 +44,95 @@ func (m *Manager) healRootAgentLayers() {
 		len(layers.legacy.unknownPaths) == 0 {
 		return
 	}
-	// Two independent cadences (#3299 review round 8). The registry and
-	// personal-config retries pace on rootHealNextAttempt's failure backoff —
-	// and ONLY on it: the two-strike absence discipline (#3315) needs its
-	// observations SPACED by that backoff, so nothing else may drag these
-	// reads onto the per-tick cadence. Re-attribution runs on every pass
-	// unconditionally: its pacing is per entry (a settled negative rests
-	// until its own retryAt; an in-flight probe is checked without blocking),
-	// so an idle visit costs a map walk, not filesystem work, and a probe
-	// landing between ticks is consumed on the next tick.
+	// Two independent cadences (#3299 review round 8). The personal-config and
+	// reconcile retries pace on rootHealNextAttempt's failure backoff, and the
+	// legacy root_agents recompute rides that same clock when it retries on
+	// its own. The registry arm paces on a SEPARATE clock,
+	// rootHealRegistryNextAttempt: the two-strike absence discipline (#3315)
+	// needs its two observations SPACED by that backoff, and a legacy path
+	// that narrows in the same pass as the streak's first observation resets
+	// rootHealNextAttempt to now — so the registry's second read keeps its
+	// OWN spacing, or the two-strike mount-flap protection collapses to the
+	// per-tick cadence. Re-attribution runs on every pass unconditionally:
+	// its pacing is per entry (a settled negative rests until its own
+	// retryAt; an in-flight probe is checked without blocking), so an idle
+	// visit costs a map walk, not filesystem work, and a probe landing
+	// between ticks is consumed on the next tick.
 	m.mu.Lock()
 	due := !nowFunc().Before(m.rootHealNextAttempt)
+	registryDue := !nowFunc().Before(m.rootHealRegistryNextAttempt)
 	m.mu.Unlock()
 
 	healed := *layers
 	changed := false
-	// rpAttempted/rpChanged track only the backoff-paced reads; the clock
-	// below must not move when this pass did none of them.
+	// rpAttempted/rpChanged track only the backoff-paced reads on the SHARED
+	// clock (personal-config, reconcile, legacy root_agents); the clock below
+	// must not move when this pass did none of them. The registry arm carries
+	// its OWN pair (registryAttempted/registryCommitted) below — a legacy
+	// narrowing that resets the shared clock must not collapse the registry
+	// streak's two-strike spacing.
 	rpAttempted := false
 	rpChanged := false
+	registryAttempted := false
+	registryCommitted := false
 
 	if layers.registryUnreadable {
-		if !due {
-			return
-		}
-		rpAttempted = true
-		// A latched registry PROVABLY existed at daemon start — plain absence
-		// never sets the latch — so during recovery an ABSENT directory is a
-		// transition, not proof of zero projects: a repair mv in flight, a
-		// mount blip. ListProjectsDetailed makes that distinction explicit
-		// and binds an empty result to a present registry. On top of that,
-		// recovery publishes only on the SECOND consecutive MATCHING present-
-		// and-listable snapshot, one backoff cadence apart, and re-verifies
-		// presence after the dependent personal-config reads — the
-		// applyHomeCheck two-strike discipline (only a definite observation,
-		// twice consecutively), because a mount flap inside a single pass can
-		// make removed-looking reads out of files that are about to return
-		// (#3315 review, rounds 2-3). A flap now has to defeat two spaced
-		// passes plus the post-read binding; that residue is indistinguishable
-		// without filesystem transactions and is accepted, in writing, here.
-		// Per-record failures and strays take the #3297 granularity treatment
-		// exactly as at boot.
-		if projects, failures, strays, present, err := config.ListProjectsDetailed(); err == nil && present {
-			streak := m.observeRootHealRegistrySnapshot(projects)
-			if streak >= 2 {
-				logRegistryRecordProblems(m.warn(), failures, strays)
-				// The RUNTIME rebuild, so it carries the fence (#3530 review id
-				// 3920258554): this path proves legacy rows while the daemon is
-				// serving, and a delete can hold the identity it would write.
-				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(m.warn(), projects, m.identityTransitionUnfenced)
-				verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
-				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
-					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
-					healed.reconcileOwed = reconcileOwed
-					healed.recordFailureIDs = recordFailureDirectoryIDs(failures)
-					healed.registryUnreadable = false
-					changed = true
-					rpChanged = true
-					m.resetRootHealRegistryObservation()
-					m.info().Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
-				} else if perr == nil && stillPresent {
-					// The post-read check is another valid observation. Retain it as
-					// the new candidate, but require the next cadence to agree before
-					// any latch is released.
-					m.observeRootHealRegistrySnapshot(verifiedProjects)
-				} else {
-					m.resetRootHealRegistryObservation()
+		// The registry arm paces on its OWN backoff clock
+		// (rootHealRegistryNextAttempt), not the shared one — see the
+		// two-independent-cadences note above. When it is not due the read is
+		// skipped, but the pass does NOT early-return: a legacy root_agents
+		// path that is due on the shared clock may still narrow below, on its
+		// own cadence, and that narrowing must not wait on the registry's.
+		if registryDue {
+			registryAttempted = true
+			// A latched registry PROVABLY existed at daemon start — plain absence
+			// never sets the latch — so during recovery an ABSENT directory is a
+			// transition, not proof of zero projects: a repair mv in flight, a
+			// mount blip. ListProjectsDetailed makes that distinction explicit
+			// and binds an empty result to a present registry. On top of that,
+			// recovery publishes only on the SECOND consecutive MATCHING present-
+			// and-listable snapshot, one backoff cadence apart — paced on THIS
+			// arm's OWN clock, rootHealRegistryNextAttempt, so a legacy path that
+			// narrows in the same pass cannot drag the second read onto the
+			// per-tick cadence — and re-verifies presence after the dependent
+			// personal-config reads — the applyHomeCheck two-strike discipline
+			// (only a definite observation, twice consecutively), because a mount
+			// flap inside a single pass can make removed-looking reads out of
+			// files that are about to return (#3315 review, rounds 2-3). A flap
+			// now has to defeat two spaced passes plus the post-read binding;
+			// that residue is indistinguishable without filesystem transactions
+			// and is accepted, in writing, here. Per-record failures and strays
+			// take the #3297 granularity treatment exactly as at boot.
+			if projects, failures, strays, present, err := config.ListProjectsDetailed(); err == nil && present {
+				streak := m.observeRootHealRegistrySnapshot(projects)
+				if streak >= 2 {
+					logRegistryRecordProblems(m.warn(), failures, strays)
+					// The RUNTIME rebuild, so it carries the fence (#3530 review id
+					// 3920258554): this path proves legacy rows while the daemon is
+					// serving, and a delete can hold the identity it would write.
+					personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(m.warn(), projects, m.identityTransitionUnfenced)
+					verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
+					if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
+						healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
+						healed.reconcileOwed = reconcileOwed
+						healed.recordFailureIDs = recordFailureDirectoryIDs(failures)
+						healed.registryUnreadable = false
+						changed = true
+						registryCommitted = true
+						m.resetRootHealRegistryObservation()
+						m.info().Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
+					} else if perr == nil && stillPresent {
+						// The post-read check is another valid observation. Retain it as
+						// the new candidate, but require the next cadence to agree before
+						// any latch is released.
+						m.observeRootHealRegistrySnapshot(verifiedProjects)
+					} else {
+						m.resetRootHealRegistryObservation()
+					}
 				}
+			} else {
+				m.resetRootHealRegistryObservation()
 			}
-		} else {
-			m.resetRootHealRegistryObservation()
 		}
 	} else {
 		if due && len(layers.personalUnreadable) > 0 {
@@ -199,6 +218,11 @@ func (m *Manager) healRootAgentLayers() {
 		}
 		m.rootAgentLayers.Store(&healed)
 	}
+	// The shared clock serves personal-config, reconcile, and legacy
+	// root_agents only. The registry arm no longer touches it: a legacy
+	// narrowing resets this clock to now, and pacing the registry's
+	// two-strike streak on it would let the second read land one poll tick
+	// later instead of one cadence later.
 	if rpAttempted {
 		m.mu.Lock()
 		if rpChanged {
@@ -207,6 +231,21 @@ func (m *Manager) healRootAgentLayers() {
 		} else {
 			m.rootHealFailures++
 			m.rootHealNextAttempt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealFailures))
+		}
+		m.mu.Unlock()
+	}
+	// The registry arm's OWN clock. A non-committing read (a first-observation
+	// streak, a differing post-read, a failed or absent enumeration) charges a
+	// full backoff; a commit resets it. Independent of rootHealNextAttempt, so
+	// the legacy reset above cannot collapse the streak's two-strike spacing.
+	if registryAttempted {
+		m.mu.Lock()
+		if registryCommitted {
+			m.rootHealRegistryFailures = 0
+			m.rootHealRegistryNextAttempt = nowFunc()
+		} else {
+			m.rootHealRegistryFailures++
+			m.rootHealRegistryNextAttempt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealRegistryFailures))
 		}
 		m.mu.Unlock()
 	}

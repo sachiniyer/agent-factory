@@ -1,0 +1,27 @@
+# Subtest: compositionstart → update → end → insertText commits once without consuming Ctrl
+ok 697 - compositionstart → update → end → insertText commits once without consuming Ctrl
+  ---
+  duration_ms: 16.023179
+  type: 'test'
+  ...
+# Subtest: composition ownership survives microtasks and leaves beforeinput uncancelled
+ok 698 - composition ownership survives microtasks and leaves beforeinput uncancelled
+  ---
+  duration_ms: 3.078209
+  type: 'test'
+  ...
+# Subtest: new composition cancels the previous release; reset and disposal clear ownership
+ok 699 - new composition cancels the previous release; reset and disposal clear ownership
+  ---
+  duration_ms: 0.784691
+  type: 'test'
+  ...
+1..749
+# tests 749
+# suites 0
+# pass 749
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 18335.003465

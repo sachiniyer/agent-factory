@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +41,31 @@ func writeLegacyRepoConfig(t *testing.T, repoID string, cfg *config.RepoConfig) 
 // hook that outlives its worktree keeps running with its cwd on a deleted
 // directory, so relative I/O would fail with ENOENT and hide the very thing this
 // measures; absolute-path work is exactly the half that still lands (#2770).
-func gatedHookRepo(t *testing.T) (repoRoot, startedDir, releaseFile, doneDir string) {
+const (
+	gatedHookPollInterval = 50 * time.Millisecond
+	gatedHookPollLimit    = 600 // 30 seconds: a hard ceiling, not a usual completion path.
+)
+
+func boundedFileGate(path, timedOutDir string, pollLimit int, pollInterval time.Duration) string {
+	quotedPath := shellquote.Quote(path)
+	intervalSeconds := strconv.FormatFloat(pollInterval.Seconds(), 'f', -1, 64)
+	timeoutAction := ""
+	if timedOutDir != "" {
+		timeoutAction = "touch " + shellquote.Quote(timedOutDir) + "/$$; "
+	}
+	return "_af_gate_i=0; while [ ! -f " + quotedPath + " ] && " +
+		"[ \"$_af_gate_i\" -lt " + strconv.Itoa(pollLimit) + " ]; do " +
+		"sleep " + intervalSeconds + "; _af_gate_i=$((_af_gate_i + 1)); done; " +
+		"if [ ! -f " + quotedPath + " ]; then " + timeoutAction + "exit 124; fi"
+}
+
+func gatedHookRepo(t *testing.T) (repoRoot, startedDir, releaseFile, doneDir, timedOutDir string) {
+	return gatedHookRepoWithPollLimit(t, gatedHookPollLimit)
+}
+
+func gatedHookRepoWithPollLimit(t *testing.T, pollLimit int) (
+	repoRoot, startedDir, releaseFile, doneDir, timedOutDir string,
+) {
 	t.Helper()
 	sandboxHome(t)
 	repoRoot = createGitRepo(t)
@@ -47,15 +73,17 @@ func gatedHookRepo(t *testing.T) (repoRoot, startedDir, releaseFile, doneDir str
 	markers := t.TempDir()
 	startedDir = filepath.Join(markers, "started")
 	doneDir = filepath.Join(markers, "done")
+	timedOutDir = filepath.Join(markers, "timed-out")
 	releaseFile = filepath.Join(markers, "release")
 	require.NoError(t, os.MkdirAll(startedDir, 0o755))
 	require.NoError(t, os.MkdirAll(doneDir, 0o755))
+	require.NoError(t, os.MkdirAll(timedOutDir, 0o755))
 
 	// $$ is the hook shell's pid, so concurrent runs cannot overwrite each
 	// other's markers — two runs leave two files, which is the whole point.
-	hook := "touch " + startedDir + "/$$; " +
-		"while [ ! -f " + releaseFile + " ]; do sleep 0.05; done; " +
-		"touch " + doneDir + "/$$"
+	hook := "touch " + shellquote.Quote(startedDir) + "/$$; " +
+		boundedFileGate(releaseFile, timedOutDir, pollLimit, gatedHookPollInterval) + "; " +
+		"touch " + shellquote.Quote(doneDir) + "/$$"
 
 	repoID := config.RepoIDFromRoot(repoRoot)
 	writeLegacyRepoConfig(t, repoID, &config.RepoConfig{
@@ -65,7 +93,34 @@ func gatedHookRepo(t *testing.T) (repoRoot, startedDir, releaseFile, doneDir str
 	cfg := config.DefaultConfig()
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
-	return repoRoot, startedDir, releaseFile, doneDir
+	return repoRoot, startedDir, releaseFile, doneDir, timedOutDir
+}
+
+func TestGatedHookRepoGateIsBounded(t *testing.T) {
+	repoRoot, startedDir, releaseFile, doneDir, timedOutDir := gatedHookRepoWithPollLimit(t, 2)
+	commitInitial(t, repoRoot)
+	gw, _, err := NewGitWorktree(repoRoot, "bounded-gate", branchPrefixForTest(t))
+	require.NoError(t, err)
+
+	// Even on the red run, release and observe the old unbounded hook before the
+	// fixture's TempDir cleanup. The regression must not manufacture the leak it
+	// exists to prevent.
+	t.Cleanup(func() {
+		if err := os.WriteFile(releaseFile, []byte("go"), 0o644); err != nil {
+			t.Errorf("release hook during cleanup: %v", err)
+			return
+		}
+		if done := gw.HooksDone(); done != nil && !closed(done, 5*time.Second) {
+			t.Errorf("hook did not stop after the fail-first cleanup released it")
+		}
+	})
+
+	require.NoError(t, gw.Setup())
+	require.True(t, waitForMarkers(t, startedDir, 1, 10*time.Second), "the hook never reached its gate")
+	require.True(t, closed(gw.HooksDone(), 2*time.Second),
+		"the fixture hook waited forever when its release was never written")
+	require.Zero(t, countMarkers(t, doneDir), "a timed-out gate must not run the hook's post-release action")
+	require.Equal(t, 1, countMarkers(t, timedOutDir), "a bounded exit must identify itself as a timeout")
 }
 
 func commitInitial(t *testing.T, repoRoot string) {
@@ -125,7 +180,7 @@ func closed(ch <-chan struct{}, timeout time.Duration) bool {
 // The gate holds both runs open at once so the overlap is a fact rather than a
 // race: with the bug BOTH complete when released.
 func TestRebuildFromExistingBranch_CancelsTheHookRunAlreadyInFlight(t *testing.T) {
-	repoRoot, startedDir, releaseFile, doneDir := gatedHookRepo(t)
+	repoRoot, startedDir, releaseFile, doneDir, timedOutDir := gatedHookRepo(t)
 	commitInitial(t, repoRoot)
 
 	gw, _, err := NewGitWorktree(repoRoot, "rebuild-hooks", branchPrefixForTest(t))
@@ -150,10 +205,13 @@ func TestRebuildFromExistingBranch_CancelsTheHookRunAlreadyInFlight(t *testing.T
 	require.True(t, closed(first, 10*time.Second),
 		"the hook run from before the rebuild is STILL RUNNING: the rebuild started a second one "+
 			"without cancelling it, so the operator's post_worktree_commands execute twice over this path")
+	require.Zero(t, countMarkers(t, timedOutDir),
+		"the prior hook reached the fixture timeout; its closed channel does not prove rebuild cancelled it")
 
 	// Release the gate and let the surviving run finish.
 	require.NoError(t, os.WriteFile(releaseFile, []byte("go"), 0o644))
 	require.True(t, closed(second, 20*time.Second), "the rebuilt worktree's hook run never finished")
+	require.Zero(t, countMarkers(t, timedOutDir), "the rebuilt hook reached the fixture timeout")
 
 	// Give a duplicate every chance to show up before ruling it out: the killed
 	// run would race to its own completion marker the moment the gate opened.
@@ -174,7 +232,7 @@ func TestRebuildFromExistingBranch_CancelsTheHookRunAlreadyInFlight(t *testing.T
 // when the recorded branch is gone too. It is a separate function with its own
 // copy of the launch, so a fix applied to only one of them leaves this open.
 func TestRebuildFreshFromRecordedBase_CancelsTheHookRunAlreadyInFlight(t *testing.T) {
-	repoRoot, startedDir, releaseFile, doneDir := gatedHookRepo(t)
+	repoRoot, startedDir, releaseFile, doneDir, timedOutDir := gatedHookRepo(t)
 	commitInitial(t, repoRoot)
 
 	gw, branchName, err := NewGitWorktree(repoRoot, "fresh-rebuild-hooks", branchPrefixForTest(t))
@@ -197,9 +255,12 @@ func TestRebuildFreshFromRecordedBase_CancelsTheHookRunAlreadyInFlight(t *testin
 	require.True(t, closed(first, 10*time.Second),
 		"the hook run from before the fresh rebuild is STILL RUNNING: the operator's "+
 			"post_worktree_commands execute twice over this path")
+	require.Zero(t, countMarkers(t, timedOutDir),
+		"the prior hook reached the fixture timeout; its closed channel does not prove fresh rebuild cancelled it")
 
 	require.NoError(t, os.WriteFile(releaseFile, []byte("go"), 0o644))
 	require.True(t, closed(gw.HooksDone(), 20*time.Second), "the rebuilt worktree's hook run never finished")
+	require.Zero(t, countMarkers(t, timedOutDir), "the rebuilt hook reached the fixture timeout")
 
 	if waitForMarkers(t, doneDir, 2, 2*time.Second) {
 		t.Fatalf("post-worktree hooks COMPLETED %d times for one worktree, want 1", countMarkers(t, doneDir))
@@ -247,18 +308,31 @@ func TestRebuildAfterCleanup_StillRunsHooks(t *testing.T) {
 // Sanity: a worktree whose hooks are still in flight reports them, so the
 // markers above cannot be explained by hooks that never ran at all.
 func TestSetupLaunchesHooksBeforeTheyFinish(t *testing.T) {
-	repoRoot, startedDir, releaseFile, _ := gatedHookRepo(t)
+	repoRoot, startedDir, releaseFile, _, timedOutDir := gatedHookRepo(t)
 	commitInitial(t, repoRoot)
 
 	gw, _, err := NewGitWorktree(repoRoot, "in-flight", branchPrefixForTest(t))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := os.WriteFile(releaseFile, []byte("go"), 0o644); err != nil {
+			t.Errorf("release hook during cleanup: %v", err)
+			return
+		}
+		if done := gw.HooksDone(); done != nil && !closed(done, 5*time.Second) {
+			t.Errorf("hook did not observe its cleanup release before the fixture was removed")
+		}
+	})
 	require.NoError(t, gw.Setup())
-	t.Cleanup(func() { _ = os.WriteFile(releaseFile, []byte("go"), 0o644) })
 
 	require.True(t, waitForMarkers(t, startedDir, 1, 10*time.Second))
 	require.False(t, closed(gw.HooksDone(), 200*time.Millisecond),
 		"a gated hook reported done while still blocked; the gate is not holding")
 	require.False(t, strings.Contains(gw.GetWorktreePath(), " "), "unexpected path shape")
+
+	require.NoError(t, os.WriteFile(releaseFile, []byte("go"), 0o644))
+	require.True(t, closed(gw.HooksDone(), 5*time.Second),
+		"the hook did not observe its release before the fixture was removed")
+	require.Zero(t, countMarkers(t, timedOutDir), "the hook reached the fixture timeout instead of its release")
 }
 
 // The recreated tree must be untouched by the run that preceded it (#2770,

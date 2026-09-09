@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -458,4 +460,215 @@ func TestSandboxReapRecoversAfterANonceFailure(t *testing.T) {
 	failNonce = false
 	require.NoError(t, p.reap(), "the retry the non-latch preserves must be able to succeed")
 	assert.True(t, p.reaped, "a confirmed reap latches, so the record may finally be retired")
+}
+
+// ErrWaitDelay fusion. exec.CommandContext can return exec.ErrWaitDelay when the
+// child exited CLEANLY (exit code 0 — a non-zero exit surfaces as an
+// *exec.ExitError, never as ErrWaitDelay) and only a descendant held the capture
+// pipe open past cmd.WaitDelay, so the captured output is already complete.
+//
+// The rest of the tree treats a bare ErrWaitDelay as success (12 normalize-to-nil
+// sites: backend_docker.go:161, doctor/remote.go:132, tmux/bounded.go, the git
+// bounded helpers, etc.). runCommand was the sole exception: its check was
+// `if ctx.Err() != nil` AFTER Output/CombinedOutput, with no ErrWaitDelay
+// carve-out, so when an orphan pushed the return past the deadline it rewrote
+// the bare ErrWaitDelay as context.DeadlineExceeded — flattening "the command
+// completed; only pipe cleanup overran" into "the deadline killed the command."
+// In reap that routed a sentinel-present reap (positive proof the far side ran)
+// into the ErrWorkspaceStateUnknown branch instead of latching.
+//
+// The fix normalizes a bare ErrWaitDelay to nil BEFORE the deadline check,
+// matching backend_docker.go and doctor/remote.go, and gates the deadline wrap
+// on `err != nil` so it never fires for a completed command. These tests pin
+// both the fix and the genuine-timeout path it must not touch.
+
+// sandboxOrphanGuard bounds the real-exec tests below. A completed command with
+// an orphaned pipe-holder returns at ~sandboxTunnelWaitDelay (2s); a missing
+// WaitDelay regression would block on the straggler's full sleep (30s) and trip
+// the guard. Ample slack over 2s keeps a loaded box from flaking the fixed path.
+const sandboxOrphanGuard = 8 * time.Second
+
+// stubSSHStraggler writes an executable `ssh` stub that runs printCmd (writing
+// the wanted output to stdout), then backgrounds a `sleep` that inherits the
+// capture pipe (the orphaned descriptor-holder of #1967), records its pid, and
+// exits 0 — so CombinedOutput() returns exec.ErrWaitDelay after
+// sandboxTunnelWaitDelay while the buffer already holds printCmd's output. The
+// straggler is killed on cleanup so a regression cannot leak it past the test.
+func stubSSHStraggler(t *testing.T, printCmd string) string {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "straggler.pid")
+	body := "#!/usr/bin/env bash\n" +
+		printCmd + "\n" +
+		"sleep 30 &\n" +
+		"echo $! > " + shSingleQuoteExec(pidFile) + "\n" +
+		"exit 0\n"
+	path := filepath.Join(dir, "ssh")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
+	t.Cleanup(func() {
+		data, rerr := os.ReadFile(pidFile)
+		if rerr != nil {
+			return
+		}
+		pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if perr != nil || pid <= 0 {
+			return
+		}
+		if proc, ferr := os.FindProcess(pid); ferr == nil {
+			_ = proc.Kill()
+		}
+	})
+	return path
+}
+
+// TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe drives the REAL
+// runCommand (real buildRunCommand + CombinedOutput) against a stub ssh that
+// prints a marker, orphans a sleep holding the capture pipe, and exits 0. With a
+// 1s timeout and a 2s WaitDelay the orphaned pipe-holder pushes the return past
+// the deadline, so os/exec returns exec.ErrWaitDelay with ctx.Err() = Deadline-
+// Exceeded simultaneously. A bare ErrWaitDelay means the child exited 0 and the
+// output is complete, so runCommand must normalize it to nil — NOT rewrite it as
+// a timeout. Before the fix this returned "...timed out...: context deadline
+// exceeded"; after, it returns the complete output and no error.
+func TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe(t *testing.T) {
+	ssh := stubSSHStraggler(t, "printf 'AF-SANDBOX-ANSWER\\n'")
+	p := &sandboxProvisioner{sshCmd: ssh}
+
+	var (
+		out   []byte
+		err   error
+		start = time.Now()
+	)
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		out, err = p.Run(1*time.Second, "true", nil, true)
+	}), "runCommand must return within the guard — a missing WaitDelay would block on the straggler (#1967)")
+
+	elapsed := time.Since(start)
+	assert.NoError(t, err,
+		"a bare exec.ErrWaitDelay (child exited 0, output complete) must NOT be wrapped as a timeout")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded),
+		"a completed command must not be reported as a deadline kill")
+	assert.Contains(t, string(out), "AF-SANDBOX-ANSWER",
+		"the orphaned pipe-holder must not lose already-written output")
+	// ~sandboxTunnelWaitDelay, not the command's runtime: the stub exits ~instantly,
+	// so the elapsed time is the WaitDelay overrun, proving the err came from the
+	// orphaned-pipe path rather than a slow command (and self-checking that the
+	// straggler did hold the pipe, else elapsed would be ~0).
+	assert.GreaterOrEqual(t, elapsed, sandboxTunnelWaitDelay-500*time.Millisecond,
+		"the return must wait at least sandboxTunnelWaitDelay for the orphan's pipe")
+	assert.Less(t, elapsed, sandboxOrphanGuard, "and must not block on the straggler's full sleep")
+}
+
+// TestSandboxRunGenuineTimeoutWrapsAsDeadlineExceeded pins the path the fix must
+// NOT change: a command still running at the deadline is killed (group SIGKILL),
+// producing an *exec.ExitError — never a bare exec.ErrWaitDelay — so the
+// normalize-to-nil does not fire and runCommand still wraps it as a timeout.
+// Non-reap callers (copyAfBinary, etc.) that do not branch on error identity
+// continue to see a correct timeout for a genuine deadline kill.
+func TestSandboxRunGenuineTimeoutWrapsAsDeadlineExceeded(t *testing.T) {
+	ssh := stubSSH(t, "sleep 10")
+	p := &sandboxProvisioner{sshCmd: ssh}
+
+	var err error
+	start := time.Now()
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		_, err = p.Run(1*time.Second, "true", nil, true)
+	}), "a genuinely timed-out command must be killed at the deadline, not block forever")
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"a genuine deadline kill must still surface as context.DeadlineExceeded")
+	assert.Contains(t, err.Error(), "timed out")
+	assert.GreaterOrEqual(t, elapsed, 1*time.Second-300*time.Millisecond,
+		"the process must be killed near the 1s deadline")
+	assert.Less(t, elapsed, sandboxOrphanGuard, "and must not wait for the 10s sleep to end naturally")
+}
+
+// TestSandboxReapSentinelRoutingDependsOnRunCommandErrorIdentity pins that reap's
+// switch is the site that decides a sentinel-present reap, so a regression that
+// re-introduces the wrap is caught at the decision boundary rather than only
+// end-to-end. Through the runCommandFn seam three error identities meet the same
+// answered=true reap:
+//
+//   - context.DeadlineExceeded → the first case → ErrWorkspaceStateUnknown, NOT
+//     latched (the bug shape, retained so a genuine timeout reap stays unknown).
+//   - nil (the fix: runCommand normalized a bare ErrWaitDelay) → the
+//     `err == nil && answered` early return → latched.
+//   - a raw exec.ErrWaitDelay (the narrower carve-out) → falls to `default` →
+//     latched; the sentinel is positive proof the far side ran.
+func TestSandboxReapSentinelRoutingDependsOnRunCommandErrorIdentity(t *testing.T) {
+	_, expect := sandboxReapChallenge("0123456789abcdef")
+	stubSandboxReapNonce(t, func() (string, error) { return "0123456789abcdef", nil })
+
+	cases := []struct {
+		name        string
+		err         error
+		wantLatched bool
+		wantUnknown bool
+	}{
+		{
+			name:        "DeadlineExceeded misroutes a sentinel-present reap to unknown",
+			err:         context.DeadlineExceeded,
+			wantLatched: false,
+			wantUnknown: true,
+		},
+		{
+			name:        "nil latches via the answered early return",
+			err:         nil,
+			wantLatched: true,
+			wantUnknown: false,
+		},
+		{
+			name:        "raw ErrWaitDelay latches via the default branch",
+			err:         exec.ErrWaitDelay,
+			wantLatched: true,
+			wantUnknown: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &sandboxProvisioner{sshCmd: "ssh host", sessionDir: "/remote/dir", remotePID: "1"}
+			p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+				return []byte(expect), tc.err
+			}
+			err := p.reap()
+			if tc.wantUnknown {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+					"a deadline-expired reap must retain the record as unknown-state")
+			} else {
+				assert.False(t, errors.Is(err, ErrWorkspaceStateUnknown),
+					"a sentinel-present reap that completed must not be reported unknown")
+			}
+			assert.Equal(t, tc.wantLatched, p.reaped)
+		})
+	}
+}
+
+// TestSandboxReapLatchesRealErrWaitDelayOrphanEndToEnd closes the composition gap:
+// runCommandFn is wired to the REAL runCommand (real buildRunCommand +
+// CombinedOutput) with a 1s timeout, so sandboxTunnelWaitDelay (2s) overruns the
+// deadline within test time. The stub ssh prints the uppercase sentinel (as only
+// real remote execution can — it transforms the lowercase challenge via tr),
+// orphans a sleep holding the capture pipe, and exits 0. After the fix runCommand
+// normalizes the resulting exec.ErrWaitDelay to nil, so reap's
+// `err == nil && answered` early return latches and retires the record — instead
+// of misrouting a completed reap into ErrWorkspaceStateUnknown (the bug, end to
+// end through the real transport).
+func TestSandboxReapLatchesRealErrWaitDelayOrphanEndToEnd(t *testing.T) {
+	ssh := stubSSHStraggler(t, `printf '%s' "${!#}" | grep -o 'af-sandbox-reaped-[0-9a-f]*' | tr 'a-z' 'A-Z'`)
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "77"}
+	p.runCommandFn = func(_ time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
+		return p.runCommand(1*time.Second, script, stdin, combined)
+	}
+
+	var err error
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		err = p.reap()
+	}), "reap must return within the guard — a missing WaitDelay would block on the straggler")
+
+	assert.False(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"a sentinel-present reap that completed with an orphaned pipe-holder must latch, not misroute to unknown-state")
+	assert.True(t, p.reaped, "the completed reap must latch so the record may be retired")
 }

@@ -574,10 +574,7 @@ func (i *Instance) SetPendingTabCleanupForTest(pending []TabCleanupData) {
 func (i *Instance) SetGitWorktreeForTest(gw *git.GitWorktree) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.gitWorktree != gw {
-		i.gitWorktree = gw
-		i.touchLocked()
-	}
+	i.setGitWorktreeLocked(gw)
 }
 
 // AddTabForTest appends a tmux-less tab record. Test-only: UI tests (the

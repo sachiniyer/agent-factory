@@ -469,6 +469,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// prefix — a legacy record, or one whose hooks never entered a scope —
 			// leaves the sweep disabled, which is the pre-#3650 behaviour.
 			gw.SetHookScopeSessionID(id)
+			// Relocation recovery is a pending fence, not terminal state: the
+			// adoption seam checks gw.HasUnresolvedRelocation without finishing
+			// its journal. A later recovery pass may establish the owning path.
+			gw.SetHookResumeDisabled(data.UserKilled || liveness == LiveArchived)
 			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
 			instance.gitWorktree = gw
 		}

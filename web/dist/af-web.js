@@ -8094,15 +8094,457 @@ function accountLoginStreamEndpoint(agent, name) {
   };
 }
 
+// src/terminal-soft-input.ts
+function insertedTextareaText(before, after) {
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix += 1;
+  return after.slice(prefix, after.length - suffix);
+}
+var TerminalSoftInput = class {
+  constructor(host, textarea, enabled, physicalInput, send, hasArmedModifier = () => true, keydownReachesCompositionHelper = () => true) {
+    this.host = host;
+    this.textarea = textarea;
+    this.enabled = enabled;
+    this.physicalInput = physicalInput;
+    this.send = send;
+    this.hasArmedModifier = hasArmedModifier;
+    this.keydownReachesCompositionHelper = keydownReachesCompositionHelper;
+    textarea?.addEventListener("compositionstart", this.onCompositionStart);
+    textarea?.addEventListener("compositionupdate", this.onCompositionUpdate);
+    textarea?.addEventListener("compositionend", this.onCompositionEnd);
+    textarea?.addEventListener("keydown", this.onKeyDown, true);
+    textarea?.addEventListener("keyup", this.onKeyUp, true);
+    textarea?.addEventListener("blur", this.onBlur, true);
+    host.addEventListener("beforeinput", this.onInput, true);
+    host.addEventListener("input", this.onInput, true);
+  }
+  active;
+  pending = [];
+  trailingFlushes = /* @__PURE__ */ new Set();
+  postCompositionTimers = /* @__PURE__ */ new Set();
+  forwardingTrailing;
+  forwardingComposition;
+  forwardingQueued;
+  keyDownSeen = false;
+  staleKeydown = false;
+  staleBeforeInputSent = false;
+  staleBeforeValue;
+  onKeyDown = (event) => {
+    this.keyDownSeen = true;
+    this.staleKeydown = false;
+    this.staleBeforeInputSent = false;
+    this.staleBeforeValue = void 0;
+    const range = this.pending.at(-1);
+    const keyCode = event.keyCode;
+    if (range && ![16, 17, 18, 229].includes(keyCode)) {
+      range.keydownAfterEnd = void 0;
+      range.keydownAfterEndEvent = event;
+    }
+  };
+  onKeyUp = () => {
+    this.keyDownSeen = false;
+    this.staleKeydown = false;
+    this.staleBeforeInputSent = false;
+    this.staleBeforeValue = void 0;
+  };
+  onBlur = () => {
+    if (this.keyDownSeen) this.staleKeydown = true;
+  };
+  onCompositionStart = () => {
+    const value = this.textarea?.value;
+    for (const range of this.pending) {
+      if (range.frozenText === void 0 && range.start !== void 0 && value !== void 0) {
+        range.frozenText = value.substring(range.start);
+      }
+      this.queueTrailingFlush(range);
+    }
+    this.active = { start: value?.length, initialValue: value, observedValue: value, text: "" };
+  };
+  onCompositionUpdate = (event) => {
+    const data = event.data;
+    if (this.active) {
+      this.observeCompositionValue(this.active);
+      this.active.sawUpdate = true;
+      if (typeof data === "string") this.active.text = this.active.updateText = data;
+    }
+  };
+  onCompositionEnd = (event) => {
+    this.active ??= { text: "" };
+    const range = this.active;
+    this.observeCompositionValue(range);
+    const data = event.data;
+    if (typeof data === "string") range.text = data;
+    this.active = void 0;
+    const value = this.textarea?.value;
+    const endText = range.start !== void 0 && value !== void 0 ? value.substring(range.start) : void 0;
+    range.provisionalAtEnd = endText !== void 0 && endText.length > 0 && range.updateText !== void 0 && range.updateText.length > endText.length && range.updateText.startsWith(endText);
+    if (range.start !== void 0 && value !== void 0 && value.length > range.start)
+      range.commitLength = value.length - range.start;
+    else if (range.textareaChanged && value === range.initialValue || !range.text && !range.sawUpdate)
+      range.commitLength = 0;
+    this.pending.push(range);
+    range.release = setTimeout(() => this.release(range), 0);
+  };
+  onInput = (event) => {
+    const input = event;
+    if (!this.enabled()) return;
+    if (this.active || this.pending.length) {
+      if (this.active && input.type === "input")
+        this.observeCompositionValue(this.active);
+      const range = this.pending.at(-1);
+      const postCompositionText = input.inputType === "insertText" || input.inputType === "insertCompositionText";
+      if (range && input.inputType === "deleteContentBackward" && input.isComposing === false) {
+        if (input.type === "beforeinput") {
+          range.beforeDeleteValue = this.textarea?.value ?? range.observedValue;
+        } else if (input.type === "input") {
+          const value = this.textarea?.value;
+          const beforeValue = range.beforeDeleteValue ?? range.observedValue;
+          const priorLength = beforeValue?.length ?? (range.start !== void 0 && range.commitLength !== void 0 ? range.start + range.commitLength + (range.trailingLength ?? 0) : void 0);
+          range.beforeDeleteValue = void 0;
+          if (value !== void 0 && priorLength !== void 0 && value.length < priorLength && range.start !== void 0) {
+            const beforeText = range.queuedInput?.beforeText ?? beforeValue?.substring(range.start);
+            if (beforeText !== void 0) {
+              range.frozenText = beforeText;
+              range.queuedInput = {
+                beforeText,
+                afterText: value.substring(range.start),
+                emissions: [...range.queuedInput?.emissions ?? [], "\x7F"]
+              };
+            }
+          }
+          range.observedValue = value;
+        }
+        return;
+      }
+      if (range && postCompositionText && input.type === "input" && input.isComposing === false) {
+        const keydownAfterEnd = this.keydownReachedCompositionHelper(range);
+        const value = this.textarea?.value;
+        const mutationLength = value !== void 0 && range.start !== void 0 && value.length > range.start ? value.length - range.start : void 0;
+        const fallbackLength = input.data?.length;
+        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !keydownAfterEnd && range.commitLength !== void 0 && (mutationLength ?? fallbackLength ?? 0) > range.commitLength;
+        if (keydownAfterEnd) {
+          range.trailingLength = mutationLength !== void 0 ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0)) : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
+        } else if (range.commitLength === void 0) {
+          range.commitLength = mutationLength ?? input.data?.length;
+        } else if (firstCommitGrowth) {
+          range.commitLength = mutationLength ?? fallbackLength;
+        } else {
+          range.trailingLength = mutationLength !== void 0 ? Math.max(range.trailingLength ?? 0, mutationLength - range.commitLength) : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
+        }
+        range.postEndInputSeen = true;
+        range.observedValue = value;
+      }
+      if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
+      return;
+    }
+    if (this.physicalInput() || input.inputType !== "insertText") return;
+    if (input.isComposing && !this.staleKeydown) return;
+    if (this.staleKeydown) {
+      if (input.type === "beforeinput") {
+        this.staleBeforeInputSent = false;
+        this.staleBeforeValue = this.textarea?.value;
+        if (!input.data) return;
+        input.stopImmediatePropagation();
+        this.staleBeforeInputSent = true;
+        this.sendRecovered(input.data, input.isComposing);
+      } else if (input.type === "input") {
+        input.stopImmediatePropagation();
+        const value = this.textarea?.value;
+        const observed = value !== void 0 && this.staleBeforeValue !== void 0 ? insertedTextareaText(this.staleBeforeValue, value) : "";
+        const recovered = observed || input.data;
+        if (recovered && !this.staleBeforeInputSent) this.sendRecovered(recovered, input.isComposing);
+        this.staleBeforeInputSent = false;
+        this.staleBeforeValue = void 0;
+      }
+      return;
+    }
+    if (!input.data) return;
+    if (!this.hasArmedModifier()) return;
+    if (input.type === "beforeinput" && !input.cancelable) return;
+    input.preventDefault();
+    input.stopImmediatePropagation();
+    this.send(input.data);
+  };
+  /** Queue custom input after xterm's already-scheduled composition finalizer. */
+  deferAfterPendingComposition(action) {
+    if (!this.pending.length) return false;
+    const release = setTimeout(() => {
+      this.postCompositionTimers.delete(release);
+      action();
+    }, 0);
+    this.postCompositionTimers.add(release);
+    return true;
+  }
+  transform(text, applyModifiers) {
+    if (this.forwardingComposition === text) return text;
+    if (this.forwardingQueued?.text === text)
+      return this.applyQueuedInput(this.forwardingQueued.range, applyModifiers);
+    if (this.forwardingTrailing === text) return applyModifiers(text, true);
+    const ranges = this.active ? [...this.pending, this.active] : [...this.pending];
+    let rest = text, prefix = "", matchedComposition = false;
+    for (const range of ranges) {
+      const queued = range.queuedInput;
+      if (queued?.afterText && rest.startsWith(queued.afterText)) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(queued.afterText.length);
+        matchedComposition = true;
+        this.remove(range);
+        if (!rest) break;
+        continue;
+      }
+      const value = this.textarea?.value;
+      const committed = range.frozenText ?? (range.start !== void 0 && value !== void 0 ? value.substring(range.start) : range.text);
+      const boundary = Math.min(
+        committed.length,
+        range.commitLength ?? committed.length - (range.trailingLength ?? 0)
+      );
+      let length = 0;
+      for (const character of committed.slice(0, boundary)) {
+        if (!rest.startsWith(character, length)) break;
+        length += character.length;
+      }
+      if (!length) {
+        const trailingLength = Math.min(range.trailingLength ?? 0, committed.length);
+        const trailing = boundary === 0 && trailingLength ? committed.slice(-trailingLength) : "";
+        if (trailing && rest.startsWith(trailing)) {
+          prefix += applyModifiers(trailing, true);
+          rest = rest.slice(trailing.length);
+          this.remove(range);
+          if (!rest) break;
+        }
+        continue;
+      }
+      matchedComposition = true;
+      prefix += rest.slice(0, length);
+      rest = rest.slice(length);
+      const flush = range.trailingFlush;
+      if (flush && rest.startsWith(flush.text)) {
+        this.cancelTrailingFlush(flush);
+        range.trailingFlush = void 0;
+        prefix += applyModifiers(flush.text, true);
+        rest = rest.slice(flush.text.length);
+      }
+      this.remove(range);
+      if (!rest) break;
+    }
+    return prefix + (rest ? applyModifiers(rest, matchedComposition) : "");
+  }
+  remove(range) {
+    if (range.release !== void 0) clearTimeout(range.release);
+    const index = this.pending.indexOf(range);
+    if (index !== -1) this.pending.splice(index, 1);
+    if (this.active === range) this.active = void 0;
+  }
+  release(range) {
+    const queued = range.queuedInput;
+    if (!queued) {
+      this.remove(range);
+      return;
+    }
+    const text = queued.beforeText + queued.emissions.join("");
+    this.remove(range);
+    this.forwardingQueued = { range, text };
+    try {
+      this.send(text);
+    } finally {
+      this.forwardingQueued = void 0;
+    }
+  }
+  applyQueuedInput(range, applyModifiers) {
+    const queued = range.queuedInput;
+    if (!queued) return "";
+    const boundary = Math.min(
+      queued.beforeText.length,
+      range.commitLength ?? queued.beforeText.length - (range.trailingLength ?? 0)
+    );
+    const commit = queued.beforeText.slice(0, boundary);
+    const trailing = queued.beforeText.slice(boundary);
+    const input = queued.emissions.map((text) => applyModifiers(text, true)).join("");
+    return commit + (trailing ? applyModifiers(trailing, true) : "") + input;
+  }
+  observeCompositionValue(range) {
+    const value = this.textarea?.value;
+    if (value !== void 0) {
+      range.observedValue = value;
+      if (range.initialValue !== void 0 && value !== range.initialValue) range.textareaChanged = true;
+    }
+  }
+  keydownReachedCompositionHelper(range) {
+    if (range.keydownAfterEnd !== void 0) return range.keydownAfterEnd;
+    const event = range.keydownAfterEndEvent;
+    if (!event) return false;
+    range.keydownAfterEndEvent = void 0;
+    range.keydownAfterEnd = this.keydownReachesCompositionHelper(event);
+    return range.keydownAfterEnd;
+  }
+  queueTrailingFlush(range) {
+    const trailingLength = range.trailingLength ?? 0;
+    if (!trailingLength || !range.frozenText || range.trailingFlush) return;
+    const text = range.frozenText.slice(-trailingLength);
+    const flush = { text };
+    range.trailingFlush = flush;
+    this.trailingFlushes.add(flush);
+    flush.release = setTimeout(() => {
+      this.trailingFlushes.delete(flush);
+      if (range.trailingFlush === flush) range.trailingFlush = void 0;
+      this.forwardingTrailing = text;
+      try {
+        this.send(text);
+      } finally {
+        this.forwardingTrailing = void 0;
+      }
+    }, 0);
+  }
+  cancelTrailingFlush(flush) {
+    if (flush.release !== void 0) clearTimeout(flush.release);
+    this.trailingFlushes.delete(flush);
+  }
+  sendRecovered(text, composing) {
+    if (!composing) {
+      this.send(text);
+      return;
+    }
+    this.forwardingComposition = text;
+    try {
+      this.send(text);
+    } finally {
+      this.forwardingComposition = void 0;
+    }
+  }
+  reset() {
+    for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
+    for (const flush of this.trailingFlushes) if (flush.release !== void 0) clearTimeout(flush.release);
+    for (const release of this.postCompositionTimers) clearTimeout(release);
+    this.trailingFlushes.clear();
+    this.postCompositionTimers.clear();
+    this.pending.length = 0;
+    this.active = void 0;
+  }
+  dispose() {
+    this.reset();
+    this.textarea?.removeEventListener("compositionstart", this.onCompositionStart);
+    this.textarea?.removeEventListener("compositionupdate", this.onCompositionUpdate);
+    this.textarea?.removeEventListener("compositionend", this.onCompositionEnd);
+    this.textarea?.removeEventListener("keydown", this.onKeyDown, true);
+    this.textarea?.removeEventListener("keyup", this.onKeyUp, true);
+    this.textarea?.removeEventListener("blur", this.onBlur, true);
+    this.host.removeEventListener("beforeinput", this.onInput, true);
+    this.host.removeEventListener("input", this.onInput, true);
+  }
+};
+
 // src/terminal-keybar.ts
+var ARROW_SUFFIXES = { "\u2190": "D", "\u2191": "A", "\u2193": "B", "\u2192": "C" };
+var SPECIAL_BYTES = { Esc: "\x1B", Tab: "	", "^C": "" };
+var KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
 function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
-  const arrows = { "\u2190": "D", "\u2191": "A", "\u2193": "B", "\u2192": "C" };
-  const special = { Esc: "\x1B", Tab: "	", "^C": "" };
-  if (arrows[key]) return `\x1B${applicationCursor ? "O" : "["}${arrows[key]}`;
-  if (special[key]) return special[key];
-  const code = key.toUpperCase().charCodeAt(0);
-  const text = ctrl && /^[\x40-\x7f]$/.test(key) && code >= 64 && code <= 95 ? String.fromCharCode(code & 31) : key;
+  const sequence = userSequence(key);
+  if (sequence) return encodeSequence(sequence, (alt ? 2 : 0) | (ctrl ? 4 : 0), key);
+  if (ARROW_SUFFIXES[key]) {
+    const modifier = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    return modifier > 1 ? `\x1B[1;${modifier}${ARROW_SUFFIXES[key]}` : `\x1B${applicationCursor ? "O" : "["}${ARROW_SUFFIXES[key]}`;
+  }
+  if (SPECIAL_BYTES[key]) return (alt ? "\x1B" : "") + SPECIAL_BYTES[key];
+  if (key === "\x7F") return (alt ? "\x1B" : "") + (ctrl ? "\b" : key);
+  const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127 ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1B" : "") + text;
+}
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+function userSequence(text) {
+  if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
+  const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
+  if (csi) return { kind: "CSI", parameters: csi[1], final: csi[2] };
+  const ss3 = /^\x1bO([\x40-\x7e])$/.exec(text);
+  if (ss3) return { kind: "SS3", parameters: "", final: ss3[1] };
+  return void 0;
+}
+function encodeSequence(sequence, modifierBits, original, replaceModifiers = false) {
+  if (!modifierBits) return original;
+  if (sequence.kind === "SS3") return `\x1B[1;${modifierBits + 1}${sequence.final}`;
+  const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+  parameters[0] ||= "1";
+  const encoded = Number(parameters[1] || "1");
+  const existingBits = !replaceModifiers && Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+  parameters[1] = String((existingBits | modifierBits) + 1);
+  return `\x1B[${parameters.join(";")}${sequence.final}`;
+}
+function decodeKeyBytes(text) {
+  let sequenceText = text;
+  let prefixedAlt = false;
+  let sequence = userSequence(sequenceText);
+  if (!sequence && text.charCodeAt(0) === 27) {
+    sequenceText = text.slice(1);
+    sequence = userSequence(sequenceText);
+    prefixedAlt = sequence !== void 0;
+  }
+  if (sequence) {
+    if (sequence.kind === "CSI" && sequence.final === "Z") return void 0;
+    const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+    const encoded = Number(parameters[1] || "1");
+    const modifierBits = Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+    return {
+      key: sequenceText,
+      ctrl: (modifierBits & 4) !== 0,
+      alt: prefixedAlt || (modifierBits & 2) !== 0,
+      applicationCursor: sequence.kind === "SS3"
+    };
+  }
+  const alt = text.length > 1 && text.charCodeAt(0) === 27;
+  const character = alt ? text.slice(1) : text;
+  const codePoint = character.codePointAt(0);
+  if (codePoint === void 0 || character.length !== (codePoint > 65535 ? 2 : 1)) return void 0;
+  if (codePoint <= 31)
+    return { key: String.fromCharCode(codePoint + 64), ctrl: true, alt, applicationCursor: false };
+  return { key: character, ctrl: false, alt, applicationCursor: false };
+}
+function ctrlModifiedEmission(text) {
+  if (text.length !== 1) return void 0;
+  const code = text.charCodeAt(0);
+  if (code <= 31) return text;
+  if (code === 127) return "\b";
+  if (text === " ") return "\0";
+  const upper = text.toUpperCase();
+  if (upper.length === 1) {
+    const upperCode = upper.charCodeAt(0);
+    if (upperCode >= 64 && upperCode <= 95) return String.fromCharCode(upperCode & 31);
+  }
+  if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
+  if (code === 56) return "\x7F";
+  return void 0;
+}
+function xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt) {
+  if (physical.metaKey || physical.key.length !== 1 || /^[A-Za-z ]$/.test(physical.key)) return void 0;
+  const control = ctrlModifiedEmission(physical.key);
+  if (control === void 0) return void 0;
+  if (physical.ctrlKey && !physical.altKey && stickyAlt && text === control)
+    return `\x1B${physical.key}`;
+  if (physical.altKey && !physical.ctrlKey && stickyCtrl && text === `\x1B${physical.key}`)
+    return text;
+  return void 0;
+}
+function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
+  if ((!stickyCtrl || physical.ctrlKey) && (!stickyAlt || physical.altKey)) return text;
+  const ctrl = physical.ctrlKey || stickyCtrl;
+  const alt = physical.altKey || stickyAlt;
+  const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
+  if (physical.key === "Insert") return text;
+  if ((physical.key === "PageUp" || physical.key === "PageDown") && !ctrl) return text;
+  const sequence = userSequence(text);
+  if (sequence) {
+    if (sequence.kind === "CSI" && sequence.final === "Z") return text;
+    return encodeSequence(sequence, modifierBits, text, true);
+  }
+  const arrow = { ArrowLeft: "D", ArrowUp: "A", ArrowDown: "B", ArrowRight: "C" }[physical.key];
+  if (arrow && physical.altKey && (text === "\x1Bb" || text === "\x1Bf"))
+    return `\x1B[1;${modifierBits + 1}${arrow}`;
+  const altAlias = xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt);
+  if (altAlias !== void 0) return altAlias;
+  const physicalAltPrefix = physical.altKey && text.length > 1 && text.charCodeAt(0) === 27;
+  let payload = physicalAltPrefix ? text.slice(1) : text;
+  if (stickyCtrl && !physical.ctrlKey) payload = ctrlModifiedEmission(payload) ?? payload;
+  return (physicalAltPrefix || stickyAlt && !physical.altKey ? "\x1B" : "") + payload;
 }
 var StickyModifiers = class {
   values = { Ctrl: "off", Alt: "off" };
@@ -8118,20 +8560,46 @@ var StickyModifiers = class {
     this.values = { Ctrl: "off", Alt: "off" };
     this.tapped = { Ctrl: -Infinity, Alt: -Infinity };
   }
-  input(text) {
-    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
-    return Array.from(text, (char) => {
-      const result = keyBytes(char, this.values.Ctrl !== "off", this.values.Alt !== "off");
-      for (const key of ["Ctrl", "Alt"]) if (this.values[key] === "once") this.values[key] = "off";
+  key(key, applicationCursor = false) {
+    const ctrl = this.values.Ctrl !== "off";
+    const alt = this.values.Alt !== "off";
+    const result = keyBytes(key, ctrl, alt, applicationCursor);
+    this.consumeApplied(ctrl, alt);
+    return result;
+  }
+  input(text, source = "user", physical) {
+    if (source === "terminal") return text;
+    const stickyCtrl = this.values.Ctrl !== "off";
+    const stickyAlt = this.values.Alt !== "off";
+    if (physical && (stickyCtrl || stickyAlt)) {
+      const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
+      this.consumeApplied(stickyCtrl && !physical.ctrlKey, stickyAlt && !physical.altKey);
       return result;
-    }).join("");
+    }
+    const decoded = decodeKeyBytes(text);
+    if (decoded) {
+      const encode2 = (ctrl, alt) => keyBytes(
+        decoded.key,
+        decoded.ctrl || ctrl,
+        decoded.alt || alt,
+        decoded.applicationCursor
+      );
+      const result = encode2(stickyCtrl, stickyAlt);
+      this.consumeApplied(stickyCtrl, stickyAlt);
+      return result;
+    }
+    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
+    return Array.from(text, (char) => this.key(char)).join("");
+  }
+  consumeApplied(ctrl, alt) {
+    if (ctrl && this.values.Ctrl === "once") this.values.Ctrl = "off";
+    if (alt && this.values.Alt === "once") this.values.Alt = "off";
   }
 };
 function keybarPointerDown(event, act) {
   event.preventDefault();
   act();
 }
-var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
 var TerminalKeybar = class {
   constructor(host, input, refit, applicationCursor) {
     this.host = host;
@@ -8139,6 +8607,7 @@ var TerminalKeybar = class {
     this.refit = refit;
     this.applicationCursor = applicationCursor;
     this.originalMaxHeight = host.style.maxHeight;
+    this.textarea = host.querySelector(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
     this.bar.setAttribute("role", "group");
     this.bar.setAttribute("aria-label", "Terminal keys");
@@ -8155,7 +8624,7 @@ var TerminalKeybar = class {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else this.input(keyBytes(key, false, false, this.applicationCursor()));
+          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
         button.addEventListener("pointerdown", (event) => keybarPointerDown(event, act));
@@ -8176,8 +8645,15 @@ var TerminalKeybar = class {
     window.addEventListener("resize", this.layout);
     host.addEventListener("keydown", this.onKeyDown, true);
     host.addEventListener("keyup", this.onKeyUp, true);
-    host.addEventListener("beforeinput", this.onSoftInput, true);
-    host.addEventListener("input", this.onSoftInput, true);
+    this.softInput = new TerminalSoftInput(
+      host,
+      this.textarea,
+      () => this.focused && this.phone.matches,
+      () => this.physicalInput,
+      (data) => this.sendUserInput(data),
+      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off",
+      (event) => !this.suppressedKeydowns.delete(event)
+    );
     this.paint();
   }
   arrows = false;
@@ -8187,37 +8663,104 @@ var TerminalKeybar = class {
   phone = window.matchMedia("(max-width: 768px)");
   viewport = window.visualViewport;
   observer;
+  textarea;
   focused = false;
   physicalInput = false;
   onKeyDown = (event) => {
     this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
+    if (event.keyCode === 229) this.markDeferredUserInput();
   };
   onKeyUp = () => {
     this.physicalInput = false;
   };
-  onSoftInput = (event) => {
-    if (!this.focused || !this.phone.matches || this.physicalInput || event.isComposing || event.inputType !== "insertText" || !event.data || this.modifiers.state("Ctrl") === "off" && this.modifiers.state("Alt") === "off") return;
-    if (event.type === "beforeinput" && !event.cancelable) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    this.input(event.data);
-  };
+  softInput;
   buttons = /* @__PURE__ */ new Map();
   originalMaxHeight;
+  userInput;
+  userInputGeneration = 0;
+  deferred229;
+  deferred229Generation = 0;
+  suppressedKeydowns = /* @__PURE__ */ new WeakSet();
   setFocused(focused) {
     this.focused = focused;
     if (!focused) {
       this.modifiers.reset();
+      this.softInput.reset();
       this.physicalInput = false;
       this.arrows = false;
+      this.deferred229 = void 0;
+      this.deferred229Generation += 1;
     }
     this.paint();
     this.layout();
   }
   transform(text) {
-    const output = this.focused && this.phone.matches ? this.modifiers.input(text) : text;
+    const marker = this.userInput;
+    const source = marker || this.takeDeferred229(text) ? "user" : "terminal";
+    this.userInput = void 0;
+    this.userInputGeneration += 1;
+    const output = this.softInput.transform(text, (value, compositionTrailing) => this.focused && this.phone.matches && marker?.source !== "keybar" ? this.modifiers.input(
+      value,
+      compositionTrailing ? "user" : source,
+      compositionTrailing ? void 0 : marker?.physical
+    ) : value);
     this.paint();
     return output;
+  }
+  /** Mark xterm's synchronous onKey emission with its unaliased DOM identity. */
+  markUserInput(physical, keybar = false) {
+    const generation = ++this.userInputGeneration;
+    this.userInput = {
+      source: keybar ? "keybar" : "user",
+      physical: physical ? {
+        key: physical.key,
+        shiftKey: physical.shiftKey,
+        altKey: physical.altKey,
+        ctrlKey: physical.ctrlKey,
+        metaKey: physical.metaKey
+      } : void 0
+    };
+    const clear = () => {
+      if (this.userInputGeneration === generation) this.userInput = void 0;
+    };
+    queueMicrotask(clear);
+  }
+  /** Match xterm's deferred 229 textarea diff without marking an intervening reply. */
+  markDeferredUserInput() {
+    const before = this.textarea?.value;
+    if (before === void 0) return;
+    const generation = ++this.deferred229Generation;
+    this.deferred229 = { before, generation };
+    queueMicrotask(() => setTimeout(() => {
+      if (this.deferred229?.generation === generation) this.deferred229 = void 0;
+    }, 0));
+  }
+  /** Record that xterm's custom handler rejected this event before CompositionHelper. */
+  markKeydownSuppressed(event) {
+    this.suppressedKeydowns.add(event);
+  }
+  takeDeferred229(text) {
+    const pending = this.deferred229;
+    const value = this.textarea?.value;
+    if (!pending || value === void 0) return false;
+    const diff = value.replace(pending.before, "");
+    const expected = value.length > pending.before.length ? diff : value.length < pending.before.length ? "\x7F" : value !== pending.before ? value : void 0;
+    if (text !== expected) return false;
+    this.deferred229 = void 0;
+    this.deferred229Generation += 1;
+    return true;
+  }
+  sendUserInput(data, options = {}) {
+    if (options.afterComposition && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    this.emitUserInput(data, options);
+  }
+  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  sendCustomUserInput(data, physical) {
+    this.sendUserInput(data, { physical, afterComposition: true });
+  }
+  emitUserInput(data, options) {
+    this.markUserInput(options.physical, options.keybar);
+    this.input(data);
   }
   paint() {
     this.rows.forEach((row, index) => {
@@ -8227,7 +8770,7 @@ var TerminalKeybar = class {
       const state = this.modifiers.state(key);
       button.dataset.state = state;
       button.setAttribute("aria-pressed", String(state !== "off"));
-      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next character" : "Double tap to lock");
+      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
       button.title = state === "locked" ? `${key} locked \xB7 Tap to release` : `${key} \xB7 Double tap to lock`;
       button.textContent = state === "locked" ? `\u25B8 ${key}` : key;
     }
@@ -8254,8 +8797,7 @@ var TerminalKeybar = class {
   dispose() {
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
-    this.host.removeEventListener("beforeinput", this.onSoftInput, true);
-    this.host.removeEventListener("input", this.onSoftInput, true);
+    this.softInput.dispose();
     this.observer.disconnect();
     this.phone.removeEventListener("change", this.layout);
     this.viewport?.removeEventListener("resize", this.layout);
@@ -8778,23 +9320,26 @@ var AttachTerminal = class {
         }
       });
     }
+    this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.attachCustomKeyEventHandler((ev) => {
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
       }
-      return handleClipboardKeydown(ev, {
+      const accepted = handleClipboardKeydown(ev, {
         composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.sendInput(text),
+        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.term.input(text, true)
+        sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev)
       });
+      if (!accepted) this.keybar.markKeydownSuppressed(ev);
+      return accepted;
     });
     this.ro = new ResizeObserver(() => this.scheduleFit());
     this.ro.observe(container);
