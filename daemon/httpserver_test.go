@@ -522,9 +522,26 @@ func TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe(t *testing.T) {
 	assert.Empty(t, warnings.String())
 }
 
+// maskSnapshotOperationClock preserves every response byte except the volatile
+// monotonic reading independently sampled by each Snapshot call.
+func maskSnapshotOperationClock(t *testing.T, body string) string {
+	t.Helper()
+	const field = `"operation_clock_ms":`
+	start := strings.Index(body, field)
+	require.NotEqual(t, -1, start, "Snapshot envelope must carry its operation clock")
+	valueStart := start + len(field)
+	valueEnd := valueStart
+	for valueEnd < len(body) && body[valueEnd] >= '0' && body[valueEnd] <= '9' {
+		valueEnd++
+	}
+	require.Greater(t, valueEnd, valueStart, "Snapshot operation clock must be numeric")
+	return body[:valueStart] + "<operation-clock>" + body[valueEnd:]
+}
+
 // TestHTTP_SuccessBodyUsesSharedEnvelopeWriter pins that the HTTP success body is
 // produced by the SAME apiproto.WriteEnvelope the CLI's --json path uses, so the
-// two surfaces are byte-for-byte identical and can never drift.
+// two surfaces are byte-for-byte identical apart from independently sampled
+// volatile values and can never otherwise drift.
 func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
@@ -539,7 +556,8 @@ func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
 	var want bytes.Buffer
 	require.NoError(t, apiproto.WriteEnvelope(&want, apiproto.Success(resp)))
 
-	require.Equal(t, want.String(), rec.Body.String(),
+	require.Equal(t, maskSnapshotOperationClock(t, want.String()),
+		maskSnapshotOperationClock(t, rec.Body.String()),
 		"HTTP body must be the shared envelope writer's bytes (identical to CLI --json)")
 }
 
