@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -35,7 +36,14 @@ func TestRestoredRelocationRecoveryBlocksHookAdoption(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "systemctl"), []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 0\n"), 0700))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	git.AdoptRunningHooks([]*git.GitWorktree{inst.gitWorktree})
-	require.Nil(t, inst.gitWorktree.HooksDone())
+	done := inst.gitWorktree.HooksDone()
+	require.NotNil(t, done, "unresolved relocation must report its pending hook obligation")
+	t.Cleanup(func() { require.NoError(t, inst.gitWorktree.CancelAndJoinHooks()) })
+	select {
+	case <-done:
+		t.Fatal("unresolved relocation reported its hook obligation complete")
+	case <-time.After(100 * time.Millisecond):
+	}
 	_, err = os.Stat(marker)
 	require.True(t, os.IsNotExist(err), "unresolved relocation must be fenced before probing/adopting legacy scopes")
 }
