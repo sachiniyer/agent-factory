@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hooklog"
 )
 
 func TestHookProgressExpiredClaimWaitKeepsSuffixPending(t *testing.T) {
@@ -65,18 +66,44 @@ func TestHookProgressLaunchFailureWaitsForCompetingClaimExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(p.receipt(0), 0700); err != nil {
-		t.Fatal(err)
-	}
 	previousTimeout := hookStopTimeout
 	hookStopTimeout = 2 * time.Second
+	originalOpen, originalProbe := openHookLog, runningHookPrefixesForResume
+	openEntered, releaseOpen := make(chan struct{}), make(chan struct{})
+	var openOnce, releaseOpenOnce sync.Once
+	openHookLog = func(kind hooklog.Kind) (*os.File, error) {
+		openOnce.Do(func() {
+			close(openEntered)
+			<-releaseOpen
+		})
+		return originalOpen(kind)
+	}
+	claimLive := atomic.Bool{}
+	claimLive.Store(true)
+	runningHookPrefixesForResume = func(...string) ([]string, error) {
+		if claimLive.Load() {
+			return []string{p.Prefix}, nil
+		}
+		return nil, nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
 	t.Cleanup(func() {
+		releaseOpenOnce.Do(func() { close(releaseOpen) })
 		cancel()
 		waitForClosed(t, done, 5*time.Second, "competing-claim runner did not stop")
 		hookStopTimeout = previousTimeout
+		openHookLog, runningHookPrefixesForResume = originalOpen, originalProbe
 	})
+	select {
+	case <-openEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not pass its initial unclaimed-entry check")
+	}
+	if err := os.Mkdir(p.receipt(0), 0700); err != nil {
+		t.Fatal(err)
+	}
+	releaseOpenOnce.Do(func() { close(releaseOpen) })
 	time.Sleep(100 * time.Millisecond)
 	requireOpen(t, done, "start failure advanced before the competing claim finished")
 	if err := os.Mkdir(tree, 0700); err != nil {
@@ -90,6 +117,7 @@ func TestHookProgressLaunchFailureWaitsForCompetingClaimExit(t *testing.T) {
 	if err := config.AtomicWriteFile(filepath.Join(p.receipt(0), "exit"), []byte("0\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	claimLive.Store(false)
 	waitForClosed(t, done, 5*time.Second, "runner did not continue after the competing exit receipt")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("suffix did not run after the competing claim finished: %v", err)

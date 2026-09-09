@@ -272,22 +272,35 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			// raced ahead of doneCh — so no grandchild outlives its parent hook
 			// (see #610, #769).
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			// And close the scope behind the same exit, synchronously, so that
-			// hooksDone closing keeps meaning "nothing from this run is left" for
-			// the scope too — a grandchild that escaped the process group (a
-			// setsid'd child) is still inside the scope's control group. Stopping
-			// an already-collected scope is a no-op.
+			state := hookEntryUnknown
+			var stateErr error
+			if run.progress != nil {
+				state, stateErr = run.progress.entryState(index)
+			}
+			// A successful wait proves this launcher owned the scope. A terminal
+			// receipt proves the operator command is done even if this process was
+			// the loser in a same-unit collision. Cancellation authorizes teardown.
+			// Without one of those positive facts, stopping the shared unit name
+			// could kill the competing claimant whose receipt we must wait for.
+			scopeCanStop := ctx.Err() != nil || waitErr == nil || state == hookEntryFinished
 			var scopeStopErr error
-			if scopeUnit != "" {
+			if scopeUnit != "" && scopeCanStop {
 				if err := stopHookScopeUnits(scopeUnit); err != nil {
 					scopeStopErr = err
 					log.WarningLog.Printf("post-worktree hook scope %s did not stop (full output: %s): %v", scopeUnit, outputPath, err)
 				}
 			}
 			if run.progress != nil {
-				state, stateErr := run.progress.entryState(index)
 				if stateErr != nil {
 					log.WarningLog.Printf("cannot verify post-worktree hook entry %d completion: %v; waiting to recover the ordered suffix", index, stateErr)
+					_ = outputFile.Close()
+					if waitForHookEntryRecovery(ctx, run.progress, index) {
+						continue
+					}
+					return
+				}
+				if scopeUnit != "" && waitErr != nil && ctx.Err() == nil && state != hookEntryFinished {
+					log.WarningLog.Printf("post-worktree hook launcher for entry %d exited without proving scope ownership; waiting for the competing claim", index)
 					_ = outputFile.Close()
 					if waitForHookEntryRecovery(ctx, run.progress, index) {
 						continue
