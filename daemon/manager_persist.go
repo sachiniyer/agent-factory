@@ -761,7 +761,11 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 		var lateErr error
 		select {
 		case <-stop:
-			return
+			// The descriptor worker owns a checkpoint callback and may still
+			// persist cleanup-finalizing state. Join it even during shutdown;
+			// abandoning only this consumer would leave that write live across
+			// the terminal instance checkpoint.
+			lateErr = <-lateResult
 		case lateErr = <-lateResult:
 		}
 		if lateErr != nil {

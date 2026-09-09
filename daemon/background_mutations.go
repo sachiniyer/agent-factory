@@ -23,8 +23,9 @@ func (m *Manager) launchBackgroundMutation(run func(stop <-chan struct{})) bool 
 
 // stopAndWaitBackgroundMutationsForShutdown is called only after external RPCs,
 // the poll loop, and root creates have been joined, so every possible launcher
-// has stopped. Closing stop lets pre-destructive task/ghost workers stand down;
-// a writer already mutating is joined through its persist before this returns.
+// has stopped. Closing stop lets pre-destructive task workers and ghost retries
+// stand down; a descriptor worker or writer already mutating is joined through
+// its persist before this returns.
 func (m *Manager) stopAndWaitBackgroundMutationsForShutdown() {
 	m.backgroundMutationMu.Lock()
 	if !m.backgroundMutationsStopped {

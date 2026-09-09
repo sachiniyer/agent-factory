@@ -442,8 +442,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	manager.waitRootAgentCreatesForShutdown()
 	// RPCs and the poll are gone, and root creates (which can launch a final
 	// conversation capture) are joined. No detached durable writer may now be
-	// admitted; cancel those still waiting before destructive work and join any
-	// one already mutating through its targeted persist.
+	// admitted; let pre-destructive work stand down and join any descriptor worker
+	// or mutation already in progress through its targeted persist.
 	manager.stopAndWaitBackgroundMutationsForShutdown()
 
 	if homeGone {
