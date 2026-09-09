@@ -11,20 +11,21 @@ const RESTORE_RECONCILE_RETRY_MAX_MS = 10_000;
 const SNAPSHOT_ISSUANCE_HISTORY = 128;
 
 type RestoreTimer = ReturnType<typeof globalThis.setTimeout>;
+type RestoreTicket = {
+  settled: boolean;
+  uncertain: boolean;
+  succeededAt: number | null;
+  uncertainAt: number;
+  uncertainSince: number;
+  sawBusy: boolean;
+  timer: RestoreTimer | null;
+  retryDelayMs: number;
+  restoreEligible: RestoreRow["restoreEligible"];
+};
 
 /** Request fences outlive dialogs and remain until a successful restore is visible. */
 export class PendingRestores {
-  private readonly tickets = new Map<string, {
-    settled: boolean;
-    uncertain: boolean;
-    succeededAt: number | null;
-    uncertainAt: number;
-    uncertainSince: number;
-    sawBusy: boolean;
-    timer: RestoreTimer | null;
-    retryDelayMs: number;
-    restoreEligible: RestoreRow["restoreEligible"];
-  }>();
+  private readonly tickets = new Map<string, RestoreTicket>();
   private snapshotGeneration = 0;
   private readonly snapshotIssuedAt = new Map<number, number>();
   private rows: ReadonlyArray<RestoreRow> | null = null;
@@ -38,7 +39,13 @@ export class PendingRestores {
     private readonly now: () => number = () => globalThis.performance.now(),
     private readonly requestReconcile: () => void = () => {},
     private readonly schedule: (callback: () => void, delayMs: number) => RestoreTimer =
-      (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+      (callback, delayMs) => {
+        const timer = globalThis.setTimeout(callback, delayMs);
+        // Browser timers are numbers. Let Node's unit runner exit when a test
+        // intentionally leaves a fenced ticket behind for a later observation.
+        if (typeof timer === "object") timer.unref();
+        return timer;
+      },
     private readonly cancel: (timer: RestoreTimer) => void = timer => globalThis.clearTimeout(timer),
   ) {}
 
@@ -68,6 +75,7 @@ export class PendingRestores {
           ticket.settled = true;
           // Events can advance the row before the HTTP response arrives.
           if (this.rows) this.observe(this.rows);
+          if (this.tickets.get(id) === ticket) this.armRetryTimer(id, ticket);
         }
         return result;
       } catch (error) {
@@ -114,7 +122,7 @@ export class PendingRestores {
         this.operationLockTimeoutMs = evidence.operationLockTimeoutMs;
         for (const ticket of this.tickets.values()) this.cancelTimer(ticket);
       }
-      for (const [id, ticket] of this.tickets) this.armUncertainTimer(id, ticket);
+      for (const [id, ticket] of this.tickets) this.armTimerForState(id, ticket);
     }
     const eligibility = new Map(rows.map(row => [row.id, row.restoreEligible]));
     let changed = false;
@@ -167,9 +175,12 @@ export class PendingRestores {
     this.changed(new Set(this.tickets.keys()));
   }
 
-  private armUncertainTimer(id: string, ticket: {
-    uncertain: boolean; uncertainSince: number; timer: RestoreTimer | null; retryDelayMs: number;
-  }): void {
+  private armTimerForState(id: string, ticket: RestoreTicket): void {
+    if (ticket.uncertain) this.armUncertainTimer(id, ticket);
+    else if (ticket.settled) this.armRetryTimer(id, ticket);
+  }
+
+  private armUncertainTimer(id: string, ticket: RestoreTicket): void {
     if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
     const remaining = Math.max(0,
       ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now());
@@ -177,22 +188,24 @@ export class PendingRestores {
       ticket.timer = null;
       if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
       this.requestReconcile();
-      if (this.tickets.get(id) === ticket && ticket.uncertain) this.armRetryTimer(id, ticket);
+      if (this.tickets.get(id) === ticket && this.needsReconcile(ticket)) this.armRetryTimer(id, ticket);
     }, remaining);
   }
 
-  private armRetryTimer(id: string, ticket: {
-    uncertain: boolean; timer: RestoreTimer | null; retryDelayMs: number;
-  }): void {
-    if (ticket.timer !== null) return;
+  private armRetryTimer(id: string, ticket: RestoreTicket): void {
+    if (!this.needsReconcile(ticket) || ticket.timer !== null) return;
     const delay = ticket.retryDelayMs;
     ticket.retryDelayMs = Math.min(ticket.retryDelayMs * 2, RESTORE_RECONCILE_RETRY_MAX_MS);
     ticket.timer = this.schedule(() => {
       ticket.timer = null;
-      if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
+      if (this.tickets.get(id) !== ticket || !this.needsReconcile(ticket)) return;
       this.requestReconcile();
-      if (this.tickets.get(id) === ticket && ticket.uncertain) this.armRetryTimer(id, ticket);
+      if (this.tickets.get(id) === ticket && this.needsReconcile(ticket)) this.armRetryTimer(id, ticket);
     }, delay);
+  }
+
+  private needsReconcile(ticket: RestoreTicket): boolean {
+    return ticket.uncertain || ticket.settled;
   }
 
   private cancelTimer(ticket: { timer: RestoreTimer | null }): void {

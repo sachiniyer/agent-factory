@@ -24,7 +24,7 @@ function fakeRestoreTimer() {
     fire(): void {
       const fn = callback;
       callback = null;
-      assert.ok(fn, "an uncertain ticket must have an armed reconciliation timer");
+      assert.ok(fn, "a pending restore must have an armed reconciliation timer");
       fn();
     },
     delay: () => delay,
@@ -114,6 +114,50 @@ test("successful restore survives failed resync and releases on absence or reset
   assert.equal(pending.has("session"), true);
   pending.reset();
   assert.equal(pending.has("session"), false);
+});
+
+test("successful restore retries reconciliation after its first Snapshot fails", async () => {
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  let reconciliations = 0;
+  let pending!: PendingRestores;
+  pending = new PendingRestores(
+    () => {}, () => false, () => false, () => 1_000,
+    () => {
+      reconciliations++;
+      pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+    },
+    timer.schedule,
+    timer.cancel,
+  );
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+
+  await pending.run("session", async () => {}, true);
+  // The caller's immediate post-success Snapshot failed and never reached observe().
+  assert.equal(pending.has("session"), true);
+  assert.equal(timer.armed(), true, "settled tickets must retry without an events socket");
+  assert.equal(timer.delay(), RESTORE_RECONCILE_RETRY_MIN_MS);
+
+  timer.fire();
+  assert.equal(reconciliations, 1);
+  assert.equal(pending.has("session"), false);
+  assert.equal(timer.armed(), false);
+});
+
+test("prompt confirmation of a successful restore cancels its reconciliation retry", async () => {
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(
+    () => {}, () => false, () => false, () => 1_000, () => {}, timer.schedule, timer.cancel,
+  );
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+
+  await pending.run("session", async () => {}, true);
+  assert.equal(timer.armed(), true);
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  assert.equal(pending.has("session"), false);
+  assert.equal(timer.armed(), false);
+  assert.equal(timer.cancellations(), 1);
 });
 
 test("row advancement before the response releases only after success", async () => {
