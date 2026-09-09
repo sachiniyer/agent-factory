@@ -234,6 +234,11 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
+	// rootProgramDriftLogged deduplicates the adopted-command warning by resolved
+	// repository identity. Two legacy paths can share one repo while retaining
+	// independent retry states; they must still produce only one warning. Guarded
+	// by mu and retained for the Manager's lifetime.
+	rootProgramDriftLogged map[string]bool
 	// rootCreateRefusals holds each repo's standing create-boundary identity
 	// refusal (#3714): the outcome class of the most recent identity proof at
 	// a root create, and when it was taken. Keyed by REPO ID — the key
@@ -717,6 +722,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		aliveObservations:         make(map[string]uint64),
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
+		rootProgramDriftLogged:    make(map[string]bool),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
 		rootCreatesInFlight:       make(map[string]string),
 		rootKilledAt:              make(map[string]time.Time),

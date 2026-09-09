@@ -233,40 +233,55 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		report.markIncomplete("root agent program")
 		return
 	}
-	compared, drifted := 0, 0
+	compared, drifted, unresolved := 0, 0, 0
 	for _, inst := range instances {
 		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
 			continue
 		}
-		repoPath := inst.Worktree.RepoPath
-		if repoPath == "" {
-			repoPath = inst.Worktree.WorktreePath
+		identityPath := inst.Worktree.RepoPath
+		if identityPath == "" {
+			identityPath = inst.Worktree.WorktreePath
 		}
-		if repoPath == "" {
-			repoPath = inst.Path
+		if identityPath == "" {
+			identityPath = inst.Path
 		}
-		if repoPath == "" {
+		if identityPath == "" {
 			continue
 		}
-		resolved, resolveErr := config.ResolveRootAgentForInspectionWithConfig(cfg, repoPath, false)
-		if resolveErr != nil || config.RootAgentValueFailsClosed(resolved) {
+		resolved, resolveErr := config.ResolveRootAgentForInspectionWithConfig(cfg, identityPath, false)
+		if resolveErr != nil {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not resolve the configured profile for live root at %s: %s", identityPath, oneLine(resolveErr)),
+				"restore the checkout or mount, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if config.RootAgentValueFailsClosed(resolved) {
 			continue
 		}
 		profile, ok := resolved.Value.(config.RootAgent)
 		if !ok || !profile.Enabled {
 			continue
 		}
-		configuredProgram := daemon.RootAgentProgramForProfile(repoPath, profile)
+		commandPath := inst.Worktree.WorktreePath
+		if commandPath == "" {
+			commandPath = inst.Path
+		}
+		if commandPath == "" {
+			commandPath = identityPath
+		}
+		configuredProgram := daemon.RootAgentProgramForProfile(commandPath, profile)
 		compared++
 		if configuredProgram == inst.Program {
 			continue
 		}
 		drifted++
 		report.Warn(sectionDaemon, "root agent program",
-			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", repoPath, configuredProgram, inst.Program),
+			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", commandPath, configuredProgram, inst.Program),
 			"kill the root, then restart the daemon", true)
 	}
-	if drifted == 0 {
+	if drifted == 0 && unresolved == 0 {
 		detail := "no enabled live root sessions to compare"
 		if compared > 0 {
 			detail = fmt.Sprintf("%d live root session(s) match the configured command", compared)

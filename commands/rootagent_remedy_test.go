@@ -33,3 +33,24 @@ func TestRootAgentRemedyPreservesPersonalProgram(t *testing.T) {
 	require.True(t, cfg.RootAgent.Enabled)
 	require.Equal(t, "claude --model opus", cfg.RootAgent.Program)
 }
+
+func TestRootAgentDottedProjectUnsetNamesAdoptedSessionRemedy(t *testing.T) {
+	_, repo := setupConfigExplainCommandTest(t, "schema_version = 1\n")
+	t.Setenv("AF_DAEMON_URL", "")
+	project, err := config.RegisterProject(repo)
+	require.NoError(t, err)
+	path, err := config.ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte("[root_agent]\nenabled = true\nprogram = 'codex'\n"), 0644))
+	t.Chdir(repo)
+	oldProject := configUnsetProjectFlag
+	configUnsetProjectFlag = "."
+	t.Cleanup(func() { configUnsetProjectFlag = oldProject })
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	require.NoError(t, configUnsetCmd.RunE(cmd, []string{"root_agent.program"}))
+	require.Contains(t, out.String(), "restart them to apply")
+	require.Contains(t, out.String(), "already-running root session is adopted as-is")
+	require.Contains(t, out.String(), "program change also requires killing that session")
+}

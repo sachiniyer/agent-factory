@@ -124,6 +124,14 @@ type rootEnsureState struct {
 	// ensure-state. A healthy adopt is revisited every sweep tick, so the bit is
 	// deliberately not reset by rootEnsureSucceeded.
 	programDriftLogged bool
+	// The default root command requires repository/config resolution. Cache that
+	// answer after resolving it off the ensure sweep; the frozen profile makes it
+	// stable, while the running program remains cheap to compare every tick.
+	programDriftResolving         bool
+	programDriftResolved          bool
+	programDriftResolvedWorkspace string
+	programDriftResolvedProfile   config.RootAgent
+	programDriftConfiguredProgram string
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot
 	// one-second ensure path.
@@ -526,17 +534,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
-			configuredProgram := rootAgentProgramForProfile(workspace, resolution.RootAgent)
-			runningProgram := inst.AgentProgram()
-			if configuredProgram != runningProgram {
-				m.mu.Lock()
-				logDrift := !st.programDriftLogged
-				st.programDriftLogged = true
-				m.mu.Unlock()
-				if logDrift {
-					m.warn().Printf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is; kill the root, then restart the daemon", workspace, configuredProgram, runningProgram)
-				}
-			}
+			m.checkAdoptedRootProgramDrift(repo.ID, key, workspace, st, resolution.RootAgent, inst)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return

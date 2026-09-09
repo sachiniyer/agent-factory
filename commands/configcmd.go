@@ -577,8 +577,7 @@ owns.`, tmux.SupportedProgramsString()),
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
 			if res.RequiresRestart {
-				notice := "note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)"
-				fmt.Fprintln(cmd.OutOrStdout(), config.WithRootAgentAdoptionNotice(res.Key, notice))
+				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
 			}
 			return nil
 		}
@@ -768,11 +767,24 @@ override file it clears is this machine's.`,
 		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
 			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
 		if res.RequiresRestart {
-			fmt.Fprintln(cmd.OutOrStdout(),
-				"saved. It applies to sessions created in this project from now on.")
+			if rootAgentConfigKey(res.Key) {
+				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(),
+					"saved. It applies to sessions created in this project from now on.")
+			}
 		}
 		return nil
 	},
+}
+
+func rootAgentConfigKey(key string) bool {
+	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
+}
+
+func projectConfigRestartNotice(key string) string {
+	notice := "note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)"
+	return config.WithRootAgentAdoptionNotice(key, notice)
 }
 
 // echoValue renders a just-set value for the `set <key> = <value>` echo. An
