@@ -21,7 +21,7 @@ interface CompositionRange {
 interface PostCompositionInput {
   beforeText: string;
   afterText: string;
-  text: string;
+  emissions: string[];
 }
 
 interface TrailingFlush {
@@ -154,7 +154,7 @@ export class TerminalSoftInput {
               range.queuedInput = {
                 beforeText,
                 afterText: value.substring(range.start),
-                text: (range.queuedInput?.text ?? "") + "\x7f",
+                emissions: [...(range.queuedInput?.emissions ?? []), "\x7f"],
               };
             }
           }
@@ -335,7 +335,7 @@ export class TerminalSoftInput {
       this.remove(range);
       return;
     }
-    const text = queued.beforeText + queued.text;
+    const text = queued.beforeText + queued.emissions.join("");
     this.remove(range);
     this.forwardingQueued = { range, text };
     try { this.send(text); } finally { this.forwardingQueued = undefined; }
@@ -348,7 +348,8 @@ export class TerminalSoftInput {
       range.commitLength ?? (queued.beforeText.length - (range.trailingLength ?? 0)));
     const commit = queued.beforeText.slice(0, boundary);
     const trailing = queued.beforeText.slice(boundary);
-    return commit + (trailing ? applyModifiers(trailing, true) : "") + applyModifiers(queued.text, true);
+    const input = queued.emissions.map(text => applyModifiers(text, true)).join("");
+    return commit + (trailing ? applyModifiers(trailing, true) : "") + input;
   }
   private observeCompositionValue(range: CompositionRange): void {
     const value = this.textarea?.value;

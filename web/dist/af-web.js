@@ -8184,7 +8184,7 @@ var TerminalSoftInput = class {
               range.queuedInput = {
                 beforeText,
                 afterText: value.substring(range.start),
-                text: (range.queuedInput?.text ?? "") + "\x7F"
+                emissions: [...range.queuedInput?.emissions ?? [], "\x7F"]
               };
             }
           }
@@ -8316,7 +8316,7 @@ var TerminalSoftInput = class {
       this.remove(range);
       return;
     }
-    const text = queued.beforeText + queued.text;
+    const text = queued.beforeText + queued.emissions.join("");
     this.remove(range);
     this.forwardingQueued = { range, text };
     try {
@@ -8334,7 +8334,8 @@ var TerminalSoftInput = class {
     );
     const commit = queued.beforeText.slice(0, boundary);
     const trailing = queued.beforeText.slice(boundary);
-    return commit + (trailing ? applyModifiers(trailing, true) : "") + applyModifiers(queued.text, true);
+    const input = queued.emissions.map((text) => applyModifiers(text, true)).join("");
+    return commit + (trailing ? applyModifiers(trailing, true) : "") + input;
   }
   observeCompositionValue(range) {
     const value = this.textarea?.value;

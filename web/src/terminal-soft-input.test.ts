@@ -795,6 +795,38 @@ for (const [commit, after] of [["字", ""], ["ab", "a"]] as const) test(
   assert.equal(soft.transform("a", value => modifiers.input(value)), "a");
 });
 
+for (const [locked, expected, finalState] of [
+  [false, "\x08\x7f", "off"], [true, "\x08\x08", "locked"],
+] as const) test(`queued Backspaces apply ${locked ? "locked" : "one-shot"} Ctrl per deletion`, t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  if (locked) modifiers.tap("Ctrl", 100);
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  textarea.addEventListener("compositionend", () => setTimeout(() => {
+    if (textarea.value) send(textarea.value);
+  }, 0));
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "ab";
+  textarea.dispatchEvent(composition("compositionend", "ab"));
+  textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
+  for (const after of ["a", ""]) {
+    host.dispatchEvent(deleteBackward("beforeinput"));
+    textarea.value = after;
+    host.dispatchEvent(deleteBackward("input"));
+  }
+  t.mock.timers.tick(0);
+
+  assert.equal(writes.join(""), "ab" + expected);
+  assert.equal(modifiers.state("Ctrl"), finalState);
+});
+
 test("composing insertText without lifecycle stays native and preserves Alt", () => {
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
