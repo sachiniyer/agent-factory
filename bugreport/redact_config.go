@@ -3,13 +3,15 @@ package bugreport
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"unicode"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
 )
 
-type configStringScalar struct {
+type encodedStringScalar struct {
 	start int
 	end   int
 	value string
@@ -33,8 +35,18 @@ func (r *redactor) scrubConfig(data []byte, format string) string {
 	return r.scrubConfigText(string(data), kind)
 }
 
+// scrubJSON scrubs an already-encoded JSON document. Its implementation is
+// deliberately kept at this seam so the document's target grammar is explicit.
+func (r *redactor) scrubJSON(s string) string {
+	scalars, ok := parseJSONScalars(s, nil)
+	if !ok {
+		return r.scrubRecognizedText(s, redactionTextUnknown)
+	}
+	return r.scrubEncodedText(s, redactionTextJSONDocument, scalars)
+}
+
 func (r *redactor) scrubConfigText(s string, kind redactionTextKind) string {
-	var scalars []configStringScalar
+	var scalars []encodedStringScalar
 	var ok bool
 	switch kind {
 	case redactionTextConfigJSON:
@@ -45,7 +57,18 @@ func (r *redactor) scrubConfigText(s string, kind redactionTextKind) string {
 	if !ok {
 		return r.scrubRecognizedText(s, redactionTextUnknown)
 	}
-	spans := r.genericTextSpans(s)
+	return r.scrubEncodedText(s, kind, scalars)
+}
+
+func (r *redactor) scrubEncodedText(s string, kind redactionTextKind, scalars []encodedStringScalar) string {
+	var spans []redactionSpan
+	if kind == redactionTextConfigTOML {
+		// TOML comments are free text outside scalar tokens and remain useful in
+		// the collected config. JSON has no such region: planning exclusively on
+		// its decoded key/value strings guarantees that no replacement can cross
+		// structural syntax and make the document unparsable.
+		spans = r.genericTextSpans(s)
+	}
 	for _, scalar := range scalars {
 		inner := r.genericTextSpans(scalar.value)
 		if scalar.shell {
@@ -55,7 +78,7 @@ func (r *redactor) scrubConfigText(s string, kind redactionTextKind) string {
 		if redacted == scalar.value {
 			continue
 		}
-		replacement, err := encodeConfigString(redacted)
+		replacement, err := encodeStringForGrammar(redacted, kind)
 		if err != nil {
 			return r.scrubRecognizedText(s, redactionTextUnknown)
 		}
@@ -67,17 +90,71 @@ func (r *redactor) scrubConfigText(s string, kind redactionTextKind) string {
 	return applyRedactionSpans(s, spans)
 }
 
-func encodeConfigString(value string) (string, error) {
+// encodeStringForGrammar is the transport half of the recognition invariant:
+// a decoded replacement must be valid syntax in its TARGET grammar, never just
+// in Go's. In particular, strconv.Quote can emit \xNN escapes which Go accepts
+// but JSON rejects. Each encoded-document owner selects its own encoder here;
+// adding verbatim exceptions for bytes where two grammars happen to agree would
+// only enumerate today's differences.
+func encodeStringForGrammar(value string, kind redactionTextKind) (string, error) {
+	switch kind {
+	case redactionTextJSONDocument, redactionTextConfigJSON:
+		return encodeJSONString(value)
+	case redactionTextConfigTOML:
+		return encodeTOMLString(value)
+	default:
+		return "", fmt.Errorf("unsupported redaction text grammar %d", kind)
+	}
+}
+
+func encodeJSONString(value string) (string, error) {
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
-	// This encoding is emitted into both JSON and TOML. Keep grammar-neutral
-	// bytes such as &, <, and > verbatim so redaction does not rewrite config
-	// content merely because it round-tripped through a decoded scalar.
+	// Keep legal JSON bytes such as &, <, and > verbatim so redaction does not
+	// rewrite content merely because it round-tripped through a decoded scalar.
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
 		return "", err
 	}
 	return strings.TrimSuffix(encoded.String(), "\n"), nil
+}
+
+func encodeTOMLString(value string) (string, error) {
+	// The TOML encoder documents that a value containing an apostrophe uses a
+	// basic (double-quoted) string. Prefix one solely to select that target-owned
+	// grammar, then remove its verbatim byte from the encoded token. This keeps
+	// the existing double-quoted report shape without copying TOML's escape table
+	// or maintaining a list of bytes on which another grammar happens to agree.
+	forced := "'" + value
+	doc, err := toml.Marshal(struct {
+		Value string `toml:"value"`
+	}{Value: forced})
+	if err != nil {
+		return "", err
+	}
+	var parser unstable.Parser
+	parser.Reset(doc)
+	if !parser.NextExpression() {
+		if err := parser.Error(); err != nil {
+			return "", fmt.Errorf("parse encoded TOML string: %w", err)
+		}
+		return "", fmt.Errorf("TOML encoder produced no value")
+	}
+	node := parser.Expression().Value()
+	if node == nil || node.Kind != unstable.String {
+		return "", fmt.Errorf("TOML encoder produced an unexpected document")
+	}
+	start := int(node.Raw.Offset)
+	end := start + int(node.Raw.Length)
+	encoded := string(doc[start:end])
+	decoded := string(node.Data)
+	if parser.NextExpression() || parser.Error() != nil {
+		return "", fmt.Errorf("TOML encoder produced an unexpected document")
+	}
+	if decoded != forced || len(encoded) < 3 || encoded[0] != '"' || encoded[1] != '\'' {
+		return "", fmt.Errorf("TOML encoder did not produce a basic string")
+	}
+	return encoded[:1] + encoded[2:], nil
 }
 
 func isConfigShellPath(path []string) bool {
@@ -95,17 +172,22 @@ func isConfigShellPath(path []string) bool {
 	return len(path) == 3 && path[0] == "root_agents" && path[2] == "program"
 }
 
-type jsonConfigParser struct {
+type jsonDocumentParser struct {
+	shell   func([]string) bool
 	s       string
 	pos     int
-	scalars []configStringScalar
+	scalars []encodedStringScalar
 }
 
-func parseJSONConfigScalars(s string) ([]configStringScalar, bool) {
+func parseJSONConfigScalars(s string) ([]encodedStringScalar, bool) {
+	return parseJSONScalars(s, isConfigShellPath)
+}
+
+func parseJSONScalars(s string, shell func([]string) bool) ([]encodedStringScalar, bool) {
 	if !json.Valid([]byte(s)) {
 		return nil, false
 	}
-	p := jsonConfigParser{s: s}
+	p := jsonDocumentParser{s: s, shell: shell}
 	if !p.parseValue(nil) {
 		return nil, false
 	}
@@ -113,7 +195,7 @@ func parseJSONConfigScalars(s string) ([]configStringScalar, bool) {
 	return p.scalars, p.pos == len(s)
 }
 
-func (p *jsonConfigParser) parseValue(path []string) bool {
+func (p *jsonDocumentParser) parseValue(path []string) bool {
 	p.skipSpace()
 	if p.pos >= len(p.s) {
 		return false
@@ -126,7 +208,9 @@ func (p *jsonConfigParser) parseValue(path []string) bool {
 	case '"':
 		scalar, ok := p.parseString()
 		if ok {
-			scalar.shell = isConfigShellPath(path)
+			if p.shell != nil {
+				scalar.shell = p.shell(path)
+			}
 			p.scalars = append(p.scalars, scalar)
 		}
 		return ok
@@ -139,7 +223,7 @@ func (p *jsonConfigParser) parseValue(path []string) bool {
 	}
 }
 
-func (p *jsonConfigParser) parseObject(path []string) bool {
+func (p *jsonDocumentParser) parseObject(path []string) bool {
 	p.pos++
 	p.skipSpace()
 	if p.take('}') {
@@ -166,7 +250,7 @@ func (p *jsonConfigParser) parseObject(path []string) bool {
 	}
 }
 
-func (p *jsonConfigParser) parseArray(path []string) bool {
+func (p *jsonDocumentParser) parseArray(path []string) bool {
 	p.pos++
 	p.skipSpace()
 	if p.take(']') {
@@ -186,30 +270,30 @@ func (p *jsonConfigParser) parseArray(path []string) bool {
 	}
 }
 
-func (p *jsonConfigParser) parseString() (configStringScalar, bool) {
+func (p *jsonDocumentParser) parseString() (encodedStringScalar, bool) {
 	if p.pos >= len(p.s) || p.s[p.pos] != '"' {
-		return configStringScalar{}, false
+		return encodedStringScalar{}, false
 	}
 	start := p.pos
 	end := goQuotedEnd(p.s, start)
 	if end < 0 {
-		return configStringScalar{}, false
+		return encodedStringScalar{}, false
 	}
 	var value string
 	if err := json.Unmarshal([]byte(p.s[start:end]), &value); err != nil {
-		return configStringScalar{}, false
+		return encodedStringScalar{}, false
 	}
 	p.pos = end
-	return configStringScalar{start: start, end: end, value: value}, true
+	return encodedStringScalar{start: start, end: end, value: value}, true
 }
 
-func (p *jsonConfigParser) skipSpace() {
+func (p *jsonDocumentParser) skipSpace() {
 	for p.pos < len(p.s) && unicode.IsSpace(rune(p.s[p.pos])) {
 		p.pos++
 	}
 }
 
-func (p *jsonConfigParser) take(want byte) bool {
+func (p *jsonDocumentParser) take(want byte) bool {
 	if p.pos >= len(p.s) || p.s[p.pos] != want {
 		return false
 	}
@@ -217,7 +301,7 @@ func (p *jsonConfigParser) take(want byte) bool {
 	return true
 }
 
-func parseTOMLConfigScalars(s string) ([]configStringScalar, bool) {
+func parseTOMLConfigScalars(s string) ([]encodedStringScalar, bool) {
 	data := []byte(s)
 	offset := 0
 	if bytes.HasPrefix(data, []byte("\xef\xbb\xbf")) {
@@ -226,7 +310,7 @@ func parseTOMLConfigScalars(s string) ([]configStringScalar, bool) {
 	}
 	var parser unstable.Parser
 	parser.Reset(data)
-	var scalars []configStringScalar
+	var scalars []encodedStringScalar
 	var tablePath []string
 	for parser.NextExpression() {
 		expression := parser.Expression()
@@ -242,26 +326,26 @@ func parseTOMLConfigScalars(s string) ([]configStringScalar, bool) {
 }
 
 func appendTOMLKeyValueScalars(
-	scalars []configStringScalar,
+	scalars []encodedStringScalar,
 	node *unstable.Node,
 	base []string,
 	offset int,
-) []configStringScalar {
+) []encodedStringScalar {
 	path, scalars := appendTOMLKeys(base, scalars, node.Key(), offset)
 	return appendTOMLValueScalars(scalars, node.Value(), path, offset)
 }
 
 func appendTOMLKeys(
 	path []string,
-	scalars []configStringScalar,
+	scalars []encodedStringScalar,
 	keys unstable.Iterator,
 	offset int,
-) ([]string, []configStringScalar) {
+) ([]string, []encodedStringScalar) {
 	path = appendConfigPath(nil, path...)
 	for keys.Next() {
 		key := keys.Node()
 		start := offset + int(key.Raw.Offset)
-		scalars = append(scalars, configStringScalar{
+		scalars = append(scalars, encodedStringScalar{
 			start: start, end: start + int(key.Raw.Length), value: string(key.Data),
 		})
 		path = append(path, string(key.Data))
@@ -270,11 +354,11 @@ func appendTOMLKeys(
 }
 
 func appendTOMLValueScalars(
-	scalars []configStringScalar,
+	scalars []encodedStringScalar,
 	node *unstable.Node,
 	path []string,
 	offset int,
-) []configStringScalar {
+) []encodedStringScalar {
 	if node == nil {
 		return scalars
 	}
@@ -283,7 +367,7 @@ func appendTOMLValueScalars(
 		return appendTOMLKeyValueScalars(scalars, node, path, offset)
 	case unstable.String:
 		start := offset + int(node.Raw.Offset)
-		scalars = append(scalars, configStringScalar{
+		scalars = append(scalars, encodedStringScalar{
 			start: start, end: start + int(node.Raw.Length), value: string(node.Data), shell: isConfigShellPath(path),
 		})
 		return scalars

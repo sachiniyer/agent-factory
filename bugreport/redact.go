@@ -168,8 +168,9 @@ func addUserVariant(users []string, name string) []string {
 // "~" — removes title-derived segments in their registered sibling/subdirectory
 // path context, and blanks account/username tokens. It does not match bare titles.
 // All candidates are found before a replacement is applied, including inside
-// valid Go-quoted values. It runs last over already field-redacted content, so it
-// is defense-in-depth, not the only line of defense.
+// valid Go-quoted values. It runs last over already field-redacted rendered
+// content, so it is defense-in-depth, not the only line of defense. Encoded JSON
+// uses scrubJSON so changed values are emitted in JSON rather than Go grammar.
 func (r *redactor) scrub(s string) string {
 	return r.scrubRecognizedText(s, redactionTextRendered)
 }
@@ -177,18 +178,17 @@ func (r *redactor) scrub(s string) string {
 // scrubUnstructured is the single sanitizer for a free-text scalar or blob
 // before it is embedded in any bug-report rendering. In addition to scrub's
 // credential/path policy, it removes every known representation of a session
-// title. Keeping this separate from scrub is intentional: scrub also runs over
-// already-encoded JSON documents, where treating a short title such as "id" as
+// title. Keeping this separate from the generic pass is intentional: that same
+// policy applies to JSON tokens, where treating a short title such as "id" as
 // bare text would rewrite structural keys. Call this while the value is still a
 // value; all later text/JSON renderings then inherit the safe form.
 //
-// Account labels take the OPPOSITE trade and are swept by scrub() itself, keys
-// and all. They have to be: the config file is handed to scrub() whole and shares
-// no other pass, so leaving them out of it would leave the label in the section
-// that names the default account. What that costs is over-redaction for an
-// operator who names an account after a config key — visible in a file they are
-// told to read, and the safe direction for an artifact meant to be shared
-// (#3871).
+// Account labels take the OPPOSITE trade and are swept by the generic policy,
+// keys and all. They have to be: scrubConfig owns the config document as a whole,
+// so leaving labels out of that policy would leave one in the section that names
+// the default account. What that costs is over-redaction for an operator who
+// names an account after a config key — visible in a file they are told to read,
+// and the safe direction for an artifact meant to be shared (#3871).
 func (r *redactor) scrubUnstructured(s string) string {
 	return r.scrubRecognizedText(s, redactionTextDiagnostic)
 }
@@ -410,9 +410,9 @@ const unparsedInstancesNote = `"[instances.json could not be parsed; contents om
 // policy can't apply, so we redact MORE, not less (fail-safe — this bundle is
 // shared publicly): a generic key-aware walk blanks every value under a
 // known-sensitive key (prompts, commands, tokens, paths, arbitrary metadata)
-// before the text scrub runs. If it is not even valid JSON, the contents are
-// omitted entirely with a note. The fallback is never raw-with-regex-only —
-// under-including beats leaking.
+// before the JSON-owned scalar scrub runs. If it is not even valid JSON, the
+// contents are omitted entirely with a note. The fallback is never
+// raw-with-regex-only — under-including beats leaking.
 func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	var datas []session.InstanceData
 	if err := json.Unmarshal(raw, &datas); err == nil {
@@ -429,7 +429,7 @@ func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 			r.redactInstanceData(&datas[i])
 		}
 		if out, marshalErr := json.MarshalIndent(datas, "", "  "); marshalErr == nil {
-			return json.RawMessage(r.scrub(string(out)))
+			return json.RawMessage(r.scrubJSON(string(out)))
 		}
 	}
 
@@ -448,7 +448,7 @@ func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	if err != nil {
 		return json.RawMessage(unparsedInstancesNote)
 	}
-	return json.RawMessage(r.scrub(string(out)))
+	return json.RawMessage(r.scrubJSON(string(out)))
 }
 
 // sensitiveJSONKeys are object keys whose values are dropped wholesale on the
@@ -728,8 +728,8 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// ArchiveWarning is the bounded projection of ArchiveReport.Warning, and that
 	// renderer prints the user-chosen names of the files af could not read.
 	// #3554 closed the LOG path for exactly this text, but scrubArchiveWarningPaths
-	// is reached only from scrubLog while redactInstancesJSON applies plain
-	// scrub — so the same names still rode the JSON section of every bundle
+	// is reached only from scrubLog while redactInstancesJSON applies the generic
+	// JSON scrub — so the same names still rode the JSON section of every bundle
 	// (#3588). Routing the field through the same function rather than blanking it
 	// keeps one policy for one string, and keeps the warning's SHAPE, which is
 	// what triage reads: "af skipped 3 unreadable files", with a reason beside

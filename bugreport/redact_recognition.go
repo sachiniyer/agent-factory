@@ -11,6 +11,7 @@ const (
 	redactionTextRendered
 	redactionTextLog
 	redactionTextDiagnostic
+	redactionTextJSONDocument
 	redactionTextConfigJSON
 	redactionTextConfigTOML
 	redactionTextGoQuoted
@@ -36,11 +37,18 @@ const (
 //     scalars are decoded with that declared JSON or TOML grammar. Only paths
 //     inside fields whose config-schema consumer invokes /bin/sh -c use shell
 //     word boundaries.
+//   - A bug-report JSON document is identified at the json.Marshal call site.
+//     Every string token is decoded and re-encoded as JSON; config field names
+//     inside that document do not establish shell provenance.
 //   - Decoded Go strings and proven shell commands are nested logical values.
 //     Their grammar plans spans on the decoded/original value, and the owning
 //     transport maps the safe value back into its source representation. POSIX
-//     parameter/pathname expansions and escaped line continuations therefore
-//     affect boundaries only inside a parser-proven shell value.
+//     quote and escape removal, adjacent literal segments, parameter/pathname
+//     expansion, expansion-driven field splitting, and escaped line
+//     continuations therefore affect boundaries only inside a parser-proven
+//     shell value. Tilde expansion can materialize a home prefix at execution
+//     time, but those bytes are absent from the bug report, so it does not
+//     synthesize a candidate or change source boundaries.
 //
 // Unknown provenance never falls back to a guessed, weaker grammar. The owning
 // logical value is replaced with redactedMarker. Parser recovery inside a known
