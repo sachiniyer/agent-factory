@@ -136,7 +136,15 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			wl.webHandle.retire()
 			wl.webHandle = nil
 			if wl.manager.lifecycle != nil {
+				// Clear the bound half FIRST, then the configured half, so a
+				// concurrent /v1/health snapshot reader can never observe the
+				// bug's disable-direction signature (TCPConfigured=true while
+				// TCPBound=false) between the two updates. The death closure
+				// below clears the bound half only — this path additionally
+				// clears the configured half because the operator asked for the
+				// opt-out (network.listen_addr is now "").
 				wl.manager.lifecycle.clearTCPBound()
+				wl.manager.lifecycle.setTCPConfigured("")
 			}
 		}
 		wl.webConfigAddr = ""
@@ -182,6 +190,17 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	wl.webGen++
 	gen := wl.webGen
 	if wl.manager.lifecycle != nil {
+		// Update the configured half BEFORE the bound half, so a concurrent
+		// /v1/health snapshot reader can never observe the bug's enable-direction
+		// signature (TCPConfigured=false while TCPBound=true) between the two
+		// updates. setTCPConfigured takes the CONFIGured address (addr), while
+		// setTCPBound takes the kernel-resolved one (info.Addr), so TCPListenAddr
+		// stays the operator's value and TCPBoundAddr the concrete port — matching
+		// the documented split (lifecycle.go:42-44). This runs only on the
+		// bind-success branch; the failed-rebind branch above returns before it,
+		// leaving the configured half at the previous serving value (the exact
+		// `webConfigAddr` discipline this file keeps for the failed-rebind case).
+		wl.manager.lifecycle.setTCPConfigured(addr)
 		wl.manager.lifecycle.setTCPBound(info.Addr)
 	}
 	go func() {
@@ -277,7 +296,14 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 			wl.previewHandle.retire()
 			wl.previewHandle = nil
 			if wl.manager.lifecycle != nil {
+				// Clear bound first, then configured, for the same reason as the
+				// control listener's opt-out: a concurrent snapshot reader must
+				// never see PreviewConfigured=true while PreviewBound=false as a
+				// stable post-apply state. The death closure below clears the
+				// bound half only; this additionally clears the configured half
+				// because the operator set network.preview_listen_addr to "".
 				wl.manager.lifecycle.clearPreviewBound()
+				wl.manager.lifecycle.setPreviewConfigured("")
 			}
 		}
 		wl.previewConfigAddr = ""
@@ -300,6 +326,11 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 	wl.previewGen++
 	gen := wl.previewGen
 	if wl.manager.lifecycle != nil {
+		// Configured before bound, same ordering rationale as the control
+		// listener: a concurrent snapshot reader must not see PreviewConfigured=false
+		// while PreviewBound=true. setPreviewConfigured takes the configured address;
+		// setPreviewBound takes the kernel-resolved concrete address.
+		wl.manager.lifecycle.setPreviewConfigured(addr)
 		wl.manager.lifecycle.setPreviewBound(info.Addr)
 	}
 	go func() {
