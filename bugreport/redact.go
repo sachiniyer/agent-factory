@@ -237,13 +237,18 @@ func (r *redactor) scrubLog(s string) string {
 	// the rest of the name — and matching the whole quoted token makes that
 	// impossible in either order.
 	s = r.scrubArchiveWarningPaths(s)
-	// Remove every known full title representation before any shape-based pass
-	// can consume only part of it. In particular, the legacy raw task-start
+	// Contextual paths go before labels: a display title can itself be a component
+	// of the registered repo root, and scrubbing that component first would destroy
+	// the exact root/sibling match while leaving the on-disk title behind (#4099
+	// review). Collapse roots at the same point, before any label can mutate them.
+	s = r.scrubWorktreePathTitles(s)
+	s = r.collapseKnownRoots(s)
+	// Remove every known full display-title representation before a shape-based
+	// pass can consume only part of it. In particular, the legacy raw task-start
 	// matcher is line-oriented while a legal title may contain newlines; running
 	// that matcher first replaced line one and made the original full-title match
 	// impossible, leaking the remaining lines (#2249 late review).
 	s = r.scrubKnownLabels(s)
-	s = r.scrubWorktreePathTitles(s)
 	s = r.scrubTmuxNames(s)
 	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
 	// syntax is a safer boundary than a global punctuation matcher and also
@@ -285,11 +290,14 @@ func (r *redactor) scrubTmuxNames(s string) string {
 // names the same things the log does, and a second policy for it would drift
 // from the first (#3588).
 //
-// Titles go FIRST, before the shape-based tmux pass, for the reason scrubLog
-// orders them that way: a shape matcher that consumes part of a name makes the
-// exact full-title match impossible afterwards.
+// Contextual paths and roots go before labels for scrubLog's #4099 ordering
+// reason. Display titles still precede the shape-based tmux pass: a shape matcher
+// that consumes part of a name makes the exact full-title match impossible
+// afterwards.
 func (r *redactor) scrubDiagnostic(s string) string {
-	return r.scrub(r.scrubTmuxNames(r.scrubWorktreePathTitles(r.scrubKnownLabels(s))))
+	s = r.scrubWorktreePathTitles(s)
+	s = r.collapseKnownRoots(s)
+	return r.scrub(r.scrubTmuxNames(r.scrubKnownLabels(s)))
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
@@ -406,6 +414,19 @@ var titleJSONKeys = map[string]bool{"title": true, "session_name": true}
 // locations (worktree.session_name, tabs[].tmux_name) without assuming the
 // record layout the typed decode already rejected.
 func (r *redactor) noteUnknownJSON(v any) {
+	// The typed shape is a top-level record list. Preserve that one trustworthy
+	// ownership boundary even though a field inside made typed decoding fail; a
+	// cross-product across records fabricates paths and grows quadratically.
+	if records, ok := v.([]any); ok {
+		for _, record := range records {
+			r.noteUnknownJSONRecord(record)
+		}
+		return
+	}
+	r.noteUnknownJSONRecord(v)
+}
+
+func (r *redactor) noteUnknownJSONRecord(v any) {
 	titles := make(map[string]struct{})
 	repoPaths := make(map[string]struct{})
 	var walk func(any)

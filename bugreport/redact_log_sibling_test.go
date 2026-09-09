@@ -3,6 +3,7 @@ package bugreport
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,7 +46,7 @@ func TestScrubLogRedactsSanitizedTitleInSiblingRecoveryPath(t *testing.T) {
 			t.Errorf("scrubLog leaked %q:\n%s", secret, got)
 		}
 	}
-	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "identity unresolved", "[repo:1]", "[af-home]"} {
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "identity unresolved", "[repo:1]", "[worktree:1]"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("scrubLog removed triage value %q:\n%s", want, got)
 		}
@@ -103,6 +104,89 @@ func TestScrubWorktreePathTitlesKeepsCollisionSuffixAndUnrelatedText(t *testing.
 	got := r.scrubWorktreePathTitles(line)
 	if want := siblingLeakRepo + "-" + redactedMarker + "-2 failed; classification=" + siblingLeakDiskTitle; got != want {
 		t.Fatalf("contextual worktree-title scrub changed the wrong value:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestScrubLogRedactsSiblingWhenTitleAppearsInRepoPath(t *testing.T) {
+	const (
+		title     = "fix bug"
+		diskTitle = "fix-bug"
+		repo      = "/srv/fix bug/repo"
+	)
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Title: title,
+		Worktree: session.GitWorktreeData{
+			RepoPath: repo,
+		},
+	})
+
+	line := "recovery location: " + repo + "-" + diskTitle
+	for _, tc := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.scrub(line)
+			if strings.Contains(got, diskTitle) {
+				t.Fatalf("scrubber leaked %q after the raw title changed its registered repo root: %s", diskTitle, got)
+			}
+			if want := "[repo:1]-" + redactedMarker; !strings.Contains(got, want) {
+				t.Errorf("scrubber lost the registered sibling layout, want %q in %q", want, got)
+			}
+		})
+	}
+}
+
+func TestCollapseKnownRootsRecognizesFileURIPath(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+
+	got := r.scrub("editor target file://" + siblingLeakRepo)
+	if strings.Contains(got, "ConfidentialClient") {
+		t.Fatalf("known repo root survived inside a file URI: %s", got)
+	}
+	if want := "file://[repo:1]"; !strings.Contains(got, want) {
+		t.Errorf("file URI lost its useful wrapper, want %q in %q", want, got)
+	}
+	for _, longer := range []string{
+		"nested path /mnt" + siblingLeakRepo,
+		"nested URI file:///mnt" + siblingLeakRepo,
+	} {
+		if got := r.collapseKnownRoots(longer); got != longer {
+			t.Errorf("root suffix inside a longer path was rewritten:\n got: %s\nwant: %s", got, longer)
+		}
+	}
+}
+
+func TestRejectedRecordsKeepWorktreeTitlePairOwnership(t *testing.T) {
+	r := &redactor{}
+	raw := json.RawMessage(`[
+		{"status":"legacy", "title":"alpha secret", "worktree":{"repo_path":"/srv/alpha/repo"}},
+		{"status":"legacy", "title":"beta secret", "worktree":{"repo_path":"/srv/beta/repo"}}
+	]`)
+	r.redactInstancesJSON(raw)
+
+	line := "unrelated sibling: /srv/alpha/repo-beta-secret"
+	if got := r.scrubWorktreePathTitles(line); got != line {
+		t.Fatalf("fallback fabricated a cross-record repo/title pair:\n got: %s\nwant: %s", got, line)
+	}
+	if got, want := len(r.worktreePathTitles), 2; got != want {
+		t.Errorf("registered fallback repo/title pairs = %d, want %d", got, want)
+	}
+}
+
+func TestScrubWorktreePathTitlesHandlesFilesystemRootRepo(t *testing.T) {
+	r := &redactor{}
+	r.noteWorktreeTitle(string(filepath.Separator), siblingLeakTitle)
+	line := string(filepath.Separator) + "-" + siblingLeakDiskTitle
+
+	got := r.scrubWorktreePathTitles(line)
+	if strings.Contains(got, siblingLeakDiskTitle) {
+		t.Fatalf("filesystem-root repo leaked its sibling worktree title %q: %s", siblingLeakDiskTitle, got)
 	}
 }
 

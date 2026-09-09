@@ -72,8 +72,8 @@ func (r *redactor) noteAFHome(path string) {
 }
 
 func (r *redactor) noteWorktreeTitle(repoPath, title string) {
-	repoPath = normalizeRoot(repoPath)
-	if repoPath == "" {
+	repoPath = filepath.Clean(repoPath)
+	if !filepath.IsAbs(repoPath) {
 		return
 	}
 	segment := sessiongit.DerivedWorktreePathTitleSegment(repoPath, title)
@@ -233,11 +233,8 @@ func replaceSiblingWorktreeTitle(s, needle, replacement string) string {
 }
 
 func siblingWorktreeBoundary(s string, start, end int) bool {
-	if start > 0 {
-		before, _ := utf8.DecodeLastRuneInString(s[:start])
-		if !isPathTextDelimiter(before) {
-			return false
-		}
+	if !pathStartsAt(s, start) {
+		return false
 	}
 	if pathEndsAt(s, end) {
 		return true
@@ -293,11 +290,8 @@ func replaceKnownRoot(s, root, token string) string {
 }
 
 func knownRootTextBoundary(s string, start, end int) bool {
-	if start > 0 {
-		before, _ := utf8.DecodeLastRuneInString(s[:start])
-		if !isPathTextDelimiter(before) {
-			return false
-		}
+	if !pathStartsAt(s, start) {
+		return false
 	}
 	if end == len(s) || s[end] == byte(filepath.Separator) {
 		return true
@@ -311,6 +305,24 @@ func knownRootTextBoundary(s string, start, end int) bool {
 	}
 	after, _ := utf8.DecodeRuneInString(s[end:])
 	return isPathTextDelimiter(after)
+}
+
+func pathStartsAt(s string, start int) bool {
+	if start == 0 {
+		return true
+	}
+	before, _ := utf8.DecodeLastRuneInString(s[:start])
+	if isPathTextDelimiter(before) {
+		return true
+	}
+	// A URI wrapper can put its first filesystem-path slash immediately after
+	// the scheme/authority, so the byte before an absolute root is not a text
+	// delimiter (`file:///srv/repo`, `vscode://file/srv/repo`). Accept only that
+	// FIRST URI path component: a slash already present after "://" means this
+	// root is merely a suffix of a longer URI path and must not be rewritten.
+	prefix := s[:start]
+	scheme := strings.LastIndex(prefix, "://")
+	return scheme >= 0 && !strings.Contains(prefix[scheme+3:], "/")
 }
 
 // isPathTextDelimiter names punctuation and whitespace used by the renderers
