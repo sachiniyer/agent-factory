@@ -259,6 +259,37 @@ func TestWorktreeReconcileCannotClearLaneRestoredAfterValidation(t *testing.T) {
 		"identity validation and warning reconciliation must be one atomic instance operation")
 }
 
+func TestWorktreeReconcileCannotClearWhenCorrelatedPeerRestoresAfterValidation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	newLane := func(title string) *session.Instance {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
+		require.NoError(t, err)
+		inst.SetBackend(session.NewFakeBackend())
+		inst.SetStartedForTest(true)
+		manager.mu.Lock()
+		manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+		manager.mu.Unlock()
+		return inst
+	}
+	holder := newLane("holder")
+	peer := newLane("peer")
+	confirmed := "DANGER: confirmed duplicate branch"
+	require.True(t, holder.ReconcileWorktreeInspection(confirmed, nil))
+	peer.SetStatusForTest(session.Archived)
+
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: holder.ID}}
+	}
+	manager.worktreeBeforeReconcile = func() {
+		peer.SetStatusForTest(session.Ready)
+	}
+
+	manager.refreshWorktreeIntegrityWarnings()
+
+	assert.Contains(t, holder.WorktreeWarning(), confirmed,
+		"a clean correlated result must not apply after any peer changes applicability")
+}
+
 func TestSessionStatusProjectsWorktreeIntegrityWarning(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "unsafe-lane", Path: repoPath, Program: "claude"})

@@ -147,7 +147,7 @@ func TestIncompleteWorktreeScanReplacesStaleWarningWithNewDanger(t *testing.T) {
 	assert.Contains(t, warning, "could not be verified", "the correlation gap must remain visible")
 }
 
-func TestWorktreeInspectionCompareAndSetRejectsRestoredLane(t *testing.T) {
+func TestWorktreeInspectionCohortRejectsRestoredLane(t *testing.T) {
 	inst, err := NewInstance(InstanceOptions{Title: "holder", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	require.True(t, inst.ReconcileWorktreeInspection("DANGER: confirmed duplicate branch", nil))
@@ -155,8 +155,32 @@ func TestWorktreeInspectionCompareAndSetRejectsRestoredLane(t *testing.T) {
 	archivedSnapshot := inst.ToInstanceData()
 	inst.SetStatusForTest(Ready)
 
-	changed, applied := inst.ReconcileWorktreeInspectionIfCurrent(archivedSnapshot, "", nil)
+	changed, applied := ReconcileWorktreeInspectionCohortIfCurrent([]WorktreeInspectionReconciliation{
+		{Instance: inst, Snapshot: archivedSnapshot},
+	}, nil)
 	assert.False(t, applied, "a restored lane no longer matches its archived scan snapshot")
-	assert.False(t, changed)
+	assert.Empty(t, changed)
 	assert.Contains(t, inst.WorktreeWarning(), "confirmed duplicate branch")
+}
+
+func TestWorktreeInspectionCohortRejectsRestoredPeerBeforeAnyClear(t *testing.T) {
+	holder, err := NewInstance(InstanceOptions{Title: "holder", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	peer, err := NewInstance(InstanceOptions{Title: "peer", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	require.True(t, holder.ReconcileWorktreeInspection("DANGER: confirmed duplicate branch", nil))
+	holderSnapshot := holder.ToInstanceData()
+	peer.SetStatusForTest(Archived)
+	peerSnapshot := peer.ToInstanceData()
+	peer.SetStatusForTest(Ready)
+
+	changed, applied := ReconcileWorktreeInspectionCohortIfCurrent([]WorktreeInspectionReconciliation{
+		{Instance: holder, Snapshot: holderSnapshot},
+		{Instance: peer, Snapshot: peerSnapshot},
+	}, nil)
+
+	assert.False(t, applied, "one changed peer invalidates the whole correlated observation")
+	assert.Empty(t, changed)
+	assert.Contains(t, holder.WorktreeWarning(), "confirmed duplicate branch",
+		"a later peer mismatch must not follow an earlier warning clear")
 }
