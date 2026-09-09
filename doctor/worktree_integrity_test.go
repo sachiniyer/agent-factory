@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,6 +46,37 @@ func TestDoctorReportsWorktreeIntegrityDangerWithoutFix(t *testing.T) {
 	assert.Contains(t, rows[0].Detail, "idle-lane")
 	assert.Contains(t, rows[0].Remediation, "does not reset or clean")
 	assert.Empty(t, report.Findings, "the read-only check must never carry a --fix action")
+}
+
+func TestDoctorRetainsLiveDangerWhenPersistedInventoryFails(t *testing.T) {
+	opts := testOptions(t, false)
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	doctorIntegrityGit(t, repo, "add", "--all")
+	doctorIntegrityGit(t, repo, "commit", "-q", "-m", "base")
+	holder := filepath.Join(filepath.Dir(repo), "holder")
+	sibling := filepath.Join(filepath.Dir(repo), "sibling")
+	doctorIntegrityGit(t, repo, "worktree", "add", "-q", "-b", "shared", holder, "HEAD")
+	doctorIntegrityGit(t, repo, "worktree", "add", "-q", "-b", "takeover", sibling, "HEAD")
+	doctorIntegrityGit(t, sibling, "checkout", "-q", "--ignore-other-worktrees", "-B", "shared", "shared")
+	live := []session.InstanceData{
+		{ID: "holder-id", Title: "holder", Liveness: session.LiveReady, BackendType: "local", Worktree: session.GitWorktreeData{RepoPath: repo, WorktreePath: holder}},
+		{ID: "sibling-id", Title: "sibling", Liveness: session.LiveReady, BackendType: "local", Worktree: session.GitWorktreeData{RepoPath: repo, WorktreePath: sibling}},
+	}
+	opts.worktreeInventory = func() ([]session.InstanceData, error) {
+		return live, errors.New("persisted inventory unreadable")
+	}
+
+	report := &Report{}
+	checkWorktreeIntegrity(&scanContext{opts: opts}, report, daemon.HealthStatus{})
+	require.Len(t, report.Checks, 1)
+	assert.Equal(t, StatusFail, report.Checks[0].Status,
+		"definite danger in the live subset must survive an unrelated persisted-inventory failure")
+	assert.Contains(t, report.Checks[0].Detail, "holder")
+	assert.Contains(t, report.Checks[0].Detail, "sibling")
+	assert.Contains(t, report.Checks[0].Detail, "persisted inventory unreadable")
+	assert.Equal(t, []string{"worktree-integrity"}, report.Incomplete)
 }
 
 func TestDoctorPassesCleanWorktreeIntegrityScan(t *testing.T) {

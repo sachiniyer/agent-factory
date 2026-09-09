@@ -98,7 +98,7 @@ func WorktreeBranchBindingsContext(parent context.Context, repoRoot string) ([]W
 	cmd.WaitDelay = gitWaitDelay
 
 	output, err := cmd.Output()
-	terminateGitCommandTree(cmd)
+	terminateGitCommandTree(cmd, err)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited successfully (a non-zero exit surfaces as an
 		// ExitError); only a pipe-holder outlived it, so the output is complete.

@@ -12,11 +12,36 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type inPlaceWorktreeFakeBackend struct {
+	readyFakeBackend
+}
+
+func (b inPlaceWorktreeFakeBackend) Start(instance *session.Instance, firstTimeSetup bool) error {
+	if err := b.Provision(instance, firstTimeSetup); err != nil {
+		return err
+	}
+	return b.Launch(instance, firstTimeSetup)
+}
+
+func (b inPlaceWorktreeFakeBackend) Provision(instance *session.Instance, firstTimeSetup bool) error {
+	if !firstTimeSetup {
+		return nil
+	}
+	worktree, branch, err := sessiongit.NewGitWorktreeInPlace(instance.Path)
+	if err != nil {
+		return err
+	}
+	instance.SetGitWorktreeForTest(worktree)
+	instance.Branch = branch
+	return nil
+}
 
 func TestReserveCreateRefusesBranchHeldByNamedLiveLane(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
@@ -89,6 +114,52 @@ func TestReserveCreateInPlaceRefusesActualBranchHeldByLiveLane(t *testing.T) {
 	assert.Contains(t, err.Error(), live.Title, "the refusal must name the live lane holding the actual branch")
 	assert.NotContains(t, err.Error(), manager.branchForTitle("title-derived-branch-is-different"),
 		"an in-place admission must not derive its branch from the requested title")
+}
+
+func TestConcurrentInPlaceCreatesReserveBranchAdmission(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	parent, _, firstPath := setupBareCloneWorktree3358(t)
+	secondPath := filepath.Join(parent, "second-worktree")
+	out, err := exec.Command("git", "-C", firstPath, "worktree", "add", "-q", "-b", "second-staging", secondPath, "HEAD").CombinedOutput()
+	require.NoError(t, err, string(out))
+	branchOut, err := exec.Command("git", "-C", firstPath, "symbolic-ref", "--short", "HEAD").CombinedOutput()
+	require.NoError(t, err, string(branchOut))
+	branch := strings.TrimSpace(string(branchOut))
+	out, err = exec.Command("git", "-C", secondPath, "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
+	require.NoError(t, err, string(out))
+	firstRepo, err := config.RepoFromPath(firstPath)
+	require.NoError(t, err)
+	secondRepo, err := config.RepoFromPath(secondPath)
+	require.NoError(t, err)
+	require.Equal(t, firstRepo.ID, secondRepo.ID, "both worktrees must share the serialized repository identity")
+
+	backend := session.NewFakeBackend()
+	backend.CompleteStart()
+	entered, unblock := blockingCreateFactory(t, inPlaceWorktreeFakeBackend{readyFakeBackend{backend}}, nil)
+	server := &controlServer{manager: manager}
+	firstDone := startCreateCall(server, CreateSessionRequest{
+		Title: "first-here", RepoPath: firstPath, Program: "claude", InPlace: true,
+	})
+	waitForCreateFactory(t, entered)
+	secondDone := startCreateCall(server, CreateSessionRequest{
+		Title: "second-here", RepoPath: secondPath, Program: "claude", InPlace: true,
+	})
+	require.Eventually(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return len(manager.pendingCreates) == 2
+	}, time.Second, 5*time.Millisecond,
+		"the second create must pass the pre-lock check and wait behind the first under the shared repo admission lock")
+
+	unblock()
+	first := waitForCreateResult(t, firstDone)
+	second := waitForCreateResult(t, secondDone)
+	require.NoError(t, first.err)
+	require.Error(t, second.err,
+		"the serialized admission point must refuse the second create after the first lane becomes live; roster: %+v",
+		manager.Snapshot(firstRepo.ID))
+	assert.Contains(t, second.err.Error(), branch)
+	assert.Contains(t, second.err.Error(), "first-here")
 }
 
 func TestReserveCreateRefusesLiveHolderWhenArchivedHolderIsListedLast(t *testing.T) {

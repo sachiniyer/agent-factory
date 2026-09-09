@@ -22,7 +22,10 @@ func completeWorktreeInventory() ([]session.InstanceData, error) {
 	}
 	persisted, err := persistedWorktreeInventory()
 	if err != nil {
-		return nil, err
+		// Preserve definite observations from the daemon even when the disk half
+		// of the correlation is unavailable. The caller carries err alongside
+		// these rows so they can prove danger but can never prove safety.
+		return live, fmt.Errorf("could not read persisted session inventory: %w", err)
 	}
 	return mergeWorktreeInventories(live, persisted), nil
 }
@@ -64,14 +67,24 @@ func checkWorktreeIntegrity(ctx *scanContext, report *Report, health daemon.Heal
 		inventoryName = "persisted session"
 	}
 	rows, err := inventory()
-	if err != nil {
+	if err != nil && len(rows) == 0 {
 		report.markIncomplete("worktree-integrity")
 		report.Warn(sectionProcesses, "worktree-integrity",
 			fmt.Sprintf("could not read the %s inventory, so worktree safety is unknown: %v", inventoryName, err),
 			"restore access to the session inventory and rerun `af doctor`; no worktree was changed", true)
 		return
 	}
-	checkWorktreeIntegrityRows(report, session.InspectSessionWorktrees(rows))
+	inspections := session.InspectSessionWorktrees(rows)
+	if err != nil {
+		// A partial inventory may still contain positive danger evidence. Append
+		// the observation gap to the same result set: warnings remain failures,
+		// while a clean live subset remains unknown rather than passing.
+		inspections = append(inspections, session.SessionWorktreeInspection{
+			Title:          inventoryName + " inventory",
+			CorrelationErr: err,
+		})
+	}
+	checkWorktreeIntegrityRows(report, inspections)
 }
 
 func persistedWorktreeInventory() ([]session.InstanceData, error) {
