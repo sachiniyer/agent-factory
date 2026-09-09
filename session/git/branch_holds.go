@@ -81,11 +81,16 @@ func WorktreeBranchBindings(repoRoot string) ([]WorktreeBranchBinding, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain", "-z")
 	// Keep repository selection bound to -C without changing runtime settings.
 	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	// This admission probe has the same helper-spawn shape as the integrity
+	// status/reflog probes. Its deadline must terminate the whole Git command
+	// tree, not abandon a hook or fsmonitor process after killing git itself.
+	isolateGitCommandTree(cmd)
 	// Bound the post-exit wait so a child that inherited the capture pipe cannot
 	// hold Output() open past the deadline (#856).
 	cmd.WaitDelay = gitWaitDelay
 
 	output, err := cmd.Output()
+	terminateGitCommandTree(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited successfully (a non-zero exit surfaces as an
 		// ExitError); only a pipe-holder outlived it, so the output is complete.

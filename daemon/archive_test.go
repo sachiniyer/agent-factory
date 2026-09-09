@@ -790,6 +790,43 @@ func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
 	assert.Contains(t, string(list), worktreePath, "git must register the worktree at the restored path")
 }
 
+func TestRestoreArchivedRefusesBranchHeldByLiveLane(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	archived.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := archived.GetWorktreePath()
+	branch := archived.ToInstanceData().Worktree.BranchName
+	require.NotEmpty(t, branch)
+
+	liveTitle := "live-holder"
+	livePath := filepath.Join(t.TempDir(), "live-holder")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-q", "-b", "live-staging", livePath, "HEAD").CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", livePath, "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
+	require.NoError(t, err, string(out))
+	liveWorktree, err := sessiongit.NewGitWorktreeFromStorage(repoPath, livePath, liveTitle, branch, "", false, true)
+	require.NoError(t, err)
+	live, err := session.NewInstance(session.InstanceOptions{Title: liveTitle, Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	live.SetBackend(session.NewFakeBackend())
+	live.SetGitWorktreeForTest(liveWorktree)
+	live.SetStartedForTest(true)
+	live.SetStatusForTest(session.Ready)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, liveTitle)] = live
+	manager.mu.Unlock()
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err, "restoring an archived holder must not revive a second live lane on the same branch")
+	assert.Contains(t, err.Error(), liveTitle, "the refusal must name the live lane holding the branch")
+	assert.Equal(t, session.Archived, archived.GetStatus())
+	assert.Equal(t, archivedPath, archived.GetWorktreePath())
+	assert.True(t, exists(archivedPath), "a refused restore must not move the archived worktree")
+}
+
 // TestRestoreArchived_RejectsNonArchived: restoring a live (non-archived) session
 // is an error.
 func TestRestoreArchived_RejectsNonArchived(t *testing.T) {

@@ -532,7 +532,7 @@ func TestAccountSwapOpportunity_UsesObservationFromUnloadablePersistedSession(t 
 	// durable observation must still exclude the exhausted identity even though
 	// the row contributes nothing to the manager's in-memory instance map.
 	failLoadFor(t, observer.Title)
-	loaded, _, err := refreshDaemonInstances(nil)
+	loaded, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

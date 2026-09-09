@@ -176,3 +176,18 @@ func TestDoctorInspectsPersistedLiveLanesWhenDaemonIsStopped(t *testing.T) {
 	}
 	t.Fatal("doctor omitted the worktree-integrity check")
 }
+
+func TestMergeWorktreeInventoriesRetainsPersistedLaneSkippedByDaemon(t *testing.T) {
+	persisted := []session.InstanceData{
+		{ID: "holder", Title: "holder", Liveness: session.LiveReady, BackendType: "local", Worktree: session.GitWorktreeData{RepoPath: "/repo", WorktreePath: "/repo/holder"}},
+		{ID: "skipped", Title: "skipped", Liveness: session.LiveReady, BackendType: "local", Worktree: session.GitWorktreeData{RepoPath: "/repo", WorktreePath: "/repo/skipped"}},
+	}
+	live := []session.InstanceData{
+		{ID: "holder", Title: "holder-newer", Liveness: session.LiveReady, BackendType: "local", Worktree: session.GitWorktreeData{RepoPath: "/repo", WorktreePath: "/repo/holder"}},
+	}
+
+	merged := mergeWorktreeInventories(live, persisted)
+	require.Len(t, merged, 2, "a daemon materialization skip must not erase a persisted worktree owner")
+	assert.Equal(t, "holder-newer", merged[0].Title, "the daemon projection wins for a row it did materialize")
+	assert.Equal(t, "skipped", merged[1].Title)
+}

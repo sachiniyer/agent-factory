@@ -312,6 +312,44 @@ func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
 	return lock
 }
 
+// refuseLiveHeldBranchRestore applies the same all-holder rule to an archived
+// local restore. Moving the archived worktree does not invoke Git's checkout
+// guard, so this boundary must explicitly refuse when another live AF lane is
+// among the holders. Git paths stay as-recorded for diagnostics; only identity
+// comparisons resolve both the Git and AF spellings through symlinks.
+func (m *Manager) refuseLiveHeldBranchRestore(repoID, title string, instance *session.Instance) error {
+	row := instance.ToInstanceData()
+	repoPath := row.Worktree.RepoPath
+	branch := row.Worktree.BranchName
+	if strings.TrimSpace(repoPath) == "" || strings.TrimSpace(branch) == "" {
+		return fmt.Errorf("cannot restore session %q: its repository or branch identity is missing, so af cannot verify whether another live lane holds the branch; nothing was moved", title)
+	}
+	diskData, err := loadRepoInstanceData(repoID)
+	if err != nil {
+		return fmt.Errorf("cannot restore session %q: could not read the persisted lane inventory needed to verify branch %q; nothing was moved: %w", title, branch, err)
+	}
+	held, err := branchesHeldByWorktrees(repoPath)
+	if err != nil {
+		return fmt.Errorf("cannot restore session %q: could not inspect worktree holders for branch %q; nothing was moved: %w", title, branch, err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.instances[daemonInstanceKey(repoID, title)] != instance {
+		return fmt.Errorf("session %q changed state before its branch holders could be verified", title)
+	}
+	for _, holder := range held[branch] {
+		lane := m.liveLaneHoldingWorktreeLocked(repoID, holder, diskData)
+		if lane == "" || lane == title {
+			continue
+		}
+		handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
+		return fmt.Errorf("cannot restore session %q: branch %q is already checked out by live lane %q at %s. Restoring would bind two live worktrees to one branch, so continue in that workspace with `%s` or release the branch yourself; af did not rename, detach, reset, or move either worktree",
+			title, branch, lane, config.ShellQuotePath(holder), handoff)
+	}
+	return nil
+}
+
 // reclaimArchivedBranchLocked decides the branch name the archived session moves
 // to when its title is reused, or "" for "leave the branch where it is" (#2127).
 //

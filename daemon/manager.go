@@ -104,15 +104,12 @@ type Manager struct {
 	// automatic account replacement. Manager.mu protects roster shape; it cannot
 	// cover per-instance liveness writes without inverting existing lock order.
 	accountLimitMu sync.Mutex
-	// worktreeIntegrityMu serializes the read-only #4092 Git probes. The probes
-	// run on their own loop and never under m.mu, so a slow filesystem cannot
-	// block operational status, self-healing, or manager RPCs.
-	worktreeIntegrityMu sync.Mutex
-	worktreeInspector   func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection
-	// worktreeBeforeReconcile is a test seam for the narrow interval after the
-	// first correlated snapshot check and before cohort warning reconciliation.
-	worktreeBeforeReconcile func()
-
+	// Serialize #4092 probes off the operational status/self-healing loop.
+	worktreeIntegrityMu      sync.Mutex
+	worktreeInspector        func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection
+	worktreeInventory        worktreeInventoryState
+	worktreeInventoryVersion uint64
+	worktreeBeforeReconcile  func()
 	// ready is closed once restored state is safe for state-dependent RPCs. For
 	// RunDaemon that includes the startup orphan sweep as well as instance restore,
 	// so a create cannot race the destructive sweep (#2632). Until then the daemon
@@ -790,7 +787,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, worktreeInventory, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
@@ -811,6 +808,7 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	m.setWorktreeInventoryLocked(worktreeInventory)
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.mu.Unlock()
 	return nil
@@ -928,8 +926,9 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 }
 
 func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
+	refreshed, ghosts, worktreeInventory, err := refreshDaemonInstances(m.instances)
 	if err != nil {
+		m.setWorktreeInventoryLocked(worktreeInventory)
 		return err
 	}
 	owed := persistLoadRuntimeReplacements(refreshed)
@@ -940,6 +939,7 @@ func (m *Manager) refreshLocked() error {
 	// ghost, or its slot would be held twice — once by the ghost and once by the
 	// instance it became.
 	m.ghostTaskRuns = ghosts
+	m.setWorktreeInventoryLocked(worktreeInventory)
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	return nil
 }

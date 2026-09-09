@@ -108,6 +108,27 @@ func TestParseWorktreeBranchBindingsDistinguishesDetachedFromBranchName(t *testi
 	}, bindings)
 }
 
+func TestBranchesHeldByWorktreesKeepsGitRecordedPathAcrossSymlinkRoot(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	recordedRoot := filepath.Join(root, "recorded")
+	require.NoError(t, os.Mkdir(realRoot, 0o755))
+	require.NoError(t, os.Symlink(realRoot, recordedRoot))
+	repo := filepath.Join(recordedRoot, "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	runGitInPlaceTest(t, repo, "commit", "--allow-empty", "-m", "init")
+	recordedHolder := filepath.Join(recordedRoot, "holder")
+	runGitInPlaceTest(t, repo, "worktree", "add", "-b", "held", recordedHolder)
+
+	held, err := BranchesHeldByWorktrees(repo)
+	require.NoError(t, err)
+	gitRecordedHolder := onlyBranchHolder(t, held, "held")
+	assert.NotEqual(t, filepath.Clean(recordedHolder), filepath.Clean(gitRecordedHolder),
+		"the fixture must reproduce Git canonicalizing a symlink-root spelling")
+	assert.Equal(t, pathutil.ResolveForCompare(recordedHolder), pathutil.ResolveForCompare(gitRecordedHolder),
+		"Git's as-recorded path and AF's caller-recorded path identify the same worktree only after comparison-time resolution")
+}
+
 // TestBranchesHeldByWorktrees_WalkSkipsArchivedSuffixes is the regression lock
 // for #2091. A recurring task derives `<name>[-N]` afresh on every run; once its
 // archived predecessors hold `foo` and `foo-2`, the walk must land on `foo-3`

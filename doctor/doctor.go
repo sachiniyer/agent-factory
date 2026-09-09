@@ -389,7 +389,7 @@ func (o *Options) applyDefaults() error {
 		o.sessionInventory = daemonSessionInventory
 	}
 	if o.worktreeInventory == nil {
-		o.worktreeInventory = daemonSessionInventory
+		o.worktreeInventory = completeWorktreeInventory
 	}
 	if o.taskInventory == nil {
 		o.taskInventory = daemonTaskInventory

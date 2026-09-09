@@ -163,6 +163,14 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		// route below is the one with a worktree relocate in front of its re-spawn.
 		return m.restoreRemoteSession(repoID, instance, req.Title)
 	}
+	// Restoring relocates an already-registered worktree, so Git performs no
+	// checkout and cannot enforce its usual one-worktree-per-branch guard. Check
+	// every holder before raising the restore fence or moving anything; in the
+	// corrupted multiply-bound state, finding the archived lane among the holders
+	// is not enough when any live lane is there too.
+	if err := m.refuseLiveHeldBranchRestore(repoID, req.Title, instance); err != nil {
+		return "", err
+	}
 
 	// Raise the fence HERE, at the top of the LOCAL route, so it is coextensive with
 	// the claim above (#3596 — the archived half of #3586).
