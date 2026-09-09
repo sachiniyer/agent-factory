@@ -22,6 +22,12 @@ import (
 func recordTapCommands(t *testing.T, alive bool, tap func(s *TmuxSession) error) ([]string, error) {
 	t.Helper()
 	var cmds []string
+	// A real *exec.ExitError with the "can't find session" diagnostic: the
+	// post-#2875 lossy probe corroborates absence through tmuxProvedSessionAbsent,
+	// which needs stderr to classify — a bare fmt.Errorf reads as unknown and
+	// ExistsOrUnknown reports true (the conservative lie), suppressing the
+	// ErrSessionGone the tap tests assert.
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("io", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
@@ -32,7 +38,7 @@ func recordTapCommands(t *testing.T, alive bool, tap func(s *TmuxSession) error)
 				if alive {
 					return nil
 				}
-				return fmt.Errorf("can't find session")
+				return goneErr
 			}
 			if !alive {
 				return fmt.Errorf("send-keys failed")

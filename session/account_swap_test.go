@@ -233,7 +233,7 @@ func shortLivedProcessExec(processName string) cmd_test.MockCmdExec {
 				case strings.Contains(command, "has-session") && spawned:
 					probesAfterSpawn++
 					if probesAfterSpawn > 2 {
-						return assertNoSession
+						return hasSessionGoneErr(cmd)
 					}
 				}
 			}
@@ -479,7 +479,7 @@ func TestSynchronizeAccountSwapRuntimeMetadataRestoresSessionEnvPassthrough(t *t
 
 	pty := &captureAccountSwapEnvironmentPty{}
 	execu := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return fmt.Errorf("session not found") },
+		RunFunc: func(c *exec.Cmd) error { return hasSessionGoneErr(c) },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
 			return nil, nil
 		},

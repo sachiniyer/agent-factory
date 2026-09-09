@@ -48,8 +48,9 @@ func TestStartDoesNotGiveTmuxAmbientSecrets(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
 
 	pty := &captureLaunchEnvPty{}
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("env-boundary", ""))
 	execu := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		RunFunc: func(*exec.Cmd) error { return goneErr },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
 			return nil, nil
 		},
@@ -79,8 +80,9 @@ func TestStartAllowsConfiguredExactVariable(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
 
 	pty := &captureLaunchEnvPty{}
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("env-extension", ""))
 	execu := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		RunFunc: func(*exec.Cmd) error { return goneErr },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
 			return nil, nil
 		},
@@ -306,8 +308,9 @@ func TestStartImportsAllowedEnvironmentIntoExistingTmuxServer(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
 
 	pty := &captureLaunchEnvPty{}
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("existing-server-env", ""))
 	execu := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		RunFunc: func(*exec.Cmd) error { return goneErr },
 		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
 			if len(command.Args) >= 2 && command.Args[1] == "show-options" {
 				return []byte("DISPLAY SSH_AUTH_SOCK\n"), nil
@@ -359,8 +362,9 @@ func TestStartImportsAllowedEnvironmentIntoExistingTmuxServer(t *testing.T) {
 func TestStartSurfacesUnexpectedEnvironmentImportFailure(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
 	pty := &captureLaunchEnvPty{}
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("environment-import-error", ""))
 	execu := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		RunFunc: func(*exec.Cmd) error { return goneErr },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
 			return nil, errors.New("permission denied")
 		},

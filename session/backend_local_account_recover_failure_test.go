@@ -418,7 +418,7 @@ func TestLoad_AccountRestoreRaceStopsReattachedPreScopeSibling(t *testing.T) {
 			if strings.Contains(text, "has-session") && strings.Contains(text, shellName) {
 				probeCount++
 				if probeCount == 1 {
-					return assertNoSession
+					return goneSessionErr(shellName)
 				}
 				return nil
 			}

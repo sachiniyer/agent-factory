@@ -68,7 +68,7 @@ func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 				if existing[n] {
 					return nil
 				}
-				return assertNoSession
+				return goneSessionErr(n)
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
 				return nil

@@ -63,7 +63,7 @@ func cleanupExec(alive map[string]bool, unkillable map[string]bool) (cmd_test.Mo
 				if existing[name] {
 					return nil
 				}
-				return errors.New("can't find session")
+				return goneSessionErr(name)
 			case strings.Contains(s, "new-session"):
 				existing[name] = true
 			case strings.Contains(s, "kill-session"):

@@ -74,7 +74,7 @@ func (w *inPlaceTmuxWorld) exec() cmd_test.MockCmdExec {
 				w.mu.Lock()
 				defer w.mu.Unlock()
 				if !w.created[name] {
-					return fmt.Errorf("can't find session: %s", name)
+					return goneSessionErr(name)
 				}
 			}
 			return nil

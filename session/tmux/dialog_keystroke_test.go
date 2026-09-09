@@ -32,13 +32,17 @@ func dyingDialogPane(t *testing.T) (*TmuxSession, *claudeFolderTrustPane) {
 	t.Helper()
 	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
 	dead := false
+	// Precompute the "gone" exit error so probeSession's tmuxProvedSessionAbsent
+	// corroboration (#2875) classifies the dead session as definitively absent;
+	// a bare errors.New has no stderr and reads as unknown.
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("dying", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
 			switch {
 			case strings.Contains(joined, "has-session"):
 				if dead {
-					return errors.New("can't find session")
+					return goneErr
 				}
 				return nil
 			case strings.Contains(joined, "send-keys"):

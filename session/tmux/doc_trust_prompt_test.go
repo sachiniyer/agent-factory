@@ -574,8 +574,9 @@ func TestCodexSafetyModelChangeClearsWhenRuntimeIsReplaced(t *testing.T) {
 
 	forceNewSessionEnvMarkers(t, false)
 	session.ptyFactory = failingPtyFactory{}
+	goneErr := tmuxCantFindSessionError(t, session.sanitizedName)
 	session.cmdExec = cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		RunFunc: func(*exec.Cmd) error { return goneErr },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
 			return nil, nil
 		},

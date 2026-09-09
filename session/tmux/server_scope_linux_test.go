@@ -705,7 +705,10 @@ func TestSystemdRunRefusalIsActionableButCleanupUnsafe(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "has-session") {
-				return errors.New("session not found")
+				// Determinate absence so Start proceeds past the existence gate
+				// to the systemd-run refusal (#2875: a real *exec.ExitError with
+				// the diagnostic, not a bare errors.New).
+				return tmuxCantFindSessionError(t, "af_scope-refusal")
 			}
 			return nil
 		},

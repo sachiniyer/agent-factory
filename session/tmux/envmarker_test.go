@@ -80,11 +80,12 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 
 	ptyFactory := NewMockPtyFactory(t)
 	created := false
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("marked", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "has-session") && !created {
 				created = true
-				return fmt.Errorf("session not found")
+				return goneErr
 			}
 			return nil
 		},

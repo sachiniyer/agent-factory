@@ -44,7 +44,7 @@ func archivableTabExec(agentName string) (cmd_test.MockCmdExec, func(string) boo
 				if existing[n] {
 					return nil
 				}
-				return &tabNoSessionErr{}
+				return goneSessionExitErr(n)
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
 				return nil

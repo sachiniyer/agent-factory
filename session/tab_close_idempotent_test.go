@@ -49,7 +49,7 @@ func deadAwareExec(alive map[string]bool) cmd_test.MockCmdExec {
 				if existing[n] {
 					return nil
 				}
-				return errors.New("can't find session")
+				return goneSessionErr(n)
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
 				return nil

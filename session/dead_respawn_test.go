@@ -50,7 +50,7 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 				if existing[n] {
 					return nil
 				}
-				return assertNoSession
+				return goneSessionErr(n)
 			case strings.Contains(s, "new-session"):
 				*newSessions++
 				existing[n] = true

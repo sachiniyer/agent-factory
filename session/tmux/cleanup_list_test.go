@@ -490,3 +490,134 @@ func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
 		})
 	}
 }
+
+// hasSessionFailureTmuxOnPath puts a `tmux` earlier on PATH whose `has-session`
+// AND `ls` fail with the given exit status and stderr diagnostic — the shape a
+// socket-absent ENOENT takes for BOTH commands, since they connect to the same
+// unlinked socket. Every other subcommand exits 97 so a test can detect that the
+// probe reached no further tmux command.
+func hasSessionFailureTmuxOnPath(t *testing.T, diagnostic string, exitCode int) {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+has-session|ls)
+  printf '%%s\n' "$PROBE_DIAGNOSTIC" >&2
+  exit %d
+  ;;
+*)
+  exit 97
+  ;;
+esac
+`, exitCode)
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROBE_DIAGNOSTIC", diagnostic)
+}
+
+// TestProbeSessionTreatsSocketAbsentWithLiveServerAsUnknown is the #2875
+// regression on the LOSSY probe path: probeSession (the probe behind
+// ExistsOrUnknown and LocalBackend.IsAlive) must treat a socket-absent ENOENT
+// backed by a still-running tmux server as UNKNOWN, not as definitive absence —
+// the same refinement probeSessionStrict/NoServerRunning already apply.
+//
+// The hole this closes: before the fix, probeSession returned (exists=false,
+// known=true) for EVERY non-timeout has-session failure, including the ENOENT a
+// /tmp cleaner produces while the server and its panes keep running. IsAlive
+// consumed that as a confirmed death, the daemon's local Lost-recovery loop
+// (which has no strict re-probe for local sessions) respawned a second agent
+// into the same worktree, and the two agents concurrently wrote git against it.
+//
+// Both directions are pinned, because the naive fix (always return unknown for
+// ENOENT) breaks `af reset` and ordinary liveness on every machine that simply
+// has no tmux server running:
+//
+//	socket absent + a live server  -> (false, false) — UNKNOWN, refuse to classify
+//	socket absent + no server      -> (false, true)  — definitive absence
+//
+// The fixture drives the PRODUCTION probeSession through a real fake tmux on
+// PATH (not a MockCmdExec), so the *exec.ExitError carrying tmux's stderr is the
+// genuine production artifact the classifier reads. The live-server answer is
+// pinned via PinServerProbeForTest so the host's process table cannot flip the
+// verdict.
+func TestProbeSessionTreatsSocketAbsentWithLiveServerAsUnknown(t *testing.T) {
+	const enoent = "error connecting to /tmp/tmux-1000/default (No such file or directory)"
+
+	for _, tc := range []struct {
+		name        string
+		serverAlive bool
+		wantExists  bool
+		wantKnown   bool
+	}{
+		{"socket absent while a server is ALIVE", true, false, false},
+		{"socket absent, no server anywhere", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinTmuxServerProbe(t, tc.serverAlive)
+			hasSessionFailureTmuxOnPath(t, enoent, 1)
+
+			exists, known := probeSession(cmd.MakeExecutor(), "af_probe_target")
+
+			if exists != tc.wantExists {
+				t.Errorf("exists = %v, want %v", exists, tc.wantExists)
+			}
+			if known != tc.wantKnown {
+				t.Errorf("known = %v, want %v: a socket-absent ENOENT backed by a live "+
+					"server must read as UNKNOWN (known=false), not as definitive absence, "+
+					"so the liveness path refuses to classify where the strict path already "+
+					"does (#2875)", known, tc.wantKnown)
+			}
+		})
+	}
+}
+
+// TestProbeSessionReportsDefinitiveAbsenceForCantFindSession pins the ordinary
+// "no such session" answer that drives every caller acting on !ExistsOrUnknown:
+// the canonical "can't find session: <name>" exit 1 must still report
+// (exists=false, known=true) after the #2875 refinement, so a genuinely absent
+// session is not laundered into the conservative lie.
+//
+// probeSession uses runTmuxBoundedWith (Run, which discards stderr), so the
+// has-session diagnostic itself is not readable — but tmuxProvedSessionAbsent
+// corroborates against ListSessionNames (Output, which captures stderr), and a
+// live server whose listing omits the target is authoritative absence. The fake
+// tmux answers has-session with exit 1 and ls with exit 0 (an empty listing),
+// modeling a live server where the named session has been killed but others
+// (or none) remain.
+func TestProbeSessionReportsDefinitiveAbsenceForCantFindSession(t *testing.T) {
+	pinTmuxServerProbe(t, false)
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+has-session)
+  printf 'can'"'"'t find session: %%s\n' "$PROBE_NAME" >&2
+  exit 1
+  ;;
+ls)
+  # A live server that no longer holds the target session: an authoritative
+  # listing, empty or naming other sessions only.
+  exit 0
+  ;;
+*)
+  exit 97
+  ;;
+esac
+`)
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROBE_NAME", "af_proven_absent")
+
+	exists, known := probeSession(cmd.MakeExecutor(), "af_proven_absent")
+
+	if exists {
+		t.Errorf("exists = true, want false for a session tmux proved absent")
+	}
+	if !known {
+		t.Errorf("known = false, want true: tmux's own 'can't find session' diagnostic is " +
+			"definitive absence and must not be laundered into the conservative lie")
+	}
+}

@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -66,7 +68,7 @@ func tabNameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 				if existing[n] {
 					return nil
 				}
-				return &tabNoSessionErr{}
+				return goneSessionExitErr(n)
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
 				return nil
@@ -90,9 +92,28 @@ func tabNameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 	}
 }
 
-type tabNoSessionErr struct{}
+// daemonExitOnePS is a cached *os.ProcessState taken from a trivial exit-1
+// child, used to build *exec.ExitError instances with a custom Stderr without
+// forking per mock call.
+var (
+	daemonExitOnePSOnce sync.Once
+	daemonExitOnePS     *os.ProcessState
+)
 
-func (*tabNoSessionErr) Error() string { return "session does not exist" }
+// goneSessionExitErr returns tmux's "can't find session: <name>" exit-1 error.
+// The post-#2875 probeSession corroborates absence through tmuxProvedSessionAbsent,
+// which needs a real *exec.ExitError with the diagnostic on stderr — a plain
+// error reads as unknown, not gone, and would break the tab lifecycle that
+// treats has-session-absent as idempotent teardown or name availability.
+func goneSessionExitErr(name string) error {
+	daemonExitOnePSOnce.Do(func() {
+		err := exec.Command("sh", "-c", "exit 1").Run()
+		var ee *exec.ExitError
+		errors.As(err, &ee)
+		daemonExitOnePS = ee.ProcessState
+	})
+	return &exec.ExitError{ProcessState: daemonExitOnePS, Stderr: []byte("can't find session: " + name + "\n")}
+}
 
 // remoteTypeBackend is a FakeBackend that reports a WorkspaceRemote capability
 // descriptor, letting CreateTab's remote-rejection branch (no TabManagement) be

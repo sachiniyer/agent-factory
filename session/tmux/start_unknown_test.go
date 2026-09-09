@@ -30,11 +30,12 @@ func TestStart_ReadinessTimeoutOnWedgedServer_PropagatesTheUnknown(t *testing.T)
 	// already-exists gate and spawns. Everything else stalls past the deadline —
 	// the readiness poll never sees the session, and the cleanup Close cannot
 	// confirm whether the pane it just spawned is running.
+	goneErr := tmuxCantFindSessionError(t, "af_wedged_start")
 	execu := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			for _, a := range c.Args {
 				if a == "has-session" {
-					return fmt.Errorf("exit status 1") // answered: no such session
+					return goneErr // answered: no such session
 				}
 			}
 			time.Sleep(2 * time.Second)

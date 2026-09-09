@@ -197,12 +197,13 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// the PTY factory, subsequent has-session calls report exists so Start's
 	// poll loop and the inner Restore("") call can succeed.
 	hasSessionCalls := 0
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("missing", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "has-session") {
 				hasSessionCalls++
 				if hasSessionCalls <= 2 {
-					return fmt.Errorf("can't find session")
+					return goneErr
 				}
 			}
 			return nil
@@ -242,7 +243,7 @@ func TestRestoreReturnsErrorWhenSessionMissingAndNoWorkDir(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "has-session") {
-				return fmt.Errorf("can't find session")
+				return tmuxCantFindSessionError(t, toTmuxName("gone", ""))
 			}
 			return nil
 		},
@@ -265,11 +266,12 @@ func TestStartTmuxSession(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 
 	created := false
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("test-session", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "has-session") && !created {
 				created = true
-				return fmt.Errorf("session not found")
+				return goneErr
 			}
 			return nil
 		},
@@ -309,11 +311,12 @@ func TestStartTimeoutCleanupSucceeds(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 
 	sessionName := toTmuxName("timeout-ok", "")
+	goneErr := tmuxCantFindSessionError(t, sessionName)
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			// Session never appears; kill-session (cleanup) succeeds.
 			if strings.Contains(cmd.String(), "has-session") {
-				return fmt.Errorf("session not found")
+				return goneErr
 			}
 			return nil
 		},
@@ -353,10 +356,11 @@ func TestStartTimeoutKeepsCleanupUnsafeWhileKilledPaneStillRuns(t *testing.T) {
 	paneExitWait = 20 * time.Millisecond
 	t.Cleanup(func() { paneExitWait = oldWait })
 	ptyFactory := NewMockPtyFactory(t)
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("timeout-live-pane", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "has-session") {
-				return fmt.Errorf("session not found")
+				return goneErr
 			}
 			return nil
 		},
@@ -386,6 +390,7 @@ func TestStartTimeoutCleanupFails(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 
 	killAttempted := false
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("timeout-bad", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "kill-session") {
@@ -399,7 +404,7 @@ func TestStartTimeoutCleanupFails(t *testing.T) {
 				if killAttempted {
 					return nil
 				}
-				return fmt.Errorf("session not found")
+				return goneErr
 			}
 			return nil
 		},
@@ -439,6 +444,12 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 	t.Helper()
 	var captureCalls atomic.Int32
 	var hasSessionCalls atomic.Int32
+	// Precompute the exit-1 "can't find session" error once: the monitor's
+	// dead latch means has-session reports "gone" at most once per session, but
+	// probeSession now corroborates absence through tmuxProvedSessionAbsent
+	// (#2875), which needs a real *exec.ExitError with the diagnostic on
+	// stderr — a bare fmt.Errorf has none and reads as unknown, not gone.
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("monitor", ""))
 
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
@@ -447,7 +458,7 @@ func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*T
 				if sessionAlive.Load() {
 					return nil
 				}
-				return fmt.Errorf("can't find session")
+				return goneErr
 			}
 			return nil
 		},

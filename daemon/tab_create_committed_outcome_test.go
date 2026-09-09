@@ -47,7 +47,7 @@ func tabKillRefusedExec(alive map[string]bool) cmd_test.MockCmdExec {
 				if existing[n] {
 					return nil
 				}
-				return &tabNoSessionErr{}
+				return goneSessionExitErr(n)
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
 				return nil

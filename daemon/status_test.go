@@ -15,9 +15,12 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// errSessionAbsent makes the mock executor's has-session probe report "no such
-// session", driving ExistsOrUnknown to false for the #999 nil-monitor test.
-var errSessionAbsent = errors.New("no such session")
+// errSessionAbsent makes the mock executor's has-session probe report the
+// session as definitively absent, driving ExistsOrUnknown to false for the
+// #999 nil-monitor test. A real *exec.ExitError with the "can't find session"
+// diagnostic is required because #2875 routed probeSession through
+// tmuxProvedSessionAbsent, which needs the stderr diagnostic.
+var errSessionAbsent = goneSessionExitErr("af_999_nil_monitor")
 
 // deadTmuxBackend is a FakeBackend whose IsAlive reports false, modelling a
 // tmux/remote session that vanished out from under the daemon — the #935

@@ -51,7 +51,7 @@ func raceHookExec(alive map[string]bool, onNewSession func()) (cmd_test.MockCmdE
 				if existing[n] {
 					return nil
 				}
-				return assertNoSession
+				return goneSessionErr(n)
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
 				// Simulate Kill racing in after the spawn but before the append.

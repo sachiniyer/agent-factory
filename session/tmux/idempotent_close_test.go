@@ -22,7 +22,15 @@ var errExit1 = errors.New("exit status 1")
 // controls what has-session reports — i.e. whether the session survived the
 // kill. killCalls counts kill-session invocations so tests can assert the kill
 // was actually attempted.
-func killSessionProbeExec(present bool, killCalls *int) cmd_test.MockCmdExec {
+//
+// `name` is the session's sanitized tmux name; has-session for a gone session
+// returns a real *exec.ExitError carrying tmux's "can't find session: <name>"
+// diagnostic, so probeSession's absence corroboration (#2875) classifies it as
+// definitively absent rather than unknown. errExit1 — a bare error with no
+// stderr — is kept for kill-session, where the probe is a separate command and
+// never inspects the kill error.
+func killSessionProbeExec(t *testing.T, name string, present bool, killCalls *int) cmd_test.MockCmdExec {
+	goneErr := tmuxCantFindSessionError(t, name)
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			s := strings.Join(c.Args, " ")
@@ -37,7 +45,7 @@ func killSessionProbeExec(present bool, killCalls *int) cmd_test.MockCmdExec {
 				if present {
 					return nil
 				}
-				return errExit1
+				return goneErr
 			}
 			return nil
 		},
@@ -53,7 +61,7 @@ func killSessionProbeExec(present bool, killCalls *int) cmd_test.MockCmdExec {
 // Close — so Close swallows the error and returns nil.
 func TestClose_AlreadyDeadSession_ReturnsNil(t *testing.T) {
 	var killCalls int
-	exec := killSessionProbeExec(false /* session gone */, &killCalls)
+	exec := killSessionProbeExec(t, "af_dead", false /* session gone */, &killCalls)
 	session := NewTmuxSessionFromSanitizedNameWithDeps("af_dead", "claude", NewMockPtyFactory(t), exec)
 
 	state, err := session.Close()
@@ -69,7 +77,7 @@ func TestClose_AlreadyDeadSession_ReturnsNil(t *testing.T) {
 // still present afterward — must still surface as an error, so the idempotency
 // shortcut can't mask a session that refuses to die.
 func TestClose_SessionSurvivesKill_StillErrors(t *testing.T) {
-	exec := killSessionProbeExec(true /* session still present */, nil)
+	exec := killSessionProbeExec(t, "af_stuck", true /* session still present */, nil)
 	session := NewTmuxSessionFromSanitizedNameWithDeps("af_stuck", "claude", NewMockPtyFactory(t), exec)
 
 	state, err := session.Close()

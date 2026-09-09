@@ -468,7 +468,7 @@ func closeBlockingTabExec(alive map[string]bool, blockedKillName string, killSta
 				if ok {
 					return nil
 				}
-				return &tabNoSessionErr{}
+				return goneSessionExitErr(name)
 			case strings.Contains(s, "new-session"):
 				mu.Lock()
 				existing[name] = true

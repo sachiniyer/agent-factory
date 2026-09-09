@@ -112,13 +112,17 @@ func TestDeadAgentWithLiveShellSiblingIsNotPrefixMatched(t *testing.T) {
 	sessions := map[string]bool{shellName: true}
 
 	var capturedShell bool
+	// A real *exec.ExitError with the "can't find session" diagnostic, so the
+	// dead agent session is classified as definitively absent (#2875) rather
+	// than unknown — the conservative lie "exists" would suppress ErrSessionGone.
+	goneErr := tmuxCantFindSessionError(t, agentName)
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			if strings.Contains(strings.Join(c.Args, " "), "has-session") {
 				if _, ok := resolveTmuxTarget(targetOf(c.Args), sessions); ok {
 					return nil
 				}
-				return fmt.Errorf("can't find session")
+				return goneErr
 			}
 			return nil
 		},

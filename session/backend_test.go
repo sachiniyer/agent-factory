@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,6 +64,48 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+// goneExitErr returns a real *exec.ExitError (exit 1) carrying the given
+// diagnostic on stderr. The ProcessState is taken from a single cached exit-1
+// child, so the helper is fork-free after the first call — safe inside a mock's
+// RunFunc that a Start readiness poll may invoke hundreds of times.
+//
+// The post-#2875 lossy has-session probe (probeSession) corroborates absence
+// through tmuxProvedSessionAbsent, which reads the diagnostic off a real
+// *exec.ExitError's Stderr. A bare fmt.Errorf has no stderr and reads as
+// unknown (not gone), so mock has-session failures for absent sessions must
+// return one of these instead.
+var (
+	exitOnePSOnce sync.Once
+	exitOnePS     *os.ProcessState
+)
+
+func goneExitErr(diagnostic string) error {
+	exitOnePSOnce.Do(func() {
+		err := exec.Command("sh", "-c", "exit 1").Run()
+		var ee *exec.ExitError
+		errors.As(err, &ee)
+		exitOnePS = ee.ProcessState
+	})
+	return &exec.ExitError{ProcessState: exitOnePS, Stderr: []byte(diagnostic + "\n")}
+}
+
+// goneSessionErr returns tmux's "can't find session: <name>" exit-1 error.
+func goneSessionErr(name string) error {
+	return goneExitErr("can't find session: " + name)
+}
+
+// hasSessionGoneErr extracts the -t target from a has-session command and
+// returns tmux's matching "can't find session" exit-1 error, for a mock
+// has-session whose session is absent.
+func hasSessionGoneErr(c *exec.Cmd) error {
+	for _, a := range c.Args {
+		if name, ok := strings.CutPrefix(a, "-t="); ok {
+			return goneSessionErr(name)
+		}
+	}
+	return goneSessionErr("")
 }
 
 // --- Backend interface compliance ---
@@ -290,7 +333,7 @@ func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 			// #967 idempotent no-op. A dead session cannot be writing, so the
 			// teardown has reached its goal and deletion may proceed.
 			if strings.Contains(c.String(), "has-session") {
-				return errors.New("can't find session")
+				return hasSessionGoneErr(c)
 			}
 			return errors.New("kill failed")
 		},
@@ -444,7 +487,7 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 			// would make this test about tmux rather than about the multi-component
 			// warning it exists to check.)
 			if strings.Contains(c.String(), "has-session") {
-				return errors.New("can't find session")
+				return hasSessionGoneErr(c)
 			}
 			return errors.New("kill failed")
 		},

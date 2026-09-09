@@ -664,12 +664,13 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustWaitsForTheDialogToSettle(t 
 // a refusal already reported for the dead pane must not silence the same
 // refusal for the new one.
 func TestStart_ResetsClaudeTrustStateAtTheProvenRuntimeBoundary(t *testing.T) {
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("respawn", ""))
 	session := newTmuxSession(toTmuxName("respawn", ""), ProgramClaude, NewMockPtyFactory(t), cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			for _, arg := range c.Args {
 				if arg == "has-session" {
 					// Determinate absence: Start proceeds past the existence gate.
-					return errors.New("can't find session")
+					return goneErr
 				}
 			}
 			return nil

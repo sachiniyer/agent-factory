@@ -62,14 +62,20 @@ func (t *TmuxSession) ExistsOrUnknown() bool {
 // they check ctx.Err() on their own bounded command and skip it entirely (see
 // tmuxTimeoutContext, and Close's kill-session timeout branch).
 //
-// A non-timeout failure — the usual `has-session` exit 1 for "no such session",
-// or any other tmux error — still reports false, preserving the pre-#1917
-// conflation callers already relied on.
+// A non-timeout failure reports false ONLY when tmux proved the session absent
+// (probeSession corroborates via tmuxProvedSessionAbsent, #2875). A
+// socket-absent ENOENT backed by a still-running server is reported as
+// !known — the same "could not tell" collapse a tripped deadline uses — so the
+// conservative lie is true and the live session is not torn down. The ordinary
+// "no such session" answer and a definitive no-server still report false,
+// preserving the conflation callers relied on for the cases that are actually
+// authoritative.
 func sessionExists(cmdExec cmd.Executor, name string) bool {
 	exists, known := probeSession(cmdExec, name)
 	if !known {
-		log.WarningLog.Printf("tmux has-session for %s timed out after %s; the server is wedged, so "+
-			"reporting the session as still present rather than risk a false teardown", name, tmuxCommandTimeout)
+		log.WarningLog.Printf("tmux has-session for %s did not answer definitively (timed out after %s, "+
+			"or an unclassifiable failure such as a socket-absent ENOENT backed by a live server); "+
+			"reporting still present rather than risk a false teardown (#2875)", name, tmuxCommandTimeout)
 		return true
 	}
 	return exists
@@ -90,7 +96,7 @@ func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
 }
 
 // probeSession is sessionExists WITHOUT the lossy collapse: it reports whether
-// the session exists AND whether tmux actually answered.
+// the session exists AND whether tmux answered AUTHORITATIVELY.
 //
 // The two-value form exists because the collapse above, while safe for the
 // probe's many read-only callers, silently destroyed information for the one
@@ -99,6 +105,15 @@ func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
 // so its caller deleted the workspace with the session's fate unknown (#1917).
 // A caller that acts on the answer takes this form and handles !known; a caller
 // that only reads takes the bool and gets the conservative lie.
+//
+// known means "authoritatively answered," not "tmux returned quickly." A
+// non-timeout failure is absence ONLY when tmux proved it absent (#2875): a
+// socket-absent ENOENT backed by a live server is a connect error, so it
+// routes through tmuxProvedSessionAbsent and reports known=false when the
+// server outlives its unlinked socket — the boundary #2875 closed for the
+// strict probes, now closed for the lossy probe that feeds IsAlive, so it
+// cannot misclassify that ENOENT as a confirmed death and trigger a
+// destructive respawn into a worktree the live agent is still writing.
 func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -110,9 +125,14 @@ func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	if ctx.Err() != nil {
 		return false, false
 	}
-	// tmux answered: the usual `has-session` exit 1 for "no such session", or any
-	// other error, which this probe has always conflated with absence.
-	return false, true
+	// A non-timeout failure is absence ONLY when tmux proved it absent. A
+	// socket-absent ENOENT backed by a live server is not a determinate answer
+	// (#2875); fall back to the same corroboration the strict probe uses so the
+	// liveness path refuses to classify where the strict path already does.
+	if tmuxProvedSessionAbsent(cmdExec, err, name) {
+		return false, true
+	}
+	return false, false
 }
 
 // recoveryWindowObserver is notified when a vanished-session recovery's bounded

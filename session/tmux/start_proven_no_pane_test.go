@@ -173,10 +173,13 @@ func TestStart_SpawnSucceededThenFailed_ProvesNothing(t *testing.T) {
 }
 
 // TestStart_ProbeDeniedNotAbsent_ProvesNothing is the P1 on this change: the gate
-// at the top of Start reads probeSession, which collapses EVERY non-timeout
-// execution failure into absence. A wrapper or socket policy that denies access
-// while the server and its pane are alive therefore looks like a free name — and
-// latching on that would skip the teardown's liveness gate and delete the worktree
+// at the top of Start reads probeSession. After the #2875 fix the lossy probe no
+// longer collapses every non-timeout failure into absence — a denial with no
+// "can't find session" diagnostic routes through tmuxProvedSessionAbsent, which
+// refuses to classify it, so Start reports unknown and bails safely rather than
+// treating a live-but-denied session as a free name. A bare exit 1 with no
+// diagnostic models that denial here and must not prove the pane never existed;
+// latching on it would skip the teardown's liveness gate and delete the worktree
 // under a running agent.
 func TestStart_ProbeDeniedNotAbsent_ProvesNothing(t *testing.T) {
 	execu := cmd_test.MockCmdExec{

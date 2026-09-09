@@ -47,7 +47,7 @@ func TestLocalBackendAnsweredStartFailurePreservesFreshWorktree(t *testing.T) {
 	t.Cleanup(func() { _, _ = gw.Cleanup() })
 
 	execu := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		RunFunc: func(c *exec.Cmd) error { return hasSessionGoneErr(c) },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
 			return nil, nil
 		},

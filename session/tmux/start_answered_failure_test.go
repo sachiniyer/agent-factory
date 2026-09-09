@@ -21,6 +21,7 @@ type answeredFailurePtyFactory struct {
 func TestStartAnsweredCommandFailureDoesNotOverrideObservedSession(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
 	var probes atomic.Int32
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("answered-start-live", ""))
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			for _, arg := range c.Args {
@@ -30,7 +31,7 @@ func TestStartAnsweredCommandFailureDoesNotOverrideObservedSession(t *testing.T)
 				if probes.Add(1) >= 3 {
 					return nil
 				}
-				return errors.New("session not found")
+				return goneErr
 			}
 			return nil
 		},
@@ -73,8 +74,9 @@ func (f answeredFailurePtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan err
 // that a pane never ran or finished flushing into the worktree.
 func TestStartAnsweredCommandFailureDoesNotClaimPreSpawn(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
+	goneErr := tmuxCantFindSessionError(t, toTmuxName("answered-start-failure", ""))
 	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		RunFunc: func(*exec.Cmd) error { return goneErr },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
 			return nil, nil
 		},

@@ -93,7 +93,7 @@ func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 				return nil
 			case strings.Contains(joined, "has-session"):
 				if killed && len(ptyFactory.cmds) == 0 {
-					return errors.New("session absent after close")
+					return hasSessionGoneErr(c)
 				}
 			}
 			return nil
@@ -186,7 +186,7 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 			if strings.Contains(c.String(), "has-session") {
 				hasSessionCalls++
 				if hasSessionCalls <= 2 {
-					return fmt.Errorf("can't find session")
+					return hasSessionGoneErr(c)
 				}
 			}
 			return nil

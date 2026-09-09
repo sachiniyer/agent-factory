@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,7 +59,7 @@ func (w *renamedTmuxWorld) exec() cmd_test.MockCmdExec {
 			w.mu.Lock()
 			defer w.mu.Unlock()
 			if !w.running[target] {
-				return errors.New("can't find session")
+				return goneSessionErr(target)
 			}
 			if slices.Contains(c.Args, "kill-session") {
 				delete(w.running, target)
