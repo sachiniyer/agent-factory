@@ -205,9 +205,9 @@ func TestDottedSiblingProjectPathHeaderFormStillWorks(t *testing.T) {
 
 // TestInsertTOMLDottedLeafAfterMultilineStringSibling guards the
 // lastSiblingIdx-placement fix: when the last dotted sibling has a multiline
-// string value (''' ... '''), the new leaf must land AFTER the closing
-// delimiter, not on the line immediately after the opening line. Before the
-// fix, lastSiblingIdx recorded the opening line and insertAt(i+1) wrote the
+// string value (triple-single-quote literal), the new leaf must land AFTER the
+// closing delimiter, not on the line immediately after the opening line. Before
+// the fix, lastSiblingIdx recorded the opening line and insertAt(i+1) wrote the
 // new key inside the string literal, producing a corrupt file that failed the
 // rewrite-drift gate.
 func TestInsertTOMLDottedLeafAfterMultilineStringSibling(t *testing.T) {
