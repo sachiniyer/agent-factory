@@ -762,7 +762,8 @@ test("unmodified soft input remains native so xterm can observe Backspace", () =
   soft.dispose();
 });
 
-test("229 Backspace after compositionend is forwarded from the textarea mutation", t => {
+for (const [commit, after] of [["字", ""], ["ab", "a"]] as const) test(
+  `229 Backspace is sequenced after pending commit ${JSON.stringify(commit)}`, t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
@@ -779,15 +780,17 @@ test("229 Backspace after compositionend is forwarded from the textarea mutation
   t.after(() => soft.dispose());
 
   textarea.dispatchEvent(new Event("compositionstart"));
-  textarea.value = "字";
-  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = commit;
+  textarea.dispatchEvent(composition("compositionend", commit));
   textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
-  host.dispatchEvent(deleteBackward("beforeinput"));
-  textarea.value = "";
+  // Cover both the normal beforeinput snapshot and the last live textarea
+  // observation used when a browser exposes only the input mutation.
+  if (!after) host.dispatchEvent(deleteBackward("beforeinput"));
+  textarea.value = after;
   host.dispatchEvent(deleteBackward("input"));
   t.mock.timers.tick(0);
 
-  assert.deepEqual(writes, ["\x08"]);
+  assert.equal(writes.join(""), commit + "\x08");
   assert.equal(modifiers.state("Ctrl"), "off");
   assert.equal(soft.transform("a", value => modifiers.input(value)), "a");
 });

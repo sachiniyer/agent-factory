@@ -19,12 +19,10 @@ export function keyBytes(key: string, ctrl = false, alt = false, applicationCurs
   if (SPECIAL_BYTES[key]) return (alt ? "\x1b" : "") + SPECIAL_BYTES[key];
   // Xterm represents Backspace as DEL and Ctrl+Backspace as BS.
   if (key === "\x7f") return (alt ? "\x1b" : "") + (ctrl ? "\x08" : key);
-  const rawCode = key.charCodeAt(0);
-  let text = key;
-  if (ctrl && key.length === 1 && rawCode >= 64 && rawCode <= 127) {
-    const upperCode = key.toUpperCase().charCodeAt(0);
-    if (upperCode >= 64 && upperCode <= 95) text = String.fromCharCode(upperCode & 31);
-  }
+  // Soft input has no physical layout identity. Apply the same complete ASCII
+  // control map as physical emissions without guessing across keyboard layouts.
+  const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127
+    ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1b" : "") + text;
 }
 
@@ -183,8 +181,11 @@ export class StickyModifiers {
     this.tapped = { Ctrl: -Infinity, Alt: -Infinity };
   }
   key(key: string, applicationCursor = false): string {
-    const result = keyBytes(key, this.values.Ctrl !== "off", this.values.Alt !== "off", applicationCursor);
-    this.consumeOnce();
+    const ctrl = this.values.Ctrl !== "off";
+    const alt = this.values.Alt !== "off";
+    const result = keyBytes(key, ctrl, alt, applicationCursor);
+    this.consumeApplied(result, keyBytes(key, false, alt, applicationCursor),
+      keyBytes(key, ctrl, false, applicationCursor));
     return result;
   }
   input(text: string, source: "terminal" | "user" = "user", physical?: PhysicalKeyInput): string {
@@ -193,27 +194,31 @@ export class StickyModifiers {
     const stickyAlt = this.values.Alt !== "off";
     if (physical && (stickyCtrl || stickyAlt)) {
       const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
-      this.consumeOnce();
+      this.consumeApplied(result, mergePhysicalKeyBytes(text, physical, false, stickyAlt),
+        mergePhysicalKeyBytes(text, physical, stickyCtrl, false));
       return result;
     }
     // Soft and deferred textarea input have no physical modifier identity. Their
     // byte shapes are unambiguous here, so the encoder inverse remains a fallback.
     const decoded = decodeKeyBytes(text);
     if (decoded) {
-      const result = keyBytes(decoded.key, decoded.ctrl || this.values.Ctrl !== "off",
-        decoded.alt || this.values.Alt !== "off", decoded.applicationCursor);
-      this.consumeOnce();
+      const encode = (ctrl: boolean, alt: boolean) => keyBytes(decoded.key, decoded.ctrl || ctrl,
+        decoded.alt || alt, decoded.applicationCursor);
+      const result = encode(stickyCtrl, stickyAlt);
+      this.consumeApplied(result, encode(false, stickyAlt), encode(stickyCtrl, false));
       return result;
     }
-    // Unrecognized user controls retain the consume-and-pass-through fallback.
-    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) {
-      if (text) this.consumeOnce();
-      return text;
-    }
+    // Unrecognized user controls pass through. No modifier was applied, so the
+    // one-shot remains armed for an input shape that can represent it.
+    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
     return Array.from(text, char => this.key(char)).join("");
   }
-  private consumeOnce(): void {
-    for (const modifier of ["Ctrl", "Alt"] as const) if (this.values[modifier] === "once") this.values[modifier] = "off";
+  private consumeApplied(result: string, withoutCtrl: string, withoutAlt: string): void {
+    // Invariant: a one-shot is consumed only when that modifier actually
+    // changes the emission. A pass-through or redundant physical modifier can
+    // never silently spend the keybar's advertised "Next key" state.
+    if (this.values.Ctrl === "once" && result !== withoutCtrl) this.values.Ctrl = "off";
+    if (this.values.Alt === "once" && result !== withoutAlt) this.values.Alt = "off";
   }
 }
 

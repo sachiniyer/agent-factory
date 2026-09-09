@@ -15,6 +15,18 @@ test("terminal key bytes match physical keys", () => {
   assert.equal(keyBytes("ß", true), "ß");
 });
 
+test("sticky Ctrl encodes every supported soft-keyboard digit chord", () => {
+  for (const [digit, expected] of [
+    ["3", "\x1b"], ["4", "\x1c"], ["5", "\x1d"],
+    ["6", "\x1e"], ["7", "\x1f"], ["8", "\x7f"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap("Ctrl", 0);
+    assert.equal(state.input(digit, "user"), expected);
+    assert.equal(state.state("Ctrl"), "off");
+  }
+});
+
 test("one shot consumes only the next non-composed character", () => {
   const state = new StickyModifiers();
   state.tap("Ctrl", 0);
@@ -47,12 +59,13 @@ test("terminal escape sequences and control bytes do not consume a character mod
   assert.equal(state.input("c"), "\x03");
 });
 
-test("soft control input consumes a one-shot while terminal replies do not", () => {
+test("pass-through soft controls and terminal replies leave one-shots armed", () => {
   const state = new StickyModifiers();
   state.tap("Ctrl", 0);
   assert.equal(state.input("\r", "user"), "\r");
+  assert.equal(state.state("Ctrl"), "once");
+  assert.equal(state.input("a"), "\x01");
   assert.equal(state.state("Ctrl"), "off");
-  assert.equal(state.input("a"), "a");
 
   state.tap("Ctrl", 1000);
   assert.equal(state.input("\x1b[?1;2c", "terminal"), "\x1b[?1;2c");
@@ -108,7 +121,7 @@ test("hardware modifier identity survives xterm arrow aliases", () => {
   }
 });
 
-test("sticky no-op preserves xterm's physical Alt aliases", () => {
+test("sticky no-op preserves xterm's physical Alt aliases and remains armed", () => {
   for (const [bytes, physical] of [
     ["\x1b[1;5A", { key: "ArrowUp", altKey: true }],
     ["\x1bb", { key: "ArrowLeft", altKey: true }],
@@ -117,8 +130,8 @@ test("sticky no-op preserves xterm's physical Alt aliases", () => {
     const state = new StickyModifiers();
     state.tap("Alt", 0);
     assert.equal(state.input(bytes, "user", event), bytes);
-    assert.equal(state.state("Alt"), "off");
-    assert.equal(state.input("a", "user"), "a");
+    assert.equal(state.state("Alt"), "once");
+    assert.equal(state.input("a", "user"), "\x1ba");
   }
 });
 
@@ -191,8 +204,18 @@ test("the decoder closes over the complete keyBytes domain", () => {
         const expected = keyBytes(key, ctrl || stickyCtrl, alt || stickyAlt, applicationCursor);
         const actual = keyBytes(decoded.key, decoded.ctrl || stickyCtrl,
           decoded.alt || stickyAlt, decoded.applicationCursor);
-        if (actual !== expected)
-          assert.equal(actual, expected, JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt }));
+        if (actual !== expected) {
+          // Terminal bytes have genuine aliases (DEL is both Backspace and
+          // Ctrl+8). The byte-only fallback may choose any preimage whose base
+          // and merged encodings agree; hardware identity bypasses this path.
+          const aliases = [...KEY_BYTES_NAMED_KEYS,
+            ...Array.from({ length: 128 }, (_, code) => String.fromCharCode(code))];
+          const equivalent = aliases.some(alias => booleans.some(aliasCtrl => booleans.some(aliasAlt =>
+            booleans.some(aliasCursor => keyBytes(alias, aliasCtrl, aliasAlt, aliasCursor) === encoded &&
+              keyBytes(alias, aliasCtrl || stickyCtrl, aliasAlt || stickyAlt, aliasCursor) === actual))));
+          assert.ok(equivalent,
+            JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt, expected, actual }));
+        }
       }
     }
   }
@@ -274,7 +297,8 @@ test("backtab has no generic sticky CSI encoding", () => {
     const state = new StickyModifiers();
     state.tap(sticky, 0);
     assert.equal(state.input("\x1b[Z", "user"), "\x1b[Z");
-    assert.equal(state.state(sticky), "off");
+    assert.equal(state.state(sticky), "once");
+    assert.equal(state.input("a", "user"), sticky === "Ctrl" ? "\x01" : "\x1ba");
   }
 });
 
@@ -339,12 +363,11 @@ test("an armed one-shot survives a keybar arrow press and hits the NEXT letter",
   assert.equal(m.input("l"), "l");
 });
 
-test("bar keys apply and consume one-shots before the following letter", () => {
+test("bar keys consume one-shots only when their encoding applies them", () => {
   for (const [modifier, key, bytes] of [
     ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],
     ["Alt", "Tab", "\x1b\t"], ["Alt", "Esc", "\x1b\x1b"],
-    ["Alt", "^C", "\x1b\x03"], ["Ctrl", "Tab", "\t"],
-    ["Ctrl", "Esc", "\x1b"], ["Ctrl", "^C", "\x03"],
+    ["Alt", "^C", "\x1b\x03"],
   ] as const) {
     const state = new StickyModifiers();
     state.tap(modifier, 0);
@@ -352,6 +375,20 @@ test("bar keys apply and consume one-shots before the following letter", () => {
     assert.equal(state.state(modifier), "off");
     assert.equal(state.input("ls"), "ls");
   }
+
+  for (const [key, bytes] of [["Tab", "\t"], ["Esc", "\x1b"], ["^C", "\x03"]] as const) {
+    const state = new StickyModifiers();
+    state.tap("Ctrl", 0);
+    assert.equal(state.key(key), bytes);
+    assert.equal(state.state("Ctrl"), "once");
+  }
+
+  const split = new StickyModifiers();
+  split.tap("Ctrl", 0); split.tap("Alt", 0);
+  assert.equal(split.key("Tab"), "\x1b\t");
+  assert.equal(split.state("Alt"), "off");
+  assert.equal(split.state("Ctrl"), "once");
+  assert.equal(split.input("a"), "\x01");
 });
 
 test("locked Ctrl survives an arrow and combined modifiers use CSI in both cursor modes", () => {

@@ -1,6 +1,7 @@
 interface CompositionRange {
   start?: number;
   initialValue?: string;
+  observedValue?: string;
   text: string;
   updateText?: string;
   sawUpdate?: boolean;
@@ -12,8 +13,15 @@ interface CompositionRange {
   trailingLength?: number;
   keydownAfterEnd?: boolean;
   beforeDeleteValue?: string;
+  queuedInput?: PostCompositionInput;
   trailingFlush?: TrailingFlush;
   release?: ReturnType<typeof setTimeout>;
+}
+
+interface PostCompositionInput {
+  beforeText: string;
+  afterText: string;
+  text: string;
 }
 
 interface TrailingFlush {
@@ -37,6 +45,7 @@ export class TerminalSoftInput {
   private readonly trailingFlushes = new Set<TrailingFlush>();
   private forwardingTrailing: string | undefined;
   private forwardingComposition: string | undefined;
+  private forwardingQueued: { range: CompositionRange; text: string } | undefined;
   private keyDownSeen = false;
   private staleKeydown = false;
   private staleBeforeInputSent = false;
@@ -71,7 +80,7 @@ export class TerminalSoftInput {
       }
       this.queueTrailingFlush(range);
     }
-    this.active = { start: value?.length, initialValue: value, text: "" };
+    this.active = { start: value?.length, initialValue: value, observedValue: value, text: "" };
   };
   private readonly onCompositionUpdate = (event: Event): void => {
     const data = (event as CompositionEvent).data;
@@ -113,7 +122,7 @@ export class TerminalSoftInput {
     // release. Pending membership keeps that delayed send owned while Safari
     // establishes its commit boundary or Chrome receives trailing input.
     // A microtask would expire ownership before Safari's final mutation.
-    range.release = setTimeout(() => this.remove(range), 0);
+    range.release = setTimeout(() => this.release(range), 0);
   };
   private readonly onInput = (event: Event): void => {
     const input = event as InputEvent;
@@ -125,18 +134,30 @@ export class TerminalSoftInput {
       const postCompositionText = input.inputType === "insertText" || input.inputType === "insertCompositionText";
       if (range && input.inputType === "deleteContentBackward" && input.isComposing === false) {
         if (input.type === "beforeinput") {
-          range.beforeDeleteValue = this.textarea?.value;
+          range.beforeDeleteValue = this.textarea?.value ?? range.observedValue;
         } else if (input.type === "input") {
           const value = this.textarea?.value;
-          const priorLength = range.beforeDeleteValue?.length ??
+          const beforeValue = range.beforeDeleteValue ?? range.observedValue;
+          const priorLength = beforeValue?.length ??
             (range.start !== undefined && range.commitLength !== undefined
               ? range.start + range.commitLength + (range.trailingLength ?? 0) : undefined);
           range.beforeDeleteValue = undefined;
           // CompositionHelper ignores 229 while its delayed finalizer is
-          // pending. A real post-end textarea deletion is instead a new user
-          // action, so forward the DEL without taking ownership of mutation.
-          if (value !== undefined && priorLength !== undefined && value.length < priorLength)
-            this.send("\x7f");
+          // pending. Keep the authoritative pre-delete textarea text, then
+          // sequence the ordinary DEL after that composition is emitted.
+          if (value !== undefined && priorLength !== undefined && value.length < priorLength &&
+            range.start !== undefined) {
+            const beforeText = range.queuedInput?.beforeText ?? beforeValue?.substring(range.start);
+            if (beforeText !== undefined) {
+              range.frozenText = beforeText;
+              range.queuedInput = {
+                beforeText,
+                afterText: value.substring(range.start),
+                text: (range.queuedInput?.text ?? "") + "\x7f",
+              };
+            }
+          }
+          range.observedValue = value;
         }
         return;
       }
@@ -166,6 +187,7 @@ export class TerminalSoftInput {
             : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         }
         range.postEndInputSeen = true;
+        range.observedValue = value;
       }
       // Preserve beforeinput's native mutation; CompositionHelper owns sending.
       if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
@@ -229,6 +251,8 @@ export class TerminalSoftInput {
     // Stale xterm state can require forwarding an InputEvent-only composition
     // ourselves. It remains composition text and must bypass sticky modifiers.
     if (this.forwardingComposition === text) return text;
+    if (this.forwardingQueued?.text === text)
+      return this.applyQueuedInput(this.forwardingQueued.range, applyModifiers);
     // A rescued A→B interstitial is ordinary input even when it happens to
     // equal B's current composition prefix.
     if (this.forwardingTrailing === text) return applyModifiers(text, true);
@@ -236,6 +260,15 @@ export class TerminalSoftInput {
     const ranges = this.active ? [...this.pending, this.active] : [...this.pending];
     let rest = text, prefix = "", matchedComposition = false;
     for (const range of ranges) {
+      const queued = range.queuedInput;
+      if (queued?.afterText && rest.startsWith(queued.afterText)) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(queued.afterText.length);
+        matchedComposition = true;
+        this.remove(range);
+        if (!rest) break;
+        continue;
+      }
       const value = this.textarea?.value;
       const committed = range.frozenText ?? (range.start !== undefined && value !== undefined
         ? value.substring(range.start) : range.text);
@@ -281,10 +314,33 @@ export class TerminalSoftInput {
     if (index !== -1) this.pending.splice(index, 1);
     if (this.active === range) this.active = undefined;
   }
+  private release(range: CompositionRange): void {
+    const queued = range.queuedInput;
+    if (!queued) {
+      this.remove(range);
+      return;
+    }
+    const text = queued.beforeText + queued.text;
+    this.remove(range);
+    this.forwardingQueued = { range, text };
+    try { this.send(text); } finally { this.forwardingQueued = undefined; }
+  }
+  private applyQueuedInput(range: CompositionRange,
+    applyModifiers: (text: string, userInput: boolean) => string): string {
+    const queued = range.queuedInput;
+    if (!queued) return "";
+    const boundary = Math.min(queued.beforeText.length,
+      range.commitLength ?? (queued.beforeText.length - (range.trailingLength ?? 0)));
+    const commit = queued.beforeText.slice(0, boundary);
+    const trailing = queued.beforeText.slice(boundary);
+    return commit + (trailing ? applyModifiers(trailing, true) : "") + applyModifiers(queued.text, true);
+  }
   private observeCompositionValue(range: CompositionRange): void {
     const value = this.textarea?.value;
-    if (value !== undefined && range.initialValue !== undefined && value !== range.initialValue)
-      range.textareaChanged = true;
+    if (value !== undefined) {
+      range.observedValue = value;
+      if (range.initialValue !== undefined && value !== range.initialValue) range.textareaChanged = true;
+    }
   }
   private queueTrailingFlush(range: CompositionRange): void {
     const trailingLength = range.trailingLength ?? 0;

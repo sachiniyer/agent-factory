@@ -8102,6 +8102,7 @@ var TerminalSoftInput = class {
   trailingFlushes = /* @__PURE__ */ new Set();
   forwardingTrailing;
   forwardingComposition;
+  forwardingQueued;
   keyDownSeen = false;
   staleKeydown = false;
   staleBeforeInputSent = false;
@@ -8132,7 +8133,7 @@ var TerminalSoftInput = class {
       }
       this.queueTrailingFlush(range);
     }
-    this.active = { start: value?.length, initialValue: value, text: "" };
+    this.active = { start: value?.length, initialValue: value, observedValue: value, text: "" };
   };
   onCompositionUpdate = (event) => {
     const data = event.data;
@@ -8157,7 +8158,7 @@ var TerminalSoftInput = class {
     else if (!range.text && (range.textareaChanged && value === range.initialValue || !range.sawUpdate))
       range.commitLength = 0;
     this.pending.push(range);
-    range.release = setTimeout(() => this.remove(range), 0);
+    range.release = setTimeout(() => this.release(range), 0);
   };
   onInput = (event) => {
     const input = event;
@@ -8169,13 +8170,24 @@ var TerminalSoftInput = class {
       const postCompositionText = input.inputType === "insertText" || input.inputType === "insertCompositionText";
       if (range && input.inputType === "deleteContentBackward" && input.isComposing === false) {
         if (input.type === "beforeinput") {
-          range.beforeDeleteValue = this.textarea?.value;
+          range.beforeDeleteValue = this.textarea?.value ?? range.observedValue;
         } else if (input.type === "input") {
           const value = this.textarea?.value;
-          const priorLength = range.beforeDeleteValue?.length ?? (range.start !== void 0 && range.commitLength !== void 0 ? range.start + range.commitLength + (range.trailingLength ?? 0) : void 0);
+          const beforeValue = range.beforeDeleteValue ?? range.observedValue;
+          const priorLength = beforeValue?.length ?? (range.start !== void 0 && range.commitLength !== void 0 ? range.start + range.commitLength + (range.trailingLength ?? 0) : void 0);
           range.beforeDeleteValue = void 0;
-          if (value !== void 0 && priorLength !== void 0 && value.length < priorLength)
-            this.send("\x7F");
+          if (value !== void 0 && priorLength !== void 0 && value.length < priorLength && range.start !== void 0) {
+            const beforeText = range.queuedInput?.beforeText ?? beforeValue?.substring(range.start);
+            if (beforeText !== void 0) {
+              range.frozenText = beforeText;
+              range.queuedInput = {
+                beforeText,
+                afterText: value.substring(range.start),
+                text: (range.queuedInput?.text ?? "") + "\x7F"
+              };
+            }
+          }
+          range.observedValue = value;
         }
         return;
       }
@@ -8194,6 +8206,7 @@ var TerminalSoftInput = class {
           range.trailingLength = mutationLength !== void 0 ? Math.max(range.trailingLength ?? 0, mutationLength - range.commitLength) : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         }
         range.postEndInputSeen = true;
+        range.observedValue = value;
       }
       if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
       return;
@@ -8228,10 +8241,21 @@ var TerminalSoftInput = class {
   };
   transform(text, applyModifiers) {
     if (this.forwardingComposition === text) return text;
+    if (this.forwardingQueued?.text === text)
+      return this.applyQueuedInput(this.forwardingQueued.range, applyModifiers);
     if (this.forwardingTrailing === text) return applyModifiers(text, true);
     const ranges = this.active ? [...this.pending, this.active] : [...this.pending];
     let rest = text, prefix = "", matchedComposition = false;
     for (const range of ranges) {
+      const queued = range.queuedInput;
+      if (queued?.afterText && rest.startsWith(queued.afterText)) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(queued.afterText.length);
+        matchedComposition = true;
+        this.remove(range);
+        if (!rest) break;
+        continue;
+      }
       const value = this.textarea?.value;
       const committed = range.frozenText ?? (range.start !== void 0 && value !== void 0 ? value.substring(range.start) : range.text);
       const boundary = Math.min(
@@ -8275,10 +8299,38 @@ var TerminalSoftInput = class {
     if (index !== -1) this.pending.splice(index, 1);
     if (this.active === range) this.active = void 0;
   }
+  release(range) {
+    const queued = range.queuedInput;
+    if (!queued) {
+      this.remove(range);
+      return;
+    }
+    const text = queued.beforeText + queued.text;
+    this.remove(range);
+    this.forwardingQueued = { range, text };
+    try {
+      this.send(text);
+    } finally {
+      this.forwardingQueued = void 0;
+    }
+  }
+  applyQueuedInput(range, applyModifiers) {
+    const queued = range.queuedInput;
+    if (!queued) return "";
+    const boundary = Math.min(
+      queued.beforeText.length,
+      range.commitLength ?? queued.beforeText.length - (range.trailingLength ?? 0)
+    );
+    const commit = queued.beforeText.slice(0, boundary);
+    const trailing = queued.beforeText.slice(boundary);
+    return commit + (trailing ? applyModifiers(trailing, true) : "") + applyModifiers(queued.text, true);
+  }
   observeCompositionValue(range) {
     const value = this.textarea?.value;
-    if (value !== void 0 && range.initialValue !== void 0 && value !== range.initialValue)
-      range.textareaChanged = true;
+    if (value !== void 0) {
+      range.observedValue = value;
+      if (range.initialValue !== void 0 && value !== range.initialValue) range.textareaChanged = true;
+    }
   }
   queueTrailingFlush(range) {
     const trailingLength = range.trailingLength ?? 0;
@@ -8347,12 +8399,7 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   }
   if (SPECIAL_BYTES[key]) return (alt ? "\x1B" : "") + SPECIAL_BYTES[key];
   if (key === "\x7F") return (alt ? "\x1B" : "") + (ctrl ? "\b" : key);
-  const rawCode = key.charCodeAt(0);
-  let text = key;
-  if (ctrl && key.length === 1 && rawCode >= 64 && rawCode <= 127) {
-    const upperCode = key.toUpperCase().charCodeAt(0);
-    if (upperCode >= 64 && upperCode <= 95) text = String.fromCharCode(upperCode & 31);
-  }
+  const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127 ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1B" : "") + text;
 }
 var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
@@ -8451,8 +8498,14 @@ var StickyModifiers = class {
     this.tapped = { Ctrl: -Infinity, Alt: -Infinity };
   }
   key(key, applicationCursor = false) {
-    const result = keyBytes(key, this.values.Ctrl !== "off", this.values.Alt !== "off", applicationCursor);
-    this.consumeOnce();
+    const ctrl = this.values.Ctrl !== "off";
+    const alt = this.values.Alt !== "off";
+    const result = keyBytes(key, ctrl, alt, applicationCursor);
+    this.consumeApplied(
+      result,
+      keyBytes(key, false, alt, applicationCursor),
+      keyBytes(key, ctrl, false, applicationCursor)
+    );
     return result;
   }
   input(text, source = "user", physical) {
@@ -8461,28 +8514,31 @@ var StickyModifiers = class {
     const stickyAlt = this.values.Alt !== "off";
     if (physical && (stickyCtrl || stickyAlt)) {
       const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
-      this.consumeOnce();
+      this.consumeApplied(
+        result,
+        mergePhysicalKeyBytes(text, physical, false, stickyAlt),
+        mergePhysicalKeyBytes(text, physical, stickyCtrl, false)
+      );
       return result;
     }
     const decoded = decodeKeyBytes(text);
     if (decoded) {
-      const result = keyBytes(
+      const encode2 = (ctrl, alt) => keyBytes(
         decoded.key,
-        decoded.ctrl || this.values.Ctrl !== "off",
-        decoded.alt || this.values.Alt !== "off",
+        decoded.ctrl || ctrl,
+        decoded.alt || alt,
         decoded.applicationCursor
       );
-      this.consumeOnce();
+      const result = encode2(stickyCtrl, stickyAlt);
+      this.consumeApplied(result, encode2(false, stickyAlt), encode2(stickyCtrl, false));
       return result;
     }
-    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) {
-      if (text) this.consumeOnce();
-      return text;
-    }
+    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
     return Array.from(text, (char) => this.key(char)).join("");
   }
-  consumeOnce() {
-    for (const modifier of ["Ctrl", "Alt"]) if (this.values[modifier] === "once") this.values[modifier] = "off";
+  consumeApplied(result, withoutCtrl, withoutAlt) {
+    if (this.values.Ctrl === "once" && result !== withoutCtrl) this.values.Ctrl = "off";
+    if (this.values.Alt === "once" && result !== withoutAlt) this.values.Alt = "off";
   }
 };
 function keybarPointerDown(event, act) {
