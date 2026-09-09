@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -76,10 +77,16 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	m.handoffChoices = choices
+	m.handoffAccounts = nil
+	m.handoffWarnings = nil
+	if account, _ := selected.AccountSelection(); account != "" {
+		m.handoffChoices = nil
+		choices = []string{"Loading accounts…"}
+	}
 	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
 	m.state = stateSelectHandoffAgent
-	return m, nil
+	return m, m.loadHandoffAccounts(current, selected.GetRepoPath())
 }
 
 // handleStateSelectHandoffAgent handles key events while the handoff agent
@@ -88,6 +95,12 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 // live branch and the picker alone is a single keystroke away from doing that
 // by accident.
 func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyEnter {
+		idx := m.selectionOverlay.GetSelectedIndex()
+		if idx < 0 || idx >= len(m.handoffChoices) || m.handoffChoices[idx] == "" {
+			return m, nil
+		}
+	}
 	shouldClose := m.selectionOverlay.HandleKeyPress(msg)
 	if !shouldClose {
 		return m, nil
@@ -96,10 +109,14 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	submitted := m.selectionOverlay.IsSubmitted()
 	idx := m.selectionOverlay.GetSelectedIndex()
 	choices := m.handoffChoices
+	accounts := m.handoffAccounts
+	warnings := m.handoffWarnings
 	pickerTarget := m.handoffTarget
 
 	m.selectionOverlay = nil
 	m.handoffChoices = nil
+	m.handoffAccounts = nil
+	m.handoffWarnings = nil
 	m.handoffTarget = handoffPickerTarget{}
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
@@ -108,6 +125,10 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	target := choices[idx]
+	account := ""
+	if idx < len(accounts) {
+		account = accounts[idx]
+	}
 
 	selected := m.resolveSessionActionTarget(pickerTarget)
 	if selected == nil {
@@ -117,9 +138,15 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	from := selected.CurrentAgentName()
 
 	message := handoffConfirmMessage(title, from, target)
+	if account != "" {
+		message = fmt.Sprintf("Hand %q to %s account %q?", title, target, account)
+	}
 	detail := "The new agent starts fresh with a summary of the work so far. " +
 		"Same worktree and branch — nothing is discarded."
 
+	if idx < len(warnings) {
+		detail = warnings[idx] + detail
+	}
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		// Confirmation is a second retained-intent boundary after the picker.
 		// Re-resolve the captured identity so an id-less legacy row replaced while
@@ -127,7 +154,8 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		if m.resolveSessionActionTarget(pickerTarget) == nil {
 			return nil
 		}
-		return startHandoffMsg{request: pickerTarget.handoffRequest(target), target: pickerTarget}
+		req := pickerTarget.handoffRequest(target, account)
+		return startHandoffMsg{request: req, target: pickerTarget}
 	})
 }
 
@@ -141,21 +169,28 @@ type startHandoffMsg struct {
 }
 
 type handoffDoneMsg struct {
-	title  string
-	from   string
-	target string
-	err    error
+	fromAccount string
+	toAccount   string
+	title       string
+	from        string
+	target      string
+	err         error
 }
 
 // handoffCmd runs the daemon handoff off the event loop.
 func (m *home) handoffCmd(request daemon.HandoffSessionRequest) tea.Cmd {
 	handoff := handoffSessionThroughDaemon
 	return func() tea.Msg {
-		from, err := handoff(request)
+		response, err := handoff(request)
 		if err != nil {
 			log.ErrorLog.Printf("could not hand session %q off to %s: %v", request.Title, request.To, err)
 		}
-		return handoffDoneMsg{title: request.Title, from: from, target: request.To, err: err}
+		target := response.To
+		if target == "" {
+			target = request.To
+		}
+		return handoffDoneMsg{title: request.Title, from: response.From, target: target,
+			fromAccount: response.FromAccount, toAccount: response.ToAccount, err: err}
 	}
 }
 
@@ -164,11 +199,25 @@ func (m *home) handoffCmd(request daemon.HandoffSessionRequest) tea.Cmd {
 // so there is no local state to reconcile beyond surfacing the outcome.
 func (m *home) handleHandoffDone(msg handoffDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
+		if apiclient.IsMutationCommitted(msg.err) {
+			from := msg.from
+			if from == "" {
+				from = "its previous agent"
+			}
+			return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s, with warning: %v", msg.title, handoffIdentityLabel(from, msg.fromAccount), handoffIdentityLabel(msg.target, msg.toAccount), msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("handoff of '%s' to %s failed: %w", msg.title, msg.target, msg.err))
 	}
 	from := msg.from
 	if from == "" {
 		from = "its previous agent"
 	}
-	return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s", msg.title, from, msg.target))
+	return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s", msg.title, handoffIdentityLabel(from, msg.fromAccount), handoffIdentityLabel(msg.target, msg.toAccount)))
+}
+
+func handoffIdentityLabel(agent, account string) string {
+	if account == "" {
+		return agent
+	}
+	return fmt.Sprintf("%s (%s)", agent, account)
 }

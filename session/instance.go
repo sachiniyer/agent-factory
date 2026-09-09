@@ -110,7 +110,11 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
-	// limitAccount attributes the current limit after Account changes; empty means ambient.
+	// limitAgent and limitAccount attribute the current limit after Program or
+	// Account changes. Account labels are scoped to an agent, so neither field
+	// alone identifies the provider identity that produced the wall.
+	limitAgent string
+	// Empty means the agent's ambient identity.
 	limitAccount string
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData
@@ -167,11 +171,10 @@ type Instance struct {
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
 	// pendingHandoffMission is a rendered takeover brief whose delivery has not
-	// been durably confirmed. It is separate from Prompt: Prompt is the user's
-	// durable goal, while this value includes one handoff's generated context and
-	// must be cleared once that exact delivery lands. Persisting it closes the
-	// daemon-crash window between a runtime swap and readiness.
+	// been durably confirmed. Its status is mission-scoped: session-wide prompt
+	// evidence can be overwritten by unrelated work and cannot authorize replay.
 	pendingHandoffMission string
+	handoffDeliveryStatus PromptDeliveryStatus
 	// inPlace is true when the instance was created with `--here`: on first
 	// start it attaches to the repo's existing working tree at its current
 	// branch (external worktree) instead of creating a fresh worktree+branch.

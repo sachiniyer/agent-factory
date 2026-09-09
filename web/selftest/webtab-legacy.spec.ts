@@ -33,6 +33,8 @@ for (const host of ["127.1", "0177.0.0.1", "2130706433"]) {
     await expect(pane.locator("iframe")).toHaveCount(0);
     await expect(pane.locator("a")).toHaveCount(0);
     expect(unsafeRequests).toEqual([]);
+    // First-open resync can still be fetching after these fast DOM assertions.
+    // Drain intercepted requests before Playwright closes their page/context.
     await stopPolledRoutes(page.context());
   });
 }
