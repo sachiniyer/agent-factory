@@ -110,7 +110,7 @@ type Manager struct {
 	worktreeIntegrityMu sync.Mutex
 	worktreeInspector   func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection
 	// worktreeBeforeReconcile is a test seam for the narrow interval after the
-	// correlated snapshot check and before per-instance warning reconciliation.
+	// first correlated snapshot check and before cohort warning reconciliation.
 	worktreeBeforeReconcile func()
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For

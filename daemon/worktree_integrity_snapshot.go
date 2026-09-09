@@ -26,6 +26,13 @@ func (m *Manager) worktreeInspectionSnapshotCurrent(entries []worktreeInspection
 	// per-instance identities were being serialized invalidates the scan too.
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.worktreeInspectionMembershipCurrentLocked(entries)
+}
+
+// worktreeInspectionMembershipCurrentLocked checks the non-instance half of a
+// scan cohort. The caller holds m.mu, which keeps this roster fixed until it has
+// finished applying the correlated result.
+func (m *Manager) worktreeInspectionMembershipCurrentLocked(entries []worktreeInspectionEntry) bool {
 	if len(m.instances) != len(entries) {
 		return false
 	}

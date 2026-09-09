@@ -421,8 +421,6 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 	}
 
 	m.mu.Lock()
-	instances := make(map[string]*session.Instance, len(m.instances))
-	repos := make(map[string]string, len(m.instances))
 	entries := make([]worktreeInspectionEntry, 0, len(m.instances))
 	for key, instance := range m.instances {
 		if instance == nil {
@@ -433,15 +431,8 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 	}
 	m.mu.Unlock()
 	rows := make([]session.InstanceData, 0, len(entries))
-	applicable := make(map[string]bool, len(entries))
-	snapshots := make(map[string]session.InstanceData, len(entries))
 	for _, entry := range entries {
-		row := entry.instance.ToInstanceData()
-		rows = append(rows, row)
-		instances[row.ID] = entry.instance
-		repos[row.ID] = entry.repoID
-		applicable[row.ID] = session.NeedsWorktreeIntegrityInspection(row)
-		snapshots[row.ID] = row
+		rows = append(rows, entry.instance.ToInstanceData())
 	}
 
 	inspector := m.worktreeInspector
@@ -455,34 +446,42 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 	if m.worktreeBeforeReconcile != nil {
 		m.worktreeBeforeReconcile()
 	}
-	seen := make(map[string]bool, len(inspections))
+	inspectionsByID := make(map[string]session.SessionWorktreeInspection, len(inspections))
 	for _, inspection := range inspections {
-		instance := instances[inspection.InstanceID]
-		if instance == nil {
-			continue
-		}
-		seen[inspection.InstanceID] = true
-		changed, applied := instance.ReconcileWorktreeInspectionIfCurrent(
-			snapshots[inspection.InstanceID], inspection.Warning, inspection.IncompleteError())
-		if applied && changed {
-			m.publishWorktreeIntegrityChange(repos[inspection.InstanceID], instance)
-		}
+		inspectionsByID[inspection.InstanceID] = inspection
 	}
-	for id, instance := range instances {
-		if seen[id] {
-			continue
+	updates := make([]session.WorktreeInspectionReconciliation, len(entries))
+	for index, entry := range entries {
+		row := rows[index]
+		update := session.WorktreeInspectionReconciliation{Instance: entry.instance, Snapshot: row}
+		if inspection, ok := inspectionsByID[row.ID]; ok {
+			update.Warning = inspection.Warning
+			update.Incomplete = inspection.IncompleteError()
+		} else if session.NeedsWorktreeIntegrityInspection(row) {
+			update.Incomplete = fmt.Errorf("worktree safety inspector returned no result for live local lane %q", row.Title)
 		}
-		if applicable[id] {
-			incomplete := fmt.Errorf("worktree safety inspector returned no result for live local lane %q", instance.Title)
-			changed, applied := instance.ReconcileWorktreeInspectionIfCurrent(snapshots[id], "", incomplete)
-			if applied && changed {
-				m.publishWorktreeIntegrityChange(repos[id], instance)
-			}
-		} else {
-			changed, applied := instance.ReconcileWorktreeInspectionIfCurrent(snapshots[id], "", nil)
-			if applied && changed {
-				m.publishWorktreeIntegrityChange(repos[id], instance)
-			}
+		updates[index] = update
+	}
+
+	// A clean result for one lane depends on the identity and applicability of
+	// every peer in the correlation. Hold the manager roster, then lock every
+	// captured row in the daemon's established manager-to-instance order. The
+	// cohort, not an individual row, is the compare-and-swap unit: any peer
+	// restore or membership change rejects every update before a warning clears.
+	changed, applied := session.ReconcileWorktreeInspectionCohortIfCurrent(updates, func() (bool, func()) {
+		m.mu.Lock()
+		if !m.worktreeInspectionMembershipCurrentLocked(entries) {
+			m.mu.Unlock()
+			return false, nil
+		}
+		return true, m.mu.Unlock
+	})
+	if !applied {
+		return
+	}
+	for index, rowChanged := range changed {
+		if rowChanged {
+			m.publishWorktreeIntegrityChange(entries[index].repoID, entries[index].instance)
 		}
 	}
 }

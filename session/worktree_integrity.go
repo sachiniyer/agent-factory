@@ -228,17 +228,77 @@ func (i *Instance) ReconcileWorktreeInspection(warning string, incomplete error)
 	return i.reconcileWorktreeInspectionLocked(warning, incomplete)
 }
 
-// ReconcileWorktreeInspectionIfCurrent atomically verifies that an observation
-// still describes this lane and applies it under the same instance lock. A
-// restore or backend/worktree replacement in the gap after a Git scan therefore
-// leaves the existing warning untouched.
-func (i *Instance) ReconcileWorktreeInspectionIfCurrent(snapshot InstanceData, warning string, incomplete error) (changed, applied bool) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if !SameWorktreeInspectionIdentity(snapshot, i.toInstanceDataLocked()) {
-		return false, false
+// WorktreeInspectionReconciliation is one row in a correlated worktree scan.
+type WorktreeInspectionReconciliation struct {
+	Instance   *Instance
+	Snapshot   InstanceData
+	Warning    string
+	Incomplete error
+}
+
+// ReconcileWorktreeInspectionCohortIfCurrent atomically validates and applies a
+// correlated scan. A clean result for one lane depends on every peer that was
+// correlated against, so the cohort -- not the row being written -- is the CAS
+// unit: every instance identity and every external dependency must remain fixed
+// from validation through application, or no warning changes at all.
+//
+// holdDependencies runs before any instance is locked. When non-nil, it must
+// atomically validate the scan's non-instance dependencies and return a release
+// function that keeps them stable through application. It must not inspect or
+// mutate an Instance. Taking the dependency lock first lets callers preserve
+// their established outer-to-instance lock order.
+func ReconcileWorktreeInspectionCohortIfCurrent(
+	updates []WorktreeInspectionReconciliation,
+	holdDependencies func() (current bool, release func()),
+) (changed []bool, applied bool) {
+	if holdDependencies != nil {
+		current, release := holdDependencies()
+		if release != nil {
+			defer release()
+		}
+		if !current || release == nil {
+			return nil, false
+		}
 	}
-	return i.reconcileWorktreeInspectionLocked(warning, incomplete), true
+
+	type lockTarget struct {
+		instance *Instance
+		key      string
+	}
+	targets := make([]lockTarget, 0, len(updates))
+	seen := make(map[*Instance]bool, len(updates))
+	for _, update := range updates {
+		if update.Instance == nil || seen[update.Instance] {
+			return nil, false
+		}
+		seen[update.Instance] = true
+		targets = append(targets, lockTarget{
+			instance: update.Instance,
+			key:      fmt.Sprintf("%p", update.Instance),
+		})
+	}
+	sort.Slice(targets, func(left, right int) bool {
+		return targets[left].key < targets[right].key
+	})
+	for _, target := range targets {
+		target.instance.mu.Lock()
+	}
+	defer func() {
+		for index := len(targets) - 1; index >= 0; index-- {
+			targets[index].instance.mu.Unlock()
+		}
+	}()
+
+	for _, update := range updates {
+		if !SameWorktreeInspectionIdentity(update.Snapshot, update.Instance.toInstanceDataLocked()) {
+			return nil, false
+		}
+	}
+	changed = make([]bool, len(updates))
+	for index, update := range updates {
+		changed[index] = update.Instance.reconcileWorktreeInspectionLocked(update.Warning, update.Incomplete)
+	}
+	return changed, true
 }
 
 func (i *Instance) reconcileWorktreeInspectionLocked(warning string, incomplete error) bool {
