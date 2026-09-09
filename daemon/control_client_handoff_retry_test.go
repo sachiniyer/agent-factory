@@ -112,76 +112,114 @@ func refuseRealDaemonLaunchForHandoffRetryTest(t *testing.T) {
 	t.Cleanup(func() { launchDaemonProcessFn = previous })
 }
 
-// TestCallDaemonRetriesPostQuiescingConnectionLoss covers the ordering where
-// the client has already observed quiescing, then connects to the old daemon
-// once more just as it exits. The accepted connection is closed without an RPC
-// response, which net/rpc reports as io.ErrUnexpectedEOF. The candidate binds
-// immediately afterward. The client must keep retrying and reach it.
-func TestCallDaemonRetriesPostQuiescingConnectionLoss(t *testing.T) {
+type commitThenDropHandoffControl struct {
+	mu          sync.Mutex
+	currentConn net.Conn
+	mutations   int
+}
+
+func (c *commitThenDropHandoffControl) setCurrentConn(conn net.Conn) {
+	c.mu.Lock()
+	c.currentConn = conn
+	c.mu.Unlock()
+}
+
+func (c *commitThenDropHandoffControl) Ping(_ PingRequest, _ *PingResponse) error {
+	return nil
+}
+
+func (c *commitThenDropHandoffControl) Mutate(_ struct{}, _ *struct{}) error {
+	c.mu.Lock()
+	c.mutations++
+	mutation := c.mutations
+	conn := c.currentConn
+	c.mu.Unlock()
+
+	if mutation == 1 {
+		return errDaemonQuiescing()
+	}
+	if mutation == 2 {
+		// The mutation has committed, but its response is lost. From the
+		// client's side this is indistinguishable from the old quiescing daemon
+		// disappearing before its refusal arrived.
+		_ = conn.Close()
+	}
+	return nil
+}
+
+func bindCommitThenDropHandoffServer(control *commitThenDropHandoffControl) (net.Listener, error) {
+	socketPath, err := DaemonSocketPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	srv := rpc.NewServer()
+	if err := srv.RegisterName(controlServiceName, control); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			control.setCurrentConn(conn)
+			go srv.ServeConn(conn)
+		}
+	}()
+	return listener, nil
+}
+
+// TestCallDaemonDoesNotReplayAmbiguousResponseLossAfterQuiescing covers an
+// admitted candidate mutation that commits and then loses its response. The
+// preceding quiescing refusal proves a hand-off, but not which daemon accepted
+// this later call. Replaying it could execute a non-idempotent mutation twice,
+// so every established-connection failure remains final.
+func TestCallDaemonDoesNotReplayAmbiguousResponseLossAfterQuiescing(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	withAutostartTestEnv(t, runtime.GOOS)
 	refuseRealDaemonLaunchForHandoffRetryTest(t)
 
-	oldSrv := rpc.NewServer()
-	oldControl := &quiesceThenTransitionControl{}
-	if err := oldSrv.RegisterName(controlServiceName, oldControl); err != nil {
-		t.Fatalf("register old Control: %v", err)
-	}
-	oldListener, err := bindHandoffRetryTestServer(oldSrv)
+	control := &commitThenDropHandoffControl{}
+	listener, err := bindCommitThenDropHandoffServer(control)
 	if err != nil {
-		t.Fatalf("bind old Control: %v", err)
+		t.Fatalf("bind commit-then-drop Control: %v", err)
 	}
-	t.Cleanup(func() { closeHandoffRetryTestListener(oldListener) })
-
-	var (
-		candidateMu       sync.Mutex
-		candidateListener net.Listener
-	)
-	candidateSrv := acceptingHandoffRetryServer(t)
-	transitionDone := make(chan error, 1)
-	oldControl.transition = func() error {
-		closeHandoffRetryTestListener(oldListener)
-		socketPath, pathErr := DaemonSocketPath()
-		if pathErr != nil {
-			return pathErr
-		}
-		abruptListener, listenErr := net.Listen("unix", socketPath)
-		if listenErr != nil {
-			return listenErr
-		}
-		go func() {
-			conn, acceptErr := abruptListener.Accept()
-			if acceptErr == nil {
-				_ = conn.Close() // no response: net/rpc maps the EOF to UnexpectedEOF
-			}
-			closeHandoffRetryTestListener(abruptListener)
-			candidate, candidateErr := bindHandoffRetryTestServer(candidateSrv)
-			if candidateErr == nil {
-				candidateMu.Lock()
-				candidateListener = candidate
-				candidateMu.Unlock()
-			}
-			if acceptErr != nil {
-				transitionDone <- acceptErr
-				return
-			}
-			transitionDone <- candidateErr
-		}()
-		return nil
-	}
-	t.Cleanup(func() {
-		candidateMu.Lock()
-		listener := candidateListener
-		candidateMu.Unlock()
-		closeHandoffRetryTestListener(listener)
-	})
+	t.Cleanup(func() { closeHandoffRetryTestListener(listener) })
 
 	callErr := callDaemon("Mutate", struct{}{}, &struct{}{})
-	if transitionErr := <-transitionDone; transitionErr != nil {
-		t.Fatalf("complete abrupt-close transition: %v", transitionErr)
+	if callErr == nil || !isDaemonHandoffConnectionErr(callErr) {
+		t.Fatalf("callDaemon replayed an ambiguously committed mutation instead of returning its response-loss error: %v", callErr)
 	}
-	if callErr != nil {
-		t.Fatalf("callDaemon returned the post-quiescing connection loss instead of reaching the candidate: %v", callErr)
+	control.mu.Lock()
+	mutations := control.mutations
+	control.mu.Unlock()
+	if mutations != 2 {
+		t.Fatalf("ambiguous response loss was replayed: mutation called %d times, want 2", mutations)
+	}
+}
+
+type handoffRetryTimeoutError struct{}
+
+func (handoffRetryTimeoutError) Error() string   { return "synthetic dial timeout" }
+func (handoffRetryTimeoutError) Timeout() bool   { return true }
+func (handoffRetryTimeoutError) Temporary() bool { return true }
+
+// TestGenericTimeoutDoesNotEstablishHandoffProof pins the timeout-is-unknown
+// boundary shared with daemon health probes. A generic timeout can mean a live
+// listener with a saturated accept backlog; it cannot by itself authorize the
+// retry loop to run the reclaiming EnsureDaemon path.
+func TestGenericTimeoutDoesNotEstablishHandoffProof(t *testing.T) {
+	if isDaemonHandoffConnectionErr(handoffRetryTimeoutError{}) {
+		t.Fatal("generic timeout was classified as hand-off connection loss without quiescing or live-gate proof")
 	}
 }
 
@@ -279,6 +317,49 @@ func TestCallDaemonDetectsGateAfterInitialPostEnsureAbsence(t *testing.T) {
 	}
 	if callErr != nil {
 		t.Fatalf("callDaemon surfaced the first post-ensure absence instead of using the live gate and reaching the candidate: %v", callErr)
+	}
+}
+
+// TestCallDaemonRetriesInitialLiveGateRefusal covers a command that starts
+// after the old daemon has unlinked its socket and before the candidate binds.
+// The first EnsureDaemon sees the live upgrade gate; callDaemon must carry that
+// proof into the same bounded retry phase instead of returning it immediately.
+func TestCallDaemonRetriesInitialLiveGateRefusal(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	withAutostartTestEnv(t, runtime.GOOS)
+	refuseRealDaemonLaunchForHandoffRetryTest(t)
+
+	candidateSrv := acceptingHandoffRetryServer(t)
+	var (
+		candidateOnce     sync.Once
+		candidateListener net.Listener
+	)
+	candidateReady := make(chan error, 1)
+	inProgress := &upgradetxn.UpgradeInProgressError{
+		TransactionID: "txn-initial-gate",
+		ToVersion:     "1.0.286",
+		Phase:         upgradetxn.PhaseDaemonStopping,
+		Deadline:      time.Now().Add(time.Minute),
+	}
+	stubEntrypointGate(t, func(context.Context, string, bool) error {
+		candidateOnce.Do(func() {
+			go func() {
+				time.Sleep(150 * time.Millisecond)
+				var bindErr error
+				candidateListener, bindErr = bindHandoffRetryTestServer(candidateSrv)
+				candidateReady <- bindErr
+			}()
+		})
+		return inProgress
+	})
+	t.Cleanup(func() { closeHandoffRetryTestListener(candidateListener) })
+
+	callErr := callDaemon("Mutate", struct{}{}, &struct{}{})
+	if bindErr := <-candidateReady; bindErr != nil {
+		t.Fatalf("bind candidate Control: %v", bindErr)
+	}
+	if callErr != nil {
+		t.Fatalf("callDaemon returned the initial live upgrade-gate refusal instead of reaching the candidate: %v", callErr)
 	}
 }
 
