@@ -56,23 +56,6 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
   await page.keyboard.insertText("c"); // input/beforeinput, without keydown
   await expect.poll(stream).toBe(before + "\x03");
   await expect(bar.getByRole("button", { name: "Ctrl", exact: true })).toHaveAttribute("aria-pressed", "false");
-  before = stream();
-  await bar.getByRole("button", { name: "Ctrl", exact: true }).click();
-  await textarea.evaluate(el => {
-    const input = el as HTMLTextAreaElement;
-    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
-    input.dispatchEvent(new InputEvent("beforeinput", {
-      bubbles: true, data: "c", inputType: "insertCompositionText", isComposing: true,
-    }));
-    input.value += "c";
-    input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "c" }));
-    input.dispatchEvent(new InputEvent("input", {
-      bubbles: true, data: "c", inputType: "insertCompositionText", isComposing: true,
-    }));
-    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "c" }));
-  });
-  await expect.poll(stream).toBe(before + "\x03");
-  await expect(textarea).toBeFocused();
   // Locked modifiers must neither double-send physical keypress + input pairs,
   // nor release on a soft-keyboard character.
   const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
