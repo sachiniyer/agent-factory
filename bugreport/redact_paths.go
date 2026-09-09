@@ -81,7 +81,7 @@ func (r *redactor) noteAFHome(path string) {
 }
 
 func (r *redactor) noteWorktreeTitle(repoPath, title string) {
-	for _, spelling := range rootSpellings(repoPath) {
+	for _, spelling := range absolutePathSpellings(repoPath) {
 		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
 		if segment == "" {
 			continue
@@ -144,13 +144,27 @@ func (r *redactor) noteRootSpelling(path, token string) {
 // Linux symlinked fixture roots have the identical shape. Registering both at
 // admission keeps that filesystem alias from becoming an unrecognized text kind.
 func rootSpellings(path string) []string {
-	path = normalizeRoot(path)
-	if path == "" {
+	spellings := absolutePathSpellings(path)
+	out := spellings[:0]
+	for _, spelling := range spellings {
+		if normalized := normalizeRoot(spelling); normalized != "" {
+			out = append(out, normalized)
+		}
+	}
+	return out
+}
+
+// absolutePathSpellings also admits the filesystem root. Registering "/" as a
+// path root would consume every absolute path, so rootSpellings filters it; a
+// repo at "/" can still own the exact sibling-title shape "/-<segment>".
+func absolutePathSpellings(path string) []string {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
 		return nil
 	}
 	spellings := []string{path}
-	resolved := normalizeRoot(pathutil.ResolveForCompare(path))
-	if resolved != "" && resolved != path {
+	resolved := filepath.Clean(pathutil.ResolveForCompare(path))
+	if filepath.IsAbs(resolved) && resolved != path {
 		spellings = append(spellings, resolved)
 	}
 	return spellings

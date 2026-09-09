@@ -55,16 +55,26 @@ func (r *redactor) scrubConfigText(s string, kind redactionTextKind) string {
 		if redacted == scalar.value {
 			continue
 		}
-		replacement, err := json.Marshal(redacted)
+		replacement, err := encodeConfigString(redacted)
 		if err != nil {
 			return r.scrubRecognizedText(s, redactionTextUnknown)
 		}
 		spans = append(spans, redactionSpan{
 			start: scalar.start, end: scalar.end,
-			replacement: string(replacement), priority: spanQuotedValue,
+			replacement: replacement, priority: spanQuotedValue,
 		})
 	}
 	return applyRedactionSpans(s, spans)
+}
+
+func encodeConfigString(value string) (string, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(encoded.String(), "\n"), nil
 }
 
 func isConfigShellPath(path []string) bool {
