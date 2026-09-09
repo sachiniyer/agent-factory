@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -148,7 +149,7 @@ func TestProvenShellValueWithUnparseableSyntaxFailsClosed(t *testing.T) {
 }
 
 func TestRegisteredRootCoversCanonicalSymlinkSpelling(t *testing.T) {
-	physical := t.TempDir()
+	physical := testguard.CanonicalTempDir(t)
 	aliasParent := t.TempDir()
 	alias := filepath.Join(aliasParent, "fixture-link")
 	if err := os.Symlink(physical, alias); err != nil {
