@@ -59,12 +59,12 @@ test("terminal escape sequences and control bytes do not consume a character mod
   assert.equal(state.input("c"), "\x03");
 });
 
-test("pass-through soft controls and terminal replies leave one-shots armed", () => {
+test("accepted soft controls consume one-shots while terminal replies do not", () => {
   const state = new StickyModifiers();
   state.tap("Ctrl", 0);
   assert.equal(state.input("\r", "user"), "\r");
-  assert.equal(state.state("Ctrl"), "once");
-  assert.equal(state.input("a"), "\x01");
+  assert.equal(state.state("Ctrl"), "off");
+  assert.equal(state.input("a"), "a");
   assert.equal(state.state("Ctrl"), "off");
 
   state.tap("Ctrl", 1000);
@@ -296,9 +296,23 @@ test("backtab has no generic sticky CSI encoding", () => {
   for (const sticky of ["Ctrl", "Alt"] as const) {
     const state = new StickyModifiers();
     state.tap(sticky, 0);
-    assert.equal(state.input("\x1b[Z", "user"), "\x1b[Z");
-    assert.equal(state.state(sticky), "once");
-    assert.equal(state.input("a", "user"), sticky === "Ctrl" ? "\x01" : "\x1ba");
+    assert.equal(state.input("\x1b[Z", "user", {
+      key: "Tab", shiftKey: true, altKey: false, ctrlKey: false, metaKey: false,
+    }), "\x1b[Z");
+    assert.equal(state.state(sticky), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
+test("physical Insert keeps xterm's bare encoding while consuming sticky modifiers", () => {
+  for (const sticky of ["Ctrl", "Alt"] as const) {
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input("\x1b[2~", "user", {
+      key: "Insert", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+    }), "\x1b[2~");
+    assert.equal(state.state(sticky), "off");
+    assert.equal(state.input("a", "user"), "a");
   }
 });
 
@@ -363,7 +377,7 @@ test("an armed one-shot survives a keybar arrow press and hits the NEXT letter",
   assert.equal(m.input("l"), "l");
 });
 
-test("bar keys consume one-shots only when their encoding applies them", () => {
+test("bar keys consume every one-shot consulted by their encoding", () => {
   for (const [modifier, key, bytes] of [
     ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],
     ["Alt", "Tab", "\x1b\t"], ["Alt", "Esc", "\x1b\x1b"],
@@ -380,15 +394,15 @@ test("bar keys consume one-shots only when their encoding applies them", () => {
     const state = new StickyModifiers();
     state.tap("Ctrl", 0);
     assert.equal(state.key(key), bytes);
-    assert.equal(state.state("Ctrl"), "once");
+    assert.equal(state.state("Ctrl"), "off");
   }
 
   const split = new StickyModifiers();
   split.tap("Ctrl", 0); split.tap("Alt", 0);
   assert.equal(split.key("Tab"), "\x1b\t");
   assert.equal(split.state("Alt"), "off");
-  assert.equal(split.state("Ctrl"), "once");
-  assert.equal(split.input("a"), "\x01");
+  assert.equal(split.state("Ctrl"), "off");
+  assert.equal(split.input("a"), "a");
 });
 
 test("locked Ctrl survives an arrow and combined modifiers use CSI in both cursor modes", () => {

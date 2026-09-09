@@ -95,7 +95,8 @@ export function decodeKeyBytes(text: string): DecodedKeyBytes | undefined {
   }
   if (sequence) {
     // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held. It has no
-    // modifier parameter form, so let the caller consume and pass it through.
+    // modifier parameter form. Without a physical event, preserve it rather
+    // than guessing whether a sticky modifier participated.
     if (sequence.kind === "CSI" && sequence.final === "Z") return undefined;
     const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
     const encoded = Number(parameters[1] || "1");
@@ -142,6 +143,10 @@ function mergePhysicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyC
   const alt = physical.altKey || stickyAlt;
   const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) |
     (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
+  // Xterm 5.5 reserves physical Ctrl/Shift+Insert for clipboard handling and
+  // otherwise emits Insert only as bare CSI 2~, ignoring Alt. Preserve that
+  // contract; the caller still consumes a sticky modifier consulted here.
+  if (physical.key === "Insert") return text;
   const sequence = userSequence(text);
   if (sequence) {
     // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held.
@@ -184,8 +189,7 @@ export class StickyModifiers {
     const ctrl = this.values.Ctrl !== "off";
     const alt = this.values.Alt !== "off";
     const result = keyBytes(key, ctrl, alt, applicationCursor);
-    this.consumeApplied(result, keyBytes(key, false, alt, applicationCursor),
-      keyBytes(key, ctrl, false, applicationCursor));
+    this.consumeApplied(ctrl, alt);
     return result;
   }
   input(text: string, source: "terminal" | "user" = "user", physical?: PhysicalKeyInput): string {
@@ -194,8 +198,9 @@ export class StickyModifiers {
     const stickyAlt = this.values.Alt !== "off";
     if (physical && (stickyCtrl || stickyAlt)) {
       const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
-      this.consumeApplied(result, mergePhysicalKeyBytes(text, physical, false, stickyAlt),
-        mergePhysicalKeyBytes(text, physical, stickyCtrl, false));
+      // A physically held equivalent already shaped xterm's bytes; only a
+      // sticky modifier absent from the DOM chord participates in this emission.
+      this.consumeApplied(stickyCtrl && !physical.ctrlKey, stickyAlt && !physical.altKey);
       return result;
     }
     // Soft and deferred textarea input have no physical modifier identity. Their
@@ -205,7 +210,7 @@ export class StickyModifiers {
       const encode = (ctrl: boolean, alt: boolean) => keyBytes(decoded.key, decoded.ctrl || ctrl,
         decoded.alt || alt, decoded.applicationCursor);
       const result = encode(stickyCtrl, stickyAlt);
-      this.consumeApplied(result, encode(false, stickyAlt), encode(stickyCtrl, false));
+      this.consumeApplied(stickyCtrl, stickyAlt);
       return result;
     }
     // Unrecognized user controls pass through. No modifier was applied, so the
@@ -213,12 +218,12 @@ export class StickyModifiers {
     if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
     return Array.from(text, char => this.key(char)).join("");
   }
-  private consumeApplied(result: string, withoutCtrl: string, withoutAlt: string): void {
-    // Invariant: a one-shot is consumed only when that modifier actually
-    // changes the emission. A pass-through or redundant physical modifier can
-    // never silently spend the keybar's advertised "Next key" state.
-    if (this.values.Ctrl === "once" && result !== withoutCtrl) this.values.Ctrl = "off";
-    if (this.values.Alt === "once" && result !== withoutAlt) this.values.Alt = "off";
+  private consumeApplied(ctrl: boolean, alt: boolean): void {
+    // A one-shot is consumed when its modifier participates in encoding an
+    // accepted user emission, even if that terminal encoding is byte-identical.
+    // Pass-through input and a modifier already held physically do not spend it.
+    if (ctrl && this.values.Ctrl === "once") this.values.Ctrl = "off";
+    if (alt && this.values.Alt === "once") this.values.Alt = "off";
   }
 }
 

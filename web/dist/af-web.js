@@ -8470,6 +8470,7 @@ function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
   const ctrl = physical.ctrlKey || stickyCtrl;
   const alt = physical.altKey || stickyAlt;
   const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
+  if (physical.key === "Insert") return text;
   const sequence = userSequence(text);
   if (sequence) {
     if (sequence.kind === "CSI" && sequence.final === "Z") return text;
@@ -8501,11 +8502,7 @@ var StickyModifiers = class {
     const ctrl = this.values.Ctrl !== "off";
     const alt = this.values.Alt !== "off";
     const result = keyBytes(key, ctrl, alt, applicationCursor);
-    this.consumeApplied(
-      result,
-      keyBytes(key, false, alt, applicationCursor),
-      keyBytes(key, ctrl, false, applicationCursor)
-    );
+    this.consumeApplied(ctrl, alt);
     return result;
   }
   input(text, source = "user", physical) {
@@ -8514,11 +8511,7 @@ var StickyModifiers = class {
     const stickyAlt = this.values.Alt !== "off";
     if (physical && (stickyCtrl || stickyAlt)) {
       const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
-      this.consumeApplied(
-        result,
-        mergePhysicalKeyBytes(text, physical, false, stickyAlt),
-        mergePhysicalKeyBytes(text, physical, stickyCtrl, false)
-      );
+      this.consumeApplied(stickyCtrl && !physical.ctrlKey, stickyAlt && !physical.altKey);
       return result;
     }
     const decoded = decodeKeyBytes(text);
@@ -8530,15 +8523,15 @@ var StickyModifiers = class {
         decoded.applicationCursor
       );
       const result = encode2(stickyCtrl, stickyAlt);
-      this.consumeApplied(result, encode2(false, stickyAlt), encode2(stickyCtrl, false));
+      this.consumeApplied(stickyCtrl, stickyAlt);
       return result;
     }
     if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
     return Array.from(text, (char) => this.key(char)).join("");
   }
-  consumeApplied(result, withoutCtrl, withoutAlt) {
-    if (this.values.Ctrl === "once" && result !== withoutCtrl) this.values.Ctrl = "off";
-    if (this.values.Alt === "once" && result !== withoutAlt) this.values.Alt = "off";
+  consumeApplied(ctrl, alt) {
+    if (ctrl && this.values.Ctrl === "once") this.values.Ctrl = "off";
+    if (alt && this.values.Alt === "once") this.values.Alt = "off";
   }
 };
 function keybarPointerDown(event, act) {
