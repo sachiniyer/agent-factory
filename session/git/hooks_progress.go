@@ -245,9 +245,13 @@ func (p *hookProgress) finish() {
 }
 
 func (p *hookProgress) releaseLease() {
+	p.releaseLeaseWith(closeHookProgressFile)
+}
+
+func (p *hookProgress) releaseLeaseWith(closeFile func(*os.File)) {
 	if p.leaseMu == nil {
 		if p.lease != nil {
-			unlockAndCloseHookProgressFile(p.lease)
+			unlockAndCloseHookProgressFileWith(p.lease, closeFile)
 			p.lease = nil
 		}
 		p.leaseHolds = 0
@@ -263,7 +267,7 @@ func (p *hookProgress) releaseLease() {
 	p.lease = nil
 	p.leaseHolds = 0
 	p.leaseMu.Unlock()
-	unlockAndCloseHookProgressFile(lease)
+	unlockAndCloseHookProgressFileWith(lease, closeFile)
 }
 
 func (p *hookProgress) retainLease() bool {

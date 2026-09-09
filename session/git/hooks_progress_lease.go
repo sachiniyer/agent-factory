@@ -45,6 +45,20 @@ var hookProgressLeaseStatFlights = struct {
 // eventually succeeds, it closes the descriptor immediately. The per-path
 // latch prevents repeated pruning passes from stacking blocked OS workers.
 func boundedOpenHookProgressLease(path string, flags int, mode os.FileMode) (*os.File, error) {
+	openFile := hookProgressOpenLeaseFile
+	closeLeaseFile := hookProgressCloseLeaseFile
+	closeFile := func(file *os.File) { closeHookProgressFileWith(file, closeLeaseFile) }
+	return boundedOpenHookProgressLeaseWith(path, flags, mode, openFile, closeFile, relocationIdentityTimeout)
+}
+
+func boundedOpenHookProgressLeaseWith(
+	path string,
+	flags int,
+	mode os.FileMode,
+	openFile func(string, int, os.FileMode) (*os.File, error),
+	closeFile func(*os.File),
+	timeout time.Duration,
+) (*os.File, error) {
 	hookProgressLeaseOpenFlights.Lock()
 	if hookProgressLeaseOpenFlights.byPath[path] != nil {
 		hookProgressLeaseOpenFlights.Unlock()
@@ -52,7 +66,6 @@ func boundedOpenHookProgressLease(path string, flags int, mode os.FileMode) (*os
 	}
 	flight := &hookProgressLeaseOpenFlight{done: make(chan struct{})}
 	hookProgressLeaseOpenFlights.byPath[path] = flight
-	openFile := hookProgressOpenLeaseFile
 	hookProgressLeaseOpenFlights.Unlock()
 	go func() {
 		file, err := openFile(path, flags, mode)
@@ -69,14 +82,14 @@ func boundedOpenHookProgressLease(path string, flags int, mode os.FileMode) (*os
 		close(flight.done)
 		hookProgressLeaseOpenFlights.Unlock()
 		if abandoned != nil {
-			closeHookProgressFile(abandoned)
+			closeFile(abandoned)
 		}
 	}()
-	return waitForHookProgressLeaseOpen(path, flight)
+	return waitForHookProgressLeaseOpen(path, flight, timeout)
 }
 
-func waitForHookProgressLeaseOpen(path string, flight *hookProgressLeaseOpenFlight) (*os.File, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+func waitForHookProgressLeaseOpen(path string, flight *hookProgressLeaseOpenFlight, timeout time.Duration) (*os.File, error) {
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -86,7 +99,7 @@ func waitForHookProgressLeaseOpen(path string, flight *hookProgressLeaseOpenFlig
 		if hookProgressLeaseOpenFlights.byPath[path] == flight {
 			flight.timedOut = true
 			hookProgressLeaseOpenFlights.Unlock()
-			return nil, fmt.Errorf("timed out after %s while opening hook runner lease %s: %w", relocationIdentityTimeout, path, context.DeadlineExceeded)
+			return nil, fmt.Errorf("timed out after %s while opening hook runner lease %s: %w", timeout, path, context.DeadlineExceeded)
 		}
 		hookProgressLeaseOpenFlights.Unlock()
 		<-flight.done
@@ -100,12 +113,19 @@ func waitForHookProgressLeaseOpen(path string, flight *hookProgressLeaseOpenFlig
 // survivor. Once opened, no lease timeout, PID-reuse guess, or heartbeat
 // freshness is involved.
 func newHookProgressLease(dir string) (*os.File, error) {
-	file, err := boundedOpenHookProgressLease(filepath.Join(dir, "runner.lock"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	return newHookProgressLeaseWithIO(dir, captureHookProgressPrepareIO())
+}
+
+func newHookProgressLeaseWithIO(dir string, io hookProgressPrepareIO) (*os.File, error) {
+	file, err := boundedOpenHookProgressLeaseWith(
+		filepath.Join(dir, "runner.lock"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600,
+		io.openLeaseFile, io.closeFile, io.timeout,
+	)
 	if err != nil {
 		return nil, err
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		closeHookProgressFile(file)
+		io.closeFile(file)
 		return nil, err
 	}
 	return file, nil
@@ -165,19 +185,26 @@ func withInactiveHookProgressLease(dir string, remove func() error) (bool, error
 // or bounded-flight mutex is held; an explicit unlock first releases any lease
 // whose semantic lifetime has ended.
 func closeHookProgressFile(file *os.File) {
+	closeHookProgressFileWith(file, hookProgressCloseLeaseFile)
+}
+
+func closeHookProgressFileWith(file *os.File, closeFile func(*os.File) error) {
 	if file == nil {
 		return
 	}
-	closeFile := hookProgressCloseLeaseFile
 	go func() { _ = closeFile(file) }()
 }
 
 func unlockAndCloseHookProgressFile(file *os.File) {
+	unlockAndCloseHookProgressFileWith(file, closeHookProgressFile)
+}
+
+func unlockAndCloseHookProgressFileWith(file *os.File, closeFile func(*os.File)) {
 	if file == nil {
 		return
 	}
 	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	closeHookProgressFile(file)
+	closeFile(file)
 }
 
 func boundedHookProgressLeaseStat(file *os.File, path string) (os.FileInfo, error) {

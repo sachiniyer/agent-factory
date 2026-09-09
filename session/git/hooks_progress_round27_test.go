@@ -160,11 +160,11 @@ func TestHookProgressPreparationIsBoundedUnderProgressLock(t *testing.T) {
 	release := make(chan struct{})
 	drained := make(chan struct{})
 	var releaseOnce sync.Once
-	hookProgressPrepare = func(run hookRun, commands []string, prefix, generation, path string, identity *hookWorktreeIdentity, resumeDisabled bool) (*preparedHookProgress, error) {
+	hookProgressPrepare = func(run hookRun, commands []string, prefix, generation, path string, identity *hookWorktreeIdentity, resumeDisabled bool, io hookProgressPrepareIO) (*preparedHookProgress, error) {
 		close(entered)
 		<-release
 		defer close(drained)
-		return originalPrepare(run, commands, prefix, generation, path, identity, resumeDisabled)
+		return originalPrepare(run, commands, prefix, generation, path, identity, resumeDisabled, io)
 	}
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })

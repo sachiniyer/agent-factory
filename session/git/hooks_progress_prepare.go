@@ -18,6 +18,29 @@ type preparedHookProgress struct {
 	retainArtifacts bool
 	journalFile     *os.File
 	resumeReadyAt   int64
+	io              hookProgressPrepareIO
+}
+
+// Preparation can outlive the caller's deadline. Capture every mutable I/O
+// dependency before starting its worker so late cleanup can touch only the
+// unique files it owns without consulting package seams another test or caller
+// may already have replaced.
+type hookProgressPrepareIO struct {
+	openLeaseFile func(string, int, os.FileMode) (*os.File, error)
+	closeFile     func(*os.File)
+	timeout       time.Duration
+}
+
+func captureHookProgressPrepareIO() hookProgressPrepareIO {
+	openLeaseFile := hookProgressOpenLeaseFile
+	closeLeaseFile := hookProgressCloseLeaseFile
+	return hookProgressPrepareIO{
+		openLeaseFile: openLeaseFile,
+		closeFile: func(file *os.File) {
+			closeHookProgressFileWith(file, closeLeaseFile)
+		},
+		timeout: relocationIdentityTimeout,
+	}
 }
 
 type hookProgressPublicationRollback struct {
@@ -105,6 +128,7 @@ func boundedDiscardHookProgress(prepared *preparedHookProgress, journal string, 
 // .progress. The atomic rename remains synchronous in the locked commit phase.
 func boundedPrepareHookProgress(run hookRun, commands []string, prefix, generation, path string, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*preparedHookProgress, error) {
 	directory := filepath.Dir(path)
+	io := captureHookProgressPrepareIO()
 	hookProgressPrepareFlights.Lock()
 	if hookProgressPrepareFlights.byDirectory[directory] != nil {
 		hookProgressPrepareFlights.Unlock()
@@ -115,7 +139,7 @@ func boundedPrepareHookProgress(run hookRun, commands []string, prefix, generati
 	prepare := hookProgressPrepare
 	hookProgressPrepareFlights.Unlock()
 	go func() {
-		prepared, err := prepare(run, commands, prefix, generation, path, worktreeIdentity, resumeDisabled)
+		prepared, err := prepare(run, commands, prefix, generation, path, worktreeIdentity, resumeDisabled, io)
 		hookProgressPrepareFlights.Lock()
 		if flight.timedOut {
 			hookProgressPrepareFlights.Unlock()
@@ -154,7 +178,7 @@ func waitForHookProgressPreparation(directory, path string, flight *hookProgress
 	}
 }
 
-func prepareHookProgress(run hookRun, commands []string, prefix, generation, path string, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (_ *preparedHookProgress, resultErr error) {
+func prepareHookProgress(run hookRun, commands []string, prefix, generation, path string, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool, io hookProgressPrepareIO) (_ *preparedHookProgress, resultErr error) {
 	dir, err := os.MkdirTemp(filepath.Dir(path), "entries-")
 	if err != nil {
 		return nil, err
@@ -164,14 +188,14 @@ func prepareHookProgress(run hookRun, commands []string, prefix, generation, pat
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir, WorktreeIdentity: worktreeIdentity, ResumeDisabled: resumeDisabled,
 		PublicationVersion: 1,
-	}}
+	}, io: io}
 	defer func() {
 		if resultErr != nil {
 			prepared.discard("", false)
 		}
 	}()
 	if run.leaseProgress {
-		prepared.progress.lease, err = newHookProgressLease(dir)
+		prepared.progress.lease, err = newHookProgressLeaseWithIO(dir, io)
 		if err != nil {
 			return nil, err
 		}
@@ -209,10 +233,10 @@ func (p *preparedHookProgress) discard(journal string, renamed bool) {
 		return
 	}
 	if p.progress != nil && p.progress.lease != nil {
-		p.progress.releaseLease()
+		p.progress.releaseLeaseWith(p.io.closeFile)
 	}
 	if p.journalFile != nil {
-		closeHookProgressFile(p.journalFile)
+		p.io.closeFile(p.journalFile)
 		p.journalFile = nil
 	}
 	if p.retainArtifacts {

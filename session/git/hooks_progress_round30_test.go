@@ -48,7 +48,7 @@ func TestHookProgressRecoveryWritesAreBounded(t *testing.T) {
 				if handled {
 					t.Fatal("inconclusive recovery write reported a terminal claim")
 				}
-			case <-time.After(3 * relocationIdentityTimeout):
+			case <-time.After(time.Second):
 				t.Error("recovery write did not return at its filesystem bound")
 			}
 			close(release)
@@ -207,7 +207,7 @@ func TestHookProgressAbandonedClaimMarkersAreBounded(t *testing.T) {
 				if terminal {
 					t.Fatal("inconclusive marker write reported a terminal claim")
 				}
-			case <-time.After(3 * relocationIdentityTimeout):
+			case <-time.After(time.Second):
 				t.Error("abandoned-claim marker write did not return at its filesystem bound")
 			}
 			close(release)
