@@ -90,3 +90,26 @@ func TestBackgroundMutationShutdownClosesAdmissionAndJoinsWriter(t *testing.T) {
 		t.Fatal("background drain did not join the registered writer")
 	}
 }
+
+func TestBackgroundMutationShutdownAbandonsPermanentlyStalledGhostCleanup(t *testing.T) {
+	manager := &Manager{}
+	lateResult := make(chan error)
+	manager.reconcileLateGhostCleanup("repo", "ghost", "repo\x00ghost", "ghost-id", lateResult)
+
+	drained := make(chan struct{})
+	go func() {
+		manager.stopAndWaitBackgroundMutationsForShutdown()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown remained blocked on a permanently stalled ghost cleanup worker")
+	}
+	manager.lateGhostCleanupWG.Wait()
+
+	if _, admitted := manager.beginBackgroundMutation(); admitted {
+		manager.backgroundMutationWG.Done()
+		t.Fatal("late ghost checkpoint callback was admitted after shutdown")
+	}
+}

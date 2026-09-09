@@ -717,6 +717,20 @@ func (m *Manager) persistGhostCleanupStall(repoID string, data *session.Instance
 	return persistInstanceData(repoID, *data)
 }
 
+// persistLateGhostCleanupCheckpoint is the revocable callback captured by a
+// descriptor worker that may outlive its caller. The caller has already durably
+// retained the ghost's cleanup-recovery row before shutdown can reach the
+// background drain. A callback that arrives after that drain starts therefore
+// leaves the safe row alone; one already admitted is counted and joined through
+// its targeted write.
+func (m *Manager) persistLateGhostCleanupCheckpoint(repoID string, data *session.InstanceData) error {
+	if _, admitted := m.beginBackgroundMutation(); !admitted {
+		return nil
+	}
+	defer m.backgroundMutationWG.Done()
+	return m.persistGhostCleanupStall(repoID, data)
+}
+
 var (
 	lateGhostDeleteSessionRecord  = deleteLateGhostSessionRecord
 	lateGhostCleanupRetryInterval = 10 * time.Second
@@ -761,11 +775,11 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 		var lateErr error
 		select {
 		case <-stop:
-			// The descriptor worker owns a checkpoint callback and may still
-			// persist cleanup-finalizing state. Join it even during shutdown;
-			// abandoning only this consumer would leave that write live across
-			// the terminal instance checkpoint.
-			lateErr = <-lateResult
+			// A stuck descriptor worker is deliberately restart-recoverable: its
+			// cleanup-recovery row was retained before this reconciler launched.
+			// Its callback has separate shutdown admission, so abandoning this
+			// consumer cannot leave a write live across the terminal checkpoint.
+			return
 		case lateErr = <-lateResult:
 		}
 		if lateErr != nil {
