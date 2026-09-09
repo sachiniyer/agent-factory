@@ -19,6 +19,32 @@ test("a no-op responsive pass discards its event-scoped picker state", () => {
   assert.equal(shell.responsiveNewTabState, null);
 });
 
+test("a no-op responsive pass restores a picker closed by the owner media listener", () => {
+  const calls: string[] = [];
+  const cancel = () => calls.push("cancel");
+  let expanded = false;
+  const trigger = { getAttribute: () => expanded ? "true" : "false" };
+  const returns = new WeakMap<object, () => void>();
+  const shell = {
+    phone: { matches: true },
+    terminalSelected: true,
+    el: { classList: { contains: () => true } },
+    terminalChrome: { newTabSlot: { querySelector: () => trigger } },
+    responsiveNewTabState: { trigger, cancel, open: true },
+    newTabCancelReturn: returns,
+    openNewTabPicker: () => { expanded = true; calls.push("reopen"); },
+  };
+  const syncPhone = (AppShell.prototype as unknown as {
+    syncPhone(this: typeof shell): void;
+  }).syncPhone;
+
+  syncPhone.call(shell);
+
+  assert.equal(shell.responsiveNewTabState, null);
+  assert.deepEqual(calls, ["reopen"]);
+  assert.equal(returns.get(trigger), cancel);
+});
+
 // Exercise the real picker entry point without constructing terminals or browser
 // chrome. Ownership is the DOM contains() question, independent of viewport width.
 for (const [owned, hidden] of [[true, true], [true, false], [false, true]]) {
