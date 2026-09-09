@@ -342,6 +342,9 @@ const AWAITING_MAINTAINER_REVIEW_REMEDY =
   "an allowed author posts that marker as the whole first line of a PR comment, or leaves an " +
   "APPROVED review — neither needs anything from the author; it binds to this head, so a push " +
   "after it needs a fresh one, and on this path it restores the manual pass";
+const ABSENT_CODEX_VERDICT_REMEDY =
+  "post `@codex review` on this head in a PR comment; requesting the review needs nothing from " +
+  "the author, and the blocker clears when Codex returns a covering verdict";
 const RETRY_DELAYS_MS = [250, 1000];
 // A merge that has already STARTED needs longer than a read retry to land.
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
@@ -934,12 +937,11 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // waive one — this is the same rule, applied to the branch that skipped it.
   //
   // The test is PER-ITEM ANSWERABLE BY A MAINTAINER, not "is it a finding". A
-  // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack] reply
-  // the maintainer already posts, so blocking on one leaves an exit. A missing
-  // play-tested label or an absent verdict has no such answer on a PR whose author
-  // does not iterate, and blocking on those would turn the manual path into a stop
-  // with no way out — the failure mode the reviewer degradation was written to
-  // avoid. Those stay notes.
+  // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack]
+  // reply, and an absent verdict is cleared by posting `@codex review` on this
+  // head. Neither action needs the author, so both leave an exit and both block.
+  // The missing play-tested label remains a note as a separate policy choice;
+  // #4091 is only about enforcing the review-verdict requirement.
   //
   // An unreviewed usage-limit degradation passes that test, so it blocks here too
   // (#3825). The maintainer clears it by posting the approval marker on this head,
@@ -948,11 +950,18 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // what the manual conclusion is computed from, a non-allowed author's decision
   // went green carrying the verbatim title #3819 opened with.
   //
-  // The two kinds never coexist: the degradation requires every OTHER reason to be
-  // absent, and a live finding is a reason.
+  // A proven reviewer-unavailable response suppresses the absent-verdict blocker
+  // even when another requirement prevents the degradation from activating yet:
+  // asking again cannot produce the verdict this remedy promises. Once the other
+  // requirement clears, the existing approval-marker degradation is the exit.
+  // The awaiting-review blocker cannot coexist with a finding because degradation
+  // requires every other reason to be absent.
   const manualMergeBlockers = manualMergeRequired
     ? [
         ...(codex.findingBlockers ?? []),
+        ...(!codex.reviewerUnavailable && codex.absentVerdictBlocker
+          ? [codex.absentVerdictBlocker]
+          : []),
         ...(awaitingMaintainerReview
           ? [
               {
@@ -4223,6 +4232,7 @@ async function evaluateCodex({
   let reviewerUnavailableSince = null;
   let reviewerUnavailableKind = null;
   let reviewerUnavailableReason = "";
+  let absentVerdictBlocker = null;
   const { owner, repo } = context.repo;
   // Two anchors, because the rules below ask two different questions and one
   // value cannot answer both (#3380).
@@ -4393,6 +4403,10 @@ async function evaluateCodex({
       reviewerUnavailableKind = unavailable.kind;
     }
     reasons.push(missingVerdictReason);
+    absentVerdictBlocker = {
+      reason: missingVerdictReason,
+      remedy: ABSENT_CODEX_VERDICT_REMEDY,
+    };
   } else {
     // The artifact's own time: the comment's for a prose line, the row's for a
     // summary row.
@@ -4641,6 +4655,7 @@ async function evaluateCodex({
     reviewerUnavailableReason,
     reviewerUnavailableSince,
     reviewerUnavailableKind,
+    absentVerdictBlocker,
     findingBlockers,
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.

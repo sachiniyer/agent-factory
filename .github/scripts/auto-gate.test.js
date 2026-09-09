@@ -818,12 +818,12 @@ test("a read-only fork token leaves the decision unreported without failing the 
   );
 });
 
-test("a non-allowed author gets a passing manual decision without an automatic merge", async () => {
+test("a reviewed non-allowed author gets a passing manual decision without an automatic merge", async () => {
   const github = fakeGateGithub({
     author: "detail-app",
     nativeAutoMergeEnabled: true,
     files: ["app/termpane.go"],
-    issueComments: [],
+    issueComments: [codexVerdict(HEAD_SHA)],
   });
 
   const transaction = await autoGate.processAggregateHead({
@@ -847,7 +847,7 @@ test("a non-allowed author gets a passing manual decision without an automatic m
     /Auto Gate does not auto-merge PRs from this author; a maintainer must review and merge manually\./,
   );
   assert.match(exactDecision.output.summary, /missing the play-tested label/);
-  assert.match(exactDecision.output.summary, /Codex has not reviewed head/);
+  assert.doesNotMatch(exactDecision.output.summary, /Codex has not reviewed head/);
   assert.doesNotMatch(exactDecision.output.summary, /not an allowed maintainer/);
   assert.equal(github.updatedChecks.at(-1).conclusion, "success");
   assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
@@ -4038,6 +4038,11 @@ test("a maintainer approval restores a non-allowed author's manual pass", async 
   assert.equal(result.manualMergeRequired, true, "the author still cannot auto-merge");
   assert.equal(result.shouldMerge, false);
   assert.deepEqual(result.manualMergeBlockers, [], "the approval answers the only blocker");
+  assert.doesNotMatch(
+    result.summary,
+    /@codex review/,
+    "the absent-verdict blocker must not swallow the proven reviewer-outage path",
+  );
   assert.match(result.summary, /^PASS:/);
   assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
 
@@ -4801,6 +4806,25 @@ test("a usage-limited reviewer does not waive an unrelated blocker", async () =>
   assert.match(result.summary, /^BLOCKED:/);
   assert.match(result.reasons.join("\n"), /missing the play-tested label/);
   assert.match(result.reasons.join("\n"), /usage-limited/);
+});
+
+// reviewerUnavailable is the suppression guard, not
+// degradedForUnavailableReviewer: an unrelated advisory can keep degradation
+// false on the current evaluation even though asking the unavailable reviewer
+// again still cannot produce a verdict.
+test("a reviewer-outage response never gets the absent-verdict remedy", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    files: ["app/termpane.go"],
+    issueComments: [codexRateLimit()],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.equal(result.degradedForUnavailableReviewer, false);
+  assert.deepEqual(result.manualMergeBlockers, []);
+  assert.doesNotMatch(result.summary, /@codex review/);
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.match(result.reasons.join("\n"), /latest Codex response was usage-limited/);
 });
 
 // The TUI path gate asks whether a user could SEE the change, and answered it by
@@ -8714,30 +8738,71 @@ test("answering the finding restores the manual-merge pass for a non-allowed aut
   assert.match(result.summary, /^PASS:/);
 });
 
-// Scope: what blocks this path is what a maintainer can answer PER ITEM — a live
-// finding (#3558), and since #3825 an unreviewed usage-limit degradation, which
-// the approval marker clears without the author iterating. A missing play-tested
-// label and a merely ABSENT verdict are still notes, exactly as before: neither
-// has such an answer on a PR whose author does not iterate, and blocking on them
-// would make every external PR unmergeable. This fixture is silence rather than a
-// usage-limit reply, so no degradation fires and nothing is promoted.
-test("a non-allowed author's other unmet requirements stay notes, not blockers", async () => {
+// #4091. A maintainer can request the missing review without the author doing
+// anything, so plain reviewer silence is an answerable blocker, not an advisory
+// item. Prove the fixed-name required check stays red too: that is the check a
+// hand merge actually reads, and a blocked in-memory result alone would not close
+// the reported hole.
+test("an absent verdict keeps the required manual decision red for a non-allowed author", async () => {
+  const github = fakeGateGithub({ author: "detail-app", issueComments: [] });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  const exactDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.equal(exactDecision.conclusion, "failure");
+  assert.match(exactDecision.output.title, /^BLOCKED:/);
+  assert.match(exactDecision.output.summary, /post `@codex review` on this head/);
+  assert.equal(transaction.aggregate.ok, false, "the required aggregate must stay red");
+});
+
+test("a covered verdict restores the manual pass for a non-allowed author", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    issueComments: [codexVerdict(HEAD_SHA)],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.deepEqual(result.manualMergeBlockers, []);
+  assert.match(result.summary, /^PASS:/);
+});
+
+// The play-tested label is explicitly outside #4091. Give this fixture a
+// covering verdict so it proves the label itself remains advisory rather than
+// passing only because two classifications happened to be wrong together.
+test("a missing play-tested label stays a note on the manual path", async () => {
   const result = await evaluateGate({
     author: "detail-app",
     files: ["app/termpane.go"],
-    issueComments: [],
+    issueComments: [codexVerdict(HEAD_SHA)],
   });
 
   assert.equal(result.manualMergeRequired, true);
   assert.deepEqual(result.manualMergeBlockers, []);
   assert.match(result.summary, /^PASS:/);
   assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+});
+
+test("an absent verdict keeps its existing auto-merge semantics for an allowed author", async () => {
+  const result = await evaluateGate({ author: "sachiniyer", issueComments: [] });
+
+  assert.equal(result.manualMergeRequired, false);
+  assert.equal(result.shouldMerge, false);
   assert.match(result.reasons.join("\n"), /Codex has not reviewed head/);
 });
 
-test("fork heads from non-allowed authors pass for manual merge but cannot auto-merge", async () => {
+test("fork heads from non-allowed authors cannot bypass the verdict blocker", async () => {
   const github = fakeGateGithub({
     author: "outside-contributor",
+    issueComments: [],
     pullRequestsByNumber: { 1465: { headRepository: "outside/fork" } },
   });
   const result = await autoGate.evaluate({
@@ -8750,8 +8815,13 @@ test("fork heads from non-allowed authors pass for manual merge but cannot auto-
 
   assert.equal(result.shouldMerge, false);
   assert.equal(result.manualMergeRequired, true);
+  assert.match(
+    result.manualMergeBlockers.map((blocker) => blocker.reason).join("\n"),
+    /Codex has not reviewed head/,
+  );
   assert.match(result.reasons.join("\n"), /head repository outside\/fork.*base-repository branch/);
-  assert.match(result.summary, /maintainer must review and merge manually/);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.summary, /post `@codex review` on this head/);
 });
 
 test("Codex verdict parsing requires a real verdict and matches its short SHA", () => {
