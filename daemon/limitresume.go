@@ -219,8 +219,17 @@ func (m *Manager) resumeLimitedSession(
 	if hasReset {
 		ordinaryDue = resetAt.Add(limitResumeGrace)
 	}
+	incomingManualReset := false
+	if accountSwap != nil && accountSwap.manual && hasReset {
+		limitedAccount, limited := inst.LimitAccount()
+		incomingManualReset = limited && limitedAccount == accountSwap.to
+	}
 	due := ordinaryDue
-	if accountSwap != nil {
+	if accountSwap != nil && !incomingManualReset {
+		// The ordinary reset belongs to the outgoing account, so it cannot delay
+		// candidate preflight for a different identity. A parked manual transaction
+		// is different: when its reset belongs to the incoming account, ordinaryDue
+		// is exactly when that same identity may be contacted again.
 		due = now
 	}
 	// The per-attempt backoff/interval gate sits on top of the due time, so the
