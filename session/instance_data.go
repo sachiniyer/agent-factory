@@ -52,6 +52,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		PendingAccountSwap:       cloneAccountSwapData(i.pendingAccountSwap),
 		Prompt:                   i.Prompt,
 		PendingHandoffMission:    i.pendingHandoffMission,
+		HandoffDeliveryStatus:    i.handoffDeliveryStatus,
 		UserKilled:               i.userKilled,
 		StartupStateUnknown:      i.startupStateUnknown,
 		RootRecreateContext:      i.rootRecreateContext,
@@ -263,7 +264,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
 	data = data.RestoreAccountSwapRollbackFence()
-	data = data.restoreLegacyAccountSwapMissionEvidence()
+	data = data.restoreMissingAccountSwapMissionEvidence()
 	id := data.ID
 	if id == "" {
 		// Legacy records predate stable session identity. Materialized instances
@@ -338,6 +339,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
 		Prompt:                   data.Prompt,
 		pendingHandoffMission:    data.PendingHandoffMission,
+		handoffDeliveryStatus:    data.HandoffDeliveryStatus,
 		userKilled:               data.UserKilled,
 		startupStateUnknown:      data.StartupStateUnknown,
 		// Survives the restart on purpose (#2629): a root that came back amnesiac

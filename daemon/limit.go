@@ -465,9 +465,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
 	manual := accountSwap != nil && accountSwap.manual
-	identityCommitted := accountSwap != nil && accountSwap.alreadySet
+	identityCommittedThisAttempt := false
 	defer func() {
-		if resultErr == nil || !manual || !identityCommitted || isMutationCommitted(resultErr) {
+		if resultErr == nil || !manual || !identityCommittedThisAttempt || isMutationCommitted(resultErr) {
 			return
 		}
 		// A successful identity checkpoint is already an externally visible
@@ -611,7 +611,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			accountSwap = nil
 			releaseAccountSwapFences()
 		} else {
-			identityCommitted = true
+			identityCommittedThisAttempt = true
 			releaseAccountSwapFences()
 			forceRespawn = true
 		}

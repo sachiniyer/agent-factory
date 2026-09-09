@@ -52,6 +52,9 @@ func (i *Instance) SetPendingHandoffMission(mission string) {
 	defer i.mu.Unlock()
 	if i.pendingHandoffMission != mission {
 		i.pendingHandoffMission = mission
+		// Recording the obligation precedes submission, so this is positive
+		// mission-scoped evidence that an automatic attempt is initially safe.
+		i.handoffDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
 }
@@ -61,6 +64,48 @@ func (i *Instance) PendingHandoffMission() string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.pendingHandoffMission
+}
+
+// BeginPendingHandoffMissionDelivery fails closed before submission. The caller
+// persists this marker before touching the composer, closing the crash window in
+// which an attempt may land without its verdict becoming durable.
+func (i *Instance) BeginPendingHandoffMissionDelivery(mission string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingHandoffMission != mission || mission == "" {
+		return fmt.Errorf("pending handoff mission changed before delivery")
+	}
+	if i.handoffDeliveryStatus != PromptCouldNotConfirm {
+		i.handoffDeliveryStatus = PromptCouldNotConfirm
+		i.touchLocked()
+	}
+	return nil
+}
+
+// RecordPendingHandoffMissionDelivery binds the runtime verdict to this exact
+// mission. Empty and future verdicts are ambiguity, never retry authorization.
+func (i *Instance) RecordPendingHandoffMissionDelivery(mission string, status PromptDeliveryStatus) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingHandoffMission != mission || mission == "" {
+		return fmt.Errorf("pending handoff mission changed during delivery")
+	}
+	if !status.Valid() {
+		status = PromptCouldNotConfirm
+	}
+	if i.handoffDeliveryStatus != status {
+		i.handoffDeliveryStatus = status
+		i.touchLocked()
+	}
+	return nil
+}
+
+// PendingHandoffMissionAutoRetryable permits automatic redelivery only after a
+// mission-scoped observation proved that the exact pending mission did not land.
+func (i *Instance) PendingHandoffMissionAutoRetryable() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pendingHandoffMission != "" && i.handoffDeliveryStatus == PromptNotDelivered
 }
 
 // ClearPendingHandoffMission clears the marker only if it still names mission.
@@ -74,6 +119,7 @@ func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 	}
 	if i.pendingHandoffMission != "" {
 		i.pendingHandoffMission = ""
+		i.handoffDeliveryStatus = ""
 		i.touchLocked()
 	}
 	return true

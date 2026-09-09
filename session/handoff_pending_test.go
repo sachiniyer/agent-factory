@@ -51,6 +51,24 @@ func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 	}
 }
 
+func TestPendingHandoffMissionWithoutEvidenceFailsClosed(t *testing.T) {
+	restored, err := FromInstanceData(InstanceData{
+		ID:                    "legacy-pending-id",
+		Title:                 "legacy-pending",
+		Program:               "claude",
+		Status:                Running,
+		Liveness:              LiveRunning,
+		BackendType:           "docker",
+		PendingHandoffMission: "continue the inherited work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.PendingHandoffMissionAutoRetryable() {
+		t.Fatal("a legacy pending mission without durable delivery evidence authorized automatic replay")
+	}
+}
+
 // TestPendingHandoffMissionWithUserKilledDoesNotReconstructFence proves the
 // durable kill tombstone outranks an undelivered handoff mission after storage
 // has scrubbed the process-local operation axis. The row must remain settled and

@@ -51,11 +51,22 @@ func TestRestoreLegacyAccountSwapDoesNotTrustGenericDeliveryEvidence(t *testing.
 		LastPromptAttemptAt:      time.Now(),
 		LastPromptDeliveryStatus: PromptNotDelivered,
 	}
-	restored := data.restoreLegacyAccountSwapMissionEvidence()
+	restored := data.restoreMissingAccountSwapMissionEvidence()
 	require.Equal(t, PromptCouldNotConfirm, restored.PendingAccountSwap.MissionDeliveryStatus,
 		"session-wide non-delivery may belong to another prompt and cannot authorize mission redelivery")
 	require.Empty(t, data.PendingAccountSwap.MissionDeliveryStatus,
 		"migration must not mutate the caller's checkpoint")
+}
+
+func TestRestoreAccountSwapMissingMissionEvidenceFailsClosed(t *testing.T) {
+	data := InstanceData{
+		PendingAccountSwap: &AccountSwapData{
+			Manual: true, From: "work", To: "personal", ReplacementPanesStarted: true,
+		},
+	}
+	restored := data.restoreMissingAccountSwapMissionEvidence()
+	require.Equal(t, PromptCouldNotConfirm, restored.PendingAccountSwap.MissionDeliveryStatus,
+		"missing durable evidence after replacement startup must not authorize mission redelivery")
 }
 
 func TestParkManualAccountSwapRecordsMissionNonDelivery(t *testing.T) {

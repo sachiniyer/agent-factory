@@ -21,9 +21,10 @@ type pendingHandoffEntry struct {
 	instance *session.Instance
 }
 
-// ResumePendingHandoffs retries takeover briefs that survived the post-swap
-// checkpoint but not a confirmed prompt delivery. It is deliberately driven by
-// the ordinary daemon poll. A crash-restored OpReplacing row stays hidden from
+// ResumePendingHandoffs retries takeover briefs only when mission-scoped evidence
+// proves the prior attempt did not deliver. Missing and ambiguous evidence stays
+// pending for inspection. It is deliberately driven by the ordinary daemon poll.
+// A crash-restored OpReplacing row stays hidden from
 // status settlement and this path performs the readiness check itself; a legacy
 // settled row waits for RefreshStatuses to provide LiveReady first. The same
 // target-before-op locks as handoff/send-prompt prevent a recovery paste from
@@ -47,7 +48,8 @@ func (m *Manager) ResumePendingHandoffs() {
 
 	for _, entry := range entries {
 		mission := entry.instance.PendingHandoffMission()
-		if mission == "" || entry.instance.UserKilled() || entry.instance.StartupStateUnknown() {
+		if mission == "" || entry.instance.UserKilled() || entry.instance.StartupStateUnknown() ||
+			!entry.instance.PendingHandoffMissionAutoRetryable() {
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 			continue
 		}
@@ -74,7 +76,8 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	op := entry.instance.GetInFlightOp()
 	if killing || current != entry.instance || entry.instance.IsTearingDown() ||
 		(op != session.OpNone && op != session.OpReplacing) ||
-		entry.instance.PendingHandoffMission() != mission || entry.instance.UserKilled() || entry.instance.StartupStateUnknown() {
+		entry.instance.PendingHandoffMission() != mission || !entry.instance.PendingHandoffMissionAutoRetryable() ||
+		entry.instance.UserKilled() || entry.instance.StartupStateUnknown() {
 		return nil
 	}
 
@@ -110,7 +113,17 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	if !m.pendingHandoffRetryAllowed(entry.repoID, entry.instance) {
 		return nil
 	}
+	delivery := handoffDelivery{
+		repoID: entry.repoID, key: entry.key, title: entry.instance.Title,
+		mission: mission, instance: entry.instance,
+	}
+	if err := m.beginHandoffMissionDelivery(delivery); err != nil {
+		return err
+	}
 	status, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), entry.instance, mission)
+	if evidenceErr := entry.instance.RecordPendingHandoffMissionDelivery(mission, status); evidenceErr != nil {
+		return errors.Join(err, evidenceErr)
+	}
 	if err = handoffDeliveryResultError(status, err); err != nil {
 		var limitErr *task.LimitReachedError
 		if errors.As(err, &limitErr) {
@@ -139,6 +152,11 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 			entry.instance.MarkStartupStateUnknown()
 			m.persistAndPublishInstance(entry.repoID, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
+		}
+		if errors.Is(err, task.ErrPromptDelivery) {
+			if evidenceErr := m.persistSettlement(entry.repoID, entry.key, entry.instance); evidenceErr != nil {
+				return errors.Join(err, evidenceErr)
+			}
 		}
 		return err
 	}

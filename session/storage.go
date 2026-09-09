@@ -152,9 +152,14 @@ type InstanceData struct {
 	Prompt    string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
-	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
-	// the exact mission lands (or is transferred to the usage-limit retry path).
+	// Unlike Prompt, it is cleared only after the exact mission lands (or is
+	// transferred to the usage-limit retry path). Automatic recovery also requires
+	// the mission-scoped status below to prove that redelivery is safe.
 	PendingHandoffMission string `json:"pending_handoff_mission,omitempty"`
+	// HandoffDeliveryStatus belongs only to PendingHandoffMission. Missing
+	// or ambiguous evidence fails closed; only not-delivered permits an automatic
+	// retry because it proves this exact mission did not land.
+	HandoffDeliveryStatus PromptDeliveryStatus `json:"pending_handoff_delivery_status,omitempty"`
 	// PendingAccountSwap is the committed identity change whose replacement
 	// runtime still needs the in-session notice and stored task delivered.
 	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`

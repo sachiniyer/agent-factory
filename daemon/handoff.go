@@ -79,8 +79,9 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 // Instance.Program would be wrong. If the swap SUCCEEDS but readiness cannot be
 // established, the record becomes startup-unknown rather than claiming a
 // healthy incoming runtime. If readiness succeeds but the mission paste fails,
-// the exact rendered brief and OpReplacing fence remain durable for the daemon's
-// bounded retry path; neither failure is flattened into a false Running state.
+// the exact rendered brief and OpReplacing fence remain durable. Automatic
+// recovery proceeds only from mission-scoped proof that delivery did not occur;
+// neither failure is flattened into a false Running state.
 //
 // Locking mirrors resumeFromLimit exactly: per-(repo,title) target lock FIRST,
 // then the per-session op lock (#2006's canonical target-before-op order), with
@@ -245,6 +246,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// instead of silently claiming an instruction-less agent is complete.
 	instance.SetPendingHandoffMission(mission)
 	checkpoint.PendingHandoffMission = mission
+	checkpoint.HandoffDeliveryStatus = session.PromptNotDelivered
 	// The process swap is already irreversible, so checkpoint its durable facts
 	// before the readiness wait. Memory stays fenced, but a daemon crash in this
 	// window must restore the incoming Program rather than lie that the outgoing

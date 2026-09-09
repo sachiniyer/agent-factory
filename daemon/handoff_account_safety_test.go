@@ -170,6 +170,30 @@ func TestControlRetryHandoffSettlementFailureUsesCommittedEnvelope(t *testing.T)
 	require.Contains(t, resp.MutationOutcome.Warning, "pending settlement")
 }
 
+func TestControlRetryHandoffDeliveryFailureIsNotCommitted(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	prepareHandoffTargetPreflight(t, inst)
+	backend.sendPromptErr = errors.New("delivery reply lost")
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.Error(t, err)
+	require.NotNil(t, inst.ToInstanceData().PendingAccountSwap)
+
+	backend.sendPromptErr = errors.New("retry delivery failed")
+	var resp ResumeFromLimitResponse
+	err = (&controlServer{manager: m}).ResumeFromLimit(
+		ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}, &resp,
+	)
+	require.ErrorContains(t, err, "retry delivery failed")
+	require.False(t, isMutationCommitted(err),
+		"a retry that did not deliver the mission must remain a failed retry")
+	require.False(t, resp.OK)
+	require.Empty(t, resp.MutationOutcome.Code)
+	require.NotNil(t, inst.ToInstanceData().PendingAccountSwap)
+}
+
 func prepareHandoffTargetPreflight(t *testing.T, inst *session.Instance) {
 	t.Helper()
 	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
