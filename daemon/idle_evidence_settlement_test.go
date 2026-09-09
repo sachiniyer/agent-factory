@@ -82,7 +82,8 @@ func TestSuccessfulLimitResumePersistFailureIsRetried(t *testing.T) {
 	manager.FlushOwedSettlements()
 	rec = recordFor(t, repoID, inst.Title)
 	require.False(t, rec.LastPromptAttemptAt.IsZero())
-	require.Equal(t, session.PromptCouldNotConfirm, rec.LastPromptDeliveryStatus)
+	require.Equal(t, session.PromptDelivered, rec.LastPromptDeliveryStatus,
+		"settlement retry must preserve the interactive backend's confirmed delivery verdict")
 	require.Equal(t, session.LiveRunning, rec.Liveness)
 }
 

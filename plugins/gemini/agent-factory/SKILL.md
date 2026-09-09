@@ -18,7 +18,8 @@ Sessions (one agent per isolated worktree):
   af sessions kill <title>                             Delete a session; work in af-owned workspaces can be lost
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
   af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
-  af sessions handoff <title> --to <agent>             Continue a stuck session under a different agent (same worktree/branch)
+  af sessions handoff <title> [--to <agent>] [--account <name>]  Continue under another agent, account, or both
+  af sessions retry-limit <title>                      Retry a usage-limit resume or an inspected, unconfirmed handoff
   af sessions restore <title>                          Restore an archived, lost, or dead session
 
 Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; external HTTPS web tabs work on remote sessions; loopback web targets still require a local session (--port is loopback). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.

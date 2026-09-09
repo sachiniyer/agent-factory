@@ -80,6 +80,13 @@ func reloadedHandoffRow(t *testing.T, m *Manager, repoID, repoPath string, rec *
 	inst.SetTmuxSession(tmux.NewTmuxSession(rec.Title, rec.Program))
 	if rec.PendingHandoffMission != "" {
 		inst.SetPendingHandoffMission(rec.PendingHandoffMission)
+		if rec.HandoffDeliveryStatus.Valid() {
+			if err := inst.RecordPendingHandoffMissionDelivery(
+				rec.PendingHandoffMission, rec.HandoffDeliveryStatus,
+			); err != nil {
+				t.Fatalf("restore pending mission evidence: %v", err)
+			}
+		}
 		if err := inst.Transition(session.BeginHandoff()); err != nil {
 			t.Fatalf("reconstruct replacement fence: %v", err)
 		}
@@ -98,14 +105,11 @@ func reloadedHandoffRow(t *testing.T, m *Manager, repoID, repoPath string, rec *
 // settlement write after a confirmed delivery is the other half of that bargain —
 // it is what retires the obligation.
 //
-// That write used persistInstance, whose failure is logged and dropped, so a
+// That write used persistInstance, whose failure was logged and dropped, so a
 // failed settlement left the obligation standing over a mission the agent had
-// already run. Nothing downstream repaired it: persistPollChange only writes on a
-// liveness or reset-time change and never inspects PendingHandoffMission, and the
-// whole-state shutdown checkpoint is exactly what an unclean exit skips. The next
-// daemon rebuilt the replacement fence from the stale marker and sent the same
-// brief again — the agent redoing work it had already done, on a branch its first
-// run had already changed.
+// already run. Mission-scoped ambiguity now prevents automatic replay, but the
+// stale replacement fence still survives a restart and an explicit retry can
+// repeat the work. The settlement retry removes that false obligation.
 //
 // Note which assertion carries the fix. Surfacing the error (the obvious change)
 // makes the FIRST check pass while the mission still gets delivered twice; only
@@ -167,8 +171,7 @@ func TestHandoffSession_SettlementPersistFailureCannotRedeliverTheMission(t *tes
 // to, which is exactly why the retry, not the error return, is what protects it.
 func TestResumePendingHandoffs_SettlementPersistFailureCannotRedeliverTheMission(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	sendErr := errors.New("paste transport failed")
-	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), deliveryStatus: session.PromptNotDelivered}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "settle-once-on-retry", backend)
 
 	// Leave the mission pending behind the replacement fence: the paste fails, so
@@ -186,7 +189,7 @@ func TestResumePendingHandoffs_SettlementPersistFailureCannotRedeliverTheMission
 
 	diskFull := errors.New("no space left on device")
 	injected := failSettlementWrite(t, "settle-once-on-retry", diskFull, true)
-	backend.setSendErr(nil)
+	backend.setDeliveryStatus(session.PromptDelivered)
 
 	manager.ResumePendingHandoffs()
 	if !injected() {
@@ -208,8 +211,8 @@ func TestResumePendingHandoffs_SettlementPersistFailureCannotRedeliverTheMission
 	manager.ResumePendingHandoffs()
 
 	_, prompts := backend.snapshot()
-	if len(prompts) != 1 || !strings.Contains(prompts[0], "continuing work") {
-		t.Fatalf("recovery delivered %d prompts (%q), want exactly the one rendered mission: a "+
+	if len(prompts) != 2 || !strings.Contains(prompts[1], "continuing work") {
+		t.Fatalf("recovery attempted %d prompts (%q), want one observed absent and one delivered: a "+
 			"settlement write lost by the recovery pass replays the mission just as one lost by the "+
 			"handoff itself does", len(prompts), prompts)
 	}
