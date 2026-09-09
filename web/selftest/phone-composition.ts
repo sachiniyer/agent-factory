@@ -245,4 +245,28 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
   await page.keyboard.insertText("x");
   await expect.poll(stream).toBe(before + "字文\x18");
   await expect(ctrl).toHaveAttribute("data-state", "off");
+
+  // The composer owns bare Shift+Enter before CompositionHelper.keydown sees
+  // it. Dispatch it in the compositionend turn so the custom LF must queue
+  // behind xterm's zero-delay commit rather than overtaking it.
+  {
+    const before = stream();
+    await textarea.evaluate(async el => {
+      const input = el as HTMLTextAreaElement;
+      const start = input.value.length;
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "字" }));
+      input.value = input.value.substring(0, start) + "字";
+      await new Promise(resolve => setTimeout(resolve, 0));
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "字" }));
+      const keydown = new KeyboardEvent("keydown", {
+        bubbles: true, cancelable: true, key: "Enter", shiftKey: true,
+      });
+      Object.defineProperty(keydown, "keyCode", { value: 13 });
+      input.dispatchEvent(keydown);
+      input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", shiftKey: true }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    await expect.poll(stream).toBe(before + "字\n");
+  }
 }

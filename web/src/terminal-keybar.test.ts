@@ -4,6 +4,7 @@ import {
   decodeKeyBytes, KEYBAR_ROWS, keyBytes, keyBytesDomain, KEY_BYTES_NAMED_KEYS, StickyModifiers, TerminalKeybar,
   keybarPointerDown,
 } from "./terminal-keybar.js";
+import { TerminalSoftInput } from "./terminal-soft-input.js";
 
 test("terminal key bytes match physical keys", () => {
   for (const [key, bytes] of Object.entries({ Esc: "\x1b", Tab: "\t", "←": "\x1b[D", "↑": "\x1b[A", "↓": "\x1b[B", "→": "\x1b[C", "^C": "\x03" })) {
@@ -350,6 +351,58 @@ test("the onKey marker carries physical identity into its matching onData", () =
   });
   assert.equal(keybar.transform("\x1b[1;5A"), "\x1b[1;7A");
   assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("custom hardware input carries physical identity into its matching onData", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  modifiers.tap("Alt", 0);
+  let output = "";
+  let keybar: TerminalKeybar;
+  keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea: { value: "" }, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0,
+    softInput: { transform: (text: string, apply: (value: string) => string) => apply(text) },
+    input: (text: string) => { output = keybar.transform(text); },
+  }) as unknown as TerminalKeybar;
+
+  keybar.sendUserInput("\x03", { physical: {
+    key: "c", shiftKey: false, altKey: false, ctrlKey: true, metaKey: false,
+  } });
+  assert.equal(output, "\x1b\x03");
+  assert.equal(modifiers.state("Ctrl"), "once", "the physically held Ctrl did not consult sticky Ctrl");
+  assert.equal(modifiers.state("Alt"), "off", "sticky Alt participated in the interrupt emission");
+});
+
+test("custom Shift+Enter waits behind a pending composition commit", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const writes: string[] = [];
+  let keybar: TerminalKeybar;
+  textarea.addEventListener("compositionend", () => setTimeout(() => {
+    writes.push(keybar.transform(textarea.value));
+  }, 0));
+  const softInput = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => softInput.dispose());
+  keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers: new StickyModifiers(), textarea, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0, softInput,
+    input: (text: string) => { writes.push(keybar.transform(text)); },
+  }) as unknown as TerminalKeybar;
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(Object.assign(new Event("compositionend"), { data: "字" }));
+  keybar.sendUserInput("\n", {
+    physical: { key: "Enter", shiftKey: true, altKey: false, ctrlKey: false, metaKey: false },
+    afterComposition: true,
+  });
+  assert.deepEqual(writes, [], "the custom newline must not overtake xterm's finalizer");
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["字", "\n"]);
 });
 
 test("pointerdown prevents focus transfer before acting", () => {

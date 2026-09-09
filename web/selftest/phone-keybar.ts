@@ -168,6 +168,17 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     await page.keyboard.insertText("a");
     await expect.poll(stream).toBe(before + bytes + "a");
   }
+  // Ctrl+C is custom-handled before xterm can fire onKey. Its explicit marker
+  // must still retain the physically held Ctrl identity: redundant sticky Ctrl
+  // remains the advertised next key rather than being consumed by the ETX alias.
+  before = stream();
+  await ctrl.click();
+  await page.keyboard.press("Control+c");
+  await expect.poll(stream).toBe(before + "\x03");
+  await expect(ctrl).toHaveAttribute("data-state", "once");
+  await page.keyboard.insertText("a");
+  await expect.poll(stream).toBe(before + "\x03\x01");
+  await expect(ctrl).toHaveAttribute("data-state", "off");
   for (const [modifier, chord, bytes] of [
     ["Alt", "Control+x", "\x1b\x18"],
     ["Ctrl", "Alt+x", "\x1b\x18"],

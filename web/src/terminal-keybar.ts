@@ -62,6 +62,12 @@ interface UserInputMarker {
   physical?: PhysicalKeyInput;
 }
 
+interface UserInputOptions {
+  physical?: PhysicalKeyInput;
+  keybar?: boolean;
+  afterComposition?: boolean;
+}
+
 function userSequence(text: string): UserSequence | undefined {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return undefined;
   const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
@@ -282,7 +288,7 @@ export class TerminalKeybar {
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
           // Resolve and consume at source. The marker preserves these bytes
           // without sending a keybar emission through the user decoder again.
-          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), true);
+          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
         button.addEventListener("pointerdown", event => keybarPointerDown(event, act));
@@ -374,8 +380,13 @@ export class TerminalKeybar {
     this.deferred229Generation += 1;
     return true;
   }
-  sendUserInput(data: string, keybar = false): void {
-    this.markUserInput(undefined, keybar);
+  sendUserInput(data: string, options: UserInputOptions = {}): void {
+    if (options.afterComposition &&
+      this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    this.emitUserInput(data, options);
+  }
+  private emitUserInput(data: string, options: UserInputOptions): void {
+    this.markUserInput(options.physical, options.keybar);
     this.input(data);
   }
   private paint(): void {

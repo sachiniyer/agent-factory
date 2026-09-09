@@ -8100,6 +8100,7 @@ var TerminalSoftInput = class {
   active;
   pending = [];
   trailingFlushes = /* @__PURE__ */ new Set();
+  postCompositionTimers = /* @__PURE__ */ new Set();
   forwardingTrailing;
   forwardingComposition;
   forwardingQueued;
@@ -8239,6 +8240,16 @@ var TerminalSoftInput = class {
     input.stopImmediatePropagation();
     this.send(input.data);
   };
+  /** Queue custom input after xterm's already-scheduled composition finalizer. */
+  deferAfterPendingComposition(action) {
+    if (!this.pending.length) return false;
+    const release = setTimeout(() => {
+      this.postCompositionTimers.delete(release);
+      action();
+    }, 0);
+    this.postCompositionTimers.add(release);
+    return true;
+  }
   transform(text, applyModifiers) {
     if (this.forwardingComposition === text) return text;
     if (this.forwardingQueued?.text === text)
@@ -8369,7 +8380,9 @@ var TerminalSoftInput = class {
   reset() {
     for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== void 0) clearTimeout(flush.release);
+    for (const release of this.postCompositionTimers) clearTimeout(release);
     this.trailingFlushes.clear();
+    this.postCompositionTimers.clear();
     this.pending.length = 0;
     this.active = void 0;
   }
@@ -8562,7 +8575,7 @@ var TerminalKeybar = class {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), true);
+          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
         button.addEventListener("pointerdown", (event) => keybarPointerDown(event, act));
@@ -8688,8 +8701,12 @@ var TerminalKeybar = class {
     this.deferred229Generation += 1;
     return true;
   }
-  sendUserInput(data, keybar = false) {
-    this.markUserInput(void 0, keybar);
+  sendUserInput(data, options = {}) {
+    if (options.afterComposition && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    this.emitUserInput(data, options);
+  }
+  emitUserInput(data, options) {
+    this.markUserInput(options.physical, options.keybar);
     this.input(data);
   }
   paint() {
@@ -9263,10 +9280,13 @@ var AttachTerminal = class {
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.keybar.sendUserInput(text),
+        sendInput: (text) => this.keybar.sendUserInput(text, { physical: ev }),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.keybar.sendUserInput(text)
+        sendUserInput: (text) => this.keybar.sendUserInput(text, {
+          physical: ev,
+          afterComposition: true
+        })
       });
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
       return accepted;

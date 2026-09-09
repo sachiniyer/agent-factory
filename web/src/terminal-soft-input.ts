@@ -43,6 +43,7 @@ export class TerminalSoftInput {
   private active: CompositionRange | undefined;
   private readonly pending: CompositionRange[] = [];
   private readonly trailingFlushes = new Set<TrailingFlush>();
+  private readonly postCompositionTimers = new Set<ReturnType<typeof setTimeout>>();
   private forwardingTrailing: string | undefined;
   private forwardingComposition: string | undefined;
   private forwardingQueued: { range: CompositionRange; text: string } | undefined;
@@ -247,6 +248,20 @@ export class TerminalSoftInput {
     host.addEventListener("input", this.onInput, true);
   }
 
+  /** Queue custom input after xterm's already-scheduled composition finalizer. */
+  deferAfterPendingComposition(action: () => void): boolean {
+    if (!this.pending.length) return false;
+    // compositionend registered xterm's finalizer and our range release before
+    // the custom keydown can reach this method. Timer FIFO therefore preserves
+    // the user's commit-before-key order even though xterm rejects that keydown.
+    const release = setTimeout(() => {
+      this.postCompositionTimers.delete(release);
+      action();
+    }, 0);
+    this.postCompositionTimers.add(release);
+    return true;
+  }
+
   transform(text: string, applyModifiers: (text: string, userInput: boolean) => string): string {
     // Stale xterm state can require forwarding an InputEvent-only composition
     // ourselves. It remains composition text and must bypass sticky modifiers.
@@ -371,7 +386,9 @@ export class TerminalSoftInput {
   reset(): void {
     for (const range of this.pending) if (range.release !== undefined) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== undefined) clearTimeout(flush.release);
+    for (const release of this.postCompositionTimers) clearTimeout(release);
     this.trailingFlushes.clear();
+    this.postCompositionTimers.clear();
     this.pending.length = 0;
     this.active = undefined;
   }
