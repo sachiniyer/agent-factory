@@ -155,6 +155,10 @@ func TestRedactAccessTokenURLRedactsPercentEncodedComponentKey(t *testing.T) {
 		{"path", "http://box:8080/%61ccess_token=component-sekrit"},
 		{"userinfo", "http://user:%61ccess_token=component-sekrit@box:8080/"},
 		{"fragment-with-query-token", "http://box:8080/callback?access_token=q#%61ccess_token=component-sekrit"},
+		// Opaque URLs: url.Parse does NOT decode u.Opaque, so the literal-needle
+		// scan misses %61ccess_token=.  The fix decodes before scanning.
+		{"opaque", "mailto:%61ccess_token=component-sekrit"},
+		{"opaque-literal", "mailto:access_token=component-sekrit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.component, func(t *testing.T) {

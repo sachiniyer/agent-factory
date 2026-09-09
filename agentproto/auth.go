@@ -86,7 +86,16 @@ func redactAccessTokenQuery(u *url.URL) bool {
 // query pass: '&' does not end a value, so the scan would swallow every
 // parameter behind the one it just redacted.
 func redactAccessTokenComponents(u *url.URL) {
-	u.Opaque = RedactAccessTokenText(u.Opaque)
+	// u.Opaque is "encoded opaque data" (net/url/url.go:376) — unlike Path,
+	// Fragment, and User, url.Parse does NOT percent-decode it.  We must decode
+	// before scanning so that %61ccess_token= is matched; if the escape sequence
+	// is malformed we must not emit the raw opaque value, so fall back to
+	// redacting the whole field rather than leaving a credential in place.
+	if decoded, err := url.PathUnescape(u.Opaque); err != nil {
+		u.Opaque = accessTokenRedaction
+	} else {
+		u.Opaque = RedactAccessTokenText(decoded)
+	}
 	u.Host = RedactAccessTokenText(u.Host)
 	if path := RedactAccessTokenText(u.Path); path != u.Path {
 		// RawPath is honoured only while it still encodes Path, and a rewritten
