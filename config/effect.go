@@ -224,7 +224,7 @@ func WithRootAgentAdoptionNotice(key, notice string) string {
 	if key != "root_agent" && !strings.HasPrefix(key, "root_agent.") && key != "root_agents" {
 		return notice
 	}
-	return notice + " · An already-running root session is adopted as-is, so a program change also requires killing that session."
+	return notice + " · An already-running root session is adopted as-is, so changing its program, disabling it, or removing its enabling entry also requires killing that session."
 }
 
 // listenerRebindDeferredNotice is the honest notice when a network.listen_addr /

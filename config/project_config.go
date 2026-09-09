@@ -250,13 +250,21 @@ func projectForRoot(root string) (Project, bool, error) {
 // checkout marker. Bare linked worktrees share the common directory that owns
 // that marker, while two clones at the same path have different markers.
 func projectForRepo(repo *RepoContext) (Project, bool, error) {
+	return projectForRepoContext(context.Background(), repo)
+}
+
+func projectForRepoContext(ctx context.Context, repo *RepoContext) (Project, bool, error) {
 	if repo == nil {
 		return Project{}, false, nil
 	}
-	return projectForWorkspace(repo.WorkspacePath())
+	return projectForWorkspaceContext(ctx, repo.WorkspacePath())
 }
 
 func projectForWorkspace(root string) (Project, bool, error) {
+	return projectForWorkspaceContext(context.Background(), root)
+}
+
+func projectForWorkspaceContext(parent context.Context, root string) (Project, bool, error) {
 	if root == "" {
 		return Project{}, false, nil
 	}
@@ -264,7 +272,7 @@ func projectForWorkspace(root string) (Project, bool, error) {
 	if err != nil {
 		return Project{}, false, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
+	ctx, cancel := context.WithTimeout(parent, registeredProjectScanTimeout)
 	defer cancel()
 	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
 	if !ok {

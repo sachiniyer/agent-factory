@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -233,9 +234,22 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		report.markIncomplete("root agent program")
 		return
 	}
+	// Reuse doctor's binaryProbeTimeout: both checks wait on an operator-facing
+	// diagnostic whose external command may never answer, and neither should
+	// hold the whole report open indefinitely.
+	probeCtx, cancel := context.WithTimeout(context.Background(), binaryProbeTimeout)
+	defer cancel()
 	compared, drifted, unresolved := 0, 0, 0
 	for _, inst := range instances {
 		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
+			continue
+		}
+		if inst.StartupStateUnknown {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because its startup state is unknown", rootSessionDisplayPath(inst)),
+				"kill the startup-unknown root, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
 			continue
 		}
 		identityPath := inst.Worktree.RepoPath
@@ -246,9 +260,14 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			identityPath = inst.Path
 		}
 		if identityPath == "" {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the root agent program for %s because its repository path is missing", rootSessionDisplayPath(inst)),
+				"repair or remove the retained root session record, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
 			continue
 		}
-		resolved, resolveErr := config.ResolveRootAgentForInspectionWithConfig(cfg, identityPath, false)
+		resolved, resolveErr := config.ResolveRootAgentForInspectionWithConfigContext(probeCtx, cfg, identityPath, false)
 		if resolveErr != nil {
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
@@ -258,10 +277,23 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			continue
 		}
 		if config.RootAgentValueFailsClosed(resolved) {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured profile for live root at %s: %s", identityPath, config.RootAgentFailClosedReason(resolved)),
+				"repair the named config source, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
 			continue
 		}
 		profile, ok := resolved.Value.(config.RootAgent)
-		if !ok || !profile.Enabled {
+		if !ok {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured profile for live root at %s: unexpected root_agent resolution type %T", identityPath, resolved.Value),
+				"rerun `af doctor`; if this persists, report the incompatible config result", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if !profile.Enabled {
 			continue
 		}
 		commandPath := inst.Worktree.WorktreePath
@@ -271,7 +303,27 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		if commandPath == "" {
 			commandPath = identityPath
 		}
-		configuredProgram := daemon.RootAgentProgramForProfile(commandPath, profile)
+		var commandRepo *config.RepoContext
+		if strings.TrimSpace(profile.Program) == "" {
+			commandRepo, resolveErr = config.RepoFromPathContext(probeCtx, commandPath)
+			if resolveErr != nil {
+				unresolved++
+				report.Warn(sectionDaemon, "root agent program",
+					fmt.Sprintf("could not resolve the configured command for live root at %s: %s", commandPath, oneLine(resolveErr)),
+					"restore the checkout or mount, then rerun `af doctor`", false)
+				report.markIncomplete("root agent program")
+				continue
+			}
+		}
+		configuredProgram, programErr := daemon.RootAgentProgramForProfileInspection(commandRepo, profile)
+		if programErr != nil {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured command for live root at %s: %s", commandPath, oneLine(programErr)),
+				"repair the named config source, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
 		compared++
 		if configuredProgram == inst.Program {
 			continue
@@ -288,6 +340,15 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		}
 		report.Pass(sectionDaemon, "root agent program", detail)
 	}
+}
+
+func rootSessionDisplayPath(inst session.InstanceData) string {
+	for _, path := range []string{inst.Worktree.WorktreePath, inst.Path, inst.Worktree.RepoPath} {
+		if path != "" {
+			return path
+		}
+	}
+	return inst.Title
 }
 
 func rootSessionIsInert(inst session.InstanceData) bool {

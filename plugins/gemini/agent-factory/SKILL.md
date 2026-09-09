@@ -45,7 +45,7 @@ Root-agent configuration (global unless --project <id-or-path> selects a persona
   af config set root_agent <compact-json>             Merge the enabled/program profile as one table
   af config set root_agent.enabled <bool>             Enable or disable the singleton profile
   af config set root_agent.program <command>          Set the command while preserving enabled
-Root-agent configuration is frozen at daemon start. An already-running root session is adopted as-is; after a program change, kill the root, then restart the daemon.
+Root-agent configuration is frozen at daemon start. An already-running root session is adopted as-is, so changing its program, disabling it, or removing its enabling entry also requires killing that session; restart the daemon to apply the frozen configuration.
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
 

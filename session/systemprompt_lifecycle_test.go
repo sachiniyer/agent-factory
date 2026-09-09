@@ -55,7 +55,11 @@ func TestAfUsageReferenceRootAgentConfigCopy(t *testing.T) {
 			for _, want := range []string{
 				"af config set root_agent.enabled <bool>",
 				"af config set root_agent.program <command>",
-				"kill the root, then restart the daemon",
+				"changing its program",
+				"disabling it",
+				"removing its enabling entry",
+				"also requires killing that session",
+				"restart the daemon to apply the frozen configuration",
 			} {
 				if !strings.Contains(reference, want) {
 					t.Errorf("root-agent config guidance missing %q", want)

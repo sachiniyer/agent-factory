@@ -84,6 +84,21 @@ func ResolveRootAgentForInspectionWithConfig(global *Config, projectSelector str
 	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
 }
 
+// ResolveRootAgentForInspectionWithConfigContext is the bounded diagnostic
+// form used by non-interactive inspections. Unlike the human-invoked explain
+// path above, every repository probe shares the caller's deadline and an
+// unanswered legacy lookup is returned as an error rather than read as absent.
+func ResolveRootAgentForInspectionWithConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
+	if global == nil {
+		return ResolvedValue{}, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
+	}
+	assembly, err := assembleRootAgentInspectionInputsFromConfigContext(ctx, global, projectSelector, strictProjectLookup)
+	if err != nil {
+		return ResolvedValue{}, err
+	}
+	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
+}
+
 func resolveRootAgentInspectionAssembly(assembly rootAgentInspectionAssembly, projectSelected bool) ResolvedValue {
 	if assembly.failClosed != "" {
 		return rootAgentFailClosedValue(assembly)
@@ -148,6 +163,14 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 }
 
 func assembleRootAgentInspectionInputsFromConfig(global *Config, projectSelector string, strictProjectLookup bool) (rootAgentInspectionAssembly, error) {
+	return assembleRootAgentInspectionInputsFromConfigWithContext(context.Background(), global, projectSelector, strictProjectLookup, false)
+}
+
+func assembleRootAgentInspectionInputsFromConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (rootAgentInspectionAssembly, error) {
+	return assembleRootAgentInspectionInputsFromConfigWithContext(ctx, global, projectSelector, strictProjectLookup, true)
+}
+
+func assembleRootAgentInspectionInputsFromConfigWithContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup, bounded bool) (rootAgentInspectionAssembly, error) {
 	out := rootAgentInspectionAssembly{
 		locs:   rootAgentLocations{globalPath: global.source.path},
 		inputs: RootAgentInputs{Global: GlobalRootAgentLayer(global)},
@@ -163,17 +186,38 @@ func assembleRootAgentInspectionInputsFromConfig(global *Config, projectSelector
 		if err != nil {
 			return rootAgentInspectionAssembly{}, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
-		repo, err := RepoFromPath(abs)
+		repo, err := RepoFromPathContext(ctx, abs)
 		if err != nil {
 			return rootAgentInspectionAssembly{}, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
-		legacy, key := LegacyRootAgentForRepo(global, repo.ID)
+		var legacy *RootAgentConfig
+		var key string
+		if bounded {
+			legacy, key, err = LegacyRootAgentForRepoContext(ctx, global, repo.ID)
+			if err != nil {
+				return rootAgentInspectionAssembly{}, err
+			}
+		} else {
+			legacy, key = LegacyRootAgentForRepo(global, repo.ID)
+		}
 		if legacy != nil {
 			out.inputs.Legacy = legacy
 			out.locs.legacyKey = key
 		}
-		project, found, err := projectForRepo(repo)
+		var project Project
+		var found bool
+		if bounded {
+			project, found, err = projectForRepoContext(ctx, repo)
+			if err == nil && !found && ctx.Err() != nil {
+				err = fmt.Errorf("could not inspect the registered project before the repository probe deadline: %w", ctx.Err())
+			}
+		} else {
+			project, found, err = projectForRepo(repo)
+		}
 		if err != nil {
+			if bounded && ctx.Err() != nil {
+				return rootAgentInspectionAssembly{}, err
+			}
 			if strictProjectLookup {
 				return rootAgentInspectionAssembly{}, err
 			}
@@ -289,6 +333,21 @@ func rootAgentFailClosedValue(assembly rootAgentInspectionAssembly) ResolvedValu
 // because no config source decided it.
 func RootAgentValueFailsClosed(rv ResolvedValue) bool {
 	return rv.Key == "root_agent" && len(rv.Origins) == 0
+}
+
+// RootAgentFailClosedReason returns the cause carried by a fail-closed
+// root-agent inspection. The renderer repeats the same cause on every affected
+// candidate; diagnostics use the first one rather than re-deriving the marker.
+func RootAgentFailClosedReason(rv ResolvedValue) string {
+	if !RootAgentValueFailsClosed(rv) {
+		return ""
+	}
+	for _, candidate := range rv.Candidates {
+		if candidate.Reason != "" {
+			return candidate.Reason
+		}
+	}
+	return "the root-agent profile failed closed for an unknown reason"
 }
 
 // ProjectFailClosedRootAgentLeaf projects one leaf of a fail-closed

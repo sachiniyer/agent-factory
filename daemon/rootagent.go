@@ -846,18 +846,33 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 	if strings.TrimSpace(ra.Program) != "" {
 		return ra.Program
 	}
-	program := "claude"
 	repo, err := config.RepoFromPath(repoRoot)
 	if err == nil {
-		var resolved *config.ResolvedConfig
-		resolved, err = config.ResolveConfigForRepo(repo)
+		var program string
+		program, err = rootAgentProgramForResolvedRepo(repo, ra, config.ResolveConfigForRepo)
 		if err == nil {
-			program = config.ResolveProgram(&resolved.Config, "claude")
+			return program
 		}
 	}
-	if err != nil {
-		log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
+	log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
+	return finishRootAgentProgram("claude")
+}
+
+func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAgent, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
+	if strings.TrimSpace(ra.Program) != "" {
+		return ra.Program, nil
 	}
+	if repo == nil {
+		return "", fmt.Errorf("repo context is required for the default root-agent program")
+	}
+	resolved, err := resolve(repo)
+	if err != nil {
+		return "", err
+	}
+	return finishRootAgentProgram(config.ResolveProgram(&resolved.Config, "claude")), nil
+}
+
+func finishRootAgentProgram(program string) string {
 	// Only ensure the claude-only flag when the resolved command actually
 	// runs claude: a program_overrides entry may point "claude" at another
 	// program that exits on the unknown flag (#1116 defect class — e.g. the
@@ -869,9 +884,10 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 	return program
 }
 
-// RootAgentProgramForProfile exposes the daemon's exact root command resolution
-// to read-only diagnostics. It must stay a thin wrapper so doctor never compares
-// a live root against a second, subtly different interpretation of the profile.
-func RootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
-	return rootAgentProgramForProfile(repoRoot, ra)
+// RootAgentProgramForProfileInspection exposes the daemon's exact command
+// interpretation to read-only diagnostics. The caller resolves the repository
+// under its own deadline; config resolution suppresses the durable in-repo load
+// observation that runtime callers intentionally record.
+func RootAgentProgramForProfileInspection(repo *config.RepoContext, ra config.RootAgent) (string, error) {
+	return rootAgentProgramForResolvedRepo(repo, ra, config.ResolveConfigForRepoInspection)
 }
