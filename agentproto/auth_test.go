@@ -111,9 +111,8 @@ func TestRedactAccessTokenURLRedactsEveryKeyCase(t *testing.T) {
 // The set of components is closed, so sweeping it is a claim the next added
 // field cannot quietly falsify, unlike "the separators we thought of".
 func TestRedactAccessTokenURLRedactsEveryComponent(t *testing.T) {
-	// Every case also carries a query token, so the structured pass matches and
-	// the whole-string text fallback never runs. That is the path the component
-	// token has to survive redaction on.
+	// Every case here carries a query token, exercising the query-match branch
+	// where the component sweep always ran (the path that always worked).
 	for _, tc := range []struct {
 		component string
 		raw       string
@@ -131,6 +130,42 @@ func TestRedactAccessTokenURLRedactsEveryComponent(t *testing.T) {
 					t.Errorf("RedactAccessTokenURL(%q) = %q, %s token %q survived",
 						tc.raw, got, tc.component, secret)
 				}
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenURLRedactsPercentEncodedComponentKey is the regression
+// guard for the leak that motivated un-gating the component sweep. When a
+// URL's only access_token lives in a component (fragment / path / userinfo) and
+// its key is percent-encoded (%61ccess_token=), the literal-needle text pass
+// cannot see the decoded key — only the component sweep, which reads url.URL's
+// percent-DECODED fields, can. The sweep used to be gated behind
+// redactAccessTokenQuery, so a component-only percent-encoded key took the
+// early return and survived the redaction boundary verbatim. These cases
+// deliberately carry NO query access_token so they exercise the no-query
+// branch where the sweep was previously skipped; the last case carries one to
+// guard the query-match branch still redacts the encoded component.
+func TestRedactAccessTokenURLRedactsPercentEncodedComponentKey(t *testing.T) {
+	cases := []struct {
+		component string
+		raw       string
+	}{
+		{"fragment", "http://box:8080/callback#%61ccess_token=component-sekrit"},
+		{"path", "http://box:8080/%61ccess_token=component-sekrit"},
+		{"userinfo", "http://user:%61ccess_token=component-sekrit@box:8080/"},
+		{"fragment-with-query-token", "http://box:8080/callback?access_token=q#%61ccess_token=component-sekrit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.component, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, "component-sekrit") || strings.Contains(got, "q-sekrit") {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; %s token survived",
+					tc.raw, got, tc.component)
+			}
+			if !strings.Contains(got, accessTokenRedaction) {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; want redaction marker",
+					tc.raw, got)
 			}
 		})
 	}

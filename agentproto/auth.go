@@ -34,13 +34,22 @@ func RedactAccessTokenURL(raw string) string {
 		// An unparseable URL cannot be safely separated from its credential.
 		return "[url redacted]"
 	}
-	if !redactAccessTokenQuery(parsed) {
-		// URL.Query discards malformed query pairs, so a structured miss says
-		// nothing about the raw text. The text pass reads the whole string
-		// rather than trusting a partially parsed query.
-		return RedactAccessTokenText(raw)
-	}
+	found := redactAccessTokenQuery(parsed)
+	// Run the percent-decoding component sweep regardless of the query result.
+	// url.URL's string fields (Fragment/Path/Opaque/Host/User) are url.Parse's
+	// percent-DECODED forms, so this is the only pass that can see a key the raw
+	// text carries percent-encoded (%61ccess_token= / access%5Ftoken=). Gating
+	// it on the query match left such keys unreachable when the query carried no
+	// access_token: the literal-needle text fallback does not decode, so a
+	// component-only percent-encoded key survived the redaction boundary.
 	redactAccessTokenComponents(parsed)
+	if !found {
+		// The raw query may still hold a literal access_token= in a pair that
+		// url.Query discarded, so a structured miss says nothing about the raw
+		// text. Scan the SERIALIZED url rather than raw so component tokens the
+		// sweep already redacted are not re-read from the un-decoded string.
+		return RedactAccessTokenText(parsed.String())
+	}
 	return parsed.String()
 }
 
