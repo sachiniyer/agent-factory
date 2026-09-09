@@ -20,8 +20,9 @@ import (
 )
 
 var (
-	rootAgentProgramProbeTimeout = binaryProbeTimeout
-	inspectRootAgentProgram      = daemon.RootAgentProgramForProfileInspectionContext
+	rootAgentProgramProbeTimeout  = binaryProbeTimeout
+	resolveRootAgentForInspection = config.ResolveRootAgentForInspectionWithConfigContext
+	inspectRootAgentProgram       = daemon.RootAgentProgramForProfileInspectionContext
 )
 
 func selfPID() int { return os.Getpid() }
@@ -239,11 +240,6 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		report.markIncomplete("root agent program")
 		return
 	}
-	// Reuse doctor's binaryProbeTimeout: both checks wait on an operator-facing
-	// diagnostic whose external command may never answer, and neither should
-	// hold the whole report open indefinitely.
-	probeCtx, cancel := context.WithTimeout(context.Background(), rootAgentProgramProbeTimeout)
-	defer cancel()
 	compared, drifted, unresolved := 0, 0, 0
 	for _, inst := range instances {
 		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
@@ -280,8 +276,13 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			report.markIncomplete("root agent program")
 			continue
 		}
-		resolved, resolveErr := config.ResolveRootAgentForInspectionWithConfigContext(probeCtx, cfg, identityPath, false)
+		// Reuse doctor's binaryProbeTimeout independently for each root: one stale
+		// mount is an unknown answer about that root, not permission to spend the
+		// probe budget of every healthy root that follows it in the inventory.
+		probeCtx, cancel := context.WithTimeout(context.Background(), rootAgentProgramProbeTimeout)
+		resolved, resolveErr := resolveRootAgentForInspection(probeCtx, cfg, identityPath, false)
 		if resolveErr != nil {
+			cancel()
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("could not resolve the configured profile for live root at %s: %s", identityPath, oneLine(resolveErr)),
@@ -290,6 +291,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			continue
 		}
 		if config.RootAgentValueFailsClosed(resolved) {
+			cancel()
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("could not inspect the configured profile for live root at %s: %s", identityPath, config.RootAgentFailClosedReason(resolved)),
@@ -299,6 +301,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		}
 		profile, ok := resolved.Value.(config.RootAgent)
 		if !ok {
+			cancel()
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("could not inspect the configured profile for live root at %s: unexpected root_agent resolution type %T", identityPath, resolved.Value),
@@ -307,6 +310,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			continue
 		}
 		if !profile.Enabled {
+			cancel()
 			drifted++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("live root at %s remains running although its configured profile is disabled · the live root was adopted as-is", identityPath),
@@ -315,6 +319,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		}
 		runningProgram := inst.RuntimeProgram
 		if strings.TrimSpace(runningProgram) == "" {
+			cancel()
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("could not compare the root agent program for %s because its resolved runtime command was not recorded", rootSessionDisplayPath(inst)),
@@ -333,6 +338,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		if daemon.RootAgentProfileNeedsRepoConfig(profile) {
 			commandRepo, resolveErr = config.RepoFromPathContext(probeCtx, commandPath)
 			if resolveErr != nil {
+				cancel()
 				unresolved++
 				report.Warn(sectionDaemon, "root agent program",
 					fmt.Sprintf("could not resolve the configured command for live root at %s: %s", commandPath, oneLine(resolveErr)),
@@ -342,6 +348,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			}
 		}
 		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, cfg)
+		cancel()
 		if programErr != nil {
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",

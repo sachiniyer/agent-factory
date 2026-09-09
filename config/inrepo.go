@@ -182,6 +182,26 @@ func InRepoConfigHash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// InRepoConfigFingerprint returns a content identity for the checked-in config
+// currently selected for repoRoot. The filename is part of the identity because
+// config.toml and config.json have different parsers; "none" identifies absence.
+// It uses the same guarded read as LoadInRepoConfig, so cache validators cannot
+// bypass the loader's symlink, regular-file, or dual-file checks.
+func InRepoConfigFingerprint(repoRoot string) (string, error) {
+	raw, path, err := readInRepoConfigFile(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return inRepoConfigFingerprint(raw, path), nil
+}
+
+func inRepoConfigFingerprint(raw []byte, path string) string {
+	if path == "" {
+		return "none"
+	}
+	return filepath.Base(path) + ":" + InRepoConfigHash(raw)
+}
+
 // readInRepoConfigFile locates and reads the repo's in-repo config file
 // (config.toml or config.json — locateInRepoConfigFile rejects a repo with
 // both) with the path safety guards the location demands — the file ships

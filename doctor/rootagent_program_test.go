@@ -214,6 +214,48 @@ func TestRootAgentProgramInspectionBoundsCommandConfigLoads(t *testing.T) {
 	require.Contains(t, report.Incomplete, "root agent program")
 }
 
+func TestRootAgentProgramInspectionBudgetsEachRootIndependently(t *testing.T) {
+	opts := testOptions(t, false)
+	firstRepo := filepath.Join(t.TempDir(), "first")
+	secondRepo := filepath.Join(t.TempDir(), "second")
+	cfg := config.DefaultConfig()
+	opts.sessionInventory = func() ([]session.InstanceData, error) {
+		return []session.InstanceData{
+			{Title: session.RootSessionTitle, RuntimeProgram: "/first", Liveness: session.LiveReady,
+				Path: firstRepo, Worktree: session.GitWorktreeData{RepoPath: firstRepo, WorktreePath: firstRepo}},
+			{Title: session.RootSessionTitle, RuntimeProgram: "/second", Liveness: session.LiveReady,
+				Path: secondRepo, Worktree: session.GitWorktreeData{RepoPath: secondRepo, WorktreePath: secondRepo}},
+		}, nil
+	}
+
+	previousTimeout := rootAgentProgramProbeTimeout
+	previousResolve := resolveRootAgentForInspection
+	previousInspect := inspectRootAgentProgram
+	rootAgentProgramProbeTimeout = 100 * time.Millisecond
+	resolveRootAgentForInspection = func(_ context.Context, _ *config.Config, path string, _ bool) (config.ResolvedValue, error) {
+		return config.ResolvedValue{Value: config.RootAgent{Enabled: true, Program: "/" + filepath.Base(path)}}, nil
+	}
+	secondInspected := false
+	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, profile config.RootAgent, _ *config.Config) (string, error) {
+		if profile.Program == "/first" {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("second root inherited the first root's deadline: %w", err)
+		}
+		secondInspected = true
+		return "/second", nil
+	}
+	t.Cleanup(func() { rootAgentProgramProbeTimeout = previousTimeout })
+	t.Cleanup(func() { resolveRootAgentForInspection = previousResolve })
+	t.Cleanup(func() { inspectRootAgentProgram = previousInspect })
+
+	report := runRootAgentProgramCheck(t, opts, cfg)
+	require.True(t, secondInspected, "the healthy second root must receive its own probe budget")
+	require.Contains(t, report.Incomplete, "root agent program")
+}
+
 func TestRootAgentUnreadablePersonalConfigIsIncomplete(t *testing.T) {
 	opts := testOptions(t, false)
 	repoPath := filepath.Join(t.TempDir(), "repo")

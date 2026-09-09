@@ -53,6 +53,10 @@ const rootEnsureEscalationThreshold = 6
 var (
 	rootEnsureBackoffBase = 10 * time.Second
 	rootEnsureBackoffMax  = 5 * time.Minute
+	// Checked-in configuration changes outside ApplyConfig (for example, on a
+	// branch switch). Revalidate its content identity off the poll goroutine on
+	// this cadence; the expensive command resolution reruns only when it changed.
+	rootProgramDriftConfigInspectionInterval = 30 * time.Second
 	// A transcript creation or removal can lag one poll without affecting the
 	// live root. Bound the directory scan instead of statting every historical
 	// transcript on the daemon's default one-second ensure cadence.
@@ -127,10 +131,10 @@ type rootEnsureState struct {
 	programDriftLoggedRepoID string
 	// The default root command and bare agent names require repository/config
 	// resolution. Cache that answer after resolving it off the ensure sweep; the
-	// frozen profile plus the current ApplyConfig epoch make it stable, while the
-	// running program remains cheap to compare every tick. Repository identity is
-	// part of the discriminator because a legacy configured path can be repointed
-	// without changing the state key.
+	// key covers the frozen profile, ApplyConfig epoch, repository identity,
+	// workspace, and checked-in config content. The last input is periodically
+	// revalidated off the poll goroutine because a branch switch has no
+	// ApplyConfig boundary; a stale cache is never compared before that probe.
 	programDriftResolving         bool
 	programDriftResolvingEpoch    uint64
 	programDriftResolved          bool
@@ -139,6 +143,10 @@ type rootEnsureState struct {
 	programDriftResolvedWorkspace string
 	programDriftResolvedProfile   config.RootAgent
 	programDriftConfiguredProgram string
+	programDriftInRepoFingerprint string
+	programDriftNextConfigCheck   time.Time
+	// Test seam between the latch's two runtime-evidence validations.
+	programDriftBeforeLatchForTest func()
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot
 	// one-second ensure path.

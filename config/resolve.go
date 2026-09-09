@@ -70,6 +70,11 @@ type ResolvedConfig struct {
 	// InRepoConfigFile is the repo-relative filename selected by the loader.
 	// It stays empty when no in-repo file was loaded.
 	InRepoConfigFile string `json:"-" toml:"-"`
+	// InRepoConfigFingerprint identifies the exact checked-in config bytes and
+	// parser that contributed to this resolution, or "none" when no file exists.
+	// Long-lived consumers use it to prove a cached resolution still describes
+	// the working tree without reconstructing precedence themselves.
+	InRepoConfigFingerprint string `json:"-" toml:"-"`
 
 	// Resolution is produced by the same manifest-driven pass that populated
 	// the effective fields above. Renderers consume it directly; they never
@@ -345,6 +350,7 @@ func resolveConfigRootsWithOptions(
 	}
 
 	res.InRepoConfigFile = inRepoConfigFile
+	res.InRepoConfigFingerprint = inRepoConfigFingerprint(raw, inRepoConfigFile)
 
 	// Rewrite relative hook command paths to absolute against workspaceRoot
 	// (#834). This is the single chokepoint for the rewrite: every exec of a
