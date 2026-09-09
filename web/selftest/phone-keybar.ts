@@ -231,7 +231,7 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     await expect(button).toHaveAttribute("data-state", "once");
     await bar.getByRole("button", { name: "Arrows", exact: true }).click();
     await bar.getByRole("button", { name: arrow, exact: true }).click();
-    await bar.getByRole("button", { name: "Back", exact: true }).click();
+    await bar.getByRole("button", { name: "More keys", exact: true }).click();
     await expect(button).toHaveAttribute("data-state", "off");
     await expect(button).toHaveAttribute("aria-description", "Double tap to lock");
     await expect(page.locator(".af-pane-host .xterm-helper-textarea").first()).toBeFocused();
@@ -242,7 +242,7 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
   before = stream();
   await bar.getByRole("button", { name: "Arrows", exact: true }).click();
   await bar.getByRole("button", { name: "↑", exact: true }).click();
-  await bar.getByRole("button", { name: "Back", exact: true }).click();
+  await bar.getByRole("button", { name: "More keys", exact: true }).click();
   await expect.poll(stream).toBe(before + "\x1b[1;5A");
   await expect(ctrl).toHaveAttribute("data-state", "locked");
   await page.keyboard.insertText("x");

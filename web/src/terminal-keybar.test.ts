@@ -15,7 +15,7 @@ test("terminal key bytes match physical keys", () => {
   assert.equal(keyBytes("ß", true), "ß");
 });
 
-test("one shot consumes only the next character, including committed composition text", () => {
+test("one shot consumes only the next non-composed character", () => {
   const state = new StickyModifiers();
   state.tap("Ctrl", 0);
   assert.equal(state.input("cd"), "\x03d");

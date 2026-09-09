@@ -109,6 +109,7 @@ which passes in green.
 [Full perf/visual validation](final-perf-green.txt) passes all five visual tests
 and all web/TUI budgets. Unit tests pass 745/745; typecheck, bundle build,
 strict MkDocs, and Go/lint gates pass. No golden or budget was updated.
+
 ## Post-composition soft input
 
 Codex thread 3955185264 identified a phone IME commit arriving as `insertText`
