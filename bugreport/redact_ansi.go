@@ -1,9 +1,6 @@
 package bugreport
 
 import (
-	"path/filepath"
-	"unicode/utf8"
-
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
@@ -13,20 +10,19 @@ import (
 // byte as a delimiter in ordinary text.
 type ansiTextContext struct {
 	starts map[int]int
-	ends   map[int]int
 }
 
 func parseANSITextContext(s string) ansiTextContext {
-	context := ansiTextContext{starts: make(map[int]int), ends: make(map[int]int)}
+	context := ansiTextContext{starts: make(map[int]int)}
 	state := byte(0)
 	for offset := 0; offset < len(s); {
 		sequence, width, n, nextState := xansi.DecodeSequence(s[offset:], state, nil)
 		if n <= 0 {
 			break
 		}
-		if state == 0 && nextState == 0 && width == 0 && len(sequence) > 1 && sequence[0] == '\x1b' {
+		if state == 0 && nextState == 0 && width == 0 && len(sequence) > 1 &&
+			isANSISequenceIntroducer(sequence[0]) {
 			context.starts[offset] = offset + n
-			context.ends[offset+n] = offset
 		}
 		offset += n
 		state = nextState
@@ -34,47 +30,41 @@ func parseANSITextContext(s string) ansiTextContext {
 	return context
 }
 
+func isANSISequenceIntroducer(b byte) bool {
+	switch b {
+	case '\x1b', xansi.DCS, xansi.SOS, xansi.CSI, xansi.OSC, xansi.PM, xansi.APC:
+		return true
+	default:
+		return false
+	}
+}
+
 func (r *redactor) appendANSIPathSpans(spans []redactionSpan, s string) []redactionSpan {
 	context := parseANSITextContext(s)
 	if len(context.starts) == 0 {
 		return spans
 	}
-	worktreeBoundary := func(s string, start, end int) bool {
-		return derivedWorktreePathBoundaryWithContext(s, start, end, context.pathStartsAt, context.pathEndsAt)
-	}
-	rootBoundary := func(s string, start, end int) bool {
-		return knownRootTextBoundaryWithContext(s, start, end, context.pathStartsAt, context.pathEndsAt)
-	}
-	spans = r.appendWorktreePathTitleSpansWithBoundary(spans, s, worktreeBoundary)
-	spans = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, s, worktreeBoundary)
-	return r.appendKnownRootSpansWithBoundary(spans, s, rootBoundary)
+	logical := context.sourceMappedText(s)
+	spans = r.appendSourceMappedPathSpans(
+		spans,
+		logical,
+		derivedWorktreePathBoundary,
+		knownRootTextBoundary,
+	)
+	return r.appendSourceMappedURIPathSpans(spans, logical)
 }
 
-func (c ansiTextContext) pathStartsAt(s string, start int) bool {
-	for {
-		before, ok := c.ends[start]
-		if !ok {
-			return pathStartsAt(s, start)
+func (c ansiTextContext) sourceMappedText(s string) sourceMappedText {
+	value := make([]byte, 0, len(s))
+	source := make([]textSourceRange, 0, len(s))
+	for offset := 0; offset < len(s); {
+		if after, ok := c.starts[offset]; ok {
+			offset = after
+			continue
 		}
-		start = before
+		value = append(value, s[offset])
+		source = append(source, textSourceRange{start: offset, end: offset + 1})
+		offset++
 	}
-}
-
-func (c ansiTextContext) pathEndsAt(s string, start, end int) bool {
-	originalEnd := end
-	for {
-		after, ok := c.starts[end]
-		if !ok {
-			break
-		}
-		end = after
-	}
-	if end == originalEnd {
-		return pathEndsAt(s, start, end)
-	}
-	if end == len(s) || s[end] == byte(filepath.Separator) {
-		return true
-	}
-	after, _ := utf8.DecodeRuneInString(s[end:])
-	return isPathTextDelimiter(after)
+	return sourceMappedText{value: string(value), source: source}
 }

@@ -21,18 +21,22 @@ const (
 // Recognition model
 //
 //   - Rendered and free diagnostic text use ordinary filesystem/text boundaries.
-//     A URI is a self-identifying nested context: a valid scheme and the parsed
-//     URL.Path, not a delimiter list, decide whether the registered path is
-//     complete.
+//     A URI is a self-identifying nested context: a valid scheme and the parsed,
+//     percent-decoded URL.Path decide which bytes form its path. The path is
+//     source-mapped before matching, so encoded bytes anywhere in a root or
+//     contextual sibling title cannot hide it; query and fragment values remain
+//     outside that view. An independently valid URI inside either is recognized
+//     separately; a query's literal '&' field separator bounds that nested URI.
 //   - A daemon log is identified by the collectLog call site. Valid %q fields
 //     are decoded with Go string syntax. Shell syntax is enabled only for
 //     command ranges proven by a fixed AF log emitter; shell-looking user/output
 //     text is not guessed to be a command. Current emitters quote commands. A
 //     legacy raw hook command may span physical lines and ends only when the
 //     exact prefix grammar configured by log.Initialize proves a new record.
-//     Complete ANSI controls are parsed as zero-width wrappers around paths in
-//     log and diagnostic provenance; an arbitrary ESC byte is not a path
-//     delimiter.
+//     Complete ANSI controls are parsed as zero-width bytes in a source-mapped
+//     logical view of log and diagnostic provenance, including when styling is
+//     embedded inside a path. An arbitrary ESC byte is not removed or treated
+//     as a path delimiter.
 //   - A config document is identified by configSection.Format. Its string
 //     scalars are decoded with that declared JSON or TOML grammar. Only paths
 //     inside fields whose config-schema consumer invokes /bin/sh -c use shell

@@ -68,6 +68,7 @@ func (r *redactor) genericTextSpans(s string) []redactionSpan {
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
+	spans = r.appendURIPathSpans(spans, s)
 	spans = appendCredentialSpans(spans, s)
 	return r.appendUsernameSpans(spans, s)
 }
@@ -82,6 +83,7 @@ func (r *redactor) knownTextSpans(s string) []redactionSpan {
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
+	spans = r.appendURIPathSpans(spans, s)
 	return spans
 }
 

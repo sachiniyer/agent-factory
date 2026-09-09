@@ -153,10 +153,7 @@ func (r *redactor) shellCommandPathSpans(command string) []redactionSpan {
 	return r.appendShellLiteralPathSpans(spans, context.literalRuns)
 }
 
-type shellWordRange struct {
-	start int
-	end   int
-}
+type shellWordRange = textSourceRange
 
 type shellPathContext struct {
 	expansions        map[int][]shellWordRange
@@ -166,10 +163,7 @@ type shellPathContext struct {
 	source            string
 }
 
-type shellLiteralRun struct {
-	value  string
-	source []shellWordRange
-}
+type shellLiteralRun = sourceMappedText
 
 func parseShellPathContext(command string) (shellPathContext, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
@@ -222,18 +216,12 @@ func (r *redactor) appendShellLiteralPathSpans(
 	runs []shellLiteralRun,
 ) []redactionSpan {
 	for _, run := range runs {
-		inner := r.appendWorktreePathTitleSpans(nil, run.value)
-		inner = r.appendWorktreeSubdirectoryTitleSpans(inner, run.value)
-		inner = r.appendKnownRootSpans(inner, run.value)
-		for _, span := range inner {
-			if span.start < 0 || span.end <= span.start || span.end > len(run.source) {
-				continue
-			}
-			mapped := span
-			mapped.start = run.source[span.start].start
-			mapped.end = run.source[span.end-1].end
-			spans = append(spans, mapped)
-		}
+		spans = r.appendSourceMappedPathSpans(
+			spans,
+			run,
+			derivedWorktreePathBoundary,
+			knownRootTextBoundary,
+		)
 	}
 	return spans
 }
