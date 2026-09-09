@@ -102,6 +102,8 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	var resp SnapshotResponse
 	dataInto(t, env, &resp)
 	require.Empty(t, resp.Instances)
+	require.Equal(t, m.lifecycle.snapshot().bootID, resp.BootID,
+		"Snapshot must identify the daemon process that owns in-flight requests")
 	require.Equal(t, opLockTimeout.Milliseconds(), resp.OperationLockTimeoutMS,
 		"the browser must receive the daemon's live admission bound")
 	require.GreaterOrEqual(t, resp.OperationClockMS, clockBefore,

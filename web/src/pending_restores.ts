@@ -10,6 +10,7 @@ export type RestoreEvidence =
     generation: number;
     operationLockTimeoutMs?: number;
     operationClockMs?: number;
+    daemonBootId?: string;
   }
   | { kind: "updated" | "restored"; id: string };
 
@@ -35,6 +36,7 @@ type RestoreTicket = {
   retryDelayMs: number;
   reconcileGeneration: number;
   restoreEligible: RestoreRow["restoreEligible"];
+  daemonBootId: string | null;
 };
 
 /** Request fences outlive dialogs; uncertain outcomes require correlated evidence. */
@@ -44,6 +46,8 @@ export class PendingRestores {
   private rows: ReadonlyArray<RestoreRow> | null = null;
   private operationLockTimeoutMs: number | null = null;
   private operationClockMs: number | null = null;
+  private daemonBootId: string | null = null;
+  private daemonBootGeneration = -1;
 
   constructor(
     private readonly changed: (ids: ReadonlySet<string>) => void,
@@ -81,6 +85,7 @@ export class PendingRestores {
       retryDelayMs: RESTORE_RECONCILE_RETRY_MIN_MS,
       reconcileGeneration: 0,
       restoreEligible,
+      daemonBootId: this.daemonBootId,
     };
     this.tickets.set(id, ticket);
     this.changed(new Set(this.tickets.keys()));
@@ -126,7 +131,15 @@ export class PendingRestores {
 
   observe(rows: ReadonlyArray<RestoreRow>, evidence?: RestoreEvidence): void {
     this.rows = rows;
+    let daemonRestarted = false;
     if (evidence?.kind === "snapshot") {
+      const daemonBootId = typeof evidence.daemonBootId === "string" && evidence.daemonBootId !== ""
+        ? evidence.daemonBootId : null;
+      if (daemonBootId !== null && evidence.generation > this.daemonBootGeneration) {
+        daemonRestarted = this.daemonBootId !== null && daemonBootId !== this.daemonBootId;
+        this.daemonBootId = daemonBootId;
+        this.daemonBootGeneration = evidence.generation;
+      }
       const operationLockTimeoutMs = typeof evidence.operationLockTimeoutMs === "number" &&
         evidence.operationLockTimeoutMs >= 0 ? evidence.operationLockTimeoutMs : LEGACY_OPERATION_LOCK_TIMEOUT_MS;
       const operationClockMs = typeof evidence.operationClockMs === "number" &&
@@ -146,6 +159,14 @@ export class PendingRestores {
     const eligibility = new Map(rows.map(row => [row.id, row.restoreEligible]));
     let changed = false;
     for (const [id, ticket] of this.tickets) {
+      if (daemonRestarted && ticket.daemonBootId !== null && ticket.daemonBootId !== this.daemonBootId) {
+        // A daemon process cannot leave a request queued or running after it
+        // exits. This boot-id transition is correlated positive evidence; an
+        // absent id from an older daemon remains unknown and fails closed.
+        this.release(id, ticket);
+        changed = true;
+        continue;
+      }
       const authoritative = evidence?.kind === "updated" || evidence?.kind === "restored" || evidence?.kind === "snapshot";
       // A delayed recover-fence update may arrive after HTTP success. Only a
       // Snapshot issued afterward proves completion. Identity-only restored events

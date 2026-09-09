@@ -390,6 +390,38 @@ test("a pre-admission daemon clock sample cannot expire an uncertain restore", a
     "a client Snapshot cannot establish when this request entered daemon admission");
 });
 
+test("a changed daemon incarnation releases a previous process's uncertain restore", async () => {
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  const snapshot = (daemonBootId: string) => ({
+    kind: "snapshot" as const, generation: pending.beginSnapshot(), daemonBootId,
+  });
+  pending.observe(rows, snapshot("daemon-a"));
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+  pending.observe(rows, snapshot("daemon-a"));
+  assert.equal(pending.has("session"), true, "the same daemon cannot clear its uncertain request");
+
+  pending.reset();
+  pending.observe(rows, snapshot("daemon-b"));
+  assert.equal(pending.has("session"), false,
+    "a new daemon process proves the predecessor's request cannot still run");
+});
+
+test("a delayed Snapshot cannot fake a daemon restart for a newer request", async () => {
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
+  const oldGeneration = pending.beginSnapshot();
+  pending.observe(rows, { kind: "snapshot", generation: oldGeneration, daemonBootId: "daemon-a" });
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), daemonBootId: "daemon-b",
+  });
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+
+  pending.observe(rows, { kind: "snapshot", generation: oldGeneration, daemonBootId: "daemon-a" });
+  assert.equal(pending.has("session"), true,
+    "an older response cannot supersede the accepted daemon incarnation");
+});
+
 test("an older-daemon Snapshot cannot release without daemon admission evidence", async () => {
   let now = 1_000;
   const rows = [{ id: "session", restoreEligible: true }];

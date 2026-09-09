@@ -386,11 +386,13 @@ async function connect(candidate: string): Promise<void> {
   let sessions: SessionData[];
   let operationLockTimeoutMs: number | undefined;
   let operationClockMs: number | undefined;
+  let daemonBootId: string | undefined;
   try {
     const snapshot = await fetchSessionSnapshot(candidate);
     sessions = snapshot.sessions;
     operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
     operationClockMs = snapshot.operationClockMs;
+    daemonBootId = snapshot.daemonBootId;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     // A rejected credential is forgotten so the next load prompts cleanly instead of
@@ -451,7 +453,8 @@ async function connect(candidate: string): Promise<void> {
     registeredProjects,
   });
   applySessions(sessions, {
-    kind: "snapshot", generation: restoreSnapshot, operationLockTimeoutMs, operationClockMs,
+    kind: "snapshot", generation: restoreSnapshot,
+    operationLockTimeoutMs, operationClockMs, daemonBootId,
   }, sessions);
   resolvingRoute = false;
   resolveRoute();
@@ -1209,7 +1212,10 @@ function guardedTabRebind(
   void run()
     .then((snapshot) => {
       if (snapshot === null) return;
-      const { sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs } = snapshot;
+      const {
+        sessions, authoritative, generation,
+        operationLockTimeoutMs, operationClockMs, daemonBootId,
+      } = snapshot;
       const targetIdx = resolve(sessions);
       // Read the generation BEFORE committing the roster. The guard asks whether the
       // USER formed a newer intent during the await, and this commit's own rerender is
@@ -1224,7 +1230,7 @@ function guardedTabRebind(
       // user made during the await (pickSelection keeps their newer choice) — the one
       // input that deliberately does read the committed state.
       applySessions(sessions, {
-        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs,
+        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs, daemonBootId,
       }, authoritative);
       // Whether the session this gesture was aimed at survived the round trip. A
       // session killed by another client mid-flight ALSO moves the selection
@@ -1474,6 +1480,7 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
         kind: "snapshot", generation: snapshot.generation,
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId,
       }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
@@ -1520,6 +1527,7 @@ function reorderSessionTab(from: number, to: number): void {
         kind: "snapshot", generation: snapshot.generation,
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId,
       }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
@@ -2423,6 +2431,7 @@ interface AcceptedSessionSnapshot {
   generation: number;
   operationLockTimeoutMs?: number;
   operationClockMs?: number;
+  daemonBootId?: string;
 }
 async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnapshot | null> {
   if (token !== tok) return null;
@@ -2431,6 +2440,7 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
     let authoritative: SessionData[] = [];
     let operationLockTimeoutMs: number | undefined;
     let operationClockMs: number | undefined;
+    let daemonBootId: string | undefined;
     const sessions = await optimisticSessions.refresh(async () => {
       // refresh may retry after an intervening event. Carry the issuance stamp
       // and raw rows from the accepted attempt together to the commit site.
@@ -2439,10 +2449,11 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
       authoritative = snapshot.sessions;
       operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
       operationClockMs = snapshot.operationClockMs;
+      daemonBootId = snapshot.daemonBootId;
       return authoritative;
     });
     return sessions === null ? null : {
-      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs,
+      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId,
     };
   } catch (error) {
     // The gesture cannot safely rebind without its post-mutation roster. Keep
@@ -2497,6 +2508,7 @@ function requestResync(): void {
           kind: "snapshot", generation: restoreSnapshot,
           operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
           operationClockMs: snapshot.operationClockMs,
+          daemonBootId: snapshot.daemonBootId,
         }, sessions);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root

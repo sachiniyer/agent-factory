@@ -267,6 +267,8 @@ export interface WorktreeData {
 export interface SnapshotResponse {
 	instances: SessionData[] | null;
 	delivery_alarms?: unknown[];
+	/** Unique identity of the daemon process that produced this Snapshot. */
+	boot_id?: string;
 	/** Daemon lifecycle-operation admission bound, projected from its live value. */
 	operation_lock_timeout_ms?: number;
 	/** Process-local monotonic reading used to measure that admission bound. */

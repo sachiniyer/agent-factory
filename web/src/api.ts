@@ -289,6 +289,7 @@ export interface SessionSnapshot {
   sessions: SessionData[];
   operationLockTimeoutMs?: number;
   operationClockMs?: number;
+  daemonBootId?: string;
 }
 
 export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
@@ -297,6 +298,7 @@ export async function fetchSessionSnapshot(token: string): Promise<SessionSnapsh
     sessions: resp.instances ?? [],
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
+    daemonBootId: resp.boot_id,
   };
 }
 

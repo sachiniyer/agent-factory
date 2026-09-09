@@ -77,7 +77,7 @@ afterEach(() => {
   delete (globalThis as { fetch?: unknown }).fetch;
 });
 
-test("Snapshot carries the daemon's lifecycle admission clock and bound with its rows", async () => {
+test("Snapshot carries daemon identity and lifecycle admission timing with its rows", async () => {
   (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
     ok: true,
     status: 200,
@@ -87,6 +87,7 @@ test("Snapshot carries the daemon's lifecycle admission clock and bound with its
         instances: [{ id: "session" }],
         operation_lock_timeout_ms: 30_000,
         operation_clock_ms: 12_345,
+        boot_id: "daemon-a",
       },
       error: null,
     }),
@@ -95,6 +96,7 @@ test("Snapshot carries the daemon's lifecycle admission clock and bound with its
   assert.equal(snapshot.sessions[0]?.id, "session");
   assert.equal(snapshot.operationLockTimeoutMs, 30_000);
   assert.equal(snapshot.operationClockMs, 12_345);
+  assert.equal(snapshot.daemonBootId, "daemon-a");
 });
 
 // The backend-on-create contract (#1933). The daemon already accepted `backend`;
