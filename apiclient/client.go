@@ -284,7 +284,7 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 	// Status still wins over body decoding so malformed or zero-shaped proxy
 	// responses can never become a successful call.
 	if httpResp.StatusCode == http.StatusNotFound {
-		if daemonRejected404(raw) {
+		if routeNotServed404(raw, httpReq.URL.Path, c.remoteTransport == nil) {
 			return &RouteNotServedError{Route: httpReq.URL.Path, Detail: notServedDetail(raw)}
 		}
 		return &UnconfirmedHTTPResponseError{

@@ -137,11 +137,27 @@ func (e *UnconfirmedHTTPResponseError) Error() string {
 	return fmt.Sprintf("request to %s received an unverified HTTP %d response (%s); the request outcome could not be confirmed", e.Route, e.Status, e.Detail)
 }
 
-func daemonRejected404(raw []byte) bool {
+func routeNotServed404(raw []byte, route string, trustedLocalSocket bool) bool {
+	// A Unix-socket client has no HTTP intermediary: the peer bound at the
+	// selected AF home's 0600 socket is the daemon, including older daemons whose
+	// catch-all predates DaemonRejected.
+	if trustedLocalSocket {
+		return true
+	}
 	var env struct {
 		Error *apiproto.EnvelopeError `json:"error"`
 	}
-	return json.Unmarshal(raw, &env) == nil && env.Error != nil && env.Error.DaemonRejected
+	if json.Unmarshal(raw, &env) != nil || env.Error == nil {
+		return false
+	}
+	if env.Error.DaemonRejected {
+		return true
+	}
+	// DaemonRejected is additive. A remote daemon from before that field can
+	// still prove route absence with its exact catch-all envelope. Bind the legacy
+	// sentence to the requested path; a generic, mismatched, or non-envelope proxy
+	// 404 remains UnconfirmedHTTPResponseError.
+	return env.Error.Code == "" && env.Error.Message == fmt.Sprintf("unknown route %q", route)
 }
 
 // notServedDetail renders a 404 body for the refusal message: the daemon's own

@@ -195,7 +195,7 @@ func TestControlRoundTrips(t *testing.T) {
 	})
 
 	t.Run("HandoffSession preserves an intermediary 404 as uncertain", func(t *testing.T) {
-		c := statusServer(t, func(*http.Request) (int, []byte) {
+		c := remoteStatusServer(t, func(*http.Request) (int, []byte) {
 			return http.StatusNotFound, []byte("proxy could not read the upstream response")
 		})
 		_, err := c.HandoffSession(daemon.HandoffSessionRequest{To: "codex"})

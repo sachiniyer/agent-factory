@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,24 @@ func statusServer(t *testing.T, handle func(r *http.Request) (int, []byte)) *Cli
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return NewWithSocket(sockPath)
+}
+
+// remoteStatusServer is the intermediary-response seam. Unlike statusServer's
+// trusted Unix socket, this client crosses HTTP where a proxy can replace the
+// daemon's response and therefore needs positive origin evidence.
+func remoteStatusServer(t *testing.T, handle func(r *http.Request) (int, []byte)) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status, body := handle(r)
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewRemote(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	return c
 }
 
 func mustEnvelope(t *testing.T, env apiproto.Envelope) []byte {
@@ -144,11 +163,21 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		}
 	})
 
+	t.Run("a legacy remote daemon's unmarked catch-all", func(t *testing.T) {
+		c := remoteStatusServer(t, func(r *http.Request) (int, []byte) {
+			return http.StatusNotFound, mustEnvelope(t, apiproto.Failure(`unknown route "`+r.URL.Path+`"`))
+		})
+		_, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: "sandbox.ssh"})
+		if !IsRouteNotServed(err) {
+			t.Fatalf("a legacy daemon catch-all must retain route-skew handling, got %T: %v", err, err)
+		}
+	})
+
 	// A reverse proxy in front of the daemon can substitute its own 404 after the
 	// upstream mutation ran. Without the daemon provenance marker, absence and
 	// execution are indistinguishable, so the response must remain uncertain.
 	t.Run("a proxy's non-envelope 404", func(t *testing.T) {
-		c := statusServer(t, func(*http.Request) (int, []byte) {
+		c := remoteStatusServer(t, func(*http.Request) (int, []byte) {
 			return http.StatusNotFound, []byte("<html>\n<head><title>404 Not Found</title></head>\n</html>\n")
 		})
 		_, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
@@ -172,7 +201,7 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		`{"error":"not found"}`, // error present but not the envelope's object shape
 	} {
 		t.Run("a proxy's JSON 404: "+body, func(t *testing.T) {
-			c := statusServer(t, func(*http.Request) (int, []byte) {
+			c := remoteStatusServer(t, func(*http.Request) (int, []byte) {
 				return http.StatusNotFound, []byte(body)
 			})
 			resp, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
