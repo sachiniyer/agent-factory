@@ -12,8 +12,10 @@ import (
 )
 
 var (
-	hookProgressWriteFile = config.AtomicWriteFile
-	hookProgressRemoveAll = os.RemoveAll
+	hookProgressMkdirTemp       = os.MkdirTemp
+	hookProgressWriteFile       = config.AtomicWriteFile
+	hookProgressRenameNoReplace = renameHookProgressNoReplace
+	hookProgressRemoveAll       = os.RemoveAll
 )
 
 // Preserve continue-on-error semantics without leaving a pending hole before
@@ -25,28 +27,7 @@ func (p *hookProgress) recordLaunchFailure(ctx context.Context, index int, cause
 		return true
 	}
 	receipt := p.receipt(index)
-	temporary, err := os.MkdirTemp(p.Directory, ".launch-failed-")
-	if err != nil {
-		log.ErrorLog.Printf("cannot claim failed post-worktree hook entry %d: %v", index, err)
-		return false
-	}
-	published := false
-	defer func() {
-		if !published {
-			_ = hookProgressRemoveAll(temporary)
-		}
-	}()
-	markers := []struct{ name, value string }{
-		{name: "launch-failed", value: fmt.Sprintln(cause)},
-		{name: "exit", value: "125\n"},
-	}
-	for _, marker := range markers {
-		if err := hookProgressWriteFile(filepath.Join(temporary, marker.name), []byte(marker.value), 0600); err != nil {
-			log.ErrorLog.Printf("cannot record failed post-worktree hook entry %d: %v", index, err)
-			return false
-		}
-	}
-	if err := renameHookProgressNoReplace(temporary, receipt); err != nil {
+	if err := p.publishLaunchFailure(ctx, receipt, cause); err != nil {
 		if p.waitForEntryFinished(ctx, index) {
 			return true
 		}
@@ -56,8 +37,40 @@ func (p *hookProgress) recordLaunchFailure(ctx context.Context, index int, cause
 		log.ErrorLog.Printf("cannot publish failed post-worktree hook entry %d: %v", index, err)
 		return false
 	}
-	published = true
 	return p.waitForFailedClaimSync(ctx, index)
+}
+
+func (p *hookProgress) publishLaunchFailure(ctx context.Context, receipt string, cause error) error {
+	mkdirTemp := hookProgressMkdirTemp
+	writeFile := hookProgressWriteFile
+	renameNoReplace := hookProgressRenameNoReplace
+	removeAll := hookProgressRemoveAll
+	return boundedHookEntryRecoveryWrite(ctx, receipt, func() error {
+		temporary, err := mkdirTemp(p.Directory, ".launch-failed-")
+		if err != nil {
+			return fmt.Errorf("create private failure receipt: %w", err)
+		}
+		published := false
+		defer func() {
+			if !published {
+				_ = removeAll(temporary)
+			}
+		}()
+		markers := []struct{ name, value string }{
+			{name: "launch-failed", value: fmt.Sprintln(cause)},
+			{name: "exit", value: "125\n"},
+		}
+		for _, marker := range markers {
+			if err := writeFile(filepath.Join(temporary, marker.name), []byte(marker.value), 0600); err != nil {
+				return fmt.Errorf("write %s marker: %w", marker.name, err)
+			}
+		}
+		if err := renameNoReplace(temporary, receipt); err != nil {
+			return fmt.Errorf("publish failure receipt: %w", err)
+		}
+		published = true
+		return nil
+	})
 }
 
 func (p *hookProgress) waitForFailedClaimSync(ctx context.Context, index int) bool {
@@ -112,15 +125,23 @@ func (p *hookProgress) terminalizeInactiveClaim(ctx context.Context, index int, 
 	if state != hookEntryStarted {
 		return false
 	}
-	markers := []struct{ name, value string }{
-		{name: "launch-failed", value: fmt.Sprintf("scope ended before the claimed command recorded completion: %v\n", cause)},
-		{name: "exit", value: "125\n"},
-	}
-	for _, marker := range markers {
-		if err := hookProgressWriteFile(filepath.Join(p.receipt(index), marker.name), []byte(marker.value), 0600); err != nil {
-			log.ErrorLog.Printf("cannot terminalize abandoned post-worktree hook entry %d: %v", index, err)
-			return false
+	receipt := p.receipt(index)
+	writeFile := hookProgressWriteFile
+	err = boundedHookEntryRecoveryWrite(ctx, receipt, func() error {
+		markers := []struct{ name, value string }{
+			{name: "launch-failed", value: fmt.Sprintf("scope ended before the claimed command recorded completion: %v\n", cause)},
+			{name: "exit", value: "125\n"},
 		}
+		for _, marker := range markers {
+			if err := writeFile(filepath.Join(receipt, marker.name), []byte(marker.value), 0600); err != nil {
+				return fmt.Errorf("write %s marker: %w", marker.name, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.ErrorLog.Printf("cannot terminalize abandoned post-worktree hook entry %d: %v; leaving suffix pending", index, err)
+		return false
 	}
 	return true
 }
