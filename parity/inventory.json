@@ -813,7 +813,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts handoffSession -> HandoffSession; web/src/ui.ts Handoff action (shown on a handoff-capable selection via canHandoff); picker web/src/modals.ts handoffModal"
+        "pointer": "web/src/api.ts handoffSession -> HandoffSessionV2; web/src/ui.ts Handoff action (shown on a handoff-capable selection via canHandoff); picker web/src/modals.ts handoffModal"
       },
       "cli": {
         "status": "yes",
@@ -821,7 +821,7 @@
       },
       "verdict": "parity",
       "issue": "#2013",
-      "notes": "Closed across all three surfaces. #4018 adds an operator-selected account: app/handoff_accounts.go filters the current agent's registered accounts and preselects the project default; web/src/modals.ts filters accounts for the selected agent; api/sessions_handoff.go accepts --account with optional --to. All submit HandoffSessionRequest.Account to the shared account-swap transaction. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web now calls the existing HandoffSession public route through the same daemon path the TUI/CLI use — no parallel recovery logic — and renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSession.brief)."
+      "notes": "Closed across all three surfaces. #4018 adds an operator-selected account: app/handoff_accounts.go filters the current agent's registered accounts and preselects the project default; web/src/modals.ts filters accounts for the selected agent; api/sessions_handoff.go accepts --account with optional --to. All submit HandoffSessionRequest.Account to the shared account-swap transaction. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web calls the version-bound HandoffSessionV2 transport alias so the receiving daemon proves account-aware support in the mutation request itself. The legacy POST /v1/HandoffSession public route remains served and inventoried for older clients; both names delegate to the same daemon handler, so there is no parallel recovery logic. The web renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSessionV2.brief)."
     },
     {
       "id": "session.kill",
@@ -1689,7 +1689,7 @@
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
       "GetConfig": "config.read",
-      "HandoffSession": "session.handoff",
+      "HandoffSessionV2": "session.handoff",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
       "ListDirectory": "project.browse",
@@ -2345,9 +2345,9 @@
           "gap": "session.tab.create.web"
         }
       },
-      "HandoffSession": {
+      "HandoffSessionV2": {
         "brief": {
-          "ok": "Deliberate, mirroring the TUI's brief=ok: the web handoff is pick-agent-then-confirm, and the incoming agent's mission defaults to the session's stored prompt (which the web can set at create time and change via the live terminal). Putting a free-text mission field inside a one-decision confirm is a different interaction; `af sessions handoff --brief` is the surface for overriding the mission inline. The web sends id (the all-project client's collision-proof key, resolved first so a duplicate title cannot misroute the swap), title, repo_id, and to."
+          "ok": "Deliberate, mirroring the TUI's brief=ok: the web handoff is pick-agent-then-confirm, and the incoming agent's mission defaults to the session's stored prompt (which the web can set at create time and change via the live terminal). Putting a free-text mission field inside a one-decision confirm is a different interaction; `af sessions handoff --brief` is the surface for overriding the mission inline. The web sends id (the all-project client's collision-proof key, resolved first so a duplicate title cannot misroute the swap), title, repo_id, to, and account."
         }
       },
       "UpdateTask": {
