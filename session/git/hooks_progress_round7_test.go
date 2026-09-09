@@ -88,6 +88,9 @@ func TestHookProgressLiveCreateLeaseProtectsLaunchGap(t *testing.T) {
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, ".git"), []byte("gitdir: test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(tree, "ran")
 	repo := freshRepoConfig(t, []string{"true", "echo second >> " + shellQuoteForShim(marker)})
 	ctx, cancel := context.WithCancel(context.Background())

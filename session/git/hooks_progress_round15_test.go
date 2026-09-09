@@ -3,6 +3,7 @@
 package git
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -43,8 +44,15 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 				openHookLog, hookProgressWriteFile = originalOpen, originalWrite
 				g.SettleHookCreatePersistence()
 			})
-			done := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-			waitForClosed(t, done, 5*time.Second, "resumable create bailout did not stop")
+			ctx, cancel := context.WithCancel(context.Background())
+			done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
+			waitForHookTestCondition(t, 5*time.Second, failed.Load, "create bailout receipt failure was not reached")
+			waitForHookTestCondition(t, 5*time.Second, func() bool {
+				p.leaseMu.Lock()
+				defer p.leaseMu.Unlock()
+				return p.leaseHolds == 1
+			}, "runner did not release its lease hold")
+			requireOpen(t, done, "resumable create bailout reported completion")
 			lease, err := os.OpenFile(filepath.Join(p.Directory, "runner.lock"), os.O_RDWR, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -76,6 +84,8 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 			if outcome == "abort" && !os.IsNotExist(err) {
 				t.Fatalf("aborted create journal was not reclaimable: %v", err)
 			}
+			cancel()
+			waitForClosed(t, done, 5*time.Second, "cancelled create bailout did not close")
 		})
 	}
 }

@@ -41,6 +41,7 @@ func TestHookProgressNestedResumeRetainsCreateLease(t *testing.T) {
 	originalOpen, originalWrite := openHookLog, hookProgressWriteFile
 	originalStop, originalProbe := stopHookScopeUnits, runningHookPrefixesForResume
 	var opens atomic.Int32
+	var receiptAttempted atomic.Bool
 	openHookLog = func(kind hooklog.Kind) (*os.File, error) {
 		if opens.Add(1) > 1 {
 			return nil, errors.New("nested hook log unavailable")
@@ -48,6 +49,7 @@ func TestHookProgressNestedResumeRetainsCreateLease(t *testing.T) {
 		return originalOpen(kind)
 	}
 	hookProgressWriteFile = func(path string, data []byte, mode os.FileMode) error {
+		receiptAttempted.Store(true)
 		return errors.New("nested receipt unavailable")
 	}
 	stopHookScopeUnits = func(...string) error { return errors.New("manager unavailable") }
@@ -57,18 +59,32 @@ func TestHookProgressNestedResumeRetainsCreateLease(t *testing.T) {
 		stopHookScopeUnits, runningHookPrefixesForResume = originalStop, originalProbe
 		g.SettleHookCreatePersistence()
 	})
-	done := runPostWorktreeHooks(context.Background(), hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, done, 5*time.Second, "nested resumable bailout did not return")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
+	waitForHookTestCondition(t, 5*time.Second, receiptAttempted.Load, "nested receipt failure was not reached")
+	requireOpen(t, done, "nested resumable bailout reported completion")
 	if p.finished() || p.claimed(0) {
 		t.Fatal("nested resumable bailout terminalized the journal")
 	}
 	assertHookProgressLeaseLocked(t, p.Directory)
-	p.leaseMu.Lock()
-	holds := p.leaseHolds
-	p.leaseMu.Unlock()
-	if holds != 1 {
-		t.Fatalf("nested runners left %d lease holds, want the create hold only", holds)
+	var holds int
+	waitForHookTestCondition(t, 5*time.Second, func() bool {
+		p.leaseMu.Lock()
+		defer p.leaseMu.Unlock()
+		holds = p.leaseHolds
+		return holds == 2
+	}, "nested runner did not release its own lease hold")
+	if holds != 2 {
+		t.Fatalf("nested bailout left %d lease holds, want the waiting outer runner and create owner", holds)
 	}
+	cancel()
+	waitForClosed(t, done, 5*time.Second, "cancelled nested bailout did not close")
+	waitForHookTestCondition(t, 5*time.Second, func() bool {
+		p.leaseMu.Lock()
+		defer p.leaseMu.Unlock()
+		holds = p.leaseHolds
+		return holds == 1
+	}, "outer runner did not release its lease after cancellation")
 }
 
 func TestHookProgressFailedClaimPublishesAtomically(t *testing.T) {

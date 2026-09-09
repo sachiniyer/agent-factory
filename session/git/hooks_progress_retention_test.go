@@ -69,7 +69,9 @@ func TestHookProgressCreationPrunesInactiveOrphans(t *testing.T) {
 	if err := os.Chtimes(incomplete.dir, old, old); err != nil {
 		t.Fatal(err)
 	}
-	recent := create("recent", true, 0)
+	// Keep this fixture inside the grace window even under -race, where the 23
+	// later publications can take longer than the production five-second grace.
+	recent := create("recent", true, -time.Hour)
 	expired := create("expired", true, 15*24*time.Hour)
 	var kept []journal
 	for i := 0; i < 23; i++ {

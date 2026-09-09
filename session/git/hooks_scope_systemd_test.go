@@ -321,7 +321,11 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	if !progress.claimed(0) || progress.claimed(1) || progress.finished() {
 		t.Fatal("previous daemon did not leave entry 1 in flight and entry 2 pending")
 	}
-	if err := verifyHookResumeWorktree(context.Background(), repoPath, worktreePath, "hook-resume"); err != nil {
+	identity, err := readHookWorktreeIdentity(worktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyHookResumeWorktree(context.Background(), repoPath, worktreePath, "hook-resume", identity); err != nil {
 		t.Fatalf("fixture is not a verifiable linked worktree: %v", err)
 	}
 	AdoptRunningHooks([]*GitWorktree{restored})

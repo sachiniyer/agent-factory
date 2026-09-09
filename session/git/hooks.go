@@ -62,9 +62,11 @@ type hookRun struct {
 // The returned channel is closed once every hook has finished — whether by
 // normal completion, failure, or ctx cancellation. It is closed immediately
 // when there are no hooks to run (or the repo config can't be resolved). It
-// lets callers tell whether provisioning is still in flight; in particular the
-// readiness wait uses it so a slow build hook running concurrently with the
-// agent is not charged against the agent's startup budget (see task.WaitForReady).
+// remains open when durable storage cannot prove a launch terminal, because
+// later entries are still owed. It lets callers tell whether provisioning is
+// still in flight; in particular the readiness wait uses it so a slow build
+// hook running concurrently with the agent is not charged against the agent's
+// startup budget (see task.WaitForReady).
 func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath string, passthrough []string) <-chan struct{} {
 	return runPostWorktreeHooks(ctx, hookRun{
 		repoPath:     repoPath,
@@ -140,12 +142,32 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		}
 	}
 	go func() {
-		defer close(done)
-		finishProgress := true
-		bailResumable := func() { finishProgress = false }
+		journalTerminal := false
+		completionOwed := true
+		markTerminal := func() {
+			journalTerminal = true
+			completionOwed = false
+		}
+		bailResumable := func() {
+			journalTerminal = false
+			completionOwed = true
+		}
+		defer func() {
+			if !completionOwed || ctx.Err() != nil {
+				close(done)
+				return
+			}
+			// A storage bailout has neither an exit receipt nor terminal journal
+			// evidence. Keep HooksDone open so lifecycle's bounded wait leaves the
+			// worktree intact; cancellation is the only completion fact available.
+			go func() {
+				<-ctx.Done()
+				close(done)
+			}()
+		}()
 		if run.progress != nil {
 			defer func() {
-				if finishProgress && !(run.leaveProgressUnfinishedOnCancel && ctx.Err() != nil) {
+				if journalTerminal && !(run.leaveProgressUnfinishedOnCancel && ctx.Err() != nil) {
 					if err := run.progress.markFinished(); err != nil {
 						log.ErrorLog.Printf("cannot record post-worktree hook completion: %v", err)
 					}
@@ -155,11 +177,12 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		}
 		scopeRecorded := false
 		for index, cmdStr := range cmds {
-			if run.progress != nil && run.progress.claimed(index) {
+			if run.progress != nil && run.progress.entryFinished(index) {
 				continue
 			}
 			select {
 			case <-ctx.Done():
+				markTerminal()
 				log.InfoLog.Printf("post-worktree hooks cancelled for %s", run.worktreePath)
 				return
 			default:
@@ -276,6 +299,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 						// pre-commit hold while the owner row is still absent.
 						run.progress.retainLease()
 						<-runPostWorktreeHooks(ctx, resumed)
+						if run.progress.finished() {
+							completionOwed = false
+						}
 					}
 					return
 				}
@@ -286,6 +312,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			}
 
 			if ctx.Err() != nil {
+				markTerminal()
 				if scopeStopErr == nil {
 					removeCompletedHookLog(cmdStr, outputPath, outputReadErr)
 				}
@@ -301,6 +328,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				log.ErrorLog.Printf("post-worktree hook %q failed (full output: %s): %v\n%s", cmdStr, outputPath, waitErr, outputTail)
 			}
 		}
+		markTerminal()
 	}()
 	return done
 }

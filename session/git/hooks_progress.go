@@ -30,6 +30,11 @@ type hookProgress struct {
 	Prefix      string   `json:"scope_prefix"`
 	Generation  string   `json:"generation"`
 	Directory   string   `json:"directory"`
+	// The linked worktree's .git pointer file survives an ordinary rename but
+	// gets a new device/inode identity when a different worktree replaces it.
+	// Resume therefore requires this positive identity, not merely the absence
+	// of evidence that the path changed.
+	WorktreeIdentity *hookWorktreeIdentity `json:"worktree_identity,omitempty"`
 }
 
 func hookProgressPath(worktree string) (string, error) {
@@ -88,6 +93,10 @@ func withHookProgressLock(dir string, fn func(string, os.FileInfo) error) error 
 
 var hookProgressLockAcquired = func() {}
 
+// Kept separate from the journal reader so publication can inspect the
+// superseded receipt directory without changing the journal being published.
+var previousHookProgressReadFile = BoundedReadFile
+
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
 func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo) (*hookProgress, error) {
@@ -116,6 +125,10 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 		SessionID: run.scopeSessionID, Commands: commands, Passthrough: run.passthrough, Worktree: run.worktreePath,
 		Prefix: prefix, Generation: generation, Directory: dir,
 	}
+	p.WorktreeIdentity, err = readHookWorktreeIdentity(run.worktreePath)
+	if err != nil && run.repoPath != "" {
+		return nil, fmt.Errorf("record linked worktree identity for hook journal: %w", err)
+	}
 	if lease != nil {
 		p.leaseMu = &sync.Mutex{}
 		p.leaseHolds = 1
@@ -140,7 +153,7 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 		return nil, closeErr
 	}
 	var previous hookProgress
-	if data, readErr := os.ReadFile(path); readErr == nil {
+	if data, readErr := previousHookProgressReadFile(path); readErr == nil {
 		_ = json.Unmarshal(data, &previous)
 	}
 	currentParent, err := BoundedLstat(filepath.Dir(path))
@@ -171,12 +184,21 @@ func (p *hookProgress) claimed(index int) bool {
 	return err == nil
 }
 
+func (p *hookProgress) entryFinished(index int) bool {
+	info, err := os.Stat(filepath.Join(p.receipt(index), "exit"))
+	return err == nil && info.Mode().IsRegular()
+}
+
 // mkdir is an atomic claim. It also protects against a delayed launcher and a
 // successor racing: only one shell can execute the entry. Arguments keep shell
 // source, filenames and command text separate. A receipt directory means
 // started; its exit file means the shell finished, even if its daemon died.
 func (p *hookProgress) command(index int, command string) []string {
-	return []string{"-c", `if [ -d "$1" ]; then exit 0; fi
+	return []string{"-c", `if [ -d "$1" ]; then
+  while [ ! -f "$1/exit" ]; do sleep 0.1; done
+  status=$(cat -- "$1/exit") || exit 125
+  exit "$status"
+fi
 mkdir -- "$1" || exit 125
 sh -c "$2"
 status=$?

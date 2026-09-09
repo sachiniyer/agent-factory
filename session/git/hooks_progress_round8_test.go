@@ -169,11 +169,19 @@ func TestHookProgressMalformedJournalDoesNotBlockValidPruning(t *testing.T) {
 					t.Fatalf("ambiguous receipt directory was removed: %v", err)
 				}
 			}
-			if _, err := os.Stat(goodPath); !os.IsNotExist(err) {
-				t.Fatalf("valid old journal was not pruned: %v", err)
-			}
-			if _, err := os.Stat(good.Directory); !os.IsNotExist(err) {
-				t.Fatalf("valid old receipts were not pruned: %v", err)
+			_, journalErr := os.Stat(goodPath)
+			_, receiptErr := os.Stat(good.Directory)
+			if kind == "unreadable" {
+				if journalErr != nil || receiptErr != nil {
+					t.Fatalf("inconclusive read did not abort pruning intact: journal=%v receipts=%v", journalErr, receiptErr)
+				}
+			} else {
+				if !os.IsNotExist(journalErr) {
+					t.Fatalf("valid old journal was not pruned: %v", journalErr)
+				}
+				if !os.IsNotExist(receiptErr) {
+					t.Fatalf("valid old receipts were not pruned: %v", receiptErr)
+				}
 			}
 		})
 	}

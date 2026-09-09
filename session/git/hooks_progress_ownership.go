@@ -192,8 +192,7 @@ func (p *hookProgress) completed() bool {
 		return false
 	}
 	for index := range p.Commands {
-		info, err := os.Lstat(filepath.Join(p.receipt(index), "exit"))
-		if err != nil || !info.Mode().IsRegular() {
+		if !p.entryFinished(index) {
 			return false
 		}
 	}

@@ -85,10 +85,14 @@ func pruneHookProgressLocked(dir string, now time.Time) error {
 			continue
 		}
 		if err != nil {
-			// Corrupt and temporarily unreadable journals keep their receipts
-			// conservatively, but do not prevent independent valid journals from
-			// reaching the bounded metadata scan below.
-			continue
+			// Absence and structurally invalid JSON are conclusive for this journal,
+			// so independent valid journals can still be reclaimed. I/O failures and
+			// timeouts are a third answer: abort before paying another per-path
+			// deadline or deleting anything based on an incomplete view.
+			if noResumableHookProgress(err) {
+				continue
+			}
+			return err
 		}
 		if p.SessionID == "" || p.Prefix != systemdunit.HookScopeUnitPrefix(p.SessionID) {
 			continue

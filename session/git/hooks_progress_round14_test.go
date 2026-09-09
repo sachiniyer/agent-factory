@@ -38,8 +38,15 @@ func TestHookProgressResumableBailoutReleasesLease(t *testing.T) {
 	t.Cleanup(func() {
 		openHookLog, hookProgressWriteFile = originalOpen, originalWrite
 	})
-	done := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, done, 5*time.Second, "resumable bailout did not stop")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
+	waitForHookTestCondition(t, 5*time.Second, failed.Load, "resumable receipt failure was not reached")
+	waitForHookTestCondition(t, 5*time.Second, func() bool {
+		p.leaseMu.Lock()
+		defer p.leaseMu.Unlock()
+		return p.leaseHolds == 0
+	}, "resumable runner did not release its lease")
+	requireOpen(t, done, "resumable bailout reported completion")
 	if p.finished() {
 		t.Fatal("resumable bailout marked the journal finished")
 	}
@@ -54,6 +61,8 @@ func TestHookProgressResumableBailoutReleasesLease(t *testing.T) {
 	if err := syscall.Flock(int(lease.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
+	cancel()
+	waitForClosed(t, done, 5*time.Second, "cancelled resumable bailout did not close")
 	path, err := hookProgressPath(tree)
 	if err != nil {
 		t.Fatal(err)

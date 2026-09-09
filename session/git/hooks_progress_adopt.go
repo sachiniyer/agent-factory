@@ -78,7 +78,7 @@ func (g *GitWorktree) installHookProgressAdoption(worktreePath, sessionID string
 				lastProbeError = ""
 			}
 			if probeErr == nil && len(live) == 0 {
-				err := verifyHookResumeWorktree(ctx, repoPath, p.Worktree, branchName)
+				err := verifyHookResumeWorktree(ctx, repoPath, p.Worktree, branchName, p.WorktreeIdentity)
 				if err == nil {
 					if lastIdentityError != "" {
 						log.InfoLog.Printf("hook worktree verification recovered for %s", p.Worktree)

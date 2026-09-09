@@ -42,14 +42,18 @@ func TestHookProgressOpenFailureRemainsResumable(t *testing.T) {
 	t.Cleanup(func() {
 		openHookLog, hookProgressWriteFile = originalOpen, originalWrite
 	})
-	done := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, done, 5*time.Second, "failed launch runner did not stop")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
+	waitForHookTestCondition(t, 5*time.Second, failed.Load, "launch-failure receipt write was not attempted")
+	requireOpen(t, done, "failed launch reported completion while the journal was resumable")
 	if p.finished() {
 		t.Fatal("hook log failure marked an unfinished journal complete")
 	}
 	if p.claimed(0) {
 		t.Fatal("partial failed-launch receipt made the entry permanently claimed")
 	}
+	cancel()
+	waitForClosed(t, done, 5*time.Second, "cancelled failed-launch completion did not close")
 	resumed := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
 	waitForClosed(t, resumed, 5*time.Second, "resumed suffix did not finish")
 	if !p.finished() {
@@ -130,11 +134,15 @@ func TestHookProgressStartFailureMarkerErrorRemainsResumable(t *testing.T) {
 		return originalWrite(path, data, mode)
 	}
 	t.Cleanup(func() { hookProgressWriteFile = originalWrite })
-	done := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, done, 5*time.Second, "start failure runner did not stop")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
+	waitForHookTestCondition(t, 5*time.Second, failed.Load, "start-failure receipt write was not attempted")
+	requireOpen(t, done, "start failure reported completion while the journal was resumable")
 	if p.finished() || p.claimed(0) {
 		t.Fatal("start failure terminalized or claimed the resumable entry")
 	}
+	cancel()
+	waitForClosed(t, done, 5*time.Second, "cancelled start-failure completion did not close")
 	if err := os.Mkdir(tree, 0700); err != nil {
 		t.Fatal(err)
 	}

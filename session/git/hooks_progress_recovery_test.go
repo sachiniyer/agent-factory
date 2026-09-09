@@ -44,7 +44,7 @@ func TestHookProgressReplacementStaysPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	AdoptRunningHooks([]*GitWorktree{g})
-	waitForClosed(t, g.HooksDone(), 5*time.Second, "replacement adoption did not return")
+	requireOpen(t, g.HooksDone(), "missing replacement identity was treated as completion")
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Error("saved command ran in the replacement directory")
 	}
@@ -54,6 +54,45 @@ func TestHookProgressReplacementStaysPending(t *testing.T) {
 	if p.claimed(0) {
 		t.Error("replacement entry was claimed")
 	}
+	g.hooksCancel()
+	waitForClosed(t, g.HooksDone(), 5*time.Second, "replacement watcher did not stop after cancellation")
+}
+
+func TestLegacyHookProgressWithoutIdentityStaysPending(t *testing.T) {
+	claimDaemonProcess(t)
+	installScopeShim(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo, tree := linkedHookWorktree(t)
+	g := worktreeWithRecordedScope(t, "af-hook-owner")
+	g.SetHookScopeSessionID("owner")
+	g.repoPath, g.worktreePath, g.branchName = repo, tree, "hook-resume"
+	marker := filepath.Join(tree, "must-not-run")
+	p, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, []string{
+		"touch " + shellQuoteForShim(marker),
+	}, "af-hook-owner", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.WorktreeIdentity = nil
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := hookProgressPath(tree)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	AdoptRunningHooks([]*GitWorktree{g})
+	requireOpen(t, g.HooksDone(), "pre-identity journal was authorized to resume")
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("pre-identity journal ran without positive worktree identity")
+	}
+	if p.claimed(0) || p.finished() {
+		t.Fatal("pre-identity journal did not remain pending")
+	}
+	g.hooksCancel()
+	waitForClosed(t, g.HooksDone(), 5*time.Second, "legacy journal watcher did not stop after cancellation")
 }
 
 func TestHookProgressPublicationFailureRemovesReceipts(t *testing.T) {
