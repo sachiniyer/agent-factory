@@ -32,7 +32,7 @@ func TestInspectSessionWorktreesNamesTheOtherLiveLane(t *testing.T) {
 	sibling := filepath.Join(filepath.Dir(repo), "sibling")
 	worktreeScanGit(t, repo, "worktree", "add", "-q", "-b", "shared", holder, "HEAD")
 	worktreeScanGit(t, repo, "worktree", "add", "-q", "-b", "takeover", sibling, "HEAD")
-	worktreeScanGit(t, sibling, "checkout", "-q", "-B", "shared", "shared")
+	worktreeScanGit(t, sibling, "checkout", "-q", "--ignore-other-worktrees", "-B", "shared", "shared")
 
 	rows := []InstanceData{
 		{ID: "holder-id", Title: "holder", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: holder}},
