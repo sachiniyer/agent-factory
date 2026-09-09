@@ -6643,9 +6643,22 @@ async function resumeFromLimit(id, title, token2) {
   if (!result.ok) {
     throw new Error(result.reason || "resume was not performed");
   }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
-async function handoffSession(id, title, to, token2) {
-  return af("HandoffSession", { id, title, repo_id: "", to }, token2);
+async function handoffSession(id, title, to, token2, account = "") {
+  const result = await af("HandoffSession", { id, title, repo_id: "", to, account }, token2);
+  const requestedAccount = account.trim();
+  if (requestedAccount && result.to_account !== requestedAccount) {
+    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon \u2014 upgrade it); the runtime was already restarted under the agent's ambient identity`;
+    throw new ApiError(200, result.warning ? `${result.warning}
+${mismatch}` : mismatch, MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  return result;
 }
 async function deleteProject(root2, token2) {
   const result = await af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
@@ -7270,7 +7283,7 @@ function terminalChrome(opts) {
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
   const handoff = action("Handoff", "", opts.handoff);
-  handoff.title = "Continue with another agent";
+  handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
   copy.title = "Copy link";
   copy.setAttribute("aria-label", "Copy link");
@@ -10201,6 +10214,12 @@ var EventStream = class {
   }
 };
 
+// src/handoff_accounts.ts
+function handoffAccountChoices(accounts, agent, currentAccount = "") {
+  const rows = accountChoices(accounts, agent);
+  return accounts.entries.filter((entry) => entry.agent === agent && entry.name !== currentAccount && !entry.registration_only).map((entry) => ({ ...rows.find((row) => row.value === entry.name), logged_in: entry.logged_in }));
+}
+
 // src/account_selection.ts
 var AccountSelection = class {
   picked = false;
@@ -10727,9 +10746,36 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     confirmClass: "af-primary",
     onCancel: callbacks.onCancel
   });
+  let accounts = { entries: [], agents: [] };
+  let accountsLoaded = !callbacks.loadAccounts;
+  let accountsFailed = false;
+  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  let accountRows = [];
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "New account");
+  const syncAccountSelection = () => {
+    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
+  };
+  const refreshAccounts2 = () => {
+    const agent = agentSelect.value;
+    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    accountRows = choices;
+    accountSelect.replaceChildren();
+    if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
+    else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
+    for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
+    const fallback = accounts.defaults?.[agent];
+    const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
+    accountSelect.value = selected?.value ?? "";
+    accountSelect.disabled = choices.length === 0;
+    syncAccountSelection();
+  };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
   confirmBtn.disabled = true;
+  let catalogChoices = null;
   const renderChoices = (choices) => {
     agentSelect.replaceChildren();
     for (const choice of choices) {
@@ -10737,8 +10783,27 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     }
     confirmBtn.disabled = choices.length === 0;
   };
+  const refreshAgentChoices = () => {
+    if (catalogChoices === null || !accountsLoaded) return;
+    const hasAccount = (agent) => handoffAccountChoices(
+      accounts,
+      agent,
+      agent === currentAgent ? callbacks.currentAccount : ""
+    ).length > 0;
+    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value));
+    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
+      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    }
+    const previous = agentSelect.value;
+    renderChoices(choices);
+    if (choices.some((choice) => choice.value === previous)) agentSelect.value = previous;
+    refreshAccounts2();
+    if (accountsLoaded) handle.setError(choices.length === 0 ? callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
+  };
   body.append(
     field("New agent", agentSelect),
+    field("New account", accountSelect),
+    accountHint,
     h(
       "p",
       { class: "af-modal-text" },
@@ -10746,15 +10811,26 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     )
   );
   void callbacks.loadPrograms().then((catalog) => {
-    const choices = handoffAgentChoices(catalog, currentAgent);
-    renderChoices(choices);
-    if (choices.length === 0) {
-      handle.setError("No other agent is available to hand off to.");
-    }
+    catalogChoices = handoffAgentChoices(catalog, currentAgent);
+    refreshAgentChoices();
   }).catch(() => {
     renderChoices([]);
     handle.setError("Could not load the agent list. Try again.");
   });
+  agentSelect.addEventListener("change", refreshAccounts2);
+  accountSelect.addEventListener("change", syncAccountSelection);
+  if (callbacks.loadAccounts) {
+    void callbacks.loadAccounts().then((result) => {
+      accounts = result;
+      accountsLoaded = true;
+      refreshAgentChoices();
+    }).catch(() => {
+      accountsLoaded = true;
+      accountsFailed = true;
+      refreshAgentChoices();
+      handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+    });
+  }
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     const target = agentSelect.value;
@@ -10763,7 +10839,11 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(target);
+    if (!accountsLoaded || requiresAccount(target) && !accountSelect.value) {
+      handle.setError("Pick another registered account.");
+      return;
+    }
+    callbacks.onSubmit(target, accountSelect.value);
   });
   queueMicrotask(() => agentSelect.focus());
   return handle;
@@ -11240,6 +11320,11 @@ function isArchived(s) {
 }
 function isLimitReached(s) {
   return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
+}
+function isPendingManualHandoffDeliveryUnconfirmed(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -14280,6 +14365,16 @@ function editTaskModal(projects, task, callbacks) {
   });
 }
 
+// src/project-menu-focus.ts
+function replaceProjectMenuChildren(menu, children, fallback) {
+  const active = menu.ownerDocument.activeElement;
+  const key = active && menu.contains(active) ? active.dataset.projectFocus : void 0;
+  menu.replaceChildren(...children);
+  if (key === void 0) return;
+  const replacement = Array.from(menu.querySelectorAll("[data-project-focus]")).find((control) => control.dataset.projectFocus === key && !control.disabled);
+  (replacement ?? fallback).focus({ preventScroll: true });
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -14359,6 +14454,26 @@ function orderChildren(parent, children) {
 // src/ui.ts
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
+}
+function retryActionForSession(s) {
+  if (isPendingManualHandoffDeliveryUnconfirmed(s)) {
+    return {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane"
+    };
+  }
+  if (isLimitReached(s)) {
+    return { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" };
+  }
+  return null;
+}
+function patchRetryButton(button, action) {
+  button.hidden = action === null;
+  if (action) {
+    button.textContent = action.label;
+    button.title = action.title;
+  }
 }
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
@@ -14847,7 +14962,7 @@ var AppShell = class {
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   retryBtn = null;
-  retryVisible = false;
+  retryKind = null;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -15379,6 +15494,7 @@ var AppShell = class {
     }
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.dataset.projectFocus = "add";
     add.setAttribute("title", "Register a git checkout by path as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -15390,6 +15506,7 @@ var AppShell = class {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
+      del.dataset.projectFocus = "delete";
       const isRegistered = state.registeredProjects.includes(currentSummary.root);
       if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
@@ -15412,7 +15529,8 @@ var AppShell = class {
       footChildren.push(del);
     }
     children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
-    this.projectMenu.replaceChildren(...children);
+    const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
+    replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
@@ -15429,6 +15547,7 @@ var AppShell = class {
     );
     const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
     const item = h("button", { type: "button", class: cls }, check, label, meta);
+    item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
     item.addEventListener("click", (e) => {
@@ -15650,7 +15769,7 @@ var AppShell = class {
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
-      this.retryVisible = false;
+      this.retryKind = null;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -15688,8 +15807,9 @@ var AppShell = class {
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
     this.retryBtn = chrome.retry;
-    this.retryVisible = isLimitReached(selected);
-    chrome.retry.hidden = !this.retryVisible;
+    const retryAction = retryActionForSession(selected);
+    this.retryKind = retryAction?.kind ?? null;
+    patchRetryButton(chrome.retry, retryAction);
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -16126,10 +16246,11 @@ var AppShell = class {
       this.patchLifecycleButton(this.lifecycleBtn, nowAction, selected.title);
       this.lifecycleAction = nowAction;
     }
-    const nowLimited = isLimitReached(selected);
-    if (this.retryBtn && nowLimited !== this.retryVisible) {
-      this.retryVisible = nowLimited;
-      this.retryBtn.hidden = !nowLimited;
+    const retryAction = retryActionForSession(selected);
+    const retryKind = retryAction?.kind ?? null;
+    if (this.retryBtn && retryKind !== this.retryKind) {
+      this.retryKind = retryKind;
+      patchRetryButton(this.retryBtn, retryAction);
     }
     const nowHandoff = canHandoff(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
@@ -17465,7 +17586,13 @@ function doRetryLimit() {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      surfaceMutationError(e, "confirmed");
+      return;
+    }
+    surfaceTabError(e);
+  });
 }
 function doHandoff() {
   const sel = selectedSessionData();
@@ -17477,14 +17604,16 @@ function doHandoff() {
     handoffModal(sel.title, sel.current_agent ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
-      onSubmit: (to) => {
+      loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
+      currentAccount: sel.account,
+      onSubmit: (to, account) => {
         const tok = token;
         if (tok === null || !modal) {
           return;
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok).then(closeModal).catch((e) => {
+        void handoffSession(target.id, target.title, to, tok, account).then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(errorText(e));
         });
