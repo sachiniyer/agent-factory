@@ -512,11 +512,11 @@ test("restore completion during reconnect queues its resync until app phase", ()
     "connect must consume the queued restore resync after starting the replacement stream");
 });
 
-test("an uncertain restore deadline uses the reconnect-aware resync path", () => {
+test("an uncertain restore admission probe uses the reconnect-aware resync path", () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8");
   assert.match(source,
-    /new PendingRestores\([\s\S]*?\(\) => globalThis\.performance\.now\(\),\n  requestPendingRestoreResync,\n\)/,
-    "the ledger must share a monotonic clock with the daemon deadline and request an authoritative Snapshot");
+    /new PendingRestores\([\s\S]*?requestPendingRestoreResync,\n\)/,
+    "the ledger must request the authoritative Snapshot carrying daemon-clock evidence");
   const body = topLevelFunction(source, "requestPendingRestoreResync");
   assert.match(body, /new Promise<void>[\s\S]*?requestResync\(\);[\s\S]*?return completion/,
     "a connected app must await the authoritative Snapshot it schedules");

@@ -288,6 +288,7 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
 export interface SessionSnapshot {
   sessions: SessionData[];
   operationLockTimeoutMs?: number;
+  operationClockMs?: number;
 }
 
 export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
@@ -295,6 +296,7 @@ export async function fetchSessionSnapshot(token: string): Promise<SessionSnapsh
   return {
     sessions: resp.instances ?? [],
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
+    operationClockMs: resp.operation_clock_ms,
   };
 }
 

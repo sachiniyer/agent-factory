@@ -52,6 +52,10 @@ type SnapshotResponse struct {
 	// queued before the daemon can prove whether it started. Browser mutation
 	// ledgers consume the live value rather than mirroring a timeout constant.
 	OperationLockTimeoutMS int64 `json:"operation_lock_timeout_ms"`
+	// OperationClockMS is sampled from the same monotonic clock that bounds the
+	// admission wait. Browser clocks can advance while this host is suspended, so
+	// clients compare daemon readings instead of expiring a fence on local time.
+	OperationClockMS int64 `json:"operation_clock_ms"`
 	// DeliveryAlarms projects persistent watch-task delivery failures into the
 	// authoritative snapshot the TUI mirrors (#1238). When a watch task's events
 	// have been failing to reach their target session for longer than the alarm
@@ -151,6 +155,9 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
+	// Sample before the rows: once this reading is beyond an admission bound, the
+	// projection captured after it is safe completion evidence.
+	operationClockMS := operationClockMilliseconds()
 	instances := s.manager.Snapshot(req.RepoID)
 	alarms := s.deliveryAlarms(req.RepoID)
 	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
@@ -164,6 +171,7 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	resp.Instances = instances
 	resp.DeliveryAlarms = alarms
 	resp.OperationLockTimeoutMS = opLockTimeout.Milliseconds()
+	resp.OperationClockMS = operationClockMS
 	return nil
 }
 

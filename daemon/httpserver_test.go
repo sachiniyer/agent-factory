@@ -92,7 +92,9 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
+	clockBefore := operationClockMilliseconds()
 	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/Snapshot", `{"repo_id":""}`)
+	clockAfter := operationClockMilliseconds()
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	env := decodeEnvelope(t, rec)
@@ -102,6 +104,10 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	require.Empty(t, resp.Instances)
 	require.Equal(t, opLockTimeout.Milliseconds(), resp.OperationLockTimeoutMS,
 		"the browser must receive the daemon's live admission bound")
+	require.GreaterOrEqual(t, resp.OperationClockMS, clockBefore,
+		"the browser must receive a daemon-monotonic admission reading")
+	require.LessOrEqual(t, resp.OperationClockMS, clockAfter,
+		"the projected clock must be sampled during the Snapshot")
 }
 
 // The fixed browser palettes retired the last consumer of this renderer RPC.

@@ -57,6 +57,15 @@ import (
 // A var so tests can shorten it; production never reassigns.
 var opLockTimeout = apiproto.OperationLockTimeout
 
+// operationClockOrigin lets Snapshot expose elapsed time from the daemon's
+// monotonic clock without putting a wall-clock timestamp on the wire. Clients
+// compare readings from this process only; a daemon restart resets the origin.
+var operationClockOrigin = time.Now()
+
+func operationClockMilliseconds() int64 {
+	return time.Since(operationClockOrigin).Milliseconds()
+}
+
 // opLockPollInterval is how often lockWithin re-attempts a contended op lock.
 var opLockPollInterval = 5 * time.Millisecond
 

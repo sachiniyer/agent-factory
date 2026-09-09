@@ -267,6 +267,8 @@ export interface SnapshotResponse {
 	delivery_alarms?: unknown[];
 	/** Daemon lifecycle-operation admission bound, projected from its live value. */
 	operation_lock_timeout_ms?: number;
+	/** Process-local monotonic reading used to measure that admission bound. */
+	operation_clock_ms?: number;
 }
 
 /** One lifecycle choice served by the daemon, including its consequence. */

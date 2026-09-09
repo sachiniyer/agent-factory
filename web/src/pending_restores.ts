@@ -1,6 +1,11 @@
 type RestoreRow = { id?: string; restoreEligible: boolean; restoreSettled?: boolean };
 export type RestoreEvidence =
-  | { kind: "snapshot"; generation: number; operationLockTimeoutMs?: number }
+  | {
+    kind: "snapshot";
+    generation: number;
+    operationLockTimeoutMs?: number;
+    operationClockMs?: number;
+  }
   | { kind: "updated" | "restored"; id: string };
 
 // Network delivery and handler scheduling get a small margin after the daemon's
@@ -20,6 +25,7 @@ type RestoreTicket = {
   succeededAt: number | null;
   uncertainAt: number;
   uncertainSince: number;
+  admissionClockStartedAt: number | null;
   timer: RestoreTimer | null;
   retryDelayMs: number;
   reconcileGeneration: number;
@@ -33,12 +39,14 @@ export class PendingRestores {
   private readonly snapshotIssuedAt = new Map<number, number>();
   private rows: ReadonlyArray<RestoreRow> | null = null;
   private operationLockTimeoutMs: number | null = null;
+  private operationClockMs: number | null = null;
 
   constructor(
     private readonly changed: (ids: ReadonlySet<string>) => void,
     private readonly retainOnError: (error: unknown) => boolean = () => false,
     private readonly committedOnError: (error: unknown) => boolean = () => false,
-    // Match the daemon's monotonic operation-lock deadline across machine sleep.
+    // Local time only schedules probes and supports daemons predating the
+    // operation-clock projection; current-daemon expiry uses daemon readings.
     private readonly now: () => number = () => globalThis.performance.now(),
     private readonly requestReconcile: () => void | Promise<void> = () => {},
     private readonly schedule: (callback: () => void, delayMs: number) => RestoreTimer =
@@ -64,6 +72,7 @@ export class PendingRestores {
       succeededAt: null as number | null,
       uncertainAt: this.snapshotGeneration,
       uncertainSince: 0,
+      admissionClockStartedAt: null as number | null,
       timer: null,
       retryDelayMs: RESTORE_RECONCILE_RETRY_MIN_MS,
       reconcileGeneration: 0,
@@ -88,6 +97,7 @@ export class PendingRestores {
             ticket.uncertain = true;
             ticket.uncertainAt = this.snapshotGeneration;
             ticket.uncertainSince = this.now();
+            ticket.admissionClockStartedAt = null;
             ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
             this.armUncertainTimer(id, ticket);
             if (this.committedOnError(error)) {
@@ -121,11 +131,19 @@ export class PendingRestores {
     if (evidence?.kind === "snapshot") {
       const operationLockTimeoutMs = typeof evidence.operationLockTimeoutMs === "number" &&
         evidence.operationLockTimeoutMs >= 0 ? evidence.operationLockTimeoutMs : LEGACY_OPERATION_LOCK_TIMEOUT_MS;
-      if (this.operationLockTimeoutMs !== operationLockTimeoutMs) {
-        this.operationLockTimeoutMs = operationLockTimeoutMs;
-        for (const ticket of this.tickets.values()) this.cancelTimer(ticket);
+      const operationClockMs = typeof evidence.operationClockMs === "number" &&
+        Number.isFinite(evidence.operationClockMs) && evidence.operationClockMs >= 0 ? evidence.operationClockMs : null;
+      const clockSupportChanged = (this.operationClockMs === null) !== (operationClockMs === null);
+      const clockReset = this.operationClockMs !== null && operationClockMs !== null &&
+        operationClockMs < this.operationClockMs;
+      if (this.operationLockTimeoutMs !== operationLockTimeoutMs || clockSupportChanged || clockReset) {
+        for (const ticket of this.tickets.values()) {
+          this.cancelTimer(ticket);
+          ticket.admissionClockStartedAt = null;
+        }
       }
-      for (const [id, ticket] of this.tickets) this.armTimerForState(id, ticket);
+      this.operationLockTimeoutMs = operationLockTimeoutMs;
+      this.operationClockMs = operationClockMs;
     }
     const eligibility = new Map(rows.map(row => [row.id, row.restoreEligible]));
     let changed = false;
@@ -140,10 +158,25 @@ export class PendingRestores {
       const causalUncertainSnapshot = evidence?.kind === "snapshot" &&
         evidence.generation > ticket.uncertainAt;
       const issuedAt = evidence?.kind === "snapshot" ? this.snapshotIssuedAt.get(evidence.generation) : undefined;
-      const admissionDeadline = this.operationLockTimeoutMs === null ? null :
-        ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
-      const issuedAfterAdmission = admissionDeadline !== null && issuedAt !== undefined &&
-        issuedAt > admissionDeadline;
+      let admissionExpired = false;
+      if (causalUncertainSnapshot && this.operationLockTimeoutMs !== null) {
+        if (this.operationClockMs !== null) {
+          if (ticket.admissionClockStartedAt === null || this.operationClockMs < ticket.admissionClockStartedAt) {
+            // Start from the first post-error daemon reading. A pre-request
+            // reading could expire before the queued restore's own lock wait.
+            ticket.admissionClockStartedAt = this.operationClockMs;
+          } else {
+            admissionExpired = this.operationClockMs >
+              ticket.admissionClockStartedAt + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
+          }
+        } else {
+          // Older daemons do not project their clock. Preserve their conservative
+          // compatibility bound; upgraded daemons never release on this evidence.
+          const admissionDeadline = ticket.uncertainSince +
+            this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS;
+          admissionExpired = issuedAt !== undefined && issuedAt > admissionDeadline;
+        }
+      }
       let uncertainCompleted = false;
       if (ticket.uncertain && authoritative && causalUncertainSnapshot) {
         if (!eligibility.has(id)) {
@@ -152,11 +185,11 @@ export class PendingRestores {
           // The projection has no attempt id. A predecessor can settle after B
           // is queued but before B acquires the daemon operation lock, so only a
           // Snapshot beyond B's admission bound can release its fence.
-          uncertainCompleted = issuedAfterAdmission;
+          uncertainCompleted = admissionExpired;
         } else if (row?.restoreEligible) {
           // A reconnect can hold these captured rows behind slower task/project
           // loads. Processing time cannot turn a pre-deadline Snapshot into proof.
-          uncertainCompleted = issuedAfterAdmission;
+          uncertainCompleted = admissionExpired;
         } else {
           // LifecycleActionNone covers every operation fence and several unsettled
           // states. It carries no attempt identity, so it cannot make a later
@@ -168,6 +201,9 @@ export class PendingRestores {
         this.release(id, ticket);
         changed = true;
       }
+    }
+    if (evidence?.kind === "snapshot") {
+      for (const [id, ticket] of this.tickets) this.armTimerForState(id, ticket);
     }
     if (changed) this.changed(new Set(this.tickets.keys()));
   }
@@ -192,13 +228,17 @@ export class PendingRestores {
 
   private armUncertainTimer(id: string, ticket: RestoreTicket): void {
     if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
-    const remaining = Math.max(0,
-      ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now());
+    const remaining = this.operationClockMs === null
+      ? ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now()
+      : ticket.admissionClockStartedAt === null
+        ? 0
+        : ticket.admissionClockStartedAt + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS -
+          this.operationClockMs;
     ticket.timer = this.schedule(() => {
       ticket.timer = null;
       if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
       this.reconcile(id, ticket);
-    }, remaining);
+    }, Math.max(0, remaining));
   }
 
   private armRetryTimer(id: string, ticket: RestoreTicket): void {

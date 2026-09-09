@@ -413,7 +413,7 @@ test("deadline expiry uses Snapshot issuance time rather than delayed applicatio
   assert.equal(pending.has("session"), false);
 });
 
-test("wall-clock suspension cannot expire a monotonic admission deadline", async t => {
+test("wall-clock jumps do not affect the legacy performance-clock fallback", async t => {
   let wallNow = 1_000;
   let monotonicNow = 1_000;
   t.mock.method(Date, "now", () => wallNow);
@@ -429,13 +429,40 @@ test("wall-clock suspension cannot expire a monotonic admission deadline", async
   pending.observe(rows, {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
-  assert.equal(pending.has("session"), true, "wall time alone cannot advance the daemon's lock deadline");
+  assert.equal(pending.has("session"), true, "wall time alone cannot advance the fallback deadline");
 
   monotonicNow += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
   pending.observe(rows, {
     kind: "snapshot", generation: pending.beginSnapshot(), operationLockTimeoutMs: 30_000,
   });
   assert.equal(pending.has("session"), false);
+});
+
+test("a remote browser running ahead cannot expire the daemon admission fence", async () => {
+  let browserNow = 1_000;
+  let daemonNow = 1_000;
+  const timer = fakeRestoreTimer();
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => browserNow, () => {}, timer.schedule, timer.cancel,
+  );
+  const snapshot = () => ({
+    kind: "snapshot" as const,
+    generation: pending.beginSnapshot(),
+    operationLockTimeoutMs: 30_000,
+    operationClockMs: daemonNow,
+  });
+  pending.observe(rows, snapshot());
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+
+  browserNow += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  daemonNow += 1;
+  pending.observe(rows, snapshot());
+  assert.equal(pending.has("session"), true, "browser-ahead time cannot release a daemon-side fence");
+
+  daemonNow += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  pending.observe(rows, snapshot());
+  assert.equal(pending.has("session"), false, "daemon elapsed time eventually releases the fence");
 });
 
 for (const state of ["OpArchiving", "startup-unknown"] as const) {
