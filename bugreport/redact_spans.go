@@ -35,19 +35,26 @@ const (
 // scrubKnownLogValues includes the historical task-log shapes whose title is
 // known from fixed syntax rather than the current record set.
 func (r *redactor) scrubKnownLogValues(s string) string {
-	spans := r.sensitiveTextSpans(s)
-	spans = r.appendANSIPathSpans(spans, s)
-	spans = appendLegacyTaskTitleSpans(spans, s)
-	spans = r.appendLogShellCommandPathSpans(spans, s)
-	spans = r.appendQuotedValueSpans(spans, s, true)
+	spans := r.logTextSpans(s)
+	spans = r.appendANSITransformedSpans(spans, s, r.logTextSpans)
 	return applyRedactionSpans(s, spans)
 }
 
-func (r *redactor) scrubKnownDiagnosticValues(s string) string {
+func (r *redactor) logTextSpans(s string) []redactionSpan {
 	spans := r.sensitiveTextSpans(s)
-	spans = r.appendANSIPathSpans(spans, s)
-	spans = r.appendQuotedValueSpans(spans, s, false)
+	spans = appendLegacyTaskTitleSpans(spans, s)
+	spans = r.appendLogShellCommandPathSpans(spans, s)
+	return r.appendQuotedValueSpans(spans, s, true)
+}
+
+func (r *redactor) scrubKnownDiagnosticValues(s string) string {
+	spans := r.diagnosticTextSpans(s)
+	spans = r.appendANSITransformedSpans(spans, s, r.diagnosticTextSpans)
 	return applyRedactionSpans(s, spans)
+}
+
+func (r *redactor) diagnosticTextSpans(s string) []redactionSpan {
+	return r.appendQuotedValueSpans(r.sensitiveTextSpans(s), s, false)
 }
 
 func (r *redactor) scrubGenericText(s string) string {
@@ -57,18 +64,27 @@ func (r *redactor) scrubGenericText(s string) string {
 }
 
 func (r *redactor) sensitiveTextSpans(s string) []redactionSpan {
-	spans := r.knownTextSpans(s)
+	spans := r.sensitiveBaseTextSpans(s)
+	return r.appendURIPathSpans(spans, s, r.sensitiveURIPathTextSpans)
+}
+
+func (r *redactor) sensitiveBaseTextSpans(s string) []redactionSpan {
+	spans := r.knownBaseTextSpans(s)
 	spans = appendCredentialSpans(spans, s)
 	return r.appendUsernameSpans(spans, s)
 }
 
 func (r *redactor) genericTextSpans(s string) []redactionSpan {
+	spans := r.genericBaseTextSpans(s)
+	return r.appendURIPathSpans(spans, s, r.genericURIPathTextSpans)
+}
+
+func (r *redactor) genericBaseTextSpans(s string) []redactionSpan {
 	spans := make([]redactionSpan, 0)
 	spans = r.appendAccountLabelSpans(spans, s)
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
-	spans = r.appendURIPathSpans(spans, s)
 	spans = appendCredentialSpans(spans, s)
 	return r.appendUsernameSpans(spans, s)
 }
@@ -77,14 +93,43 @@ func (r *redactor) genericTextSpans(s string) []redactionSpan {
 // string. Priority only chooses a semantic marker for equal-length matches;
 // applyRedactionSpans always covers the union.
 func (r *redactor) knownTextSpans(s string) []redactionSpan {
+	spans := r.knownBaseTextSpans(s)
+	return r.appendURIPathSpans(spans, s, r.knownURIPathTextSpans)
+}
+
+func (r *redactor) knownBaseTextSpans(s string) []redactionSpan {
 	spans := make([]redactionSpan, 0)
 	spans = r.appendKnownLabelSpans(spans, s)
 	spans = r.appendTmuxNameSpans(spans, s)
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
-	spans = r.appendURIPathSpans(spans, s)
 	return spans
+}
+
+func (r *redactor) sensitiveURIPathTextSpans(s string) []redactionSpan {
+	spans := r.knownURIPathTextSpans(s)
+	spans = appendCredentialSpans(spans, s)
+	return r.appendUsernameSpans(spans, s)
+}
+
+func (r *redactor) genericURIPathTextSpans(s string) []redactionSpan {
+	spans := make([]redactionSpan, 0)
+	spans = r.appendAccountLabelSpans(spans, s)
+	spans = r.appendWorktreePathTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
+	spans = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
+	spans = r.appendKnownRootSpansWithBoundary(spans, s, uriKnownRootBoundary)
+	spans = appendCredentialSpans(spans, s)
+	return r.appendUsernameSpans(spans, s)
+}
+
+func (r *redactor) knownURIPathTextSpans(s string) []redactionSpan {
+	spans := make([]redactionSpan, 0)
+	spans = r.appendKnownLabelSpans(spans, s)
+	spans = r.appendTmuxNameSpans(spans, s)
+	spans = r.appendWorktreePathTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
+	spans = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
+	return r.appendKnownRootSpansWithBoundary(spans, s, uriKnownRootBoundary)
 }
 
 func (r *redactor) appendKnownLabelSpans(spans []redactionSpan, s string) []redactionSpan {

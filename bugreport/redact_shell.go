@@ -73,7 +73,7 @@ func (r *redactor) appendLogShellCommandPathSpans(spans []redactionSpan, s strin
 					} else {
 						commandEnd := nextAFLogRecordStart(s, contentEnd)
 						command := s[commandStart:commandEnd]
-						for _, span := range r.shellCommandPathSpans(command) {
+						for _, span := range r.shellCommandSpans(command, r.sensitiveTextSpans) {
 							span.start += commandStart
 							span.end += commandStart
 							spans = append(spans, span)
@@ -115,7 +115,7 @@ func (r *redactor) appendLogShellQuotedSpan(
 	}
 	inner := r.sensitiveTextSpans(value)
 	inner = appendLegacyTaskTitleSpans(inner, value)
-	inner = append(inner, r.shellCommandPathSpans(value)...)
+	inner = append(inner, r.shellCommandSpans(value, r.sensitiveTextSpans)...)
 	if redacted := applyRedactionSpans(value, inner); redacted != value {
 		spans = append(spans, redactionSpan{
 			start: start, end: end, replacement: strconv.Quote(redacted), priority: spanQuotedValue,
@@ -124,7 +124,7 @@ func (r *redactor) appendLogShellQuotedSpan(
 	return spans
 }
 
-func (r *redactor) shellCommandPathSpans(command string) []redactionSpan {
+func (r *redactor) shellCommandSpans(command string, produce textSpanProducer) []redactionSpan {
 	context, ok := parseShellPathContext(command)
 	if !ok {
 		// Proven shell provenance with syntax our parser cannot establish is an
@@ -150,7 +150,7 @@ func (r *redactor) shellCommandPathSpans(command string) []redactionSpan {
 	spans := r.appendWorktreePathTitleSpansWithBoundary(nil, command, worktreeBoundary)
 	spans = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, command, worktreeBoundary)
 	spans = r.appendKnownRootSpansWithBoundary(spans, command, rootBoundary)
-	return r.appendShellLiteralPathSpans(spans, context.literalRuns)
+	return appendShellLiteralSpans(spans, context.literalRuns, produce)
 }
 
 type shellWordRange = textSourceRange
@@ -211,17 +211,13 @@ func parseShellPathContext(command string) (shellPathContext, bool) {
 	return context, true
 }
 
-func (r *redactor) appendShellLiteralPathSpans(
+func appendShellLiteralSpans(
 	spans []redactionSpan,
 	runs []shellLiteralRun,
+	produce textSpanProducer,
 ) []redactionSpan {
 	for _, run := range runs {
-		spans = r.appendSourceMappedPathSpans(
-			spans,
-			run,
-			derivedWorktreePathBoundary,
-			knownRootTextBoundary,
-		)
+		spans = appendSourceMappedTextSpans(spans, run, produce)
 	}
 	return spans
 }

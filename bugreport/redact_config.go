@@ -42,39 +42,60 @@ func (r *redactor) scrubJSON(s string) string {
 	if !ok {
 		return r.scrubRecognizedText(s, redactionTextUnknown)
 	}
-	return r.scrubEncodedText(s, redactionTextJSONDocument, scalars)
+	return r.scrubEncodedText(s, redactionTextJSONDocument, scalars, nil)
 }
 
 func (r *redactor) scrubConfigText(s string, kind redactionTextKind) string {
 	var scalars []encodedStringScalar
+	var comments []textSourceRange
 	var ok bool
 	switch kind {
 	case redactionTextConfigJSON:
 		scalars, ok = parseJSONConfigScalars(s)
 	case redactionTextConfigTOML:
-		scalars, ok = parseTOMLConfigScalars(s)
+		scalars, comments, ok = parseTOMLConfigScalars(s)
 	}
 	if !ok {
 		return r.scrubRecognizedText(s, redactionTextUnknown)
 	}
-	return r.scrubEncodedText(s, kind, scalars)
+	return r.scrubEncodedText(s, kind, scalars, comments)
 }
 
-func (r *redactor) scrubEncodedText(s string, kind redactionTextKind, scalars []encodedStringScalar) string {
+func (r *redactor) scrubEncodedText(
+	s string,
+	kind redactionTextKind,
+	scalars []encodedStringScalar,
+	comments []textSourceRange,
+) string {
 	var spans []redactionSpan
+	var crossCredentials []redactionSpan
 	if kind == redactionTextConfigTOML {
-		// TOML comments are free text outside scalar tokens and remain useful in
-		// the collected config. JSON has no such region: planning exclusively on
-		// its decoded key/value strings guarantees that no replacement can cross
-		// structural syntax and make the document unparsable.
-		spans = r.genericTextSpans(s)
+		crossCredentials = crossingCredentialSpans(s, scalars, comments)
+		// TOML comments are parser-owned free text outside scalar tokens. Plan
+		// replacements inside each comment payload, never across the document's
+		// structural syntax. A credential matcher may still classify material
+		// spanning several regions; in that case each overlapping region is
+		// redacted independently below so the document remains valid.
+		for _, comment := range comments {
+			value := s[comment.start:comment.end]
+			inner := r.genericTextSpans(value)
+			if overlapsAnySpan(comment.start, comment.end, crossCredentials) {
+				inner = append(inner, redactionSpan{
+					start: 0, end: len(value), replacement: secretMarker, priority: spanCredential,
+				})
+			}
+			spans = appendOffsetSpans(spans, inner, comment.start)
+		}
 	}
 	for _, scalar := range scalars {
-		inner := r.genericTextSpans(scalar.value)
-		if scalar.shell {
-			inner = append(inner, r.shellCommandPathSpans(scalar.value)...)
+		redacted := secretMarker
+		if !overlapsAnySpan(scalar.start, scalar.end, crossCredentials) {
+			inner := r.genericTextSpans(scalar.value)
+			if scalar.shell {
+				inner = append(inner, r.shellCommandSpans(scalar.value, r.genericTextSpans)...)
+			}
+			redacted = applyRedactionSpans(scalar.value, inner)
 		}
-		redacted := applyRedactionSpans(scalar.value, inner)
 		if redacted == scalar.value {
 			continue
 		}
@@ -88,6 +109,54 @@ func (r *redactor) scrubEncodedText(s string, kind redactionTextKind, scalars []
 		})
 	}
 	return applyRedactionSpans(s, spans)
+}
+
+func crossingCredentialSpans(
+	s string,
+	scalars []encodedStringScalar,
+	comments []textSourceRange,
+) []redactionSpan {
+	candidates := appendCredentialSpans(nil, s)
+	crossing := make([]redactionSpan, 0, len(candidates))
+	for _, candidate := range candidates {
+		contained := false
+		for _, scalar := range scalars {
+			if candidate.start >= scalar.start && candidate.end <= scalar.end {
+				contained = true
+				break
+			}
+		}
+		if !contained {
+			for _, comment := range comments {
+				if candidate.start >= comment.start && candidate.end <= comment.end {
+					contained = true
+					break
+				}
+			}
+		}
+		if !contained {
+			crossing = append(crossing, candidate)
+		}
+	}
+	return crossing
+}
+
+func overlapsAnySpan(start, end int, spans []redactionSpan) bool {
+	for _, span := range spans {
+		if start < span.end && span.start < end {
+			return true
+		}
+	}
+	return false
+}
+
+func appendOffsetSpans(spans, inner []redactionSpan, offset int) []redactionSpan {
+	for _, span := range inner {
+		span.start += offset
+		span.end += offset
+		spans = append(spans, span)
+	}
+	return spans
 }
 
 // encodeStringForGrammar is the transport half of the recognition invariant:
@@ -301,19 +370,21 @@ func (p *jsonDocumentParser) take(want byte) bool {
 	return true
 }
 
-func parseTOMLConfigScalars(s string) ([]encodedStringScalar, bool) {
+func parseTOMLConfigScalars(s string) ([]encodedStringScalar, []textSourceRange, bool) {
 	data := []byte(s)
 	offset := 0
 	if bytes.HasPrefix(data, []byte("\xef\xbb\xbf")) {
 		offset = 3
 		data = data[offset:]
 	}
-	var parser unstable.Parser
+	parser := unstable.Parser{KeepComments: true}
 	parser.Reset(data)
 	var scalars []encodedStringScalar
+	var comments []textSourceRange
 	var tablePath []string
 	for parser.NextExpression() {
 		expression := parser.Expression()
+		comments = appendTOMLCommentRanges(comments, expression, offset)
 		switch expression.Kind {
 		case unstable.Table, unstable.ArrayTable:
 			tablePath = nil
@@ -322,7 +393,32 @@ func parseTOMLConfigScalars(s string) ([]encodedStringScalar, bool) {
 			scalars = appendTOMLKeyValueScalars(scalars, expression, tablePath, offset)
 		}
 	}
-	return scalars, parser.Error() == nil
+	return scalars, comments, parser.Error() == nil
+}
+
+func appendTOMLCommentRanges(
+	comments []textSourceRange,
+	node *unstable.Node,
+	offset int,
+) []textSourceRange {
+	if node == nil {
+		return comments
+	}
+	if node.Kind == unstable.Comment {
+		start := offset + int(node.Raw.Offset)
+		end := start + int(node.Raw.Length)
+		if start < end {
+			// Keep TOML's '#' structural byte and expose only its free-text payload
+			// to matchers, so every replacement remains a valid comment.
+			comments = append(comments, textSourceRange{start: start + 1, end: end})
+		}
+		return comments
+	}
+	children := node.Children()
+	for children.Next() {
+		comments = appendTOMLCommentRanges(comments, children.Node(), offset)
+	}
+	return comments
 }
 
 func appendTOMLKeyValueScalars(

@@ -9,13 +9,18 @@ import (
 // value. Percent escapes are decoded for matching and mapped back to their full
 // source spelling. Query and fragment text never enter the path view, but an
 // independently valid URI inside either receives its own path view.
-func (r *redactor) appendURIPathSpans(spans []redactionSpan, s string) []redactionSpan {
-	return r.appendSourceMappedURIPathSpans(spans, identitySourceMappedText(s))
+func (r *redactor) appendURIPathSpans(
+	spans []redactionSpan,
+	s string,
+	produce textSpanProducer,
+) []redactionSpan {
+	return r.appendSourceMappedURIPathSpans(spans, identitySourceMappedText(s), produce)
 }
 
 func (r *redactor) appendSourceMappedURIPathSpans(
 	spans []redactionSpan,
 	outer sourceMappedText,
+	produce textSpanProducer,
 ) []redactionSpan {
 	paths, unknown := sourceMappedURIPaths(outer)
 	for _, opaque := range unknown {
@@ -27,12 +32,7 @@ func (r *redactor) appendSourceMappedURIPathSpans(
 		})
 	}
 	for _, path := range paths {
-		spans = r.appendSourceMappedPathSpans(
-			spans,
-			path,
-			uriWorktreePathBoundary,
-			uriKnownRootBoundary,
-		)
+		spans = appendSourceMappedTextSpans(spans, path, produce)
 	}
 	return spans
 }

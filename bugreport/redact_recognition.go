@@ -18,41 +18,41 @@ const (
 	redactionTextShell
 )
 
-// Recognition model
+// Recognition model and closed transformation set
 //
-//   - Rendered and free diagnostic text use ordinary filesystem/text boundaries.
-//     A URI is a self-identifying nested context: a valid scheme and the parsed,
-//     percent-decoded URL.Path decide which bytes form its path. The path is
-//     source-mapped before matching, so encoded bytes anywhere in a root or
-//     contextual sibling title cannot hide it; query and fragment values remain
-//     outside that view. An independently valid URI inside either is recognized
-//     separately; a query's literal '&' field separator bounds that nested URI.
-//   - A daemon log is identified by the collectLog call site. Valid %q fields
-//     are decoded with Go string syntax. Shell syntax is enabled only for
-//     command ranges proven by a fixed AF log emitter; shell-looking user/output
-//     text is not guessed to be a command. Current emitters quote commands. A
-//     legacy raw hook command may span physical lines and ends only when the
-//     exact prefix grammar configured by log.Initialize proves a new record.
-//     Complete ANSI controls are parsed as zero-width bytes in a source-mapped
-//     logical view of log and diagnostic provenance, including when styling is
-//     embedded inside a path. An arbitrary ESC byte is not removed or treated
-//     as a path delimiter.
-//   - A config document is identified by configSection.Format. Its string
-//     scalars are decoded with that declared JSON or TOML grammar. Only paths
-//     inside fields whose config-schema consumer invokes /bin/sh -c use shell
-//     word boundaries.
-//   - A bug-report JSON document is identified at the json.Marshal call site.
-//     Every string token is decoded and re-encoded as JSON; config field names
-//     inside that document do not establish shell provenance.
-//   - Decoded Go strings and proven shell commands are nested logical values.
-//     Their grammar plans spans on the decoded/original value, and the owning
-//     transport maps the safe value back into its source representation. POSIX
-//     quote and escape removal, adjacent literal segments, parameter/pathname
-//     expansion, expansion-driven field splitting, and escaped line
-//     continuations therefore affect boundaries only inside a parser-proven
-//     shell value. Tilde expansion can materialize a home prefix at execution
-//     time, but those bytes are absent from the bug report, so it does not
-//     synthesize a candidate or change source boundaries.
+// Every parser-proven transform produces a logical value plus a byte-for-byte
+// map back to its source. The full matcher policy for that value's provenance
+// runs on every logical view, so transforms compose instead of being special
+// cases in individual path, title, credential, username, account, or tmux-name
+// matchers. The admitted transforms are:
+//
+//   - JSON, TOML, and Go-quoted transport decoding. The owning transport
+//     re-encodes a changed value in that same target grammar. TOML comments are
+//     separate parser-proven free-text regions; a match never crosses their
+//     structural syntax.
+//   - POSIX shell quote/escape removal and adjacent literal concatenation, only
+//     in command fields proven by the config schema or fixed AF log emitters.
+//     Parameter/command/arithmetic/process and pathname expansions split a
+//     logical run because their execution-time bytes are absent. Tilde expansion
+//     likewise synthesizes no source bytes and therefore no candidate.
+//   - Percent decoding of a parser-proven URI path. Query and fragment values
+//     remain outside that path view; an independently valid URI inside either is
+//     recognized separately, and a query's literal '&' bounds the nested field.
+//   - Removal of complete ANSI controls from raw log/diagnostic display text.
+//     This makes insertion mid-token zero-width. String-control payloads are a
+//     separate nested channel; if one contains a sensitive match, the complete
+//     control is replaced rather than preserving an unsafe opaque payload.
+//
+// Deliberate exclusions follow provenance, not byte shape: '%' is ordinary data
+// outside a parsed URI path; shell punctuation is ordinary text outside a proven
+// command field; and ANSI-looking bytes inside decoded config or shell values are
+// data for their downstream consumer, not terminal presentation. An incomplete
+// ESC sequence establishes no ANSI transform. These distinctions avoid turning
+// legal Unix filename bytes or user-authored diagnostics into global delimiters.
+// A daemon log itself is identified by collectLog; legacy raw hook commands may
+// span lines and end only at the exact record prefix configured by log.Initialize.
+// A bug-report JSON document is identified at json.Marshal; config field names
+// inside it do not establish shell provenance.
 //
 // Unknown provenance never falls back to a guessed, weaker grammar. The owning
 // logical value is replaced with redactedMarker. Parser recovery inside a known

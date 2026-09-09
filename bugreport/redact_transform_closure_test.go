@@ -36,6 +36,21 @@ func TestScrubConfigRecognizesURIReconstructedByShell(t *testing.T) {
 	}
 }
 
+func TestScrubLogComposesANSIShellAndURITransforms(t *testing.T) {
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Title:    siblingLeakTitle,
+		Worktree: session.GitWorktreeData{RepoPath: siblingLeakRepo},
+	})
+	command := "open fi\x1b[31m'le:///srv/ConfidentialClient/repo%2Dfix%2Dbug%2Durgent'"
+	input := "running post-worktree hook in /tmp/worktree (output: /tmp/hook.log): " + command
+
+	got := r.scrubLog(input)
+	if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, "urgent") {
+		t.Fatalf("composed ANSI, shell, and URI transforms leaked a sibling path: %q", got)
+	}
+}
+
 func TestScrubbersRedactSensitiveANSIControlPayload(t *testing.T) {
 	r := &redactor{}
 	r.noteRepoRoot(siblingLeakRepo)

@@ -14,6 +14,8 @@ type sourceMappedText struct {
 	source []textSourceRange
 }
 
+type textSpanProducer func(string) []redactionSpan
+
 func identitySourceMappedText(s string) sourceMappedText {
 	source := make([]textSourceRange, len(s))
 	for i := range s {
@@ -34,6 +36,28 @@ func (r *redactor) appendSourceMappedPathSpans(
 	inner := r.appendWorktreePathTitleSpansWithBoundary(nil, text.value, worktreeBoundary)
 	inner = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(inner, text.value, worktreeBoundary)
 	inner = r.appendKnownRootSpansWithBoundary(inner, text.value, rootBoundary)
+	return appendSourceMappedSpans(spans, text, inner)
+}
+
+func appendSourceMappedTextSpans(
+	spans []redactionSpan,
+	text sourceMappedText,
+	produce textSpanProducer,
+) []redactionSpan {
+	if produce == nil {
+		return spans
+	}
+	return appendSourceMappedSpans(spans, text, produce(text.value))
+}
+
+func appendSourceMappedSpans(
+	spans []redactionSpan,
+	text sourceMappedText,
+	inner []redactionSpan,
+) []redactionSpan {
+	if len(text.value) == 0 || len(text.source) != len(text.value) {
+		return spans
+	}
 	for _, span := range inner {
 		if span.start < 0 || span.end <= span.start || span.end > len(text.source) {
 			continue
