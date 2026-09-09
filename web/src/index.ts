@@ -1983,7 +1983,13 @@ function doRetryLimit(): void {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      surfaceMutationError(e, "confirmed");
+      return;
+    }
+    surfaceTabError(e);
+  });
 }
 
 /**

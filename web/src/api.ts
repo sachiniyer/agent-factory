@@ -514,12 +514,17 @@ export async function restoreSession(id: string, title: string, token: string): 
 export interface ResumeFromLimitResult {
   ok: boolean;
   reason?: string;
+  warning?: string;
+  code?: string;
 }
 
 export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
   const result = await af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
   if (!result.ok) {
     throw new Error(result.reason || "resume was not performed");
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
   }
 }
 

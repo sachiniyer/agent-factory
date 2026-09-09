@@ -415,6 +415,11 @@ the explicit override when it is needed: press **`c`** in the TUI (shown as
 **Retry**), click **Retry handoff** in the web pane header, or run
 `af sessions retry-limit <title>`. The retry verdict is attached to that pending
 handoff mission; sending another prompt does not make the daemon resend it.
+If that explicit retry delivers the mission but cannot persist its final
+settlement, every client reports the retry as completed with a warning. The TUI
+shows the warning as a completion message, the web keeps it in the confirmed
+mutation notice, and CLI JSON includes a `warning` field; do not retry the
+already-delivered mission.
 
 This is an operator-chosen account swap: the target must be registered for the
 incoming agent and have no current limit observation in the daemon's ledger.

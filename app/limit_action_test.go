@@ -215,3 +215,17 @@ func TestHandleLimitRetried_NoOpKeepsLimitLocally(t *testing.T) {
 	_, _ = h.handleLimitRetried(limitRetriedMsg{target: target, err: errors.New("resume was not performed: another operation owns the retry")})
 	require.True(t, inst.LimitReached(), "a daemon no-op must not clear the local limit state")
 }
+
+func TestHandleLimitRetried_CommittedWarningClearsLocallyAndWarns(t *testing.T) {
+	h := newTestHome(t)
+	inst := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	h.store.AddInstance(inst)
+	target := captureSessionActionTarget(inst, h.repoID)
+
+	_, _ = h.handleLimitRetried(limitRetriedMsg{
+		target: target,
+		err:    committedHandoffNoticeError{},
+	})
+	require.False(t, inst.LimitReached(), "a committed retry already landed and must clear local limit state")
+	require.Contains(t, h.errBox.FullError(), "settlement is pending")
+}

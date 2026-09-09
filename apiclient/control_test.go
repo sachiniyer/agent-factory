@@ -230,6 +230,23 @@ func TestControlRoundTrips(t *testing.T) {
 			t.Fatal("ResumeFromLimit must not report success when the daemon performed no retry")
 		}
 	})
+	t.Run("ResumeFromLimit preserves a committed settlement warning", func(t *testing.T) {
+		c := routeServer(t, "ResumeFromLimit", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.ResumeFromLimitResponse{
+				OK: true,
+				MutationOutcome: daemon.MutationOutcome{
+					Code: apiproto.ErrorCodeMutationCommitted, Warning: "mission delivered; settlement pending",
+				},
+			})
+		})
+		err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"})
+		if !IsMutationCommitted(err) {
+			t.Fatalf("ResumeFromLimit error = %T %v, want committed warning", err, err)
+		}
+		if !strings.Contains(err.Error(), "settlement pending") {
+			t.Fatalf("ResumeFromLimit warning = %q", err)
+		}
+	})
 
 	t.Run("PauseStatusPoll rides internal route", func(t *testing.T) {
 		c := routeServer(t, "PauseStatusPoll", func([]byte) apiproto.Envelope {

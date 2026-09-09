@@ -281,6 +281,10 @@ type ResumeFromLimitRequest struct {
 type ResumeFromLimitResponse struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`
+	// An explicit handoff retry can deliver its mission before the final
+	// settlement checkpoint fails. Carry that committed outcome structurally so
+	// neither HTTP nor net/rpc turns an unsafe-to-repeat retry into a failure.
+	MutationOutcome
 }
 
 type resumeFromLimitOutcome uint8
@@ -302,10 +306,10 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 		return err
 	}
 	outcome, err := s.manager.resumeFromLimitOutcome(req)
-	if err != nil {
+	resp.OK = outcome == resumePerformed
+	if !resp.MutationOutcome.record(err) {
 		return err
 	}
-	resp.OK = outcome == resumePerformed
 	if !resp.OK {
 		resp.Reason = "the session changed or another operation owns its retry"
 	}

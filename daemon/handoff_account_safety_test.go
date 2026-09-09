@@ -139,6 +139,37 @@ func TestControlHandoffAccountSettlementFailureUsesCommittedEnvelope(t *testing.
 	require.Len(t, prompts, 1)
 }
 
+func TestControlRetryHandoffSettlementFailureUsesCommittedEnvelope(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	prepareHandoffTargetPreflight(t, inst)
+	backend.sendPromptErr = errors.New("delivery reply lost")
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.Error(t, err)
+	require.True(t, inst.PendingManualAccountSwapDeliveryUnconfirmed())
+	backend.sendPromptErr = nil
+
+	previous := testHookPersistInstanceData
+	defer func() { testHookPersistInstanceData = previous }()
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == inst.Title && data.Account == "personal" && data.PendingAccountSwap == nil {
+			return errors.New("completion disk unavailable")
+		}
+		return nil
+	}
+
+	var resp ResumeFromLimitResponse
+	err = (&controlServer{manager: m}).ResumeFromLimit(
+		ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}, &resp,
+	)
+	require.NoError(t, err, "a delivered retry must answer through the response envelope")
+	require.True(t, resp.OK)
+	require.Equal(t, apiproto.ErrorCodeMutationCommitted, resp.MutationOutcome.Code)
+	require.Contains(t, resp.MutationOutcome.Warning, "pending settlement")
+}
+
 func prepareHandoffTargetPreflight(t *testing.T, inst *session.Instance) {
 	t.Helper()
 	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)

@@ -46,6 +46,14 @@ func (legacyCommittedTaskRPC) AddTask(_ AddTaskRequest, _ *AddTaskResponse) erro
 
 type legacyHandoffRPC struct{}
 
+type committedResumeRPC struct{}
+
+func (committedResumeRPC) ResumeFromLimit(_ ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
+	resp.OK = true
+	resp.MutationOutcome.record(&mutationCommittedError{err: errors.New("mission delivered; settlement pending")})
+	return nil
+}
+
 func (legacyHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	return nil
@@ -98,6 +106,17 @@ func TestControlClientPreservesMutationCommittedOutcome(t *testing.T) {
 	var outcome committedOutcome
 	require.True(t, errors.As(err, &outcome) && outcome.MutationCommitted(),
 		"the control client must preserve the server's definite committed outcome: %T: %v", err, err)
+}
+
+func TestControlClientPreservesCommittedResumeWarning(t *testing.T) {
+	serveControlRPC(t, committedResumeRPC{})
+
+	var resp ResumeFromLimitResponse
+	err := callDaemonNoEnsure("ResumeFromLimit", ResumeFromLimitRequest{Title: "worker"}, &resp)
+	require.Error(t, err)
+	require.True(t, isMutationCommitted(err), "delivered retry must remain classified across net/rpc: %T: %v", err, err)
+	require.Contains(t, err.Error(), "settlement pending")
+	require.True(t, resp.OK)
 }
 
 // TestControlClientDoesNotInventCommittedOutcome is the negative control, and it

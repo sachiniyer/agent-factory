@@ -510,7 +510,9 @@ func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 	resume := resumeFromLimitThroughDaemon
 	return func() tea.Msg {
 		if err := resume(target.resumeFromLimitRequest()); err != nil {
-			log.ErrorLog.Printf("could not resume limited session %q: %v", target.title, err)
+			if !apiclient.IsMutationCommitted(err) {
+				log.ErrorLog.Printf("could not resume limited session %q: %v", target.title, err)
+			}
 			return limitRetriedMsg{target: target, err: err}
 		}
 		return limitRetriedMsg{target: target}
@@ -520,13 +522,19 @@ func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 // handleLimitRetried finalizes an async usage-limit retry. On success the daemon
 // has already cleared the limit + set Running and persisted; clear the local row
 // optimistically for instant feedback (the badge disappears without waiting for
-// the next snapshot reconcile). On failure the error lands in the error box.
+// the next snapshot reconcile). A committed settlement warning clears the row
+// too and remains visible as a completion message; a clean failure lands in the
+// error box.
 func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
+	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
+	if msg.err != nil && !committedWarning {
 		return m, m.handleError(fmt.Errorf("failed to resume session '%s': %w", msg.target.title, msg.err))
 	}
 	if inst := m.resolveSessionActionTarget(msg.target); inst != nil {
 		inst.ClearLimitReached()
+	}
+	if committedWarning {
+		return m, m.showTransientMessage(fmt.Sprintf("Retry for '%s' completed, with warning: %v", msg.target.title, msg.err))
 	}
 	return m, nil
 }

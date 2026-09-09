@@ -197,6 +197,32 @@ test("resumeFromLimit rejects the daemon's no-op outcome", async () => {
   );
 });
 
+test("resumeFromLimit surfaces a successful response's committed settlement warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        code: "mutation_committed",
+        warning: "mission delivered; settlement pending",
+      },
+      error: null,
+    }),
+  });
+
+  const err = await resumeFromLimit("id-repoB", "feature", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /settlement pending/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
 // #2013: a handoff STOPS a live agent and starts another, so it must key by stable
 // id like kill/archive — a title-resolved misroute would tear down an unrelated
 // repo's agent. `brief` is deliberately never sent from the web (the mission
