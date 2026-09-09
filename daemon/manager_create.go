@@ -594,6 +594,9 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 	repo, err := repoFromPathForCreate(req.RepoPath)
 	if err != nil {
+		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
+			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
 		return nil, "", nil, nil, err
 	}
 	warnLegacyBareCloneSessions(repo)
@@ -700,11 +703,17 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleting)
 	}
 	if err := m.refreshLocked(); err != nil {
+		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
+			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
 		return nil, "", nil, nil, err
 	}
 
 	diskData, err := loadRepoInstanceData(repo.ID)
 	if err != nil {
+		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
+			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
 		return nil, "", nil, nil, err
 	}
 
