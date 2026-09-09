@@ -29,7 +29,6 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
       aboveKeyboard: Math.abs(rect.bottom - (visualViewport!.offsetTop + visualViewport!.height)) < 2 };
   });
   expect(geometry).toEqual({ fits: true, lastFits: true, oneRow: true, targets: true, aboveKeyboard: true });
-  await assertPhoneBarModifiers(page, stream);
   let before = stream();
   await bar.getByRole("button", { name: "Arrows", exact: true }).click();
   await expect(textarea).toBeFocused();
@@ -185,6 +184,17 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     await expect(button).toHaveAttribute("data-state", "off");
     await page.keyboard.insertText("a");
     await expect.poll(stream).toBe(before + bytes + "a");
+  }
+  for (const [modifier, chord, bytes] of [
+    ["Ctrl", "Alt+ArrowUp", "\x1b[1;7A"],
+    ["Alt", "Control+ArrowRight", "\x1b[1;7C"],
+  ] as const) {
+    before = stream();
+    const button = bar.getByRole("button", { name: modifier, exact: true });
+    await button.click();
+    await page.keyboard.press(chord);
+    await expect.poll(stream).toBe(before + bytes);
+    await expect(button).toHaveAttribute("data-state", "off");
   }
   before = stream();
   await ctrl.click();

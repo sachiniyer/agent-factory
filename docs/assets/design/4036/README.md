@@ -23,9 +23,10 @@ The browser observes actual outgoing binary Op.Input frames via the existing
 Both one-shots clear their state and armed accessibility description.
 The focused flow also verifies locked Ctrl + Up, one-shot Alt + Tab + `z`,
 and one-shot Alt + hardware Escape followed by an unmodified `a`.
-The demo’s existing full phone flow reuses these assertions and retains its
-coverage of plain arrows, interrupt, composition, physical keypresses, focus,
-and viewport resizing.
+The focused phone spec runs these modifier assertions. The demo retains its
+visual coverage of plain arrows, interrupt, composition, physical keypresses,
+focus, and viewport resizing without leaving line-breaking byte assertions in
+the terminal immediately before its screenshots.
 
 [Unit red](unit-red.txt) records the issue's two original tests failing against
 master before implementation. The second reproduction now invokes the explicit
@@ -57,8 +58,9 @@ The fix applies the existing soft-input interception to plain text as well.
 Physical-key and composition guards remain. The focused regression now repeats
 all modifier gestures after `Control+]` and refocus, then verifies physical
 letters are sent once. The shared helper also checks locked Ctrl + Up + soft
-`x` yields `ESC[1;5A` + `0x18` and remains locked. Both the demo and probe use
-these exact input assertions without synthesizing keyup or resetting xterm.
+`x` yields `ESC[1;5A` + `0x18` and remains locked. The focused phone probe runs
+these exact input assertions before and after refocus without synthesizing keyup
+or resetting xterm; the demo separately exercises the visual phone flow.
 
 Validation after the refocus fix:
 

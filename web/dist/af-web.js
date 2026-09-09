@@ -8161,7 +8161,7 @@ var TerminalSoftInput = class {
     const input = event;
     if (!this.enabled()) return;
     if (this.active || this.pending.length) {
-      if (this.active && input.type === "input" && input.inputType === "insertText")
+      if (this.active && input.type === "input")
         this.observeCompositionValue(this.active);
       const range = this.pending.at(-1);
       if (range && input.inputType === "insertText" && input.type === "input" && input.isComposing === false) {
@@ -8336,13 +8336,13 @@ function userSequence(text) {
   if (ss3) return { kind: "SS3", parameters: "", final: ss3[1] };
   return void 0;
 }
-function encodeSequence(sequence, modifierBits, original) {
+function encodeSequence(sequence, modifierBits, original, replaceModifiers = false) {
   if (!modifierBits) return original;
   if (sequence.kind === "SS3") return `\x1B[1;${modifierBits + 1}${sequence.final}`;
   const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
   parameters[0] ||= "1";
   const encoded = Number(parameters[1] || "1");
-  const existingBits = Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+  const existingBits = !replaceModifiers && Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
   parameters[1] = String((existingBits | modifierBits) + 1);
   return `\x1B[${parameters.join(";")}${sequence.final}`;
 }
@@ -8375,6 +8375,27 @@ function decodeKeyBytes(text) {
     return { key: String.fromCharCode(codePoint + 64), ctrl: true, alt, applicationCursor: false };
   return { key: character, ctrl: false, alt, applicationCursor: false };
 }
+function physicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
+  const ctrl = physical.ctrlKey || stickyCtrl;
+  const alt = physical.altKey || stickyAlt;
+  const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
+  const sequence = userSequence(text);
+  if (sequence) {
+    if (sequence.kind === "CSI" && sequence.final === "Z") return void 0;
+    return encodeSequence(sequence, modifierBits, text, true);
+  }
+  const arrow = { ArrowLeft: "\u2190", ArrowUp: "\u2191", ArrowDown: "\u2193", ArrowRight: "\u2192" }[physical.key];
+  if (arrow) return keyBytes(arrow, ctrl, alt);
+  const named = physical.key === "Escape" ? "Esc" : physical.key === "Tab" ? "Tab" : void 0;
+  if (named) return keyBytes(named, ctrl, alt);
+  if (physical.key === "Backspace") return keyBytes("\x7F", ctrl, alt);
+  if (physical.key === "Enter") return keyBytes("\r", ctrl, alt);
+  const codePoint = physical.key.codePointAt(0);
+  if (codePoint !== void 0 && physical.key.length === (codePoint > 65535 ? 2 : 1))
+    return keyBytes(physical.key, ctrl, alt);
+  const decoded = decodeKeyBytes(text);
+  return decoded ? keyBytes(decoded.key, ctrl, alt, decoded.applicationCursor) : void 0;
+}
 var StickyModifiers = class {
   values = { Ctrl: "off", Alt: "off" };
   tapped = { Ctrl: -Infinity, Alt: -Infinity };
@@ -8394,8 +8415,15 @@ var StickyModifiers = class {
     this.consumeOnce();
     return result;
   }
-  input(text, source = "user") {
+  input(text, source = "user", physical) {
     if (source === "terminal") return text;
+    const stickyCtrl = this.values.Ctrl !== "off";
+    const stickyAlt = this.values.Alt !== "off";
+    if (physical && (stickyCtrl || stickyAlt)) {
+      const result = physicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
+      this.consumeOnce();
+      return result ?? text;
+    }
     const decoded = decodeKeyBytes(text);
     if (decoded) {
       const result = keyBytes(
@@ -8488,7 +8516,7 @@ var TerminalKeybar = class {
   physicalInput = false;
   onKeyDown = (event) => {
     this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
-    if (event.keyCode === 229) this.markUserInput(true);
+    if (event.keyCode === 229) this.markDeferredUserInput();
   };
   onKeyUp = () => {
     this.physicalInput = false;
@@ -8518,28 +8546,41 @@ var TerminalKeybar = class {
     const source = marker || this.takeDeferred229(text) ? "user" : "terminal";
     this.userInput = void 0;
     this.userInputGeneration += 1;
-    const output = this.softInput.transform(text, (value, compositionTrailing) => this.focused && this.phone.matches && marker !== "keybar" ? this.modifiers.input(value, compositionTrailing ? "user" : source) : value);
+    const output = this.softInput.transform(text, (value, compositionTrailing) => this.focused && this.phone.matches && marker?.source !== "keybar" ? this.modifiers.input(
+      value,
+      compositionTrailing ? "user" : source,
+      compositionTrailing ? void 0 : marker?.physical
+    ) : value);
     this.paint();
     return output;
   }
-  /** Mark xterm's synchronous emission, or its matching 229 textarea diff, as user input. */
-  markUserInput(deferred = false, keybar = false) {
-    if (deferred) {
-      const before = this.textarea?.value;
-      if (before === void 0) return;
-      const generation2 = ++this.deferred229Generation;
-      this.deferred229 = { before, generation: generation2 };
-      queueMicrotask(() => setTimeout(() => {
-        if (this.deferred229?.generation === generation2) this.deferred229 = void 0;
-      }, 0));
-      return;
-    }
+  /** Mark xterm's synchronous onKey emission with its unaliased DOM identity. */
+  markUserInput(physical, keybar = false) {
     const generation = ++this.userInputGeneration;
-    this.userInput = keybar ? "keybar" : "user";
+    this.userInput = {
+      source: keybar ? "keybar" : "user",
+      physical: physical ? {
+        key: physical.key,
+        shiftKey: physical.shiftKey,
+        altKey: physical.altKey,
+        ctrlKey: physical.ctrlKey,
+        metaKey: physical.metaKey
+      } : void 0
+    };
     const clear = () => {
       if (this.userInputGeneration === generation) this.userInput = void 0;
     };
     queueMicrotask(clear);
+  }
+  /** Match xterm's deferred 229 textarea diff without marking an intervening reply. */
+  markDeferredUserInput() {
+    const before = this.textarea?.value;
+    if (before === void 0) return;
+    const generation = ++this.deferred229Generation;
+    this.deferred229 = { before, generation };
+    queueMicrotask(() => setTimeout(() => {
+      if (this.deferred229?.generation === generation) this.deferred229 = void 0;
+    }, 0));
   }
   takeDeferred229(text) {
     const pending = this.deferred229;
@@ -8553,7 +8594,7 @@ var TerminalKeybar = class {
     return true;
   }
   sendUserInput(data, keybar = false) {
-    this.markUserInput(false, keybar);
+    this.markUserInput(void 0, keybar);
     this.input(data);
   }
   paint() {
@@ -9114,7 +9155,7 @@ var AttachTerminal = class {
         }
       });
     }
-    this.term.onKey(() => this.keybar.markUserInput());
+    this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.attachCustomKeyEventHandler((ev) => {
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";

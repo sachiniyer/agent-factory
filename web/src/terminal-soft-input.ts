@@ -115,7 +115,7 @@ export class TerminalSoftInput {
     const input = event as InputEvent;
     if (!this.enabled()) return;
     if (this.active || this.pending.length) {
-      if (this.active && input.type === "input" && input.inputType === "insertText")
+      if (this.active && input.type === "input")
         this.observeCompositionValue(this.active);
       const range = this.pending.at(-1);
       if (range && input.inputType === "insertText" && input.type === "input" &&

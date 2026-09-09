@@ -267,6 +267,30 @@ test("updated composition rollback leaves the next no-keydown input ordinary", t
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
+test("insertCompositionText mutation makes an updated rollback authoritative", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.dispatchEvent(composition("compositionupdate", "字"));
+  textarea.value = "字";
+  host.dispatchEvent(Object.assign(new Event("input"), {
+    data: "字", inputType: "insertCompositionText", isComposing: true,
+  }));
+  textarea.value = "";
+  textarea.dispatchEvent(composition("compositionend", ""));
+  textarea.value = "x";
+  host.dispatchEvent(insertText("x"));
+
+  assert.equal(soft.transform("x", (value, user) => modifiers.input(value, user ? "user" : "terminal")), "\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 test("Safari keycode 229 after compositionend belongs to the IME commit", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();

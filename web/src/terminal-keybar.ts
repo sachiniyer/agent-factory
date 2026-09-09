@@ -51,6 +51,19 @@ interface UserSequence {
   final: string;
 }
 
+interface PhysicalKeyInput {
+  key: string;
+  shiftKey: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+}
+
+interface UserInputMarker {
+  source: "user" | "keybar";
+  physical?: PhysicalKeyInput;
+}
+
 function userSequence(text: string): UserSequence | undefined {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return undefined;
   const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
@@ -60,18 +73,19 @@ function userSequence(text: string): UserSequence | undefined {
   return undefined;
 }
 
-function encodeSequence(sequence: UserSequence, modifierBits: number, original: string): string {
+function encodeSequence(sequence: UserSequence, modifierBits: number, original: string,
+  replaceModifiers = false): string {
   if (!modifierBits) return original;
   if (sequence.kind === "SS3") return `\x1b[1;${modifierBits + 1}${sequence.final}`;
   const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
   parameters[0] ||= "1";
   const encoded = Number(parameters[1] || "1");
-  const existingBits = Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+  const existingBits = !replaceModifiers && Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
   parameters[1] = String((existingBits | modifierBits) + 1);
   return `\x1b[${parameters.join(";")}${sequence.final}`;
 }
 
-/** Canonical inverse of keyBytes. Aliased bytes choose any equivalent preimage. */
+/** Byte-only fallback for user-input paths that have no physical key event. */
 export function decodeKeyBytes(text: string): DecodedKeyBytes | undefined {
   let sequenceText = text;
   let prefixedAlt = false;
@@ -104,6 +118,35 @@ export function decodeKeyBytes(text: string): DecodedKeyBytes | undefined {
   return { key: character, ctrl: false, alt, applicationCursor: false };
 }
 
+function physicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
+  stickyAlt: boolean): string | undefined {
+  const ctrl = physical.ctrlKey || stickyCtrl;
+  const alt = physical.altKey || stickyAlt;
+  const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) |
+    (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
+  const sequence = userSequence(text);
+  if (sequence) {
+    // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held.
+    if (sequence.kind === "CSI" && sequence.final === "Z") return undefined;
+    // The DOM event is authoritative here. Xterm aliases Alt-only arrows to
+    // Ctrl-looking bytes, so the sequence parameter cannot identify the chord.
+    return encodeSequence(sequence, modifierBits, text, true);
+  }
+  const arrow = ({ ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→" } as const)
+    [physical.key as "ArrowLeft" | "ArrowUp" | "ArrowDown" | "ArrowRight"];
+  // macOS aliases Alt+Left/Right to ESC b/f, so recover arrow identity from key.
+  if (arrow) return keyBytes(arrow, ctrl, alt);
+  const named = physical.key === "Escape" ? "Esc" : physical.key === "Tab" ? "Tab" : undefined;
+  if (named) return keyBytes(named, ctrl, alt);
+  if (physical.key === "Backspace") return keyBytes("\x7f", ctrl, alt);
+  if (physical.key === "Enter") return keyBytes("\r", ctrl, alt);
+  const codePoint = physical.key.codePointAt(0);
+  if (codePoint !== undefined && physical.key.length === (codePoint > 0xffff ? 2 : 1))
+    return keyBytes(physical.key, ctrl, alt);
+  const decoded = decodeKeyBytes(text);
+  return decoded ? keyBytes(decoded.key, ctrl, alt, decoded.applicationCursor) : undefined;
+}
+
 type Modifier = "Ctrl" | "Alt";
 type State = "off" | "once" | "locked";
 export class StickyModifiers {
@@ -124,11 +167,17 @@ export class StickyModifiers {
     this.consumeOnce();
     return result;
   }
-  input(text: string, source: "terminal" | "user" = "user"): string {
+  input(text: string, source: "terminal" | "user" = "user", physical?: PhysicalKeyInput): string {
     if (source === "terminal") return text;
-    // One inverse handles sequence, control, Alt-prefixed, and plain key shapes.
-    // Existing sequence modifier bits remain embedded in decoded.key, so keyBytes
-    // merges sticky Ctrl/Alt without losing physical Shift or Meta.
+    const stickyCtrl = this.values.Ctrl !== "off";
+    const stickyAlt = this.values.Alt !== "off";
+    if (physical && (stickyCtrl || stickyAlt)) {
+      const result = physicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
+      this.consumeOnce();
+      return result ?? text;
+    }
+    // Soft and deferred textarea input have no physical modifier identity. Their
+    // byte shapes are unambiguous here, so the encoder inverse remains a fallback.
     const decoded = decodeKeyBytes(text);
     if (decoded) {
       const result = keyBytes(decoded.key, decoded.ctrl || this.values.Ctrl !== "off",
@@ -169,13 +218,13 @@ export class TerminalKeybar {
     this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
     // CompositionHelper emits textarea-diff input from a zero-delay callback,
     // after onKey's synchronous user-input marker would normally be available.
-    if (event.keyCode === 229) this.markUserInput(true);
+    if (event.keyCode === 229) this.markDeferredUserInput();
   };
   private readonly onKeyUp = (): void => { this.physicalInput = false; };
   private readonly softInput: TerminalSoftInput;
   private readonly buttons = new Map<Modifier, HTMLButtonElement>();
   private readonly originalMaxHeight: string;
-  private userInput: "user" | "keybar" | undefined;
+  private userInput: UserInputMarker | undefined;
   private userInputGeneration = 0;
   private deferred229: { before: string; generation: number } | undefined;
   private deferred229Generation = 0;
@@ -244,32 +293,37 @@ export class TerminalKeybar {
     this.userInput = undefined;
     this.userInputGeneration += 1;
     const output = this.softInput.transform(text, (value, compositionTrailing) =>
-      this.focused && this.phone.matches && marker !== "keybar"
-        ? this.modifiers.input(value, compositionTrailing ? "user" : source) : value);
+      this.focused && this.phone.matches && marker?.source !== "keybar"
+        ? this.modifiers.input(value, compositionTrailing ? "user" : source,
+          compositionTrailing ? undefined : marker?.physical) : value);
     this.paint();
     return output;
   }
-  /** Mark xterm's synchronous emission, or its matching 229 textarea diff, as user input. */
-  markUserInput(deferred = false, keybar = false): void {
-    if (deferred) {
-      const before = this.textarea?.value;
-      if (before === undefined) return;
-      const generation = ++this.deferred229Generation;
-      this.deferred229 = { before, generation };
-      // Queue expiry behind CompositionHelper's setTimeout(0), but do not mark
-      // an unrelated parser reply as user input while that callback is pending.
-      queueMicrotask(() => setTimeout(() => {
-        if (this.deferred229?.generation === generation) this.deferred229 = undefined;
-      }, 0));
-      return;
-    }
+  /** Mark xterm's synchronous onKey emission with its unaliased DOM identity. */
+  markUserInput(physical?: PhysicalKeyInput, keybar = false): void {
     const generation = ++this.userInputGeneration;
-    this.userInput = keybar ? "keybar" : "user";
+    this.userInput = {
+      source: keybar ? "keybar" : "user",
+      physical: physical ? {
+        key: physical.key, shiftKey: physical.shiftKey, altKey: physical.altKey,
+        ctrlKey: physical.ctrlKey, metaKey: physical.metaKey,
+      } : undefined,
+    };
     const clear = () => {
       if (this.userInputGeneration === generation) this.userInput = undefined;
     };
     // Synchronous onKey and term.input paths own only the current event turn.
     queueMicrotask(clear);
+  }
+  /** Match xterm's deferred 229 textarea diff without marking an intervening reply. */
+  markDeferredUserInput(): void {
+    const before = this.textarea?.value;
+    if (before === undefined) return;
+    const generation = ++this.deferred229Generation;
+    this.deferred229 = { before, generation };
+    queueMicrotask(() => setTimeout(() => {
+      if (this.deferred229?.generation === generation) this.deferred229 = undefined;
+    }, 0));
   }
   private takeDeferred229(text: string): boolean {
     const pending = this.deferred229;
@@ -285,7 +339,7 @@ export class TerminalKeybar {
     return true;
   }
   sendUserInput(data: string, keybar = false): void {
-    this.markUserInput(false, keybar);
+    this.markUserInput(undefined, keybar);
     this.input(data);
   }
   private paint(): void {

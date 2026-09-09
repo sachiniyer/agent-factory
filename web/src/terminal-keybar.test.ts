@@ -90,6 +90,24 @@ test("sticky modifiers combine with xterm hardware arrow modifier bits", () => {
   assert.equal(reply.state("Ctrl"), "once");
 });
 
+test("hardware modifier identity survives xterm arrow aliases", () => {
+  for (const [sticky, bytes, physical, expected] of [
+    ["Ctrl", "\x1b[1;5A", { key: "ArrowUp", altKey: true }, "\x1b[1;7A"],
+    ["Ctrl", "\x1bb", { key: "ArrowLeft", altKey: true }, "\x1b[1;7D"],
+    ["Alt", "\x1b[1;5C", { key: "ArrowRight", ctrlKey: true }, "\x1b[1;7C"],
+    ["Alt", "\x1b[1;14H", { key: "Home", shiftKey: true, ctrlKey: true, metaKey: true }, "\x1b[1;16H"],
+  ] as const) {
+    const event = Object.assign({ shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }, physical);
+    const bare = new StickyModifiers();
+    assert.equal(bare.input(bytes, "user", event), bytes);
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    const actual = state.input(bytes, "user", event);
+    assert.equal(actual, expected);
+    assert.equal(state.state(sticky), "off");
+  }
+});
+
 test("sticky Alt prefixes user-origin hardware controls", () => {
   for (const control of ["\t", "\x1b"] as const) {
     const state = new StickyModifiers();
@@ -236,16 +254,33 @@ test("a deferred 229 marker ignores parser replies before its textarea diff", ()
   const textarea = { value: "ab" };
   const keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
     modifiers, textarea, rows: [], buttons: new Map(), focused: true,
-    phone: { matches: true }, userInput: false, inputSource: "terminal", userInputGeneration: 0,
+    phone: { matches: true }, userInput: undefined, inputSource: "terminal", userInputGeneration: 0,
     deferred229Generation: 0,
     softInput: { transform: (text: string, apply: (value: string) => string) => apply(text) },
-  }) as unknown as Pick<TerminalKeybar, "markUserInput" | "transform">;
+  }) as unknown as Pick<TerminalKeybar, "markDeferredUserInput" | "transform">;
 
-  keybar.markUserInput(true);
+  keybar.markDeferredUserInput();
   textarea.value = "a";
   assert.equal(keybar.transform("\x1b[?1;2c"), "\x1b[?1;2c");
   assert.equal(modifiers.state("Ctrl"), "once");
   assert.equal(keybar.transform("\x7f"), "\x08");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("the onKey marker carries physical identity into its matching onData", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea: { value: "" }, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0,
+    softInput: { transform: (text: string, apply: (value: string) => string) => apply(text) },
+  }) as unknown as Pick<TerminalKeybar, "markUserInput" | "transform">;
+
+  keybar.markUserInput({
+    key: "ArrowUp", shiftKey: false, altKey: true, ctrlKey: false, metaKey: false,
+  });
+  assert.equal(keybar.transform("\x1b[1;5A"), "\x1b[1;7A");
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
