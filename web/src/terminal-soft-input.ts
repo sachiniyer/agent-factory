@@ -12,6 +12,7 @@ interface CompositionRange {
   commitLength?: number;
   trailingLength?: number;
   keydownAfterEnd?: boolean;
+  keydownAfterEndEvent?: Event;
   beforeDeleteValue?: string;
   queuedInput?: PostCompositionInput;
   trailingFlush?: TrailingFlush;
@@ -60,8 +61,13 @@ export class TerminalSoftInput {
     const keyCode = (event as KeyboardEvent).keyCode;
     // Only a key that xterm accepted past its custom handler can make
     // CompositionHelper finalize the pending commit before handling that key.
-    if (range && this.keydownReachesCompositionHelper(event) &&
-      ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
+    if (range && ![16, 17, 18, 229].includes(keyCode)) {
+      // Xterm's custom handler runs later at the textarea target. Retain the
+      // capture-phase candidate and classify it only when the following input
+      // arrives, after that handler has had a chance to reject the keydown.
+      range.keydownAfterEnd = undefined;
+      range.keydownAfterEndEvent = event;
+    }
   };
   private readonly onKeyUp = (): void => {
     this.keyDownSeen = false;
@@ -164,13 +170,14 @@ export class TerminalSoftInput {
       }
       if (range && postCompositionText && input.type === "input" &&
         input.isComposing === false) {
+        const keydownAfterEnd = this.keydownReachedCompositionHelper(range);
         const value = this.textarea?.value;
         const mutationLength = value !== undefined && range.start !== undefined && value.length > range.start
           ? value.length - range.start : undefined;
         const fallbackLength = input.data?.length;
-        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !range.keydownAfterEnd &&
+        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !keydownAfterEnd &&
           range.commitLength !== undefined && (mutationLength ?? fallbackLength ?? 0) > range.commitLength;
-        if (range.keydownAfterEnd) {
+        if (keydownAfterEnd) {
           range.trailingLength = mutationLength !== undefined
             ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0))
             : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
@@ -357,6 +364,14 @@ export class TerminalSoftInput {
       range.observedValue = value;
       if (range.initialValue !== undefined && value !== range.initialValue) range.textareaChanged = true;
     }
+  }
+  private keydownReachedCompositionHelper(range: CompositionRange): boolean {
+    if (range.keydownAfterEnd !== undefined) return range.keydownAfterEnd;
+    const event = range.keydownAfterEndEvent;
+    if (!event) return false;
+    range.keydownAfterEndEvent = undefined;
+    range.keydownAfterEnd = this.keydownReachesCompositionHelper(event);
+    return range.keydownAfterEnd;
   }
   private queueTrailingFlush(range: CompositionRange): void {
     const trailingLength = range.trailingLength ?? 0;

@@ -136,11 +136,16 @@ test("sticky no-op preserves xterm's physical Alt aliases and remains armed", ()
   }
 });
 
-test("physical modifier merging preserves xterm's emitted control bytes", () => {
+test("physical modifier merging follows xterm's Ctrl and Alt precedence", () => {
   for (const [sticky, bytes, physical, expected] of [
     ["Alt", "\x00", { key: " ", ctrlKey: true }, "\x1b\x00"],
-    ["Alt", "\x1b", { key: "3", ctrlKey: true }, "\x1b\x1b"],
-    ["Alt", "\x7f", { key: "8", ctrlKey: true }, "\x1b\x7f"],
+    ["Alt", "\x1b", { key: "3", ctrlKey: true }, "\x1b3"],
+    ["Alt", "\x1c", { key: "4", ctrlKey: true }, "\x1b4"],
+    ["Alt", "\x1b", { key: "[", ctrlKey: true }, "\x1b["],
+    ["Alt", "\x1f", { key: "_", shiftKey: true, ctrlKey: true }, "\x1b_"],
+    ["Alt", "\x7f", { key: "8", ctrlKey: true }, "\x1b8"],
+    ["Ctrl", "\x1b3", { key: "3", altKey: true }, "\x1b3"],
+    ["Ctrl", "\x1b[", { key: "[", altKey: true }, "\x1b["],
     ["Ctrl", "\x1b ", { key: " ", altKey: true }, "\x1b\x00"],
     ["Ctrl", "z", { key: "x" }, "\x1a"], // Emitted/layout text wins over the DOM key label.
   ] as const) {

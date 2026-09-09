@@ -139,6 +139,22 @@ function ctrlModifiedEmission(text: string): string | undefined {
   return undefined;
 }
 
+function xtermAltControlAlias(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
+  stickyAlt: boolean): string | undefined {
+  if (physical.metaKey || physical.key.length !== 1 || /^[A-Za-z ]$/.test(physical.key)) return undefined;
+  const control = ctrlModifiedEmission(physical.key);
+  if (control === undefined) return undefined;
+  // In xterm 5.5's default-key branch, Alt takes precedence over Ctrl for the
+  // printable digit/punctuation mapping. Letters and Space deliberately retain
+  // their Ctrl folds. Preserve that precedence whichever sticky modifier fills
+  // the missing half of a physical Ctrl+Alt chord.
+  if (physical.ctrlKey && !physical.altKey && stickyAlt && text === control)
+    return `\x1b${physical.key}`;
+  if (physical.altKey && !physical.ctrlKey && stickyCtrl && text === `\x1b${physical.key}`)
+    return text;
+  return undefined;
+}
+
 function mergePhysicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
   stickyAlt: boolean): string {
   // A sticky modifier that is already physically held adds no information.
@@ -173,6 +189,8 @@ function mergePhysicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyC
 
   // Xterm has already evaluated named, scalar, and control keys. Retain that
   // payload and apply only a missing sticky modifier to it.
+  const altAlias = xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt);
+  if (altAlias !== undefined) return altAlias;
   const physicalAltPrefix = physical.altKey && text.length > 1 && text.charCodeAt(0) === 27;
   let payload = physicalAltPrefix ? text.slice(1) : text;
   if (stickyCtrl && !physical.ctrlKey) payload = ctrlModifiedEmission(payload) ?? payload;

@@ -8115,7 +8115,10 @@ var TerminalSoftInput = class {
     this.staleBeforeValue = void 0;
     const range = this.pending.at(-1);
     const keyCode = event.keyCode;
-    if (range && this.keydownReachesCompositionHelper(event) && ![16, 17, 18, 229].includes(keyCode)) range.keydownAfterEnd = true;
+    if (range && ![16, 17, 18, 229].includes(keyCode)) {
+      range.keydownAfterEnd = void 0;
+      range.keydownAfterEndEvent = event;
+    }
   };
   onKeyUp = () => {
     this.keyDownSeen = false;
@@ -8193,11 +8196,12 @@ var TerminalSoftInput = class {
         return;
       }
       if (range && postCompositionText && input.type === "input" && input.isComposing === false) {
+        const keydownAfterEnd = this.keydownReachedCompositionHelper(range);
         const value = this.textarea?.value;
         const mutationLength = value !== void 0 && range.start !== void 0 && value.length > range.start ? value.length - range.start : void 0;
         const fallbackLength = input.data?.length;
-        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !range.keydownAfterEnd && range.commitLength !== void 0 && (mutationLength ?? fallbackLength ?? 0) > range.commitLength;
-        if (range.keydownAfterEnd) {
+        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !keydownAfterEnd && range.commitLength !== void 0 && (mutationLength ?? fallbackLength ?? 0) > range.commitLength;
+        if (keydownAfterEnd) {
           range.trailingLength = mutationLength !== void 0 ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0)) : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         } else if (range.commitLength === void 0) {
           range.commitLength = mutationLength ?? input.data?.length;
@@ -8344,6 +8348,14 @@ var TerminalSoftInput = class {
       if (range.initialValue !== void 0 && value !== range.initialValue) range.textareaChanged = true;
     }
   }
+  keydownReachedCompositionHelper(range) {
+    if (range.keydownAfterEnd !== void 0) return range.keydownAfterEnd;
+    const event = range.keydownAfterEndEvent;
+    if (!event) return false;
+    range.keydownAfterEndEvent = void 0;
+    range.keydownAfterEnd = this.keydownReachesCompositionHelper(event);
+    return range.keydownAfterEnd;
+  }
   queueTrailingFlush(range) {
     const trailingLength = range.trailingLength ?? 0;
     if (!trailingLength || !range.frozenText || range.trailingFlush) return;
@@ -8479,6 +8491,16 @@ function ctrlModifiedEmission(text) {
   if (code === 56) return "\x7F";
   return void 0;
 }
+function xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt) {
+  if (physical.metaKey || physical.key.length !== 1 || /^[A-Za-z ]$/.test(physical.key)) return void 0;
+  const control = ctrlModifiedEmission(physical.key);
+  if (control === void 0) return void 0;
+  if (physical.ctrlKey && !physical.altKey && stickyAlt && text === control)
+    return `\x1B${physical.key}`;
+  if (physical.altKey && !physical.ctrlKey && stickyCtrl && text === `\x1B${physical.key}`)
+    return text;
+  return void 0;
+}
 function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
   if ((!stickyCtrl || physical.ctrlKey) && (!stickyAlt || physical.altKey)) return text;
   const ctrl = physical.ctrlKey || stickyCtrl;
@@ -8494,6 +8516,8 @@ function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
   const arrow = { ArrowLeft: "D", ArrowUp: "A", ArrowDown: "B", ArrowRight: "C" }[physical.key];
   if (arrow && physical.altKey && (text === "\x1Bb" || text === "\x1Bf"))
     return `\x1B[1;${modifierBits + 1}${arrow}`;
+  const altAlias = xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt);
+  if (altAlias !== void 0) return altAlias;
   const physicalAltPrefix = physical.altKey && text.length > 1 && text.charCodeAt(0) === 27;
   let payload = physicalAltPrefix ? text.slice(1) : text;
   if (stickyCtrl && !physical.ctrlKey) payload = ctrlModifiedEmission(payload) ?? payload;

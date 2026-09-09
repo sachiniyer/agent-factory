@@ -372,13 +372,17 @@ test("a custom-suppressed keydown cannot classify a Safari-order commit as trail
   const suppressed = Object.assign(new Event("keydown", { cancelable: true }), {
     key: "v", keyCode: 86, ctrlKey: true,
   });
+  const suppressedKeydowns = new WeakSet<Event>();
   const soft = Reflect.construct(TerminalSoftInput, [host, textarea, () => true, () => false,
-    () => {}, () => true, (event: Event) => event !== suppressed]) as TerminalSoftInput;
+    () => {}, () => true, (event: Event) => !suppressedKeydowns.delete(event)]) as TerminalSoftInput;
   t.after(() => soft.dispose());
 
   textarea.dispatchEvent(new Event("compositionstart"));
   textarea.dispatchEvent(composition("compositionend", "字"));
   textarea.dispatchEvent(suppressed);
+  // Xterm's custom key handler runs after our capture listener and suppresses
+  // the event before CompositionHelper receives it.
+  suppressedKeydowns.add(suppressed);
   textarea.value = "字";
   host.dispatchEvent(insertText("字"));
 
