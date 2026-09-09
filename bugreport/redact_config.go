@@ -70,6 +70,9 @@ func (r *redactor) scrubConfigText(s string, kind redactionTextKind) string {
 func encodeConfigString(value string) (string, error) {
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
+	// This encoding is emitted into both JSON and TOML. Keep grammar-neutral
+	// bytes such as &, <, and > verbatim so redaction does not rewrite config
+	// content merely because it round-tripped through a decoded scalar.
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
 		return "", err
