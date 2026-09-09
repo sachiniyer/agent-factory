@@ -233,6 +233,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"DeleteProject":    blockedDuringProbation,
 	"DeliverPrompt":    blockedDuringProbation,
 	"HandoffSession":   blockedDuringProbation,
+	"HandoffSessionV2": blockedDuringProbation,
 	"KillSession":      blockedDuringProbation,
 	"PauseStatusPoll":  blockedDuringProbation,
 	"ReapConfigAgent":  blockedDuringProbation,

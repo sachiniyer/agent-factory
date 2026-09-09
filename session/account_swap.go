@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -97,6 +98,15 @@ func (i *Instance) SupportsAutomaticAccountSwap() bool {
 // account creation remains supported, but a crash-safe automatic reprovision
 // needs a durable container identity and immutable provision plan of its own.
 func (i *Instance) ValidateAccountSwap(name string) error {
+	return i.validateAccountSwap(name, "", false)
+}
+
+// ValidateManualAccountSwap uses the same launch proof with an operator-selected identity.
+func (i *Instance) ValidateManualAccountSwap(name, agent string) error {
+	return i.validateAccountSwap(name, agent, true)
+}
+
+func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
@@ -111,7 +121,8 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	if op != OpRespawning {
 		return fmt.Errorf("account swap for %q requires the limit-resume fence", i.Title)
 	}
-	if strings.TrimSpace(current) != "" && !auto {
+	committedManual := pending != nil && pending.Manual && pending.To == current && name == current
+	if strings.TrimSpace(current) != "" && !auto && !manual && !committedManual {
 		return fmt.Errorf("account %q was explicitly pinned for session %q and will not be overridden", current, i.Title)
 	}
 	if backend == nil {
@@ -124,6 +135,13 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
+	crossAgent := agent != "" && agent != i.CurrentAgentName()
+	if crossAgent {
+		program = agent
+		resolved := resolveResolvedConfigForInstance(i)
+		resolution.command = resolveProgramForAgent(i, agent)
+		resolution.trustBase = builtInProgramOverride(resolved, agent, resolution.command)
+	}
 	resolvedProgram := resolution.command
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
 		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap requires a fresh conversation, so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
@@ -137,6 +155,20 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	// being replaced, and the af skill has to land in the root the replacement
 	// pane will actually read (see resolveSkillTargetForAccount).
 	launchProgram = injectSystemPrompt(launchProgram, resolveSkillTargetForAccount(i, launchProgram, name))
+	workDir := i.GetWorktreePath()
+	// Same-agent manual swaps with a worktree always preflight, including an
+	// unchanged command whose binary disappeared after the current process
+	// started. Worktree-less projections cannot launch, so they retain the
+	// storage-only path; cross-agent swaps must still refuse that absence.
+	if crossAgent && workDir == "" {
+		return fmt.Errorf("handoff target %s has no worktree path for launch preflight", agent)
+	}
+	if manual && workDir != "" {
+		if _, err := preflight.CheckCommandAt(launchProgram, workDir); err != nil {
+			return fmt.Errorf("handoff target %s failed launch preflight: %w", agent,
+				preflight.ProgramError(agent, resolvedProgram, err))
+		}
+	}
 	proof := accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase)
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
@@ -171,6 +203,15 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 			replacementProgram, err = sessionenv.AccountShellCommand(replacementProgram)
 			if err != nil {
 				return fmt.Errorf("cannot switch session %q to account %q because tab %q has no proven account-scoped shell replacement: %w", i.Title, name, tab.Name, err)
+			}
+		}
+		// A healthy manual handoff must prove every replacement command before
+		// stopping any pane. Automatic recovery retains its existing retryable
+		// behavior; only the manual path risks tearing down a healthy runtime.
+		if manual && workDir != "" {
+			if _, err := preflight.CheckCommandAt(replacementProgram, workDir); err != nil {
+				return fmt.Errorf("cannot switch session %q to account %q because tab %q failed launch preflight: %w", i.Title, name, tab.Name,
+					preflight.ProgramError(replacementProgram, replacementProgram, err))
 			}
 		}
 		if args := tmux.ConversationSelectorArgs(replacementProgram); len(args) > 0 {
@@ -249,9 +290,10 @@ func (i *Instance) StopForAccountSwap() error {
 	return stopper.stopForAccountSwap(i, false)
 }
 
-// StopRemainingPanesForAccountSwap rechecks every local sibling when the agent
-// probe already established that tab zero is absent. A retry must not promote
-// that one absence into proof that every credential-bearing pane is gone.
+// StopRemainingPanesForAccountSwap rechecks every local pane when the agent
+// probe reported that tab zero was absent. The probe is only a hint: a retry
+// still needs ProvenNoPane or a blindness-aware teardown before it can treat
+// any credential-bearing pane as gone.
 func (i *Instance) StopRemainingPanesForAccountSwap() error {
 	backend := i.currentBackend()
 	i.mu.RLock()
@@ -273,8 +315,16 @@ func (i *Instance) StopRemainingPanesForAccountSwap() error {
 // SelectAccountAutomatically commits the scheduler's replacement identity in
 // memory. The caller must persist it before starting the replacement runtime.
 func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversationData, error) {
+	return i.selectAccount(from, name, true)
+}
+
+func (i *Instance) selectAccount(from, name string, automatic bool) (AgentConversationData, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.selectAccountLocked(from, name, automatic)
+}
+
+func (i *Instance) selectAccountLocked(from, name string, automatic bool) (AgentConversationData, error) {
 	if i.inFlightOp != OpRespawning {
 		return AgentConversationData{}, fmt.Errorf("selecting account for %q requires the limit-resume fence", i.Title)
 	}
@@ -291,8 +341,8 @@ func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversat
 		i.Account = name
 		i.touchLocked()
 	}
-	if !i.accountAutoSelected {
-		i.accountAutoSelected = true
+	if i.accountAutoSelected != automatic {
+		i.accountAutoSelected = automatic
 		i.touchLocked()
 	}
 	pending := &AccountSwapData{From: from, To: name}
@@ -353,7 +403,7 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 		return fmt.Errorf("account swap: session %q has no local agent runtime", i.Title)
 	}
 	for idx, tab := range tabs {
-		if agentAlreadyAbsent && idx == 0 {
+		if agentAlreadyAbsent && idx == 0 && tab != nil && tab.tmux != nil && tab.tmux.ProvenNoPane() {
 			continue
 		}
 		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
@@ -363,11 +413,20 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 			continue
 		}
 		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
+		if idx == 0 && blind {
+			return fmt.Errorf("account swap: cannot stop agent tab %q for %q: %w",
+				tab.Name, i.Title, errors.Join(ErrAccountSwapAgentTeardownBlind, err))
+		}
 		switch {
 		case state == tmux.PaneStateKnown && blind:
-			return fmt.Errorf("account swap: cannot stop credential-bearing tab %q for %q: it vanished without its pane being observed; a detached child may still be writing the worktree", tab.Name, i.Title)
+			return fmt.Errorf("account swap: cannot stop credential-bearing tab %q for %q: %w", tab.Name, i.Title,
+				errors.Join(ErrAccountSwapAgentTeardownBlind, err))
 		case state == tmux.PaneStateUnknown:
-			return fmt.Errorf("account swap: cannot confirm credential-bearing tab %q stopped for %q: %w", tab.Name, i.Title, err)
+			if errors.Is(err, tmux.ErrSessionStillAlive) {
+				return fmt.Errorf("account swap: failed to stop credential-bearing tab %q for %q: %w", tab.Name, i.Title, err)
+			}
+			return fmt.Errorf("account swap: cannot confirm credential-bearing tab %q stopped for %q: %w", tab.Name, i.Title,
+				errors.Join(ErrAccountSwapAgentTeardownBlind, err))
 		case err != nil:
 			return fmt.Errorf("account swap: failed to stop credential-bearing tab %q for %q: %w", tab.Name, i.Title, err)
 		}

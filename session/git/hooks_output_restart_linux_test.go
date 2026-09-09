@@ -57,13 +57,22 @@ func TestPostWorktreeHookOutputSurvivesRunnerExit(t *testing.T) {
 	if err := runner.Start(); err != nil {
 		t.Fatalf("start hook-runner helper: %v", err)
 	}
+	runnerStopped := false
+	t.Cleanup(func() {
+		if runnerStopped {
+			return
+		}
+		_ = runner.Process.Kill()
+		_ = runner.Wait()
+	})
 
-	hookPID := waitForPidFile(t, pidFile, 5*time.Second)
+	hookPID := waitForPidFile(t, pidFile, 20*time.Second)
 	t.Cleanup(func() { _ = killProcessGroup(hookPID) })
 	if err := runner.Process.Kill(); err != nil {
 		t.Fatalf("stop helper daemon generation: %v", err)
 	}
 	_ = runner.Wait()
+	runnerStopped = true
 	if err := os.WriteFile(releaseFile, nil, 0o600); err != nil {
 		t.Fatalf("release hook writer: %v", err)
 	}
@@ -110,8 +119,8 @@ func runPostWorktreeRestartHelper(t *testing.T) {
 
 func restartProbeCommand(pidFile, releaseFile, statusFile, writer string) string {
 	return fmt.Sprintf(
-		"printf '%%s\\n' \"$$\" > %q; while [ ! -f %q ]; do sleep 0.02; done; %q; status=$?; printf '%%s\\n' \"$status\" > %q; exit \"$status\"",
-		pidFile, releaseFile, writer, statusFile,
+		"printf '%%s\\n' \"$$\" > %q; %s; %q; status=$?; printf '%%s\\n' \"$status\" > %q; exit \"$status\"",
+		pidFile, boundedFileGate(releaseFile, "", gatedHookPollLimit, gatedHookPollInterval), writer, statusFile,
 	)
 }
 
