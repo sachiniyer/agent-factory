@@ -708,6 +708,13 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Worktree.RepoPath is empty. This mirrors the repo-root collection in
 	// commands/reset.go's planFactoryReset (#667).
 	grouped := make(map[string][]InstanceData)
+	// pendingArchiveIDs tracks, per repo, the set of instance IDs (or titles when
+	// ID is empty) whose in-memory snapshot was taken while OpArchiving was
+	// in flight. A targeted writer (persistInstanceData) may have already
+	// committed the correct Archived state to disk between the snapshot and
+	// the per-repo write below, so the file-lock body re-reads disk for these
+	// rows and prefers the durable committed version over the pre-Branch snapshot.
+	pendingArchiveIDs := make(map[string]map[string]struct{})
 	for _, inst := range instances {
 		data := inst.ToInstanceData()
 		status := data.Status
@@ -777,6 +784,28 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			continue
 		}
 		rid := inst.repoIDForStorage()
+		if pendingArchiveSandbox {
+			// This snapshot was taken while an archive push was still in flight.
+			// The sandbox teardown's outcome is unknown from this vantage point:
+			// process exit interrupts ArchiveSandbox before as.Kill returns, so
+			// neither UserKilled nor RuntimeCleanupStateUnknown is set yet. Mark
+			// the row as having an unknown cleanup boundary so ForStorage
+			// preserves its staged teardown identity; without this the
+			// !UserKilled && !RuntimeCleanupStateUnknown branch in ForStorage
+			// strips RuntimeCleanup, and the next restart has no handle to prove
+			// the old sandbox gone before reprovisioning.
+			data.RuntimeCleanupStateUnknown = true
+			// Record that this row needs reconciliation with disk inside the
+			// per-repo file lock (see pendingArchiveIDs comment above).
+			key := data.ID
+			if key == "" {
+				key = data.Title
+			}
+			if pendingArchiveIDs[rid] == nil {
+				pendingArchiveIDs[rid] = make(map[string]struct{})
+			}
+			pendingArchiveIDs[rid][key] = struct{}{}
+		}
 		grouped[rid] = append(grouped[rid], data.ForStorage())
 	}
 
@@ -785,7 +814,46 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		if pathErr != nil {
 			return pathErr
 		}
+		inFlightArchive := pendingArchiveIDs[rid]
 		if err := config.WithFileLock(path, func() error {
+			// If any row was snapshotted while its archive was in flight, a
+			// targeted writer (persistInstanceData / CommitArchive) may have
+			// already committed the correct Archived state between the snapshot
+			// and this lock. Re-read those rows from disk and prefer the durable
+			// committed version so the wholesale overwrite never regresses a
+			// finished archive back to a pre-Branch snapshot.
+			if len(inFlightArchive) > 0 {
+				if raw, readErr := s.state.GetInstances(rid); readErr == nil && len(raw) > 0 {
+					var onDisk []InstanceData
+					if jsonErr := json.Unmarshal(raw, &onDisk); jsonErr == nil {
+						for i, row := range group {
+							key := row.ID
+							if key == "" {
+								key = row.Title
+							}
+							if _, tracked := inFlightArchive[key]; !tracked {
+								continue
+							}
+							// Prefer the disk row if it has advanced beyond the
+							// in-flight archive window (i.e. the targeted writer
+							// committed LiveArchived before we grabbed the lock).
+							for _, d := range onDisk {
+								diskKey := d.ID
+								if diskKey == "" {
+									diskKey = d.Title
+								}
+								if diskKey != key {
+									continue
+								}
+								if d.Liveness == LiveArchived {
+									group[i] = d
+								}
+								break
+							}
+						}
+					}
+				}
+			}
 			jsonData, err := json.Marshal(dedupeInstanceData(group))
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)

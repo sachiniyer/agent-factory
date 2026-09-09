@@ -740,3 +740,155 @@ func TestSaveInstances_RetainedNonGitAliasScope(t *testing.T) {
 		require.Contains(t, state.data, pinned)
 	}
 }
+
+// TestSaveInstances_MidArchiveSandboxUseDiskVersionIfArchiveCommitted covers
+// the interleaving where the shutdown checkpoint snapshots a mid-archive sandbox
+// row BEFORE ArchiveSandbox has written i.Branch, but a targeted writer
+// (persistInstanceData / CommitArchive) commits the correct Archived state to
+// disk BEFORE SaveInstances acquires the file lock. The checkpoint must prefer
+// the durable disk version (with Branch set and Liveness=LiveArchived) over its
+// stale pre-Branch in-memory snapshot; otherwise the wholesale overwrite
+// regresses the just-committed archive back to an empty-Branch row and the next
+// restore re-provisions from the repo default branch.
+//
+// The scenario is exercised by pre-seeding disk with the committed Archived row
+// (simulating the targeted writer) and then calling SaveInstances with the
+// stale in-memory mid-archive snapshot.
+func TestSaveInstances_MidArchiveSandboxUseDiskVersionIfArchiveCommitted(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			// Pre-seed disk with the committed Archived row — this simulates
+			// persistInstanceData / CommitArchive having already run under the
+			// file lock before SaveInstances acquires it.
+			const pushedBranch = "af/mid-archive"
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "mid-archive-id",
+				Title:       "mid-archive",
+				Path:        repoPath,
+				Branch:      pushedBranch,
+				Program:     "claude",
+				Status:      Archived,
+				Liveness:    LiveArchived,
+				BackendType: backendType,
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Stale in-memory snapshot: OpArchiving raised, Branch not yet set —
+			// the exact shape the checkpoint sees when it wakes between
+			// BeginArchive and ArchiveSandbox writing i.Branch.
+			midArchive := &Instance{
+				ID:         "mid-archive-id",
+				Title:      "mid-archive",
+				Path:       repoPath,
+				Branch:     "",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				if row.Branch != pushedBranch {
+					t.Fatalf("checkpoint overwrote the committed archive: disk Branch = %q, want %q "+
+						"(the stale pre-Branch snapshot must never clobber the committed row)", row.Branch, pushedBranch)
+				}
+				if row.Liveness != LiveArchived {
+					t.Fatalf("checkpoint reverted committed archive: Liveness = %v, want LiveArchived", row.Liveness)
+				}
+				return
+			}
+			t.Fatalf("mid-archive row missing after checkpoint")
+		})
+	}
+}
+
+// TestSaveInstances_MidArchiveSandboxPreservesRuntimeCleanupIdentity covers the
+// second P1 finding: when the shutdown checkpoint retains a mid-archive sandbox
+// row, ForStorage must preserve the backend's staged RuntimeCleanup identity.
+// Without this, the !UserKilled && !RuntimeCleanupStateUnknown branch in
+// ForStorage strips RuntimeCleanup, and after a restart the daemon has no handle
+// to prove the old sandbox gone before reprovisioning — a second container or
+// remote workspace could be provisioned while the original remains alive.
+//
+// The fix marks RuntimeCleanupStateUnknown on any pendingArchiveSandbox row
+// before calling ForStorage, so the teardown identity survives to disk.
+func TestSaveInstances_MidArchiveSandboxPreservesRuntimeCleanupIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+
+	// A mid-archive docker session with a live cleanup identity: the backend
+	// knows the container ID and engine ID that must survive to disk so a
+	// restarted daemon can prove the container gone before re-provisioning.
+	const containerID = "abc123container"
+	const engineID = "engine-xyz"
+	midArchive := &Instance{
+		ID:         "mid-archive-docker-id",
+		Title:      "mid-archive-docker",
+		Path:       repoPath,
+		Branch:     "af/mid-archive-docker",
+		Program:    "claude",
+		started:    true,
+		liveness:   LiveRunning,
+		inFlightOp: OpArchiving,
+		backend: &dockerBackend{
+			containerID: containerID,
+			cleanup: &DockerRuntimeCleanupData{
+				ContainerID: containerID,
+				EngineID:    engineID,
+			},
+		},
+	}
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title != midArchive.Title {
+			continue
+		}
+		if !row.RuntimeCleanupStateUnknown {
+			t.Fatal("mid-archive sandbox row lost its RuntimeCleanupStateUnknown marker: " +
+				"the next restart has no way to know the sandbox teardown was in flight and " +
+				"may provision a second container while the original is still alive")
+		}
+		if row.RuntimeCleanup == nil {
+			t.Fatal("mid-archive sandbox row lost its RuntimeCleanup identity: " +
+				"the next restart cannot prove the old container gone before re-provisioning")
+		}
+		if row.RuntimeCleanup.Docker == nil {
+			t.Fatalf("RuntimeCleanup missing Docker identity: %+v", row.RuntimeCleanup)
+		}
+		if row.RuntimeCleanup.Docker.ContainerID != containerID {
+			t.Fatalf("RuntimeCleanup.Docker.ContainerID = %q, want %q", row.RuntimeCleanup.Docker.ContainerID, containerID)
+		}
+		if row.RuntimeCleanup.Docker.EngineID != engineID {
+			t.Fatalf("RuntimeCleanup.Docker.EngineID = %q, want %q", row.RuntimeCleanup.Docker.EngineID, engineID)
+		}
+		return
+	}
+	t.Fatal("mid-archive sandbox row was dropped from the checkpoint")
+}
