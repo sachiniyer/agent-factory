@@ -2411,6 +2411,7 @@ function applySessions(sessions: SessionData[]): void {
   if (evidence) pendingRestores.observe(authoritative.map(s => ({
     id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
     restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive",
+    operationLockHeld: s.operation_lock_held,
   })), evidence);
 }
 

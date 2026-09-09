@@ -1,4 +1,9 @@
-type RestoreRow = { id?: string; restoreEligible: boolean; restoreSettled?: boolean };
+type RestoreRow = {
+  id?: string;
+  restoreEligible: boolean;
+  restoreSettled?: boolean;
+  operationLockHeld?: boolean;
+};
 export type RestoreEvidence =
   | {
     kind: "snapshot";
@@ -149,6 +154,9 @@ export class PendingRestores {
     let changed = false;
     for (const [id, ticket] of this.tickets) {
       const row = rows.find(candidate => candidate.id === id);
+      // Current daemons project explicit true/false. Absence preserves the
+      // bounded fallback for older daemons that cannot provide this evidence.
+      const operationLockReleased = row?.operationLockHeld !== true;
       const authoritative = evidence?.kind === "updated" || evidence?.kind === "restored" || evidence?.kind === "snapshot";
       // A delayed recover-fence update may arrive after HTTP success. Only a
       // Snapshot issued afterward proves completion. Identity-only restored events
@@ -185,11 +193,13 @@ export class PendingRestores {
           // The projection has no attempt id. A predecessor can settle after B
           // is queued but before B acquires the daemon operation lock, so only a
           // Snapshot beyond B's admission bound can release its fence.
-          uncertainCompleted = admissionExpired;
+          uncertainCompleted = admissionExpired && operationLockReleased;
         } else if (row?.restoreEligible) {
           // A reconnect can hold these captured rows behind slower task/project
           // loads. Processing time cannot turn a pre-deadline Snapshot into proof.
-          uncertainCompleted = admissionExpired;
+          // The elapsed bound proves a waiter cannot still be queued, but an
+          // admitted restore may own the lock before OpRestoring is projected.
+          uncertainCompleted = admissionExpired && operationLockReleased;
         } else {
           // LifecycleActionNone covers every operation fence and several unsettled
           // states. It carries no attempt identity, so it cannot make a later
@@ -228,12 +238,19 @@ export class PendingRestores {
 
   private armUncertainTimer(id: string, ticket: RestoreTicket): void {
     if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
-    const remaining = this.operationClockMs === null
-      ? ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now()
-      : ticket.admissionClockStartedAt === null
-        ? 0
-        : ticket.admissionClockStartedAt + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS -
+    let remaining: number;
+    if (this.operationClockMs !== null && ticket.admissionClockStartedAt === null) {
+      remaining = 0; // Establish a causal daemon-clock baseline immediately.
+    } else {
+      remaining = this.operationClockMs === null
+        ? ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now()
+        : ticket.admissionClockStartedAt! + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS -
           this.operationClockMs;
+      if (remaining <= 0) {
+        this.armRetryTimer(id, ticket);
+        return;
+      }
+    }
     ticket.timer = this.schedule(() => {
       ticket.timer = null;
       if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;

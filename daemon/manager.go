@@ -859,11 +859,12 @@ func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
 // of the single-writer model (#960 PR 3): the manager's settled instance map plus
 // its daemon-owned pending-create map ARE the source of truth, so clients mirror
 // this projection instead of re-reading instances.json or inventing optimistic
-// rows. Pure read — it copies the instance pointers/pending values under m.mu,
+// rows. It copies the instance pointers/pending values under m.mu,
 // then serializes each Instance via ToInstanceData (which takes its own lock)
 // OUTSIDE m.mu so a slow serialize never blocks a concurrent mutation. Results
 // are ordered by (repo, title) key for a stable diff, so the TUI reconcile does
-// not repaint on map-iteration jitter.
+// not repaint on map-iteration jitter. Each operation lock is probed without
+// waiting after its row is serialized; a free lock is released immediately.
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 	m.mu.Lock()
 	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
@@ -890,28 +891,30 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 	}
 	sort.Strings(keys)
 	type snapshotEntry struct {
-		instance *session.Instance
-		pending  session.InstanceData
+		instance      *session.Instance
+		pending       session.InstanceData
+		operationLock *sync.Mutex
 	}
 	entries := make([]snapshotEntry, 0, len(keys))
 	for _, key := range keys {
 		if inst := m.instances[key]; inst != nil {
-			entries = append(entries, snapshotEntry{instance: inst})
+			entries = append(entries, snapshotEntry{instance: inst, operationLock: m.instanceOpLocks[key]})
 			continue
 		}
 		if pending, ok := m.pendingCreates[key]; ok {
-			entries = append(entries, snapshotEntry{pending: pending})
+			entries = append(entries, snapshotEntry{pending: pending, operationLock: m.instanceOpLocks[key]})
 		}
 	}
 	m.mu.Unlock()
 
 	data := make([]session.InstanceData, 0, len(entries))
 	for _, entry := range entries {
+		projected := entry.pending
 		if entry.instance != nil {
-			data = append(data, entry.instance.ToInstanceData())
-			continue
+			projected = entry.instance.ToInstanceData()
 		}
-		data = append(data, entry.pending)
+		projected.OperationLockHeld = snapshotOperationLockHeld(entry.operationLock)
+		data = append(data, projected)
 	}
 	return data
 }

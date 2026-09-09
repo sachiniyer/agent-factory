@@ -465,6 +465,36 @@ test("a remote browser running ahead cannot expire the daemon admission fence", 
   assert.equal(pending.has("session"), false, "daemon elapsed time eventually releases the fence");
 });
 
+test("an admitted restore stays fenced until its lock ownership reaches the projection", async () => {
+  let daemonNow = 1_000;
+  const timer = fakeRestoreTimer();
+  const pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => 1_000, () => {}, timer.schedule, timer.cancel,
+  );
+  const snapshot = () => ({
+    kind: "snapshot" as const,
+    generation: pending.beginSnapshot(),
+    operationLockTimeoutMs: 30_000,
+    operationClockMs: daemonNow,
+  });
+  const row = (operationLockHeld: boolean, restoreEligible: boolean, restoreSettled = false) => [{
+    id: "session", restoreEligible, restoreSettled, operationLockHeld,
+  }];
+  pending.observe(row(false, true), snapshot());
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+
+  daemonNow += 1;
+  pending.observe(row(true, true), snapshot()); // Admitted, but OpRestoring is not projected yet.
+  daemonNow += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  pending.observe(row(true, true), snapshot());
+  assert.equal(pending.has("session"), true, "deadline alone cannot release an admitted restore");
+
+  pending.observe(row(true, false), snapshot());
+  assert.equal(pending.has("session"), true, "the projected restore remains fenced while it owns the lock");
+  pending.observe(row(false, false, true), snapshot());
+  assert.equal(pending.has("session"), false, "the settled projection and free lock release the fence");
+});
+
 for (const state of ["OpArchiving", "startup-unknown"] as const) {
   test(`an uncertain restore stays fenced through the ${state} no-action projection`, async () => {
     const timer = fakeRestoreTimer();
@@ -538,6 +568,41 @@ test("an early Snapshot schedules reconciliation at the uncertain admission dead
   timer.fire();
   assert.equal(reconciliations, 1);
   assert.equal(pending.has("session"), false);
+});
+
+test("an admitted restore backs off reconciliation after its admission deadline", async () => {
+  let daemonNow = 1_000;
+  const timer = fakeRestoreTimer();
+  let rows = [{ id: "session", restoreEligible: true, operationLockHeld: false }];
+  let reconciliations = 0;
+  let pending!: PendingRestores;
+  const snapshot = () => ({
+    kind: "snapshot" as const,
+    generation: pending.beginSnapshot(),
+    operationLockTimeoutMs: 30_000,
+    operationClockMs: daemonNow,
+  });
+  pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => 1_000,
+    () => {
+      reconciliations++;
+      pending.observe(rows, snapshot());
+    },
+    timer.schedule,
+    timer.cancel,
+  );
+  pending.observe(rows, snapshot());
+  await assert.rejects(pending.run("session", async () => { throw new ApiError(0, "lost reply"); }, true)!);
+
+  timer.fire(); // Establish the first causal daemon-clock reading.
+  assert.equal(timer.delay(), 30_000 + RESTORE_ADMISSION_MARGIN_MS);
+  daemonNow += 30_000 + RESTORE_ADMISSION_MARGIN_MS + 1;
+  rows = [{ id: "session", restoreEligible: false, operationLockHeld: true }];
+  timer.fire();
+  assert.equal(reconciliations, 2);
+  assert.equal(pending.has("session"), true);
+  assert.equal(timer.delay(), RESTORE_RECONCILE_RETRY_MIN_MS,
+    "an admitted long-running restore must use the retry backoff, not a zero-delay loop");
 });
 
 test("a failed deadline resync retries until an accepted Snapshot releases the ticket", async () => {

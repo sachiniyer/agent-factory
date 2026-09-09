@@ -123,6 +123,8 @@ export interface SessionData {
   liveness?: number;
   /** Transient client-op axis; absent (→ None) in the steady state. */
   in_flight_op?: number;
+  /** Snapshot-only ownership of the daemon's per-session operation lock. */
+  operation_lock_held?: boolean;
   /** Daemon-owned lifecycle capability. The web consumes this decision instead
    *  of re-deriving TUI policy from liveness/in-flight fields. */
   lifecycle_action?: LifecycleAction;
