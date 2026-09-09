@@ -43,6 +43,21 @@ func TestPendingManualAccountSwapDeliveryEvidenceIsMissionScoped(t *testing.T) {
 	require.Equal(t, PromptCouldNotConfirm, inst.ToInstanceData().PendingAccountSwap.MissionDeliveryStatus)
 }
 
+func TestStartupUnknownManualAccountSwapDoesNotExposeRetry(t *testing.T) {
+	inst := &Instance{
+		liveness:            LiveRunning,
+		startupStateUnknown: true,
+		pendingAccountSwap: &AccountSwapData{
+			Manual: true, From: "work", To: "personal", ReplacementPanesStarted: true,
+			MissionDeliveryStatus: PromptCouldNotConfirm,
+		},
+	}
+	require.True(t, inst.PendingManualAccountSwapDeliveryUnconfirmed(),
+		"startup uncertainty must not erase the mission's ambiguous verdict")
+	require.False(t, inst.CanRetryPendingManualAccountSwapDelivery(),
+		"an unknown replacement runtime must stay inert instead of advertising a delivery retry")
+}
+
 func TestRestoreLegacyAccountSwapDoesNotTrustGenericDeliveryEvidence(t *testing.T) {
 	data := InstanceData{
 		PendingAccountSwap: &AccountSwapData{

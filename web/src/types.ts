@@ -181,6 +181,8 @@ export interface SessionData {
   limit_reset_at?: string;
   /** Present while a committed identity change still owes its replacement mission. */
   pending_account_swap?: AccountSwapData;
+  /** The replacement runtime may exist, but its identity/liveness was not confirmed. */
+  startup_state_unknown?: boolean;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
   backend_type?: string;
   /** The daemon's OWN answer, per tab kind, to "may this session gain one of

@@ -111,6 +111,44 @@ func TestHandleLimitRetry_UnconfirmedAccountHandoffDispatches(t *testing.T) {
 	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
 }
 
+func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveRunning
+	data.StartupStateUnknown = true
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	called := false
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error {
+		called = true
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	if cmd != nil {
+		_ = cmd()
+	}
+	require.False(t, called, "an unknown replacement runtime must not expose a retry submission")
+}
+
 // A manual retry retains its target while the tea.Cmd waits to run. If a
 // snapshot replaces the selected row with a different session that reused the
 // title in that window, the pending retry must not deliver the old prompt into

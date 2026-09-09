@@ -6651,7 +6651,7 @@ async function handoffSession(id, title, to, token2, account = "") {
   const result = await af("HandoffSession", { id, title, repo_id: "", to, account }, token2);
   const requestedAccount = account.trim();
   if (requestedAccount && result.to_account !== requestedAccount) {
-    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon \u2014 upgrade it); the runtime was already restarted under the agent's ambient identity`;
+    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon \u2014 upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces`;
     throw new ApiError(200, result.warning ? `${result.warning}
 ${mismatch}` : mismatch, MUTATION_COMMITTED_ERROR_CODE);
   }
@@ -11324,7 +11324,7 @@ function isLimitReached(s) {
 function isPendingManualHandoffDeliveryUnconfirmed(s) {
   const pending = s.pending_account_swap;
   const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
 function canHandoff(s) {
   return s.can_handoff === true;

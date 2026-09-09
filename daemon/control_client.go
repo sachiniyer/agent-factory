@@ -698,7 +698,7 @@ func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 	}
 	requestedAccount := strings.TrimSpace(req.Account)
 	if requestedAccount != "" && resp.ToAccount != requestedAccount {
-		mismatch := &rpcMutationCommittedError{err: fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity", requestedAccount)}
+		mismatch := &rpcMutationCommittedError{err: fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces", requestedAccount)}
 		return resp, errors.Join(err, mismatch)
 	}
 	return resp, err

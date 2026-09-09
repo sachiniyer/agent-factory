@@ -140,7 +140,8 @@ func TestControlRoundTrips(t *testing.T) {
 			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "codex"})
 		})
 		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
-		if resp.To != "codex" || !IsMutationCommitted(err) || !strings.Contains(err.Error(), "did not honor") {
+		if resp.To != "codex" || !IsMutationCommitted(err) || !strings.Contains(err.Error(), "did not honor") ||
+			!strings.Contains(err.Error(), "credential identity is unknown") || strings.Contains(err.Error(), "ambient identity") {
 			t.Fatalf("HandoffSession = %+v, %T %v; want payload plus committed account mismatch", resp, err, err)
 		}
 	})

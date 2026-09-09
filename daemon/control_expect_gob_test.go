@@ -171,6 +171,8 @@ func TestControlClientClassifiesIgnoredHandoffAccountAsCommitted(t *testing.T) {
 	resp, err := HandoffSession(HandoffSessionRequest{To: "codex", Account: "personal"})
 	require.Equal(t, "codex", resp.To)
 	require.ErrorContains(t, err, "did not honor")
+	require.ErrorContains(t, err, "credential identity is unknown")
+	require.NotContains(t, err.Error(), "ambient identity")
 	require.True(t, isMutationCommitted(err),
 		"an older daemon already restarted the runtime, so the compatibility mismatch is committed: %T: %v", err, err)
 }

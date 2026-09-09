@@ -422,7 +422,7 @@ func (m *Menu) addInstanceOptions() {
 	if m.instance != nil {
 		lifecycleAction = m.instance.LifecycleAction()
 		canKill = m.instance.CanKill()
-		canRetryHandoff = m.instance.PendingManualAccountSwapDeliveryUnconfirmed()
+		canRetryHandoff = m.instance.CanRetryPendingManualAccountSwapDelivery()
 	}
 	if lifecycleAction == session.LifecycleActionNone && !canRetryHandoff {
 		m.options = []keys.KeyName{keys.KeyNew}

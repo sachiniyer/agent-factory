@@ -496,7 +496,7 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
-	if !selected.LimitReached() && !selected.PendingManualAccountSwapDeliveryUnconfirmed() {
+	if !selected.LimitReached() && !selected.CanRetryPendingManualAccountSwapDelivery() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)

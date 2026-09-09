@@ -36,8 +36,11 @@ func prepareHandoffDelivery(delivery handoffDelivery) handoffDelivery {
 // Every other verdict keeps the durable delivery obligation; a nil transport
 // error means the submission call returned, not that the mission landed. The
 // obligation alone never authorizes replay: automatic retry additionally needs
-// mission-scoped PromptNotDelivered evidence. Missing or ambiguous evidence
-// remains pending for inspection.
+// mission-scoped PromptNotDelivered evidence and a runtime whose startup state
+// is known. An explicit operator retry may override ambiguous delivery only
+// after pane inspection, but no retry may touch the composer until it first
+// replaces its admitting verdict with a durable PromptCouldNotConfirm fence.
+// Missing evidence or unknown startup remains pending for inspection.
 func handoffDeliveryResultError(status session.PromptDeliveryStatus, err error) error {
 	if err != nil {
 		return err

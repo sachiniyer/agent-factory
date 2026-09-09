@@ -23,6 +23,20 @@ type accountReadinessBackend struct {
 
 type accountReadinessGoneBackend struct{ *limitResumeBackend }
 
+type accountDeliveryInspectBackend struct {
+	*accountReadinessBackend
+	beforeSend func()
+}
+
+func (b *accountDeliveryInspectBackend) SendPromptCommandWithStatus(
+	i *session.Instance, prompt string,
+) (session.PromptDeliveryStatus, error) {
+	if b.beforeSend != nil {
+		b.beforeSend()
+	}
+	return b.limitResumeBackend.SendPromptCommandWithStatus(i, prompt)
+}
+
 func (b *accountReadinessGoneBackend) Preview(*session.Instance) (string, error) {
 	return "", tmux.ErrSessionGone
 }
@@ -161,4 +175,37 @@ func TestHandoffAccountReadinessLimitRetainsMission(t *testing.T) {
 	_, _, prompts = base.snapshot()
 	require.Len(t, prompts, 1)
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
+}
+
+func TestManualAccountHandoffRetryFencesMissionBeforeSubmission(t *testing.T) {
+	t.Cleanup(task.SetTrustPromptTimingForTest(time.Millisecond))
+	m, repo, inst, base := newAutoResumeManager(t, "", true, "finish migration", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.ClearLimitReached()
+	readiness := &accountReadinessBackend{
+		limitResumeBackend: base,
+		previewed:          make(chan struct{}),
+		release:            make(chan struct{}),
+		limited:            true,
+	}
+	close(readiness.release)
+	backend := &accountDeliveryInspectBackend{accountReadinessBackend: readiness}
+	inst.SetBackend(backend)
+
+	_, err := m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, Account: "personal",
+	})
+	require.Error(t, err)
+	require.Equal(t, session.PromptNotDelivered,
+		persistedInstanceByTitle(t, repo, inst.Title).PendingAccountSwap.MissionDeliveryStatus)
+
+	readiness.limited = false
+	var statusAtSubmission session.PromptDeliveryStatus
+	backend.beforeSend = func() {
+		statusAtSubmission = persistedInstanceByTitle(t, repo, inst.Title).
+			RestoreAccountSwapRollbackFence().PendingAccountSwap.MissionDeliveryStatus
+	}
+	require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+	require.Equal(t, session.PromptCouldNotConfirm, statusAtSubmission,
+		"durable positive non-delivery evidence must be fenced before the composer is touched")
 }

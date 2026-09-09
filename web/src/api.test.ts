@@ -640,7 +640,9 @@ for (const echoed of ["", "work"]) {
     assert.ok(err instanceof ApiError);
     assert.equal(err.code, "mutation_committed");
     assert.match(err.message, /did not honor the requested account/);
-    assert.match(err.message, /ambient identity/);
+    assert.match(err.message, /resulting credential identity is unknown/);
+    assert.match(err.message, /source account label may have carried across agent namespaces/);
+    assert.doesNotMatch(err.message, /ambient identity/);
   });
 }
 

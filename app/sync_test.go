@@ -76,6 +76,23 @@ func TestSnapshotReconcilesIdleEvidenceWithoutLivenessChange(t *testing.T) {
 	require.Equal(t, session.IdleReasonNone, reason)
 }
 
+func TestSnapshotReconcilesAccountHandoffBeforeRetryGate(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "account-handoff")
+	data := inst.ToInstanceData()
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal",
+		ReplacementPanesStarted: true, MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "personal", account)
+	require.True(t, inst.CanRetryPendingManualAccountSwapDelivery(),
+		"the same-session projection must expose the daemon's pending inspected retry")
+}
+
 // TestSnapshotReconcilesUserKilledTombstone pins the same-session half of the
 // durable precedence rule. Cold materialization already goes through
 // FromInstanceData; an open TUI instead mutates its existing row in place and

@@ -343,6 +343,15 @@ test("pending manual handoff retry reads mission-scoped delivery evidence", () =
     false,
     "an unattempted mission stays on the automatic recovery path",
   );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      startup_state_unknown: true,
+      pending_account_swap: pending,
+    })),
+    false,
+    "an unknown replacement runtime must remain inert instead of offering Retry",
+  );
 });
 
 // canHandoff gates the web's Handoff action (#2013). It reads the daemon-projected

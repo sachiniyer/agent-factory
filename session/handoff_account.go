@@ -75,19 +75,105 @@ func (i *Instance) RecordPendingManualAccountSwapMissionDelivery(from, to string
 	return nil
 }
 
+// BeginPendingManualAccountSwapMissionDelivery closes the durable replay gate
+// before a delivery attempt touches the composer. A crash after this boundary
+// reloads ambiguity, never the positive non-delivery verdict that admitted the
+// attempt.
+func (i *Instance) BeginPendingManualAccountSwapMissionDelivery(from, to string) (PromptDeliveryStatus, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
+		return "", fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return "", fmt.Errorf("manual account swap from %q to %q has no replacement panes", from, to)
+	}
+	previous := pending.MissionDeliveryStatus
+	if previous != PromptCouldNotConfirm {
+		pending.MissionDeliveryStatus = PromptCouldNotConfirm
+		i.touchLocked()
+	}
+	return previous, nil
+}
+
+// RestorePendingManualAccountSwapMissionDelivery rolls back a begin boundary
+// only when persistence failed before submission began. Empty is allowed here:
+// an initial delivery with no prior attempt has no verdict to restore.
+func (i *Instance) RestorePendingManualAccountSwapMissionDelivery(from, to string, status PromptDeliveryStatus) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
+		return fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+	}
+	if status != "" && !status.Valid() {
+		return fmt.Errorf("invalid manual account swap mission delivery status %q", status)
+	}
+	if pending.MissionDeliveryStatus != status {
+		pending.MissionDeliveryStatus = status
+		i.touchLocked()
+	}
+	return nil
+}
+
 // PendingManualAccountSwapDeliveryUnconfirmed reports whether the replacement
 // runtime may already have received its pending mission. The verdict lives on
 // the transaction rather than the session-wide latest prompt, so an unrelated
-// prompt cannot authorize redelivery. An operator may inspect the pane and use
-// the explicit retry even when automatic recovery stays suppressed.
+// prompt cannot authorize redelivery.
 func (i *Instance) PendingManualAccountSwapDeliveryUnconfirmed() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
+	return i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
+}
+
+func (i *Instance) pendingManualAccountSwapDeliveryUnconfirmedLocked() bool {
 	if i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual ||
 		!i.pendingAccountSwap.ReplacementPanesStarted || i.pendingAccountSwap.MissionDeliveryStatus == "" {
 		return false
 	}
 	return i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered
+}
+
+// CanRetryPendingManualAccountSwapDelivery reports whether an operator can
+// inspect a known replacement pane and explicitly override ambiguous delivery.
+// Startup-unknown is inert because there is no confirmed runtime to inspect.
+func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return !i.startupStateUnknown && i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
+}
+
+// ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity and
+// pending delivery transaction onto an existing client projection.
+func (i *Instance) ReconcileAccountHandoffSnapshot(account string, auto bool, pending *AccountSwapData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.Account == account && i.accountAutoSelected == auto && accountSwapDataEqual(i.pendingAccountSwap, pending) {
+		return false
+	}
+	i.Account = account
+	i.accountAutoSelected = auto
+	i.pendingAccountSwap = cloneAccountSwapData(pending)
+	i.touchLocked()
+	return true
+}
+
+func accountSwapDataEqual(a, b *AccountSwapData) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	aOriginal, bOriginal := a.OriginalStartupStateUnknown, b.OriginalStartupStateUnknown
+	aCopy, bCopy := *a, *b
+	aCopy.OriginalStartupStateUnknown = nil
+	bCopy.OriginalStartupStateUnknown = nil
+	if aCopy != bCopy {
+		return false
+	}
+	if aOriginal == nil || bOriginal == nil {
+		return aOriginal == nil && bOriginal == nil
+	}
+	return *aOriginal == *bOriginal
 }
 
 // ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement

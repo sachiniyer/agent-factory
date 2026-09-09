@@ -15,6 +15,22 @@ import (
 // The booleans report whether this function owned the readiness settlement and
 // whether that write landed, so the caller neither repeats nor masks it.
 func (m *Manager) deliverManualAccountMission(repoID, key string, instance *session.Instance, swap *autoAccountSwap, mission string) (bool, bool, error) {
+	// Positive non-delivery evidence admits automatic recovery. Retire it on disk
+	// before touching the composer: a crash during submission then reloads an
+	// ambiguous verdict and cannot authorize the same mission a second time. An
+	// explicit operator retry follows the same boundary after pane inspection.
+	previousStatus, err := instance.BeginPendingManualAccountSwapMissionDelivery(swap.from, swap.to)
+	if err != nil {
+		return false, false, err
+	}
+	if err := m.persistSettlement(repoID, key, instance); err != nil {
+		// The attempt never began, so positive non-delivery remains truthful. The
+		// outer failure path checkpoints this restoration and leaves no send behind.
+		_ = instance.RestorePendingManualAccountSwapMissionDelivery(
+			swap.from, swap.to, previousStatus,
+		)
+		return false, false, fmt.Errorf("could not record the account-handoff mission attempt before submission; mission was not submitted: %w", err)
+	}
 	// An outgoing wall is not evidence about the replacement identity. Its ledger
 	// observation remains durable, while the replacement is independently probed.
 	instance.ClearLimitReached()

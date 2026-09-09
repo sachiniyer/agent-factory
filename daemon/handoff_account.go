@@ -110,6 +110,9 @@ func (m *Manager) admitManualAccountSwap(instance *session.Instance, swap *autoA
 // Its pending transaction, rather than invented quota evidence, makes that row
 // recoverable even with automatic rotation disabled.
 func accountSwapResumeEligible(instance *session.Instance) bool {
+	if instance.StartupStateUnknown() {
+		return false
+	}
 	if instance.LimitReached() {
 		return true
 	}

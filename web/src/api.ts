@@ -560,7 +560,7 @@ export async function handoffSession(id: string, title: string, to: string, toke
   const result = await af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to, account }, token);
   const requestedAccount = account.trim();
   if (requestedAccount && result.to_account !== requestedAccount) {
-    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon — upgrade it); the runtime was already restarted under the agent's ambient identity`;
+    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces`;
     throw new ApiError(200, result.warning ? `${result.warning}\n${mismatch}` : mismatch, MUTATION_COMMITTED_ERROR_CODE);
   }
   if (result.warning) {

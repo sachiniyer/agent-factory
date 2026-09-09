@@ -280,6 +280,7 @@ export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boole
   const liveness = livenessOf(s);
   return (
     (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None &&
+    s.startup_state_unknown !== true &&
     (liveness === Liveness.Running || liveness === Liveness.Ready) &&
     pending?.manual === true &&
     pending.replacement_panes_started === true &&
