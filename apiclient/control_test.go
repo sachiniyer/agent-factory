@@ -3,6 +3,7 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -45,6 +46,12 @@ func routeServerWithAccountHandoff(t *testing.T, method string, supported bool, 
 		_, _ = r.Body.Read(body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = apiproto.WriteEnvelope(w, handle(body))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
+		env.Error.DaemonRejected = true
+		w.WriteHeader(http.StatusNotFound)
+		_ = apiproto.WriteEnvelope(w, env)
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
@@ -184,6 +191,22 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 		if called {
 			t.Fatal("an unsupported daemon must never receive the mutation")
+		}
+	})
+
+	t.Run("HandoffSession preserves an intermediary 404 as uncertain", func(t *testing.T) {
+		c := statusServer(t, func(*http.Request) (int, []byte) {
+			return http.StatusNotFound, []byte("proxy could not read the upstream response")
+		})
+		_, err := c.HandoffSession(daemon.HandoffSessionRequest{To: "codex"})
+		if err == nil {
+			t.Fatal("an intermediary 404 must remain an error")
+		}
+		if errors.Is(err, daemon.ErrAccountHandoffUnsupported) || IsRouteNotServed(err) {
+			t.Fatalf("an unmarked 404 cannot prove that the daemon lacks the route: %T %v", err, err)
+		}
+		if !strings.Contains(err.Error(), "outcome could not be confirmed") {
+			t.Fatalf("intermediary 404 error = %q, want explicit uncertainty", err)
 		}
 	})
 

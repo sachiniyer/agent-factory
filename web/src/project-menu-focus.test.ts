@@ -12,6 +12,7 @@ class Control {
 const doc = { activeElement: null as Control | null };
 class Menu {
   ownerDocument = doc;
+  hidden = false;
   constructor(public children: Control[]) {}
   contains(node: unknown) { return this.children.includes(node as Control); }
   replaceChildren(...children: Control[]) {
@@ -50,4 +51,15 @@ test("a project refresh does not steal focus from another control", () => {
   external.focus();
   replace(new Menu([new Control("add")]), [new Control("add")], new Control("trigger"));
   assert.equal(doc.activeElement, external);
+});
+
+test("a refresh returns focus to the switcher after the project menu closes", () => {
+  const old = new Control("project:/work/todo-cli");
+  const menu = new Menu([old]);
+  old.focus();
+  menu.hidden = true;
+  const replacement = new Control("project:/work/todo-cli");
+  const fallback = new Control("trigger");
+  replace(menu, [replacement], fallback);
+  assert.equal(doc.activeElement, fallback);
 });

@@ -87,10 +87,9 @@ func IsMutationCommitted(err error) bool {
 	return apiproto.IsMutationCommitted(err)
 }
 
-// RouteNotServedError reports that the daemon answered 404 for a /v1 route this
-// client called — the route is absent from THAT daemon's table, so the daemon is
-// OLDER than this client (or, on a remote target, something other than a daemon
-// is answering the URL).
+// RouteNotServedError reports that the daemon's marked 404 catch-all answered a
+// /v1 route this client called. The marker proves the route is absent from THAT
+// daemon's table, so the daemon is older than this client.
 //
 // The inference is sound rather than a guess, and it is the reason this is a
 // separate type from VersionSkewError. The daemon's rpcHandler answers only 200,
@@ -109,8 +108,7 @@ func IsMutationCommitted(err error) bool {
 type RouteNotServedError struct {
 	// Route is the request path that 404ed, e.g. "/v1/UnsetConfigValue".
 	Route string
-	// Detail is the peer's verbatim message — the daemon's `unknown route "…"`
-	// envelope, or a snippet of whatever non-envelope body a proxy returned.
+	// Detail is the daemon's verbatim `unknown route "…"` message.
 	Detail string
 }
 
@@ -126,11 +124,30 @@ func IsRouteNotServed(err error) bool {
 	return errors.As(err, &missing)
 }
 
+// UnconfirmedHTTPResponseError reports an unmarked intermediary response after
+// a request was sent. It deliberately carries no "daemon rejected" or "route
+// absent" classification: the intermediary cannot prove whether the handler ran.
+type UnconfirmedHTTPResponseError struct {
+	Route  string
+	Status int
+	Detail string
+}
+
+func (e *UnconfirmedHTTPResponseError) Error() string {
+	return fmt.Sprintf("request to %s received an unverified HTTP %d response (%s); the request outcome could not be confirmed", e.Route, e.Status, e.Detail)
+}
+
+func daemonRejected404(raw []byte) bool {
+	var env struct {
+		Error *apiproto.EnvelopeError `json:"error"`
+	}
+	return json.Unmarshal(raw, &env) == nil && env.Error != nil && env.Error.DaemonRejected
+}
+
 // notServedDetail renders a 404 body for the refusal message: the daemon's own
 // envelope message when it sent one (`unknown route "/v1/…"`), else a snippet of
-// whatever a proxy answered with. It is best-effort by construction — the body is
-// no longer what DECIDES the classification, only what describes it — so a body
-// it cannot parse costs a nicer sentence, never the classification itself.
+// whatever an intermediary answered with. It is best-effort by construction:
+// the daemon provenance marker decides the classification; this text describes it.
 func notServedDetail(raw []byte) string {
 	var env struct {
 		Error *apiproto.EnvelopeError `json:"error"`

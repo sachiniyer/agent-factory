@@ -263,7 +263,9 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
+	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
+	data = data.restoreMissingHandoffMissionEvidence()
 	data = data.restoreMissingAccountSwapMissionEvidence()
 	id := data.ID
 	if id == "" {

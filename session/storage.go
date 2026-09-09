@@ -160,6 +160,11 @@ type InstanceData struct {
 	// or ambiguous evidence fails closed; only not-delivered permits an automatic
 	// retry because it proves this exact mission did not land.
 	HandoffDeliveryStatus PromptDeliveryStatus `json:"pending_handoff_delivery_status,omitempty"`
+	// HandoffOriginalStartupStateUnknown is a storage-only rollback fence. A
+	// current reader removes it before interpreting the row; the previous release
+	// ignores it and sees StartupStateUnknown, which prevents replaying an
+	// ambiguous pending mission after a binary rollback.
+	HandoffOriginalStartupStateUnknown *bool `json:"pending_handoff_original_startup_state_unknown,omitempty"`
 	// PendingAccountSwap is the committed identity change whose replacement
 	// runtime still needs the in-session notice and stored task delivered.
 	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
@@ -333,7 +338,10 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // unavailable.
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
+	d = d.restoreMissingHandoffMissionEvidence()
+	d = d.restoreMissingAccountSwapMissionEvidence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
@@ -410,7 +418,10 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	d = d.restoreMissingHandoffMissionEvidence()
+	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
+	d = d.projectPendingHandoffForPreviousRelease()
 	// The compatibility projection must capture original values before either it
 	// or the relocation fence below overwrites them. Older binaries ignore
 	// ArchiveReport, but the previous release understands the inert/ownership

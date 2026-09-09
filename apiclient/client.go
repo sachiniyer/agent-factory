@@ -278,25 +278,18 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		return &TransportError{Err: fmt.Errorf("apiclient: read response body: %w", err)}
 	}
 
-	// A 404 is decided by STATUS, before the body is interpreted at all. The
-	// daemon's rpcHandler answers only 200/400/405/413/500/503, so no registered
-	// route can produce one; a 404 on /v1/<Method> means the route is absent from
-	// THIS daemon's table — version skew, not a handler that ran and refused. The
-	// two are opposite instructions to a caller, and a caller whose fallback would
-	// be wrong (a remote config write must never become a local one, #3679) has to
-	// tell them apart.
-	//
-	// Keying this on the BODY was the first version and it was wrong three ways,
-	// all reachable through the reverse proxy docs/remote-http-auth.md recommends
-	// (af terminates no TLS, so fronting the daemon is the documented deployment).
-	// A proxy's JSON 404 — `{}` or `{"message":"not found"}` — parses fine and
-	// carries no envelope error, so a check on env.Error never ran and the caller
-	// got `malformed response data` instead of the actionable refusal. Worse, a
-	// body of `{"data":null,"error":null}` decodes into a zero-valued response with
-	// a NIL error: a 404 reported as SUCCESS. Status first closes all three, and
-	// the body is consulted only for the human-readable detail.
+	// Only the daemon's marked catch-all proves that a 404 means an absent route.
+	// A reverse proxy can forward a mutation and substitute its own 404 after the
+	// upstream response is lost; that unmarked answer leaves the outcome unknown.
+	// Status still wins over body decoding so malformed or zero-shaped proxy
+	// responses can never become a successful call.
 	if httpResp.StatusCode == http.StatusNotFound {
-		return &RouteNotServedError{Route: httpReq.URL.Path, Detail: notServedDetail(raw)}
+		if daemonRejected404(raw) {
+			return &RouteNotServedError{Route: httpReq.URL.Path, Detail: notServedDetail(raw)}
+		}
+		return &UnconfirmedHTTPResponseError{
+			Route: httpReq.URL.Path, Status: httpResp.StatusCode, Detail: notServedDetail(raw),
+		}
 	}
 
 	// Decode into a RawMessage-backed envelope so the typed response is decoded

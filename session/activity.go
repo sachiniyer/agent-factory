@@ -61,6 +61,12 @@ const (
 // mid-create session as idle — releasing a concurrency slot it should hold, and
 // telling `sessions watch` a session is ready before it ever started.
 func ClassifyActivity(data InstanceData) (Activity, string) {
+	// Storage may carry StartupStateUnknown solely as a rollback fence for an
+	// ambiguous handoff. Current readers understand its mission-scoped evidence
+	// and must classify the real state; an older binary ignores the additive
+	// original field and deliberately remains inert.
+	data = data.RestoreHandoffRollbackFence()
+	data = data.restoreMissingHandoffMissionEvidence()
 	// A committed kill is terminal even while its teardown or an older operation
 	// marker remains visible. UserKilled means finish-this-kill, never resume work;
 	// treating a stale pending mission/op as active would keep watch and task slots

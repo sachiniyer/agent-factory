@@ -141,7 +141,9 @@ func (i *Instance) pendingManualAccountSwapDeliveryUnconfirmedLocked() bool {
 func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return !i.startupStateUnknown && i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady
+	return knownLive && i.inFlightOp == OpNone && !i.startupStateUnknown && !i.userKilled &&
+		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 
 // ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity and

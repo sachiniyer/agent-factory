@@ -130,7 +130,9 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 	// a 404 on a /v1 route can come from nowhere else.
 	t.Run("the daemon's 404 envelope", func(t *testing.T) {
 		c := statusServer(t, func(r *http.Request) (int, []byte) {
-			return http.StatusNotFound, mustEnvelope(t, apiproto.Failure(`unknown route "`+r.URL.Path+`"`))
+			env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
+			env.Error.DaemonRejected = true
+			return http.StatusNotFound, mustEnvelope(t, env)
 		})
 		_, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: "sandbox.ssh"})
 		if !IsRouteNotServed(err) {
@@ -142,20 +144,19 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		}
 	})
 
-	// A reverse proxy in front of the daemon — the deployment docs/remote-http-auth.md
-	// recommends, since af terminates no TLS — answers with its OWN 404 page, which
-	// is not an envelope. Reporting that as "malformed response envelope" would
-	// bury the only fact the caller can act on.
+	// A reverse proxy in front of the daemon can substitute its own 404 after the
+	// upstream mutation ran. Without the daemon provenance marker, absence and
+	// execution are indistinguishable, so the response must remain uncertain.
 	t.Run("a proxy's non-envelope 404", func(t *testing.T) {
 		c := statusServer(t, func(*http.Request) (int, []byte) {
 			return http.StatusNotFound, []byte("<html>\n<head><title>404 Not Found</title></head>\n</html>\n")
 		})
 		_, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
-		if !IsRouteNotServed(err) {
-			t.Fatalf("a non-envelope 404 must still classify as a missing route, got %T: %v", err, err)
+		if err == nil || IsRouteNotServed(err) {
+			t.Fatalf("an unmarked 404 must stay uncertain, got %T: %v", err, err)
 		}
-		if !strings.Contains(err.Error(), "404 Not Found") {
-			t.Errorf("the refusal must quote who answered, got: %v", err)
+		if !strings.Contains(err.Error(), "404 Not Found") || !strings.Contains(err.Error(), "outcome could not be confirmed") {
+			t.Errorf("the uncertainty must quote who answered, got: %v", err)
 		}
 	})
 
@@ -175,8 +176,8 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 				return http.StatusNotFound, []byte(body)
 			})
 			resp, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
-			if !IsRouteNotServed(err) {
-				t.Fatalf("a JSON 404 must classify as a missing route, got %T: %v", err, err)
+			if err == nil || IsRouteNotServed(err) {
+				t.Fatalf("an unmarked JSON 404 must stay uncertain, got %T: %v", err, err)
 			}
 			if resp.Result != nil {
 				t.Errorf("a 404 must never yield a decoded result, got %+v", resp.Result)

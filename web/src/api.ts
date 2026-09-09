@@ -567,7 +567,7 @@ export async function handoffSession(id: string, title: string, to: string, toke
     // so it returns 404 before its legacy target-only mutation can run.
     result = await af<HandoffResult>(ACCOUNT_AWARE_HANDOFF_METHOD, { id, title, repo_id: "", to, account }, token);
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
       throw new ApiError(404, ACCOUNT_AWARE_HANDOFF_UNSUPPORTED, e.code, true);
     }
     throw e;

@@ -281,6 +281,7 @@ export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boole
   return (
     (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None &&
     s.startup_state_unknown !== true &&
+    s.user_killed !== true &&
     (liveness === Liveness.Running || liveness === Liveness.Ready) &&
     pending?.manual === true &&
     pending.replacement_panes_started === true &&
@@ -301,6 +302,7 @@ export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolea
     s.pending_handoff_mission !== "" &&
     (status === "sent-unverified" || status === "could-not-confirm") &&
     s.startup_state_unknown !== true &&
+    s.user_killed !== true &&
     (liveness === Liveness.Running || liveness === Liveness.Ready) &&
     (op === InFlightOp.None || op === InFlightOp.Replacing)
   );

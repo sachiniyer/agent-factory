@@ -17,6 +17,7 @@ import {
   isArchived,
   isCreating,
   isLimitReached,
+  isPendingAgentHandoffDeliveryUnconfirmed,
   isPendingManualHandoffDeliveryUnconfirmed,
   isWorking,
   type OperatorKind,
@@ -351,6 +352,27 @@ test("pending manual handoff retry reads mission-scoped delivery evidence", () =
     })),
     false,
     "an unknown replacement runtime must remain inert instead of offering Retry",
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      user_killed: true,
+      pending_account_swap: pending,
+    })),
+    false,
+    "a retained kill tombstone must hide the manual handoff Retry action",
+  );
+});
+
+test("pending agent handoff retry is hidden by a retained kill tombstone", () => {
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      user_killed: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "could-not-confirm",
+    })),
+    false,
   );
 });
 

@@ -37,8 +37,9 @@ func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 	// stronger startup-unknown terminal state. That state must stay settled and
 	// explicitly killable after reload, not reconstruct OpReplacing and hide its
 	// only teardown handle.
-	uncertain := stored
+	uncertain := data
 	uncertain.StartupStateUnknown = true
+	uncertain = uncertain.ForStorage()
 	restoredUnknown, err := FromInstanceData(uncertain)
 	if err != nil {
 		t.Fatalf("FromInstanceData(startup unknown): %v", err)
@@ -52,7 +53,7 @@ func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 }
 
 func TestPendingHandoffMissionWithoutEvidenceFailsClosed(t *testing.T) {
-	restored, err := FromInstanceData(InstanceData{
+	data := InstanceData{
 		ID:                    "legacy-pending-id",
 		Title:                 "legacy-pending",
 		Program:               "claude",
@@ -60,12 +61,60 @@ func TestPendingHandoffMissionWithoutEvidenceFailsClosed(t *testing.T) {
 		Liveness:              LiveRunning,
 		BackendType:           "docker",
 		PendingHandoffMission: "continue the inherited work",
-	})
+	}
+	normalized := data.restoreMissingHandoffMissionEvidence()
+	if got := normalized.HandoffDeliveryStatus; got != PromptCouldNotConfirm {
+		t.Fatalf("legacy pending mission evidence = %q, want %q", got, PromptCouldNotConfirm)
+	}
+	retryable := &Instance{
+		liveness:              LiveRunning,
+		pendingHandoffMission: normalized.PendingHandoffMission,
+		handoffDeliveryStatus: normalized.HandoffDeliveryStatus,
+	}
+	if !retryable.CanRetryPendingHandoffMissionDelivery() {
+		t.Fatal("normalized legacy evidence must expose explicit retry on a known live pane")
+	}
+	restored, err := FromInstanceData(data)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if restored.PendingHandoffMissionAutoRetryable() {
 		t.Fatal("a legacy pending mission without durable delivery evidence authorized automatic replay")
+	}
+}
+
+func TestAmbiguousPendingHandoffProjectsRollbackFence(t *testing.T) {
+	data := InstanceData{
+		ID:                    "ambiguous-handoff-id",
+		Title:                 "ambiguous-handoff",
+		Program:               "claude",
+		Status:                Running,
+		Liveness:              LiveRunning,
+		BackendType:           "docker",
+		PendingHandoffMission: "continue the inherited work",
+		HandoffDeliveryStatus: PromptCouldNotConfirm,
+	}
+
+	stored := data.ForStorage()
+	if !stored.StartupStateUnknown {
+		t.Fatal("an older reader must see an ambiguous pending handoff as startup-unknown")
+	}
+
+	restored, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.StartupStateUnknown() {
+		t.Fatal("a current reader must restore the real known startup state")
+	}
+	if got := restored.ToInstanceData().HandoffDeliveryStatus; got != PromptCouldNotConfirm {
+		t.Fatalf("current reader lost mission-scoped evidence: got %q", got)
+	}
+
+	notDelivered := data
+	notDelivered.HandoffDeliveryStatus = PromptNotDelivered
+	if got := notDelivered.ForStorage(); got.StartupStateUnknown {
+		t.Fatalf("positive non-delivery must remain automatically recoverable, got %+v", got)
 	}
 }
 

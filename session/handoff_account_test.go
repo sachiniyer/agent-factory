@@ -58,6 +58,32 @@ func TestStartupUnknownManualAccountSwapDoesNotExposeRetry(t *testing.T) {
 		"an unknown replacement runtime must stay inert instead of advertising a delivery retry")
 }
 
+func TestUnavailableManualAccountSwapDoesNotExposeRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		liveness   Liveness
+		inFlightOp InFlightOp
+		userKilled bool
+	}{
+		{name: "retry in progress", liveness: LiveRunning, inFlightOp: OpRespawning},
+		{name: "kill tombstone", liveness: LiveReady, userKilled: true},
+		{name: "lost", liveness: LiveLost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &Instance{
+				liveness:   tc.liveness,
+				inFlightOp: tc.inFlightOp,
+				userKilled: tc.userKilled,
+				pendingAccountSwap: &AccountSwapData{
+					Manual: true, From: "work", To: "personal", ReplacementPanesStarted: true,
+					MissionDeliveryStatus: PromptCouldNotConfirm,
+				},
+			}
+			require.False(t, inst.CanRetryPendingManualAccountSwapDelivery())
+		})
+	}
+}
+
 func TestRestoreLegacyAccountSwapDoesNotTrustGenericDeliveryEvidence(t *testing.T) {
 	data := InstanceData{
 		PendingAccountSwap: &AccountSwapData{

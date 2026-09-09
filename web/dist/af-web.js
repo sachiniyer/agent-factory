@@ -6654,7 +6654,7 @@ async function handoffSession(id, title, to, token2, account = "") {
   try {
     result = await af(ACCOUNT_AWARE_HANDOFF_METHOD, { id, title, repo_id: "", to, account }, token2);
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
       throw new ApiError(404, ACCOUNT_AWARE_HANDOFF_UNSUPPORTED, e.code, true);
     }
     throw e;
@@ -11334,13 +11334,13 @@ function isLimitReached(s) {
 function isPendingManualHandoffDeliveryUnconfirmed(s) {
   const pending = s.pending_account_swap;
   const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
 function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.startup_state_unknown !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && (op === InFlightOp.None || op === InFlightOp.Replacing);
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -14387,6 +14387,10 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   const key = active && menu.contains(active) ? active.dataset.projectFocus : void 0;
   menu.replaceChildren(...children);
   if (key === void 0) return;
+  if (menu.hidden) {
+    fallback.focus({ preventScroll: true });
+    return;
+  }
   const replacement = Array.from(menu.querySelectorAll("[data-project-focus]")).find((control) => control.dataset.projectFocus === key && !control.disabled);
   (replacement ?? fallback).focus({ preventScroll: true });
 }

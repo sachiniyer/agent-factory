@@ -187,6 +187,8 @@ export interface SessionData {
   pending_handoff_delivery_status?: PromptDeliveryStatus;
   /** The replacement runtime may exist, but its identity/liveness was not confirmed. */
   startup_state_unknown?: boolean;
+  /** Durable kill intent; surviving rows must expose no runtime retry actions. */
+  user_killed?: boolean;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
   backend_type?: string;
   /** The daemon's OWN answer, per tab kind, to "may this session gain one of

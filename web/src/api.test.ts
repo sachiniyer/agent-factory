@@ -247,7 +247,7 @@ test("handoffSession refuses a daemon without the version-bound mutation endpoin
     ok: false,
     status: 404,
     statusText: "Not Found",
-    json: async () => ({ data: null, error: { message: 'unknown route "/v1/HandoffSessionV2"' } }),
+    json: async () => ({ data: null, error: { message: 'unknown route "/v1/HandoffSessionV2"', daemon_rejected: true } }),
   });
 
   const err = await handoffSession("id", "worker", "codex", "tok").then(
@@ -259,6 +259,26 @@ test("handoffSession refuses a daemon without the version-bound mutation endpoin
   assert.equal(err.daemonRejected, true, "the absent route proves no handoff handler ran");
   assert.match(err.message, /account-aware handoff endpoint/);
   assert.match(err.message, /handoff was not sent/);
+});
+
+test("handoffSession preserves uncertainty when an intermediary substitutes a 404", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: "proxy could not read the upstream response" } }),
+  });
+
+  const err = await handoffSession("id", "worker", "codex", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, false);
+  assert.equal(isMutationOutcomeUncertain(err), true);
+  assert.match(err.message, /proxy could not read the upstream response/);
+  assert.doesNotMatch(err.message, /handoff was not sent/);
 });
 
 test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {
