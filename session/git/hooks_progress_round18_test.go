@@ -33,6 +33,7 @@ func TestHookProgressStorageBailoutKeepsCompletionPending(t *testing.T) {
 	}
 
 	originalOpen, originalWrite := openHookLog, hookProgressWriteFile
+	originalProbe := runningHookPrefixesForResume
 	var openFailed atomic.Bool
 	openHookLog = func(kind hooklog.Kind) (*os.File, error) {
 		if !openFailed.Swap(true) {
@@ -49,6 +50,7 @@ func TestHookProgressStorageBailoutKeepsCompletionPending(t *testing.T) {
 		}
 		return originalWrite(path, data, mode)
 	}
+	runningHookPrefixesForResume = func(...string) ([]string, error) { return nil, errors.New("manager unavailable") }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
@@ -60,6 +62,7 @@ func TestHookProgressStorageBailoutKeepsCompletionPending(t *testing.T) {
 			t.Error("hook runner did not stop during cleanup")
 		}
 		openHookLog, hookProgressWriteFile = originalOpen, originalWrite
+		runningHookPrefixesForResume = originalProbe
 	})
 	select {
 	case <-markerFailed:

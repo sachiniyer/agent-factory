@@ -43,21 +43,12 @@ func TestHookProgressOpenFailureRemainsResumable(t *testing.T) {
 		openHookLog, hookProgressWriteFile = originalOpen, originalWrite
 	})
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
 	waitForHookTestCondition(t, 5*time.Second, failed.Load, "launch-failure receipt write was not attempted")
-	requireOpen(t, done, "failed launch reported completion while the journal was resumable")
-	if p.finished() {
-		t.Fatal("hook log failure marked an unfinished journal complete")
-	}
-	if p.claimed(0) {
-		t.Fatal("partial failed-launch receipt made the entry permanently claimed")
-	}
-	cancel()
-	waitForClosed(t, done, 5*time.Second, "cancelled failed-launch completion did not close")
-	resumed := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, resumed, 5*time.Second, "resumed suffix did not finish")
+	waitForClosed(t, done, 5*time.Second, "live runner did not retry the transient launch-storage failure")
 	if !p.finished() {
-		t.Fatal("resumed journal did not finish")
+		t.Fatal("recovered journal did not finish")
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("remaining command did not run: %v", err)
@@ -135,21 +126,17 @@ func TestHookProgressStartFailureMarkerErrorRemainsResumable(t *testing.T) {
 	}
 	t.Cleanup(func() { hookProgressWriteFile = originalWrite })
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
 	waitForHookTestCondition(t, 5*time.Second, failed.Load, "start-failure receipt write was not attempted")
-	requireOpen(t, done, "start failure reported completion while the journal was resumable")
-	if p.finished() || p.claimed(0) {
-		t.Fatal("start failure terminalized or claimed the resumable entry")
-	}
-	cancel()
-	waitForClosed(t, done, 5*time.Second, "cancelled start-failure completion did not close")
-	if err := os.Mkdir(tree, 0700); err != nil {
-		t.Fatal(err)
-	}
-	resumed := runPostWorktreeHooks(t.Context(), hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, resumed, 5*time.Second, "start failure suffix did not finish")
+	waitForClosed(t, done, 5*time.Second, "live runner did not recover the transient failure-marker write")
 	if !p.finished() {
-		t.Fatal("start failure resume did not finish")
+		t.Fatal("start failures did not become terminal outcomes")
+	}
+	for index := range p.Commands {
+		if state, err := p.entryState(index); err != nil || state != hookEntryFinished {
+			t.Fatalf("entry %d state = %v, %v; want terminal launch failure", index, state, err)
+		}
 	}
 }
 

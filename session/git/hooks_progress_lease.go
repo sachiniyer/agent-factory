@@ -1,19 +1,91 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 )
+
+// Test seam for lease path lookup. The worker captures it before starting so a
+// timed-out test can drain the flight before restoring the seam without racing.
+var hookProgressOpenLeaseFile = os.OpenFile
+
+type hookProgressLeaseOpenFlight struct {
+	done     chan struct{}
+	file     *os.File
+	err      error
+	timedOut bool
+}
+
+var hookProgressLeaseOpenFlights = struct {
+	sync.Mutex
+	byPath map[string]*hookProgressLeaseOpenFlight
+}{byPath: make(map[string]*hookProgressLeaseOpenFlight)}
+
+// Lease lookup is metadata I/O on the same potentially remote filesystem as
+// the journal. A timed-out worker performs no journal mutation; if its open
+// eventually succeeds, it closes the descriptor immediately. The per-path
+// latch prevents repeated pruning passes from stacking blocked OS workers.
+func boundedOpenHookProgressLease(path string, flags int, mode os.FileMode) (*os.File, error) {
+	hookProgressLeaseOpenFlights.Lock()
+	if hookProgressLeaseOpenFlights.byPath[path] != nil {
+		hookProgressLeaseOpenFlights.Unlock()
+		return nil, fmt.Errorf("hook runner lease open for %s is still running after an earlier deadline: %w", path, context.DeadlineExceeded)
+	}
+	flight := &hookProgressLeaseOpenFlight{done: make(chan struct{})}
+	hookProgressLeaseOpenFlights.byPath[path] = flight
+	openFile := hookProgressOpenLeaseFile
+	hookProgressLeaseOpenFlights.Unlock()
+	go func() {
+		file, err := openFile(path, flags, mode)
+		hookProgressLeaseOpenFlights.Lock()
+		if flight.timedOut {
+			if file != nil {
+				_ = file.Close()
+			}
+		} else {
+			flight.file, flight.err = file, err
+		}
+		if hookProgressLeaseOpenFlights.byPath[path] == flight {
+			delete(hookProgressLeaseOpenFlights.byPath, path)
+		}
+		close(flight.done)
+		hookProgressLeaseOpenFlights.Unlock()
+	}()
+	return waitForHookProgressLeaseOpen(path, flight)
+}
+
+func waitForHookProgressLeaseOpen(path string, flight *hookProgressLeaseOpenFlight) (*os.File, error) {
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case <-flight.done:
+		return flight.file, flight.err
+	case <-timer.C:
+		hookProgressLeaseOpenFlights.Lock()
+		if hookProgressLeaseOpenFlights.byPath[path] == flight {
+			flight.timedOut = true
+			hookProgressLeaseOpenFlights.Unlock()
+			return nil, fmt.Errorf("timed out after %s while opening hook runner lease %s: %w", relocationIdentityTimeout, path, context.DeadlineExceeded)
+		}
+		hookProgressLeaseOpenFlights.Unlock()
+		<-flight.done
+		return flight.file, flight.err
+	}
+}
 
 // Publication holds .progress while creating this lease. The runner retains
 // the descriptor across every launch gap until finish; a daemon exit releases
 // it automatically, leaving the existing scope/launcher probes to protect the
-// survivor. No timeout, PID-reuse guess, or heartbeat freshness is involved.
+// survivor. Once opened, no lease timeout, PID-reuse guess, or heartbeat
+// freshness is involved.
 func newHookProgressLease(dir string) (*os.File, error) {
-	file, err := os.OpenFile(filepath.Join(dir, "runner.lock"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	file, err := boundedOpenHookProgressLease(filepath.Join(dir, "runner.lock"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +111,7 @@ func retireUnleasedHookProgress(path string, p *hookProgress) (string, bool, err
 
 func withInactiveHookProgressLease(dir string, remove func() error) (bool, error) {
 	leasePath := filepath.Join(dir, "runner.lock")
-	file, err := os.OpenFile(leasePath, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	file, err := boundedOpenHookProgressLease(leasePath, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if os.IsNotExist(err) {
 		return true, remove()
 	}

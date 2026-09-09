@@ -126,6 +126,21 @@ var hookProgressLockAcquired = func() {}
 // superseded receipt directory without changing the journal being published.
 var previousHookProgressReadFile = BoundedReadFile
 
+// Test seam for the crash-durability barrier after journal publication.
+var hookProgressSyncDirectory = syncHookProgressDirectory
+
+func syncHookProgressDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
+}
+
 // The directory and journal are published under the same lock used by pruning,
 // so even a publisher stalled longer than the grace period retains its receipts.
 func publishHookProgress(run hookRun, commands []string, prefix, generation, path string, parentIdentity os.FileInfo, worktreeIdentity *hookWorktreeIdentity, resumeDisabled bool) (*hookProgress, error) {
@@ -135,10 +150,14 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	}
 	var lease *os.File
 	published := false
+	renamed := false
 	defer func() {
 		if !published {
 			if lease != nil {
 				_ = lease.Close()
+			}
+			if renamed {
+				_ = os.Remove(path)
 			}
 			_ = os.RemoveAll(dir)
 		}
@@ -191,6 +210,10 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	if err := os.Rename(f.Name(), path); err != nil {
 		return nil, err
 	}
+	renamed = true
+	if err := hookProgressSyncDirectory(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("sync published hook journal directory: %w", err)
+	}
 	published = true
 	if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
 		p.supersededDirectory = previous.Directory
@@ -208,8 +231,10 @@ func (p *hookProgress) claimed(index int) bool {
 }
 
 // mkdir is an atomic claim. It also protects against a delayed launcher and a
-// successor racing: only one shell can execute the entry. Arguments keep shell
-// source, filenames and command text separate. A receipt directory means
+// successor racing: only one shell can execute the entry. The scoped wrapper is
+// Linux-only, so coreutils sync fsyncs the receipt parent before the operator
+// command starts; failure stops without executing the command. Arguments keep
+// shell source, filenames and command text separate. A receipt directory means
 // started; its exit file means the shell finished, even if its daemon died.
 // hookStopTimeout is already the bound for uncertain hook-scope ownership. Use
 // that same budget here, rounded up to whole seconds because POSIX sleep only
@@ -217,7 +242,7 @@ func (p *hookProgress) claimed(index int) bool {
 // same-directory rename, so a successor cannot observe a partial receipt.
 func (p *hookProgress) command(index int, command string) []string {
 	return []string{"-c", `if [ -d "$1" ]; then
-	remaining=$3
+	remaining=$4
 	while :; do
 		if [ -f "$1/exit" ]; then
 			if IFS= read -r status < "$1/exit"; then
@@ -230,12 +255,13 @@ func (p *hookProgress) command(index int, command string) []string {
 	done
 fi
 mkdir -- "$1" || exit 125
+sync "$3" || exit 125
 sh -c "$2"
 status=$?
 exit_tmp=$1/.exit-$$
 printf '%s\n' "$status" > "$exit_tmp" || exit 125
 mv "$exit_tmp" "$1/exit" || exit 125
-exit "$status"`, "af-hook-entry", p.receipt(index), command, hookReceiptWaitSeconds()}
+exit "$status"`, "af-hook-entry", p.receipt(index), command, p.Directory, hookReceiptWaitSeconds()}
 }
 
 func hookReceiptWaitSeconds() string {

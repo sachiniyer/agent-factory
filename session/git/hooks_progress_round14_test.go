@@ -17,7 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 )
 
-func TestHookProgressResumableBailoutReleasesLease(t *testing.T) {
+func TestHookProgressResumableBailoutKeepsLeaseUntilRecoveryEnds(t *testing.T) {
 	claimDaemonProcess(t)
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -27,7 +27,9 @@ func TestHookProgressResumableBailoutReleasesLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalOpen, originalWrite := openHookLog, hookProgressWriteFile
+	originalProbe := runningHookPrefixesForResume
 	openHookLog = func(hooklog.Kind) (*os.File, error) { return nil, errors.New("hook log unavailable") }
+	runningHookPrefixesForResume = func(...string) ([]string, error) { return nil, errors.New("manager unavailable") }
 	var failed atomic.Bool
 	hookProgressWriteFile = func(path string, data []byte, mode os.FileMode) error {
 		if filepath.Base(path) == "launch-failed" && !failed.Swap(true) {
@@ -37,15 +39,11 @@ func TestHookProgressResumableBailoutReleasesLease(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		openHookLog, hookProgressWriteFile = originalOpen, originalWrite
+		runningHookPrefixesForResume = originalProbe
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
 	waitForHookTestCondition(t, 5*time.Second, failed.Load, "resumable receipt failure was not reached")
-	waitForHookTestCondition(t, 5*time.Second, func() bool {
-		p.leaseMu.Lock()
-		defer p.leaseMu.Unlock()
-		return p.leaseHolds == 0
-	}, "resumable runner did not release its lease")
 	requireOpen(t, done, "resumable bailout reported completion")
 	if p.finished() {
 		t.Fatal("resumable bailout marked the journal finished")
@@ -55,14 +53,17 @@ func TestHookProgressResumableBailoutReleasesLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lease.Close()
+	if err := syscall.Flock(int(lease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Fatalf("recovery owner did not retain the runner lease: %v", err)
+	}
+	cancel()
+	waitForClosed(t, done, 5*time.Second, "cancelled resumable bailout did not close")
 	if err := syscall.Flock(int(lease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		t.Fatalf("runner lease remained locked after bailout: %v", err)
+		t.Fatalf("runner lease was not released after recovery ended: %v", err)
 	}
 	if err := syscall.Flock(int(lease.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
-	cancel()
-	waitForClosed(t, done, 5*time.Second, "cancelled resumable bailout did not close")
 	path, err := hookProgressPath(tree)
 	if err != nil {
 		t.Fatal(err)

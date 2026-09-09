@@ -32,7 +32,9 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 			}
 			g.retainHookProgressForCreate(p)
 			originalOpen, originalWrite := openHookLog, hookProgressWriteFile
+			originalProbe := runningHookPrefixesForResume
 			openHookLog = func(hooklog.Kind) (*os.File, error) { return nil, errors.New("hook log unavailable") }
+			runningHookPrefixesForResume = func(...string) ([]string, error) { return nil, errors.New("manager unavailable") }
 			var failed atomic.Bool
 			hookProgressWriteFile = func(path string, data []byte, mode os.FileMode) error {
 				if filepath.Base(path) == "launch-failed" && !failed.Swap(true) {
@@ -42,6 +44,7 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 			}
 			t.Cleanup(func() {
 				openHookLog, hookProgressWriteFile = originalOpen, originalWrite
+				runningHookPrefixesForResume = originalProbe
 				g.SettleHookCreatePersistence()
 			})
 			ctx, cancel := context.WithCancel(context.Background())
@@ -50,8 +53,8 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 			waitForHookTestCondition(t, 5*time.Second, func() bool {
 				p.leaseMu.Lock()
 				defer p.leaseMu.Unlock()
-				return p.leaseHolds == 1
-			}, "runner did not release its lease hold")
+				return p.leaseHolds == 2
+			}, "runner and pending create did not retain both lease holds")
 			requireOpen(t, done, "resumable create bailout reported completion")
 			lease, err := os.OpenFile(filepath.Join(p.Directory, "runner.lock"), os.O_RDWR, 0)
 			if err != nil {
@@ -76,6 +79,8 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 				}
 			}
 			g.SettleHookCreatePersistence()
+			cancel()
+			waitForClosed(t, done, 5*time.Second, "cancelled create bailout did not close")
 			pruneHookProgress(filepath.Dir(path), time.Now().Add(48*time.Hour))
 			_, err = os.Stat(path)
 			if outcome == "commit" && err != nil {
@@ -84,8 +89,6 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 			if outcome == "abort" && !os.IsNotExist(err) {
 				t.Fatalf("aborted create journal was not reclaimable: %v", err)
 			}
-			cancel()
-			waitForClosed(t, done, 5*time.Second, "cancelled create bailout did not close")
 		})
 	}
 }

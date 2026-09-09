@@ -39,9 +39,6 @@ type hookRun struct {
 	// onProgressPublished lets the daemon create path retain the runner lease
 	// until its owner row is durably committed or the create aborts.
 	onProgressPublished func(*hookProgress)
-	// A recovery runner must leave its journal pending if cancellation interrupts
-	// the suffix; adoption can then retry it after the scope is gone.
-	leaveProgressUnfinishedOnCancel bool
 }
 
 // RunPostWorktreeHooksAsyncWithEnvironment runs the per-repo post_worktree_commands
@@ -143,31 +140,10 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 	}
 	go func() {
 		journalTerminal := false
-		completionOwed := true
-		markTerminal := func() {
-			journalTerminal = true
-			completionOwed = false
-		}
-		bailResumable := func() {
-			journalTerminal = false
-			completionOwed = true
-		}
-		defer func() {
-			if !completionOwed || ctx.Err() != nil {
-				close(done)
-				return
-			}
-			// A storage bailout has neither an exit receipt nor terminal journal
-			// evidence. Keep HooksDone open so lifecycle's bounded wait leaves the
-			// worktree intact; cancellation is the only completion fact available.
-			go func() {
-				<-ctx.Done()
-				close(done)
-			}()
-		}()
+		defer close(done)
 		if run.progress != nil {
 			defer func() {
-				if journalTerminal && !(run.leaveProgressUnfinishedOnCancel && ctx.Err() != nil) {
+				if journalTerminal {
 					if err := run.progress.markFinished(); err != nil {
 						log.ErrorLog.Printf("cannot record post-worktree hook completion: %v", err)
 					}
@@ -176,21 +152,31 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			}()
 		}
 		scopeRecorded := false
-		for index, cmdStr := range cmds {
+		for index := 0; index < len(cmds); {
+			cmdStr := cmds[index]
 			if run.progress != nil {
 				state, err := run.progress.entryState(index)
 				if err != nil {
-					log.WarningLog.Printf("cannot determine post-worktree hook entry %d state: %v; leaving suffix pending", index, err)
-					bailResumable()
+					log.WarningLog.Printf("cannot determine post-worktree hook entry %d state: %v; waiting to recover the ordered suffix", index, err)
+					if waitForHookEntryRecovery(ctx, run.progress, index) {
+						continue
+					}
 					return
 				}
 				if state == hookEntryFinished {
+					index++
 					continue
+				}
+				if state == hookEntryStarted {
+					if waitForHookEntryRecovery(ctx, run.progress, index) {
+						continue
+					}
+					return
 				}
 			}
 			select {
 			case <-ctx.Done():
-				markTerminal()
+				journalTerminal = true
 				log.InfoLog.Printf("post-worktree hooks cancelled for %s", run.worktreePath)
 				return
 			default:
@@ -199,9 +185,12 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			if outputErr != nil {
 				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", cmdStr, outputErr)
 				if !run.progress.recordLaunchFailure(ctx, index, outputErr) {
-					bailResumable()
+					if waitForHookEntryRecovery(ctx, run.progress, index) {
+						continue
+					}
 					return
 				}
+				index++
 				continue
 			}
 			outputPath := outputFile.Name()
@@ -237,9 +226,12 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				_ = outputFile.Close()
 				log.ErrorLog.Printf("post-worktree hook %q failed to start (full output: %s): %v", cmdStr, outputPath, err)
 				if !run.progress.recordLaunchFailure(ctx, index, err) {
-					bailResumable()
+					if waitForHookEntryRecovery(ctx, run.progress, index) {
+						continue
+					}
 					return
 				}
+				index++
 				continue
 			}
 			// Record the durable handle as soon as one scope exists, not when the
@@ -295,16 +287,20 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			if run.progress != nil {
 				state, stateErr := run.progress.entryState(index)
 				if stateErr != nil {
-					log.WarningLog.Printf("cannot verify post-worktree hook entry %d completion: %v; leaving suffix pending", index, stateErr)
-					bailResumable()
+					log.WarningLog.Printf("cannot verify post-worktree hook entry %d completion: %v; waiting to recover the ordered suffix", index, stateErr)
 					_ = outputFile.Close()
+					if waitForHookEntryRecovery(ctx, run.progress, index) {
+						continue
+					}
 					return
 				}
 				if state == hookEntryStarted {
 					if !run.progress.terminalizeInactiveClaim(ctx, index, waitErr) {
-						log.WarningLog.Printf("post-worktree hook entry %d has no terminal exit receipt; leaving suffix pending", index)
-						bailResumable()
+						log.WarningLog.Printf("post-worktree hook entry %d has no terminal outcome; waiting to recover the ordered suffix", index)
 						_ = outputFile.Close()
+						if waitForHookEntryRecovery(ctx, run.progress, index) {
+							continue
+						}
 						return
 					}
 				}
@@ -313,19 +309,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 						waitErr = fmt.Errorf("hook launcher exited before claiming entry %d", index)
 					}
 					if scopeStopErr != nil || !run.progress.recordLaunchFailure(ctx, index, waitErr) {
-						bailResumable()
 						_ = outputFile.Close()
-						if scopeStopErr != nil && waitForHookScopeGone(ctx, run.progress.Prefix) {
-							resumed := run
-							resumed.leaveProgressUnfinishedOnCancel = true
-							// The nested runner owns its own lease reference. Without this
-							// retain, its release and ours can consume the create path's
-							// pre-commit hold while the owner row is still absent.
-							run.progress.retainLease()
-							<-runPostWorktreeHooks(ctx, resumed)
-							if waitForHookProgressFinished(ctx, run.progress) {
-								completionOwed = false
-							}
+						if waitForHookEntryRecovery(ctx, run.progress, index) {
+							continue
 						}
 						return
 					}
@@ -337,7 +323,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			}
 
 			if ctx.Err() != nil {
-				markTerminal()
+				journalTerminal = true
 				if scopeStopErr == nil {
 					removeCompletedHookLog(cmdStr, outputPath, outputReadErr)
 				}
@@ -352,8 +338,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			} else {
 				log.ErrorLog.Printf("post-worktree hook %q failed (full output: %s): %v\n%s", cmdStr, outputPath, waitErr, outputTail)
 			}
+			index++
 		}
-		markTerminal()
+		journalTerminal = true
 	}()
 	return done
 }

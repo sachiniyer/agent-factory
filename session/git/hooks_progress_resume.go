@@ -2,70 +2,62 @@ package git
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// The runner keeps HooksDone open while a scope-stop result is inconclusive.
-// The initial deadline only changes the log message. A permanently unavailable
-// user manager must leave the journal pending rather than report completion;
-// cancellation is the only way this wait ends without resuming the suffix.
 var runningHookPrefixesForResume = systemdunit.RunningHookPrefixes
 
-func waitForHookScopeGone(ctx context.Context, prefix string) bool {
-	if prefix == "" {
-		return true
+// waitForHookEntryRecovery keeps the original runner as the owner of its lease
+// and HooksDone while the earliest nonterminal entry is inconclusive. It never
+// resumes a claimed entry: a live or unprovable claimant blocks the suffix; a
+// positively abandoned claim is terminalized as failed and stepped over; only
+// an unclaimed entry is eligible to be launched when the command loop retries.
+func waitForHookEntryRecovery(ctx context.Context, p *hookProgress, index int) bool {
+	interval := hookAdoptionPollInterval
+	if interval <= 0 {
+		interval = time.Millisecond
 	}
-	deadline := time.NewTimer(hookStopTimeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(hookAdoptionPollInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	var lastError string
-	deadlineLogged := false
+	var lastStateError, lastProbeError string
 	for {
-		live, err := runningHookPrefixesForResume(prefix)
-		if err == nil && len(live) == 0 {
-			return true
-		}
-		if err != nil {
-			if message := err.Error(); message != lastError {
-				log.WarningLog.Printf("waiting for post-worktree hook scope %s to stop: %v", prefix, err)
-				lastError = message
+		state, stateErr := p.entryState(index)
+		if stateErr != nil {
+			if message := stateErr.Error(); message != lastStateError {
+				log.WarningLog.Printf("waiting to read post-worktree hook entry %d: %v", index, stateErr)
+				lastStateError = message
 			}
-		} else if lastError != "" {
-			log.InfoLog.Printf("post-worktree hook scope %s stop probe recovered", prefix)
-			lastError = ""
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-deadline.C:
-			if !deadlineLogged {
-				log.WarningLog.Printf("post-worktree hook scope %s is still waiting to stop; keeping HooksDone open for recovery", prefix)
-				deadlineLogged = true
+		} else {
+			if lastStateError != "" {
+				log.InfoLog.Printf("post-worktree hook entry %d storage recovered", index)
+				lastStateError = ""
 			}
-		case <-ticker.C:
-		}
-	}
-}
-
-// Nested recovery completed its command loop, but its durable finished marker
-// can briefly be unreadable. Retry that third-answer storage result rather than
-// turning it into either completion or permanent in-flight state.
-func waitForHookProgressFinished(ctx context.Context, p *hookProgress) bool {
-	ticker := time.NewTicker(hookAdoptionPollInterval)
-	defer ticker.Stop()
-	var lastError string
-	for {
-		finished, err := p.finishedState()
-		if finished {
-			return true
-		}
-		if err != nil && err.Error() != lastError {
-			log.WarningLog.Printf("waiting to verify completed post-worktree hook journal for %s: %v", p.Worktree, err)
-			lastError = err.Error()
+			live, probeErr := runningHookPrefixesForResume(p.Prefix)
+			if probeErr != nil {
+				if message := probeErr.Error(); message != lastProbeError {
+					log.WarningLog.Printf("waiting to prove post-worktree hook entry %d claimant state: %v", index, probeErr)
+					lastProbeError = message
+				}
+			} else {
+				if lastProbeError != "" {
+					log.InfoLog.Printf("post-worktree hook entry %d claimant probe recovered", index)
+					lastProbeError = ""
+				}
+				if len(live) == 0 {
+					switch state {
+					case hookEntryFinished, hookEntryUnclaimed:
+						return true
+					case hookEntryStarted:
+						if p.terminalizeInactiveClaim(ctx, index, errors.New("claimant disappeared before recording a terminal receipt")) {
+							return true
+						}
+					}
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():

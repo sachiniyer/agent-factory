@@ -96,7 +96,7 @@ func TestHookProgressLaunchFailureWaitsForCompetingClaimExit(t *testing.T) {
 	}
 }
 
-func TestHookProgressNestedCompletionRetriesFinishedRead(t *testing.T) {
+func TestHookProgressRecoveryCompletesWithoutFinishedMarkerReread(t *testing.T) {
 	claimDaemonProcess(t)
 	logPath := installScopeShim(t)
 	shimDir := filepath.Dir(logPath)
@@ -138,9 +138,9 @@ func TestHookProgressNestedCompletionRetriesFinishedRead(t *testing.T) {
 		hookAdoptionPollInterval = previousPoll
 	})
 	done = runPostWorktreeHooks(ctx, hookRun{worktreePath: tree, progress: p})
-	waitForClosed(t, done, 2*time.Second, "nested completion did not recover from a transient finished-marker read")
-	if !failed.Load() {
-		t.Fatal("finished-marker failure seam was not exercised")
+	waitForClosed(t, done, 2*time.Second, "single recovery runner did not complete")
+	if failed.Load() {
+		t.Fatal("single recovery runner reread the finished marker instead of transferring its terminal outcome directly")
 	}
 }
 
