@@ -107,37 +107,31 @@ func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
 // that only reads takes the bool and gets the conservative lie.
 //
 // known means "authoritatively answered," not "tmux returned quickly." A
-// non-timeout failure is absence for all ordinary answers (exit 0 "exists",
-// exit 1 "can't find session", "no current target", ECONNREFUSED, no-server
-// ENOENT), with one exception: a socket-absent ENOENT backed by a live server
-// is a connect error (#2875) — the server keeps running with live panes after
-// its socket is removed by a /tmp cleaner, so ENOENT with a live server reports
-// known=false instead. That is the only case this probe classifies as unknown.
+// non-timeout failure is absence ONLY when tmux proved it absent (#2875): a
+// socket-absent ENOENT backed by a live server is a connect error, so it
+// routes through tmuxProvedSessionAbsent and reports known=false when the
+// server outlives its unlinked socket — the boundary #2875 closed for the
+// strict probes, now closed for the lossy probe that feeds IsAlive, so it
+// cannot misclassify that ENOENT as a confirmed death and trigger a
+// destructive respawn into a worktree the live agent is still writing.
 func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
-	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
+	// `-t=` is an exact match; a bare `-t name` does a prefix match (#1006).
+	// outputTmuxBoundedWith captures stderr so tmuxProvedSessionAbsent and
+	// NoServerRunning can classify ENOENT backed by a live server as unknown.
+	_, err := outputTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
 	if err == nil {
 		return true, true
 	}
 	if ctx.Err() != nil {
 		return false, false
 	}
-	// A socket-absent ENOENT backed by a still-running server is not a
-	// determinate answer (#2875): the server keeps running with live panes
-	// after its socket is removed by a /tmp cleaner, so ENOENT cannot be
-	// classified as "no sessions". Report unknown so the caller does not
-	// tear down a live agent on a guess. All other non-timeout answers
-	// (the ordinary "can't find session" exit 1, "no current target" on an
-	// empty server, ECONNREFUSED, no-server-ENOENT) are treated as definitive
-	// absence — the original probeSession behaviour.
-	if diagnostic, exitOne := tmuxExitOneDiagnostic(err); exitOne &&
-		classifyNoServerDiagnostic(diagnostic) == socketAbsent &&
-		len(tmuxServerProcessPIDs()) > 0 {
-		return false, false
+	// A non-timeout failure is absence ONLY when tmux proved it absent (#2875).
+	if tmuxProvedSessionAbsent(cmdExec, err, name) {
+		return false, true
 	}
-	return false, true
+	return false, false
 }
 
 // recoveryWindowObserver is notified when a vanished-session recovery's bounded
