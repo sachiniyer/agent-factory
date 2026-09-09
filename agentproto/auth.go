@@ -36,7 +36,7 @@ func RedactAccessTokenURL(raw string) string {
 	}
 	found := redactAccessTokenQuery(parsed)
 	// Run the percent-decoding component sweep regardless of the query result.
-	// url.URL's string fields (Fragment/Path/Opaque/Host/User) are url.Parse's
+	// url.URL's string fields (Fragment/Path/Host/User) are url.Parse's
 	// percent-DECODED forms, so this is the only pass that can see a key the raw
 	// text carries percent-encoded (%61ccess_token= / access%5Ftoken=). Gating
 	// it on the query match left such keys unreachable when the query carried no

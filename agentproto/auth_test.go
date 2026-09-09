@@ -159,6 +159,9 @@ func TestRedactAccessTokenURLRedactsPercentEncodedComponentKey(t *testing.T) {
 		// scan misses %61ccess_token=.  The fix decodes before scanning.
 		{"opaque", "mailto:%61ccess_token=component-sekrit"},
 		{"opaque-literal", "mailto:access_token=component-sekrit"},
+		// Malformed escape in opaque: url.PathUnescape returns an error, so the
+		// fail-closed branch must redact the whole opaque rather than emitting it.
+		{"opaque-malformed-escape", "mailto:%zz-component-sekrit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.component, func(t *testing.T) {
