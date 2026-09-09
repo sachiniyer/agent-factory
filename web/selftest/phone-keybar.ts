@@ -277,7 +277,10 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
 
 /** Exercise the custom interrupt only after every probe that needs the cat fixture. */
 export async function assertPhoneCustomInterruptIdentity(page: Page, stream: () => string): Promise<void> {
-  const ctrl = page.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Ctrl", exact: true });
+  const bar = page.locator(".af-terminal-keybar:visible");
+  const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
+  // The input-effects witness deliberately finishes on the arrows row.
+  await bar.getByRole("button", { name: "More keys", exact: true }).click();
   const before = stream();
   await ctrl.click();
   await page.keyboard.press("Control+c");
