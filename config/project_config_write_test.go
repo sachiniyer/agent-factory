@@ -236,6 +236,53 @@ func TestSetProjectConfigValueRootAgentPreservesOmittedEnabled(t *testing.T) {
 	assert.True(t, resolved.RootAgent.Enabled, "the omitted personal field must inherit global enabled=true")
 }
 
+func TestSetProjectConfigValueRootAgentReportsMergedProfile(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nprogram = \"custom\"\n")
+
+	res, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":true,"program":"custom"}`, res.Value)
+
+	res, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":false,"program":"next"}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":false,"program":"next"}`, res.Value)
+}
+
+func TestSetProjectConfigValueRootAgentReadbackOmitsUnknownMembers(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nprogram = \"custom\"\nfuture_policy = \"keep\"\n")
+
+	res, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":true,"program":"custom"}`, res.Value)
+	assert.NotContains(t, res.Value, "future_policy")
+
+	_, err = SetProjectConfigValue(project.ID, "root_agent", res.Value)
+	require.NoError(t, err, "the reported value must be accepted by config set")
+	path, err := ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `future_policy = 'keep'`)
+}
+
+func TestSetProjectConfigValueRootAgentReadbackFailureDoesNotWrite(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nfuture_policy = nan\n")
+	path, err := ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	_, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no changes written")
+	after, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, before, after)
+}
+
 func TestUnsetProjectConfigAbsentKeyIsNoOp(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 	writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n")

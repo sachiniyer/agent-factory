@@ -44,7 +44,11 @@ export function actionsDisclosure(label = "Session actions", enabled = () => tru
 
 /** The app's secondary controls use the same disclosure and Escape/focus model.
  * Desktop displays the same nodes inline; resizing closes any phone disclosure. */
-export function appbarControls(controls: HTMLElement[], phone = window.matchMedia("(max-width: 768px)")) {
+export function appbarControls(
+  controls: HTMLElement[],
+  phone = window.matchMedia("(max-width: 768px)"),
+  beforeSync: () => void = () => {},
+) {
   const menu = actionsDisclosure("More app controls", () => phone.matches);
   menu.el.className = "af-appbar-tools-wrap";
   menu.trigger.className = "af-appbar-more";
@@ -56,6 +60,7 @@ export function appbarControls(controls: HTMLElement[], phone = window.matchMedi
   menu.panel.setAttribute("aria-label", "App controls");
   menu.panel.append(...controls);
   const sync = () => {
+    beforeSync();
     const hadFocus = menu.panel.contains(document.activeElement);
     menu.close();
     menu.trigger.hidden = !phone.matches;

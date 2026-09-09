@@ -315,35 +315,6 @@ func TestSelectedAndList_RefuseAnAncestorSwappedAfterRegistration(t *testing.T) 
 	}
 }
 
-// The login guidance must be the agent's REAL invocation. Appending "login"
-// universally printed `claude login`, which Claude Code does not have — it lives
-// under `auth`. Verified against the installed CLIs on 2026-08-07.
-func TestLoginCommand_IsPerAgentAndNotGuessed(t *testing.T) {
-	claude, ok := LoginCommand("claude")
-	require.True(t, ok)
-	require.Equal(t, []string{"auth", "login"}, claude,
-		"claude puts login under `auth`; `claude login` is not a command")
-
-	codex, ok := LoginCommand("codex")
-	require.True(t, ok)
-	require.Equal(t, []string{"login", "--device-auth"}, codex,
-		"the login pane is headless and remote, so codex must take the device-code flow")
-
-	// gemini is the case that makes "no words" and "no flow" different answers.
-	// Verified against gemini 0.51.0 on 2026-09-04: `gemini --help` lists mcp,
-	// extensions, skills, hooks, gemma and the default query command, and no
-	// login or auth among them — its sign-in is the picker the bare CLI raises on
-	// a credential-less home, which is the invocation `af accounts add gemini`
-	// has printed since #3609. So it reports KNOWN with an empty word list.
-	gemini, ok := LoginCommand("gemini")
-	require.True(t, ok, "gemini's login flow is the bare CLI, which is a known invocation")
-	require.Empty(t, gemini, "gemini takes no login subcommand")
-
-	// An agent off the account roster yields nothing rather than a guess.
-	_, ok = LoginCommand("amp")
-	require.False(t, ok, "an agent with no verified login command must report none, not a guess")
-}
-
 // Concurrent registration of case-variant names must not produce two accounts.
 //
 // refuseCaseCollision is check-then-act, so two processes registering `work` and

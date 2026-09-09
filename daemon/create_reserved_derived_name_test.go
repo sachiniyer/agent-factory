@@ -54,7 +54,7 @@ func TestValidateTitleRefusesReservedDerivedName(t *testing.T) {
 			// Actionable: names the title asked for, the reserved title it
 			// collides with, and the remedy. "ro ot" and "root" look nothing
 			// alike on a sidebar row, so a bare "reserved" reads as a bug.
-			for _, want := range []string{title, session.RootSessionTitle, "reserved", "tmux", "root_agents"} {
+			for _, want := range []string{title, session.RootSessionTitle, "reserved", "tmux", "[root_agent]"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("refusal %q does not name %q", err, want)
 				}

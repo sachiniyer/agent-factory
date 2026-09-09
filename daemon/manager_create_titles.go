@@ -232,12 +232,12 @@ func archivedWorktreeHoldsBranch(archived *session.Instance, holder string) bool
 //     It is the claim the rename is about to release, so counting it would refuse
 //     a reuse that would have succeeded — turning a data-integrity fix into a
 //     feature regression.
-func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool) error {
+func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
 	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
 	if err != nil || archived == nil {
 		return err
 	}
-	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived, inPlace)
+	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived, inPlace, remedyPath...)
 }
 
 // reuseArchivedRenamePersist is the durable title rewrite the archived-name-reuse
@@ -567,7 +567,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 	// rungs and whitespace cannot turn into a punctuation-only "   -2" title.
 	// allowReserved stays true here because a base of "root" deliberately skips
 	// the reserved bare candidate and resolves to "root-2" below.
-	if err := m.validateTitleShapeLocked(baseTitle, namespace, true); err != nil {
+	if err := m.validateTitleShapeLocked(repoPath, baseTitle, namespace, true); err != nil {
 		return "", err
 	}
 	// Session records are not the only thing that can make a candidate unusable

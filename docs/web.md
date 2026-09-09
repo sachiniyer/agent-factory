@@ -170,6 +170,10 @@ reveal the menu on hover or keyboard focus. Each opens a confirmation:
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
+  The daemon-managed root is the exception: deleting it interrupts scheduled and
+  watch-task delivery to the root session until it self-heals (usually about two
+  minutes) or the daemon restarts; other scheduled and watch tasks keep running.
+  Disable it in [configuration](configuration.md#root-agents-always-ensured) to keep it down.
 
 Pending creation rows have no destructive actions. An action belongs to the row
 whose button you clicked, even when a different session is selected.
@@ -196,8 +200,9 @@ a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
 to split that pane, or onto its center to replace the displayed tab.
 
 There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
-`t` creates a shell tab, `w` asks to delete the active deletable tab, and `1`–`9` select a
-tab without attaching. Clicking a tab selects and attaches it.
+`t` opens the **New tab** picker, where **Terminal** and **VS Code** appear when
+supported. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
+without attaching. Clicking a tab selects and attaches it.
 
 When a backend cannot create local tabs, the bar explains the restriction.
 Archived sessions must be restored before creating tabs. Agents can also create
@@ -346,7 +351,7 @@ through to the agent unless a modal or menu handles them.
 | `ctrl+]` | Detach the terminal and return to navigation |
 | `Escape` | Close an open modal or menu; otherwise pass through to an attached agent |
 | `1`–`9` | Select a tab in navigation mode |
-| `t` | Create a shell tab when supported |
+| `t` | Open the New tab picker for the supported tab types |
 | `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
 | `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |

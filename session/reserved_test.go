@@ -33,7 +33,7 @@ func TestReservedTitleCollisionCatchesDerivedNames(t *testing.T) {
 			// reserved title it collides with, and what to do instead.
 			// The title is quoted in the message, so a tab or a non-breaking
 			// space appears there in its escaped form — compare the same way.
-			for _, want := range []string{fmt.Sprintf("%q", title), RootSessionTitle, "pick another name", "root_agents"} {
+			for _, want := range []string{fmt.Sprintf("%q", title), RootSessionTitle, "pick another name", "[root_agent]"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("refusal %q does not mention %q", err, want)
 				}

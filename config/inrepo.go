@@ -93,8 +93,8 @@ func (c *InRepoConfig) CommandBearingFields() []string {
 // These are compatibility views of the manifest, not independent policy
 // registries. Anything outside inRepoAllowedKeys is rejected so typos fail
 // loudly in a checked-in file that can execute commands. Known global-only keys
-// get the more actionable "move it to global config" error. Format metadata
-// decides whether that destination must specifically be config.toml.
+// get the more actionable "move it to global config" error, which names the
+// canonical global TOML file.
 var (
 	inRepoAllowedKeys    = manifestKeysForSource(SourceRepoShared)
 	inRepoGlobalOnlyKeys = manifestGlobalOnlyKeySet()
@@ -257,16 +257,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	isToml := filepath.Base(path) == TomlConfigFileName
 
 	prettyPath := prettyHomePath(path)
-	// Name the real global config file rather than a hardcoded
-	// ~/.agent-factory/config.json, which is wrong when AGENT_FACTORY_HOME
-	// relocates the config dir (same class of bug as #890). Fall back to a
-	// generic phrase if the config dir cannot be resolved.
-	globalConfigLocation := "the global config file"
-	tomlGlobalConfigLocation := globalConfigLocation
-	if configDir, dirErr := GetConfigDir(); dirErr == nil {
-		globalConfigLocation = prettyHomePath(filepath.Join(configDir, ConfigFileName))
-		tomlGlobalConfigLocation = prettyHomePath(filepath.Join(configDir, TomlConfigFileName))
-	}
+	globalConfigLocation := GlobalConfigFileForDisplay()
 	if (isToml && isEffectivelyEmptyToml(data)) || (!isToml && len(data) == 0) {
 		// A contentless config.toml (zero bytes, whitespace, a bare BOM, or comments)
 		// is valid TOML — an empty document — but an empty in-repo config is
@@ -313,23 +304,14 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		presentKeys[key] = true
 	}
 	if key, present := globalOnlyGroupedAliasInShape(metadata.shape); present {
-		return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, tomlGlobalConfigLocation)
+		return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, globalConfigLocation)
 	}
 	for key := range presentKeys {
 		if err := RetiredThemeKeyError(key); err != nil {
 			return nil, nil, fmt.Errorf("in-repo config %s: %w; remove the retired key from this file", prettyPath, err)
 		}
 		if inRepoGlobalOnlyKeys[key] {
-			// TOML-only global keys (the [keys] keymap, #1026) must point at
-			// config.toml — a config.json carrying "keys" is ignored-with-
-			// warning, so directing the user there would land them in the
-			// dead path. Every other global-only key still lives in the
-			// resolved global config file.
-			dest := globalConfigLocation
-			if tomlOnlyGlobalKeys[key] {
-				dest = tomlGlobalConfigLocation
-			}
-			return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, dest)
+			return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, globalConfigLocation)
 		}
 		allowed := false
 		for _, k := range inRepoAllowedKeys {
@@ -395,7 +377,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 					"sessions your %s credentials. A checked-in config may choose which program runs, not what "+
 					"your environment contains. Remove the %s= assignment from the value; set it in %s if you "+
 					"intend it for every repo, or export it in your own shell",
-				prettyPath, key, selector, cloudProviderForSelector(selector), selector, tomlGlobalConfigLocation)
+				prettyPath, key, selector, cloudProviderForSelector(selector), selector, globalConfigLocation)
 		}
 	}
 

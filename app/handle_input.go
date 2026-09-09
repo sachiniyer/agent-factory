@@ -94,7 +94,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the derived tmux name, not the spelling (#3732), so "ro ot" belongs
 		// here too — and a hand-copied message is exactly what let this check
 		// and the daemon drift into refusing different sets in the first place.
-		if err := session.ReservedTitleRefusal(title); err != nil {
+		if err := session.ReservedTitleRefusalFor(title, instance.Path); err != nil {
 			return m, m.handleNotice(err)
 		}
 		for _, other := range m.store.GetInstances() {
