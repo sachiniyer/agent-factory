@@ -43,14 +43,15 @@ func worktreeIntegrityFixture(t *testing.T, files int) (repo, holder, sibling st
 
 func moveSharedBranchFromSibling(t *testing.T, holder, sibling string, files int) {
 	t.Helper()
-	// This is the #4092 door: ordinary checkout refuses a held branch, while -B
-	// binds the sibling worktree to it anyway.
+	// This is the #4092 door: ordinary checkout refuses a held branch. The
+	// fixture opts through that guard explicitly so Git 2.43 and 2.55 construct
+	// the same collided state that AF must detect.
 	ordinary := exec.Command("git", "-C", sibling, "checkout", "shared")
 	ordinary.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := ordinary.CombinedOutput()
 	require.Error(t, err, "ordinary checkout must preserve Git's held-worktree refusal")
 	assert.Contains(t, string(out), "already used by worktree")
-	integrityGit(t, sibling, "checkout", "-q", "-B", "shared", "shared")
+	integrityGit(t, sibling, "checkout", "-q", "--ignore-other-worktrees", "-B", "shared", "shared")
 	for i := 0; i < files; i++ {
 		path := filepath.Join(sibling, fmt.Sprintf("file-%02d.txt", i))
 		require.NoError(t, os.WriteFile(path, []byte("new\n"), 0o644))
