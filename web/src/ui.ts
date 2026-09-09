@@ -758,7 +758,12 @@ export class AppShell {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement as HTMLElement | null;
-    const pickerOpen = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new")?.getAttribute("aria-expanded") === "true";
+    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
+    const pickerOpen = pickerTrigger?.getAttribute("aria-expanded") === "true";
+    // A desktop shortcut owns the phone disclosure opened to keep its picker
+    // reachable. Moving home to desktop retains the established trigger fallback.
+    const pickerCancelReturn = active && pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) : undefined;
+    if (!active && pickerTrigger) this.newTabCancelReturn.delete(pickerTrigger);
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
@@ -766,7 +771,14 @@ export class AppShell {
     this.el.classList.toggle("af-session-first", active);
     // Reparenting closes the old enclosing disclosure. Reopen through the new
     // owner and capture its return state before restoring the focused item.
-    if (pickerOpen) this.openNewTabPicker();
+    if (pickerOpen) {
+      this.openNewTabPicker();
+      // Closing the old owner can synchronously close the picker and clear its
+      // return. Preserve a shortcut transaction across this intentional reparent.
+      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
+        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
+      }
+    }
     if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
@@ -1770,12 +1782,14 @@ export class AppShell {
     // Responsive recomposition calls this method again without a return callback;
     // keep the original record until the picker itself closes.
     if (shortcutReturn && !this.newTabCancelReturn.has(trigger)) {
-      const appControlsWasHidden = this.appControls.panel.hidden;
+      const preserveAppControls = this.appControls.panel.contains(slot) && !this.appControls.panel.hidden;
       const sessionActionsWasHidden = this.terminalChrome?.menu.panel.hidden ?? false;
       this.newTabCancelReturn.set(trigger, () => {
         // Close inside-out before restoring focus outside either disclosure.
         if (sessionActionsWasHidden) this.terminalChrome?.menu.close();
-        if (appControlsWasHidden) this.appControls.close();
+        // Recomposition may have opened app controls after the shortcut began.
+        // Preserve it only when the user had already opened the phone disclosure.
+        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
         shortcutReturn();
       });
     }

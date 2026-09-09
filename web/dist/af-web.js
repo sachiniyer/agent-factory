@@ -14743,13 +14743,21 @@ var AppShell = class {
     const active = this.phone.matches && this.terminalSelected;
     if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement;
-    const pickerOpen = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new")?.getAttribute("aria-expanded") === "true";
+    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
+    const pickerOpen = pickerTrigger?.getAttribute("aria-expanded") === "true";
+    const pickerCancelReturn = active && pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) : void 0;
+    if (!active && pickerTrigger) this.newTabCancelReturn.delete(pickerTrigger);
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
-    if (pickerOpen) this.openNewTabPicker();
+    if (pickerOpen) {
+      this.openNewTabPicker();
+      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
+        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
+      }
+    }
     if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
@@ -15409,11 +15417,11 @@ var AppShell = class {
     const trigger = slot?.querySelector(".af-tab-new");
     if (!trigger || !slot) return;
     if (shortcutReturn && !this.newTabCancelReturn.has(trigger)) {
-      const appControlsWasHidden = this.appControls.panel.hidden;
+      const preserveAppControls = this.appControls.panel.contains(slot) && !this.appControls.panel.hidden;
       const sessionActionsWasHidden = this.terminalChrome?.menu.panel.hidden ?? false;
       this.newTabCancelReturn.set(trigger, () => {
         if (sessionActionsWasHidden) this.terminalChrome?.menu.close();
-        if (appControlsWasHidden) this.appControls.close();
+        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
         shortcutReturn();
       });
     }

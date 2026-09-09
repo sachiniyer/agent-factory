@@ -179,6 +179,28 @@ test("shortcut cancel preserves a Session actions disclosure the user opened", a
   await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
 });
 
+test("desktop shortcut cancel closes app controls opened by phone recomposition", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  await page.keyboard.press("Control+]");
+  const controls = page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true });
+  const menu = page.getByRole("menu", { name: "Tab type", exact: true });
+
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(menu).toBeVisible();
+  await expect(controls).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(controls).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("t");
+  await expect(menu).toBeVisible();
+});
 
 test("desktop picker stays visible after phone recomposition", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
