@@ -100,7 +100,7 @@ func TestHookProgressFailedClaimPublishesAtomically(t *testing.T) {
 		hookProgressWriteFile, hookProgressRemoveAll = originalWrite, originalRemove
 		_ = os.RemoveAll(p.Directory)
 	})
-	if p.recordLaunchFailure(0, errors.New("launch failed")) {
+	if p.recordLaunchFailure(t.Context(), 0, errors.New("launch failed")) {
 		t.Fatal("failed marker write published a claim")
 	}
 	if p.claimed(0) {

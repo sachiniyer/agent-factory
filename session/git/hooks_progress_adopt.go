@@ -27,6 +27,13 @@ func (g *GitWorktree) installHookProgressAdoption(worktreePath, sessionID string
 	if noResumableHookProgress(err) {
 		return false
 	}
+	done := make(chan struct{})
+	g.hooksDone = done
+	g.startHookProgressAdoption(worktreePath, sessionID, p, err, done)
+	return true
+}
+
+func (g *GitWorktree) startHookProgressAdoption(worktreePath, sessionID string, p *hookProgress, err error, done chan struct{}) {
 	if p != nil {
 		g.SetHookScopeUnitPrefix(p.Prefix)
 	}
@@ -34,8 +41,6 @@ func (g *GitWorktree) installHookProgressAdoption(worktreePath, sessionID string
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	done := make(chan struct{})
-	g.hooksDone = done
 	interval := hookAdoptionPollInterval
 	prefixes := g.hookScopePrefixes()
 	repoPath := g.repoPath
@@ -85,12 +90,12 @@ func (g *GitWorktree) installHookProgressAdoption(worktreePath, sessionID string
 					}
 					break
 				}
-				if errors.Is(err, errWorktreeIdentityMismatch) {
-					log.WarningLog.Printf("cannot resume post-worktree hooks for %s: %v; leaving hook journal pending for worktree recovery", p.Worktree, err)
-					return
-				}
 				if message := err.Error(); message != lastIdentityError {
-					log.WarningLog.Printf("waiting to verify post-worktree hooks for %s: %v", p.Worktree, err)
+					if errors.Is(err, errWorktreeIdentityMismatch) {
+						log.WarningLog.Printf("cannot resume post-worktree hooks for %s: %v; keeping hook completion pending for worktree recovery", p.Worktree, err)
+					} else {
+						log.WarningLog.Printf("waiting to verify post-worktree hooks for %s: %v", p.Worktree, err)
+					}
 					lastIdentityError = message
 				}
 			}
@@ -103,5 +108,49 @@ func (g *GitWorktree) installHookProgressAdoption(worktreePath, sessionID string
 		log.InfoLog.Printf("resuming remaining post-worktree hooks for %s", p.Worktree)
 		<-runPostWorktreeHooks(ctx, hookRun{worktreePath: p.Worktree, repoPath: repoPath, passthrough: p.Passthrough, progress: p, onScopeLaunched: g.SetHookScopeUnitPrefix})
 	}()
-	return true
+}
+
+// Relocation makes the persisted path non-authoritative, so resume cannot read
+// or verify the journal yet. Keep the same completion handle open until the
+// relocation latch settles, then start ordinary adoption behind that handle.
+func (g *GitWorktree) installRelocationPendingHookAdoption() {
+	ctx := g.hooksCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	g.hooksDone = done
+	interval := hookAdoptionPollInterval
+	sessionID := g.hookScopeSessionID
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			worktreePath, settled := g.hookAdoptionPathIfSettled()
+			if settled {
+				p, err := readPendingHookProgress(worktreePath, sessionID)
+				if noResumableHookProgress(err) {
+					watchAdoptedHookRun(ctx, done, worktreePath, g.hookScopePrefixes(), interval)
+					return
+				}
+				g.startHookProgressAdoption(worktreePath, sessionID, p, err, done)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				close(done)
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (g *GitWorktree) hookAdoptionPathIfSettled() (string, bool) {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if g.relocationRecovery != nil || g.activeRelocationClaim != nil {
+		return "", false
+	}
+	return g.worktreePath, true
 }

@@ -263,6 +263,7 @@ func TestHookProgressPruneUsesOneReadDeadlineForStalledJournals(t *testing.T) {
 func TestHookProgressSamePathReplacementStaysPending(t *testing.T) {
 	claimDaemonProcess(t)
 	installScopeShim(t)
+	fastHookAdoptionPoll(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo, tree := linkedHookWorktree(t)
 	g := worktreeWithRecordedScope(t, "af-hook-owner")
@@ -290,7 +291,12 @@ func TestHookProgressSamePathReplacementStaysPending(t *testing.T) {
 	}
 
 	AdoptRunningHooks([]*GitWorktree{g})
-	waitForClosed(t, g.HooksDone(), 5*time.Second, "replacement identity check did not settle")
+	t.Cleanup(func() {
+		g.hooksCancel()
+		waitForClosed(t, g.HooksDone(), 5*time.Second, "replacement identity watcher did not stop")
+	})
+	time.Sleep(2 * time.Second)
+	requireOpen(t, g.HooksDone(), "replacement identity mismatch reported hooks complete")
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("saved command ran in a different linked worktree at the same path")
 	}

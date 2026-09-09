@@ -177,8 +177,16 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 		}
 		scopeRecorded := false
 		for index, cmdStr := range cmds {
-			if run.progress != nil && run.progress.entryFinished(index) {
-				continue
+			if run.progress != nil {
+				state, err := run.progress.entryState(index)
+				if err != nil {
+					log.WarningLog.Printf("cannot determine post-worktree hook entry %d state: %v; leaving suffix pending", index, err)
+					bailResumable()
+					return
+				}
+				if state == hookEntryFinished {
+					continue
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -190,7 +198,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			outputFile, outputErr := openHookLog(hooklog.PostWorktree)
 			if outputErr != nil {
 				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", cmdStr, outputErr)
-				if !run.progress.recordLaunchFailure(index, outputErr) {
+				if !run.progress.recordLaunchFailure(ctx, index, outputErr) {
 					bailResumable()
 					return
 				}
@@ -228,7 +236,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			if err := cmd.Start(); err != nil {
 				_ = outputFile.Close()
 				log.ErrorLog.Printf("post-worktree hook %q failed to start (full output: %s): %v", cmdStr, outputPath, err)
-				if !run.progress.recordLaunchFailure(index, err) {
+				if !run.progress.recordLaunchFailure(ctx, index, err) {
 					bailResumable()
 					return
 				}
@@ -284,26 +292,41 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 					log.WarningLog.Printf("post-worktree hook scope %s did not stop (full output: %s): %v", scopeUnit, outputPath, err)
 				}
 			}
-			if run.progress != nil && !run.progress.claimed(index) {
-				if waitErr == nil {
-					waitErr = fmt.Errorf("hook launcher exited before claiming entry %d", index)
-				}
-				if scopeStopErr != nil || !run.progress.recordLaunchFailure(index, waitErr) {
+			if run.progress != nil {
+				state, stateErr := run.progress.entryState(index)
+				if stateErr != nil {
+					log.WarningLog.Printf("cannot verify post-worktree hook entry %d completion: %v; leaving suffix pending", index, stateErr)
 					bailResumable()
 					_ = outputFile.Close()
-					if scopeStopErr != nil && waitForHookScopeGone(ctx, run.progress.Prefix) {
-						resumed := run
-						resumed.leaveProgressUnfinishedOnCancel = true
-						// The nested runner owns its own lease reference. Without this
-						// retain, its release and ours can consume the create path's
-						// pre-commit hold while the owner row is still absent.
-						run.progress.retainLease()
-						<-runPostWorktreeHooks(ctx, resumed)
-						if run.progress.finished() {
-							completionOwed = false
-						}
-					}
 					return
+				}
+				if state == hookEntryStarted {
+					log.WarningLog.Printf("post-worktree hook entry %d has no terminal exit receipt; leaving suffix pending", index)
+					bailResumable()
+					_ = outputFile.Close()
+					return
+				}
+				if state == hookEntryUnclaimed {
+					if waitErr == nil {
+						waitErr = fmt.Errorf("hook launcher exited before claiming entry %d", index)
+					}
+					if scopeStopErr != nil || !run.progress.recordLaunchFailure(ctx, index, waitErr) {
+						bailResumable()
+						_ = outputFile.Close()
+						if scopeStopErr != nil && waitForHookScopeGone(ctx, run.progress.Prefix) {
+							resumed := run
+							resumed.leaveProgressUnfinishedOnCancel = true
+							// The nested runner owns its own lease reference. Without this
+							// retain, its release and ours can consume the create path's
+							// pre-commit hold while the owner row is still absent.
+							run.progress.retainLease()
+							<-runPostWorktreeHooks(ctx, resumed)
+							if waitForHookProgressFinished(ctx, run.progress) {
+								completionOwed = false
+							}
+						}
+						return
+					}
 				}
 			}
 			outputTail, outputReadErr := hooklog.CloseAndReadTail(outputFile)

@@ -11,6 +11,9 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
+// Test seam for path resolution that stalls beneath the bounded worker.
+var boundedResolvePath = pathutil.ResolveForCompare
+
 // Test seam for a metadata syscall that stalls beneath the bounded worker.
 var boundedLstatPath = os.Lstat
 
@@ -108,8 +111,9 @@ func boundedResolveForCompare(path string) (string, error) {
 	flight := &resolveFlight{done: make(chan struct{})}
 	resolveFlights.byPath[path] = flight
 	resolveFlights.Unlock()
+	resolve := boundedResolvePath
 	go func() {
-		flight.resolved = pathutil.ResolveForCompare(path)
+		flight.resolved = resolve(path)
 		resolveFlights.Lock()
 		if resolveFlights.byPath[path] == flight {
 			delete(resolveFlights.byPath, path)

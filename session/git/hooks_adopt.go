@@ -57,7 +57,10 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 			continue
 		}
 		if g.HasUnresolvedRelocation() {
-			log.WarningLog.Printf("cannot adopt post-worktree hooks for %s: relocation recovery is unresolved; leaving hook journal pending", g.worktreePath)
+			log.WarningLog.Printf("cannot adopt post-worktree hooks for %s: relocation recovery is unresolved; leaving hook journal pending", g.GetWorktreePath())
+			if g.hooksDone == nil {
+				g.installRelocationPendingHookAdoption()
+			}
 			continue
 		}
 		// A worktree with a live in-process run already reports itself, and

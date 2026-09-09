@@ -182,9 +182,22 @@ func (g *GitWorktree) retireHookProgress() error {
 	return nil
 }
 
+var hookProgressFinishedLstat = BoundedLstat
+
+func (p *hookProgress) finishedState() (bool, error) {
+	info, err := hookProgressFinishedLstat(filepath.Join(p.Directory, "finished"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular(), nil
+}
+
 func (p *hookProgress) finished() bool {
-	info, err := os.Lstat(filepath.Join(p.Directory, "finished"))
-	return err == nil && info.Mode().IsRegular()
+	finished, _ := p.finishedState()
+	return finished
 }
 
 func (p *hookProgress) completed() bool {

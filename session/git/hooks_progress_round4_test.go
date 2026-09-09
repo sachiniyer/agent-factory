@@ -104,10 +104,7 @@ func TestHookProgressRelocationRecoveryLeavesJournalPending(t *testing.T) {
 		}
 	})
 	AdoptRunningHooks([]*GitWorktree{g})
-	if g.HooksDone() != nil {
-		waitForClosed(t, g.HooksDone(), 5*time.Second, "watcher did not finish")
-		t.Error("unresolved relocation adopted hooks")
-	}
+	requireOpen(t, g.HooksDone(), "unresolved relocation was not represented as pending hook work")
 	if p.claimed(0) || p.finished() {
 		t.Error("unresolved relocation changed pending journal")
 	}

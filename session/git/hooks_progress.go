@@ -20,16 +20,17 @@ import (
 // index of a command that actually started. Never replay a claimed command:
 // arbitrary provisioning commands need not be idempotent.
 type hookProgress struct {
-	leaseMu     *sync.Mutex
-	lease       *os.File // Local runner only; never serialized or inherited by children.
-	leaseHolds  int
-	SessionID   string   `json:"session_id"`
-	Commands    []string `json:"commands"`
-	Passthrough []string `json:"passthrough"`
-	Worktree    string   `json:"worktree"`
-	Prefix      string   `json:"scope_prefix"`
-	Generation  string   `json:"generation"`
-	Directory   string   `json:"directory"`
+	leaseMu             *sync.Mutex
+	lease               *os.File // Local runner only; never serialized or inherited by children.
+	leaseHolds          int
+	supersededDirectory string
+	SessionID           string   `json:"session_id"`
+	Commands            []string `json:"commands"`
+	Passthrough         []string `json:"passthrough"`
+	Worktree            string   `json:"worktree"`
+	Prefix              string   `json:"scope_prefix"`
+	Generation          string   `json:"generation"`
+	Directory           string   `json:"directory"`
 	// The checkout's .git node survives an ordinary rename but gets a new
 	// device/inode identity when a different checkout replaces it.
 	// Resume therefore requires this positive identity, not merely the absence
@@ -68,13 +69,16 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	if errors.Is(err, config.ErrLockTimeout) {
 		return nil, fmt.Errorf("hook journal lock held by another process; hooks could not start; retry once the holder releases it: %w", err)
 	}
+	if err == nil && progress != nil {
+		cleanupSupersededHookProgress(progress.supersededDirectory)
+	}
 	return progress, err
 }
 
 // Publication and standalone pruning share the existing identity-probe budget.
 // Teardown remains nonblocking through TryWithFileLock in the retirement path.
 func withHookProgressLock(dir string, fn func(string, os.FileInfo) error) error {
-	pinned, err := filepath.EvalSymlinks(dir)
+	pinned, err := boundedResolveForCompare(dir)
 	if err != nil {
 		return fmt.Errorf("resolve hook journal directory: %w", err)
 	}
@@ -167,9 +171,7 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	}
 	published = true
 	if filepath.Dir(previous.Directory) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(previous.Directory), "entries-") && previous.Directory != p.Directory {
-		if _, statErr := os.Stat(filepath.Join(previous.Directory, "finished")); statErr == nil {
-			_ = os.RemoveAll(previous.Directory)
-		}
+		p.supersededDirectory = previous.Directory
 	}
 	return p, nil
 }
@@ -181,11 +183,6 @@ func (p *hookProgress) receipt(index int) string {
 func (p *hookProgress) claimed(index int) bool {
 	_, err := os.Stat(p.receipt(index))
 	return err == nil
-}
-
-func (p *hookProgress) entryFinished(index int) bool {
-	info, err := os.Stat(filepath.Join(p.receipt(index), "exit"))
-	return err == nil && info.Mode().IsRegular()
 }
 
 // mkdir is an atomic claim. It also protects against a delayed launcher and a

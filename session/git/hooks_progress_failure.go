@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,9 +17,9 @@ var (
 
 // Preserve continue-on-error semantics without leaving a pending hole before
 // later commands. An exclusive rename publishes both durable markers as one
-// claim; temporary directories never count as claimed. If storage cannot
-// publish the claim, stop before executing any later entry.
-func (p *hookProgress) recordLaunchFailure(index int, cause error) bool {
+// claim; a lost rename race returns handled only after the winner publishes a
+// valid exit receipt. If neither fact is available, stop before later entries.
+func (p *hookProgress) recordLaunchFailure(ctx context.Context, index int, cause error) bool {
 	if p == nil {
 		return true
 	}
@@ -45,7 +46,7 @@ func (p *hookProgress) recordLaunchFailure(index int, cause error) bool {
 		}
 	}
 	if err := renameHookProgressNoReplace(temporary, receipt); err != nil {
-		if _, claimErr := os.Stat(receipt); claimErr == nil {
+		if p.waitForEntryFinished(ctx, index) {
 			return true
 		}
 		log.ErrorLog.Printf("cannot publish failed post-worktree hook entry %d: %v", index, err)

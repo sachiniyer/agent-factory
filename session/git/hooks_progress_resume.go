@@ -50,3 +50,27 @@ func waitForHookScopeGone(ctx context.Context, prefix string) bool {
 		}
 	}
 }
+
+// Nested recovery completed its command loop, but its durable finished marker
+// can briefly be unreadable. Retry that third-answer storage result rather than
+// turning it into either completion or permanent in-flight state.
+func waitForHookProgressFinished(ctx context.Context, p *hookProgress) bool {
+	ticker := time.NewTicker(hookAdoptionPollInterval)
+	defer ticker.Stop()
+	var lastError string
+	for {
+		finished, err := p.finishedState()
+		if finished {
+			return true
+		}
+		if err != nil && err.Error() != lastError {
+			log.WarningLog.Printf("waiting to verify completed post-worktree hook journal for %s: %v", p.Worktree, err)
+			lastError = err.Error()
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}

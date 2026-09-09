@@ -54,8 +54,10 @@ func verifyHookResumeWorktree(ctx context.Context, repoPath, worktreePath, branc
 	return nil
 }
 
-// Only positive mismatch evidence permits a pending journal watcher to stop.
-// Timeouts, filesystem I/O errors and all other unknown failures remain retryable.
+// Positive mismatch evidence refuses authorization to resume in the current
+// checkout. It does not prove the saved list complete: the adoption watcher
+// remains pending so worktree recovery can restore the original occupant.
+// Timeouts, filesystem I/O errors and all other unknown failures are retryable too.
 var errWorktreeIdentityMismatch = errors.New("worktree identity mismatch")
 
 func worktreeIdentityMismatchf(format string, args ...any) error {
