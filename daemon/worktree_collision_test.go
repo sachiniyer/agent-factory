@@ -59,6 +59,55 @@ func TestReserveCreateRefusesBranchHeldByNamedLiveLane(t *testing.T) {
 		"the refusal must tell the operator how to continue safely: %s", msg)
 }
 
+func TestReserveCreateRefusesLiveHolderWhenArchivedHolderIsListedLast(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	branch := manager.branchForTitle("incoming")
+	liveTitle := "live-holder"
+	livePath := filepath.Join(t.TempDir(), "live")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", "live-staging", livePath).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "incoming", "incoming")
+	out, err = exec.Command("git", "-C", livePath, "checkout", "--ignore-other-worktrees", "-q", "-B", branch, branch).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	worktree, err := sessiongit.NewGitWorktreeFromStorage(repoPath, livePath, liveTitle, branch, "", false, true)
+	require.NoError(t, err)
+	live, err := session.NewInstance(session.InstanceOptions{Title: liveTitle, Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	live.SetBackend(session.NewFakeBackend())
+	live.SetGitWorktreeForTest(worktree)
+	live.Branch = branch
+	live.SetStartedForTest(true)
+	live.SetStatusForTest(session.Ready)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, live.Title)] = live
+	manager.mu.Unlock()
+
+	holds, err := sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, err)
+	assert.Equal(t, []string{resolvedPath(t, livePath), resolvedPath(t, archived.GetWorktreePath())}, holds[branch],
+		"precondition: both holders must survive even when the archived holder is listed last")
+
+	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "incoming",
+		Program:  "claude",
+	})
+	if release != nil {
+		release()
+	}
+
+	require.Error(t, err, "the live holder must refuse reuse even when an archived holder is listed after it")
+	assert.Nil(t, renamed, "a refusal must happen before the archived rename moves the live lane's HEAD")
+	assert.Equal(t, "incoming", archived.Title)
+	assert.Contains(t, err.Error(), liveTitle, "the refusal must name the live lane among the multiple holders")
+	head, headErr := exec.Command("git", "-C", livePath, "symbolic-ref", "--short", "HEAD").Output()
+	require.NoError(t, headErr)
+	assert.Equal(t, branch, strings.TrimSpace(string(head)), "the live lane's HEAD must remain on its original branch")
+}
+
 func TestUnreadableWorktreeScanCannotReportClean(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "unknown", Path: repoPath, Program: "claude"})

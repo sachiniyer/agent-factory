@@ -19,7 +19,7 @@ echo 'fixture: live idle session selected in the 120x30 tree'
 bin="$(_af_resolve_bin)"
 holder="$(cd "$AF_DRIVER_REPO" && "$bin" sessions get idle | jq -er '.worktree.worktree_path')"
 branch="$(git -C "$holder" symbolic-ref --short HEAD)"
-sibling="$HOME/sandbox/takeover-worktree"
+sibling="${AF_DRIVER_REPO}-takeover"
 
 # Populate the holder's index with enough tracked paths for the mass-revert
 # symptom to become visible after a sibling advances the shared ref.
@@ -36,7 +36,7 @@ if ! printf '%s\n' "$ordinary" | grep -qE 'already (used by worktree|checked out
     exit 1
 fi
 echo "fixture: ordinary checkout refused the held branch: $ordinary"
-git -C "$sibling" checkout -q -B "$branch" "$branch"
+git -C "$sibling" checkout --ignore-other-worktrees -q -B "$branch" "$branch"
 for i in $(seq 1 25); do
     printf 'new\n' >"$sibling/mass-$i.txt"
 done
