@@ -342,6 +342,20 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 	return firstFreeWorktreePath(basePath)
 }
 
+// DerivedWorktreePathTitleSegment returns the user-title-derived part of the
+// default sibling worktree directory name, after the same sanitizing and
+// repo-name-dependent length bound used by resolveWorktreePlacement. It returns
+// empty when the title contributes no safe bytes: in that case placement uses
+// the fixed, AF-authored "session" fallback, which is not a representation of
+// the user's title.
+func DerivedWorktreePathTitleSegment(repoRoot, title string) string {
+	segment := worktreePathTitleSegment(title)
+	if segment == "" {
+		return ""
+	}
+	return boundWorktreeComponent(filepath.Base(repoRoot), segment)
+}
+
 const (
 	// nameMax is the Linux per-component filesystem limit (NAME_MAX). A worktree
 	// directory name — and the .git/worktrees/<id> admin dir git derives from its

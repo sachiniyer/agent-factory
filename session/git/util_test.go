@@ -262,6 +262,21 @@ func TestSanitizeBranchName_TruncationCannotReexposeDotLock(t *testing.T) {
 	}
 }
 
+func TestDerivedWorktreePathTitleSegment(t *testing.T) {
+	if got, want := DerivedWorktreePathTitleSegment("/srv/repo", "fix bug (urgent)"), "fix-bug-urgent"; got != want {
+		t.Errorf("ordinary derived segment = %q, want %q", got, want)
+	}
+
+	longRepo := filepath.Join("/srv", strings.Repeat("r", 220))
+	if got, want := DerivedWorktreePathTitleSegment(longRepo, "Confidential Migration"), "Confidential-Migra"; got != want {
+		t.Errorf("bounded derived segment = %q, want %q", got, want)
+	}
+
+	if got := DerivedWorktreePathTitleSegment("/srv/repo", "!!!"); got != "" {
+		t.Errorf("AF-authored fallback reported as user-title-derived: %q", got)
+	}
+}
+
 // TestBoundTitleForDisambiguation_KeepsSuffixesInjective is the #2528 P3-b
 // mechanism lock. The daemon's uniquifying walks append "-N" / " (archived N)" to
 // a base title and judge availability on the DERIVED branch. For a long base,

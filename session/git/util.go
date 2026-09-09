@@ -134,15 +134,19 @@ func BranchForTitle(branchPrefix, title string) string {
 // "<repoName>-<segment>", so the segment's NAME_MAX allowance depends on the repo
 // name and is applied by the caller at the join site (resolveWorktreePlacement),
 // where that prefix is known (#2528).
-func sanitizeWorktreePathSegment(title string) string {
+func worktreePathTitleSegment(title string) string {
 	s := reUnsafeWorktreePathSegment.ReplaceAllString(title, "-")
 	s = strings.ReplaceAll(s, "..", "")
 	s = reMultiDash.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-.")
-	if s == "" {
-		return "session"
+	return strings.Trim(s, "-.")
+}
+
+func sanitizeWorktreePathSegment(title string) string {
+	s := worktreePathTitleSegment(title)
+	if s != "" {
+		return s
 	}
-	return s
+	return "session"
 }
 
 // maxBranchComponentLen bounds a single title-derived git ref component. Linux

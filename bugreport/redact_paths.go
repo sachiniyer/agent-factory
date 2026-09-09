@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The path-root policy: how a bundle names a directory.
@@ -42,6 +46,11 @@ type pathRoot struct {
 	token string
 }
 
+type worktreePathTitle struct {
+	repoPath string
+	segment  string
+}
+
 // noteRepoRoot registers one repository root, and noteWorktreeRoot one worktree
 // root, under the next token of that kind.
 func (r *redactor) noteRepoRoot(path string) {
@@ -60,6 +69,21 @@ func (r *redactor) noteWorktreeRoot(path string) {
 // numbered: there is exactly one per run.
 func (r *redactor) noteAFHome(path string) {
 	r.noteRoot(path, afHomeToken)
+}
+
+func (r *redactor) noteWorktreeTitle(repoPath, title string) {
+	repoPath = normalizeRoot(repoPath)
+	if repoPath == "" {
+		return
+	}
+	segment := sessiongit.DerivedWorktreePathTitleSegment(repoPath, title)
+	if segment == "" {
+		return
+	}
+	if r.worktreePathTitles == nil {
+		r.worktreePathTitles = make(map[worktreePathTitle]struct{})
+	}
+	r.worktreePathTitles[worktreePathTitle{repoPath: repoPath, segment: segment}] = struct{}{}
 }
 
 // noteRoot registers one root under an exact token, reporting whether it was
@@ -138,16 +162,164 @@ func (r *redactor) rootReplacements() []pathRoot {
 	return out
 }
 
-// collapseKnownRoots rewrites every directory this run can name to its token,
-// most specific first. It is the text-pass half of the root policy: the field
-// half (collapsePathField) rewrites the path FIELDS, and this one catches the
-// same roots wherever else they appear — a daemon log line, a diagnostic string,
-// the daemon status block, a task's project path.
+// collapseKnownRoots rewrites every complete directory this run can name to its
+// token, most specific first. It is the text-pass half of the root policy: the
+// field half (collapsePathField) rewrites the path FIELDS, and this one catches
+// the same roots wherever else they appear — a daemon log line, a diagnostic
+// string, the daemon status block, a task's project path. Text boundaries are
+// explicit: a registered "/srv/repo" must not consume the prefix of its unrelated
+// sibling "/srv/repo-backup" and strand that sibling's private suffix (#4099).
 func (r *redactor) collapseKnownRoots(s string) string {
 	for _, root := range r.rootReplacements() {
-		s = strings.ReplaceAll(s, root.path, root.token)
+		s = replaceKnownRoot(s, root.path, root.token)
 	}
 	return s
+}
+
+// scrubWorktreePathTitles removes the title-derived segment only in the exact
+// sibling path context that gives it meaning. A derived spelling is not swept
+// globally: an equal bounded diagnostic or branch value remains intact. Any
+// numeric collision suffix is AF-authored and survives as triage information.
+func (r *redactor) scrubWorktreePathTitles(s string) string {
+	titles := make([]worktreePathTitle, 0, len(r.worktreePathTitles))
+	for title := range r.worktreePathTitles {
+		titles = append(titles, title)
+	}
+	sort.Slice(titles, func(i, j int) bool {
+		iLen := len(titles[i].repoPath) + len(titles[i].segment)
+		jLen := len(titles[j].repoPath) + len(titles[j].segment)
+		if iLen != jLen {
+			return iLen > jLen
+		}
+		if titles[i].repoPath != titles[j].repoPath {
+			return titles[i].repoPath < titles[j].repoPath
+		}
+		return titles[i].segment < titles[j].segment
+	})
+	for _, title := range titles {
+		needle := title.repoPath + "-" + title.segment
+		replacement := title.repoPath + "-" + redactedMarker
+		s = replaceSiblingWorktreeTitle(s, needle, replacement)
+	}
+	return s
+}
+
+func replaceSiblingWorktreeTitle(s, needle, replacement string) string {
+	var out strings.Builder
+	scan, copied := 0, 0
+	changed := false
+	for scan <= len(s)-len(needle) {
+		rel := strings.Index(s[scan:], needle)
+		if rel < 0 {
+			break
+		}
+		start := scan + rel
+		end := start + len(needle)
+		if siblingWorktreeBoundary(s, start, end) {
+			out.WriteString(s[copied:start])
+			out.WriteString(replacement)
+			copied = end
+			scan = end
+			changed = true
+			continue
+		}
+		scan = start + 1
+	}
+	if !changed {
+		return s
+	}
+	out.WriteString(s[copied:])
+	return out.String()
+}
+
+func siblingWorktreeBoundary(s string, start, end int) bool {
+	if start > 0 {
+		before, _ := utf8.DecodeLastRuneInString(s[:start])
+		if !isPathTextDelimiter(before) {
+			return false
+		}
+	}
+	if pathEndsAt(s, end) {
+		return true
+	}
+	if end >= len(s) || s[end] != '-' {
+		return false
+	}
+	// firstFreeWorktreePath appends the lowest available "-N" suffix. Keep that
+	// bounded system value, but require all digits and a real path/text boundary
+	// so a shorter title cannot consume the prefix of a longer sibling title.
+	end++
+	digits := end
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	return end > digits && pathEndsAt(s, end)
+}
+
+func pathEndsAt(s string, end int) bool {
+	if end == len(s) || s[end] == byte(filepath.Separator) {
+		return true
+	}
+	after, _ := utf8.DecodeRuneInString(s[end:])
+	return isPathTextDelimiter(after)
+}
+
+func replaceKnownRoot(s, root, token string) string {
+	var out strings.Builder
+	scan, copied := 0, 0
+	changed := false
+	for scan <= len(s)-len(root) {
+		rel := strings.Index(s[scan:], root)
+		if rel < 0 {
+			break
+		}
+		start := scan + rel
+		end := start + len(root)
+		if knownRootTextBoundary(s, start, end) {
+			out.WriteString(s[copied:start])
+			out.WriteString(token)
+			copied = end
+			scan = end
+			changed = true
+			continue
+		}
+		scan = start + 1
+	}
+	if !changed {
+		return s
+	}
+	out.WriteString(s[copied:])
+	return out.String()
+}
+
+func knownRootTextBoundary(s string, start, end int) bool {
+	if start > 0 {
+		before, _ := utf8.DecodeLastRuneInString(s[:start])
+		if !isPathTextDelimiter(before) {
+			return false
+		}
+	}
+	if end == len(s) || s[end] == byte(filepath.Separator) {
+		return true
+	}
+	// scrubLog removes known title representations before roots. This is the
+	// one safe non-separator sibling: the suffix has already been proven to be
+	// user-title data and replaced, so collapse the registered repo prefix while
+	// retaining both the sibling dash and the marker (and any collision suffix).
+	if strings.HasPrefix(s[end:], "-"+redactedMarker) {
+		return true
+	}
+	after, _ := utf8.DecodeRuneInString(s[end:])
+	return isPathTextDelimiter(after)
+}
+
+// isPathTextDelimiter names punctuation and whitespace used by the renderers
+// around a complete path. Letters, numbers and filename punctuation such as
+// '.', '_' and '-' deliberately do not qualify: they can continue a sibling's
+// basename, which is the distinction collapsePathField's separator check makes
+// for an isolated path value.
+func isPathTextDelimiter(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(`"'=,:;()[]{}<>`, r)
 }
 
 // collapsePathField rewrites ONE absolute path field so it carries the layout

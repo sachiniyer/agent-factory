@@ -87,6 +87,10 @@ type redactor struct {
 	// repoRoots and worktreeRoots number the tokens within their kind.
 	repoRoots     int
 	worktreeRoots int
+	// worktreePathTitles are exact repo-root/title-segment pairs for the default
+	// sibling layout. Unlike raw titles, these derived spellings are scrubbed only
+	// in that path context, so an equal structural value elsewhere stays useful.
+	worktreePathTitles map[worktreePathTitle]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -239,6 +243,7 @@ func (r *redactor) scrubLog(s string) string {
 	// that matcher first replaced line one and made the original full-title match
 	// impossible, leaking the remaining lines (#2249 late review).
 	s = r.scrubKnownLabels(s)
+	s = r.scrubWorktreePathTitles(s)
 	s = r.scrubTmuxNames(s)
 	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
 	// syntax is a safer boundary than a global punctuation matcher and also
@@ -284,7 +289,7 @@ func (r *redactor) scrubTmuxNames(s string) string {
 // orders them that way: a shape matcher that consumes part of a name makes the
 // exact full-title match impossible afterwards.
 func (r *redactor) scrubDiagnostic(s string) string {
-	return r.scrub(r.scrubTmuxNames(r.scrubKnownLabels(s)))
+	return r.scrub(r.scrubTmuxNames(r.scrubWorktreePathTitles(r.scrubKnownLabels(s))))
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
@@ -330,6 +335,13 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	r.noteTmuxName(d.TmuxName)
 	r.noteTitle(d.Title)
 	r.noteTitle(d.Worktree.SessionName)
+	// A sibling worktree path carries a sanitized and possibly truncated title
+	// segment, which can differ byte-for-byte from both display-title fields. It
+	// is still user-authored title data, so register the exact representation the
+	// worktree layer derives. The helper deliberately omits AF's fixed "session"
+	// fallback: that bounded, non-user-authored value remains useful verbatim.
+	r.noteWorktreeTitle(d.Worktree.RepoPath, d.Title)
+	r.noteWorktreeTitle(d.Worktree.RepoPath, d.Worktree.SessionName)
 	// The two roots this record points at. Registered here, beside the titles,
 	// because they are the same kind of fact — something this run knows the name
 	// of and every later pass must be able to recognize — and because collecting
@@ -385,30 +397,49 @@ var titleJSONKeys = map[string]bool{"title": true, "session_name": true}
 
 // noteUnknownJSON walks a decoded-but-unparseable instances.json payload and
 // records every title/tmux-name it carries, so scrubLog can strip them from the
-// log tail exactly as it does for records that decoded typed (#1790). It must
-// run BEFORE redactUnknownJSON blanks those same values.
+// log tail exactly as it does for records that decoded typed (#1790). It also
+// pairs titles with repo_path values solely to derive the title spelling in a
+// sibling worktree path (#4099). It must run BEFORE redactUnknownJSON blanks
+// those same sensitive values.
 //
 // The walk is key-driven and shape-agnostic, so it reaches nested title-bearing
 // locations (worktree.session_name, tabs[].tmux_name) without assuming the
 // record layout the typed decode already rejected.
 func (r *redactor) noteUnknownJSON(v any) {
-	switch t := v.(type) {
-	case map[string]any:
-		for k, val := range t {
-			s, isString := val.(string)
-			key := strings.ToLower(k)
-			switch {
-			case !isString:
-				r.noteUnknownJSON(val)
-			case titleJSONKeys[key]:
-				r.noteTitle(s)
-			case key == "tmux_name":
-				r.noteTmuxName(s)
+	titles := make(map[string]struct{})
+	repoPaths := make(map[string]struct{})
+	var walk func(any)
+	walk = func(value any) {
+		switch t := value.(type) {
+		case map[string]any:
+			for k, val := range t {
+				s, isString := val.(string)
+				key := strings.ToLower(k)
+				switch {
+				case !isString:
+					walk(val)
+				case titleJSONKeys[key]:
+					titles[s] = struct{}{}
+					r.noteTitle(s)
+				case key == "tmux_name":
+					r.noteTmuxName(s)
+				case key == "repo_path":
+					repoPaths[s] = struct{}{}
+				}
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
 			}
 		}
-	case []any:
-		for _, e := range t {
-			r.noteUnknownJSON(e)
+	}
+	walk(v)
+	// repo_path is already a sensitive fallback key and is dropped below. Use
+	// it only to reproduce the worktree layer's repo-dependent title bound; do
+	// not register an untyped value as a path root or give it a structural role.
+	for title := range titles {
+		for repoPath := range repoPaths {
+			r.noteWorktreeTitle(repoPath, title)
 		}
 	}
 }
