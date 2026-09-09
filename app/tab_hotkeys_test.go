@@ -45,8 +45,21 @@ func (p tabHotkeysPty) Start(cmd *exec.Cmd) (*os.File, error) {
 // daemon spawning a tab's tmux session server-side before the TUI attaches:
 // since #1152 AttachShellTab is attach-only and no longer resurrects a missing
 // session, so the session must already exist when the TUI reflects the tab.
+// cantFindSessionError builds a genuine *exec.ExitError carrying tmux's
+// "can't find session: <name>" diagnostic on stderr. probeSession routes every
+// non-timeout has-session failure through tmuxProvedSessionAbsent (#2875),
+// which requires a real *exec.ExitError with exit code 1 and that exact text;
+// a bare fmt.Errorf has no ExitCode and reads as unknown, not absent.
+func cantFindSessionError(name string) error {
+	c := exec.Command("sh", "-c", `printf "can't find session: %s\n" "$NAME" >&2; exit 1`)
+	c.Env = append(os.Environ(), "NAME="+name)
+	_, err := c.Output()
+	return err
+}
+
 func nameKeyedTmuxExec() (cmd_test.MockCmdExec, func(sessionName string)) {
 	existing := map[string]bool{}
+	absentErrors := map[string]error{}
 	nameOf := func(cmd *exec.Cmd) string {
 		for i, a := range cmd.Args {
 			switch {
@@ -62,6 +75,16 @@ func nameKeyedTmuxExec() (cmd_test.MockCmdExec, func(sessionName string)) {
 		}
 		return ""
 	}
+	// absentError returns a cached *exec.ExitError for name, building it on
+	// first use. probeSession needs the real error shape to classify absence.
+	absentError := func(name string) error {
+		if err, ok := absentErrors[name]; ok {
+			return err
+		}
+		err := cantFindSessionError(name)
+		absentErrors[name] = err
+		return err
+	}
 	exec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
@@ -71,7 +94,7 @@ func nameKeyedTmuxExec() (cmd_test.MockCmdExec, func(sessionName string)) {
 				if existing[n] {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return absentError(n)
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
 				return nil
