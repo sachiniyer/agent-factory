@@ -4,10 +4,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-func checkWorktreeIntegrity(ctx *scanContext, report *Report) {
+func checkWorktreeIntegrity(ctx *scanContext, report *Report, health daemon.HealthStatus) {
+	if worktreeInventoryInapplicable(ctx, health) {
+		report.Pass(sectionProcesses, "worktree-integrity", "not inspected because this home's daemon is not running, so it has no live lanes")
+		return
+	}
 	rows, err := ctx.opts.worktreeInventory()
 	if err != nil {
 		report.markIncomplete("worktree-integrity")
@@ -49,4 +54,20 @@ func checkWorktreeIntegrityRows(report *Report, inspections []session.SessionWor
 		return
 	}
 	report.Pass(sectionProcesses, "worktree-integrity", fmt.Sprintf("no dangerous shape in %d live local worktree(s)", len(inspections)))
+}
+
+// worktreeInventoryInapplicable distinguishes a stopped daemon from an
+// unreachable one. A missing socket alone is not enough: a same-home daemon or
+// an owned daemon whose home could not be read may still have live lanes.
+func worktreeInventoryInapplicable(ctx *scanContext, health daemon.HealthStatus) bool {
+	if health.SocketErr != nil || health.SocketExists || health.PingErr == nil || health.PIDVerified || ctx.snapErr != nil {
+		return false
+	}
+	activeHome := normalizeHome(ctx.opts.ConfigDir)
+	for _, candidate := range ctx.daemonProcs() {
+		if candidate.ownedByUs && (!candidate.homeKnown || candidate.home == activeHome) {
+			return false
+		}
+	}
+	return true
 }

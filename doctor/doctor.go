@@ -481,7 +481,7 @@ func Run(opts Options) (*Report, error) {
 	// Before every check that reads the session list, so its silence is
 	// explained before it is read rather than after.
 	checkTmuxInspection(ctx, report)
-	checkWorktreeIntegrity(ctx, report)
+	checkWorktreeIntegrity(ctx, report, health)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
 	checkLeakedTmuxSessions(ctx, report)

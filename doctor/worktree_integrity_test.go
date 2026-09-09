@@ -115,3 +115,25 @@ func TestDoctorReportsIncompleteBranchCorrelation(t *testing.T) {
 	assert.Contains(t, report.Checks[0].Detail, "another lane was unreadable")
 	assert.Equal(t, []string{"worktree-integrity"}, report.Incomplete)
 }
+
+func TestDoctorDoesNotRequireWorktreeInventoryWhenDaemonIsStopped(t *testing.T) {
+	opts := testOptions(t, false)
+	called := false
+	opts.worktreeInventory = func() ([]session.InstanceData, error) {
+		called = true
+		return nil, errors.New("dial daemon: socket is absent")
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	assert.False(t, called, "a stopped daemon has no live lanes, so its unavailable snapshot must not be required")
+	assert.NotContains(t, report.Incomplete, "worktree-integrity")
+	for _, check := range report.Checks {
+		if check.Name == "worktree-integrity" {
+			assert.Equal(t, StatusPass, check.Status)
+			assert.Contains(t, check.Detail, "daemon is not running")
+			return
+		}
+	}
+	t.Fatal("doctor omitted the worktree-integrity check")
+}
