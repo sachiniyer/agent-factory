@@ -721,17 +721,6 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	// Gate the auto-create path: when DeliverPrompt's target session is absent it
-	// calls Manager.CreateSession with req.Program. That path bypasses
-	// controlServer.createSession (and therefore its gate), so a raw RPC caller
-	// can reach provisioning with an unsupported program through this handler too.
-	// Apply the same program validation here, before the auto-create can fire.
-	// The internal callers (root-agent ensure loop, task delivery) pass TaskRepoID
-	// or TaskOrigin and do NOT set Program; the check is a no-op for them (empty
-	// program is allowed). Only an external JSON-settable Program is rejected.
-	if err := validateCreateProgram(req.Program); err != nil {
-		return err
-	}
 	status, deliveryStatus, err := s.manager.DeliverPromptWithStatus(req)
 	if err != nil {
 		return err

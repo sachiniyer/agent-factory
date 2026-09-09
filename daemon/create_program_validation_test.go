@@ -51,11 +51,8 @@ func TestControlServer_CreateSession_RejectsUnsupportedProgram(t *testing.T) {
 	server := &controlServer{manager: manager}
 
 	// A plausible typo / pre-upgrade future agent name, a bare unknown agent, a
-	// shell that is not an agent, and whitespace-only: each is a program
-	// tmux.DetectAgentFromCommand returns "" for (it runs no known agent), so each
-	// would trigger the bug. (A compound command that EMBEDS an agent token, like
-	// "./collect codex", is a separate, documented scope boundary — see
-	// TestControlServer_CreateSession_AcceptsResolvedCommandPrograms.)
+	// shell that is not an agent, and whitespace-only: each is a program whose
+	// executable is not a recognized agent, so each would trigger the bug.
 	for _, program := range []string{
 		"my-custom-agent",
 		"notanagent",
@@ -169,20 +166,11 @@ func TestControlServer_CreateSession_AcceptsEverySupportedProgram(t *testing.T) 
 }
 
 // TestControlServer_CreateSession_AcceptsResolvedCommandPrograms: the gate keys
-// off tmux.DetectAgentFromCommand, not a bare-enum check, so a fully-resolved
-// command string that runs a known agent is ACCEPTED over the RPC boundary. A
-// bare-enum check (config.ValidateProgramEnum, the bug report's suggested fix)
-// would reject every one of these; DetectAgentFromCommand keeps them working.
-//
-// The last case pins a deliberate SCOPE BOUNDARY: a compound command that merely
-// EMBEDS an agent token ("./collect codex" — the data-injection string from
-// TestSandboxCredentialSelectionRejectsAgentNameUsedAsData) is ACCEPTED by this
-// gate, because DetectAgentFromCommand sees the codex token. The bug this change
-// targets is a bare unrecognized program (e.g. "my-custom-agent"); a compound
-// command running a non-agent binary with an agent-name argument still hits the
-// downstream sessionenv.AgentForCommand fail-closed (no codex credentials are
-// granted), preserving the security property — that path is out of scope and
-// unchanged.
+// off tmux.DetectAgentExecutable, not a bare-enum check, so a fully-resolved
+// command string whose executable is a known agent is ACCEPTED over the RPC
+// boundary. A bare-enum check (config.ValidateProgramEnum, the bug report's
+// suggested fix) would reject every one of these; DetectAgentExecutable keeps
+// them working.
 func TestControlServer_CreateSession_AcceptsResolvedCommandPrograms(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installUniversalReadyBackend(t)
@@ -194,8 +182,8 @@ func TestControlServer_CreateSession_AcceptsResolvedCommandPrograms(t *testing.T
 	}
 	server := &controlServer{manager: manager}
 
-	// Each program resolves to a known agent via DetectAgentFromCommand (pinned
-	// by the precondition), so it must NOT be rejected by the RPC gate.
+	// Each program's executable is a recognized agent (pinned by the
+	// precondition), so it must NOT be rejected by the RPC gate.
 	resolvedCommands := []struct {
 		program string
 		agent   string
@@ -204,14 +192,10 @@ func TestControlServer_CreateSession_AcceptsResolvedCommandPrograms(t *testing.T
 		{"/home/user/.local/bin/claude --dangerously-skip-permissions", tmux.ProgramClaude},
 		{"CLAUDE_CONFIG_DIR=$HOME/.claude claude", tmux.ProgramClaude},
 		{"codex", tmux.ProgramCodex},
-		// Scope boundary: a compound command embedding an agent token. Accepted
-		// here (DetectAgentFromCommand sees codex); credentials are still
-		// withheld downstream by the AgentForCommand fail-closed.
-		{"./collect codex", tmux.ProgramCodex},
 	}
 	for _, tc := range resolvedCommands {
-		if got := tmux.DetectAgentFromCommand(tc.program); got != tc.agent {
-			t.Fatalf("precondition: DetectAgentFromCommand(%q) = %q, want %q — this test only proves the RPC gate accepts programs that run a known agent", tc.program, got, tc.agent)
+		if got := tmux.DetectAgentExecutable(tc.program); got != tc.agent {
+			t.Fatalf("precondition: DetectAgentExecutable(%q) = %q, want %q — this test only proves the RPC gate accepts programs whose executable is a known agent", tc.program, got, tc.agent)
 		}
 		var resp CreateSessionResponse
 		if err := server.CreateSession(CreateSessionRequest{
@@ -221,6 +205,47 @@ func TestControlServer_CreateSession_AcceptsResolvedCommandPrograms(t *testing.T
 		}, &resp); err != nil {
 			t.Fatalf("resolved-command program %q (-> %q) must be accepted, not rejected as unsupported; got: %v", tc.program, tc.agent, err)
 		}
+	}
+}
+
+// TestControlServer_CreateSession_RejectsCompoundCommandWithNonAgentExecutable:
+// a compound command that embeds an agent token as an ARGUMENT ("./collect
+// codex") is rejected by the RPC gate because its executable ("./collect") does
+// not run a recognized agent. This is the correct behavior: the gate checks the
+// executable, not any token in the command, so appending a supported agent name
+// as an argument cannot bypass the gate.
+func TestControlServer_CreateSession_RejectsCompoundCommandWithNonAgentExecutable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	server := &controlServer{manager: manager}
+
+	// Precondition: DetectAgentFromCommand still sees the embedded token, so
+	// the old (any-token) check would accept this — the fix is in switching to
+	// DetectAgentExecutable (executable-only).
+	if got := tmux.DetectAgentFromCommand("./collect codex"); got != tmux.ProgramCodex {
+		t.Fatalf("precondition: DetectAgentFromCommand(\"./collect codex\") = %q, want %q", got, tmux.ProgramCodex)
+	}
+	if got := tmux.DetectAgentExecutable("./collect codex"); got != "" {
+		t.Fatalf("precondition: DetectAgentExecutable(\"./collect codex\") = %q, want \"\" (executable is not an agent)", got)
+	}
+
+	var resp CreateSessionResponse
+	err = server.CreateSession(CreateSessionRequest{
+		Title:    "compound-non-agent-exec",
+		RepoPath: repoPath,
+		Program:  "./collect codex",
+	}, &resp)
+	if err == nil {
+		t.Fatal("expected \"./collect codex\" to be rejected (executable is not a recognized agent), got success")
+	}
+	if resp.Instance.ID != "" {
+		t.Fatalf("rejected program must not create an instance, got %+v", resp.Instance)
 	}
 }
 
@@ -426,6 +451,48 @@ func TestControlServer_CreateSession_HttpAcceptsSupportedProgram(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HTTP create with a supported program must return 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestControlServer_DeliverPrompt_ExistingSessionWithNonAgentProgramDelivers:
+// the program gate on the auto-create path must NOT reject a DeliverPrompt to
+// an EXISTING session whose stored program is not a recognized agent (e.g. a
+// root session running "/opt/bare-root"). The gate only applies when an absent
+// session would be auto-created; when the target already exists, req.Program is
+// never read by Manager.CreateSession, so validation would only block legitimate
+// delivery.
+func TestControlServer_DeliverPrompt_ExistingSessionWithNonAgentProgramDelivers(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	// Register an existing session with a non-agent program (the root-session
+	// shape). The gate must not block delivery to this already-running session.
+	fakeBackend := session.NewFakeBackend()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "bare-root",
+		Path:    repoPath,
+		Program: "/opt/bare-root",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(fakeBackend)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	seedDiskInstance(t, repoID, "bare-root", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "bare-root")] = inst
+	manager.mu.Unlock()
+
+	server := &controlServer{manager: manager}
+	var resp DeliverPromptResponse
+	err = server.DeliverPrompt(DeliverPromptRequest{
+		Title:    "bare-root",
+		RepoPath: repoPath,
+		Program:  "/opt/bare-root",
+		Prompt:   "do something",
+	}, &resp)
+	if err != nil {
+		t.Fatalf("DeliverPrompt to an existing session with a non-agent program must not be rejected by the program gate; got: %v", err)
 	}
 }
 
