@@ -46,6 +46,10 @@ func (legacyCommittedTaskRPC) AddTask(_ AddTaskRequest, _ *AddTaskResponse) erro
 
 type legacyHandoffRPC struct{}
 
+type unsupportedAccountHandoffRPC struct {
+	handoffCalls int
+}
+
 type committedResumeRPC struct{}
 
 func (committedResumeRPC) ResumeFromLimit(_ ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
@@ -56,10 +60,22 @@ func (committedResumeRPC) ResumeFromLimit(_ ResumeFromLimitRequest, resp *Resume
 
 func (legacyHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
+	resp.AccountHandoff = true
 	return nil
 }
 
 func (legacyHandoffRPC) HandoffSession(_ HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	*resp = HandoffSessionResponse{OK: true, From: "claude", To: "codex"}
+	return nil
+}
+
+func (s *unsupportedAccountHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	return nil
+}
+
+func (s *unsupportedAccountHandoffRPC) HandoffSession(_ HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	s.handoffCalls++
 	*resp = HandoffSessionResponse{OK: true, From: "claude", To: "codex"}
 	return nil
 }
@@ -157,6 +173,15 @@ func TestControlClientClassifiesIgnoredHandoffAccountAsCommitted(t *testing.T) {
 	require.ErrorContains(t, err, "did not honor")
 	require.True(t, isMutationCommitted(err),
 		"an older daemon already restarted the runtime, so the compatibility mismatch is committed: %T: %v", err, err)
+}
+
+func TestControlClientRefusesTargetOnlyHandoffBeforeUnsupportedDaemonMutates(t *testing.T) {
+	handler := &unsupportedAccountHandoffRPC{}
+	serveControlRPC(t, handler)
+
+	_, err := HandoffSession(HandoffSessionRequest{To: "codex"})
+	require.ErrorContains(t, err, "account-aware handoff")
+	require.Zero(t, handler.handoffCalls, "an unsupported daemon must never receive the mutation")
 }
 
 // The control socket is net/rpc with gob encoding, and gob ELIDES zero-valued

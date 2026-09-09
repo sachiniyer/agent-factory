@@ -2027,6 +2027,12 @@ function doHandoff(): void {
         void handoffSession(target.id, target.title, to, tok, account)
           .then(closeModal)
           .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              if (modal === m) closeModal();
+              requestResync();
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });

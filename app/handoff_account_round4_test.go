@@ -28,8 +28,14 @@ func TestHandoffCompletionReportsAccountPair(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "/v1/HandoffSession", r.URL.Path)
-				require.NoError(t, apiproto.WriteEnvelope(w, apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: tc.from, To: tc.to, FromAccount: tc.fromAccount, ToAccount: tc.toAccount})))
+				switch r.URL.Path {
+				case "/v1/health":
+					require.NoError(t, apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{OK: true, AccountHandoff: true})))
+				case "/v1/HandoffSession":
+					require.NoError(t, apiproto.WriteEnvelope(w, apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: tc.from, To: tc.to, FromAccount: tc.fromAccount, ToAccount: tc.toAccount})))
+				default:
+					t.Fatalf("unexpected request path %q", r.URL.Path)
+				}
 			}))
 			defer server.Close()
 			previousURL := apiclient.FlagDaemonURL

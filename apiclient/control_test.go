@@ -22,6 +22,10 @@ import (
 // the real envelope writer makes each round-trip a genuine parity proof rather
 // than a mock agreeing with itself, exactly like snapshotServer does for reads.
 func routeServer(t *testing.T, method string, handle func(body []byte) apiproto.Envelope) *Client {
+	return routeServerWithAccountHandoff(t, method, true, handle)
+}
+
+func routeServerWithAccountHandoff(t *testing.T, method string, supported bool, handle func(body []byte) apiproto.Envelope) *Client {
 	t.Helper()
 	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
@@ -29,6 +33,13 @@ func routeServer(t *testing.T, method string, handle func(body []byte) apiproto.
 		t.Fatalf("listen unix: %v", err)
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(map[string]any{
+			"ok":              true,
+			"account_handoff": supported,
+		}))
+	})
 	mux.HandleFunc("/v1/"+method, func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(body)
@@ -154,6 +165,21 @@ func TestControlRoundTrips(t *testing.T) {
 		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
 		if resp.To != "claude" || !IsMutationCommitted(err) || !strings.Contains(err.Error(), "pending settlement") || !strings.Contains(err.Error(), "did not honor") {
 			t.Fatalf("HandoffSession = %+v, %v; want payload plus both committed and mismatch errors", resp, err)
+		}
+	})
+
+	t.Run("HandoffSession refuses an unsupported daemon before target-only mutation", func(t *testing.T) {
+		called := false
+		c := routeServerWithAccountHandoff(t, "HandoffSession", false, func([]byte) apiproto.Envelope {
+			called = true
+			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "codex"})
+		})
+		_, err := c.HandoffSession(daemon.HandoffSessionRequest{To: "codex"})
+		if err == nil || !strings.Contains(err.Error(), "account-aware handoff") {
+			t.Fatalf("HandoffSession error = %v; want account-aware handoff refusal", err)
+		}
+		if called {
+			t.Fatal("an unsupported daemon must never receive the mutation")
 		}
 	})
 

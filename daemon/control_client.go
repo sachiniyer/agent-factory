@@ -20,6 +20,12 @@ import (
 
 var ensureDaemonMu sync.Mutex
 
+// ErrAccountHandoffUnsupported is returned before a handoff mutation is sent
+// when the responding daemon does not affirm the account-aware protocol. The
+// daemon, not the client, owns admission against live account-pin state; an
+// older daemon cannot safely make that decision and must not receive the call.
+var ErrAccountHandoffUnsupported = errors.New("daemon does not advertise account-aware handoff support (likely an older daemon — upgrade it); the handoff was not sent")
+
 // daemonStartingErrText is the wire-visible text of the warm-up error. net/rpc
 // flattens server-side errors into plain strings, so clients cannot errors.Is
 // against a sentinel value; IsDaemonStartingErr matches this text instead.
@@ -678,6 +684,13 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 // in place (#2013): swap the agent program, keep the worktree and branch, and
 // deliver a mission brief to the incoming agent.
 func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
+	var ping PingResponse
+	if err := callDaemon("Ping", PingRequest{}, &ping); err != nil {
+		return HandoffSessionResponse{}, fmt.Errorf("cannot verify account-aware handoff support; the handoff was not sent: %w", err)
+	}
+	if !ping.AccountHandoff {
+		return HandoffSessionResponse{}, ErrAccountHandoffUnsupported
+	}
 	var resp HandoffSessionResponse
 	err := callDaemon("HandoffSession", req, &resp)
 	if err != nil && !isMutationCommitted(err) {
