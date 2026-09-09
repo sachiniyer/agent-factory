@@ -36,6 +36,10 @@ type taskScheduler struct {
 	// which must not be read as the very different "this entry will never fire"
 	// (see armingSnapshot).
 	started bool
+	// stopped latches once Stop has been called. reloadTasks checks it under
+	// s.mu so a CRUD or ReloadTasks RPC that acquired s.mu after Stop released
+	// it cannot write armed=true back onto a scheduler whose cron has exited.
+	stopped bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// parse allows a seconds-granularity parser so firing tests don't wait a
@@ -122,6 +126,7 @@ func (s *taskScheduler) Stop() {
 	s.cron.Stop()
 	s.started = false
 	s.armed = false
+	s.stopped = true
 }
 
 // Reload re-reads tasks.json and replaces the scheduled entry set so it
@@ -148,6 +153,12 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// A reload racing with Stop can acquire s.mu after Stop releases it. Honour
+	// the stopped latch so it cannot re-arm a scheduler whose cron has exited.
+	if s.stopped {
+		return nil
+	}
 
 	for id, entry := range s.entries {
 		s.cron.Remove(entry.id)
