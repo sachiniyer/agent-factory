@@ -357,8 +357,7 @@ column one; the screen must stay inside the host with no horizontal scroll.
 Keep all targets at least 44px, truncate instead of wrapping, use existing
 tokens and static glyphs, and do not animate.
 
-Ctrl and Alt apply once to the next key, including the bar’s own keys. IME
-composition is sent unchanged and leaves the modifier armed.
+Ctrl and Alt apply once to the next typed character, including composed text.
 Double tap within 350ms to lock; tap again to release. An armed modifier has the
 selected-row surface, bold ink and accent edge. A locked modifier also has an
 accent outline and static ▸ marker. Buttons retain terminal focus on pointerdown;
