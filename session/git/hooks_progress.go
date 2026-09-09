@@ -193,17 +193,42 @@ func (p *hookProgress) entryFinished(index int) bool {
 // successor racing: only one shell can execute the entry. Arguments keep shell
 // source, filenames and command text separate. A receipt directory means
 // started; its exit file means the shell finished, even if its daemon died.
+// hookStopTimeout is already the bound for uncertain hook-scope ownership. Use
+// that same budget here, rounded up to whole seconds because POSIX sleep only
+// specifies integer operands. The winner publishes its short status through a
+// same-directory rename, so a successor cannot observe a partial receipt.
 func (p *hookProgress) command(index int, command string) []string {
 	return []string{"-c", `if [ -d "$1" ]; then
-  while [ ! -f "$1/exit" ]; do sleep 0.1; done
-  status=$(cat -- "$1/exit") || exit 125
-  exit "$status"
+	remaining=$3
+	while :; do
+		if [ -f "$1/exit" ]; then
+			if IFS= read -r status < "$1/exit"; then
+				case "$status" in ''|*[!0-9]*) ;; *) exit "$status" ;; esac
+			fi
+		fi
+		if [ "$remaining" -le 0 ]; then exit 125; fi
+		sleep 1 || exit 125
+		remaining=$((remaining - 1))
+	done
 fi
 mkdir -- "$1" || exit 125
 sh -c "$2"
 status=$?
-printf '%s\n' "$status" > "$1/exit"
-exit "$status"`, "af-hook-entry", p.receipt(index), command}
+exit_tmp=$1/.exit-$$
+printf '%s\n' "$status" > "$exit_tmp" || exit 125
+mv "$exit_tmp" "$1/exit" || exit 125
+exit "$status"`, "af-hook-entry", p.receipt(index), command, hookReceiptWaitSeconds()}
+}
+
+func hookReceiptWaitSeconds() string {
+	seconds := hookStopTimeout / time.Second
+	if hookStopTimeout%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	return strconv.FormatInt(int64(seconds), 10)
 }
 
 func (p *hookProgress) finish() {
