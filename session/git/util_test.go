@@ -277,6 +277,24 @@ func TestDerivedWorktreePathTitleSegment(t *testing.T) {
 	}
 }
 
+// The AF-authored fallback still shares the sibling directory component with
+// the repository basename. Choosing it after the repo-dependent bound makes a
+// 248-byte repo name produce a 256-byte component and fail with ENAMETOOLONG.
+func TestResolveWorktreePlacementBoundsFixedSiblingFallback(t *testing.T) {
+	repoBase := strings.Repeat("r", 248)
+	got, err := resolveWorktreePlacement(nil, filepath.Join("/srv", repoBase), t.TempDir(), "!!!", "")
+	if err != nil {
+		t.Fatalf("resolve fixed fallback below NAME_MAX: %v", err)
+	}
+	component := filepath.Base(got)
+	if len(component) > nameMax {
+		t.Fatalf("fixed fallback component is %d bytes, over NAME_MAX %d: %q", len(component), nameMax, component)
+	}
+	if want := repoBase + "-s"; component != want {
+		t.Errorf("fixed fallback component = %q, want %q", component, want)
+	}
+}
+
 func TestDerivedWorktreeSubdirectoryTitleSegment(t *testing.T) {
 	if got, want := DerivedWorktreeSubdirectoryTitleSegment("fix bug (urgent)"), "fix-bug-urgent"; got != want {
 		t.Errorf("ordinary derived segment = %q, want %q", got, want)

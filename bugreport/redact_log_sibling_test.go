@@ -257,6 +257,70 @@ func TestScrubbersRedactPathsAtURIQueryAndFragmentBoundary(t *testing.T) {
 	}
 }
 
+// Global config command fields are handed to /bin/sh -c, so a parameter
+// expansion adjacent to a path is interpreted by the shell grammar rather than
+// by the generic text delimiter rule. An unclassified string with the same '$'
+// bytes remains unchanged: '$' is legal in a Unix filename.
+func TestScrubRecognizesShellExpansionPathBoundaryInConfigCommand(t *testing.T) {
+	command := "cd " + siblingLeakRepo + "${SUBDIR:+/$SUBDIR} && claude"
+	for _, tc := range []struct {
+		format string
+		text   string
+	}{
+		{format: "toml", text: "program_overrides = { claude = " + strconv.Quote(command) + " }"},
+		{format: "json", text: `{"program_overrides":{"claude":` + strconv.Quote(command) + `}}`},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			r := &redactor{}
+			r.noteRepoRoot(siblingLeakRepo)
+			r.noteConfigShellCommands([]byte(tc.text), tc.format)
+
+			got := r.scrub(tc.text)
+			if strings.Contains(got, "ConfidentialClient") {
+				t.Fatalf("registered root survived before a shell expansion:\n%s", got)
+			}
+			if want := "cd [repo:1]${SUBDIR:+/$SUBDIR} && claude"; !strings.Contains(got, want) {
+				t.Errorf("shell command lost its useful expansion, want %q in:\n%s", want, got)
+			}
+		})
+	}
+
+	unclassified := "literal filename " + siblingLeakRepo + "${SUBDIR:+/$SUBDIR}"
+	plain := &redactor{}
+	plain.noteRepoRoot(siblingLeakRepo)
+	if got := plain.scrub(unclassified); got != unclassified {
+		t.Errorf("unclassified '$' text was treated as shell syntax:\n got: %s\nwant: %s", got, unclassified)
+	}
+}
+
+// scrub deliberately omits global bare-title matching because it runs over
+// encoded JSON keys. A contextual sibling path is different: the repo/title
+// pair proves which bytes are path-owned, so the generic plan can remove that
+// segment without making the raw title a global token.
+func TestScrubRedactsContextualSiblingPathWithoutBareTitles(t *testing.T) {
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Title: siblingLeakTitle,
+		Worktree: session.GitWorktreeData{
+			RepoPath: siblingLeakRepo,
+		},
+	})
+	configText := "program_overrides = { claude = " + strconv.Quote("cd "+siblingLeakAlternate+" && claude") + " }"
+
+	got := r.scrub(configText)
+	if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, siblingLeakDiskTitle) {
+		t.Fatalf("contextual sibling worktree survived generic config scrubbing:\n%s", got)
+	}
+	if want := "cd [repo:1]-" + redactedMarker + " && claude"; !strings.Contains(got, want) {
+		t.Errorf("contextual sibling output lost its role, want %q in:\n%s", want, got)
+	}
+
+	encodedTitle := `{"title":"` + siblingLeakTitle + `"}`
+	if got := r.scrub(encodedTitle); got != encodedTitle {
+		t.Errorf("generic scrub started replacing bare titles in encoded JSON:\n got: %s\nwant: %s", got, encodedTitle)
+	}
+}
+
 func TestRejectedRecordsKeepWorktreeTitlePairOwnership(t *testing.T) {
 	r := &redactor{}
 	raw := json.RawMessage(`[

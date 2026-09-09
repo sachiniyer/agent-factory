@@ -62,7 +62,10 @@ func (r *redactor) sensitiveTextSpans(s string) []redactionSpan {
 func (r *redactor) genericTextSpans(s string) []redactionSpan {
 	spans := make([]redactionSpan, 0)
 	spans = r.appendAccountLabelSpans(spans, s)
+	spans = r.appendWorktreePathTitleSpans(spans, s)
+	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
+	spans = r.appendKnownShellCommandPathSpans(spans, s)
 	spans = appendCredentialSpans(spans, s)
 	return r.appendUsernameSpans(spans, s)
 }
@@ -221,6 +224,14 @@ func appendLegacyTaskTitleSpans(spans []redactionSpan, s string) []redactionSpan
 }
 
 func (r *redactor) appendWorktreePathTitleSpans(spans []redactionSpan, s string) []redactionSpan {
+	return r.appendWorktreePathTitleSpansWithBoundary(spans, s, derivedWorktreePathBoundary)
+}
+
+func (r *redactor) appendWorktreePathTitleSpansWithBoundary(
+	spans []redactionSpan,
+	s string,
+	boundary pathBoundary,
+) []redactionSpan {
 	for title := range r.worktreePathTitles {
 		needle := title.repoPath + "-" + title.segment
 		scan := 0
@@ -231,7 +242,7 @@ func (r *redactor) appendWorktreePathTitleSpans(spans []redactionSpan, s string)
 			}
 			start := scan + rel
 			end := start + len(needle)
-			if derivedWorktreePathBoundary(s, start, end) {
+			if boundary(s, start, end) {
 				titleStart := start + len(title.repoPath) + 1
 				spans = append(spans, redactionSpan{
 					start: titleStart, end: end, replacement: redactedMarker, priority: spanWorktreeTitle,
@@ -254,6 +265,14 @@ func (r *redactor) appendWorktreePathTitleSpans(spans []redactionSpan, s string)
 }
 
 func (r *redactor) appendWorktreeSubdirectoryTitleSpans(spans []redactionSpan, s string) []redactionSpan {
+	return r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, s, derivedWorktreePathBoundary)
+}
+
+func (r *redactor) appendWorktreeSubdirectoryTitleSpansWithBoundary(
+	spans []redactionSpan,
+	s string,
+	boundary pathBoundary,
+) []redactionSpan {
 	if r.afHome == "" {
 		return spans
 	}
@@ -268,7 +287,7 @@ func (r *redactor) appendWorktreeSubdirectoryTitleSpans(spans []redactionSpan, s
 			}
 			start := scan + rel
 			end := start + len(needle)
-			if derivedWorktreePathBoundary(s, start, end) {
+			if boundary(s, start, end) {
 				spans = append(spans, redactionSpan{
 					start: start + len(needle) - len(segment),
 					end:   end, replacement: redactedMarker, priority: spanWorktreeTitle,
@@ -283,6 +302,14 @@ func (r *redactor) appendWorktreeSubdirectoryTitleSpans(spans []redactionSpan, s
 }
 
 func (r *redactor) appendKnownRootSpans(spans []redactionSpan, s string) []redactionSpan {
+	return r.appendKnownRootSpansWithBoundary(spans, s, knownRootTextBoundary)
+}
+
+func (r *redactor) appendKnownRootSpansWithBoundary(
+	spans []redactionSpan,
+	s string,
+	boundary pathBoundary,
+) []redactionSpan {
 	for _, root := range r.rootReplacements() {
 		scan := 0
 		for scan <= len(s)-len(root.path) {
@@ -292,7 +319,7 @@ func (r *redactor) appendKnownRootSpans(spans []redactionSpan, s string) []redac
 			}
 			start := scan + rel
 			end := start + len(root.path)
-			if knownRootTextBoundary(s, start, end) {
+			if boundary(s, start, end) {
 				spans = append(spans, redactionSpan{
 					start: start, end: end, replacement: root.token, priority: spanKnownRoot,
 				})

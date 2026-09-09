@@ -52,6 +52,8 @@ type worktreePathTitle struct {
 	segment  string
 }
 
+type pathBoundary func(string, int, int) bool
+
 // noteRepoRoot registers one repository root, and noteWorktreeRoot one worktree
 // root, under the next token of that kind.
 func (r *redactor) noteRepoRoot(path string) {
@@ -249,10 +251,14 @@ func replaceSiblingWorktreeTitle(s, needle, replacement string) string {
 }
 
 func derivedWorktreePathBoundary(s string, start, end int) bool {
+	return derivedWorktreePathBoundaryWithEnd(s, start, end, pathEndsAt)
+}
+
+func derivedWorktreePathBoundaryWithEnd(s string, start, end int, endsAt pathBoundary) bool {
 	if !pathStartsAt(s, start) {
 		return false
 	}
-	if pathEndsAt(s, start, end) {
+	if endsAt(s, start, end) {
 		return true
 	}
 	if end >= len(s) || s[end] != '-' {
@@ -266,7 +272,7 @@ func derivedWorktreePathBoundary(s string, start, end int) bool {
 	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
 		end++
 	}
-	return end > digits && pathEndsAt(s, start, end)
+	return end > digits && endsAt(s, start, end)
 }
 
 func pathEndsAt(s string, start, end int) bool {
@@ -306,10 +312,14 @@ func replaceKnownRoot(s, root, token string) string {
 }
 
 func knownRootTextBoundary(s string, start, end int) bool {
+	return knownRootTextBoundaryWithEnd(s, start, end, pathEndsAt)
+}
+
+func knownRootTextBoundaryWithEnd(s string, start, end int, endsAt pathBoundary) bool {
 	if !pathStartsAt(s, start) {
 		return false
 	}
-	if pathEndsAt(s, start, end) {
+	if endsAt(s, start, end) {
 		return true
 	}
 	// This is the one safe non-separator sibling: an earlier structured or

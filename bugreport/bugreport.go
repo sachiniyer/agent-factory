@@ -575,6 +575,7 @@ func collectConfig(r *redactor, errs []string) (*configSection, []string) {
 			errs = append(errs, fmt.Sprintf("config %s: %v", c.name, readErr))
 			continue
 		}
+		r.noteConfigShellCommands(data, c.format)
 		return &configSection{
 			Path:     path,
 			Format:   c.format,

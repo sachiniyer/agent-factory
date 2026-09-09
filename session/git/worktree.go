@@ -331,7 +331,7 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 		repoBase := filepath.Base(repoRoot)
 		segment := DerivedWorktreePathTitleSegment(repoRoot, sessionName)
 		if segment == "" {
-			segment = "session"
+			segment = boundWorktreeComponent(repoBase, "session")
 		}
 		basePath = filepath.Join(worktreeDir, repoBase+"-"+segment)
 	}

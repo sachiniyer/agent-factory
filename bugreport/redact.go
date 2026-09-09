@@ -95,6 +95,10 @@ type redactor struct {
 	// only by legacy subdirectory restores with no persisted branch. They are
 	// scrubbed solely below the registered AF-home worktrees directory.
 	worktreeSubdirectoryTitles map[string]struct{}
+	// shellCommands are decoded values from global config fields whose consumers
+	// hand them to /bin/sh -c. Exact ownership lets path matching ask the shell
+	// grammar about an adjacent expansion without making '$' a text delimiter.
+	shellCommands map[string]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -161,10 +165,11 @@ func addUserVariant(users []string, name string) []string {
 // scrub is the catch-all text pass applied to every section: it removes PEM
 // blocks and pattern-matched credentials, collapses every known path root — the
 // AF home and each session's repo/worktree to its token, the home directory to
-// "~" — and blanks account/username tokens. All candidates are found before a
-// replacement is applied, including inside valid Go-quoted values. It runs last
-// over already field-redacted content, so it is defense-in-depth, not the only
-// line of defense.
+// "~" — removes title-derived segments in their registered sibling/subdirectory
+// path context, and blanks account/username tokens. It does not match bare titles.
+// All candidates are found before a replacement is applied, including inside
+// valid Go-quoted values. It runs last over already field-redacted content, so it
+// is defense-in-depth, not the only line of defense.
 func (r *redactor) scrub(s string) string {
 	return r.scrubGenericText(s)
 }
