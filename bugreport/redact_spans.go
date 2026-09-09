@@ -37,6 +37,7 @@ const (
 func (r *redactor) scrubKnownLogValues(s string) string {
 	spans := r.sensitiveTextSpans(s)
 	spans = appendLegacyTaskTitleSpans(spans, s)
+	spans = r.appendLogShellCommandPathSpans(spans, s)
 	spans = r.appendQuotedValueSpans(spans, s, true)
 	return applyRedactionSpans(s, spans)
 }
@@ -65,7 +66,6 @@ func (r *redactor) genericTextSpans(s string) []redactionSpan {
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
-	spans = r.appendKnownShellCommandPathSpans(spans, s)
 	spans = appendCredentialSpans(spans, s)
 	return r.appendUsernameSpans(spans, s)
 }
@@ -161,10 +161,10 @@ func appendGoQuotedSpans(spans []redactionSpan, s string, scrub func(string) str
 		quoted := s[start:end]
 		value, err := strconv.Unquote(quoted)
 		if err != nil {
-			// Treat the matching quote as the end of this malformed token rather
-			// than reconsidering it as an opener and swallowing the next valid %q
-			// field.
-			scan = end
+			// This opener did not establish a Go-quoted value. Resume one byte past
+			// it: the quote we tentatively treated as its closer may instead be the
+			// next real %q opener, and malformed text must not consume that evidence.
+			scan = start + 1
 			continue
 		}
 		if redacted := scrub(value); redacted != value {
@@ -189,6 +189,11 @@ func goQuotedEnd(s string, start int) int {
 			escaped = true
 		case '"':
 			return i + 1
+		case '\r', '\n':
+			// Go double-quoted literals cannot contain a physical newline. Log
+			// framing therefore terminates this malformed candidate before a quote
+			// on the next daemon line can be mistaken for its closer.
+			return -1
 		}
 	}
 	return -1
@@ -276,26 +281,28 @@ func (r *redactor) appendWorktreeSubdirectoryTitleSpansWithBoundary(
 	if r.afHome == "" {
 		return spans
 	}
-	parent := filepath.Join(r.afHome, "worktrees")
-	for segment := range r.worktreeSubdirectoryTitles {
-		needle := filepath.Join(parent, segment)
-		scan := 0
-		for scan <= len(s)-len(needle) {
-			rel := strings.Index(s[scan:], needle)
-			if rel < 0 {
-				break
+	for _, afHome := range r.afHomeSpellings {
+		parent := filepath.Join(afHome, "worktrees")
+		for segment := range r.worktreeSubdirectoryTitles {
+			needle := filepath.Join(parent, segment)
+			scan := 0
+			for scan <= len(s)-len(needle) {
+				rel := strings.Index(s[scan:], needle)
+				if rel < 0 {
+					break
+				}
+				start := scan + rel
+				end := start + len(needle)
+				if boundary(s, start, end) {
+					spans = append(spans, redactionSpan{
+						start: start + len(needle) - len(segment),
+						end:   end, replacement: redactedMarker, priority: spanWorktreeTitle,
+					})
+					scan = end
+					continue
+				}
+				scan = start + 1
 			}
-			start := scan + rel
-			end := start + len(needle)
-			if boundary(s, start, end) {
-				spans = append(spans, redactionSpan{
-					start: start + len(needle) - len(segment),
-					end:   end, replacement: redactedMarker, priority: spanWorktreeTitle,
-				})
-				scan = end
-				continue
-			}
-			scan = start + 1
 		}
 	}
 	return spans

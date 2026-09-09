@@ -92,9 +92,8 @@ func TestJSONConfigUsesDeclaredStringGrammar(t *testing.T) {
 		Worktree: session.GitWorktreeData{RepoPath: siblingLeakRepo},
 	})
 	data := []byte(`{"program_overrides":{"claude":"cd \/srv\/ConfidentialClient\/repo-fix-bug-urgent${SUBDIR:+\/$SUBDIR} && claude"}}`)
-	r.noteConfigShellCommands(data, "json")
 
-	got := r.scrub(string(data))
+	got := r.scrubConfig(data, "json")
 	if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, siblingLeakDiskTitle) {
 		t.Fatalf("JSON-escaped config scalar leaked its private path: %s", got)
 	}
@@ -106,6 +105,45 @@ func TestJSONConfigUsesDeclaredStringGrammar(t *testing.T) {
 	}
 	if want := "cd [repo:1]-" + redactedMarker + "${SUBDIR:+/$SUBDIR} && claude"; decoded.ProgramOverrides["claude"] != want {
 		t.Errorf("decoded command = %q, want %q", decoded.ProgramOverrides["claude"], want)
+	}
+}
+
+func TestConfigWithUnestablishedGrammarFailsClosed(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+	for _, tc := range []struct {
+		name   string
+		format string
+		data   string
+	}{
+		{name: "malformed declared JSON", format: "json", data: `{"path":"` + siblingLeakRepo},
+		{name: "unknown format", format: "yaml", data: "path: " + siblingLeakRepo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := r.scrubConfig([]byte(tc.data), tc.format); got != redactedMarker {
+				t.Fatalf("config without an established grammar did not fail closed: %q", got)
+			}
+		})
+	}
+}
+
+func TestProvenShellValueWithUnparseableSyntaxFailsClosed(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+	command := "cd " + siblingLeakRepo + "${"
+	data, err := json.Marshal(map[string]any{
+		"program_overrides": map[string]string{"claude": command},
+	})
+	if err != nil {
+		t.Fatalf("marshal config fixture: %v", err)
+	}
+
+	got := r.scrubConfig(data, "json")
+	if strings.Contains(got, "ConfidentialClient") {
+		t.Fatalf("unparseable proven shell value fell through to weaker text boundaries: %s", got)
+	}
+	if !strings.Contains(got, `"claude":"[redacted]"`) {
+		t.Errorf("unparseable shell value was not failed closed in place: %s", got)
 	}
 }
 
@@ -133,5 +171,21 @@ func TestRegisteredRootCoversCanonicalSymlinkSpelling(t *testing.T) {
 	}
 	if want := "recovery location: [repo:1]-" + redactedMarker; got != want {
 		t.Errorf("scrubber output = %q, want %q", got, want)
+	}
+
+	aliasAFHome := filepath.Join(alias, "ConfidentialClient", "af")
+	if err := os.MkdirAll(aliasAFHome, 0o755); err != nil {
+		t.Fatalf("create AF home through symlink: %v", err)
+	}
+	r = &redactor{}
+	r.noteAFHome(aliasAFHome)
+	r.noteSession(&session.InstanceData{Title: "fix bug"})
+	canonicalSubdirectory := filepath.Join(physical, "ConfidentialClient", "af", "worktrees", "fix-bug")
+	got = r.scrubLog("recovery location: " + canonicalSubdirectory)
+	if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, "fix-bug") {
+		t.Fatalf("canonical spelling of symlink-registered AF path leaked: %s", got)
+	}
+	if want := "recovery location: [af-home]/worktrees/" + redactedMarker; got != want {
+		t.Errorf("AF-home scrubber output = %q, want %q", got, want)
 	}
 }

@@ -575,11 +575,10 @@ func collectConfig(r *redactor, errs []string) (*configSection, []string) {
 			errs = append(errs, fmt.Sprintf("config %s: %v", c.name, readErr))
 			continue
 		}
-		r.noteConfigShellCommands(data, c.format)
 		return &configSection{
 			Path:     path,
 			Format:   c.format,
-			Contents: r.scrub(string(data)),
+			Contents: r.scrubConfig(data, c.format),
 		}, errs
 	}
 	return nil, errs

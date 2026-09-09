@@ -273,9 +273,8 @@ func TestScrubRecognizesShellExpansionPathBoundaryInConfigCommand(t *testing.T) 
 		t.Run(tc.format, func(t *testing.T) {
 			r := &redactor{}
 			r.noteRepoRoot(siblingLeakRepo)
-			r.noteConfigShellCommands([]byte(tc.text), tc.format)
 
-			got := r.scrub(tc.text)
+			got := r.scrubConfig([]byte(tc.text), tc.format)
 			if strings.Contains(got, "ConfidentialClient") {
 				t.Fatalf("registered root survived before a shell expansion:\n%s", got)
 			}

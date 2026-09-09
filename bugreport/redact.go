@@ -87,6 +87,10 @@ type redactor struct {
 	// repoRoots and worktreeRoots number the tokens within their kind.
 	repoRoots     int
 	worktreeRoots int
+	// afHomeSpellings contains the admitted and physical spellings of AF home.
+	// It is separate from the root token: first-token-wins may legitimately name
+	// the same directory as a repo while its worktrees layout remains AF-owned.
+	afHomeSpellings []string
 	// worktreePathTitles are exact repo-root/title-segment pairs for the default
 	// sibling layout. Unlike raw titles, these derived spellings are scrubbed only
 	// in that path context, so an equal structural value elsewhere stays useful.
@@ -95,10 +99,6 @@ type redactor struct {
 	// only by legacy subdirectory restores with no persisted branch. They are
 	// scrubbed solely below the registered AF-home worktrees directory.
 	worktreeSubdirectoryTitles map[string]struct{}
-	// shellCommands are decoded values from global config fields whose consumers
-	// hand them to /bin/sh -c. Exact ownership lets path matching ask the shell
-	// grammar about an adjacent expansion without making '$' a text delimiter.
-	shellCommands map[string]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -171,7 +171,7 @@ func addUserVariant(users []string, name string) []string {
 // valid Go-quoted values. It runs last over already field-redacted content, so it
 // is defense-in-depth, not the only line of defense.
 func (r *redactor) scrub(s string) string {
-	return r.scrubGenericText(s)
+	return r.scrubRecognizedText(s, redactionTextRendered)
 }
 
 // scrubUnstructured is the single sanitizer for a free-text scalar or blob
@@ -190,7 +190,7 @@ func (r *redactor) scrub(s string) string {
 // told to read, and the safe direction for an artifact meant to be shared
 // (#3871).
 func (r *redactor) scrubUnstructured(s string) string {
-	return r.scrubKnownDiagnosticValues(s)
+	return r.scrubRecognizedText(s, redactionTextDiagnostic)
 }
 
 // scrubLog scrubs the daemon log tail. On top of the standard scrub() pass it
@@ -216,7 +216,7 @@ func (r *redactor) scrubLog(s string) string {
 	// and tmux shapes against the same unmodified text. Their union is redacted:
 	// longest matches choose useful role markers, but every uncovered portion of
 	// an overlap still receives the generic marker.
-	return r.scrubKnownLogValues(s)
+	return r.scrubRecognizedText(s, redactionTextLog)
 }
 
 // scrubDiagnostic sanitizes an af-AUTHORED diagnostic string that QUOTES an
@@ -234,7 +234,7 @@ func (r *redactor) scrubLog(s string) string {
 // Known labels, contextual paths, roots, and tmux shapes are resolved against
 // one original string for scrubLog's #4099 overlap reason.
 func (r *redactor) scrubDiagnostic(s string) string {
-	return r.scrubKnownDiagnosticValues(s)
+	return r.scrubRecognizedText(s, redactionTextDiagnostic)
 }
 
 // scrubSessionTitles plans exact Go-quoted forms of every known title together

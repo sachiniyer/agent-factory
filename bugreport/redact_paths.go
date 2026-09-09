@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -72,26 +73,24 @@ func (r *redactor) noteWorktreeRoot(path string) {
 // numbered: there is exactly one per run.
 func (r *redactor) noteAFHome(path string) {
 	r.afHome = ""
-	cleaned := filepath.Clean(path)
-	if filepath.IsAbs(cleaned) {
-		r.afHome = cleaned
+	r.afHomeSpellings = rootSpellings(path)
+	if len(r.afHomeSpellings) > 0 {
+		r.afHome = r.afHomeSpellings[0]
 	}
 	r.noteRoot(path, afHomeToken)
 }
 
 func (r *redactor) noteWorktreeTitle(repoPath, title string) {
-	repoPath = filepath.Clean(repoPath)
-	if !filepath.IsAbs(repoPath) {
-		return
+	for _, spelling := range rootSpellings(repoPath) {
+		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
+		if segment == "" {
+			continue
+		}
+		if r.worktreePathTitles == nil {
+			r.worktreePathTitles = make(map[worktreePathTitle]struct{})
+		}
+		r.worktreePathTitles[worktreePathTitle{repoPath: spelling, segment: segment}] = struct{}{}
 	}
-	segment := sessiongit.DerivedWorktreePathTitleSegment(repoPath, title)
-	if segment == "" {
-		return
-	}
-	if r.worktreePathTitles == nil {
-		r.worktreePathTitles = make(map[worktreePathTitle]struct{})
-	}
-	r.worktreePathTitles[worktreePathTitle{repoPath: repoPath, segment: segment}] = struct{}{}
 }
 
 func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
@@ -110,19 +109,51 @@ func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
 // repo must read as one repo, and an AF home that is also some session's repo
 // must not gain a second name.
 func (r *redactor) noteRoot(path, token string) bool {
-	path = normalizeRoot(path)
-	if path == "" {
-		return false
-	}
-	if _, seen := r.rootTokens[path]; seen {
+	spellings := rootSpellings(path)
+	if len(spellings) == 0 {
 		return false
 	}
 	if r.rootTokens == nil {
 		r.rootTokens = make(map[string]string)
 	}
+	for _, spelling := range spellings {
+		if existing, seen := r.rootTokens[spelling]; seen {
+			for _, alias := range spellings {
+				r.noteRootSpelling(alias, existing)
+			}
+			return false
+		}
+	}
+	for _, spelling := range spellings {
+		r.noteRootSpelling(spelling, token)
+	}
+	return true
+}
+
+func (r *redactor) noteRootSpelling(path, token string) {
+	if _, seen := r.rootTokens[path]; seen {
+		return
+	}
 	r.rootTokens[path] = token
 	r.roots = append(r.roots, pathRoot{path: path, token: token})
-	return true
+}
+
+// rootSpellings returns both the spelling AF was handed and the physical
+// spelling of its deepest existing ancestor. macOS commonly supplies /var paths
+// while git and filepath resolution report the same objects below /private/var;
+// Linux symlinked fixture roots have the identical shape. Registering both at
+// admission keeps that filesystem alias from becoming an unrecognized text kind.
+func rootSpellings(path string) []string {
+	path = normalizeRoot(path)
+	if path == "" {
+		return nil
+	}
+	spellings := []string{path}
+	resolved := normalizeRoot(pathutil.ResolveForCompare(path))
+	if resolved != "" && resolved != path {
+		spellings = append(spellings, resolved)
+	}
+	return spellings
 }
 
 // normalizeRoot accepts only an absolute directory worth naming, with trailing
@@ -364,12 +395,18 @@ func uriPathEndsAt(s string, start, end, nextRuneSize int) bool {
 }
 
 // uriStartForPath locates a syntactically valid scheme whose first path slash
-// is the match at start. A slash already present after :// means the match is a
-// suffix inside a longer URI path, never a root boundary.
+// is the match at start. The URI grammar permits both an authority
+// (scheme://host/path) and no authority (scheme:/path); a path slash already
+// present after the scheme/authority makes the match a suffix inside a longer
+// URI path, never a root boundary.
 func uriStartForPath(s string, start int) (int, bool) {
 	prefix := s[:start]
-	schemeEnd := strings.LastIndex(prefix, "://")
-	if schemeEnd < 0 || strings.Contains(prefix[schemeEnd+3:], "/") {
+	schemeEnd := strings.LastIndexByte(prefix, ':')
+	if schemeEnd < 0 {
+		return 0, false
+	}
+	pathPrefix := prefix[schemeEnd+1:]
+	if pathPrefix != "" && (!strings.HasPrefix(pathPrefix, "//") || strings.Contains(pathPrefix[2:], "/")) {
 		return 0, false
 	}
 	schemeStart := schemeEnd

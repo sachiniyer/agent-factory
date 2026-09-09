@@ -1,95 +1,89 @@
 package bugreport
 
 import (
-	"bytes"
-	"encoding/json"
+	"strconv"
 	"strings"
 
-	"github.com/pelletier/go-toml/v2"
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// configShellValues mirrors only the global config fields whose consumers hand
-// operator-authored values to /bin/sh -c. Decoding this projection identifies
-// shell context without treating every quoted config value as shell source.
-type configShellValues struct {
-	ProgramOverrides map[string]string             `json:"program_overrides" toml:"program_overrides"`
-	OnArchiveCommand string                        `json:"on_archive_command" toml:"on_archive_command"`
-	SandboxSSH       string                        `json:"sandbox_ssh" toml:"sandbox_ssh"`
-	Sandbox          configShellSandbox            `json:"sandbox" toml:"sandbox"`
-	RootAgent        configShellProgram            `json:"root_agent" toml:"root_agent"`
-	RootAgents       map[string]configShellProgram `json:"root_agents" toml:"root_agents"`
-}
-
-type configShellProgram struct {
-	Program string `json:"program" toml:"program"`
-}
-
-type configShellSandbox struct {
-	SSH string `json:"ssh" toml:"ssh"`
-}
-
-// noteConfigShellCommands records decoded command values before the raw config
-// is scrubbed. A malformed config has no trustworthy grammar projection and
-// registers nothing; ordinary root/text defenses still run over its bytes.
-func (r *redactor) noteConfigShellCommands(data []byte, format string) {
-	var values configShellValues
-	var err error
-	switch format {
-	case "json":
-		err = json.Unmarshal(data, &values)
-	case "toml":
-		err = toml.Unmarshal(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), &values)
-	default:
-		return
+// appendLogShellCommandPathSpans recognizes post-worktree emitters that print a
+// /bin/sh -c value: the running line's raw final field and the other emitters'
+// %q field. Literal AF prose proves the command's provenance; arbitrary output
+// that merely looks shell-like never enters the shell parser. log.Printf line
+// framing owns the raw command's end.
+func (r *redactor) appendLogShellCommandPathSpans(spans []redactionSpan, s string) []redactionSpan {
+	const (
+		runPrefix    = "running post-worktree hook in "
+		quotedPrefix = "post-worktree hook "
+		outputOpen   = " (output: "
+		commandSep   = "): "
+	)
+	for lineStart := 0; lineStart < len(s); {
+		lineEnd := strings.IndexByte(s[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(s)
+		} else {
+			lineEnd += lineStart
+		}
+		contentEnd := lineEnd
+		if contentEnd > lineStart && s[contentEnd-1] == '\r' {
+			contentEnd--
+		}
+		line := s[lineStart:contentEnd]
+		quoted := strings.Index(line, quotedPrefix)
+		if quoted >= 0 {
+			quotedStart := lineStart + quoted + len(quotedPrefix)
+			if quotedStart < contentEnd && s[quotedStart] == '"' {
+				spans = r.appendLogShellQuotedSpan(spans, s, quotedStart, contentEnd)
+			}
+		}
+		run := strings.Index(line, runPrefix)
+		if run >= 0 {
+			afterRun := run + len(runPrefix)
+			output := strings.Index(line[afterRun:], outputOpen)
+			if output >= 0 {
+				afterOutput := afterRun + output + len(outputOpen)
+				separator := strings.Index(line[afterOutput:], commandSep)
+				if separator >= 0 {
+					commandStart := lineStart + afterOutput + separator + len(commandSep)
+					command := s[commandStart:contentEnd]
+					for _, span := range r.shellCommandPathSpans(command) {
+						span.start += commandStart
+						span.end += commandStart
+						spans = append(spans, span)
+					}
+				}
+			}
+		}
+		if lineEnd == len(s) {
+			break
+		}
+		lineStart = lineEnd + 1
 	}
+	return spans
+}
+
+func (r *redactor) appendLogShellQuotedSpan(
+	spans []redactionSpan,
+	s string,
+	start, lineEnd int,
+) []redactionSpan {
+	end := goQuotedEnd(s[:lineEnd], start)
+	if end < 0 {
+		return spans
+	}
+	value, err := strconv.Unquote(s[start:end])
 	if err != nil {
-		return
+		return spans
 	}
-	for _, command := range values.ProgramOverrides {
-		r.noteShellCommand(command)
-	}
-	r.noteShellCommand(values.OnArchiveCommand)
-	r.noteShellCommand(values.SandboxSSH)
-	r.noteShellCommand(values.Sandbox.SSH)
-	r.noteShellCommand(values.RootAgent.Program)
-	for _, agent := range values.RootAgents {
-		r.noteShellCommand(agent.Program)
-	}
-}
-
-func (r *redactor) noteShellCommand(command string) {
-	if strings.TrimSpace(command) == "" {
-		return
-	}
-	if r.shellCommands == nil {
-		r.shellCommands = make(map[string]struct{})
-	}
-	r.shellCommands[command] = struct{}{}
-}
-
-// appendKnownShellCommandPathSpans locates exact decoded command values in the
-// surrounding config text, then offsets shell-owned path candidates back into
-// that text. The quoted-value pass covers encoded spellings of the same value.
-func (r *redactor) appendKnownShellCommandPathSpans(spans []redactionSpan, s string) []redactionSpan {
-	for command := range r.shellCommands {
-		commandSpans := r.shellCommandPathSpans(command)
-		if len(commandSpans) == 0 {
-			continue
-		}
-		for scan := 0; scan <= len(s)-len(command); {
-			rel := strings.Index(s[scan:], command)
-			if rel < 0 {
-				break
-			}
-			start := scan + rel
-			for _, span := range commandSpans {
-				span.start += start
-				span.end += start
-				spans = append(spans, span)
-			}
-			scan = start + len(command)
-		}
+	inner := r.sensitiveTextSpans(value)
+	inner = appendLegacyTaskTitleSpans(inner, value)
+	inner = append(inner, r.shellCommandPathSpans(value)...)
+	if redacted := applyRedactionSpans(value, inner); redacted != value {
+		spans = append(spans, redactionSpan{
+			start: start, end: end, replacement: strconv.Quote(redacted), priority: spanQuotedValue,
+		})
 	}
 	return spans
 }
@@ -97,7 +91,16 @@ func (r *redactor) appendKnownShellCommandPathSpans(spans []redactionSpan, s str
 func (r *redactor) shellCommandPathSpans(command string) []redactionSpan {
 	context, ok := parseShellPathContext(command)
 	if !ok {
-		return nil
+		// Proven shell provenance with syntax our parser cannot establish is an
+		// unknown logical value, not permission to fall back to plain-text path
+		// boundaries. Fail closed over the command while leaving surrounding log
+		// prose or config structure intact.
+		if command == "" {
+			return nil
+		}
+		return []redactionSpan{{
+			start: 0, end: len(command), replacement: redactedMarker, priority: spanQuotedValue,
+		}}
 	}
 	endsAt := func(s string, start, end int) bool {
 		return pathEndsAt(s, start, end) || context.expansionStartsAt(start, end)
