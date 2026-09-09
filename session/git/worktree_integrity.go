@@ -71,21 +71,6 @@ func InspectWorktreeIntegrityContext(ctx context.Context, worktreePath string) (
 	return result, nil
 }
 
-// RevalidateWorktreeIntegrityContext confirms that every Git observation used
-// by a completed integrity result still agrees after its repository peers were
-// inspected. A correlated clean result cannot be trusted when one checkout
-// changed between its own probe window and the cohort-wide correlation.
-func RevalidateWorktreeIntegrityContext(ctx context.Context, worktreePath string, observed WorktreeIntegrity) error {
-	current, err := InspectWorktreeIntegrityContext(ctx, worktreePath)
-	if err != nil {
-		return fmt.Errorf("revalidate Git worktree observation: %w", err)
-	}
-	if current != observed {
-		return fmt.Errorf("git worktree observation changed before branch correlation; worktree safety is unknown")
-	}
-	return nil
-}
-
 func parseIntegrityStatus(output string) (WorktreeIntegrity, error) {
 	var result WorktreeIntegrity
 	branchObserved := false
