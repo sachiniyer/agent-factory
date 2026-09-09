@@ -299,21 +299,30 @@ func callDaemon(method string, req any, resp any) error {
 	// candidate to bind and surface its typed UpgradeInProgressError rather
 	// than leaving the loop to spin on bare dials. This restores parity with
 	// withDaemonHTTP's IsTransportError arm.
+	// fallbackErr holds the most recent typed gate error (UpgradeInProgressError)
+	// returned by EnsureDaemon during the dead window. It is kept separate from
+	// err so that assigning it never terminates the loop: err is the dial result
+	// that drives the loop condition, while fallbackErr is surfaced to the caller
+	// only when the loop exits with a bare socket error. This satisfies both P1
+	// (loop must keep polling after a live upgrade-gate rejection) and P2 (caller
+	// must see the actionable typed error, not a bare ENOENT/ECONNREFUSED).
 	var seenQuiescing bool
+	var fallbackErr error
 	deadline := time.Now().Add(daemonAdmissionRetryWait)
 	for (IsDaemonAdmissionRetryable(err) || (seenQuiescing && isDaemonAbsentErr(err))) && time.Now().Before(deadline) {
 		if IsDaemonQuiescingErr(err) {
 			seenQuiescing = true
 		}
 		time.Sleep(daemonAdmissionRetryPoll)
-		var gateErr error
 		if isDaemonAbsentErr(err) {
-			gateErr = EnsureDaemon()
+			if gateErr := EnsureDaemon(); gateErr != nil {
+				fallbackErr = gateErr
+			}
 		}
 		err = callDaemonNoEnsure(method, req, resp)
-		if err != nil && isDaemonAbsentErr(err) && gateErr != nil {
-			err = gateErr
-		}
+	}
+	if err != nil && isDaemonAbsentErr(err) && fallbackErr != nil {
+		return fallbackErr
 	}
 	return err
 }
