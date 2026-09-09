@@ -226,6 +226,83 @@ func TestScrubWorktreePathTitlesHandlesFilesystemRootRepo(t *testing.T) {
 	}
 }
 
+func TestScrubbersRedactSanitizedTitleInSubdirectoryRecoveryPath(t *testing.T) {
+	const (
+		afHome    = "/srv/ConfidentialClient/af"
+		repo      = "/srv/ConfidentialClient/repo"
+		title     = "fix bug (urgent)"
+		diskTitle = "fix-bug-urgent"
+	)
+	seeders := []struct {
+		name string
+		seed func(*redactor)
+	}{
+		{
+			name: "typed",
+			seed: func(r *redactor) {
+				r.noteSession(&session.InstanceData{
+					Title:    title,
+					Worktree: session.GitWorktreeData{RepoPath: repo},
+				})
+			},
+		},
+		{
+			name: "rejected record",
+			seed: func(r *redactor) {
+				r.redactInstancesJSON(json.RawMessage(`[{"status":"legacy","title":"fix bug (urgent)"}]`))
+			},
+		},
+	}
+	path := afHome + "/worktrees/" + diskTitle + "-2"
+	line := "restore candidate: " + path + "; classification=" + diskTitle
+	for _, seed := range seeders {
+		for _, scrubber := range []struct {
+			name  string
+			scrub func(*redactor, string) string
+		}{
+			{name: "log", scrub: func(r *redactor, s string) string { return r.scrubLog(s) }},
+			{name: "diagnostic", scrub: func(r *redactor, s string) string { return r.scrubDiagnostic(s) }},
+		} {
+			t.Run(seed.name+"/"+scrubber.name, func(t *testing.T) {
+				r := &redactor{}
+				r.noteAFHome(afHome)
+				seed.seed(r)
+				got := scrubber.scrub(r, line)
+				if strings.Count(got, diskTitle) != 1 {
+					t.Fatalf("scrubber did not remove the derived title only from its subdirectory path:\n%s", got)
+				}
+				if want := "[af-home]/worktrees/" + redactedMarker + "-2"; !strings.Contains(got, want) {
+					t.Errorf("scrubber lost the subdirectory layout and collision suffix, want %q in %q", want, got)
+				}
+			})
+		}
+	}
+}
+
+func TestCollapseKnownRootsRecognizesShellBoundaries(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "and", line: "cd " + siblingLeakRepo + "&&exec claude", want: "cd [repo:1]&&exec claude"},
+		{name: "pipe", line: "cd " + siblingLeakRepo + "|tee failure.log", want: "cd [repo:1]|tee failure.log"},
+		{name: "backtick", line: "path=`" + siblingLeakRepo + "`", want: "path=`[repo:1]`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := r.scrub(tc.line)
+			if strings.Contains(got, siblingLeakRepo) {
+				t.Fatalf("known repo root survived beside shell syntax: %s", got)
+			}
+			if got != tc.want {
+				t.Errorf("shell command output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func siblingRecoveryLogLine() string {
 	recovery := fmt.Sprintf("archive recovery location: either %s or %s (identity unresolved)",
 		siblingLeakArchive, siblingLeakAlternate)

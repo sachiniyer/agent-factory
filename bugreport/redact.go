@@ -58,8 +58,9 @@ var (
 // values. Constructed with newRedactor() in production; tests build one
 // directly with fixed values for deterministic assertions.
 type redactor struct {
-	home  string
-	users []string
+	home   string
+	afHome string
+	users  []string
 	// tmuxNames and titles are the known session tmux names and raw session
 	// titles gathered while redacting instances and tasks. scrubSessionTitles
 	// uses titles for both structured task status strings and the verbatim log;
@@ -91,6 +92,10 @@ type redactor struct {
 	// sibling layout. Unlike raw titles, these derived spellings are scrubbed only
 	// in that path context, so an equal structural value elsewhere stays useful.
 	worktreePathTitles map[worktreePathTitle]struct{}
+	// worktreeSubdirectoryTitles are the standalone title-derived leaves used
+	// only by legacy subdirectory restores with no persisted branch. They are
+	// scrubbed solely below the registered AF-home worktrees directory.
+	worktreeSubdirectoryTitles map[string]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -317,6 +322,8 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	// fallback: that bounded, non-user-authored value remains useful verbatim.
 	r.noteWorktreeTitle(d.Worktree.RepoPath, d.Title)
 	r.noteWorktreeTitle(d.Worktree.RepoPath, d.Worktree.SessionName)
+	r.noteWorktreeSubdirectoryTitle(d.Title)
+	r.noteWorktreeSubdirectoryTitle(d.Worktree.SessionName)
 	// The two roots this record points at. Registered here, beside the titles,
 	// because they are the same kind of fact — something this run knows the name
 	// of and every later pass must be able to recognize — and because collecting
@@ -426,6 +433,7 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 	// it only to reproduce the worktree layer's repo-dependent title bound; do
 	// not register an untyped value as a path root or give it a structural role.
 	for title := range titles {
+		r.noteWorktreeSubdirectoryTitle(title)
 		for repoPath := range repoPaths {
 			r.noteWorktreeTitle(repoPath, title)
 		}

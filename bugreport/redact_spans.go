@@ -1,6 +1,7 @@
 package bugreport
 
 import (
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,7 @@ func (r *redactor) knownTextSpans(s string) []redactionSpan {
 	spans = r.appendKnownLabelSpans(spans, s)
 	spans = r.appendTmuxNameSpans(spans, s)
 	spans = r.appendWorktreePathTitleSpans(spans, s)
+	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
 	for _, name := range r.users {
 		spans = appendTokenSpans(spans, s, name, userMarker, isWordRune, spanUsername)
@@ -106,7 +108,7 @@ func (r *redactor) appendWorktreePathTitleSpans(spans []redactionSpan, s string)
 			}
 			start := scan + rel
 			end := start + len(needle)
-			if siblingWorktreeBoundary(s, start, end) {
+			if derivedWorktreePathBoundary(s, start, end) {
 				titleStart := start + len(title.repoPath) + 1
 				spans = append(spans, redactionSpan{
 					start: titleStart, end: end, replacement: redactedMarker, priority: spanWorktreeTitle,
@@ -119,6 +121,35 @@ func (r *redactor) appendWorktreePathTitleSpans(spans []redactionSpan, s string)
 						start: start, end: titleStart - 1, replacement: token, priority: spanKnownRoot,
 					})
 				}
+				scan = end
+				continue
+			}
+			scan = start + 1
+		}
+	}
+	return spans
+}
+
+func (r *redactor) appendWorktreeSubdirectoryTitleSpans(spans []redactionSpan, s string) []redactionSpan {
+	if r.afHome == "" {
+		return spans
+	}
+	parent := filepath.Join(r.afHome, "worktrees")
+	for segment := range r.worktreeSubdirectoryTitles {
+		needle := filepath.Join(parent, segment)
+		scan := 0
+		for scan <= len(s)-len(needle) {
+			rel := strings.Index(s[scan:], needle)
+			if rel < 0 {
+				break
+			}
+			start := scan + rel
+			end := start + len(needle)
+			if derivedWorktreePathBoundary(s, start, end) {
+				spans = append(spans, redactionSpan{
+					start: start + len(needle) - len(segment),
+					end:   end, replacement: redactedMarker, priority: spanWorktreeTitle,
+				})
 				scan = end
 				continue
 			}

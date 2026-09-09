@@ -68,6 +68,11 @@ func (r *redactor) noteWorktreeRoot(path string) {
 // noteAFHome registers the AF home under its own single token. It is not
 // numbered: there is exactly one per run.
 func (r *redactor) noteAFHome(path string) {
+	r.afHome = ""
+	cleaned := filepath.Clean(path)
+	if filepath.IsAbs(cleaned) {
+		r.afHome = cleaned
+	}
 	r.noteRoot(path, afHomeToken)
 }
 
@@ -84,6 +89,17 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 		r.worktreePathTitles = make(map[worktreePathTitle]struct{})
 	}
 	r.worktreePathTitles[worktreePathTitle{repoPath: repoPath, segment: segment}] = struct{}{}
+}
+
+func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
+	segment := sessiongit.DerivedWorktreeSubdirectoryTitleSegment(title)
+	if segment == "" {
+		return
+	}
+	if r.worktreeSubdirectoryTitles == nil {
+		r.worktreeSubdirectoryTitles = make(map[string]struct{})
+	}
+	r.worktreeSubdirectoryTitles[segment] = struct{}{}
 }
 
 // noteRoot registers one root under an exact token, reporting whether it was
@@ -215,7 +231,7 @@ func replaceSiblingWorktreeTitle(s, needle, replacement string) string {
 		}
 		start := scan + rel
 		end := start + len(needle)
-		if siblingWorktreeBoundary(s, start, end) {
+		if derivedWorktreePathBoundary(s, start, end) {
 			out.WriteString(s[copied:start])
 			out.WriteString(replacement)
 			copied = end
@@ -232,7 +248,7 @@ func replaceSiblingWorktreeTitle(s, needle, replacement string) string {
 	return out.String()
 }
 
-func siblingWorktreeBoundary(s string, start, end int) bool {
+func derivedWorktreePathBoundary(s string, start, end int) bool {
 	if !pathStartsAt(s, start) {
 		return false
 	}
@@ -296,10 +312,10 @@ func knownRootTextBoundary(s string, start, end int) bool {
 	if end == len(s) || s[end] == byte(filepath.Separator) {
 		return true
 	}
-	// scrubLog removes known title representations before roots. This is the
-	// one safe non-separator sibling: the suffix has already been proven to be
-	// user-title data and replaced, so collapse the registered repo prefix while
-	// retaining both the sibling dash and the marker (and any collision suffix).
+	// This is the one safe non-separator sibling: an earlier structured or
+	// contextual pass has already proven the suffix to be user-title data and
+	// replaced it, so collapse the registered repo prefix while retaining both
+	// the sibling dash and the marker (and any collision suffix).
 	if strings.HasPrefix(s[end:], "-"+redactedMarker) {
 		return true
 	}
@@ -325,13 +341,14 @@ func pathStartsAt(s string, start int) bool {
 	return scheme >= 0 && !strings.Contains(prefix[scheme+3:], "/")
 }
 
-// isPathTextDelimiter names punctuation and whitespace used by the renderers
-// around a complete path. Letters, numbers and filename punctuation such as
-// '.', '_' and '-' deliberately do not qualify: they can continue a sibling's
-// basename, which is the distinction collapsePathField's separator check makes
-// for an isolated path value.
+// isPathTextDelimiter names punctuation and whitespace used by renderers around
+// a complete path. Shell control operators and backtick wrappers terminate paths
+// in command-bearing config values. Letters, numbers and filename punctuation
+// such as '.', '_' and '-' deliberately do not qualify: they can continue a
+// sibling's basename, which is the distinction collapsePathField's separator
+// check makes for an isolated path value.
 func isPathTextDelimiter(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(`"'=,:;()[]{}<>`, r)
+	return unicode.IsSpace(r) || strings.ContainsRune("\"'=,:;()[]{}<>&|`", r)
 }
 
 // collapsePathField rewrites ONE absolute path field so it carries the layout

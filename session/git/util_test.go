@@ -277,6 +277,19 @@ func TestDerivedWorktreePathTitleSegment(t *testing.T) {
 	}
 }
 
+func TestDerivedWorktreeSubdirectoryTitleSegment(t *testing.T) {
+	if got, want := DerivedWorktreeSubdirectoryTitleSegment("fix bug (urgent)"), "fix-bug-urgent"; got != want {
+		t.Errorf("ordinary derived segment = %q, want %q", got, want)
+	}
+	long := strings.Repeat("x", nameMax)
+	if got, want := len(DerivedWorktreeSubdirectoryTitleSegment(long)), nameMax-worktreeCollisionSuffixReserve; got != want {
+		t.Errorf("bounded derived segment length = %d, want %d", got, want)
+	}
+	if got := DerivedWorktreeSubdirectoryTitleSegment("!!!"); got != "" {
+		t.Errorf("AF-authored fallback reported as user-title-derived: %q", got)
+	}
+}
+
 // TestBoundTitleForDisambiguation_KeepsSuffixesInjective is the #2528 P3-b
 // mechanism lock. The daemon's uniquifying walks append "-N" / " (archived N)" to
 // a base title and judge availability on the DERIVED branch. For a long base,

@@ -315,7 +315,10 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 			// The fallback leaf is a standalone component (no repo-name prefix), so
 			// bound it against NAME_MAX on its own. Branch-derived leaves are already
 			// bounded per component by SanitizeBranchName.
-			leaf = boundWorktreeComponent("", sanitizeWorktreePathSegment(sessionName))
+			leaf = DerivedWorktreeSubdirectoryTitleSegment(sessionName)
+			if leaf == "" {
+				leaf = "session"
+			}
 		}
 		basePath = filepath.Join(worktreeDir, leaf)
 	} else {
@@ -326,7 +329,10 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 		// the join site; a fixed cap on the segment alone silently overruns once the
 		// repo name is long (#2528).
 		repoBase := filepath.Base(repoRoot)
-		segment := boundWorktreeComponent(repoBase, sanitizeWorktreePathSegment(sessionName))
+		segment := DerivedWorktreePathTitleSegment(repoRoot, sessionName)
+		if segment == "" {
+			segment = "session"
+		}
 		basePath = filepath.Join(worktreeDir, repoBase+"-"+segment)
 	}
 
@@ -356,6 +362,18 @@ func DerivedWorktreePathTitleSegment(repoRoot, title string) string {
 	return boundWorktreeComponent(filepath.Base(repoRoot), segment)
 }
 
+// DerivedWorktreeSubdirectoryTitleSegment returns the user-title-derived leaf
+// used when a legacy subdirectory-mode restore has no persisted branch. The
+// component has no repo-name prefix, so it receives the standalone NAME_MAX
+// bound. An empty result means placement uses AF's fixed "session" fallback.
+func DerivedWorktreeSubdirectoryTitleSegment(title string) string {
+	segment := worktreePathTitleSegment(title)
+	if segment == "" {
+		return ""
+	}
+	return boundWorktreeComponent("", segment)
+}
+
 const (
 	// nameMax is the Linux per-component filesystem limit (NAME_MAX). A worktree
 	// directory name — and the .git/worktrees/<id> admin dir git derives from its
@@ -378,7 +396,7 @@ const (
 // repoBase is itself a real directory name and therefore already <= NAME_MAX; when
 // it is long enough to crowd the segment out, the segment collapses to a one-byte
 // floor and the collision suffix still disambiguates. segment is ASCII
-// (sanitizeWorktreePathSegment), so a byte truncation is rune-safe.
+// (worktreePathTitleSegment), so a byte truncation is rune-safe.
 func boundWorktreeComponent(repoBase, segment string) string {
 	allow := nameMax - worktreeCollisionSuffixReserve
 	if repoBase != "" {
