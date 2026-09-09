@@ -130,7 +130,7 @@ Three regions, all always visible (subject to §2.6 minimums):
 | **Workspace** (full height, #1090) | 1–N content panes, vertical splits (#1088). Each pane is bound to one (instance, tab) and hosts an embedded interactive terminal (§2.4); header shows `title · tab`. Tabs not open as a pane keep running in the background. | ContentPane + TabbedWindow (`ui/content_pane.go`, `ui/tabbed_window.go`); the PR-5 pane-A/pane-B split |
 | **Status bar** | Context-sensitive key hints (driven by focus and mode) + error line. 1–2 rows. | Menu (`ui/menu.go`) + ErrBox (`ui/err.go`) |
 
-The tab bar disappears: tabs live in the tree (and in the pane header), so `TabbedWindow`'s even-split tab row (`ui/tabbed_window.go:282-345`) is no longer needed. Number keys 1-9 keep jumping tabs of the selected instance (preserving the #930 muscle memory); `t`/`w` keep creating/closing tabs.
+The tab bar disappears: tabs live in the tree (and in the pane header), so `TabbedWindow`'s even-split tab row (`ui/tabbed_window.go:282-345`) is no longer needed. Number keys 1-9 keep jumping tabs of the selected instance (preserving the #930 muscle memory); `t` creates tabs; `w` opens Delete tab confirmation (`y` accepts, `n`/`Esc` cancels).
 
 Hooks lose their persistent sidebar slot and move behind a key/click from the rail's automations section (they are set-and-forget; a persistent row is not warranted). The full `HooksPane` editor is kept, shown as an overlay.
 
@@ -181,7 +181,7 @@ The root model shrinks to: dispatch messages → store, route input → focused 
 **N-pane open/close/hide** (#1088, replaces the PR-5 A/B split):
 
 - `s` on a tree row (or in a pane) opens the selected tab as a **new vertical-split pane** to the right of the existing panes. Splits are vertical (side-by-side) only for now.
-- `x` on a focused pane **hides it back to the background**: the pane disappears from the workspace, the remaining panes re-divide the width, and the tab keeps running in its tmux session — reopen it any time from the tree. Nothing is killed; closing a pane and hiding a pane are the same operation (killing tabs stays `w`, an instance action).
+- `x` on a focused pane **hides it back to the background**: the pane disappears from the workspace, the remaining panes re-divide the width, and the tab keeps running in its tmux session — reopen it any time from the tree. Nothing is killed; closing a pane and hiding a pane are the same operation (deleting a tab uses `w` followed by confirmation).
 - Focus moves across the N open panes via the nav-mode `Tab` focus ring; there is no pinned/primary pane distinction.
 
 **Selection vs focus**: tree selection (which instance/tab is highlighted) is separate from pane focus (which region gets keys). If the selected tab is already open as a pane, the pane header highlights; `Enter` jumps focus there and enters interactive mode. If it is not open, `Enter`/`s` opens it. On leaving interactive mode, focus stays on that pane in nav mode.
