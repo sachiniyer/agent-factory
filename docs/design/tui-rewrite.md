@@ -130,7 +130,7 @@ Three regions, all always visible (subject to §2.6 minimums):
 | **Workspace** (full height, #1090) | 1–N content panes, vertical splits (#1088). Each pane is bound to one (instance, tab) and hosts an embedded interactive terminal (§2.4); header shows `title · tab`. Tabs not open as a pane keep running in the background. | ContentPane + TabbedWindow (`ui/content_pane.go`, `ui/tabbed_window.go`); the PR-5 pane-A/pane-B split |
 | **Status bar** | Context-sensitive key hints (driven by focus and mode) + error line. 1–2 rows. | Menu (`ui/menu.go`) + ErrBox (`ui/err.go`) |
 
-The tab bar disappears: tabs live in the tree (and in the pane header), so `TabbedWindow`'s even-split tab row (`ui/tabbed_window.go:282-345`) is no longer needed. Number keys 1-9 keep jumping tabs of the selected instance (preserving the #930 muscle memory); `t` creates tabs; `w` opens Delete tab confirmation (`y` accepts, `n`/`Esc` cancels).
+The tab bar disappears: tabs live in the tree (and in the pane header), so `TabbedWindow`'s even-split tab row (`ui/tabbed_window.go:282-345`) is no longer needed. Number keys 1-9 keep jumping tabs of the selected instance (preserving the #930 muscle memory); `t` creates tabs; `w` opens Delete tab confirmation (`y`/`Enter` accept, `n`/`Esc` cancel).
 
 Hooks lose their persistent sidebar slot and move behind a key/click from the rail's automations section (they are set-and-forget; a persistent row is not warranted). The full `HooksPane` editor is kept, shown as an overlay.
 
