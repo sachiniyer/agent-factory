@@ -95,6 +95,25 @@ func TestRootAgentProgramDriftResolvesFromLiveWorktreePath(t *testing.T) {
 	require.Contains(t, check.Detail, "match the configured command")
 }
 
+func TestRootAgentDefaultProfileMatchesChainedLaunchOverrides(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+
+	body := "schema_version = 1\n[program_overrides]\nclaude = 'codex'\ncodex = '/opt/codex'\n" +
+		"[root_agents]\n\"" + repoPath + "\" = {}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	opts.daemonHealth = rootAgentDoctorHealth
+	opts.sessionInventory = rootAgentInventory(repoPath, "/opt/codex")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusPass, check.Status)
+	require.Contains(t, check.Detail, "match the configured command")
+}
+
 func TestRootAgentProgramResolutionFailureIsIncomplete(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)

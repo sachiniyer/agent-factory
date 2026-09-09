@@ -431,7 +431,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return nil, unsettableConfigKeyError(key)
+		return nil, unsettableConfigKeyError(key, "")
 	}
 	key = canonicalConfigKey(key)
 	structured := spec.structured && section == ""
@@ -497,7 +497,7 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	section, leaf, spec, err := resolveProjectSettable(key)
+	section, leaf, spec, err := resolveProjectSettable(selector, key)
 	if err != nil {
 		return nil, err
 	}
@@ -542,11 +542,11 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 // the key admits the personal-project layer in the manifest. The manifest is the
 // single authority on which keys may live where, so the write path checks it
 // before editing rather than maintaining a second per-project allowlist.
-func resolveProjectSettable(key string) (section, leaf string, spec settableKeySpec, err error) {
+func resolveProjectSettable(selector, key string) (section, leaf string, spec settableKeySpec, err error) {
 	key = canonicalConfigKey(key)
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return "", "", settableKeySpec{}, unsettableConfigKeyError(key)
+		return "", "", settableKeySpec{}, unsettableConfigKeyError(key, selector)
 	}
 	scopeKey := key
 	if spec.dynamic && section != "" {
@@ -564,13 +564,17 @@ func resolveProjectSettable(key string) (section, leaf string, spec settableKeyS
 // unsettableConfigKeyError keeps the complete allowlist while making the
 // useful recovery local: if the user tried an unsupported leaf of a writable
 // table, name the parent table's accepted compact-JSON form.
-func unsettableConfigKeyError(key string) error {
+func unsettableConfigKeyError(key, projectSelector string) error {
 	key = canonicalConfigKey(key)
 	hint := ""
 	if i := strings.IndexByte(key, '.'); i > 0 {
 		parent := key[:i]
 		if spec, ok := settableKeySpecs[parent]; ok && spec.structured && manifestKeyIsTable(parent) {
-			hint = fmt.Sprintf(" Set the whole table with `af config set %s '<compact-json>'`.", parent)
+			projectFlag := ""
+			if projectSelector != "" {
+				projectFlag = " --project " + ShellQuotePath(projectSelector)
+			}
+			hint = fmt.Sprintf(" Set the whole table with `af config set %s '<compact-json>'%s`.", parent, projectFlag)
 		}
 	}
 	return fmt.Errorf("%q is not a settable config key.%s Settable keys: %s",

@@ -80,3 +80,27 @@ func TestUnsettableTableSubkeyNamesWholeTableForm(t *testing.T) {
 		require.Contains(t, err.Error(), "af config set "+parent)
 	}
 }
+
+func TestUnsettableProjectTableSubkeyHintPreservesSelector(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+	want := "af config set root_agent '<compact-json>' --project " + ShellQuotePath(repoRoot)
+	for _, attempt := range []struct {
+		name string
+		run  func() error
+	}{
+		{"set", func() error {
+			_, err := SetProjectConfigValue(repoRoot, "root_agent.progarm", "codex")
+			return err
+		}},
+		{"unset", func() error {
+			_, err := UnsetProjectConfigValue(repoRoot, "root_agent.progarm")
+			return err
+		}},
+	} {
+		t.Run(attempt.name, func(t *testing.T) {
+			err := attempt.run()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), want)
+		})
+	}
+}

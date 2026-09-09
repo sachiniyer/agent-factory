@@ -177,6 +177,49 @@ func TestAdoptedRootProgramDriftResolvesBareAgentOverride(t *testing.T) {
 	}
 }
 
+func TestAdoptedRootDefaultProfileMatchesChainedLaunchOverrides(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
+	cfg.ProgramOverrides = map[string]string{
+		"claude": "codex",
+		"codex":  "/opt/codex",
+	}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t, cfg)
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create launched root: %v", err)
+	}
+	root := findRootInstance(t, manager, repoPath)
+	// SetTmuxSession is the test launch boundary: the root create hands its
+	// first-stage "codex" result to the ordinary session resolver, whose second
+	// lookup selects /opt/codex and records that command as runtime evidence.
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/opt/codex"))
+
+	manager.ensureRootAgentsAndWait()
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("ensure state was not created")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	configured := st.programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if configured != "/opt/codex" {
+		t.Fatalf("configured command = %q, want the twice-resolved launch command /opt/codex", configured)
+	}
+	if strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("freshly launched root reported false drift:\n%s", warnings.String())
+	}
+}
+
 func TestAdoptedRootProgramResolutionFailureRetries(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)

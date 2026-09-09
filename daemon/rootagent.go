@@ -877,7 +877,13 @@ func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAge
 	if requested != "" {
 		return config.ResolveProgram(&resolved.Config, requested), nil
 	}
-	return finishRootAgentProgram(config.ResolveProgram(&resolved.Config, "claude")), nil
+	// The default-profile create first resolves claude here, then hands that
+	// command to the ordinary session launch path. If the first override is
+	// itself a bare agent name, launch resolves that name once more. Diagnostics
+	// must reproduce both stages or a root created from chained overrides appears
+	// stale immediately even though it runs exactly what AF launched.
+	program := finishRootAgentProgram(config.ResolveProgram(&resolved.Config, "claude"))
+	return config.ResolveProgram(&resolved.Config, program), nil
 }
 
 // RootAgentProfileNeedsRepoConfig reports whether interpreting a root profile
