@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,106 @@ func TestAdoptedRootDefaultProgramResolvesOnceAcrossEnsureSweeps(t *testing.T) {
 	}
 }
 
+func TestApplyConfigInvalidatesAdoptedRootProgramResolution(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{Program: "codex"})
+	cfg.ProgramOverrides = map[string]string{"codex": "/old/codex"}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t, cfg)
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	findRootInstance(t, manager, repoPath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/old/codex"))
+
+	manager.ensureRootAgentsAndWait()
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("ensure state was not created")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	before := st.programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if before != "/old/codex" {
+		t.Fatalf("initial configured command = %q, want /old/codex", before)
+	}
+
+	if _, err := config.SetGlobalConfigValue("program_overrides.codex", "/new/codex"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.ApplyConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(result.Applied, "program_overrides") {
+		t.Fatalf("ApplyConfig result = %+v, want program_overrides applied live", result)
+	}
+
+	manager.ensureRootAgentsAndWait()
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	after := st.programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if after != "/new/codex" {
+		t.Fatalf("configured command after live apply = %q, want /new/codex", after)
+	}
+	if !strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("live override drift was hidden by the pre-apply cache:\n%s", warnings.String())
+	}
+}
+
+func TestApplyConfigRejectsPreApplyRootProgramResolutionCompletion(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{Program: "codex"})
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t, cfg)
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	root := findRootInstance(t, manager, repoPath)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &rootEnsureState{programDriftResolving: true, programDriftResolvingEpoch: 0}
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+	manager.mu.Lock()
+	manager.rootEnsureStates[repoPath] = st
+	manager.mu.Unlock()
+	evidence := root.ObserveRuntimeProgram()
+
+	if _, err := manager.ApplyConfig(); err != nil {
+		t.Fatal(err)
+	}
+	manager.finishAdoptedRootProgramDrift(repo.ID, key, repoPath, st,
+		config.RootAgent{Enabled: true, Program: "codex"}, 0, "codex", nil, root, evidence)
+
+	manager.mu.Lock()
+	resolved, configured := st.programDriftResolved, st.programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if resolved || configured != "" {
+		t.Fatalf("pre-apply completion repopulated invalidated cache: resolved=%v configured=%q", resolved, configured)
+	}
+	if strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("pre-apply completion emitted a warning after invalidation:\n%s", warnings.String())
+	}
+}
+
 func TestAdoptedRootProgramDriftResolvesBareAgentOverride(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -261,6 +362,57 @@ func TestAdoptedRootDefaultProfileMatchesChainedLaunchOverrides(t *testing.T) {
 	}
 	if strings.Contains(warnings.String(), "root agent program drift") {
 		t.Fatalf("freshly launched root reported false drift:\n%s", warnings.String())
+	}
+}
+
+func TestCreatedRootDefaultProfileStopsAfterTwoOverrideLookups(t *testing.T) {
+	testguard.IsolateTmux(t)
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	shimDir := t.TempDir()
+	readyScript := []byte("#!/bin/sh\nprintf 'ready\\n❯\\n›\\n> \\n╰\\n'\nwhile :; do sleep 1; done\n")
+	geminiShim := filepath.Join(shimDir, "gemini")
+	thirdLookup := filepath.Join(shimDir, "third-lookup")
+	for _, path := range []string{geminiShim, thirdLookup} {
+		if err := os.WriteFile(path, readyScript, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
+	cfg.ProgramOverrides = map[string]string{
+		"claude": "codex",
+		"codex":  "gemini",
+		"gemini": thirdLookup,
+	}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t, loaded)
+	manager.ensureRootAgentsAndWait()
+	root := findRootInstance(t, manager, repoPath)
+	if root == nil {
+		t.Fatal("root was not created")
+	}
+	if got := root.RuntimeProgram(); got != "gemini" {
+		t.Errorf("real root launch recorded RuntimeProgram %q, want the two-stage result gemini", got)
+	}
+
+	manager.ensureRootAgentsAndWait()
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("ensure state was not created")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+	if strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("freshly created root reported drift after an extra override lookup:\n%s", warnings.String())
 	}
 }
 
@@ -392,7 +544,7 @@ func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
 	}
 	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "codex"))
 	manager.finishAdoptedRootProgramDrift(repo.ID, key, repoPath, st,
-		config.RootAgent{Enabled: true, Program: "codex"}, "codex", nil, root, evidence)
+		config.RootAgent{Enabled: true, Program: "codex"}, 0, "codex", nil, root, evidence)
 	if strings.Contains(warnings.String(), "root agent program drift") {
 		t.Fatalf("completion latched drift from the replaced runtime:\n%s", warnings.String())
 	}

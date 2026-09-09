@@ -92,11 +92,38 @@ func ResolveRootAgentForInspectionWithConfigContext(ctx context.Context, global 
 	if global == nil {
 		return ResolvedValue{}, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
 	}
-	assembly, err := assembleRootAgentInspectionInputsFromConfigContext(ctx, global, projectSelector, strictProjectLookup)
-	if err != nil {
-		return ResolvedValue{}, err
+	if ctx == nil {
+		return ResolvedValue{}, fmt.Errorf("context is required for bounded root_agent inspection")
 	}
-	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
+	if err := ctx.Err(); err != nil {
+		return ResolvedValue{}, fmt.Errorf("inspect root_agent profile: %w", err)
+	}
+	type result struct {
+		assembly rootAgentInspectionAssembly
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		assembly, err := assembleRootAgentInspectionInputsFromConfigContext(ctx, global, projectSelector, strictProjectLookup)
+		done <- result{assembly: assembly, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		if outcome.err != nil {
+			return ResolvedValue{}, outcome.err
+		}
+		return resolveRootAgentInspectionAssembly(outcome.assembly, projectSelector != ""), nil
+	case <-ctx.Done():
+		select {
+		case outcome := <-done:
+			if outcome.err != nil {
+				return ResolvedValue{}, outcome.err
+			}
+			return resolveRootAgentInspectionAssembly(outcome.assembly, projectSelector != ""), nil
+		default:
+			return ResolvedValue{}, fmt.Errorf("inspect root_agent profile: %w", ctx.Err())
+		}
+	}
 }
 
 func resolveRootAgentInspectionAssembly(assembly rootAgentInspectionAssembly, projectSelected bool) ResolvedValue {

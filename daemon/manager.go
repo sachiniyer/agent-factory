@@ -239,6 +239,10 @@ type Manager struct {
 	// independent retry states; they must still produce only one warning. Guarded
 	// by mu and retained for the Manager's lifetime.
 	rootProgramDriftLogged map[string]bool
+	// rootProgramDriftConfigEpoch invalidates configured-command resolutions on
+	// every ApplyConfig. That boundary covers global and project-scoped live
+	// writes alike; guarded by mu.
+	rootProgramDriftConfigEpoch uint64
 	// rootCreateRefusals holds each repo's standing create-boundary identity
 	// refusal (#3714): the outcome class of the most recent identity proof at
 	// a root create, and when it was taken. Keyed by REPO ID — the key

@@ -127,11 +127,14 @@ type rootEnsureState struct {
 	programDriftLoggedRepoID string
 	// The default root command and bare agent names require repository/config
 	// resolution. Cache that answer after resolving it off the ensure sweep; the
-	// frozen profile makes it stable, while the running program remains cheap to
-	// compare every tick. Repository identity is part of the discriminator because
-	// a legacy configured path can be repointed without changing the state key.
+	// frozen profile plus the current ApplyConfig epoch make it stable, while the
+	// running program remains cheap to compare every tick. Repository identity is
+	// part of the discriminator because a legacy configured path can be repointed
+	// without changing the state key.
 	programDriftResolving         bool
+	programDriftResolvingEpoch    uint64
 	programDriftResolved          bool
+	programDriftResolvedEpoch     uint64
 	programDriftResolvedRepoID    string
 	programDriftResolvedWorkspace string
 	programDriftResolvedProfile   config.RootAgent
@@ -852,14 +855,23 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 	}
 	repo, err := config.RepoFromPath(repoRoot)
 	if err == nil {
-		var program string
-		program, err = rootAgentProgramForResolvedRepo(repo, ra, config.ResolveConfigForRepo)
+		var resolved *config.ResolvedConfig
+		resolved, err = config.ResolveConfigForRepo(repo)
 		if err == nil {
-			return program
+			return rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
 		}
 	}
 	log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
 	return finishRootAgentProgram("claude")
+}
+
+// rootAgentCreateProgramFromResolvedConfig performs the root-specific first
+// stage for the empty/default profile. The returned command is handed to the
+// ordinary session launch resolver, which performs the second lookup if this
+// stage selected another bare agent name. It must not pre-apply that second
+// lookup or launch will perform a third one.
+func rootAgentCreateProgramFromResolvedConfig(cfg *config.Config) string {
+	return finishRootAgentProgram(config.ResolveProgram(cfg, "claude"))
 }
 
 func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAgent, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
@@ -882,7 +894,7 @@ func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAge
 	// itself a bare agent name, launch resolves that name once more. Diagnostics
 	// must reproduce both stages or a root created from chained overrides appears
 	// stale immediately even though it runs exactly what AF launched.
-	program := finishRootAgentProgram(config.ResolveProgram(&resolved.Config, "claude"))
+	program := rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
 	return config.ResolveProgram(&resolved.Config, program), nil
 }
 
@@ -913,6 +925,16 @@ func finishRootAgentProgram(program string) string {
 func RootAgentProgramForProfileInspection(repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
 	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
 		return config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	}
+	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
+}
+
+// RootAgentProgramForProfileInspectionContext is the bounded form used by
+// doctor. Its deadline covers the config files needed to turn a bare agent name
+// into the exact command AF would launch, not only the preceding Git probes.
+func RootAgentProgramForProfileInspectionContext(ctx context.Context, repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
+	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
+		return config.ResolveConfigForRepoInspectionWithGlobalContext(ctx, repo, global)
 	}
 	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
 }

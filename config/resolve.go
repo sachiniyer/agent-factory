@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -138,6 +139,48 @@ func ResolveConfigForRepoInspectionWithGlobal(repo *RepoContext, global *Config)
 	}
 	warnRetainedLegacyBareRepoConfig(repo)
 	return resolved, nil
+}
+
+// ResolveConfigForRepoInspectionWithGlobalContext bounds the complete read-only
+// resolution, including filesystem-backed legacy, checked-in, and personal
+// config loads. Repository subprocesses already receive their own deadlines,
+// but an unavailable mount can stall an ordinary file read too; inspection
+// callers must be able to return an unknown result when that happens.
+func ResolveConfigForRepoInspectionWithGlobalContext(ctx context.Context, repo *RepoContext, global *Config) (*ResolvedConfig, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required for bounded repo inspection")
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if global == nil {
+		return nil, fmt.Errorf("global config snapshot is required for read-only repo inspection")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("inspect repository config: %w", err)
+	}
+	type result struct {
+		resolved *ResolvedConfig
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resolved, err := ResolveConfigForRepoInspectionWithGlobal(repo, global)
+		done <- result{resolved: resolved, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		return outcome.resolved, outcome.err
+	case <-ctx.Done():
+		// A completed read is an answer even if its caller's deadline became ready
+		// at the same instant. Prefer it before classifying the observation unknown.
+		select {
+		case outcome := <-done:
+			return outcome.resolved, outcome.err
+		default:
+			return nil, fmt.Errorf("inspect repository config: %w", ctx.Err())
+		}
+	}
 }
 
 // ResolveConfigForIdentityDecisionFromGlobal resolves the same effective config

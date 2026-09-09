@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -115,6 +116,25 @@ func TestRootAgentDefaultProfileMatchesChainedLaunchOverrides(t *testing.T) {
 	require.Contains(t, check.Detail, "match the configured command")
 }
 
+func TestRootAgentProgramComparisonPreservesOverrideWhitespace(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+
+	body := "schema_version = 1\n[program_overrides]\ncodex = ' /opt/codex '\n" +
+		"[root_agents]\n\"" + repoPath + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	opts.daemonHealth = rootAgentDoctorHealth
+	opts.sessionInventory = rootAgentInventory(repoPath, " /opt/codex ")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusPass, check.Status)
+	require.Contains(t, check.Detail, "match the configured command")
+}
+
 func TestRootAgentProgramResolutionFailureIsIncomplete(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)
@@ -160,6 +180,37 @@ func TestRootAgentProgramInspectionBoundsRepositoryProbes(t *testing.T) {
 	require.Less(t, time.Since(started), 8*time.Second, "repository inspection exceeded its probe budget")
 	check := findCheck(t, report, "root agent program")
 	require.Contains(t, check.Detail, "context deadline exceeded")
+	require.Contains(t, report.Incomplete, "root agent program")
+}
+
+func TestRootAgentProgramInspectionBoundsCommandConfigLoads(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	body := "schema_version = 1\n[root_agents]\n\"" + repoPath + "\" = {}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	opts.sessionInventory = rootAgentInventory(repoPath, "claude --dangerously-skip-permissions")
+
+	previousTimeout := rootAgentProgramProbeTimeout
+	previousInspect := inspectRootAgentProgram
+	rootAgentProgramProbeTimeout = 500 * time.Millisecond
+	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, _ config.RootAgent, _ *config.Config) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	t.Cleanup(func() { rootAgentProgramProbeTimeout = previousTimeout })
+	t.Cleanup(func() { inspectRootAgentProgram = previousInspect })
+
+	started := time.Now()
+	report := runRootAgentProgramCheck(t, opts, cfg)
+	elapsed := time.Since(started)
+	require.Less(t, elapsed, 8*time.Second, "command config inspection exceeded its shared deadline")
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "configured command")
+	require.Contains(t, check.Detail, "deadline exceeded")
 	require.Contains(t, report.Incomplete, "root agent program")
 }
 

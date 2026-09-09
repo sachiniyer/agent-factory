@@ -19,6 +19,11 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+var (
+	rootAgentProgramProbeTimeout = binaryProbeTimeout
+	inspectRootAgentProgram      = daemon.RootAgentProgramForProfileInspectionContext
+)
+
 func selfPID() int { return os.Getpid() }
 
 func tempDirDefault() string { return os.TempDir() }
@@ -237,7 +242,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 	// Reuse doctor's binaryProbeTimeout: both checks wait on an operator-facing
 	// diagnostic whose external command may never answer, and neither should
 	// hold the whole report open indefinitely.
-	probeCtx, cancel := context.WithTimeout(context.Background(), binaryProbeTimeout)
+	probeCtx, cancel := context.WithTimeout(context.Background(), rootAgentProgramProbeTimeout)
 	defer cancel()
 	compared, drifted, unresolved := 0, 0, 0
 	for _, inst := range instances {
@@ -308,8 +313,8 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 				"restart the daemon to load the disabled profile, then kill the root; restarting alone does not stop an adopted live root", true)
 			continue
 		}
-		runningProgram := strings.TrimSpace(inst.RuntimeProgram)
-		if runningProgram == "" {
+		runningProgram := inst.RuntimeProgram
+		if strings.TrimSpace(runningProgram) == "" {
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("could not compare the root agent program for %s because its resolved runtime command was not recorded", rootSessionDisplayPath(inst)),
@@ -336,7 +341,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 				continue
 			}
 		}
-		configuredProgram, programErr := daemon.RootAgentProgramForProfileInspection(commandRepo, profile, cfg)
+		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, cfg)
 		if programErr != nil {
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",

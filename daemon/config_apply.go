@@ -170,6 +170,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
 	// the next-start notice.
 	m.live.Store(newCfg)
+	m.invalidateRootProgramDriftResolutions()
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent
 	// no-op — rebuild the detector in place.
