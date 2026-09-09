@@ -70,9 +70,24 @@ type settableKeySpec struct {
 	// family may support both forms: program_overrides accepts a whole JSON map,
 	// while program_overrides.<agent> keeps its convenient scalar leaf writer.
 	structured bool
+	// subkeys admits a fixed set of scalar leaves below a structured table. It is
+	// distinct from dynamic: root_agent.enabled and root_agent.program are real
+	// schema fields, while an arbitrary root_agent.<name> must still be rejected.
+	subkeys map[string]settableLeafSpec
+	// parent is populated only on a resolved fixed subkey. It carries the
+	// manifest/scoping key through the shared scalar writer without pretending
+	// the parent is a dynamic family.
+	parent string
 	// validate runs the loader's own validation on the parsed value before the
 	// write, returning the loader's error verbatim where possible. leaf is the
 	// sub-key for a dynamic family (the program name), else the key itself.
+	validate func(leaf, value string) error
+}
+
+// settableLeafSpec is the typed writer contract for one fixed leaf of a
+// structured table.
+type settableLeafSpec struct {
+	kind     cfgValueKind
 	validate func(leaf, value string) error
 }
 
@@ -189,8 +204,11 @@ var settableKeySpecs = map[string]settableKeySpec{
 	}},
 	"session_env_passthrough": {structured: true},
 	"root_agents":             {structured: true},
-	"root_agent":              {structured: true},
-	"keys":                    {structured: true},
+	"root_agent": {structured: true, subkeys: map[string]settableLeafSpec{
+		"enabled": {kind: cfgBool},
+		"program": {kind: cfgString},
+	}},
+	"keys": {structured: true},
 }
 
 func requirePositiveInt(name, v string) error {
@@ -272,13 +290,16 @@ func isCommaListKey(key string) bool {
 // SettableKeys returns the sorted, human-facing list of keys `config set`
 // accepts; dynamic families are rendered as prefix.<name>.
 func SettableKeys() []string {
-	out := make([]string, 0, len(settableKeySpecs)+2)
+	out := make([]string, 0, len(settableKeySpecs)+4)
 	for k, s := range settableKeySpecs {
 		if !s.dynamic || s.structured {
 			out = append(out, k)
 		}
 		if s.dynamic {
 			out = append(out, k+".<name>")
+		}
+		for leaf := range s.subkeys {
+			out = append(out, k+"."+leaf)
 		}
 	}
 	sort.Strings(out)
@@ -382,8 +403,15 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 	}
 	if i := strings.IndexByte(key, '.'); i > 0 {
 		prefix, rest := key[:i], key[i+1:]
-		if s, found := settableKeySpecs[prefix]; found && s.dynamic && rest != "" && !strings.Contains(rest, ".") {
-			return prefix, rest, s, true
+		if s, found := settableKeySpecs[prefix]; found && rest != "" && !strings.Contains(rest, ".") {
+			if s.dynamic {
+				return prefix, rest, s, true
+			}
+			if leafSpec, allowed := s.subkeys[rest]; allowed {
+				return prefix, rest, settableKeySpec{
+					kind: leafSpec.kind, section: prefix, parent: prefix, validate: leafSpec.validate,
+				}, true
+			}
 		}
 	}
 	return "", "", settableKeySpec{}, false
@@ -403,8 +431,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return nil, fmt.Errorf("%q is not a settable config key. Settable keys: %s",
-			key, strings.Join(SettableKeys(), ", "))
+		return nil, unsettableConfigKeyError(key)
 	}
 	key = canonicalConfigKey(key)
 	structured := spec.structured && section == ""
@@ -519,17 +546,44 @@ func resolveProjectSettable(key string) (section, leaf string, spec settableKeyS
 	key = canonicalConfigKey(key)
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return "", "", settableKeySpec{}, fmt.Errorf("%q is not a settable config key. Settable keys: %s",
-			key, strings.Join(SettableKeys(), ", "))
+		return "", "", settableKeySpec{}, unsettableConfigKeyError(key)
 	}
 	scopeKey := key
 	if spec.dynamic && section != "" {
 		scopeKey = section
 	}
+	if spec.parent != "" {
+		scopeKey = spec.parent
+	}
 	if !isProjectPersonalKey(scopeKey) {
 		return "", "", settableKeySpec{}, projectScopeError(scopeKey)
 	}
 	return section, leaf, spec, nil
+}
+
+// unsettableConfigKeyError keeps the complete allowlist while making the
+// useful recovery local: if the user tried an unsupported leaf of a writable
+// table, name the parent table's accepted compact-JSON form.
+func unsettableConfigKeyError(key string) error {
+	key = canonicalConfigKey(key)
+	hint := ""
+	if i := strings.IndexByte(key, '.'); i > 0 {
+		parent := key[:i]
+		if spec, ok := settableKeySpecs[parent]; ok && spec.structured && manifestKeyIsTable(parent) {
+			hint = fmt.Sprintf(" Set the whole table with `af config set %s '<compact-json>'`.", parent)
+		}
+	}
+	return fmt.Errorf("%q is not a settable config key.%s Settable keys: %s",
+		key, hint, strings.Join(SettableKeys(), ", "))
+}
+
+func manifestKeyIsTable(key string) bool {
+	for _, entry := range Manifest() {
+		if entry.Key == key {
+			return entry.Type == "table"
+		}
+	}
+	return false
 }
 
 // projectScopeError explains why a settable key cannot be a per-project personal

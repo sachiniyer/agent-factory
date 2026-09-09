@@ -66,14 +66,33 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 	if err != nil {
 		return ResolvedValue{}, err
 	}
-	if assembly.failClosed != "" {
-		return rootAgentFailClosedValue(assembly), nil
+	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
+}
+
+// ResolveRootAgentForInspectionWithConfig is the read-only diagnostic form of
+// ResolveRootAgentForInspection. The caller supplies the already-loaded global
+// snapshot, avoiding LoadConfig's create/migrate behavior while preserving the
+// same legacy and personal layer resolution used by --explain.
+func ResolveRootAgentForInspectionWithConfig(global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
+	if global == nil {
+		return ResolvedValue{}, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
 	}
-	resolved := rootAgentResolvedValue(ResolveRootAgent(assembly.inputs), assembly.locs, projectSelector != "")
+	assembly, err := assembleRootAgentInspectionInputsFromConfig(global, projectSelector, strictProjectLookup)
+	if err != nil {
+		return ResolvedValue{}, err
+	}
+	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
+}
+
+func resolveRootAgentInspectionAssembly(assembly rootAgentInspectionAssembly, projectSelected bool) ResolvedValue {
+	if assembly.failClosed != "" {
+		return rootAgentFailClosedValue(assembly)
+	}
+	resolved := rootAgentResolvedValue(ResolveRootAgent(assembly.inputs), assembly.locs, projectSelected)
 	if assembly.ignoredGlobal != nil {
 		markRootAgentGlobalIneligible(&resolved, *assembly.ignoredGlobal, assembly.ignoredReason, assembly.locs)
 	}
-	return resolved, nil
+	return resolved
 }
 
 // rootAgentInspectionAssembly is what assembleRootAgentInspectionInputs hands
@@ -125,6 +144,10 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 	if err != nil {
 		return rootAgentInspectionAssembly{}, err
 	}
+	return assembleRootAgentInspectionInputsFromConfig(global, projectSelector, strictProjectLookup)
+}
+
+func assembleRootAgentInspectionInputsFromConfig(global *Config, projectSelector string, strictProjectLookup bool) (rootAgentInspectionAssembly, error) {
 	out := rootAgentInspectionAssembly{
 		locs:   rootAgentLocations{globalPath: global.source.path},
 		inputs: RootAgentInputs{Global: GlobalRootAgentLayer(global)},

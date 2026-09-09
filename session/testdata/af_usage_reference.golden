@@ -45,6 +45,12 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks remove <id>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
+Root-agent configuration (global unless --project <id-or-path> selects a personal project override):
+  af config set root_agent <compact-json>             Merge the enabled/program profile as one table
+  af config set root_agent.enabled <bool>             Enable or disable the singleton profile
+  af config set root_agent.program <command>          Set the command while preserving enabled
+Root-agent configuration is frozen at daemon start. An already-running root session is adopted as-is; after a program change, kill the root, then restart the daemon.
+
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
 
 Finishing up: when the user confirms your work is complete and asks you to wrap up, self-archive with "af sessions archive --self". It is non-destructive — the worktree is moved out, nothing is deleted, and the session is restorable later with "af sessions restore <title>". But it tears down THIS session's tmux, so it kills you the instant you run it: nothing you say or do after it is ever seen. Treat it as the ABSOLUTE LAST action — first finish every summary, result, and confirmation the user needs, and only once you have nothing left to report run "af sessions archive --self" as the very last step.

@@ -211,7 +211,7 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 
 func TestConfigSetHelpListsEveryProjectStructuredForm(t *testing.T) {
 	want := "(default_program, program_overrides, program_overrides.<agent>, default_accounts, " +
-		"default_accounts.<agent>, root_agent, branch_prefix, on_archive_command)"
+		"default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command)"
 	if !strings.Contains(configSetCmd.Long, want) {
 		t.Fatalf("config set help omits a valid per-project structured form; want %q in:\n%s", want, configSetCmd.Long)
 	}

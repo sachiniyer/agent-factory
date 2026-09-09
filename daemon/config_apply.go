@@ -40,7 +40,9 @@ type ApplyConfigResult struct {
 	// Pending names changed keys this daemon build reads only at startup, so they
 	// take effect on the next daemon start: root_agents / root_agent (their
 	// next-daemon-start contract, carved out pending #2216) and branch_prefix (read
-	// from the FROZEN startup config in the title-reservation helpers).
+	// from the FROZEN startup config in the title-reservation helpers). Save
+	// surfaces append the root-only half of that contract: an already-running root
+	// is adopted as-is, so a program change also requires killing that session.
 	Pending []string
 	// Warnings are operator/user-facing notices produced while applying (#2480 PR2):
 	// the tokenless-network exposure notice (#2168 — warn, never refuse) and a

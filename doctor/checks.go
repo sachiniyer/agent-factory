@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -157,6 +158,7 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	}
 	if h.PingErr == nil && cfg != nil {
 		checkRunningDaemonConfig(report, h, cfg)
+		checkRootAgentPrograms(ctx, report, cfg)
 	}
 	// The #2090 exposure is INFORMATIONAL since #2168 Phase 0: a tokenless
 	// network listener is an allowed, deliberate configuration, so this is a Warn
@@ -214,6 +216,71 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	if h.BinaryDeleted {
 		report.Warn(sectionDaemon, "daemon binary", fmt.Sprintf("pid %d is running a binary that was replaced on disk", h.PIDFilePID),
 			"run `af daemon restart` to pick up the current binary", true)
+	}
+}
+
+// checkRootAgentPrograms compares every adopted live root with the profile the
+// current on-disk config resolves for its repository. The daemon-side warning
+// compares against its frozen startup snapshot; doctor's disk view is
+// deliberately complementary, so a post-start edit is visible here even before
+// a restarted daemon can enforce it.
+func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config) {
+	instances, err := ctx.opts.sessionInventory()
+	if err != nil {
+		report.Warn(sectionDaemon, "root agent program",
+			"could not compare live root sessions with the configured profiles: "+oneLine(err),
+			"rerun `af doctor` when the daemon session inventory is available", false)
+		report.markIncomplete("root agent program")
+		return
+	}
+	compared, drifted := 0, 0
+	for _, inst := range instances {
+		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
+			continue
+		}
+		repoPath := inst.Worktree.RepoPath
+		if repoPath == "" {
+			repoPath = inst.Worktree.WorktreePath
+		}
+		if repoPath == "" {
+			repoPath = inst.Path
+		}
+		if repoPath == "" {
+			continue
+		}
+		resolved, resolveErr := config.ResolveRootAgentForInspectionWithConfig(cfg, repoPath, false)
+		if resolveErr != nil || config.RootAgentValueFailsClosed(resolved) {
+			continue
+		}
+		profile, ok := resolved.Value.(config.RootAgent)
+		if !ok || !profile.Enabled {
+			continue
+		}
+		configuredProgram := daemon.RootAgentProgramForProfile(repoPath, profile)
+		compared++
+		if configuredProgram == inst.Program {
+			continue
+		}
+		drifted++
+		report.Warn(sectionDaemon, "root agent program",
+			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", repoPath, configuredProgram, inst.Program),
+			"kill the root, then restart the daemon", true)
+	}
+	if drifted == 0 {
+		detail := "no enabled live root sessions to compare"
+		if compared > 0 {
+			detail = fmt.Sprintf("%d live root session(s) match the configured command", compared)
+		}
+		report.Pass(sectionDaemon, "root agent program", detail)
+	}
+}
+
+func rootSessionIsInert(inst session.InstanceData) bool {
+	switch session.EffectiveLiveness(inst) {
+	case session.LiveLost, session.LiveDead, session.LiveArchived:
+		return true
+	default:
+		return false
 	}
 }
 

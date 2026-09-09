@@ -208,12 +208,23 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 		}
 		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	case EffectNextDaemonStart:
-		return "Saved — this setting takes effect on the next daemon start."
+		notice := "Saved — this setting takes effect on the next daemon start."
+		return WithRootAgentAdoptionNotice(key, notice)
 	case EffectNextAfLaunch:
 		return "Saved — this setting takes effect the next time you launch af."
 	default:
 		return "Saved."
 	}
+}
+
+// WithRootAgentAdoptionNotice appends the half of restart guidance unique to
+// always-ensured roots. Global and per-project save surfaces use this one copy.
+func WithRootAgentAdoptionNotice(key, notice string) string {
+	key = canonicalConfigKey(key)
+	if key != "root_agent" && !strings.HasPrefix(key, "root_agent.") && key != "root_agents" {
+		return notice
+	}
+	return notice + " · An already-running root session is adopted as-is, so a program change also requires killing that session."
 }
 
 // listenerRebindDeferredNotice is the honest notice when a network.listen_addr /

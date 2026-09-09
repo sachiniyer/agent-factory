@@ -45,3 +45,22 @@ func TestAfUsageReferenceLifecycleColumns(t *testing.T) {
 		}
 	}
 }
+
+func TestAfUsageReferenceRootAgentConfigCopy(t *testing.T) {
+	for name, reference := range map[string]string{
+		"inside": afUsageReference,
+		"plugin": AfPluginUsageReference,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range []string{
+				"af config set root_agent.enabled <bool>",
+				"af config set root_agent.program <command>",
+				"kill the root, then restart the daemon",
+			} {
+				if !strings.Contains(reference, want) {
+					t.Errorf("root-agent config guidance missing %q", want)
+				}
+			}
+		})
+	}
+}

@@ -23,8 +23,11 @@ func TestRootAgentRemedyPreservesPersonalProgram(t *testing.T) {
 	configSetProjectFlag = "."
 	t.Cleanup(func() { configSetProjectFlag = oldProject })
 	cmd := &cobra.Command{}
-	cmd.SetOut(&bytes.Buffer{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
 	require.NoError(t, configSetCmd.RunE(cmd, []string{"root_agent", `{"enabled":true}`}))
+	require.Contains(t, out.String(), "already-running root session is adopted as-is")
+	require.Contains(t, out.String(), "program change also requires killing that session")
 	cfg, err := config.LoadProjectConfig(project.ID)
 	require.NoError(t, err)
 	require.True(t, cfg.RootAgent.Enabled)

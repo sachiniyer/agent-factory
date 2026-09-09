@@ -1363,6 +1363,31 @@ _expect_config_editor_rejects() {
     return 0
 }
 
+# #4087: the scalar root-agent forms share the config panes' writer and effect
+# notice. Exercise them in the sandbox so both the merge and the full
+# restart-plus-kill guidance stay present in the real CLI response.
+# shellcheck disable=SC2317
+_expect_root_agent_config_set_copy() {
+    local enabled_out program_out notice
+    notice='Saved — this setting takes effect on the next daemon start. · An already-running root session is adopted as-is, so a program change also requires killing that session.'
+
+    enabled_out="$(af config set root_agent.enabled false 2>&1)" || {
+        printf '%s\n' "$enabled_out" >&2
+        return 1
+    }
+    program_out="$(af config set root_agent.program 'codex --profile work' 2>&1)" || {
+        printf '%s\n' "$program_out" >&2
+        return 1
+    }
+    printf '%s\n' "$enabled_out" "$program_out" | grep -Fq "$notice" || {
+        printf 'root-agent config set omitted its live-session adoption notice:\n%s\n%s\n' "$enabled_out" "$program_out" >&2
+        return 1
+    }
+    grep -q '^\[root_agent\]$' "$AGENT_FACTORY_HOME/config.toml" || return 1
+    grep -q '^enabled = false$' "$AGENT_FACTORY_HOME/config.toml" || return 1
+    grep -q "^program = 'codex --profile work'$" "$AGENT_FACTORY_HOME/config.toml" || return 1
+}
+
 # _expect_config_agent_attaches_in_tmux — regression proof for #2019. This is the
 # END-TO-END gate for the config-agent takeover, and it is only meaningful HERE:
 # the driver runs af inside a real tmux pane, so pressing C hits the reporter's
@@ -1461,6 +1486,7 @@ step "restore the self-test launch size"                    af_resize "$SELFTEST
 # config agent runs bash and needs no real agent binary.
 step "config agent (C) attaches while af runs inside tmux (#2019)"  _expect_config_agent_attaches_in_tmux
 
+step "root-agent dotted config merges and names adopted sessions (#4087)" _expect_root_agent_config_set_copy
 step "open the config editor (,) and write through the real path"  _expect_config_editor_writes
 step "config editor refuses an invalid value with the CLI error"   _expect_config_editor_rejects
 

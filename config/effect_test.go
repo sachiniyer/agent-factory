@@ -68,6 +68,23 @@ func TestKeyEffectClassClassifiesDottedLeavesByBase(t *testing.T) {
 	}
 }
 
+// TestRootAgentEffectNoticeNamesLiveSessionAdoption is issue #4087's missing
+// half: restarting applies the frozen profile, but it still adopts an existing
+// root unchanged, so the save notice must name both actions a program edit needs.
+func TestRootAgentEffectNoticeNamesLiveSessionAdoption(t *testing.T) {
+	for _, key := range []string{"root_agent", "root_agent.program", "root_agents"} {
+		notice := EffectNotice(key, ApplyOutcome{DaemonApplied: true})
+		if !strings.HasPrefix(notice, "Saved — this setting takes effect on the next daemon start.") {
+			t.Errorf("%s lost the existing next-start sentence: %q", key, notice)
+		}
+		if !strings.Contains(notice, " · ") ||
+			!strings.Contains(notice, "already-running root session is adopted as-is") ||
+			!strings.Contains(notice, "program change also requires killing that session") {
+			t.Errorf("%s does not name the live-root adoption requirement: %q", key, notice)
+		}
+	}
+}
+
 // TestEffectNoticeReportsAFailedListenerRebindAsDeferred is the #3397 contract: a
 // key whose live rebind FAILED is not live, whatever its effect class says, because
 // bind-new-before-close left the old listener serving. The notice must not

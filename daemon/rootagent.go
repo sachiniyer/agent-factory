@@ -120,6 +120,10 @@ type rootEnsureState struct {
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
+	// programDriftLogged dedupes the adopted-root command warning for this
+	// ensure-state. A healthy adopt is revisited every sweep tick, so the bit is
+	// deliberately not reset by rootEnsureSucceeded.
+	programDriftLogged bool
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot
 	// one-second ensure path.
@@ -522,6 +526,17 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			configuredProgram := rootAgentProgramForProfile(workspace, resolution.RootAgent)
+			runningProgram := inst.AgentProgram()
+			if configuredProgram != runningProgram {
+				m.mu.Lock()
+				logDrift := !st.programDriftLogged
+				st.programDriftLogged = true
+				m.mu.Unlock()
+				if logDrift {
+					m.warn().Printf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is; kill the root, then restart the daemon", workspace, configuredProgram, runningProgram)
+				}
+			}
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
@@ -854,4 +869,11 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 		program += " " + rootDangerouslySkipPermissionsFlag
 	}
 	return program
+}
+
+// RootAgentProgramForProfile exposes the daemon's exact root command resolution
+// to read-only diagnostics. It must stay a thin wrapper so doctor never compares
+// a live root against a second, subtly different interpretation of the profile.
+func RootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
+	return rootAgentProgramForProfile(repoRoot, ra)
 }
