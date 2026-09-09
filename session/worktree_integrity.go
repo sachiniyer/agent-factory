@@ -190,11 +190,27 @@ func shortOID(oid string) string {
 	return oid
 }
 
+// SameWorktreeInspectionIdentity reports whether two projections describe the
+// same safety-scan target. Liveness matters only at the live-local applicability
+// boundary; ordinary Ready/Running transitions do not change the checkout.
+func SameWorktreeInspectionIdentity(before, after InstanceData) bool {
+	return before.ID == after.ID &&
+		before.Title == after.Title &&
+		before.BackendType == after.BackendType &&
+		NeedsWorktreeIntegrityInspection(before) == NeedsWorktreeIntegrityInspection(after) &&
+		before.Worktree.RepoPath == after.Worktree.RepoPath &&
+		before.Worktree.WorktreePath == after.Worktree.WorktreePath
+}
+
 // ReconcileWorktreeWarning mirrors the daemon's read-only worktree-integrity
 // result onto an existing client projection without changing durable state.
 func (i *Instance) ReconcileWorktreeWarning(warning string) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.reconcileWorktreeWarningLocked(warning)
+}
+
+func (i *Instance) reconcileWorktreeWarningLocked(warning string) bool {
 	i.confirmedWorktreeWarning = warning
 	if i.worktreeWarning == warning {
 		return false
@@ -207,11 +223,28 @@ func (i *Instance) ReconcileWorktreeWarning(warning string) bool {
 // around an incomplete one. Only a complete scan may clear the last confirmed
 // danger; an incomplete scan retains it and says why safety was not established.
 func (i *Instance) ReconcileWorktreeInspection(warning string, incomplete error) bool {
-	if incomplete == nil {
-		return i.ReconcileWorktreeWarning(warning)
-	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.reconcileWorktreeInspectionLocked(warning, incomplete)
+}
+
+// ReconcileWorktreeInspectionIfCurrent atomically verifies that an observation
+// still describes this lane and applies it under the same instance lock. A
+// restore or backend/worktree replacement in the gap after a Git scan therefore
+// leaves the existing warning untouched.
+func (i *Instance) ReconcileWorktreeInspectionIfCurrent(snapshot InstanceData, warning string, incomplete error) (changed, applied bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !SameWorktreeInspectionIdentity(snapshot, i.toInstanceDataLocked()) {
+		return false, false
+	}
+	return i.reconcileWorktreeInspectionLocked(warning, incomplete), true
+}
+
+func (i *Instance) reconcileWorktreeInspectionLocked(warning string, incomplete error) bool {
+	if incomplete == nil {
+		return i.reconcileWorktreeWarningLocked(warning)
+	}
 	// A warning is positive evidence even when repository-wide correlation was
 	// incomplete. Replace older danger text with the newest definite finding;
 	// retain the old finding only when the partial scan found nothing new.

@@ -109,6 +109,9 @@ type Manager struct {
 	// block operational status, self-healing, or manager RPCs.
 	worktreeIntegrityMu sync.Mutex
 	worktreeInspector   func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection
+	// worktreeBeforeReconcile is a test seam for the narrow interval after the
+	// correlated snapshot check and before per-instance warning reconciliation.
+	worktreeBeforeReconcile func()
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For
 	// RunDaemon that includes the startup orphan sweep as well as instance restore,

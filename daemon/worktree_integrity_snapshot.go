@@ -38,10 +38,5 @@ func (m *Manager) worktreeInspectionSnapshotCurrent(entries []worktreeInspection
 }
 
 func sameWorktreeInspectionIdentity(before, after session.InstanceData) bool {
-	return before.ID == after.ID &&
-		before.Title == after.Title &&
-		before.BackendType == after.BackendType &&
-		session.NeedsWorktreeIntegrityInspection(before) == session.NeedsWorktreeIntegrityInspection(after) &&
-		before.Worktree.RepoPath == after.Worktree.RepoPath &&
-		before.Worktree.WorktreePath == after.Worktree.WorktreePath
+	return session.SameWorktreeInspectionIdentity(before, after)
 }

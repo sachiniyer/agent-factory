@@ -232,6 +232,33 @@ func TestStaleWorktreeScanCannotClearRestoredLaneWarning(t *testing.T) {
 		"an archived snapshot must not clear a warning after the lane becomes live again")
 }
 
+func TestWorktreeReconcileCannotClearLaneRestoredAfterValidation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "holder", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	confirmed := "DANGER: confirmed duplicate branch"
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return []session.SessionWorktreeInspection{{InstanceID: inst.ID, Warning: confirmed}}
+	}
+	manager.refreshWorktreeIntegrityWarnings()
+	inst.SetStatusForTest(session.Archived)
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection { return nil }
+	manager.worktreeBeforeReconcile = func() {
+		inst.SetStatusForTest(session.Ready)
+	}
+
+	manager.refreshWorktreeIntegrityWarnings()
+
+	assert.Contains(t, inst.WorktreeWarning(), confirmed,
+		"identity validation and warning reconciliation must be one atomic instance operation")
+}
+
 func TestSessionStatusProjectsWorktreeIntegrityWarning(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "unsafe-lane", Path: repoPath, Program: "claude"})
