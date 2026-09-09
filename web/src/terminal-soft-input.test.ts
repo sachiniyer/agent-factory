@@ -11,6 +11,12 @@ function insertText(data: string | null, type = "input", isComposing = false): E
   return Object.assign(new Event(type, { cancelable: true }), { data, inputType: "insertText", isComposing });
 }
 
+function deleteBackward(type: "beforeinput" | "input", isComposing = false): Event {
+  return Object.assign(new Event(type, { cancelable: true }), {
+    data: null, inputType: "deleteContentBackward", isComposing,
+  });
+}
+
 test("compositionstart → update → end → insertText commits once without consuming Ctrl", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
@@ -756,6 +762,64 @@ test("unmodified soft input remains native so xterm can observe Backspace", () =
   soft.dispose();
 });
 
+test("229 Backspace after compositionend is forwarded from the textarea mutation", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  // Xterm's delayed finalizer sees the deletion, while its 229 keydown path is
+  // suppressed for the pending composition and therefore emits no DEL itself.
+  textarea.addEventListener("compositionend", () => setTimeout(() => {
+    if (textarea.value) send(textarea.value);
+  }, 0));
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
+  host.dispatchEvent(deleteBackward("beforeinput"));
+  textarea.value = "";
+  host.dispatchEvent(deleteBackward("input"));
+  t.mock.timers.tick(0);
+
+  assert.deepEqual(writes, ["\x08"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+  assert.equal(soft.transform("a", value => modifiers.input(value)), "a");
+});
+
+test("composing insertText without lifecycle stays native and preserves Alt", () => {
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Alt", 0);
+  const writes: string[] = [];
+  let soft: TerminalSoftInput;
+  // Xterm installs its capture listener first and owns this fallback emission.
+  host.addEventListener("input", event => {
+    const input = event as InputEvent;
+    if (input.data) writes.push(soft.transform(input.data,
+      (value, user) => modifiers.input(value, user ? "user" : "terminal")));
+  }, true);
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value, "user")));
+  soft = new TerminalSoftInput(host, textarea, () => true, () => false, send, () => true);
+
+  const before = insertText("😀", "beforeinput", true);
+  host.dispatchEvent(before);
+  assert.equal(before.defaultPrevented, false);
+  textarea.value = "😀";
+  host.dispatchEvent(insertText("😀", "input", true));
+
+  assert.deepEqual(writes, ["😀"]);
+  assert.equal(modifiers.state("Alt"), "once");
+  assert.equal(modifiers.input("x"), "\x1bx");
+  soft.dispose();
+});
+
 test("reshaped commit is the first mutation and leaves Ctrl for the next key", t => {
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "old" });
@@ -828,8 +892,11 @@ test("stale keydown recovery preserves textarea contents for a later 229 Backspa
 test("stale recovery falls back to input data when beforeinput data is null", () => {
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Alt", 0);
   const writes: string[] = [];
-  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, text => writes.push(text), () => false);
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send, () => true);
   textarea.dispatchEvent(new Event("keydown"));
   textarea.dispatchEvent(new Event("blur"));
 
@@ -841,6 +908,7 @@ test("stale recovery falls back to input data when beforeinput data is null", ()
 
   assert.equal(textarea.value, "a");
   assert.deepEqual(writes, ["a"]);
+  assert.equal(modifiers.state("Alt"), "once");
   soft.dispose();
 });
 

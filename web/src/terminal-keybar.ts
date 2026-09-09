@@ -136,6 +136,10 @@ function ctrlModifiedEmission(text: string): string | undefined {
 
 function mergePhysicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
   stickyAlt: boolean): string {
+  // A sticky modifier that is already physically held adds no information.
+  // Preserve xterm's bytes exactly; even an equivalent re-encoding can erase
+  // intentional platform aliases such as Alt+Arrow.
+  if ((!stickyCtrl || physical.ctrlKey) && (!stickyAlt || physical.altKey)) return text;
   const ctrl = physical.ctrlKey || stickyCtrl;
   const alt = physical.altKey || stickyAlt;
   const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) |

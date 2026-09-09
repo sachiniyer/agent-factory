@@ -11,6 +11,7 @@ interface CompositionRange {
   commitLength?: number;
   trailingLength?: number;
   keydownAfterEnd?: boolean;
+  beforeDeleteValue?: string;
   trailingFlush?: TrailingFlush;
   release?: ReturnType<typeof setTimeout>;
 }
@@ -35,6 +36,7 @@ export class TerminalSoftInput {
   private readonly pending: CompositionRange[] = [];
   private readonly trailingFlushes = new Set<TrailingFlush>();
   private forwardingTrailing: string | undefined;
+  private forwardingComposition: string | undefined;
   private keyDownSeen = false;
   private staleKeydown = false;
   private staleBeforeInputSent = false;
@@ -121,6 +123,23 @@ export class TerminalSoftInput {
         this.observeCompositionValue(this.active);
       const range = this.pending.at(-1);
       const postCompositionText = input.inputType === "insertText" || input.inputType === "insertCompositionText";
+      if (range && input.inputType === "deleteContentBackward" && input.isComposing === false) {
+        if (input.type === "beforeinput") {
+          range.beforeDeleteValue = this.textarea?.value;
+        } else if (input.type === "input") {
+          const value = this.textarea?.value;
+          const priorLength = range.beforeDeleteValue?.length ??
+            (range.start !== undefined && range.commitLength !== undefined
+              ? range.start + range.commitLength + (range.trailingLength ?? 0) : undefined);
+          range.beforeDeleteValue = undefined;
+          // CompositionHelper ignores 229 while its delayed finalizer is
+          // pending. A real post-end textarea deletion is instead a new user
+          // action, so forward the DEL without taking ownership of mutation.
+          if (value !== undefined && priorLength !== undefined && value.length < priorLength)
+            this.send("\x7f");
+        }
+        return;
+      }
       if (range && postCompositionText && input.type === "input" &&
         input.isComposing === false) {
         const value = this.textarea?.value;
@@ -153,6 +172,10 @@ export class TerminalSoftInput {
       return;
     }
     if (this.physicalInput() || input.inputType !== "insertText") return;
+    // Some IMEs expose composition only through InputEvent. Let xterm's native
+    // fallback own those events; stale-keydown recovery below is the sole case
+    // where xterm cannot emit them itself.
+    if (input.isComposing && !this.staleKeydown) return;
     if (this.staleKeydown) {
       // Xterm drops the composed input while its keydown flag is stale. Send
       // beforeinput ourselves, but preserve the native textarea mutation so a
@@ -164,14 +187,14 @@ export class TerminalSoftInput {
         if (!input.data) return;
         input.stopImmediatePropagation();
         this.staleBeforeInputSent = true;
-        this.send(input.data);
+        this.sendRecovered(input.data, input.isComposing);
       } else if (input.type === "input") {
         input.stopImmediatePropagation();
         const value = this.textarea?.value;
         const observed = value !== undefined && this.staleBeforeValue !== undefined
           ? insertedTextareaText(this.staleBeforeValue, value) : "";
         const recovered = observed || input.data;
-        if (recovered && !this.staleBeforeInputSent) this.send(recovered);
+        if (recovered && !this.staleBeforeInputSent) this.sendRecovered(recovered, input.isComposing);
         this.staleBeforeInputSent = false;
         this.staleBeforeValue = undefined;
       }
@@ -203,6 +226,9 @@ export class TerminalSoftInput {
   }
 
   transform(text: string, applyModifiers: (text: string, userInput: boolean) => string): string {
+    // Stale xterm state can require forwarding an InputEvent-only composition
+    // ourselves. It remains composition text and must bypass sticky modifiers.
+    if (this.forwardingComposition === text) return text;
     // A rescued A→B interstitial is ordinary input even when it happens to
     // equal B's current composition prefix.
     if (this.forwardingTrailing === text) return applyModifiers(text, true);
@@ -277,6 +303,14 @@ export class TerminalSoftInput {
   private cancelTrailingFlush(flush: TrailingFlush): void {
     if (flush.release !== undefined) clearTimeout(flush.release);
     this.trailingFlushes.delete(flush);
+  }
+  private sendRecovered(text: string, composing: boolean): void {
+    if (!composing) {
+      this.send(text);
+      return;
+    }
+    this.forwardingComposition = text;
+    try { this.send(text); } finally { this.forwardingComposition = undefined; }
   }
   reset(): void {
     for (const range of this.pending) if (range.release !== undefined) clearTimeout(range.release);

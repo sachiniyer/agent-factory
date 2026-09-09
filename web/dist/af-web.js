@@ -8101,6 +8101,7 @@ var TerminalSoftInput = class {
   pending = [];
   trailingFlushes = /* @__PURE__ */ new Set();
   forwardingTrailing;
+  forwardingComposition;
   keyDownSeen = false;
   staleKeydown = false;
   staleBeforeInputSent = false;
@@ -8166,6 +8167,18 @@ var TerminalSoftInput = class {
         this.observeCompositionValue(this.active);
       const range = this.pending.at(-1);
       const postCompositionText = input.inputType === "insertText" || input.inputType === "insertCompositionText";
+      if (range && input.inputType === "deleteContentBackward" && input.isComposing === false) {
+        if (input.type === "beforeinput") {
+          range.beforeDeleteValue = this.textarea?.value;
+        } else if (input.type === "input") {
+          const value = this.textarea?.value;
+          const priorLength = range.beforeDeleteValue?.length ?? (range.start !== void 0 && range.commitLength !== void 0 ? range.start + range.commitLength + (range.trailingLength ?? 0) : void 0);
+          range.beforeDeleteValue = void 0;
+          if (value !== void 0 && priorLength !== void 0 && value.length < priorLength)
+            this.send("\x7F");
+        }
+        return;
+      }
       if (range && postCompositionText && input.type === "input" && input.isComposing === false) {
         const value = this.textarea?.value;
         const mutationLength = value !== void 0 && range.start !== void 0 && value.length > range.start ? value.length - range.start : void 0;
@@ -8186,6 +8199,7 @@ var TerminalSoftInput = class {
       return;
     }
     if (this.physicalInput() || input.inputType !== "insertText") return;
+    if (input.isComposing && !this.staleKeydown) return;
     if (this.staleKeydown) {
       if (input.type === "beforeinput") {
         this.staleBeforeInputSent = false;
@@ -8193,13 +8207,13 @@ var TerminalSoftInput = class {
         if (!input.data) return;
         input.stopImmediatePropagation();
         this.staleBeforeInputSent = true;
-        this.send(input.data);
+        this.sendRecovered(input.data, input.isComposing);
       } else if (input.type === "input") {
         input.stopImmediatePropagation();
         const value = this.textarea?.value;
         const observed = value !== void 0 && this.staleBeforeValue !== void 0 ? insertedTextareaText(this.staleBeforeValue, value) : "";
         const recovered = observed || input.data;
-        if (recovered && !this.staleBeforeInputSent) this.send(recovered);
+        if (recovered && !this.staleBeforeInputSent) this.sendRecovered(recovered, input.isComposing);
         this.staleBeforeInputSent = false;
         this.staleBeforeValue = void 0;
       }
@@ -8213,6 +8227,7 @@ var TerminalSoftInput = class {
     this.send(input.data);
   };
   transform(text, applyModifiers) {
+    if (this.forwardingComposition === text) return text;
     if (this.forwardingTrailing === text) return applyModifiers(text, true);
     const ranges = this.active ? [...this.pending, this.active] : [...this.pending];
     let rest = text, prefix = "", matchedComposition = false;
@@ -8286,6 +8301,18 @@ var TerminalSoftInput = class {
   cancelTrailingFlush(flush) {
     if (flush.release !== void 0) clearTimeout(flush.release);
     this.trailingFlushes.delete(flush);
+  }
+  sendRecovered(text, composing) {
+    if (!composing) {
+      this.send(text);
+      return;
+    }
+    this.forwardingComposition = text;
+    try {
+      this.send(text);
+    } finally {
+      this.forwardingComposition = void 0;
+    }
   }
   reset() {
     for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
@@ -8392,6 +8419,7 @@ function ctrlModifiedEmission(text) {
   return void 0;
 }
 function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
+  if ((!stickyCtrl || physical.ctrlKey) && (!stickyAlt || physical.altKey)) return text;
   const ctrl = physical.ctrlKey || stickyCtrl;
   const alt = physical.altKey || stickyAlt;
   const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);

@@ -108,6 +108,20 @@ test("hardware modifier identity survives xterm arrow aliases", () => {
   }
 });
 
+test("sticky no-op preserves xterm's physical Alt aliases", () => {
+  for (const [bytes, physical] of [
+    ["\x1b[1;5A", { key: "ArrowUp", altKey: true }],
+    ["\x1bb", { key: "ArrowLeft", altKey: true }],
+  ] as const) {
+    const event = Object.assign({ shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }, physical);
+    const state = new StickyModifiers();
+    state.tap("Alt", 0);
+    assert.equal(state.input(bytes, "user", event), bytes);
+    assert.equal(state.state("Alt"), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
 test("physical modifier merging preserves xterm's emitted control bytes", () => {
   for (const [sticky, bytes, physical, expected] of [
     ["Alt", "\x00", { key: " ", ctrlKey: true }, "\x1b\x00"],
