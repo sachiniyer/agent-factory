@@ -130,8 +130,9 @@ It asserts outgoing PTY input is exactly `字`, Ctrl remains armed, and the
 following soft `x` sends exactly `0x18` and clears Ctrl. Ctrl + soft Enter also
 sends CR, consumes the one-shot, and leaves the following `a` unmodified. The
 Safari-order boundary follows xterm in treating Shift, Ctrl, Alt, and keycode
-229 as continued IME input. The textarea-diff 229 Backspace sends DEL, consumes
-the armed one-shot as genuine user input, and leaves its following `a` plain.
+229 as continued IME input. The textarea-diff 229 Backspace is matched to its
+specific user emission; with Ctrl armed it sends BS, consumes the one-shot, and
+leaves its following `a` plain.
 That deferred 229 marker is matched to xterm's exact textarea diff; an unrelated
 parser reply can arrive first without being reclassified or consuming the
 one-shot. If a new composition starts before the prior commit timer, ordinary
@@ -154,14 +155,25 @@ CSI `1;<modifier><final>` form when one is. This one rule covers arrows,
 Home/End, Insert/Delete, Page Up/Down, function keys, and the other xterm
 letter-final keyboard forms without enumerating those keys.
 
-The small inverse table that remains is only for non-sequence keybar controls:
-`Esc`, `Tab`, and `^C`, whose Alt form is an ESC prefix. The round-trip test
-still derives every emitting key from `KEYBAR_ROWS`, while table-driven shape
-tests cover CSI defaults, `~` keys, letter finals, SS3 conversion, and merging
-pre-existing modifier bits. Keybar buttons remain encoded and consumed at
-source. Terminal-origin replies remain byte-for-byte and do not consume
+One decoder is the constructive inverse of all `keyBytes` shapes: an optional
+Alt ESC prefix, CSI/SS3 sequences, Ctrl-folded control bytes, or one Unicode
+scalar. It merges recovered and sticky bits, then re-encodes through `keyBytes`.
+The property test enumerates the encoder's own named-key domain plus every
+Unicode scalar and every Ctrl/Alt/application-cursor/sticky-bit combination;
+it does not depend on a hand-written list of hardware keys. Table-driven shape
+tests additionally cover CSI defaults, `~` keys, letter finals, SS3 conversion,
+pre-existing modifier bits, Enter, Backspace, and backtab. CSI `Z` is deliberately
+excluded because xterm emits bare backtab even when Ctrl or Alt is held.
+Keybar buttons remain encoded and consumed at source without re-entering the
+decoder. Terminal-origin replies remain byte-for-byte and do not consume
 one-shots; unrecognized user controls retain the consume-and-pass-through
 fallback.
+
+The custom key-handler audit found two input sends that bypass xterm's `onKey`:
+agent-composer Shift+Enter and no-selection Ctrl+C. Both now enter through the
+keybar's synchronous user marker before `term.input`; the constructor callback
+inside `TerminalKeybar` is the only remaining explicit `term.input` call and is
+always preceded by a keybar-owned marker.
 
 For IME lifecycle decisions, the live textarea and its mutation diff are the
 authoritative source; nullable event payloads are fallbacks. The browser proof
@@ -173,15 +185,16 @@ recovered textarea insertion is delivered exactly once.
 
 [Unit red](composition-unit-red.txt) shows the duplicate write before the fix;
 [unit green](composition-unit-green.txt) records the original lifecycle proof.
-Final validation has 891 passing web unit tests and the refreshed full container
-web selftest passes [238/238](full-selftest-green.txt), including the null-data
-and empty-payload IME probes, provisional commit growth, updated rollback,
-both-null and split stale-input recovery, shape-based hardware CSI/SS3
-modifiers, the complete keybar-byte round trip, deferred 229 source isolation,
-interstitial input forwarding, soft-control consumption, stale-input deletion,
-keybar effects, and the previously reported terminal READY marker cases.
-Typecheck, regenerated bundle, Go build/vet, fast lint, and file-length checks
-pass.
+Final validation has 901 passing web unit tests. The focused container keybar
+suite passes [2/2](browser-green.txt), covering the null-data and empty-payload
+IME probes, provisional commit growth, updated rollback, both-null and split
+stale-input recovery, shape-based hardware sequences, the complete keybar-byte
+round trip, deferred 229 source isolation, interstitial input forwarding,
+soft-control consumption, stale-input deletion, keybar effects, and the
+previously reported terminal READY marker cases. The preceding full container
+run records [250/251](full-selftest-green.txt): the keybar test passed, while the
+unrelated master-side mobile terminal geometry test #2347 timed out. Typecheck,
+regenerated bundle, Go build, fast lint, and file-length checks pass.
 
 The full `make perf-container` also passes: all five visual tests (including
 `web chrome · both themes`), three web measurements, and all web/TUI budgets.

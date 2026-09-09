@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { KEYBAR_ROWS, keyBytes, StickyModifiers, TerminalKeybar, keybarPointerDown } from "./terminal-keybar.js";
+import {
+  decodeKeyBytes, KEYBAR_ROWS, keyBytes, keyBytesDomain, KEY_BYTES_NAMED_KEYS, StickyModifiers, TerminalKeybar,
+  keybarPointerDown,
+} from "./terminal-keybar.js";
 
 test("terminal key bytes match physical keys", () => {
   for (const [key, bytes] of Object.entries({ Esc: "\x1b", Tab: "\t", "←": "\x1b[D", "↑": "\x1b[A", "↓": "\x1b[B", "→": "\x1b[C", "^C": "\x03" })) {
@@ -37,10 +40,10 @@ test("double tap locks; tap unlocks; slow second tap cancels; reset clears both"
   assert.equal(state.state("Ctrl"), "off");
 });
 
-test("escape sequences and control bytes do not consume a character modifier", () => {
+test("terminal escape sequences and control bytes do not consume a character modifier", () => {
   const state = new StickyModifiers(); state.tap("Ctrl", 0);
-  assert.equal(state.input("\x1b[A"), "\x1b[A");
-  assert.equal(state.input("\x03"), "\x03");
+  assert.equal(state.input("\x1b[A", "terminal"), "\x1b[A");
+  assert.equal(state.input("\x03", "terminal"), "\x03");
   assert.equal(state.input("c"), "\x03");
 });
 
@@ -96,24 +99,57 @@ test("sticky Alt prefixes user-origin hardware controls", () => {
   }
 });
 
-test("every keybar input round-trips hardware bytes through sticky encoding", () => {
-  const controls = new Set(["Ctrl", "Alt", "Arrows", "More keys"]);
-  const keys = KEYBAR_ROWS.flat().filter(key => !controls.has(key));
-  for (const key of keys) {
-    const cursorModes = [false, ...(key in { "←": 1, "↑": 1, "↓": 1, "→": 1 } ? [true] : [])];
-    for (const applicationCursor of cursorModes) {
-      for (const [inputCtrl, inputAlt] of [[false, false], [true, false], [false, true], [true, true]] as const) {
-        const hardware = keyBytes(key, inputCtrl, inputAlt, applicationCursor);
-        for (const [stickyCtrl, stickyAlt] of [[false, false], [true, false], [false, true], [true, true]] as const) {
-          const state = new StickyModifiers();
-          if (stickyCtrl) state.tap("Ctrl", 0);
-          if (stickyAlt) state.tap("Alt", 0);
-          assert.equal(state.input(hardware, "user"),
-            keyBytes(key, inputCtrl || stickyCtrl, inputAlt || stickyAlt, applicationCursor), key);
+test("the decoder closes over the complete keyBytes domain", () => {
+  const booleans = [false, true];
+  const namedKeys = new Set(KEY_BYTES_NAMED_KEYS);
+  let keys = 0;
+  for (const key of keyBytesDomain()) {
+    keys++;
+    const codePoint = key.codePointAt(0);
+    const scalar = codePoint !== undefined && key.length === (codePoint > 0xffff ? 2 : 1);
+    // Outside the 7-bit control-fold range, Ctrl and cursor mode are identity
+    // dimensions. Check both extrema once, then walk their full Cartesian
+    // product using those proven equivalence classes instead of 35M encodes.
+    if (!namedKeys.has(key) && scalar && codePoint > 127) {
+      const plain = keyBytes(key, false, false, false);
+      const prefixed = keyBytes(key, false, true, false);
+      if (keyBytes(key, true, false, true) !== plain || keyBytes(key, true, true, true) !== prefixed)
+        assert.fail(`non-ASCII encoder dimensions changed for ${JSON.stringify(key)}`);
+      const decodedPlain = decodeKeyBytes(plain);
+      const decodedPrefixed = decodeKeyBytes(prefixed);
+      assert.ok(decodedPlain && decodedPrefixed, `decode Unicode scalar U+${codePoint.toString(16)}`);
+      const mergedPlain = keyBytes(decodedPlain.key, decodedPlain.ctrl, decodedPlain.alt, decodedPlain.applicationCursor);
+      const mergedAlt = keyBytes(decodedPlain.key, decodedPlain.ctrl, true, decodedPlain.applicationCursor);
+      const retainedAlt = keyBytes(decodedPrefixed.key, decodedPrefixed.ctrl,
+        decodedPrefixed.alt, decodedPrefixed.applicationCursor);
+      if (mergedPlain !== plain || mergedAlt !== prefixed || retainedAlt !== prefixed)
+        assert.fail(`Unicode inverse changed for U+${codePoint.toString(16)}`);
+      for (const ctrl of booleans) for (const alt of booleans) for (const applicationCursor of booleans) {
+        for (const stickyCtrl of booleans) for (const stickyAlt of booleans) {
+          const expected = alt || stickyAlt ? prefixed : plain;
+          const actual = alt ? retainedAlt : stickyAlt ? mergedAlt : mergedPlain;
+          if (actual !== expected)
+            assert.fail(JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt }));
         }
+      }
+      continue;
+    }
+    for (const ctrl of booleans) for (const alt of booleans) for (const applicationCursor of booleans) {
+      const encoded = keyBytes(key, ctrl, alt, applicationCursor);
+      const decoded = decodeKeyBytes(encoded);
+      assert.ok(decoded, `decode ${JSON.stringify({ key, ctrl, alt, applicationCursor, encoded })}`);
+      assert.equal(keyBytes(decoded.key, decoded.ctrl, decoded.alt, decoded.applicationCursor), encoded);
+      for (const stickyCtrl of booleans) for (const stickyAlt of booleans) {
+        const expected = keyBytes(key, ctrl || stickyCtrl, alt || stickyAlt, applicationCursor);
+        const actual = keyBytes(decoded.key, decoded.ctrl || stickyCtrl,
+          decoded.alt || stickyAlt, decoded.applicationCursor);
+        if (actual !== expected)
+          assert.equal(actual, expected, JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt }));
       }
     }
   }
+  assert.equal(keys, KEY_BYTES_NAMED_KEYS.length + 0x110000 - 0x800,
+    "named encoder keys plus every Unicode scalar");
 });
 
 test("sticky modifiers merge into recognized user CSI and SS3 sequence shapes", () => {
@@ -135,6 +171,10 @@ test("sticky modifiers merge into recognized user CSI and SS3 sequence shapes", 
     assert.equal(armed.input(input, "user"), expected, JSON.stringify(input));
     assert.equal(armed.state(modifier), "off");
   }
+
+  const prefixedAlt = new StickyModifiers();
+  prefixedAlt.tap("Ctrl", 0);
+  assert.equal(prefixedAlt.input("\x1b\x1b[H", "user"), "\x1b[1;7H");
 });
 
 test("terminal-origin CSI replies bypass sequence rewriting", () => {
@@ -142,6 +182,52 @@ test("terminal-origin CSI replies bypass sequence rewriting", () => {
   state.tap("Ctrl", 0);
   assert.equal(state.input("\x1b[1;2H", "terminal"), "\x1b[1;2H");
   assert.equal(state.state("Ctrl"), "once");
+});
+
+test("terminal-origin control replies bypass decoding", () => {
+  const state = new StickyModifiers();
+  state.tap("Alt", 0);
+  assert.equal(state.input("\x18", "terminal"), "\x18");
+  assert.equal(state.state("Alt"), "once");
+});
+
+test("sticky modifiers combine with complementary hardware letter chords", () => {
+  for (const [sticky, hardware, expected] of [
+    ["Alt", "\x18", "\x1b\x18"],
+    ["Ctrl", "\x1bx", "\x1b\x18"],
+    ["Alt", "\x03", "\x1b\x03"],
+    ["Ctrl", "\x1bC", "\x1b\x03"],
+  ] as const) {
+    const bare = new StickyModifiers();
+    assert.equal(bare.input(hardware, "user"), hardware);
+    const armed = new StickyModifiers();
+    armed.tap(sticky, 0);
+    assert.equal(armed.input(hardware, "user"), expected);
+    assert.equal(armed.state(sticky), "off");
+  }
+});
+
+test("sticky modifiers encode known xterm user control bytes", () => {
+  for (const [sticky, input, expected] of [
+    ["Alt", "\r", "\x1b\r"],
+    ["Alt", "\x7f", "\x1b\x7f"],
+    ["Ctrl", "\x7f", "\x08"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input(input, "user"), expected);
+    assert.equal(state.state(sticky), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
+test("backtab has no generic sticky CSI encoding", () => {
+  for (const sticky of ["Ctrl", "Alt"] as const) {
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input("\x1b[Z", "user"), "\x1b[Z");
+    assert.equal(state.state(sticky), "off");
+  }
 });
 
 test("a deferred 229 marker ignores parser replies before its textarea diff", () => {
@@ -159,7 +245,7 @@ test("a deferred 229 marker ignores parser replies before its textarea diff", ()
   textarea.value = "a";
   assert.equal(keybar.transform("\x1b[?1;2c"), "\x1b[?1;2c");
   assert.equal(modifiers.state("Ctrl"), "once");
-  assert.equal(keybar.transform("\x7f"), "\x7f");
+  assert.equal(keybar.transform("\x7f"), "\x08");
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 

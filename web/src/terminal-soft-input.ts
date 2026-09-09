@@ -2,10 +2,10 @@ interface CompositionRange {
   start?: number;
   initialValue?: string;
   text: string;
+  updateText?: string;
   sawUpdate?: boolean;
   textareaChanged?: boolean;
-  endValue?: string;
-  mayGrowAfterEnd?: boolean;
+  provisionalAtEnd?: boolean;
   postEndInputSeen?: boolean;
   frozenText?: string;
   commitLength?: number;
@@ -74,7 +74,7 @@ export class TerminalSoftInput {
     if (this.active) {
       this.observeCompositionValue(this.active);
       this.active.sawUpdate = true;
-      if (typeof data === "string") this.active.text = data;
+      if (typeof data === "string") this.active.text = this.active.updateText = data;
     }
   };
   private readonly onCompositionEnd = (event: Event): void => {
@@ -85,9 +85,13 @@ export class TerminalSoftInput {
     if (typeof data === "string") range.text = data;
     this.active = undefined;
     const value = this.textarea?.value;
-    range.endValue = value;
     const endText = range.start !== undefined && value !== undefined ? value.substring(range.start) : undefined;
-    range.mayGrowAfterEnd = Boolean(range.text) && endText !== range.text;
+    // Only a prior composition update plus a strict live textarea prefix proves
+    // that the boundary is provisional. compositionend.data alone may be stale
+    // or differently normalized, so it cannot claim the next ordinary input.
+    range.provisionalAtEnd = endText !== undefined && endText.length > 0 &&
+      range.updateText !== undefined && range.updateText.length > endText.length &&
+      range.updateText.startsWith(endText);
     // Chrome mutates the textarea and emits its composing insertText before
     // compositionend. Freeze that browser-order boundary now so a later soft
     // character without keydown cannot be mistaken for the commit. Safari
@@ -120,14 +124,10 @@ export class TerminalSoftInput {
         const mutationLength = value !== undefined && range.start !== undefined && value.length > range.start
           ? value.length - range.start : undefined;
         const candidate = mutationLength !== undefined && range.start !== undefined ? value?.substring(range.start) : undefined;
-        const inserted = value !== undefined && range.endValue !== undefined
-          ? insertedTextareaText(range.endValue, value) : undefined;
         const fallbackLength = input.data?.length;
-        const firstCommitGrowth = range.mayGrowAfterEnd && !range.postEndInputSeen && !range.keydownAfterEnd &&
+        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !range.keydownAfterEnd &&
           range.commitLength !== undefined && (mutationLength ?? fallbackLength ?? 0) > range.commitLength &&
-          ((candidate !== undefined && (candidate === range.text || candidate === input.data)) ||
-            (inserted !== undefined && inserted === range.text) ||
-            (candidate === undefined && input.data === range.text));
+          (candidate !== undefined ? candidate === range.updateText : input.data === range.updateText);
         if (range.keydownAfterEnd) {
           range.trailingLength = mutationLength !== undefined
             ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0))
@@ -146,7 +146,6 @@ export class TerminalSoftInput {
             : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
         }
         range.postEndInputSeen = true;
-        if (value !== undefined) range.endValue = value;
       }
       // Preserve beforeinput's native mutation; CompositionHelper owns sending.
       if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
@@ -201,13 +200,13 @@ export class TerminalSoftInput {
     host.addEventListener("input", this.onInput, true);
   }
 
-  transform(text: string, applyModifiers: (text: string) => string): string {
+  transform(text: string, applyModifiers: (text: string, userInput: boolean) => string): string {
     // A rescued A→B interstitial is ordinary input even when it happens to
     // equal B's current composition prefix.
-    if (this.forwardingTrailing === text) return applyModifiers(text);
+    if (this.forwardingTrailing === text) return applyModifiers(text, true);
     // Oldest finalized commit first; the active composition has separate state.
     const ranges = this.active ? [...this.pending, this.active] : [...this.pending];
-    let rest = text, prefix = "";
+    let rest = text, prefix = "", matchedComposition = false;
     for (const range of ranges) {
       const value = this.textarea?.value;
       const committed = range.frozenText ?? (range.start !== undefined && value !== undefined
@@ -221,20 +220,31 @@ export class TerminalSoftInput {
         if (!rest.startsWith(character, length)) break;
         length += character.length;
       }
-      if (!length) continue;
+      if (!length) {
+        const trailingLength = Math.min(range.trailingLength ?? 0, committed.length);
+        const trailing = boundary === 0 && trailingLength ? committed.slice(-trailingLength) : "";
+        if (trailing && rest.startsWith(trailing)) {
+          prefix += applyModifiers(trailing, true);
+          rest = rest.slice(trailing.length);
+          this.remove(range);
+          if (!rest) break;
+        }
+        continue;
+      }
+      matchedComposition = true;
       prefix += rest.slice(0, length);
       rest = rest.slice(length);
       const flush = range.trailingFlush;
       if (flush && rest.startsWith(flush.text)) {
         this.cancelTrailingFlush(flush);
         range.trailingFlush = undefined;
-        prefix += applyModifiers(flush.text);
+        prefix += applyModifiers(flush.text, true);
         rest = rest.slice(flush.text.length);
       }
       this.remove(range);
       if (!rest) break;
     }
-    return prefix + (rest ? applyModifiers(rest) : "");
+    return prefix + (rest ? applyModifiers(rest, matchedComposition) : "");
   }
 
   private remove(range: CompositionRange): void {

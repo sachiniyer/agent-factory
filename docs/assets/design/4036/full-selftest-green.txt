@@ -1,13 +1,19 @@
-scripts/testbox.sh web-selftest (final-revision excerpt; all tests ran)
+scripts/testbox.sh web-selftest (preceding full-run excerpt; all tests ran)
 
-Running 238 tests using 1 worker
+Running 251 tests using 1 worker
 
-#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018xab\u0018\u0018\u0018字\u0018文字文\u0018ab字\u007fa\ra\u001b[1;5Aa\u001b[1;6Aa\u001b\u001ba\u001b[1;5H\u001b[1;3F\u001b[3;5~\u001b[1;3P\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz"
-  ✓   33 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (16.3s)
-  ✓  106 [chromium] › selftest/web-driver.spec.ts:2369:1 › #2337: agent Shift+Enter preserves xterm input effects while shell keeps CR @real-fixture (9.4s)
-  ✓  172 [chromium] › selftest/web-driver.spec.ts:6876:1 › #2347: the mobile agent terminal also reclaims peer-owned geometry @real-fixture (9.6s)
-  ✓  188 [chromium] › selftest/web-driver.spec.ts:7959:1 › a live PTY stream and the events WS survive the service worker controlling the page @real-fixture (856ms)
-  ✓  231 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (784ms)
-  ✓  238 [chromium] › selftest/webtab-legacy.spec.ts:7:3 › web tab blocks legacy shorthand 2130706433 without navigation (708ms)
+#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018xab\u0018ab\u0018\u0018\u0018字\u0018文字文\u0018ab字\u0008a\ra\na\u001b\na\u001b\u0018a\u001b\u0018a\u001b\ra\u001b\u007fa\u0008a\u001b[Za\u001b[Za\u001b[1;5Aa\u001b[1;6Aa\u001b\u001ba\u001b[1;5H\u001b[1;3F\u001b[3;5~\u001b[1;3P\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz"
+  ✓   46 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (20.4s)
+  ✓  119 [chromium] › selftest/web-driver.spec.ts:2369:1 › #2337: agent Shift+Enter preserves xterm input effects while shell keeps CR @real-fixture (11.7s)
+  ✘  185 [chromium] › selftest/web-driver.spec.ts:6876:1 › #2347: the mobile agent terminal also reclaims peer-owned geometry @real-fixture (22.1s)
+  ✓  201 [chromium] › selftest/web-driver.spec.ts:7959:1 › a live PTY stream and the events WS survive the service worker controlling the page @real-fixture (935ms)
+  ✓  244 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (916ms)
+  ✓  251 [chromium] › selftest/webtab-legacy.spec.ts:7:3 › web tab blocks legacy shorthand 2130706433 without navigation (738ms)
 
-  238 passed (6.8m)
+  1) [chromium] › selftest/web-driver.spec.ts:6876:1 › #2347: the mobile agent terminal also reclaims peer-owned geometry @real-fixture
+
+    Error: opening the overlay must reclaim peer-owned terminal geometry;
+    last geometry={"hostHeight":573,"viewportHeight":573,"scrollHeight":573,"scrollTop":0,"rows":114}
+
+  1 failed
+  250 passed (7.8m)

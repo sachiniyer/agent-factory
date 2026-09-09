@@ -130,10 +130,10 @@ export async function assertPhoneStaleRecovery(page: Page, stream: () => string)
     await new Promise(resolve => setTimeout(resolve, 0));
     key("keyup", 229, "Unidentified");
   });
-  await expect.poll(stream).toBe(before + "ab字\x7f");
+  await expect.poll(stream).toBe(before + "ab字\x08");
   await expect(ctrl).toHaveAttribute("data-state", "off");
   await page.keyboard.insertText("a");
-  await expect.poll(stream).toBe(before + "ab字\x7fa");
+  await expect.poll(stream).toBe(before + "ab字\x08a");
 }
 
 /** The focused regression also runs with the ordinary selftest cat fixture. */
@@ -147,6 +147,45 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
   await expect(ctrl).toHaveAttribute("data-state", "off");
   await page.keyboard.insertText("a");
   await expect.poll(stream).toBe(before + "\ra");
+  for (const [modifier, bytes] of [["Ctrl", "\n"], ["Alt", "\x1b\n"]] as const) {
+    before = stream();
+    const button = bar.getByRole("button", { name: modifier, exact: true });
+    await button.click();
+    await page.keyboard.press("Shift+Enter");
+    await expect.poll(stream).toBe(before + bytes);
+    await expect(button).toHaveAttribute("data-state", "off");
+    await page.keyboard.insertText("a");
+    await expect.poll(stream).toBe(before + bytes + "a");
+  }
+  for (const [modifier, chord, bytes] of [
+    ["Alt", "Control+x", "\x1b\x18"],
+    ["Ctrl", "Alt+x", "\x1b\x18"],
+  ] as const) {
+    before = stream();
+    const button = bar.getByRole("button", { name: modifier, exact: true });
+    await button.click();
+    await page.keyboard.press(chord);
+    await expect.poll(stream).toBe(before + bytes);
+    await expect(button).toHaveAttribute("data-state", "off");
+    await page.keyboard.insertText("a");
+    await expect.poll(stream).toBe(before + bytes + "a");
+  }
+  for (const [modifier, key, bytes] of [
+    ["Alt", "Enter", "\x1b\r"],
+    ["Alt", "Backspace", "\x1b\x7f"],
+    ["Ctrl", "Backspace", "\x08"],
+    ["Ctrl", "Shift+Tab", "\x1b[Z"],
+    ["Alt", "Shift+Tab", "\x1b[Z"],
+  ] as const) {
+    before = stream();
+    const button = bar.getByRole("button", { name: modifier, exact: true });
+    await button.click();
+    await page.keyboard.press(key);
+    await expect.poll(stream).toBe(before + bytes);
+    await expect(button).toHaveAttribute("data-state", "off");
+    await page.keyboard.insertText("a");
+    await expect.poll(stream).toBe(before + bytes + "a");
+  }
   before = stream();
   await ctrl.click();
   await page.keyboard.press("ArrowUp");

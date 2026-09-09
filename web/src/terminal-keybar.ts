@@ -1,28 +1,48 @@
 import { TerminalSoftInput } from "./terminal-soft-input.js";
 
+const ARROW_SUFFIXES: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
+const SPECIAL_BYTES: Record<string, string> = { Esc: "\x1b", Tab: "\t", "^C": "\x03" };
+export const KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
+
 /** Phone terminal controls and xterm-compatible key encodings. */
 export function keyBytes(key: string, ctrl = false, alt = false, applicationCursor = false): string {
-  const arrows: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
-  const special: Record<string, string> = { Esc: "\x1b", Tab: "\t", "^C": "\x03" };
-  if (arrows[key]) {
+  const sequence = userSequence(key);
+  if (sequence) return encodeSequence(sequence, (alt ? 2 : 0) | (ctrl ? 4 : 0), key);
+  if (ARROW_SUFFIXES[key]) {
     const modifier = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
     // Modified arrows always use CSI, including in application-cursor mode.
-    return modifier > 1 ? `\x1b[1;${modifier}${arrows[key]}`
-      : `\x1b${applicationCursor ? "O" : "["}${arrows[key]}`;
+    return modifier > 1 ? `\x1b[1;${modifier}${ARROW_SUFFIXES[key]}`
+      : `\x1b${applicationCursor ? "O" : "["}${ARROW_SUFFIXES[key]}`;
   }
   // Ctrl+Tab has no legacy byte form: send Tab and consume the one-shot.
   // Esc and ^C already encode control bytes; Alt prefixes all three with ESC.
-  if (special[key]) return (alt ? "\x1b" : "") + special[key];
-  const code = key.toUpperCase().charCodeAt(0);
-  const text = ctrl && /^[\x40-\x7f]$/.test(key) && code >= 64 && code <= 95 ? String.fromCharCode(code & 31) : key;
+  if (SPECIAL_BYTES[key]) return (alt ? "\x1b" : "") + SPECIAL_BYTES[key];
+  // Xterm represents Backspace as DEL and Ctrl+Backspace as BS.
+  if (key === "\x7f") return (alt ? "\x1b" : "") + (ctrl ? "\x08" : key);
+  const rawCode = key.charCodeAt(0);
+  let text = key;
+  if (ctrl && key.length === 1 && rawCode >= 64 && rawCode <= 127) {
+    const upperCode = key.toUpperCase().charCodeAt(0);
+    if (upperCode >= 64 && upperCode <= 95) text = String.fromCharCode(upperCode & 31);
+  }
   return (alt ? "\x1b" : "") + text;
+}
+
+/** The complete intended keyBytes key domain: named keys plus one Unicode scalar. */
+export function* keyBytesDomain(): Generator<string> {
+  yield* KEY_BYTES_NAMED_KEYS;
+  for (let codePoint = 0; codePoint <= 0x10ffff; codePoint++) {
+    if (codePoint < 0xd800 || codePoint > 0xdfff) yield String.fromCodePoint(codePoint);
+  }
 }
 
 export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
 
-interface DecodedKeybarControl {
+export interface DecodedKeyBytes {
   key: string;
-  modifierBits: number;
+  ctrl: boolean;
+  alt: boolean;
+  applicationCursor: boolean;
 }
 
 interface UserSequence {
@@ -32,6 +52,7 @@ interface UserSequence {
 }
 
 function userSequence(text: string): UserSequence | undefined {
+  if (text.length < 3 || text.charCodeAt(0) !== 27) return undefined;
   const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
   if (csi) return { kind: "CSI", parameters: csi[1], final: csi[2] };
   const ss3 = /^\x1bO([\x40-\x7e])$/.exec(text);
@@ -50,20 +71,37 @@ function encodeSequence(sequence: UserSequence, modifierBits: number, original: 
   return `\x1b[${parameters.join(";")}${sequence.final}`;
 }
 
-// Non-sequence keybar controls still need an inverse because Alt is an ESC
-// prefix. CSI and SS3 emissions are handled by their shapes, not by key names.
-const decodedKeybarControl = new Map<string, DecodedKeybarControl>();
-const nonInputKeys = new Set(["Ctrl", "Alt", "Arrows", "More keys"]);
-for (const key of KEYBAR_ROWS.flat().filter(value => !nonInputKeys.has(value))) {
-  for (const ctrl of [false, true]) {
-    for (const alt of [false, true]) {
-      for (const applicationCursor of [false, true]) {
-        const bytes = keyBytes(key, ctrl, alt, applicationCursor);
-        if (!userSequence(bytes) && !decodedKeybarControl.has(bytes))
-          decodedKeybarControl.set(bytes, { key, modifierBits: (ctrl ? 4 : 0) | (alt ? 2 : 0) });
-      }
-    }
+/** Canonical inverse of keyBytes. Aliased bytes choose any equivalent preimage. */
+export function decodeKeyBytes(text: string): DecodedKeyBytes | undefined {
+  let sequenceText = text;
+  let prefixedAlt = false;
+  let sequence = userSequence(sequenceText);
+  if (!sequence && text.charCodeAt(0) === 27) {
+    sequenceText = text.slice(1);
+    sequence = userSequence(sequenceText);
+    prefixedAlt = sequence !== undefined;
   }
+  if (sequence) {
+    // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held. It has no
+    // modifier parameter form, so let the caller consume and pass it through.
+    if (sequence.kind === "CSI" && sequence.final === "Z") return undefined;
+    const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+    const encoded = Number(parameters[1] || "1");
+    const modifierBits = Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+    return {
+      key: sequenceText,
+      ctrl: (modifierBits & 4) !== 0,
+      alt: prefixedAlt || (modifierBits & 2) !== 0,
+      applicationCursor: sequence.kind === "SS3",
+    };
+  }
+  const alt = text.length > 1 && text.charCodeAt(0) === 27;
+  const character = alt ? text.slice(1) : text;
+  const codePoint = character.codePointAt(0);
+  if (codePoint === undefined || character.length !== (codePoint > 0xffff ? 2 : 1)) return undefined;
+  if (codePoint <= 31)
+    return { key: String.fromCharCode(codePoint + 64), ctrl: true, alt, applicationCursor: false };
+  return { key: character, ctrl: false, alt, applicationCursor: false };
 }
 
 type Modifier = "Ctrl" | "Alt";
@@ -86,27 +124,21 @@ export class StickyModifiers {
     this.consumeOnce();
     return result;
   }
-  input(text: string, source: "terminal" | "user" = "terminal"): string {
-    // Xterm's keyboard CSI/SS3 sequences share one modifier-parameter rule.
-    // Terminal replies never enter it; physical and Meta bits are preserved.
-    const sequence = source === "user" ? userSequence(text) : undefined;
-    if (sequence) {
-      const stickyBits = (this.values.Alt !== "off" ? 2 : 0) | (this.values.Ctrl !== "off" ? 4 : 0);
-      const result = encodeSequence(sequence, stickyBits, text);
-      this.consumeOnce();
-      return result;
-    }
-    const decoded = source === "user" ? decodedKeybarControl.get(text) : undefined;
+  input(text: string, source: "terminal" | "user" = "user"): string {
+    if (source === "terminal") return text;
+    // One inverse handles sequence, control, Alt-prefixed, and plain key shapes.
+    // Existing sequence modifier bits remain embedded in decoded.key, so keyBytes
+    // merges sticky Ctrl/Alt without losing physical Shift or Meta.
+    const decoded = decodeKeyBytes(text);
     if (decoded) {
-      const combined = decoded.modifierBits |
-        (this.values.Alt !== "off" ? 2 : 0) | (this.values.Ctrl !== "off" ? 4 : 0);
-      const result = keyBytes(decoded.key, (combined & 4) !== 0, (combined & 2) !== 0);
+      const result = keyBytes(decoded.key, decoded.ctrl || this.values.Ctrl !== "off",
+        decoded.alt || this.values.Alt !== "off", decoded.applicationCursor);
       this.consumeOnce();
       return result;
     }
     // Unrecognized user controls retain the consume-and-pass-through fallback.
     if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) {
-      if (text && source === "user") this.consumeOnce();
+      if (text) this.consumeOnce();
       return text;
     }
     return Array.from(text, char => this.key(char)).join("");
@@ -143,7 +175,7 @@ export class TerminalKeybar {
   private readonly softInput: TerminalSoftInput;
   private readonly buttons = new Map<Modifier, HTMLButtonElement>();
   private readonly originalMaxHeight: string;
-  private userInput = false;
+  private userInput: "user" | "keybar" | undefined;
   private userInputGeneration = 0;
   private deferred229: { before: string; generation: number } | undefined;
   private deferred229Generation = 0;
@@ -168,9 +200,9 @@ export class TerminalKeybar {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          // Resolve and consume at source, then enter xterm's user-input path.
-          // transform() preserves these control/escape bytes without reapplying.
-          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()));
+          // Resolve and consume at source. The marker preserves these bytes
+          // without sending a keybar emission through the user decoder again.
+          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), true);
           this.paint();
         };
         button.addEventListener("pointerdown", event => keybarPointerDown(event, act));
@@ -207,16 +239,18 @@ export class TerminalKeybar {
     this.layout();
   }
   transform(text: string): string {
-    const source = this.userInput || this.takeDeferred229(text) ? "user" : "terminal";
-    this.userInput = false;
+    const marker = this.userInput;
+    const source = marker || this.takeDeferred229(text) ? "user" : "terminal";
+    this.userInput = undefined;
     this.userInputGeneration += 1;
-    const output = this.softInput.transform(text, value =>
-      this.focused && this.phone.matches ? this.modifiers.input(value, source) : value);
+    const output = this.softInput.transform(text, (value, compositionTrailing) =>
+      this.focused && this.phone.matches && marker !== "keybar"
+        ? this.modifiers.input(value, compositionTrailing ? "user" : source) : value);
     this.paint();
     return output;
   }
   /** Mark xterm's synchronous emission, or its matching 229 textarea diff, as user input. */
-  markUserInput(deferred = false): void {
+  markUserInput(deferred = false, keybar = false): void {
     if (deferred) {
       const before = this.textarea?.value;
       if (before === undefined) return;
@@ -230,9 +264,9 @@ export class TerminalKeybar {
       return;
     }
     const generation = ++this.userInputGeneration;
-    this.userInput = true;
+    this.userInput = keybar ? "keybar" : "user";
     const clear = () => {
-      if (this.userInputGeneration === generation) this.userInput = false;
+      if (this.userInputGeneration === generation) this.userInput = undefined;
     };
     // Synchronous onKey and term.input paths own only the current event turn.
     queueMicrotask(clear);
@@ -250,8 +284,8 @@ export class TerminalKeybar {
     this.deferred229Generation += 1;
     return true;
   }
-  private sendUserInput(data: string): void {
-    this.markUserInput();
+  sendUserInput(data: string, keybar = false): void {
+    this.markUserInput(false, keybar);
     this.input(data);
   }
   private paint(): void {

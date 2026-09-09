@@ -93,6 +93,54 @@ export async function assertPhoneComposition(page: Page, stream: () => string): 
     await expect(ctrl).toHaveAttribute("data-state", "off");
   }
 
+  // A stale compositionend payload cannot overrule an already-complete live
+  // textarea boundary and claim the next ordinary character as commit growth.
+  {
+    const before = stream();
+    await ctrl.click();
+    await textarea.evaluate(async el => {
+      const input = el as HTMLTextAreaElement;
+      const start = input.value.length;
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      input.value = input.value.substring(0, start) + "ab";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "ab", inputType: "insertText", isComposing: true,
+      }));
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "x" }));
+      input.value += "x";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "x", inputType: "insertText", isComposing: false,
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    await expect.poll(stream).toBe(before + "ab\x18");
+    await expect(ctrl).toHaveAttribute("data-state", "off");
+  }
+
+  // Even when the stale payload is a strict extension of the complete live
+  // value, compositionend data alone cannot make the boundary provisional.
+  {
+    const before = stream();
+    await ctrl.click();
+    await textarea.evaluate(async el => {
+      const input = el as HTMLTextAreaElement;
+      const start = input.value.length;
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      input.value = input.value.substring(0, start) + "a";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "a", inputType: "insertText", isComposing: true,
+      }));
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "ab" }));
+      input.value += "b";
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true, composed: true, data: "b", inputType: "insertText", isComposing: false,
+      }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    await expect.poll(stream).toBe(before + "a\x02");
+    await expect(ctrl).toHaveAttribute("data-state", "off");
+  }
+
   // A canceled IME owns no prefix; no-keydown x still consumes Ctrl.
   {
     const before = stream();

@@ -63,7 +63,8 @@ test("Chrome commit before compositionend keeps no-keydown trailing input outsid
   const modifiers = new StickyModifiers();
   modifiers.tap("Ctrl", 0);
   const writes: string[] = [];
-  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  const send = (text: string) => writes.push(soft.transform(text,
+    (value, user) => modifiers.input(value, user ? "user" : "terminal")));
   textarea.addEventListener("compositionend", () => setTimeout(() => send(textarea.value), 0));
   const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
   t.after(() => soft.dispose());
@@ -96,7 +97,7 @@ test("Safari commit after compositionend establishes the boundary before trailin
   textarea.value += "x";
   host.dispatchEvent(insertText("x")); // Trailing even without keydown.
 
-  assert.equal(soft.transform("字x", value => modifiers.input(value)), "字\x18");
+  assert.equal(soft.transform("字x", (value, user) => modifiers.input(value, user ? "user" : "terminal")), "字\x18");
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
@@ -161,6 +162,45 @@ test("a complete Chrome commit does not absorb a same-character ordinary key", t
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
+test("a complete textarea commit ignores a stale compositionend payload", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "ab";
+  textarea.dispatchEvent(composition("compositionend", "x"));
+  textarea.value = "abx";
+  host.dispatchEvent(insertText("x"));
+
+  assert.equal(soft.transform("abx", (value, user) => modifiers.input(value, user ? "user" : "terminal")), "ab\x18");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("a stale compositionend extension cannot claim the next ordinary character", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "a";
+  host.dispatchEvent(insertText("a", "input", true));
+  textarea.dispatchEvent(composition("compositionend", "ab"));
+  textarea.value = "ab";
+  host.dispatchEvent(insertText("b"));
+
+  assert.equal(soft.transform("ab", (value, user) => modifiers.input(value, user ? "user" : "terminal")), "a\x02");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 test("canceled composition gives no-keydown ordinary input a zero-length commit boundary", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
@@ -168,7 +208,8 @@ test("canceled composition gives no-keydown ordinary input a zero-length commit 
   const modifiers = new StickyModifiers();
   modifiers.tap("Ctrl", 0);
   const writes: string[] = [];
-  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  const send = (text: string) => writes.push(soft.transform(text,
+    (value, user) => modifiers.input(value, user ? "user" : "terminal")));
   textarea.addEventListener("compositionend", () => setTimeout(() => send(textarea.value), 0));
   const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
   t.after(() => soft.dispose());
@@ -222,7 +263,7 @@ test("updated composition rollback leaves the next no-keydown input ordinary", t
   textarea.value = "x";
   host.dispatchEvent(insertText("x"));
 
-  assert.equal(soft.transform("x", value => modifiers.input(value)), "\x18");
+  assert.equal(soft.transform("x", (value, user) => modifiers.input(value, user ? "user" : "terminal")), "\x18");
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 

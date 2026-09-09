@@ -635,10 +635,10 @@ export class AttachTerminal {
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.sendInput(text),
+        sendInput: (text) => this.keybar.sendUserInput(text),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.term.input(text, true),
+        sendUserInput: (text) => this.keybar.sendUserInput(text),
       });
     });
 
