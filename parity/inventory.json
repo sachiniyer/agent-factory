@@ -2041,11 +2041,17 @@
       },
       "RestoreSessionRequest": {
         "cli": {
+          "expected_daemon_boot_id": {
+            "ok": "Internal correlation for the web's persistent uncertain-outcome fence, not a restore option. A CLI invocation has no retained Snapshot or client fence: it deliberately sends one request to the daemon it connects to, and a transport loss ends the command rather than carrying admission state across a restart."
+          },
           "id": {
             "ok": "The CLI resolves and dispatches one restore by title under explicit --repo scoping; stable ID protects retained TUI/web intent that can outlive the selected row."
           }
         },
         "tui": {
+          "expected_daemon_boot_id": {
+            "ok": "Internal correlation for the web's persistent uncertain-outcome fence, not a user option. The TUI retains no restore ticket across a lost response or reconnect and never releases a client-owned fence from a daemon boot transition, so it has no boot identity to pin; stable ID still protects the selected session."
+          },
           "force_reap": {
             "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it — not a button or a keystroke that a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
           }
