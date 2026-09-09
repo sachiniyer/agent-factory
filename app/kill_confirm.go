@@ -263,15 +263,50 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA string) (stri
 	if countGitLines(uniqueOut) == 0 {
 		return "", false // nothing beyond base — kill loses no committed work
 	}
-	// Of the session's commits, those NOT reachable from any remote-tracking ref
-	// are the ones that exist only here. branch -D orphans exactly these.
-	localOut, err := runKillGit(worktreePath, "log", "--oneline", base+".."+branchRef, "--not", "--remotes")
+	// Of the session's commits, those NOT reachable from any ref that survives
+	// `git branch -D` are the ones that exist only here. branch -D deletes only
+	// refs/heads/<branch>, so commits also reachable from a tag, another local
+	// branch, or refs/stash survive it. Enumerate refs containing the branch tip
+	// and exclude those that survive cleanup, mirroring detachedHeadCommitWarning
+	// and refSurvivesWorktreeCleanup so the branch half and the detached half
+	// agree on durability for the same commit held by the same ref.
+	tipSHA, err := runKillGit(worktreePath, "rev-parse", "--verify", branchRef+"^{commit}")
+	if err != nil {
+		return unmergedFailClosedLine(branchName, err), false
+	}
+	// logArgs is built around a SINGLE `--not`: `--not` is a toggle that flips
+	// exclusion for every following revision arg until the next `--not`, so
+	// --remotes and each surviving ref share one exclusion context. A per-ref
+	// `--not <ref>` would re-toggle that ref back to inclusion and re-introduce
+	// the bug. Surviving refs are appended bare.
+	logArgs := []string{"log", "--oneline", base + ".." + branchRef, "--not", "--remotes"}
+	// If for-each-ref itself fails we cannot enumerate survivors; fall back to
+	// the remote-tracking-only exclusion, which over-warns (conservative) rather
+	// than silently suppressing real loss.
+	if refList, ferr := runKillGit(worktreePath, "for-each-ref",
+		"--contains="+strings.TrimSpace(string(tipSHA)), "--format=%(refname)"); ferr == nil {
+		for _, ref := range strings.Split(strings.TrimSpace(string(refList)), "\n") {
+			ref = strings.TrimSpace(ref)
+			if ref == "" {
+				continue
+			}
+			// The session branch itself contains the tip but does NOT survive
+			// cleanup (refSurvivesWorktreeCleanup returns false for it), so it
+			// is correctly NOT excluded — a commit held only by the session
+			// branch stays severe. Per-worktree refs are filtered out the same
+			// way, so they cannot falsely suppress the warning.
+			if refSurvivesWorktreeCleanup(ref, branchName, true) {
+				logArgs = append(logArgs, ref)
+			}
+		}
+	}
+	localOut, err := runKillGit(worktreePath, logArgs...)
 	if err != nil {
 		return unmergedFailClosedLine(branchName, err), false
 	}
 	localOnly := countGitLines(localOut)
 	if localOnly == 0 {
-		return "", false // every commit is pushed somewhere — recoverable
+		return "", false // every commit survives some durable ref — recoverable
 	}
 	return unmergedSevereLine(branchName, localOnly), true
 }
