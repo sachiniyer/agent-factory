@@ -124,7 +124,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				continue
 			}
 			outputPath := outputFile.Name()
-			log.InfoLog.Printf("running post-worktree hook in %s (output: %s): %s", run.worktreePath, outputPath, cmdStr)
+			// Keep an arbitrary multiline command in one grammar-delimited log field;
+			// bug-report redaction also recognizes the legacy raw %s spelling.
+			log.InfoLog.Printf("running post-worktree hook in %s (output: %s): %q", run.worktreePath, outputPath, cmdStr)
 
 			// The daemon-spawned hook enters a transient scope with NO edge to the
 			// daemon unit, so the operator's build is charged to its own cgroup and

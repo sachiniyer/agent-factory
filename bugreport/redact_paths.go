@@ -54,6 +54,7 @@ type worktreePathTitle struct {
 }
 
 type pathBoundary func(string, int, int) bool
+type pathStartBoundary func(string, int) bool
 
 // noteRepoRoot registers one repository root, and noteWorktreeRoot one worktree
 // root, under the next token of that kind.
@@ -300,7 +301,16 @@ func derivedWorktreePathBoundary(s string, start, end int) bool {
 }
 
 func derivedWorktreePathBoundaryWithEnd(s string, start, end int, endsAt pathBoundary) bool {
-	if !pathStartsAt(s, start) {
+	return derivedWorktreePathBoundaryWithContext(s, start, end, pathStartsAt, endsAt)
+}
+
+func derivedWorktreePathBoundaryWithContext(
+	s string,
+	start, end int,
+	startsAt pathStartBoundary,
+	endsAt pathBoundary,
+) bool {
+	if !startsAt(s, start) {
 		return false
 	}
 	if endsAt(s, start, end) {
@@ -361,7 +371,16 @@ func knownRootTextBoundary(s string, start, end int) bool {
 }
 
 func knownRootTextBoundaryWithEnd(s string, start, end int, endsAt pathBoundary) bool {
-	if !pathStartsAt(s, start) {
+	return knownRootTextBoundaryWithContext(s, start, end, pathStartsAt, endsAt)
+}
+
+func knownRootTextBoundaryWithContext(
+	s string,
+	start, end int,
+	startsAt pathStartBoundary,
+	endsAt pathBoundary,
+) bool {
+	if !startsAt(s, start) {
 		return false
 	}
 	if endsAt(s, start, end) {
@@ -395,17 +414,29 @@ func pathStartsAt(s string, start int) bool {
 }
 
 // uriPathEndsAt asks the URI parser whether the matched bytes are the complete
-// path once the next rune is included. That recognizes query and fragment
-// syntax without declaring '?' or '#' to be filesystem delimiters. Both bytes
-// are legal Unix filename bytes; outside a URI they may continue a sibling name
-// and must not make a registered-root prefix eligible for collapse.
+// path, or are followed by a percent-encoded path separator. That recognizes
+// query, fragment, and encoded descendant syntax without declaring '?', '#', or
+// '%' to be filesystem delimiters. All three are legal Unix filename bytes;
+// outside a URI they may continue a sibling name and must not make a
+// registered-root prefix eligible for collapse.
 func uriPathEndsAt(s string, start, end, nextRuneSize int) bool {
 	uriStart, ok := uriStartForPath(s, start)
 	if !ok {
 		return false
 	}
-	parsed, err := url.Parse(s[uriStart : end+nextRuneSize])
-	return err == nil && parsed.Path == s[start:end]
+	parseEnd := end + nextRuneSize
+	if s[end] == '%' {
+		if end+3 > len(s) {
+			return false
+		}
+		parseEnd = end + 3
+	}
+	parsed, err := url.Parse(s[uriStart:parseEnd])
+	if err != nil {
+		return false
+	}
+	root := s[start:end]
+	return parsed.Path == root || parsed.Path == root+"/"
 }
 
 // uriStartForPath locates a syntactically valid scheme whose first path slash

@@ -23,17 +23,24 @@ const (
 //     A URI is a self-identifying nested context: a valid scheme and the parsed
 //     URL.Path, not a delimiter list, decide whether the registered path is
 //     complete.
-//   - A daemon log is identified by the collectLog call site and split into
-//     lines by the Go logger. Valid %q fields are decoded with Go string syntax.
-//     Shell syntax is enabled only for command ranges proven by a fixed AF log
-//     emitter; shell-looking user/output text is not guessed to be a command.
+//   - A daemon log is identified by the collectLog call site. Valid %q fields
+//     are decoded with Go string syntax. Shell syntax is enabled only for
+//     command ranges proven by a fixed AF log emitter; shell-looking user/output
+//     text is not guessed to be a command. Current emitters quote commands. A
+//     legacy raw hook command may span physical lines and ends only when the
+//     exact prefix grammar configured by log.Initialize proves a new record.
+//     Complete ANSI controls are parsed as zero-width wrappers around paths in
+//     log and diagnostic provenance; an arbitrary ESC byte is not a path
+//     delimiter.
 //   - A config document is identified by configSection.Format. Its string
 //     scalars are decoded with that declared JSON or TOML grammar. Only paths
 //     inside fields whose config-schema consumer invokes /bin/sh -c use shell
 //     word boundaries.
 //   - Decoded Go strings and proven shell commands are nested logical values.
 //     Their grammar plans spans on the decoded/original value, and the owning
-//     transport maps the safe value back into its source representation.
+//     transport maps the safe value back into its source representation. POSIX
+//     parameter/pathname expansions and escaped line continuations therefore
+//     affect boundaries only inside a parser-proven shell value.
 //
 // Unknown provenance never falls back to a guessed, weaker grammar. The owning
 // logical value is replaced with redactedMarker. Parser recovery inside a known

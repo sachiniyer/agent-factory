@@ -36,6 +36,7 @@ const (
 // known from fixed syntax rather than the current record set.
 func (r *redactor) scrubKnownLogValues(s string) string {
 	spans := r.sensitiveTextSpans(s)
+	spans = r.appendANSIPathSpans(spans, s)
 	spans = appendLegacyTaskTitleSpans(spans, s)
 	spans = r.appendLogShellCommandPathSpans(spans, s)
 	spans = r.appendQuotedValueSpans(spans, s, true)
@@ -44,6 +45,7 @@ func (r *redactor) scrubKnownLogValues(s string) string {
 
 func (r *redactor) scrubKnownDiagnosticValues(s string) string {
 	spans := r.sensitiveTextSpans(s)
+	spans = r.appendANSIPathSpans(spans, s)
 	spans = r.appendQuotedValueSpans(spans, s, false)
 	return applyRedactionSpans(s, spans)
 }
