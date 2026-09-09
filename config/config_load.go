@@ -154,6 +154,18 @@ type ReadOnlyConfigLoad struct {
 	Missing      bool
 	LegacyJSON   bool
 	ShadowedJSON bool
+	// EmptyStub is set when a contentless config.toml (zero bytes, whitespace,
+	// a UTF-8 BOM, or comments only) is present with no shadowing config.json
+	// and is a regular file rather than a symlink-stub. Startup's LoadConfig
+	// self-heals this state — it removes the stub and materializes defaults,
+	// returning (*Config, nil) — but a no-write diagnostic must not mutate
+	// disk, so it returns this verdict instead of the loud "config is empty"
+	// error parseConfigTOML raises. That keeps `af doctor` and `af config
+	// validate` aligned with the startup they claim to mirror (the shadow and
+	// symlink-stub cases stay loud errors, matching loadConfig). Config is nil:
+	// the effective config is the defaults startup will materialize on the
+	// next start, not something this no-write check can produce.
+	EmptyStub bool
 }
 
 // LoadConfigReadOnly reads and validates the active global config without
@@ -182,11 +194,32 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
+		// Mirror loadConfig's empty-stub disambiguation so the read-only
+		// diagnostics agree with startup's verdict on a contentless
+		// config.toml (zero bytes, whitespace, a BOM, or comments only).
+		// loadConfig self-heals the regular-file/no-config.json case by
+		// removing the stub and materializing defaults; a diagnostic that
+		// cannot write returns the verdict that self-heal would produce
+		// (EmptyStub) instead of parseConfigTOML's hard "config is empty"
+		// error — otherwise `af doctor`/`af config validate` would reject a
+		// state af boots on (#864 fingerprint; the comment-only widening in
+		// #3196 broadened this branch while leaving the read-only path
+		// divergent). The two cases loadConfig keeps as loud errors — a
+		// config.json shadow (re-materializing would discard those
+		// settings) and a symlink-stub (a hand-made arrangement, not a
+		// failed write) — fall through to parseLoadedConfigTOML, which
+		// raises the same error loadConfig does for them.
+		jsonExists := fileExists(configPath)
+		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
+			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+				return ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true}, nil
+			}
+		}
 		cfg, err := parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
 		return ReadOnlyConfigLoad{
 			Config:       cfg,
 			Path:         tomlPath,
-			ShadowedJSON: fileExists(configPath),
+			ShadowedJSON: jsonExists,
 		}, err
 	}
 	if !os.IsNotExist(tomlErr) {

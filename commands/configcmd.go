@@ -663,8 +663,13 @@ host to check that host.`,
 
 		// LoadConfigReadOnly is the same parse+validate af runs at startup, minus
 		// the materialize/convert/secure side effects LoadConfig has — so validate
-		// can never itself change the thing it is checking. A missing file is not a
-		// failure: first run has no config yet, and af materializes defaults then.
+		// can never itself change the thing it is checking. A missing file is not
+		// a failure: first run has no config yet, and af materializes defaults
+		// then. A contentless config.toml with no shadowing config.json is the
+		// same verdict from startup's side: af removes the stub and materializes
+		// defaults, so an empty stub is OK — the very state this command claims
+		// to mirror (the "same parse+validate af runs at startup") must not
+		// reject it.
 		loaded, err := config.LoadConfigReadOnly()
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
@@ -672,6 +677,10 @@ host to check that host.`,
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(),
 				apiproto.Success(configValidateResult{OK: true, Path: loaded.Path}))
+		}
+		if loaded.EmptyStub {
+			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af will regenerate defaults on the next start\n", prettyPath(loaded.Path))
+			return nil
 		}
 		if loaded.Missing {
 			fmt.Fprintln(cmd.OutOrStdout(), "config OK: no config file yet — af will write defaults on first start")
