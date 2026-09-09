@@ -1,6 +1,6 @@
 import { assertPhoneComposition } from "./phone-composition.js";
 import { expect, test } from "@playwright/test";
-import { assertPhoneBarModifiers, assertPhoneStaleRecovery, leavePageAndCleanup,
+import { assertPhoneBarModifiers, assertPhoneCustomInterruptIdentity, assertPhoneStaleRecovery, leavePageAndCleanup,
   phoneInputStream } from "./phone-keybar.js";
 import { assertPhoneKeybarInputEffects } from "./phone-keybar-effects.js";
 
@@ -33,6 +33,7 @@ test("#4036 phone keybar applies and consumes modifiers before the next letter",
     await page.keyboard.type("xy");
     await expect.poll(stream).toBe(before + "xy");
     await assertPhoneKeybarInputEffects(page, stream);
+    await assertPhoneCustomInterruptIdentity(page, stream);
   } finally {
     try {
       await page.screenshot({ path: testInfo.outputPath("phone-keybar.png") });

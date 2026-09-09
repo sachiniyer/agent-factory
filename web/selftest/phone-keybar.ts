@@ -1,4 +1,3 @@
-import { assertPhoneComposition } from "./phone-composition.js";
 import { expect, type Page } from "@playwright/test";
 import { decode, Op } from "../src/frame.js";
 
@@ -57,8 +56,23 @@ export async function assertPhoneKeybar(page: Page, stream: () => string): Promi
   await page.keyboard.insertText("c"); // input/beforeinput, without keydown
   await expect.poll(stream).toBe(before + "\x03");
   await expect(bar.getByRole("button", { name: "Ctrl", exact: true })).toHaveAttribute("aria-pressed", "false");
-  await assertPhoneComposition(page, stream);
-  await assertPhoneStaleRecovery(page, stream);
+  before = stream();
+  await bar.getByRole("button", { name: "Ctrl", exact: true }).click();
+  await textarea.evaluate(el => {
+    const input = el as HTMLTextAreaElement;
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    input.dispatchEvent(new InputEvent("beforeinput", {
+      bubbles: true, data: "c", inputType: "insertCompositionText", isComposing: true,
+    }));
+    input.value += "c";
+    input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "c" }));
+    input.dispatchEvent(new InputEvent("input", {
+      bubbles: true, data: "c", inputType: "insertCompositionText", isComposing: true,
+    }));
+    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "c" }));
+  });
+  await expect.poll(stream).toBe(before + "\x03");
+  await expect(textarea).toBeFocused();
   // Locked modifiers must neither double-send physical keypress + input pairs,
   // nor release on a soft-keyboard character.
   const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
@@ -168,17 +182,6 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     await page.keyboard.insertText("a");
     await expect.poll(stream).toBe(before + bytes + "a");
   }
-  // Ctrl+C is custom-handled before xterm can fire onKey. Its explicit marker
-  // must still retain the physically held Ctrl identity: redundant sticky Ctrl
-  // remains the advertised next key rather than being consumed by the ETX alias.
-  before = stream();
-  await ctrl.click();
-  await page.keyboard.press("Control+c");
-  await expect.poll(stream).toBe(before + "\x03");
-  await expect(ctrl).toHaveAttribute("data-state", "once");
-  await page.keyboard.insertText("a");
-  await expect.poll(stream).toBe(before + "\x03\x01");
-  await expect(ctrl).toHaveAttribute("data-state", "off");
   for (const [modifier, chord, bytes] of [
     ["Alt", "Control+x", "\x1b\x18"],
     ["Ctrl", "Alt+x", "\x1b\x18"],
@@ -187,7 +190,7 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
     const button = bar.getByRole("button", { name: modifier, exact: true });
     await button.click();
     await page.keyboard.press(chord);
-    await expect.poll(stream).toBe(before + bytes);
+    await expect.poll(stream, { message: `${modifier} + ${chord} reaches the PTY` }).toBe(before + bytes);
     await expect(button).toHaveAttribute("data-state", "off");
     await page.keyboard.insertText("a");
     await expect.poll(stream).toBe(before + bytes + "a");
@@ -287,4 +290,18 @@ export async function assertPhoneBarModifiers(page: Page, stream: () => string):
   await page.keyboard.insertText("z");
   await expect.poll(stream).toBe(before + "\x1b[1;5A\x18\x1b\tz");
   await expect(bar.getByRole("button", { name: "Alt", exact: true })).toHaveAttribute("data-state", "off");
+}
+
+/** Exercise the custom interrupt only after every probe that needs the cat fixture. */
+export async function assertPhoneCustomInterruptIdentity(page: Page, stream: () => string): Promise<void> {
+  const ctrl = page.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Ctrl", exact: true });
+  const before = stream();
+  await ctrl.click();
+  await page.keyboard.press("Control+c");
+  await expect.poll(stream, { message: "sticky Ctrl + physical Ctrl+C reaches the PTY" }).toBe(before + "\x03");
+  // Ctrl+C is custom-handled before xterm can fire onKey. Its explicit marker
+  // must retain the physically held Ctrl identity, so redundant sticky Ctrl
+  // remains armed. Sending ETX kills the cat fixture, hence this is the final
+  // stream assertion in the spec rather than part of the reusable matrix.
+  await expect(ctrl).toHaveAttribute("data-state", "once");
 }
