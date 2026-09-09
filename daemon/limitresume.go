@@ -115,9 +115,10 @@ func (m *Manager) ResumeLimitedSessions() {
 			live[stableSessionKey(repoID, inst)] = struct{}{}
 		}
 	}
-	// Drop retry state for sessions that are gone, or that have stayed OUT of
-	// LimitReached past their backoff window (a resume that stuck — the episode
-	// is over). State is deliberately KEPT for a row that is momentarily
+	// Drop retry state for sessions that are gone, or that have stayed outside
+	// resume eligibility past their backoff window (the episode is over). A
+	// healthy pending manual swap still owns an unfinished recovery episode.
+	// State is deliberately KEPT for a row that is momentarily
 	// non-limit within its backoff window: that window is the gap between
 	// resumeFromLimit clearing the limit and the next poll re-detecting the
 	// banner, and keeping the state there is what throttles an immediate
@@ -135,7 +136,7 @@ func (m *Manager) ResumeLimitedSessions() {
 		if st == nil {
 			continue
 		}
-		if inst.GetLiveness() != session.LiveLimitReached && !now.Before(st.nextAttempt) {
+		if !accountSwapScheduledResumeEligible(inst) && !now.Before(st.nextAttempt) {
 			delete(m.limitResumeStates, stateKey)
 		}
 	}
@@ -169,7 +170,7 @@ func (m *Manager) resumeLimitedSession(
 	retryInterval time.Duration,
 	loadEvidence accountLimitEvidenceLoader,
 ) {
-	if inst == nil || !inst.Started() || inst.GetLiveness() != session.LiveLimitReached {
+	if inst == nil || !inst.Started() || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
 	if !cfg.LimitAutoResume {
@@ -218,8 +219,18 @@ func (m *Manager) resumeLimitedSession(
 	if hasReset {
 		ordinaryDue = resetAt.Add(limitResumeGrace)
 	}
+	incomingManualReset := false
+	if accountSwap != nil && accountSwap.manual && hasReset {
+		limitedAgent, limitedAccount, limited := inst.LimitIdentity()
+		incomingManualReset = limited && limitedAgent == accountSwap.agent && limitedAccount == accountSwap.to
+	}
 	due := ordinaryDue
-	if accountSwap != nil {
+	if accountSwap != nil && !incomingManualReset {
+		// Account labels are agent-scoped. The ordinary reset belongs to the
+		// outgoing agent/account, so it cannot delay candidate preflight for a
+		// different identity. A parked manual transaction is different: only when
+		// both its agent and label name the incoming identity is ordinaryDue exactly
+		// when that same identity may be contacted again.
 		due = now
 	}
 	// The per-attempt backoff/interval gate sits on top of the due time, so the
@@ -264,7 +275,7 @@ func (m *Manager) resumeLimitedSession(
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || inst.GetLiveness() != session.LiveLimitReached {
+	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
 	if accountSwap != nil {
