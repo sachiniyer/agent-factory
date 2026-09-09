@@ -529,13 +529,20 @@ func maskSnapshotOperationClock(t *testing.T, body string) string {
 	const field = `"operation_clock_ms":`
 	start := strings.Index(body, field)
 	require.NotEqual(t, -1, start, "Snapshot envelope must carry its operation clock")
-	valueStart := start + len(field)
-	valueEnd := valueStart
+	numberStart := start + len(field)
+	for numberStart < len(body) && strings.ContainsRune(" \t\r\n", rune(body[numberStart])) {
+		numberStart++
+	}
+	valueEnd := numberStart
+	if valueEnd < len(body) && body[valueEnd] == '-' {
+		valueEnd++
+	}
+	digitStart := valueEnd
 	for valueEnd < len(body) && body[valueEnd] >= '0' && body[valueEnd] <= '9' {
 		valueEnd++
 	}
-	require.Greater(t, valueEnd, valueStart, "Snapshot operation clock must be numeric")
-	return body[:valueStart] + "<operation-clock>" + body[valueEnd:]
+	require.Greater(t, valueEnd, digitStart, "Snapshot operation clock must be numeric")
+	return body[:numberStart] + "<operation-clock>" + body[valueEnd:]
 }
 
 // TestHTTP_SuccessBodyUsesSharedEnvelopeWriter pins that the HTTP success body is
