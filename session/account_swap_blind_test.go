@@ -59,6 +59,59 @@ func TestAccountSwapBlindTeardownIdentifiesOnlyAgent(t *testing.T) {
 	}
 }
 
+func TestAccountSwapAbsentProbeStillChecksAgentPane(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	const name = "af_absent_before_account_swap"
+	var missing *exec.ExitError
+	require.ErrorAs(t, exec.Command("sh", "-c", "exit 1").Run(), &missing)
+	missing.Stderr = []byte("can't find session: " + name)
+	executor := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return missing },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(c.String(), "list-panes") {
+				return nil, missing
+			}
+			return nil, nil
+		},
+	}
+	inst := accountSwapTestInstance("claude")
+	repo := initTempGitRepo(t)
+	gw, err := git.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
+	inst.liveness = LiveRunning
+	inst.Account = "work"
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, "claude", nil, executor))}
+
+	err = inst.StopRemainingPanesForAccountSwap()
+	require.ErrorIs(t, err, ErrAccountSwapAgentTeardownBlind)
+	require.ErrorContains(t, err, "detached child")
+	require.Equal(t, LiveRunning, inst.GetLiveness())
+	require.Equal(t, "work", inst.Account)
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap,
+		"an absent probe must not let the manual handoff commit its replacement identity")
+}
+
+func TestAccountSwapSkipsProvenPanelessSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	const agentName = "af_swap_live_agent"
+	inner := nameKeyedExec(map[string]bool{agentName: true})
+	inst := accountSwapTestInstance("claude")
+	repo := initTempGitRepo(t)
+	gw, err := git.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
+	paneless := neverSpawnedSession(t, "af_swap_paneless_sibling")
+	require.True(t, paneless.ProvenNoPane())
+	inst.Tabs = []*Tab{
+		newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", nil, inner)),
+		{ID: "shell", Name: "shell", Kind: TabKindProcess, Command: "cat", tmux: paneless},
+	}
+
+	require.NoError(t, inst.StopForAccountSwap(),
+		"positive no-pane provenance must keep exempting a sibling from teardown")
+}
+
 func TestAccountSwapUnknownSiblingTeardownIsUnsafe(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	names := []string{"af_unknown_agent", "af_unknown_shell"}

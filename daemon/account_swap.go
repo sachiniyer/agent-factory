@@ -27,6 +27,7 @@ type autoAccountSwap struct {
 	previousConversation     session.AgentConversationData
 	to                       string
 	candidates               []string
+	fromAgent                string
 	agent                    string
 	alreadySet               bool
 	fallbackDue              bool
@@ -115,10 +116,17 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	if !pending || (!currentAuto && !manual) || strings.TrimSpace(to) == "" || current != to {
 		return nil
 	}
+	fromAgent := agent
+	if manual {
+		if handoff, ok := instance.LastHandoff(); ok && strings.TrimSpace(handoff.From.Agent) != "" {
+			fromAgent = handoff.From.Agent
+		}
+	}
 	return &autoAccountSwap{
 		manual: manual, mission: mission,
 		from:       from,
 		to:         to,
+		fromAgent:  fromAgent,
 		agent:      agent,
 		alreadySet: true,
 	}
@@ -387,7 +395,12 @@ func accountSwapIdentity(agent, account string) string {
 
 func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 	if swap.manual {
-		return fmt.Sprintf("[Agent Factory] Handed off from account %q to %s account %q. Continue the same task.\n\n%s", swap.from, swap.agent, swap.to, swap.mission)
+		fromAgent := swap.fromAgent
+		if strings.TrimSpace(fromAgent) == "" {
+			fromAgent = swap.agent
+		}
+		return fmt.Sprintf("[Agent Factory] Handed off from %s to %s. Continue the same task.\n\n%s",
+			accountSwapIdentity(fromAgent, swap.from), accountSwapIdentity(swap.agent, swap.to), swap.mission)
 	}
 	notice := fmt.Sprintf(
 		"[Agent Factory] This session switched from %s to %s after the previous identity reached its usage limit. "+

@@ -95,6 +95,34 @@ func TestHandoffAccountCombinesNewAgentAndAccount(t *testing.T) {
 	require.Equal(t, "claude", resp.To)
 	require.Equal(t, "personal", inst.Account)
 	require.Equal(t, "new brief", inst.GetPrompt())
+	_, _, prompts := backend.snapshot()
+	require.Len(t, prompts, 1)
+	require.Contains(t, prompts[0], `Handed off from codex account "work" to claude account "personal".`)
+}
+
+func TestHandoffAccountPromptNamesAmbientAndPinnedIdentities(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		fromAccount string
+		want        string
+	}{
+		{name: "ambient", want: `Handed off from the ambient claude identity to claude account "personal".`},
+		{name: "pinned", fromAccount: "work", want: `Handed off from claude account "work" to claude account "personal".`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+			configureLimitAccountCandidate(t, m, "personal")
+			inst.Account = tc.fromAccount
+			inst.ClearLimitReached()
+
+			_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+			require.NoError(t, err)
+			_, _, prompts := backend.snapshot()
+			require.Len(t, prompts, 1)
+			require.Contains(t, prompts[0], tc.want)
+			require.NotContains(t, prompts[0], `account ""`)
+		})
+	}
 }
 
 func TestHandoffAccountRecoversPinnedDelivery(t *testing.T) {

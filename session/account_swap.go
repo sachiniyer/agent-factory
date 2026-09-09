@@ -290,9 +290,10 @@ func (i *Instance) StopForAccountSwap() error {
 	return stopper.stopForAccountSwap(i, false)
 }
 
-// StopRemainingPanesForAccountSwap rechecks every local sibling when the agent
-// probe already established that tab zero is absent. A retry must not promote
-// that one absence into proof that every credential-bearing pane is gone.
+// StopRemainingPanesForAccountSwap rechecks every local pane when the agent
+// probe reported that tab zero was absent. The probe is only a hint: a retry
+// still needs ProvenNoPane or a blindness-aware teardown before it can treat
+// any credential-bearing pane as gone.
 func (i *Instance) StopRemainingPanesForAccountSwap() error {
 	backend := i.currentBackend()
 	i.mu.RLock()
@@ -402,7 +403,7 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 		return fmt.Errorf("account swap: session %q has no local agent runtime", i.Title)
 	}
 	for idx, tab := range tabs {
-		if agentAlreadyAbsent && idx == 0 {
+		if agentAlreadyAbsent && idx == 0 && tab != nil && tab.tmux != nil && tab.tmux.ProvenNoPane() {
 			continue
 		}
 		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {

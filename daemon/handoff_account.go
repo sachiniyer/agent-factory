@@ -57,8 +57,11 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	if instance.LimitReached() {
 		reason = session.HandoffReasonUsageLimit
 	}
-	swap := &autoAccountSwap{manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account), agent: target, reason: reason}
 	outgoing := instance.CurrentAgentName()
+	swap := &autoAccountSwap{
+		manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account),
+		fromAgent: outgoing, agent: target, reason: reason,
+	}
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
 	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, FromAccount: from, ToAccount: swap.to, HeadSHA: swap.headSHA}
 	if err != nil {
