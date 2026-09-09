@@ -342,6 +342,9 @@ const AWAITING_MAINTAINER_REVIEW_REMEDY =
   "an allowed author posts that marker as the whole first line of a PR comment, or leaves an " +
   "APPROVED review — neither needs anything from the author; it binds to this head, so a push " +
   "after it needs a fresh one, and on this path it restores the manual pass";
+const CODEX_VERDICT_REMEDY =
+  "post `@codex review` on this head in a PR comment; requesting the review needs nothing from " +
+  "the author, and the blocker clears when Codex returns a covering verdict";
 const RETRY_DELAYS_MS = [250, 1000];
 // A merge that has already STARTED needs longer than a read retry to land.
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
@@ -861,10 +864,10 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // it does not waive it. What is left is the mechanical part the gate already
   // performs for every other passing PR, so it performs it here too.
   const approval = degradedForUnavailableReviewer ? codex.maintainerApproval : null;
-  // Named once and read twice: here, and again where the manual path assembles its
-  // blockers. #3824 named it nowhere and pushed only into `reasons`, which the
-  // manual path never reads — so on a non-allowed author's PR the item was
-  // computed, dropped, and the decision published green (#3825).
+  // This variable owns the automatic degradation's two outcomes. The manual path
+  // derives its approval requirement directly from reviewerUnavailable below:
+  // another advisory can prevent degradation from activating without making the
+  // missing review safe to waive (#4091 Codex P1).
   const awaitingMaintainerReview = degradedForUnavailableReviewer && !approval;
   if (degradedForUnavailableReviewer) {
     const outage = await require("./codex-outage.js").gateNotice({
@@ -924,6 +927,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     );
   }
   const manualMergeRequired = manualMergeReasons.length > 0;
+  const manualAwaitingMaintainerReview =
+    Boolean(codex.reviewerUnavailable) && !codex.maintainerApproval;
   // The manual path exists so branch protection does not sit red on a PR this
   // gate will never merge itself. It was passing the required check for EVERY
   // blocker, which made "the author is external" waive a live Codex finding and
@@ -934,26 +939,32 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // waive one — this is the same rule, applied to the branch that skipped it.
   //
   // The test is PER-ITEM ANSWERABLE BY A MAINTAINER, not "is it a finding". A
-  // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack] reply
-  // the maintainer already posts, so blocking on one leaves an exit. A missing
-  // play-tested label or an absent verdict has no such answer on a PR whose author
-  // does not iterate, and blocking on those would turn the manual path into a stop
-  // with no way out — the failure mode the reviewer degradation was written to
-  // avoid. Those stay notes.
+  // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack]
+  // reply, and an absent or stale verdict is cleared by posting `@codex review`
+  // on this head. Neither action needs the author, so both leave an exit and
+  // both block.
+  // The missing play-tested label remains a note as a separate policy choice;
+  // #4091 is only about enforcing the review-verdict requirement.
   //
-  // An unreviewed usage-limit degradation passes that test, so it blocks here too
-  // (#3825). The maintainer clears it by posting the approval marker on this head,
-  // which needs nothing from the author — the same property that makes a finding
-  // safe to block on. #3824 recorded it in `reasons` alone, and since this list is
-  // what the manual conclusion is computed from, a non-allowed author's decision
-  // went green carrying the verbatim title #3819 opened with.
+  // A fresh reviewer-unavailable response passes that test too (#3825). The
+  // maintainer clears it by posting the approval marker on this head, which needs
+  // nothing from the author — the same property that makes a finding safe to
+  // block on. This is required even when another advisory keeps the automatic
+  // degradation from activating: otherwise the manual decision goes green with
+  // neither a verdict nor an approval (#4091 Codex P1).
   //
-  // The two kinds never coexist: the degradation requires every OTHER reason to be
-  // absent, and a live finding is a reason.
+  // A proven reviewer-unavailable response suppresses the absent-verdict blocker
+  // even when another requirement prevents the degradation from activating yet:
+  // asking again cannot produce the verdict this remedy promises. The approval
+  // blocker replaces it immediately and can coexist with any independent finding
+  // blocker; each item keeps its own maintainer-only exit.
   const manualMergeBlockers = manualMergeRequired
     ? [
         ...(codex.findingBlockers ?? []),
-        ...(awaitingMaintainerReview
+        ...(!codex.reviewerUnavailable && codex.verdictBlocker
+          ? [codex.verdictBlocker]
+          : []),
+        ...(manualAwaitingMaintainerReview
           ? [
               {
                 reason: AWAITING_MAINTAINER_REVIEW_REASON,
@@ -4223,6 +4234,7 @@ async function evaluateCodex({
   let reviewerUnavailableSince = null;
   let reviewerUnavailableKind = null;
   let reviewerUnavailableReason = "";
+  let verdictBlocker = null;
   const { owner, repo } = context.repo;
   // Two anchors, because the rules below ask two different questions and one
   // value cannot answer both (#3380).
@@ -4330,14 +4342,22 @@ async function evaluateCodex({
     .filter(Boolean)
     .sort((left, right) => right.time - left.time);
   const verdict = matchingReviewArtifacts[0];
+  // The artifact's own time: the comment's for a prose line, the row's for a
+  // summary row. A matching artifact from before this head became current is not
+  // a covering verdict, so availability still has to be classified after it.
+  const verdictTime = verdict?.time || 0;
+  const verdictIsFresh =
+    Boolean(verdict) && headCurrentSince != null && verdictTime > headCurrentSince;
 
-  if (!verdict) {
+  if (!verdictIsFresh) {
     // Only the latest response decides availability: an older unavailable note
-    // that a later verdict superseded proves nothing about now. Conversely, a
-    // later Codex response that is neither a review, finding nor verdict remains
-    // reviewer-unavailable instead of silently withdrawing the degradation
-    // (#3985). A read failure throws out of retryRead rather than reaching here,
-    // so an unreadable list can never be mistaken for silence or availability.
+    // that a later FRESH verdict superseded proves nothing about now. Conversely,
+    // a later Codex response after a stale matching verdict can prove the reviewer
+    // unavailable on the restored head (#4091 Codex P1). A response that is
+    // neither a review, finding nor verdict remains reviewer-unavailable instead
+    // of silently withdrawing the degradation (#3985). A read failure throws out
+    // of retryRead rather than reaching here, so an unreadable list can never be
+    // mistaken for silence or availability.
     //
     // Latest across issue comments, reviews AND inline replies — already sorted
     // newest-first. Reading only issue comments would miss a review posted after
@@ -4380,29 +4400,28 @@ async function evaluateCodex({
         ? `; the latest Codex response was ${cause}${inlineSource}`
         : `; the latest Codex response was ${cause} but predates this head, so it is not ` +
           "evidence about this head";
-    // Split, because the two states need different actions from a reader: one
-    // says wait for or request a review, the other says a review ran and this
-    // gate could not read it — go look at the artifact, not at Codex.
-    const missingVerdictReason = summaryNamesHead(codexReviewArtifacts, sha) &&
-      summaryCorroboration(corroborationArtifacts, sha, headCurrentSince)
-      ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
-      : `Codex has not reviewed head ${sha} yet${suffix}`;
+    // Split, because the states need different actions from a reader: silence
+    // says request a review, an unparseable review says inspect the artifact, and
+    // a stale matching verdict says its review predates this head transition.
+    const missingVerdictReason = verdict
+      ? `Codex verdict for the head commit is older than the head commit timestamp${suffix}`
+      : summaryNamesHead(codexReviewArtifacts, sha) &&
+          summaryCorroboration(corroborationArtifacts, sha, headCurrentSince)
+        ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
+        : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
       reviewerUnavailableSince = new Date(rateLimitTime).toISOString();
       reviewerUnavailableKind = unavailable.kind;
     }
     reasons.push(missingVerdictReason);
+    verdictBlocker = {
+      reason: missingVerdictReason,
+      remedy: CODEX_VERDICT_REMEDY,
+    };
   } else {
-    // The artifact's own time: the comment's for a prose line, the row's for a
-    // summary row.
-    const verdictTime = verdict.time;
-    if (headCurrentSince == null || verdictTime === 0 || verdictTime <= headCurrentSince) {
-      reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
-    } else {
-      notes.push(`Codex verdict matches head ${sha}`);
-      notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
-    }
+    notes.push(`Codex verdict matches head ${sha}`);
+    notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
   }
 
   // Findings are read from artifacts BOUND to this head, which is a wider set
@@ -4641,6 +4660,7 @@ async function evaluateCodex({
     reviewerUnavailableReason,
     reviewerUnavailableSince,
     reviewerUnavailableKind,
+    verdictBlocker,
     findingBlockers,
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
