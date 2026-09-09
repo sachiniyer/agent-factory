@@ -278,9 +278,37 @@ func callDaemon(method string, req any, resp any) error {
 	// an upgrade candidate rejects mutations until its validator releases
 	// probation. Both are alive and retryable, so callers share one bounded
 	// retry rather than growing per-call-site lifecycle logic.
+	//
+	// The quiescing admission is the one refusal whose retryable response is
+	// followed by the daemon FREEING the control socket mid-loop (#2212 R2b
+	// upgrade hand-off): after returning errDaemonQuiescing it exits and
+	// unlinks the socket before the candidate binds, so a subsequent
+	// callDaemonNoEnsure re-dial lands in that dead window with a bare dial
+	// error (ECONNREFUSED / fs.ErrNotExist) that IsDaemonAdmissionRetryable
+	// does NOT classify as retryable. Without handling this, the loop would
+	// terminate on the first re-dial in the window and surface the bare dial
+	// error, violating the errDaemonQuiescing contract that the client reach
+	// the new daemon that takes over.
+	//
+	// Treat that dial error as retryable ONLY after the loop has already
+	// observed a quiescing admission refusal (seenQuiescing): the guard keeps
+	// a genuine cold no-daemon dial failure non-retryable, preserving the
+	// existing fail-open behavior for non-hand-off errors. On the absent
+	// error re-run EnsureDaemon so the upgrade gate — provably live
+	// throughout the dead window (RecoveryActorLive) — can wait for the
+	// candidate to bind and surface its typed UpgradeInProgressError rather
+	// than leaving the loop to spin on bare dials. This restores parity with
+	// withDaemonHTTP's IsTransportError arm.
+	var seenQuiescing bool
 	deadline := time.Now().Add(daemonAdmissionRetryWait)
-	for IsDaemonAdmissionRetryable(err) && time.Now().Before(deadline) {
+	for (IsDaemonAdmissionRetryable(err) || (seenQuiescing && isDaemonAbsentErr(err))) && time.Now().Before(deadline) {
+		if IsDaemonQuiescingErr(err) {
+			seenQuiescing = true
+		}
 		time.Sleep(daemonAdmissionRetryPoll)
+		if isDaemonAbsentErr(err) {
+			_ = EnsureDaemon()
+		}
 		err = callDaemonNoEnsure(method, req, resp)
 	}
 	return err
