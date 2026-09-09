@@ -176,10 +176,6 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	return ensureDaemonAdHocUntil(launch, deadline)
 }
 
-func ensureDaemonThroughUnit(launch func() error) error {
-	return ensureDaemonThroughUnitUntil(launch, time.Time{})
-}
-
 func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error {
 	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
 
@@ -206,10 +202,6 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 	// still surfaced where the user looks: the warning above, and af doctor /
 	// af daemon status carry a supervision-owner row. Report success.
 	return nil
-}
-
-func ensureDaemonAdHoc(launch func() error) error {
-	return ensureDaemonAdHocUntil(launch, time.Time{})
 }
 
 func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
@@ -283,7 +275,7 @@ func pingDaemon() error {
 
 func pingDaemonUntil(deadline time.Time) error {
 	var resp PingResponse
-	return callDaemonNoEnsureUntil("Ping", PingRequest{}, &resp, deadline)
+	return callDaemonNoEnsureBefore("Ping", PingRequest{}, &resp, deadline, true)
 }
 
 // pingDaemonResponse pings the daemon and returns its full reply, so callers
@@ -300,7 +292,14 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	return callDaemonNoEnsureUntil(method, req, resp, time.Time{})
 }
 
+// callDaemonNoEnsureUntil bounds only the retry dial. Once a daemon accepts the
+// RPC, handler execution keeps its historical method-specific lifetime: session
+// creation and other legitimate operations may outlive the admission window.
 func callDaemonNoEnsureUntil(method string, req any, resp any, deadline time.Time) error {
+	return callDaemonNoEnsureBefore(method, req, resp, deadline, false)
+}
+
+func callDaemonNoEnsureBefore(method string, req any, resp any, deadline time.Time, boundRPC bool) error {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
 		return err
@@ -319,7 +318,7 @@ func callDaemonNoEnsureUntil(method string, req any, resp any, deadline time.Tim
 	if err != nil {
 		return err
 	}
-	if !deadline.IsZero() {
+	if boundRPC && !deadline.IsZero() {
 		if err := conn.SetDeadline(deadline); err != nil {
 			_ = conn.Close()
 			return err
