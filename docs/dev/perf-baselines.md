@@ -80,10 +80,10 @@ they never establish that a frame completed.
 The original P1 recording was measured on 2026-09-05; its layout-shift and TUI
 entries remain unchanged. The three web latency baselines were tightened on
 2026-09-06 for #3914 using the six after samples detailed below. Bundle baselines
-were refreshed on 2026-09-07 for #4050 using three container samples. Measurements
-use Linux amd64, Node/Chromium from the pinned Playwright 1.56.1 Noble image,
-Go 1.25.0 and a 4GiB container memory limit. The original warm end-to-end run took
-about three minutes.
+were refreshed on 2026-09-07 for #4050 and on 2026-09-09 for #4018, each using
+three container samples. Measurements use Linux amd64, Node/Chromium from the
+pinned Playwright 1.56.1 Noble image, Go 1.25.0 and a 4GiB container memory limit.
+The original warm end-to-end run took about three minutes.
 
 The committed `scripts/perf/baselines.json` is the budget source. The table below
 reports arithmetic mean, range and population standard deviation: six samples
@@ -94,8 +94,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 921868.000 | 921868.000–921868.000 | 0.000 | 967961.400 |
-| gzip_bytes | 205077.000 | 205077.000–205077.000 | 0.000 | 215330.850 |
+| raw_bytes | 970703.000 | 970703.000–970703.000 | 0.000 | 1019238.150 |
+| gzip_bytes | 216250.000 | 216250.000–216250.000 | 0.000 | 227062.500 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -110,8 +110,8 @@ payload increase. Timing margin is 100% of the baseline, with a 50ms absolute
 floor, to tolerate shared-runner scheduling and sub-frame observation noise.
 Layout-shift margin is an absolute 0.01 (multiplying a zero baseline would allow
 no noise). These are regression budgets, not latency SLOs. P3 tightened only the first-terminal,
-echo and initial-rail baselines while preserving this margin policy; #4050 refreshed
-only the bundle entries under the same 5% policy. CI compares the
+echo and initial-rail baselines while preserving this margin policy; #4050 and
+#4018 refreshed only the bundle entries under the same 5% policy. CI compares the
 three-run mean and fails on missing, negative or non-finite samples, missing
 budgets, or a mean above its budget. It never learns a new baseline in CI.
 
@@ -120,6 +120,26 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Account handoff bundle refresh (#4018)
+
+Recorded with `AF_PERF_RECORD=1 make perf-container` on PR head
+`bdcda1c9b95f7687eb09b7f591906ccbf4d227d9`, artifact run `2357344-953435`.
+The two bundle rows above come from that run's `metrics.md`; all three samples
+were identical. Only those two entries were copied from the generated
+`baselines.json`. Every recorded timing and layout-shift mean passed its existing
+budget, so their baselines, samples, deviations and margins remain unchanged.
+
+The reviewed PR adds 8,173 raw JavaScript bytes over master; CSS is unchanged and
+the service worker changes only its generated cache stamp. That code provides the
+same-agent and cross-agent account picker and its eligibility rules, the
+version-bound account-handoff call and mixed-version warnings, explicit but
+fail-closed recovery for ambiguous mission delivery, and project-menu focus
+preservation. The previous bundle baseline also predates 40,662 bytes already
+merged to master: master's 962,530-byte bundle passed the old 967,961.4-byte
+budget, but left 5,431.4 bytes of headroom. The reviewed account-handoff delta
+raised the total to 970,703 bytes, 2,741.6 bytes over that budget. This refresh
+records the reviewed feature cost while preserving the 5% regression margin.
 
 ### Bundle refresh provenance (#4050)
 
