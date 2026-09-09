@@ -300,12 +300,18 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 					return
 				}
 				if scopeUnit != "" && waitErr != nil && ctx.Err() == nil && state != hookEntryFinished {
-					log.WarningLog.Printf("post-worktree hook launcher for entry %d exited without proving scope ownership; waiting for the competing claim", index)
+					log.WarningLog.Printf("post-worktree hook launcher for entry %d exited without proving scope ownership; waiting for a competing claim or positive absence", index)
 					_ = outputFile.Close()
-					if waitForHookEntryRecovery(ctx, run.progress, index) {
+					outcome, recovered := waitForHookEntryRecoveryOutcome(ctx, run.progress, index)
+					if !recovered {
+						return
+					}
+					if outcome != hookEntryUnclaimed {
 						continue
 					}
-					return
+					// No durable claim and no live launcher remain. This launcher's
+					// error is now the terminal outcome; publishing it once lets the
+					// ordered suffix advance without relaunching the failed entry.
 				}
 				if state == hookEntryStarted {
 					if !run.progress.terminalizeInactiveClaim(ctx, index, waitErr) {

@@ -17,6 +17,11 @@ var runningHookPrefixesForResume = systemdunit.RunningHookPrefixes
 // positively abandoned claim is terminalized as failed and stepped over; only
 // an unclaimed entry is eligible to be launched when the command loop retries.
 func waitForHookEntryRecovery(ctx context.Context, p *hookProgress, index int) bool {
+	_, recovered := waitForHookEntryRecoveryOutcome(ctx, p, index)
+	return recovered
+}
+
+func waitForHookEntryRecoveryOutcome(ctx context.Context, p *hookProgress, index int) (hookEntryState, bool) {
 	interval := hookAdoptionPollInterval
 	if interval <= 0 {
 		interval = time.Millisecond
@@ -50,10 +55,10 @@ func waitForHookEntryRecovery(ctx context.Context, p *hookProgress, index int) b
 				if len(live) == 0 {
 					switch state {
 					case hookEntryFinished, hookEntryUnclaimed:
-						return true
+						return state, true
 					case hookEntryStarted:
 						if p.terminalizeInactiveClaim(ctx, index, errors.New("claimant disappeared before recording a terminal receipt")) {
-							return true
+							return hookEntryFinished, true
 						}
 					}
 				}
@@ -61,7 +66,7 @@ func waitForHookEntryRecovery(ctx context.Context, p *hookProgress, index int) b
 		}
 		select {
 		case <-ctx.Done():
-			return false
+			return hookEntryUnknown, false
 		case <-ticker.C:
 		}
 	}

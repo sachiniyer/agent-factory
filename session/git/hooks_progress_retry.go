@@ -20,10 +20,13 @@ func retireHookProgressSnapshot(p *hookProgress, path string) (bool, error) {
 			retired := filepath.Join(filepath.Dir(path), "retired-"+filepath.Base(p.Directory)+".json")
 			if _, statErr := BoundedLstat(retired); statErr == nil {
 				// A prior attempt may have renamed the resumable journal before
-				// failing to remove its receipts. Continue the same retirement
-				// against the non-resumable name.
-				cleanup = hookProgressCleanup{journal: retired, progress: p}
-				return nil
+				// failing its directory sync or receipt removal. Re-establish the
+				// durability barrier before continuing that retirement.
+				retired, retireErr := retireHookProgressName(retired, p)
+				if retireErr == nil {
+					cleanup = hookProgressCleanup{journal: retired, progress: p}
+				}
+				return retireErr
 			} else if !os.IsNotExist(statErr) {
 				return statErr
 			}

@@ -70,19 +70,16 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 		log.WarningLog.Printf("post-worktree hook journal for %s is not resumable: %v; the current run will continue, but an interrupted suffix cannot be restarted safely", run.worktreePath, identityErr)
 	}
 	ownerSnapshot, ownersErr := boundedHookProgressOwners()
+	pruneNow := time.Now()
+	var candidates []keptProgress
+	var cleanups []hookProgressCleanup
 	var progress *hookProgress
-	var retired []hookProgressCleanup
 	err = withHookProgressLock(filepath.Dir(path), func(dir string, identity os.FileInfo) error {
-		// Share one acquisition budget for GC and publication; a contended home
-		// must not pay the timeout twice before reporting that hooks could not start.
 		if ownersErr == nil && dir != ownerSnapshot.hookDirectory {
 			ownersErr = fmt.Errorf("hook owner snapshot belongs to %s, not locked directory %s", ownerSnapshot.hookDirectory, dir)
 		}
 		if ownersErr == nil {
-			ownersErr = pruneHookProgressLocked(dir, time.Now(), ownerSnapshot.owners, &retired)
-		}
-		if ownersErr != nil {
-			log.WarningLog.Printf("cannot prune inactive hook journals: %v", ownersErr)
+			candidates, ownersErr = collectHookProgressCandidatesLocked(dir, pruneNow, ownerSnapshot.owners, &cleanups)
 		}
 		var publishErr error
 		progress, publishErr = publishHookProgress(run, commands, prefix, generation, filepath.Join(dir, filepath.Base(path)), identity, checkoutIdentity, resumeDisabled)
@@ -91,8 +88,13 @@ func newHookProgress(run hookRun, commands []string, prefix, generation string) 
 	if errors.Is(err, config.ErrLockTimeout) {
 		return nil, fmt.Errorf("hook journal lock held by another process; hooks could not start; retry once the holder releases it: %w", err)
 	}
-	if cleanupErr := cleanupHookProgressArtifacts(retired); cleanupErr != nil {
-		log.WarningLog.Printf("cannot finish reclaiming inactive hook journals: %v", cleanupErr)
+	if ownersErr == nil {
+		ownersErr = finishHookProgressPrune(filepath.Dir(path), pruneNow, ownerSnapshot, candidates, cleanups)
+	} else {
+		ownersErr = errors.Join(ownersErr, cleanupHookProgressArtifacts(cleanups))
+	}
+	if ownersErr != nil {
+		log.WarningLog.Printf("cannot prune inactive hook journals: %v", ownersErr)
 	}
 	if err == nil && progress != nil {
 		cleanupSupersededHookProgress(progress.supersededDirectory)

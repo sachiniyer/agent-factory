@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -56,13 +57,33 @@ func (p *hookProgress) recordLaunchFailure(ctx context.Context, index int, cause
 		return false
 	}
 	published = true
-	if parent, err := os.Open(p.Directory); err == nil {
-		if syncErr := parent.Sync(); syncErr != nil {
-			log.WarningLog.Printf("cannot sync failed post-worktree hook entry %d: %v", index, syncErr)
-		}
-		_ = parent.Close()
+	return p.waitForFailedClaimSync(ctx, index)
+}
+
+func (p *hookProgress) waitForFailedClaimSync(ctx context.Context, index int) bool {
+	interval := hookAdoptionPollInterval
+	if interval <= 0 {
+		interval = time.Millisecond
 	}
-	return true
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lastError string
+	for {
+		if err := hookProgressSyncDirectory(p.Directory); err == nil {
+			if lastError != "" {
+				log.InfoLog.Printf("failed post-worktree hook entry %d durability sync recovered", index)
+			}
+			return true
+		} else if message := err.Error(); message != lastError {
+			log.WarningLog.Printf("cannot sync failed post-worktree hook entry %d: %v; keeping suffix pending", index, err)
+			lastError = message
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
 }
 
 // A started receipt can be made terminal only after the durable scope probe
