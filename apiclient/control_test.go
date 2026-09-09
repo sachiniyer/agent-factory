@@ -123,7 +123,7 @@ func TestControlRoundTrips(t *testing.T) {
 	})
 
 	t.Run("HandoffSession preserves committed response", func(t *testing.T) {
-		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.HandoffSessionResponse{
 				OK: true, From: "claude", To: "claude", FromAccount: "work", ToAccount: "personal", HeadSHA: "abc123",
 				MutationOutcome: daemon.MutationOutcome{Code: apiproto.ErrorCodeMutationCommitted, Warning: "pending settlement"},
@@ -136,7 +136,7 @@ func TestControlRoundTrips(t *testing.T) {
 	})
 
 	t.Run("HandoffSession refuses an account mismatch", func(t *testing.T) {
-		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "codex"})
 		})
 		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
@@ -147,7 +147,7 @@ func TestControlRoundTrips(t *testing.T) {
 	})
 
 	t.Run("HandoffSession compares the canonical account", func(t *testing.T) {
-		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "claude", ToAccount: "personal"})
 		})
 		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: " personal "})
@@ -157,7 +157,7 @@ func TestControlRoundTrips(t *testing.T) {
 	})
 
 	t.Run("HandoffSession preserves committed warning with account mismatch", func(t *testing.T) {
-		c := routeServer(t, "HandoffSession", func([]byte) apiproto.Envelope {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.HandoffSessionResponse{
 				OK: true, From: "claude", To: "claude",
 				MutationOutcome: daemon.MutationOutcome{Code: apiproto.ErrorCodeMutationCommitted, Warning: "pending settlement"},
@@ -169,9 +169,12 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
-	t.Run("HandoffSession refuses an unsupported daemon before target-only mutation", func(t *testing.T) {
+	t.Run("HandoffSession binds support to the target-only mutation", func(t *testing.T) {
 		called := false
-		c := routeServerWithAccountHandoff(t, "HandoffSession", false, func([]byte) apiproto.Envelope {
+		// Model a daemon replacement between the old health probe and mutation:
+		// health advertises account handoff, but the daemon serving mutations has
+		// only the legacy endpoint whose target-only behavior is unsafe for a pin.
+		c := routeServerWithAccountHandoff(t, "HandoffSession", true, func([]byte) apiproto.Envelope {
 			called = true
 			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "codex"})
 		})

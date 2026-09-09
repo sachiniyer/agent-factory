@@ -27,6 +27,12 @@ type HandoffSessionRequest struct {
 	Brief string `json:"brief"`
 }
 
+// AccountAwareHandoffMethod is the version-bound mutation endpoint used by
+// first-party clients. Its presence on the daemon that receives the request is
+// the capability check: a daemon predating account-aware handoffs cannot serve
+// this method, so it refuses before any legacy agent-only mutation can run.
+const AccountAwareHandoffMethod = "HandoffSessionV2"
+
 type HandoffSessionResponse struct {
 	OK          bool   `json:"ok"`
 	FromAccount string `json:"from_account,omitempty"`
@@ -54,6 +60,13 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 	}
 	resp.OK = true
 	return nil
+}
+
+// HandoffSessionV2 binds account-aware admission and the destructive handoff to
+// one request. Keep the implementation in HandoffSession so legacy callers and
+// this versioned entry point share exactly one mutation path.
+func (s *controlServer) HandoffSessionV2(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	return s.HandoffSession(req, resp)
 }
 
 // HandoffSession swaps a session's agent in place, keeping its workspace,

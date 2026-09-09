@@ -44,7 +44,7 @@ func (legacyCommittedTaskRPC) AddTask(_ AddTaskRequest, _ *AddTaskResponse) erro
 	return errors.New(taskAddCommittedErrorPrefix + " simulated reload failure")
 }
 
-type legacyHandoffRPC struct{}
+type accountIgnoringHandoffRPC struct{}
 
 type unsupportedAccountHandoffRPC struct {
 	handoffCalls int
@@ -58,19 +58,20 @@ func (committedResumeRPC) ResumeFromLimit(_ ResumeFromLimitRequest, resp *Resume
 	return nil
 }
 
-func (legacyHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
+func (accountIgnoringHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
 	return nil
 }
 
-func (legacyHandoffRPC) HandoffSession(_ HandoffSessionRequest, resp *HandoffSessionResponse) error {
+func (accountIgnoringHandoffRPC) HandoffSessionV2(_ HandoffSessionRequest, resp *HandoffSessionResponse) error {
 	*resp = HandoffSessionResponse{OK: true, From: "claude", To: "codex"}
 	return nil
 }
 
 func (s *unsupportedAccountHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
+	resp.AccountHandoff = true
 	return nil
 }
 
@@ -166,7 +167,7 @@ func TestControlClientClassifiesLegacyCommittedRPCError(t *testing.T) {
 }
 
 func TestControlClientClassifiesIgnoredHandoffAccountAsCommitted(t *testing.T) {
-	serveControlRPC(t, legacyHandoffRPC{})
+	serveControlRPC(t, accountIgnoringHandoffRPC{})
 
 	resp, err := HandoffSession(HandoffSessionRequest{To: "codex", Account: "personal"})
 	require.Equal(t, "codex", resp.To)
@@ -183,7 +184,8 @@ func TestControlClientRefusesTargetOnlyHandoffBeforeUnsupportedDaemonMutates(t *
 
 	_, err := HandoffSession(HandoffSessionRequest{To: "codex"})
 	require.ErrorContains(t, err, "account-aware handoff")
-	require.Zero(t, handler.handoffCalls, "an unsupported daemon must never receive the mutation")
+	require.Zero(t, handler.handoffCalls,
+		"a legacy mutation must stay untouched even when that daemon's health response advertised support")
 }
 
 // The control socket is net/rpc with gob encoding, and gob ELIDES zero-valued

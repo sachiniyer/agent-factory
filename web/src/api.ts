@@ -541,6 +541,10 @@ export interface HandoffResult {
   code?: string;
 }
 
+const ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
+const ACCOUNT_AWARE_HANDOFF_UNSUPPORTED =
+  "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon — upgrade it); the handoff was not sent";
+
 /** Continues a session under another agent or account, in place (#2013) — the
  *  web half of the TUI's `F`. The daemon keeps the worktree and branch and
  *  delivers a mission brief to the incoming identity; the resulting
@@ -557,7 +561,17 @@ export interface HandoffResult {
  *  A failed handoff (not found, busy, unsupported backend, same agent) comes back
  *  as an envelope error and throws ApiError, so callers share one error path. */
 export async function handoffSession(id: string, title: string, to: string, token: string, account = ""): Promise<HandoffResult> {
-  const result = await af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to, account }, token);
+  let result: HandoffResult;
+  try {
+    // The route itself is the capability check. An older daemon cannot serve it,
+    // so it returns 404 before its legacy target-only mutation can run.
+    result = await af<HandoffResult>(ACCOUNT_AWARE_HANDOFF_METHOD, { id, title, repo_id: "", to, account }, token);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      throw new ApiError(404, ACCOUNT_AWARE_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
   const requestedAccount = account.trim();
   if (requestedAccount && result.to_account !== requestedAccount) {
     const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces`;

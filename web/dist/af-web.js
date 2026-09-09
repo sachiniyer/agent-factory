@@ -6647,8 +6647,18 @@ async function resumeFromLimit(id, title, token2) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+var ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
+var ACCOUNT_AWARE_HANDOFF_UNSUPPORTED = "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon \u2014 upgrade it); the handoff was not sent";
 async function handoffSession(id, title, to, token2, account = "") {
-  const result = await af("HandoffSession", { id, title, repo_id: "", to, account }, token2);
+  let result;
+  try {
+    result = await af(ACCOUNT_AWARE_HANDOFF_METHOD, { id, title, repo_id: "", to, account }, token2);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      throw new ApiError(404, ACCOUNT_AWARE_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
   const requestedAccount = account.trim();
   if (requestedAccount && result.to_account !== requestedAccount) {
     const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon \u2014 upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces`;

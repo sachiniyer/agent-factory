@@ -31,7 +31,7 @@ func TestHandoffCompletionReportsAccountPair(t *testing.T) {
 				switch r.URL.Path {
 				case "/v1/health":
 					require.NoError(t, apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{OK: true, AccountHandoff: true})))
-				case "/v1/HandoffSession":
+				case "/v1/" + daemon.AccountAwareHandoffMethod:
 					require.NoError(t, apiproto.WriteEnvelope(w, apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: tc.from, To: tc.to, FromAccount: tc.fromAccount, ToAccount: tc.toAccount})))
 				default:
 					t.Fatalf("unexpected request path %q", r.URL.Path)

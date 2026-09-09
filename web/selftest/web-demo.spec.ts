@@ -863,7 +863,7 @@ for (const scoped of [true, false]) {
         { agent: "codex", name: "personal", dir: "", logged_in: true, registration_only: false },
       ] }, error: null } })
       : route.fulfill({ status: 500, json: { data: null, error: { message: "registry unreadable" } } }));
-    await page.route("**/v1/HandoffSession", route => route.fulfill({ json: { data: {
+    await page.route("**/v1/HandoffSessionV2", route => route.fulfill({ json: { data: {
       ok: true,
       from: "claude",
       to: "codex",
@@ -888,7 +888,7 @@ for (const scoped of [true, false]) {
     }
     const confirm = dialog.getByRole("button", { name: "Hand off", exact: true });
     await expect(confirm).toBeEnabled();
-    const request = page.waitForRequest(req => req.url().endsWith("/v1/HandoffSession"));
+    const request = page.waitForRequest(req => req.url().endsWith("/v1/HandoffSessionV2"));
     await confirm.click();
     expect((await request).postDataJSON()).toMatchObject({ to: "codex", account: scoped ? "personal" : "" });
     await expect(dialog).toHaveCount(0);

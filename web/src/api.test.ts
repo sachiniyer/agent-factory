@@ -232,13 +232,33 @@ test("handoffSession posts the stable id and target agent, and never a brief", a
   const cap = stubFetch();
   await handoffSession("id-repoB", "feature", "gemini", "tok");
 
-  assert.equal(cap.url, "/v1/HandoffSession");
+  assert.equal(cap.url, "/v1/HandoffSessionV2",
+    "the mutation endpoint itself proves the receiving daemon supports account-aware admission");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.id, "id-repoB", "the daemon resolves by id first, so a duplicate title cannot misroute the swap");
   assert.equal(cap.body.title, "feature", "the title rides along for the event and the title-only fallback");
   assert.equal(cap.body.to, "gemini", "the picked agent is the incoming program");
   assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
   assert.equal("brief" in cap.body, false, "the web never sends a brief — the mission defaults to the stored prompt");
+});
+
+test("handoffSession refuses a daemon without the version-bound mutation endpoint", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: 'unknown route "/v1/HandoffSessionV2"' } }),
+  });
+
+  const err = await handoffSession("id", "worker", "codex", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, true, "the absent route proves no handoff handler ran");
+  assert.match(err.message, /account-aware handoff endpoint/);
+  assert.match(err.message, /handoff was not sent/);
 });
 
 test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {

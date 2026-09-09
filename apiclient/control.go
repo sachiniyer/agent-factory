@@ -99,15 +99,11 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 // in place (#2013) — the TUI's handoff action. Returns the swap the daemon
 // actually performed (outgoing agent, incoming agent, attribution boundary).
 func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
-	health, err := c.Health(context.Background())
-	if err != nil {
-		return daemon.HandoffSessionResponse{}, fmt.Errorf("cannot verify account-aware handoff support; the handoff was not sent: %w", err)
-	}
-	if !health.AccountHandoff {
+	var resp daemon.HandoffSessionResponse
+	err := c.call(daemon.AccountAwareHandoffMethod, req, &resp)
+	if IsRouteNotServed(err) {
 		return daemon.HandoffSessionResponse{}, daemon.ErrAccountHandoffUnsupported
 	}
-	var resp daemon.HandoffSessionResponse
-	err = c.call("HandoffSession", req, &resp)
 	if err != nil && !IsMutationCommitted(err) {
 		return daemon.HandoffSessionResponse{}, err
 	}
