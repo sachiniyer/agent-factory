@@ -123,10 +123,7 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 			return fmt.Errorf("failed to create git worktree: %w", err)
 		}
 		i.mu.Lock()
-		if i.gitWorktree != gitWorktree {
-			i.gitWorktree = gitWorktree
-			i.touchLocked()
-		}
+		i.setGitWorktreeLocked(gitWorktree)
 		if i.Branch != branchName {
 			i.Branch = branchName
 			i.touchLocked()
@@ -487,6 +484,10 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 	if closeErr != nil {
 		return fmt.Errorf("swap agent: failed to stop the current agent for %q: %w", i.Title, closeErr)
+	}
+
+	if err := plan.CaptureAfterStop(); err != nil {
+		return err
 	}
 
 	ts.SetProgram(plan.program)

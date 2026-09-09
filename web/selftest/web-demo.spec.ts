@@ -839,3 +839,59 @@ test("task completion catalog failure is visible and preserves the seed", async 
   // Saving refreshes tasks; finish intercepted refreshes before closing the page.
   await page.unrouteAll({ behavior: "wait" });
 });
+
+for (const scoped of [true, false]) {
+  test(scoped ? "account handoff requires a target account across agents" : "ambient handoff survives an unavailable account registry", async ({ page }) => {
+    // This pin exists only in the mocked Snapshot. Real session.updated events
+    // carry the fixture's ambient identity and must not overwrite the test case.
+    await page.routeWebSocket((url) => url.pathname === "/v1/events", () => {});
+    await page.route("**/v1/Snapshot", async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      for (const instance of body.data.instances) {
+        instance.current_agent = "claude";
+        instance.can_handoff = true;
+        instance.account = scoped ? "work" : "";
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.route("**/v1/ListPrograms", route => route.fulfill({ json: {
+      data: { programs: [{ name: "claude" }, { name: "codex" }] }, error: null,
+    } }));
+    await page.route("**/v1/ListAccounts", route => scoped
+      ? route.fulfill({ json: { data: { agents: ["claude", "codex"], entries: [
+        { agent: "codex", name: "personal", dir: "", logged_in: true, registration_only: false },
+      ] }, error: null } })
+      : route.fulfill({ status: 500, json: { data: null, error: { message: "registry unreadable" } } }));
+    await page.route("**/v1/HandoffSessionV2", route => route.fulfill({ json: { data: {
+      ok: true,
+      from: "claude",
+      to: "codex",
+      ...(scoped ? { to_account: "personal" } : {}),
+    }, error: null } }));
+    await openAfterInitialResync(page, async () => { await page.goto("/"); });
+    await row(page, SESSION_JSON).click();
+    await page.getByRole("button", { name: "Session actions", exact: true }).click();
+    await page.getByRole("button", { name: "Handoff", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    const agent = dialog.getByRole("combobox", { name: "New agent", exact: true });
+    await expect(agent.locator('option[value="codex"]')).toHaveCount(1);
+    await agent.selectOption("codex");
+    const account = dialog.getByRole("combobox", { name: "New account", exact: true });
+    if (scoped) {
+      await expect(account.locator('option[value="personal"]')).toHaveCount(1);
+      await expect(account.locator('option[value=""]')).toHaveCount(0);
+      await expect(account).toHaveValue("personal");
+    } else {
+      await expect(dialog.locator(".af-modal-error")).toContainText("Could not load accounts");
+      await expect(agent.locator('option[value="claude"]')).toHaveCount(0);
+    }
+    const confirm = dialog.getByRole("button", { name: "Hand off", exact: true });
+    await expect(confirm).toBeEnabled();
+    const request = page.waitForRequest(req => req.url().endsWith("/v1/HandoffSessionV2"));
+    await confirm.click();
+    expect((await request).postDataJSON()).toMatchObject({ to: "codex", account: scoped ? "personal" : "" });
+    await expect(dialog).toHaveCount(0);
+    await page.unrouteAll({ behavior: "wait" });
+  });
+}

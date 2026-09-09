@@ -226,14 +226,14 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ResumeFromLimit",
-		Description: "Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit.",
+		Description: "Resume a usage-limit-blocked session, or explicitly retry an inspected handoff whose mission delivery was ambiguous.",
 		requestType: reflect.TypeOf(ResumeFromLimitRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/HandoffSession",
-		Description: "Continue a session under a different agent, in place: swap its agent program, keep its worktree and branch, and deliver a mission brief to the new agent.",
+		Description: "Continue a session in place under a different agent (to), another account for the same agent (account), or both (to and account). Keep its worktree and branch, and deliver a mission brief with the goal and existing work to the replacement conversation. Omit to to keep the current agent.",
 		requestType: reflect.TypeOf(HandoffSessionRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSession) },
 	},
@@ -435,6 +435,10 @@ var httpRoutes = []HTTPRoute{
 // every client that is not the TUI, and nothing fails when it stays parked.
 //
 // What remains belongs here PERMANENTLY, not provisionally:
+//   - HandoffSessionV2 is the version-bound transport alias for the public
+//     HandoffSession verb. Its route presence is an atomic protocol check, not
+//     a second user-facing operation; first-party clients call it so an older
+//     daemon refuses before its legacy mutation can run.
 //   - Preview is the daemon-sole-capturer render path, an implementation detail of
 //     how the TUI draws, not something a user scripts.
 //   - Pause/ResumeStatusPoll are attach-coordination infra (best-effort poll
@@ -443,6 +447,13 @@ var httpRoutes = []HTTPRoute{
 // Before adding to this table, ask whether the verb is infra or merely
 // unfinished. If a user could reasonably want it, it goes above.
 var internalHTTPRoutes = []HTTPRoute{
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/" + AccountAwareHandoffMethod,
+		Description: "Version-bound account-aware transport for HandoffSession.",
+		requestType: reflect.TypeOf(HandoffSessionRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSessionV2) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/Preview",

@@ -21,6 +21,12 @@ import (
 // only the second is evidence of absence (Codex on #2966).
 var errPaneQueryFoundNoPane = errors.New("tmux reported no pane for this session")
 
+// ErrSessionStillAlive marks the one PaneStateUnknown teardown that is not an
+// unobservable process: tmux answered the post-kill probe and confirmed the
+// session remains present. Callers may retry or restore its existing identity;
+// every other unknown outcome must assume a detached writer may remain.
+var ErrSessionStillAlive = errors.New("tmux session is still alive")
+
 // ErrSessionVanishedBeforeCapture marks a pane-list read that failed because
 // tmux says the session does not exist. Whether that is a determinate EMPTY or a
 // lost ancestry depends on the caller: see captureSessionProcessTrees.
@@ -164,7 +170,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%v)", ErrTmuxTimeout, err))
 				leaked = nil
 			case exists:
-				errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
+				errs = append(errs, errors.Join(fmt.Errorf("error killing tmux session: %w", err), ErrSessionStillAlive))
 				// Idempotent teardown (#967): a kill-session that fails because the
 				// session is already gone has achieved Close's goal — a dead session is
 				// the desired end state. Only a session that survives the kill is a

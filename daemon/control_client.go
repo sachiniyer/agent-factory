@@ -20,6 +20,12 @@ import (
 
 var ensureDaemonMu sync.Mutex
 
+// ErrAccountHandoffUnsupported is returned before a handoff mutation is sent
+// when the responding daemon does not affirm the account-aware protocol. The
+// daemon, not the client, owns admission against live account-pin state; an
+// older daemon cannot safely make that decision and must not receive the call.
+var ErrAccountHandoffUnsupported = errors.New("daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon — upgrade it); the handoff was not sent")
+
 // daemonStartingErrText is the wire-visible text of the warm-up error. net/rpc
 // flattens server-side errors into plain strings, so clients cannot errors.Is
 // against a sentinel value; IsDaemonStartingErr matches this text instead.
@@ -728,10 +734,19 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 // deliver a mission brief to the incoming agent.
 func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 	var resp HandoffSessionResponse
-	if err := callDaemon("HandoffSession", req, &resp); err != nil {
+	err := callDaemon(AccountAwareHandoffMethod, req, &resp)
+	if isRPCMethodMissing(err) {
+		return HandoffSessionResponse{}, ErrAccountHandoffUnsupported
+	}
+	if err != nil && !isMutationCommitted(err) {
 		return HandoffSessionResponse{}, err
 	}
-	return resp, nil
+	requestedAccount := strings.TrimSpace(req.Account)
+	if requestedAccount != "" && resp.ToAccount != requestedAccount {
+		mismatch := &rpcMutationCommittedError{err: fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces", requestedAccount)}
+		return resp, errors.Join(err, mismatch)
+	}
+	return resp, err
 }
 
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.

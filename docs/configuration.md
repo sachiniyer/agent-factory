@@ -561,6 +561,37 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   worktree, and left alone otherwise.
 
   The restarted daemon also picks that hook back up rather than forgetting it.
+  It waits for the survivor to finish, then resumes the remaining
+  `post_worktree_commands` entries in order, each in its own scope and output
+  log. The original list is saved before launch; configuration edits do not
+  change a pending run. Publication waits at most two seconds to acquire the
+  journal lock; on timeout it reports that another process holds the lock and
+  the hooks could not start. Started entries are never replayed, and completed or
+  deliberately cancelled lists are not resumed. Only the owning managed session
+  can adopt a saved list, after verifying worktree registration and Git linkage.
+  A hook may switch branches or detach HEAD within that verified worktree without
+  preventing the remaining entries from running. A missing or replaced checkout
+  leaves the journal pending for normal worktree recovery. External `--here`, tombstoned, and archived sessions
+  never resume it. Runs without a progress record or recorded owning session ID
+  keep survivor observation only.
+
+  Safe kill/archive teardown removes finished journals and their receipts after
+  hook writers have stopped. Interrupted retirements are reclaimed after grace
+  and lease/liveness checks even while their owning session stays active.
+  Standalone pruning uses the same bounded journal-lock acquisition as publication.
+  If cancellation encounters an unreadable journal,
+  it keeps retrying terminalization; teardown refuses to modify the checkout
+  until the journal is terminal or provably absent/invalid. On creation, completed
+  journals whose sessions no longer exist are pruned to the newest 20 and a maximum age of 14 days, excluding
+  files modified within five seconds. A live local runner holds a publication
+  lease across launch gaps. Leased journals, live scopes, and unfinished journals
+  with stored owners are preserved; old unfinished ownerless journals can be
+  reclaimed once both scope and launcher are absent. Unpublished receipt
+  directories are removed after a failed publication; unreferenced directories left by a crash are pruned after
+  the five-second grace period. Malformed or unreadable journals protect ambiguous
+  receipts while independently valid journals can still be pruned. Pruning
+  completed journals is skipped when session ownership or scope
+  liveness cannot be established.
   A session whose hook is still running reports it as in flight exactly as it
   did on its first run, so the agent's startup budget is not charged for the
   build, and a task's `on_complete` teardown waits instead of moving the tree
