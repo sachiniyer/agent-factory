@@ -157,7 +157,7 @@ func TestPreviewScrolling(t *testing.T) {
 				if sessionCreated {
 					return nil // Session exists
 				} else {
-					return fmt.Errorf("session does not exist")
+					return cantFindSessionError(tmuxTargetName(cmd))
 				}
 			}
 
@@ -333,7 +333,7 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 				if sessionCreated {
 					return nil // Session exists
 				} else {
-					return fmt.Errorf("session does not exist")
+					return cantFindSessionError(tmuxTargetName(cmd))
 				}
 			}
 
@@ -757,7 +757,7 @@ func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instan
 				if existing[name] {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(name)
 			case strings.Contains(cmdStr, "new-session"):
 				existing[name] = true
 				return nil
@@ -819,12 +819,12 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 			cmdStr := cmd.String()
 			if strings.Contains(cmdStr, "has-session") {
 				if sessionGone.Load() {
-					return fmt.Errorf("session gone")
+					return cantFindSessionError(tmuxTargetName(cmd))
 				}
 				if sessionCreated.Load() {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(tmuxTargetName(cmd))
 			}
 			if strings.Contains(cmdStr, "new-session") {
 				sessionCreated.Store(true)
@@ -895,7 +895,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 				if sessionCreated {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(tmuxTargetName(cmd))
 			}
 			if strings.Contains(cmdStr, "new-session") {
 				sessionCreated = true

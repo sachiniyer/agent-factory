@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -24,6 +25,18 @@ import (
 // #920 Deleting fallback, #669 fallback-resets-scroll, #746 scroll-uses-selected
 // view, #496 session-gone fallback (no ERROR log), and the #843 remote
 // terminal_cmd behavior.
+
+// cantFindSessionError builds a genuine *exec.ExitError carrying tmux's
+// "can't find session: <name>" diagnostic on stderr. probeSession routes every
+// non-timeout has-session failure through tmuxProvedSessionAbsent (#2875),
+// which requires a real *exec.ExitError with exit code 1 and that exact text;
+// a bare fmt.Errorf has no ExitCode and reads as unknown, not absent.
+func cantFindSessionError(name string) error {
+	c := exec.Command("sh", "-c", `printf "can't find session: %s\n" "$NAME" >&2; exit 1`)
+	c.Env = append(os.Environ(), "NAME="+name)
+	_, err := c.Output()
+	return err
+}
 
 // tmuxTargetName extracts the tmux session name from a command's -t/-s flag,
 // handling "-t name" / "-s name", "-t=name" / "-s=name", and the exact-match
@@ -57,7 +70,7 @@ func shellMockExec(captureContent string) cmd_test.MockCmdExec {
 				if existing[name] {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(name)
 			case strings.Contains(s, "new-session"):
 				existing[name] = true
 				return nil
@@ -345,12 +358,12 @@ func TestTabPaneShellSessionGoneFallback(t *testing.T) {
 			switch {
 			case strings.Contains(s, "has-session"):
 				if gone.Load() {
-					return fmt.Errorf("session gone")
+					return cantFindSessionError(name)
 				}
 				if existing[name] {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(name)
 			case strings.Contains(s, "new-session"):
 				existing[name] = true
 				return nil
@@ -429,12 +442,12 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 				// A session killed externally fails has-session, which is what
 				// ExistsOrUnknown()/TabAlive keys off of (#977).
 				if gone.Load() {
-					return fmt.Errorf("session gone")
+					return cantFindSessionError(name)
 				}
 				if existing[name] {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(name)
 			case strings.Contains(s, "new-session"):
 				existing[name] = true
 				return nil
@@ -521,12 +534,12 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 			switch {
 			case strings.Contains(s, "has-session"):
 				if gone.Load() {
-					return fmt.Errorf("session gone")
+					return cantFindSessionError(name)
 				}
 				if existing[name] {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(name)
 			case strings.Contains(s, "new-session"):
 				existing[name] = true
 				return nil

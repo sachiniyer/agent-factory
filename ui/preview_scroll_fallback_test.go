@@ -251,12 +251,12 @@ func TestPreviewScrollModeThenSessionGoneFallback(t *testing.T) {
 			cmdStr := cmd.String()
 			if strings.Contains(cmdStr, "has-session") {
 				if sessionGone.Load() {
-					return fmt.Errorf("session gone")
+					return cantFindSessionError(tmuxTargetName(cmd))
 				}
 				if sessionCreated.Load() {
 					return nil
 				}
-				return fmt.Errorf("session does not exist")
+				return cantFindSessionError(tmuxTargetName(cmd))
 			}
 			if strings.Contains(cmdStr, "new-session") {
 				sessionCreated.Store(true)
