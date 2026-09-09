@@ -43,10 +43,6 @@ var nowFunc = time.Now
 // A var so tests can shrink it; production never reassigns.
 var taskRunPollBackstop = 30 * time.Second
 
-// worktreeIntegrityInterval keeps the two read-only Git probes per live local
-// lane out of the ordinary sub-second status cadence.
-var worktreeIntegrityInterval = 10 * time.Second
-
 const (
 	statusPollIDPrefix    = "id:"
 	statusPollTitlePrefix = "title:"
@@ -393,7 +389,6 @@ func (m *Manager) RefreshStatuses() {
 	// already has the instance map (#2595).
 	m.sweepDeferredTaskLifecycleLocked()
 	m.mu.Unlock()
-	m.refreshWorktreeIntegrityWarnings()
 
 	// Drop debounce state for sessions that are gone or replaced, colocated with
 	// the pass that creates it (#1794), and backstop timers for sessions no longer
@@ -412,11 +407,6 @@ func (m *Manager) RefreshStatuses() {
 func (m *Manager) refreshWorktreeIntegrityWarnings() {
 	m.worktreeIntegrityMu.Lock()
 	defer m.worktreeIntegrityMu.Unlock()
-	if now := nowFunc(); now.Before(m.worktreeIntegrityNext) {
-		return
-	} else {
-		m.worktreeIntegrityNext = now.Add(worktreeIntegrityInterval)
-	}
 
 	m.mu.Lock()
 	instances := make(map[string]*session.Instance, len(m.instances))

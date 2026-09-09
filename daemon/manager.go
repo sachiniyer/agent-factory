@@ -103,11 +103,11 @@ type Manager struct {
 	// automatic account replacement. Manager.mu protects roster shape; it cannot
 	// cover per-instance liveness writes without inverting existing lock order.
 	accountLimitMu sync.Mutex
-	// worktreeIntegrityMu paces and serializes the read-only #4092 Git probes.
-	// They must never run under m.mu, where a slow filesystem would block RPCs.
-	worktreeIntegrityMu   sync.Mutex
-	worktreeIntegrityNext time.Time
-	worktreeInspector     func([]session.InstanceData) []session.SessionWorktreeInspection
+	// worktreeIntegrityMu serializes the read-only #4092 Git probes. The probes
+	// run on their own loop and never under m.mu, so a slow filesystem cannot
+	// block operational status, self-healing, or manager RPCs.
+	worktreeIntegrityMu sync.Mutex
+	worktreeInspector   func([]session.InstanceData) []session.SessionWorktreeInspection
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For
 	// RunDaemon that includes the startup orphan sweep as well as instance restore,

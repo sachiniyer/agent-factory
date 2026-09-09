@@ -79,10 +79,15 @@ func InspectSessionWorktrees(rows []InstanceData) []SessionWorktreeInspection {
 		}
 		var signals []string
 		key := repoKeys[index] + "\x00" + inspection.Evidence.Branch
-		if siblings := otherWorktreeLanes(inspections, groups[key], index); len(siblings) > 0 {
+		siblings := otherWorktreeLanes(inspections, groups[key], index)
+		if len(siblings) > 0 {
 			signals = append(signals, fmt.Sprintf("branch %q is also checked out by live lane(s) %s", inspection.Evidence.Branch, strings.Join(siblings, ", ")))
 		}
-		if inspection.Evidence.MassRevert {
+		// A fully staged large commit has the same raw index shape. Only surface
+		// it when a duplicate live binding or the worktree-local reflog also says
+		// this checkout may have followed a sibling's ref move.
+		corroboratedTakeover := len(siblings) > 0 || inspection.Evidence.HeadMovedWithoutReflog
+		if inspection.Evidence.MassRevert && corroboratedTakeover {
 			signals = append(signals, fmt.Sprintf("the index has %d staged paths and zero unstaged paths (the mass-revert shape)", inspection.Evidence.StagedPaths))
 		}
 		if inspection.Evidence.HeadMovedWithoutReflog {
