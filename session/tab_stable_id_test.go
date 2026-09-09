@@ -178,68 +178,13 @@ func TestEnsureBrokerFollowsTabAcrossClose(t *testing.T) {
 	assert.Equal(t, 1, nAfter, "no stale second broker may be created for the shifted ordinal")
 }
 
-// TestTabTmuxByID_ResolvesTargetAtomically pins the atomic primitive the id-native
-// data plane binds on (#1779): a stable id resolves DIRECTLY to the tmux its tab
-// currently backs, and keeps resolving to that same tmux after an unrelated close
-// shifts the tab's ordinal. Resolving id→ordinal→tmux in two steps is what let a
-// concurrent close land the second step on a different tab; this is the one-step
-// route that has no such window.
-func TestTabTmuxByID_ResolvesTargetAtomically(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	inst, _ := raceMockInstance(t, "af_stable_tmuxbyid", func() {})
-	_, err := inst.AddProcessTab("a", "a")
-	require.NoError(t, err)
-	b, err := inst.AddProcessTab("b", "b")
-	require.NoError(t, err)
-
-	// b sits at ordinal 2; its id resolves to the tmux backing b.
-	tsBefore, ok := inst.TabTmuxByID(b.ID)
-	require.True(t, ok, "a live tab's id must resolve to its tmux")
-	require.NotNil(t, tsBefore)
-
-	// Close the middle tab a; b shifts down to ordinal 1.
-	require.NoError(t, inst.CloseTab(1))
-	requireIndex(t, inst, b.ID, 1)
-
-	// b's id STILL resolves to b's own tmux — it followed the tab, not the ordinal.
-	tsAfter, ok := inst.TabTmuxByID(b.ID)
-	require.True(t, ok)
-	assert.Same(t, tsBefore, tsAfter, "a tab id must resolve to the same tmux across an ordinal shift")
-}
-
-// TestTabTmuxByID_RefusesStaleAndEmpty: an id that names no live tab — closed, or
-// never minted — resolves to nothing rather than to whatever tab now holds its old
-// ordinal. This is the refusal the whole #1779 follow-up rests on: once a caller
-// addresses a tab by id, "gone" must be an answer the plane can give.
-func TestTabTmuxByID_RefusesStaleAndEmpty(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	inst, _ := raceMockInstance(t, "af_stable_tmuxstale", func() {})
-	a, err := inst.AddProcessTab("a", "a")
-	require.NoError(t, err)
-	_, err = inst.AddProcessTab("b", "b")
-	require.NoError(t, err)
-
-	// Close a (ordinal 1). Tab b shifts into the ordinal a used to hold.
-	require.NoError(t, inst.CloseTab(1))
-
-	_, ok := inst.TabTmuxByID(a.ID)
-	assert.False(t, ok, "a closed tab's id must resolve to no tmux, not to the tab that took its ordinal")
-	_, ok = inst.TabTmuxByID("nonexistent-id")
-	assert.False(t, ok, "an unknown id must resolve to no tmux")
-	_, ok = inst.TabTmuxByID("")
-	assert.False(t, ok, "an empty id must resolve to no tmux")
-}
-
-// TestTabTmuxByID_NotStartedIsNotGone pins the distinction the refusal must NOT
-// over-reach into: a tab on a not-yet-started instance is real — it simply has no
-// live PTY yet. It must report exists=true with a nil tmux, so the data plane
-// answers "nothing to stream" rather than ErrTabGone. Calling it gone would 404 the
-// client, telling it to stop addressing a tab that is about to come up.
-func TestTabTmuxByID_NotStartedIsNotGone(t *testing.T) {
+// TestSubscribeTab_NotStartedIsNotGone pins the not-started distinction the
+// id-native data plane's refusal must NOT over-reach into: a tab on a
+// not-yet-started instance is real — it simply has no live PTY yet. SubscribeTab
+// must therefore error on it without reporting ErrTabGone, so the data plane
+// answers "nothing to stream" rather than 404-ing the client off a tab that is
+// about to come up (#1779).
+func TestSubscribeTab_NotStartedIsNotGone(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
@@ -249,11 +194,7 @@ func TestTabTmuxByID_NotStartedIsNotGone(t *testing.T) {
 
 	inst.SetStartedForTest(false)
 
-	ts, exists := inst.TabTmuxByID(b.ID)
-	assert.True(t, exists, "a real tab on a not-started instance EXISTS — it is not gone")
-	assert.Nil(t, ts, "a not-started instance has no live tmux to stream")
-
-	// And the data plane must not call it gone.
+	// The data plane must not call a not-started tab gone.
 	las := inst.AgentServer().(*localAgentServer)
 	_, err = las.SubscribeTab(b.ID, 0)
 	require.Error(t, err)
