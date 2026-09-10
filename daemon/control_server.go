@@ -23,6 +23,7 @@ type controlServer struct {
 	watchers     *watcherSupervisor
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+	httpRequests *httpRequestDrain
 }
 
 const (
@@ -786,7 +787,8 @@ func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, watc
 }
 
 // startControlServer registers the control RPC service on the Unix socket and
-// returns a cleanup function that closes the listener (which also unlinks the
+// returns a cleanup function that closes the listener and accepted connections,
+// then joins methods already dispatched (the listener close also unlinks the
 // socket file). When shutdownCh is non-nil, the Shutdown RPC will close it on the
 // first invocation, allowing the daemon main loop to exit on RPC request.
 // scheduler may be nil for servers that do not host task schedules (tests);
@@ -822,23 +824,67 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 		return nil, err
 	}
 
+	var (
+		connectionsMu sync.Mutex
+		connections   = make(map[net.Conn]struct{})
+		closing       bool
+		serveWG       sync.WaitGroup
+		closeOnce     sync.Once
+		closeErr      error
+	)
+	serveWG.Add(1)
 	go func() {
+		defer serveWG.Done()
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			go server.ServeConn(conn)
+			connectionsMu.Lock()
+			if closing {
+				connectionsMu.Unlock()
+				_ = conn.Close()
+				continue
+			}
+			connections[conn] = struct{}{}
+			serveWG.Add(1)
+			connectionsMu.Unlock()
+			go func() {
+				defer serveWG.Done()
+				server.ServeConn(conn)
+				connectionsMu.Lock()
+				delete(connections, conn)
+				connectionsMu.Unlock()
+			}()
 		}
 	}()
 
 	return func() error {
-		// Closing the listener also unlinks the socket file (net's default
-		// unlink-on-close for unix listeners it created). Deliberately no
-		// explicit os.Remove here: between the close-unlink and an explicit
-		// Remove, a new daemon can pass its ping check and bind a fresh
-		// socket at the same path, and the Remove would delete the new
-		// daemon's socket, orphaning it — the same race class as #718/#767.
-		return listener.Close()
+		closeOnce.Do(func() {
+			connectionsMu.Lock()
+			closing = true
+			accepted := make([]net.Conn, 0, len(connections))
+			for conn := range connections {
+				accepted = append(accepted, conn)
+			}
+			connectionsMu.Unlock()
+
+			// Closing the listener also unlinks the socket file (net's default
+			// unlink-on-close for unix listeners it created). Deliberately no
+			// explicit os.Remove here: between the close-unlink and an explicit
+			// Remove, a new daemon can pass its ping check and bind a fresh
+			// socket at the same path, and the Remove would delete the new
+			// daemon's socket, orphaning it — the same race class as #718/#767.
+			closeErr = listener.Close()
+			// Closing accepted connections stops them from admitting another RPC.
+			// net/rpc's ServeConn waits for methods already dispatched before it
+			// returns; joining our ServeConn goroutines therefore joins every call
+			// that passed mutation admission before shutdown quiesced the daemon.
+			for _, conn := range accepted {
+				_ = conn.Close()
+			}
+			serveWG.Wait()
+		})
+		return closeErr
 	}, nil
 }

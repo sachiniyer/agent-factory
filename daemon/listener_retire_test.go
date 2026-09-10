@@ -323,6 +323,67 @@ func TestDisablingAListenerRetiresIt(t *testing.T) {
 	require.True(t, old.retired.Load(), "the opt-out must retire the listener, not close it mid-reply")
 }
 
+// TestControlDrainWindowListenerIsClosedAfterControlReturns is the shutdown race
+// described in the P2 finding: a control-socket ApplyConfig admitted before
+// markQuiescing can rebind a TCP listener after closeHTTP's second wl.close()
+// (the one-shot sync.Once prevents a third run via that path) but before
+// closeControl returns. The fix adds a third wl.close() after closeControl so
+// the replacement listener does not outlive shutdown.
+//
+// This test directly exercises the fix: it calls wl.close() (simulating
+// closeHTTP's final close), then wl.reconcile() (simulating an in-flight
+// ApplyConfig that rebinds), asserts the new port is listening, then calls
+// wl.close() once more (the post-closeControl close added by this PR) and
+// asserts nothing is left accepting on either address.
+func TestControlDrainWindowListenerIsClosedAfterControlReturns(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.PreviewListenAddr = ""
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+	cs := &controlServer{manager: m}
+	wl := newWebListeners(m, newHTTPMux(cs), newPreviewMux(cs))
+	m.webListeners = wl
+	failed, err := wl.reconcile(m.Config())
+	require.NoError(t, err)
+	require.Empty(t, failed)
+
+	firstAddr := m.lifecycle.snapshot().listeners.TCPBoundAddr
+	require.NotEmpty(t, firstAddr, "web listener must be bound before closeHTTP")
+
+	// closeHTTP's final close — simulates the sync.Once-guarded double close.
+	require.NoError(t, wl.close())
+
+	// An ApplyConfig that was admitted before markQuiescing rebinds the listener
+	// during closeControl's handler drain. Move to a fresh address to ensure the
+	// new listener is distinct.
+	newAddr := grabFreeLoopbackAddr(t)
+	next := *m.Config()
+	next.ListenAddr = newAddr
+	m.live.Store(&next)
+	failed, err = wl.reconcile(&next)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+
+	// The new listener must be accepting — this is the window the bug leaves open.
+	require.Equal(t, http.StatusOK, getStatus(t, newAddr, "/v1/health"),
+		"the rebound listener must be serving before the post-control close")
+
+	// Post-closeControl close: the third wl.close() added by this fix.
+	require.NoError(t, wl.close())
+
+	// Nothing must be accepting on the rebound address after the third close.
+	require.Eventually(t, func() bool {
+		conn, err := net.DialTimeout("tcp", newAddr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err != nil
+	}, 3*time.Second, 20*time.Millisecond,
+		"the rebound listener must not remain accepting after the post-control-drain close")
+}
+
 // withRetireGrace shortens the drain deadline for one test and restores it.
 func withRetireGrace(t *testing.T, d time.Duration) {
 	t.Helper()

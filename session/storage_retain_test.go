@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -485,6 +487,168 @@ func TestSaveInstances_KeepsLostSandboxRowAlongsideStartedSibling(t *testing.T) 
 	}
 }
 
+// TestSaveInstances_KeepsMidArchiveSandboxRowAlongsideStartedSibling is the
+// off-box mid-archive wholesale-checkpoint gap: an off-box session (docker/ssh/
+// sandbox/hook) caught mid-archive at the daemon shutdown checkpoint has
+// already pushed its branch to origin and recorded it on i.Branch, but
+// BeginArchive raised OpArchiving while leaving liveness LiveRunning until
+// CommitArchive committed the archive (composeStatus(LiveRunning, OpArchiving)
+// is Deleting). The off-box row has no daemon-side gitWorktree, so the LOCAL
+// mid-archive retention claim (archiveReportPending, sourced only from a live
+// worktree's ProjectionSnapshot) never fires for it; lostSandbox requires
+// LiveLost and a mid-archive row is still LiveRunning. The (Loading/Deleting)
+// skip then silently drops the row, and with an alive same-repo sibling the
+// per-repo OVERWRITE erases its only af-side handle to the pushed branch —
+// the exact obligation lostSandboxRecord exists for (#3422), reached at a
+// different op. With the pendingArchiveSandbox claim the mid-archive row is
+// retained: the next restart restores from the pushed branch instead of
+// stranding the work on origin behind a lost handle.
+//
+// The started sibling is load-bearing: without it the repo has no rows to save
+// and the checkpoint is a no-op, so the bug never fires.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the mid-archive sandbox row is absent
+// after the save for docker/ssh/sandbox/remote.
+func TestSaveInstances_KeepsMidArchiveSandboxRowAlongsideStartedSibling(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			alive := makeAliveInstance("alive", repoPath)
+			// The exact mid-archive off-box shape: branch pushed and recorded on
+			// i.Branch, OpArchiving raised, liveness still LiveRunning, CommitArchive
+			// not yet run. started=true because step 4 of ArchiveSandbox (the
+			// started=false flip) runs AFTER as.Kill returns, which is the second
+			// half of the window; this captures the first half, where the daemon
+			// has not even reaped the sandbox yet. The inert sandbox backend is
+			// only a Type()/Capabilities() carrier — its runtime has no live handle
+			// on the daemon side, exactly like the loaded lost-sandbox shape.
+			midArchive := &Instance{
+				ID:                   "mid-archive-id",
+				Title:                "mid-archive",
+				Path:                 repoPath,
+				Branch:               "af/mid-archive",
+				Program:              "claude",
+				started:              true,
+				liveness:             LiveRunning,
+				inFlightOp:           OpArchiving,
+				archivePushCompleted: true,
+				backend:              newInertSandboxBackend(backendType),
+			}
+			if got := midArchive.backend.Type(); got != backendType {
+				t.Fatalf("mid-archive backend Type() = %q, want %q", got, backendType)
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				if row.Branch != "af/mid-archive" {
+					t.Fatalf("retained mid-archive %s row lost its pushed-branch pointer: %q (without it the next restore re-clones the repo DEFAULT branch)", backendType, row.Branch)
+				}
+				if row.BackendType != backendType {
+					t.Fatalf("retained mid-archive row backend type = %q, want %q", row.BackendType, backendType)
+				}
+				return
+			}
+			t.Fatalf("daemon checkpoint dropped the mid-archive %s session and "+
+				"erased the only af-side handle to its pushed origin branch (its record "+
+				"was the only pointer, exactly the obligation lostSandboxRecord exists for)",
+				backendType)
+		})
+	}
+}
+
+// TestSaveInstances_NoSibling_KeepsMidArchiveRowReplacingStale documents the
+// no-sibling failure mode of the off-box mid-archive gap covered by the
+// pendingArchiveSandbox retention claim. When the mid-archive session is the
+// ONLY in-memory row for its repo, the wholesale checkpoint leaves the repo's
+// instances.json UNREWRITTEN without the claim (grouped[rid] is built AFTER the
+// Loading/Deleting skip's continue fires), so a stale pre-archive on-disk row
+// the daemon held BEFORE the branch push returns survives untouched —
+// typically with Branch="" (the daemon's i.Branch is empty until
+// ArchiveSandbox records the pushed branch). On restart the dead sandbox
+// resolves Lost and the Lost re-provision fetches the repo DEFAULT branch
+// because RestoreBranch is empty, a "successful" recovery that silently
+// strands the pushed work onto the wrong branch (session/archive_sandbox.go).
+// With the pendingArchiveSandbox claim the mid-archive row becomes the
+// retained row and the per-repo overwrite REPLACES the stale row with the
+// pushed-branch pointer.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the stale pre-archive row survives and the
+// mid-archive row with its pushed branch is absent after the save.
+func TestSaveInstances_NoSibling_KeepsMidArchiveRowReplacingStale(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+			// The stale pre-archive on-disk row: LiveRunning with an empty Branch
+			// pointer, the state the daemon snapshot persisted before the push
+			// returned. After a restart that loses the in-memory mid-archive row,
+			// restore re-provisions from this empty Branch — i.e. from the repo
+			// DEFAULT branch — and silently strands the pushed work.
+			seedDisk(t, state, repoPath, []InstanceData{{
+				Title:       "mid-archive",
+				Path:        repoPath,
+				Branch:      "",
+				Program:     "claude",
+				Status:      Running,
+				Liveness:    LiveRunning,
+				BackendType: backendType,
+			}})
+
+			// The in-memory row now in the mid-archive window: branch pushed and
+			// recorded, OpArchiving raised, CommitArchive not yet run.
+			midArchive := &Instance{
+				ID:                   "mid-archive-id",
+				Title:                "mid-archive",
+				Path:                 repoPath,
+				Branch:               "af/mid-archive",
+				Program:              "claude",
+				started:              true,
+				liveness:             LiveRunning,
+				inFlightOp:           OpArchiving,
+				archivePushCompleted: true,
+				backend:              newInertSandboxBackend(backendType),
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			rows := readDisk(t, state, repoPath)
+			if len(rows) != 1 {
+				t.Fatalf("checkpoint persisted %d rows, want the mid-archive row replacing the stale pre-archive row (no stale Branch=\"\" survivor)", len(rows))
+			}
+			row := rows[0]
+			if row.Title != midArchive.Title {
+				t.Fatalf("persisted row title = %q, want %q (the stale pre-archive row survived untouched instead of being overwritten)", row.Title, midArchive.Title)
+			}
+			if row.Branch != "af/mid-archive" {
+				t.Fatalf("mid-archive %s row persisted with stale Branch %q; want the pushed %q (the disaster case is the empty Branch the daemon held before the push that re-provisions onto the repo DEFAULT branch after restart)", backendType, row.Branch, "af/mid-archive")
+			}
+			if row.BackendType != backendType {
+				t.Fatalf("retained mid-archive row backend type = %q, want %q", row.BackendType, backendType)
+			}
+		})
+	}
+}
+
 // TestSaveInstances_StillPrunesDisposableSandboxRows is the other half of #3422:
 // making a lost sandbox durable must not degrade into "never prune anything".
 // Both rows below are sandbox-backed and !Started, and both must still be
@@ -578,5 +742,686 @@ func TestSaveInstances_RetainedNonGitAliasScope(t *testing.T) {
 		require.NoError(t, storage.SaveInstances(loaded))
 		require.Len(t, state.data, 1)
 		require.Contains(t, state.data, pinned)
+	}
+}
+
+// TestSaveInstances_MidArchiveSandboxUseDiskVersionIfArchiveCommitted covers
+// the interleaving where the shutdown checkpoint snapshots a mid-archive sandbox
+// row BEFORE ArchiveSandbox has written i.Branch, but a targeted writer
+// (persistInstanceData / CommitArchive) commits the correct Archived state to
+// disk BEFORE SaveInstances acquires the file lock. The checkpoint must prefer
+// the durable disk version (with Branch set and Liveness=LiveArchived) over its
+// stale pre-Branch in-memory snapshot; otherwise the wholesale overwrite
+// regresses the just-committed archive back to an empty-Branch row and the next
+// restore re-provisions from the repo default branch.
+//
+// The scenario is exercised by pre-seeding disk with the committed Archived row
+// (simulating the targeted writer) and then calling SaveInstances with the
+// stale in-memory mid-archive snapshot.
+func TestSaveInstances_MidArchiveSandboxUseDiskVersionIfArchiveCommitted(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			// Pre-seed disk with the committed Archived row — this simulates
+			// persistInstanceData / CommitArchive having already run under the
+			// file lock before SaveInstances acquires it.
+			const pushedBranch = "af/mid-archive"
+			snapshotTime := time.Now().Add(-time.Second)
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "mid-archive-id",
+				Title:       "mid-archive",
+				Path:        repoPath,
+				Branch:      pushedBranch,
+				Program:     "claude",
+				Status:      Archived,
+				Liveness:    LiveArchived,
+				BackendType: backendType,
+				UpdatedAt:   snapshotTime.Add(time.Second),
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Stale in-memory snapshot: OpArchiving raised, Branch not yet set —
+			// the exact shape the checkpoint sees when it wakes between
+			// BeginArchive and ArchiveSandbox writing i.Branch.
+			midArchive := &Instance{
+				ID:         "mid-archive-id",
+				Title:      "mid-archive",
+				Path:       repoPath,
+				Branch:     "",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+				UpdatedAt:  snapshotTime,
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				if row.Branch != pushedBranch {
+					t.Fatalf("checkpoint overwrote the committed archive: disk Branch = %q, want %q "+
+						"(the stale pre-Branch snapshot must never clobber the committed row)", row.Branch, pushedBranch)
+				}
+				if row.Liveness != LiveArchived {
+					t.Fatalf("checkpoint reverted committed archive: Liveness = %v, want LiveArchived", row.Liveness)
+				}
+				return
+			}
+			t.Fatalf("mid-archive row missing after checkpoint")
+		})
+	}
+}
+
+// TestSaveInstances_MidArchiveSandboxPreservesRuntimeCleanupIdentity covers the
+// second P1 finding: when the shutdown checkpoint retains a mid-archive sandbox
+// row, ForStorage must preserve the backend's staged RuntimeCleanup identity.
+// Without this, the !UserKilled && !RuntimeCleanupStateUnknown branch in
+// ForStorage strips RuntimeCleanup, and after a restart the daemon has no handle
+// to prove the old sandbox gone before reprovisioning — a second container or
+// remote workspace could be provisioned while the original remains alive.
+//
+// The fix marks RuntimeCleanupStateUnknown on any pendingArchiveSandbox row
+// before calling ForStorage, so the teardown identity survives to disk.
+func TestSaveInstances_MidArchiveSandboxPreservesRuntimeCleanupIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+
+	// A mid-archive docker session with a live cleanup identity: the backend
+	// knows the container ID and engine ID that must survive to disk so a
+	// restarted daemon can prove the container gone before re-provisioning.
+	const containerID = "abc123container"
+	const engineID = "engine-xyz"
+	midArchive := &Instance{
+		ID:                   "mid-archive-docker-id",
+		Title:                "mid-archive-docker",
+		Path:                 repoPath,
+		Branch:               "af/mid-archive-docker",
+		Program:              "claude",
+		started:              true,
+		liveness:             LiveRunning,
+		inFlightOp:           OpArchiving,
+		archivePushCompleted: true,
+		backend: &dockerBackend{
+			containerID: containerID,
+			cleanup: &DockerRuntimeCleanupData{
+				ContainerID: containerID,
+				EngineID:    engineID,
+			},
+		},
+	}
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title != midArchive.Title {
+			continue
+		}
+		if !row.RuntimeCleanupStateUnknown {
+			t.Fatal("mid-archive sandbox row lost its RuntimeCleanupStateUnknown marker: " +
+				"the next restart has no way to know the sandbox teardown was in flight and " +
+				"may provision a second container while the original is still alive")
+		}
+		if row.RuntimeCleanup == nil {
+			t.Fatal("mid-archive sandbox row lost its RuntimeCleanup identity: " +
+				"the next restart cannot prove the old container gone before re-provisioning")
+		}
+		if row.RuntimeCleanup.Docker == nil {
+			t.Fatalf("RuntimeCleanup missing Docker identity: %+v", row.RuntimeCleanup)
+		}
+		if row.RuntimeCleanup.Docker.ContainerID != containerID {
+			t.Fatalf("RuntimeCleanup.Docker.ContainerID = %q, want %q", row.RuntimeCleanup.Docker.ContainerID, containerID)
+		}
+		if row.RuntimeCleanup.Docker.EngineID != engineID {
+			t.Fatalf("RuntimeCleanup.Docker.EngineID = %q, want %q", row.RuntimeCleanup.Docker.EngineID, engineID)
+		}
+		return
+	}
+	t.Fatal("mid-archive sandbox row was dropped from the checkpoint")
+}
+
+// TestSaveInstances_PrePushArchiveSandboxPreservesCommittedDiskRow covers
+// finding 3966202344 / 3966405841: a sandbox snapshot taken between BeginArchive
+// and the push returning (Branch still empty) must NOT use RuntimeCleanupState
+// Unknown to retain, and a committed LiveArchived disk row present when the file
+// lock is acquired must survive the wholesale write.
+func TestSaveInstances_PrePushArchiveSandboxPreservesCommittedDiskRow(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			const pushedBranch = "af/pre-push-archive"
+			commitTime := time.Now()
+			// Committed disk row: archive succeeded while the checkpoint was in
+			// the pre-push window (Branch was empty in memory at snapshot time).
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "pre-push-id",
+				Title:       "pre-push-archive",
+				Path:        repoPath,
+				Branch:      pushedBranch,
+				Program:     "claude",
+				Status:      Archived,
+				Liveness:    LiveArchived,
+				BackendType: backendType,
+				UpdatedAt:   commitTime,
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Pre-push in-memory snapshot: Branch empty, OpArchiving set.
+			prePush := &Instance{
+				ID:         "pre-push-id",
+				Title:      "pre-push-archive",
+				Path:       repoPath,
+				Branch:     "",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend:    newInertSandboxBackend(backendType),
+				UpdatedAt:  commitTime.Add(-time.Second),
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, prePush}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != prePush.Title {
+					continue
+				}
+				if row.Branch != pushedBranch {
+					t.Fatalf("checkpoint overwrote the committed archive: Branch = %q, want %q "+
+						"(pre-push snapshot must not clobber a just-committed LiveArchived row)", row.Branch, pushedBranch)
+				}
+				if row.Liveness != LiveArchived {
+					t.Fatalf("Liveness = %v, want LiveArchived", row.Liveness)
+				}
+				return
+			}
+			t.Fatalf("committed archive row for %s was erased by the checkpoint", backendType)
+		})
+	}
+}
+
+// TestSaveInstances_PrePushDropsRowWithoutCleanupMarker verifies the safety
+// half of finding 3966202344: a pre-push row (Branch empty) that the archive
+// does NOT commit to disk before the lock is simply dropped — it must not be
+// retained with RuntimeCleanupStateUnknown, which would cause a restart to
+// reap the live sandbox.
+func TestSaveInstances_PrePushDropsRowWithoutCleanupMarker(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			alive := makeAliveInstance("alive", repoPath)
+			prePush := &Instance{
+				ID:         "pre-push-id",
+				Title:      "pre-push",
+				Path:       repoPath,
+				Branch:     "",
+				Program:    "claude",
+				started:    true,
+				liveness:   LiveRunning,
+				inFlightOp: OpArchiving,
+				backend: &dockerBackend{
+					containerID: "live-container",
+					cleanup: &DockerRuntimeCleanupData{
+						ContainerID: "live-container",
+						EngineID:    "engine-id",
+					},
+				},
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, prePush}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title == prePush.Title {
+					t.Fatalf("pre-push row must be dropped; retaining with RuntimeCleanupStateUnknown "+
+						"would allow a restart to reap the live sandbox mid-push (%s)", backendType)
+				}
+			}
+		})
+	}
+}
+
+// TestSaveInstances_ReconcileUsesAbortArchiveOutcome covers finding 3966202352:
+// when archiveRemoteSession runs AbortArchiveToLost (push succeeded, teardown
+// failed), the committed disk row has Liveness=LiveLost with a non-empty Branch.
+// reconcilePendingArchiveRows must prefer that durable outcome over the stale
+// in-memory pre-Branch snapshot, not only LiveArchived.
+func TestSaveInstances_ReconcileUsesAbortArchiveOutcome(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			const pushedBranch = "af/abort-archive"
+			snapshotTime := time.Now().Add(-time.Second)
+			commitTime := time.Now()
+
+			// Disk: AbortArchiveToLost row — push succeeded, teardown failed.
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "abort-archive-id",
+				Title:       "abort-archive",
+				Path:        repoPath,
+				Branch:      pushedBranch,
+				Program:     "claude",
+				Status:      Lost,
+				Liveness:    LiveLost,
+				BackendType: backendType,
+				UpdatedAt:   commitTime,
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Stale snapshot: Branch already set (post-push), but snapshot was
+			// taken before AbortArchiveToLost ran.
+			midArchive := &Instance{
+				ID:                   "abort-archive-id",
+				Title:                "abort-archive",
+				Path:                 repoPath,
+				Branch:               pushedBranch,
+				Program:              "claude",
+				started:              true,
+				liveness:             LiveRunning,
+				inFlightOp:           OpArchiving,
+				archivePushCompleted: true,
+				backend:              newInertSandboxBackend(backendType),
+				UpdatedAt:            snapshotTime,
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				if row.Liveness != LiveLost {
+					t.Fatalf("committed AbortArchiveToLost outcome overwritten: Liveness = %v, want LiveLost", row.Liveness)
+				}
+				if row.Branch != pushedBranch {
+					t.Fatalf("Branch = %q, want %q (pushed work must survive", row.Branch, pushedBranch)
+				}
+				return
+			}
+			t.Fatalf("abort-archive row missing after checkpoint for %s", backendType)
+		})
+	}
+}
+
+// TestSaveInstances_ReconcileRequiresFresherUpdateAt covers finding 3966293189:
+// reconcilePendingArchiveRows must only adopt a disk row whose UpdatedAt is
+// strictly after the snapshot's. A stale Archived disk row from a prior archive
+// cycle must not displace a fresh sandbox snapshot.
+func TestSaveInstances_ReconcileRequiresFresherUpdateAt(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			// Disk: stale Archived row from a PREVIOUS archive cycle, same key,
+			// but UpdatedAt is BEFORE the snapshot.
+			snapshotTime := time.Now()
+			priorArchiveTime := snapshotTime.Add(-time.Second)
+			const staleBranch = "af/prior-archive"
+			const freshBranch = "af/fresh-archive"
+			seedDisk(t, state, repoPath, []InstanceData{{
+				ID:          "reused-id",
+				Title:       "reused-session",
+				Path:        repoPath,
+				Branch:      staleBranch,
+				Program:     "claude",
+				Status:      Archived,
+				Liveness:    LiveArchived,
+				BackendType: backendType,
+				UpdatedAt:   priorArchiveTime,
+			}})
+
+			alive := makeAliveInstance("alive", repoPath)
+			// Fresh snapshot: branch pushed, archive in flight.
+			midArchive := &Instance{
+				ID:                   "reused-id",
+				Title:                "reused-session",
+				Path:                 repoPath,
+				Branch:               freshBranch,
+				Program:              "claude",
+				started:              true,
+				liveness:             LiveRunning,
+				inFlightOp:           OpArchiving,
+				archivePushCompleted: true,
+				backend:              newInertSandboxBackend(backendType),
+				UpdatedAt:            snapshotTime,
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, midArchive}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != midArchive.Title {
+					continue
+				}
+				// The stale Archived row must NOT displace the fresh snapshot.
+				if row.Liveness == LiveArchived && row.Branch == staleBranch {
+					t.Fatalf("stale Archived row from a prior archive cycle replaced the fresh snapshot: "+
+						"reconciliation adopted a disk row with UpdatedAt before the snapshot (%s)", backendType)
+				}
+				return
+			}
+		})
+	}
+}
+
+// TestSaveInstances_PostTeardownNoRuntimeCleanupUnknown covers finding 3966293181:
+// when ArchiveSandbox has already completed teardown (as.Kill returned and cleared
+// the backend's cleanup handle), the snapshot has runtimeCleanup == nil. The
+// checkpoint must NOT set RuntimeCleanupStateUnknown in that case, because a
+// restart would then re-run cleanup on a backend that is already gone.
+func TestSaveInstances_PostTeardownNoRuntimeCleanupUnknown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+
+	// Post-teardown snapshot: Branch set (push completed), OpArchiving set (commit
+	// not yet run), but backend has no live cleanup handle (teardown is done).
+	postTeardown := &Instance{
+		ID:                   "post-teardown-id",
+		Title:                "post-teardown",
+		Path:                 repoPath,
+		Branch:               "af/post-teardown",
+		Program:              "claude",
+		started:              true,
+		liveness:             LiveRunning,
+		inFlightOp:           OpArchiving,
+		archivePushCompleted: true,
+		// dockerBackend with nil cleanup: teardown completed, no identity to retain.
+		backend: &dockerBackend{containerID: ""},
+	}
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, postTeardown}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title != postTeardown.Title {
+			continue
+		}
+		if row.RuntimeCleanupStateUnknown {
+			t.Fatal("post-teardown row must not have RuntimeCleanupStateUnknown: teardown already completed " +
+				"(runtimeCleanup nil), so marking unknown would cause a restart to attempt cleanup " +
+				"on an already-gone backend")
+		}
+		return
+	}
+	t.Fatal("post-teardown row was not retained")
+}
+
+// failOnGetInstancesMockStorage wraps mockInstanceStorage and returns an error
+// on GetInstances for a specific repo, simulating a transient read failure
+// during reconciliation.
+type failOnGetInstancesMockStorage struct {
+	*mockInstanceStorage
+	failRepoID string
+}
+
+func (m *failOnGetInstancesMockStorage) GetInstances(repoID string) (json.RawMessage, error) {
+	if repoID == m.failRepoID {
+		return nil, fmt.Errorf("simulated transient read failure")
+	}
+	return m.mockInstanceStorage.GetInstances(repoID)
+}
+
+// TestSaveInstances_ReconcileReadFailureIsPropagatd covers finding 3966293172:
+// if GetInstances fails during the archive reconciliation read, SaveInstances
+// must return an error rather than silently proceeding to overwrite disk. A
+// silent overwrite would clobber a committed archive row with the stale snapshot.
+func TestSaveInstances_ReconcileReadFailureIsPropagated(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	ms := newMockStorage()
+	rid := config.RepoIDFromRoot(repoPath)
+	failingState := &failOnGetInstancesMockStorage{
+		mockInstanceStorage: ms,
+		failRepoID:          rid,
+	}
+
+	alive := makeAliveInstance("alive", repoPath)
+	midArchive := &Instance{
+		ID:                   "mid-archive-id",
+		Title:                "mid-archive",
+		Path:                 repoPath,
+		Branch:               "af/mid-archive",
+		Program:              "claude",
+		started:              true,
+		liveness:             LiveRunning,
+		inFlightOp:           OpArchiving,
+		archivePushCompleted: true,
+		backend:              newInertSandboxBackend("docker"),
+	}
+
+	storage, err := NewStorage(failingState, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, midArchive}); err == nil {
+		t.Fatal("SaveInstances must return an error when GetInstances fails during archive reconciliation: " +
+			"silently proceeding would overwrite a committed archive row with the stale snapshot")
+	}
+}
+
+// snapshotHookBackend runs hook when SaveInstances reaches this instance's
+// ToInstanceData call. Placing it after another instance makes the hook an exact
+// seam between that earlier instance's snapshot and the per-repo file lock.
+type snapshotHookBackend struct {
+	Backend
+	once sync.Once
+	hook func()
+}
+
+func (b *snapshotHookBackend) Type() string {
+	b.once.Do(b.hook)
+	return b.Backend.Type()
+}
+
+// TestSaveInstances_ReconcilesArchiveStartedAfterCollection covers finding
+// 3966405841's exact interleaving: the target was snapshotted as Running, then
+// its archive started and committed before SaveInstances acquired the repo
+// lock. The checkpoint must not overwrite that newer durable archive with the
+// stale snapshot merely because the snapshot had not observed OpArchiving.
+func TestSaveInstances_ReconcilesArchiveStartedAfterCollection(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+	snapshotTime := time.Now().Add(-time.Hour)
+	target := &Instance{
+		ID: "late-archive-id", Title: "late-archive", Path: repoPath,
+		Program: "claude", started: true, liveness: LiveRunning,
+		backend: &dockerBackend{}, UpdatedAt: snapshotTime,
+	}
+	trigger := makeAliveInstance("snapshot-trigger", repoPath)
+	trigger.backend = &snapshotHookBackend{
+		Backend: trigger.backend,
+		hook: func() {
+			require.NoError(t, target.Transition(BeginArchive()))
+			target.recordArchivePush("af/late-archive")
+			require.NoError(t, target.Transition(CommitArchive()))
+			seedDisk(t, state, repoPath, []InstanceData{target.ToInstanceData().ForStorage()})
+		},
+	}
+
+	storage, err := NewStorage(state, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances([]*Instance{target, trigger}))
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.ID != target.ID {
+			continue
+		}
+		if row.Liveness != LiveArchived || row.Branch != "af/late-archive" {
+			t.Fatalf("checkpoint overwrote the archive that committed after collection: "+
+				"Liveness=%v Branch=%q, want LiveArchived and %q", row.Liveness, row.Branch, "af/late-archive")
+		}
+		return
+	}
+	t.Fatal("checkpoint erased the archive that committed after collection")
+}
+
+// TestReconcilePendingArchiveRows_SelectsNewestDuplicate covers finding
+// 3968810374. persistInstanceData updates the first matching duplicate, so a
+// stale duplicate can follow it on disk; reconciliation must select by mutation
+// time instead of whichever duplicate happens to occur last.
+func TestReconcilePendingArchiveRows_SelectsNewestDuplicate(t *testing.T) {
+	snapshotTime := time.Now()
+	group := []InstanceData{{
+		ID: "duplicate-id", Title: "duplicate", BackendType: "docker",
+		Branch: "af/in-flight", Liveness: LiveRunning, UpdatedAt: snapshotTime,
+	}}
+	onDisk := []InstanceData{
+		{
+			ID: "duplicate-id", Title: "duplicate", BackendType: "docker",
+			Branch: "af/committed", Liveness: LiveArchived,
+			UpdatedAt: snapshotTime.Add(time.Second),
+		},
+		{
+			ID: "duplicate-id", Title: "duplicate", BackendType: "docker",
+			Branch: "", Liveness: LiveRunning,
+			UpdatedAt: snapshotTime.Add(-time.Second),
+		},
+	}
+
+	reconcilePendingArchiveRows(group, map[string]struct{}{"duplicate-id": {}}, onDisk)
+
+	if group[0].Liveness != LiveArchived || group[0].Branch != "af/committed" {
+		t.Fatalf("later stale duplicate hid the committed archive: Liveness=%v Branch=%q, "+
+			"want LiveArchived and %q", group[0].Liveness, group[0].Branch, "af/committed")
+	}
+}
+
+// TestSaveInstances_HistoricalBranchDoesNotFenceCurrentPush covers finding
+// 3968810390. A restored sandbox deliberately retains its previous archive
+// branch. BeginArchive alone therefore cannot make that non-empty branch proof
+// that the second archive's push finished.
+func TestSaveInstances_HistoricalBranchDoesNotFenceCurrentPush(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+	const historicalBranch = "af/previous-archive"
+	snapshotTime := time.Now()
+	seedDisk(t, state, repoPath, []InstanceData{{
+		ID: "restored-id", Title: "restored", Path: repoPath,
+		Program: "claude", BackendType: "docker", Branch: historicalBranch,
+		Status: Archived, Liveness: LiveArchived,
+		UpdatedAt: snapshotTime.Add(-time.Hour),
+	}})
+
+	alive := makeAliveInstance("alive", repoPath)
+	restored := &Instance{
+		ID: "restored-id", Title: "restored", Path: repoPath,
+		Program: "claude", Branch: historicalBranch, started: true,
+		liveness: LiveRunning, UpdatedAt: snapshotTime,
+		backend: &dockerBackend{
+			containerID: "fresh-live-container",
+			cleanup: &DockerRuntimeCleanupData{
+				ContainerID: "fresh-live-container", EngineID: "engine-id",
+			},
+		},
+	}
+	require.NoError(t, restored.Transition(BeginArchive()))
+
+	storage, err := NewStorage(state, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances([]*Instance{alive, restored}))
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.ID != restored.ID {
+			continue
+		}
+		if row.RuntimeCleanupStateUnknown || row.RuntimeCleanup != nil {
+			t.Fatalf("second archive retained a pre-push row using historical Branch %q: "+
+				"RuntimeCleanupStateUnknown=%v RuntimeCleanup=%+v; restart could reap the live sandbox "+
+				"and restore the previous archive", row.Branch, row.RuntimeCleanupStateUnknown, row.RuntimeCleanup)
+		}
+		t.Fatalf("second archive's pre-push row survived from historical Branch %q; "+
+			"the current push has not made its new work durable", row.Branch)
+	}
+}
+
+func TestArchivePushFenceTracksOnlyCurrentGeneration(t *testing.T) {
+	inst := &Instance{
+		Title: "restored", Branch: "af/previous-archive", started: true,
+		liveness: LiveRunning, archivePushCompleted: true,
+	}
+	require.NoError(t, inst.Transition(BeginArchive()))
+	if inst.ToInstanceData().archivePushCompleted {
+		t.Fatal("BeginArchive retained the previous generation's push fence")
+	}
+
+	// A second archive normally pushes the same branch. The phase must advance
+	// even when recording the branch does not change the Branch field.
+	beforePush := inst.UpdatedAt
+	inst.recordArchivePush("af/previous-archive")
+	afterPush := inst.ToInstanceData()
+	if !afterPush.archivePushCompleted {
+		t.Fatal("a successful current-generation push did not raise its checkpoint fence")
+	}
+	if !afterPush.UpdatedAt.After(beforePush) {
+		t.Fatal("raising the current-generation push fence did not advance UpdatedAt")
+	}
+
+	require.NoError(t, inst.Transition(AbortArchiveToLost()))
+	if inst.ToInstanceData().archivePushCompleted {
+		t.Fatal("the settled archive retained a process-local push fence")
 	}
 }

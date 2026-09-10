@@ -203,7 +203,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
 		return nil
 	}
+	controlClosed := false
 	defer func() {
+		if controlClosed {
+			return
+		}
 		if err := closeControl(); err != nil {
 			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
 		}
@@ -215,10 +219,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// point, so no extra spawn race applies. A bind failure is logged but never
 	// fatal: HTTP is auxiliary — the gob control plane every existing client
 	// depends on must not regress if the HTTP socket cannot bind.
-	if closeHTTP, err := startHTTPServer(manager, scheduler, watchers); err != nil {
+	var closeHTTP func() error
+	httpClosed := false
+	if closeCandidate, err := startHTTPServer(manager, scheduler, watchers); err != nil {
 		log.WarningLog.Printf("failed to start daemon HTTP server: %v", err)
 	} else {
+		closeHTTP = closeCandidate
 		defer func() {
+			if httpClosed {
+				return
+			}
 			if err := closeHTTP(); err != nil {
 				log.WarningLog.Printf("failed to close daemon HTTP server: %v", err)
 			}
@@ -398,17 +408,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
 	}
 
-	// Stop the goroutines so we don't race.
-	close(stopCh)
-	wg.Wait()
-	// The poll loop is out, so no further root-agent create can be launched; wait
-	// for one that already is (#3721). JOINED, never cancelled — a create torn
-	// down mid-provision is the half-created session the always-ensure loop has no
-	// way to reconcile — and BEFORE the final SaveInstances below, so a create
-	// that lands late is persisted rather than overwritten by a save that predates
-	// it. This is also what the poll goroutine's own wg.Wait did while the create
-	// still ran on it.
-	manager.waitRootAgentCreatesForShutdown()
+	drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
@@ -418,7 +418,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return nil
 	}
 
-	if err := manager.SaveInstances(); err != nil {
+	if err := manager.SaveInstancesForShutdown(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil

@@ -578,6 +578,9 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// mis-ordered edge (#2135). The observer re-decides on its next tick.
 		return nil
 	}
+	if ev.kind == tkBeginArchive && i.archiveCheckpointSealed {
+		return fmt.Errorf("session %q cannot begin an archive after the daemon shutdown checkpoint was sealed", i.Title)
+	}
 	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
 		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
 	}
@@ -594,6 +597,16 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	}
 
 	to := spec.target(from, ev)
+	if ev.kind == tkBeginArchive {
+		i.archiveSettled = make(chan struct{})
+	}
+	// The durable-push fence belongs to exactly one archive generation. Begin
+	// clears any historical value before the remote push starts; every settling
+	// edge clears it after checkpoint retention no longer needs the phase.
+	switch ev.kind {
+	case tkBeginArchive, tkCancelArchive, tkCommitArchive, tkAbortArchiveToLost:
+		i.archivePushCompleted = false
+	}
 	// Apply this transition's declared effect on the task run (#1892). The answer
 	// comes from the table, not from reading the resulting state — see runEffect.
 	//
@@ -668,6 +681,10 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	switch ev.kind {
 	case tkCommitArchive, tkBeginRestore:
 		i.clearAgentModelChangeLocked()
+	}
+	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
+		close(i.archiveSettled)
+		i.archiveSettled = nil
 	}
 	return nil
 }
