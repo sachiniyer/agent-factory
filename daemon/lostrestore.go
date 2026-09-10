@@ -691,6 +691,24 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 	m.mu.Unlock()
 }
 
+// resetRecoverBudget clears the Recover-flap episode counter for the session
+// identified by repoID and inst. Call this when the sandbox is replaced (force-
+// reap): the old sandbox is gone, so any prior Recover failures are stale and
+// the new sandbox earns a fresh budget. Do NOT call this on a plain successful
+// preserve push — that does not replace the sandbox, and zeroing
+// consecutiveFailures there would erase a legitimate Recover-flap count from a
+// running episode. The symmetric probeAlive paths that settle the session
+// (RestoreLostSessions) instead delete the whole lostRestoreStates entry, so
+// they do not use this helper either.
+func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
+	stateKey := stableSessionKey(repoID, inst)
+	m.mu.Lock()
+	if st := m.lostRestoreStates[stateKey]; st != nil {
+		st.consecutiveFailures = 0
+	}
+	m.mu.Unlock()
+}
+
 // lostRestoreFailed records a failed restore attempt, backing off until the
 // bounded attempt budget is exhausted. The terminal outcome is a durable session
 // fact as well as an ERROR log, so daemon restart and every client retain the
