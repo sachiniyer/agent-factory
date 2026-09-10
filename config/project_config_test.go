@@ -294,6 +294,23 @@ func TestProjectLookupMarkerProbeTimeoutIsUnknown(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestProjectConfigLockTreatsUnknownMarkerAsEnrichment(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	require.NoError(t, os.WriteFile(shim, []byte("#!/bin/sh\nexec /bin/sleep 5\n"), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	called := false
+	err := WithProjectConfigLockForRoot(repoRoot, func() error {
+		called = true
+		return nil
+	})
+	require.NoError(t, err,
+		"an unanswered marker used only to select an extra lock must not replace the wrapped decision")
+	require.True(t, called, "the wrapped decision must still run when checkout identity is unknown")
+}
+
 func TestProjectForRootMatchesRegisteredRoot(t *testing.T) {
 	_, repoRoot, project := registeredTestProject(t)
 	got, found, err := projectForRoot(repoRoot)

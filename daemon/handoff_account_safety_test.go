@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -44,6 +45,42 @@ func TestHandoffAccountMissingTargetRefusesBeforeTeardown(t *testing.T) {
 			require.Empty(t, prompts)
 		})
 	}
+}
+
+func TestHandoffAccountMissingTargetRefusesWhenCheckoutMarkerProbeTimesOut(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	gitShim := filepath.Join(binDir, "git")
+	shim := fmt.Sprintf(`#!/bin/sh
+if [ "$3" = "rev-parse" ] && [ "$4" = "--git-common-dir" ]; then
+  exec /bin/sleep 5
+fi
+exec %q "$@"
+`, realGit)
+	require.NoError(t, os.WriteFile(gitShim, []byte(shim), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+	backend.onRespawn = func(i *session.Instance) {
+		i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram()))
+	}
+	inst.Program = "codex"
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex"))
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	_, err = m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: "claude", Account: "personal",
+	})
+	require.ErrorContains(t, err, "launch preflight")
+	require.False(t, isMutationCommitted(err))
+	require.Equal(t, "codex", inst.AgentProgram())
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
 }
 
 func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {

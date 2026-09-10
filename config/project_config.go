@@ -276,6 +276,22 @@ func isProjectRegistryReadError(err error) bool {
 	return errors.As(err, &target)
 }
 
+// checkoutMarkerProbeError preserves an UNKNOWN checkout-identity observation
+// so each caller can apply its own policy. Identity decisions keep the error and
+// fail closed; callers using the marker only to enrich an independent decision
+// may deliberately continue without a project match.
+type checkoutMarkerProbeError struct {
+	err error
+}
+
+func (e *checkoutMarkerProbeError) Error() string { return e.err.Error() }
+func (e *checkoutMarkerProbeError) Unwrap() error { return e.err }
+
+func isCheckoutMarkerProbeError(err error) bool {
+	var target *checkoutMarkerProbeError
+	return errors.As(err, &target)
+}
+
 func projectForWorkspace(root string) (Project, bool, error) {
 	return projectForWorkspaceContext(context.Background(), root)
 }
@@ -365,17 +381,21 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	select {
 	case marker := <-result:
 		if marker.err != nil {
-			return "", false, marker.err
+			return "", false, &checkoutMarkerProbeError{err: marker.err}
 		}
 		return marker.id, marker.exists, nil
 	case <-ctx.Done():
-		return "", false, fmt.Errorf("read checkout marker for %s: %w", root, ctx.Err())
+		return "", false, &checkoutMarkerProbeError{
+			err: fmt.Errorf("read checkout marker for %s: %w", root, ctx.Err()),
+		}
 	}
 }
 
 func checkoutMarkerProbeFailure(ctx context.Context, root string, err error) error {
 	classified := markUnansweredProbe(ctx, err)
-	return fmt.Errorf("inspect checkout marker location for %s: %w", root, classified)
+	return &checkoutMarkerProbeError{
+		err: fmt.Errorf("inspect checkout marker location for %s: %w", root, classified),
+	}
 }
 
 // ResolveRegisteredProjectRepoID returns the repository identity for a durable
@@ -420,6 +440,15 @@ func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (st
 // --project. The ordinary resolver intentionally remains a point-in-time read.
 func WithProjectConfigLockForRoot(root string, fn func() error) error {
 	project, found, err := projectForRoot(root)
+	if isCheckoutMarkerProbeError(err) {
+		// The marker selects an extra personal-config lock; it is not the domain
+		// decision made by fn. An unanswered probe cannot establish a project to
+		// lock, but it must not replace an independent refusal (for example, a
+		// missing handoff executable) with an infrastructure diagnostic. Callers
+		// whose decision itself depends on checkout identity use the strict lookup
+		// paths above and keep failing closed.
+		return fn()
+	}
 	if err != nil {
 		return err
 	}
