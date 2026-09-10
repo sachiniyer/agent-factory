@@ -38,6 +38,10 @@ func (m *Manager) reserveLocalRestoreBranch(
 	if repoPath == "" || worktreePath == "" {
 		return nil, fmt.Errorf("cannot restore session %q: its repository or worktree identity is missing, so af cannot verify branch ownership", title)
 	}
+	canonicalRepo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot restore session %q: af could not establish the repository identity needed to serialize worktree admission; nothing was moved: %w", title, err)
+	}
 
 	initial, err := worktreeBranchBindings(repoPath)
 	if err != nil {
@@ -50,9 +54,22 @@ func (m *Manager) reserveLocalRestoreBranch(
 	if !registered && requireRegistered {
 		return nil, fmt.Errorf("cannot restore session %q: its worktree %s is absent from Git's registration, so af cannot establish the branch it would activate; nothing was moved", title, config.ShellQuotePath(worktreePath))
 	}
-	lock := m.worktreeAdmissionLockForRepo(repoID)
+	// repoID is the persisted inventory key and may survive a repository rename.
+	// Admission is a property of the physical Git repository, so restores and
+	// creates must rendezvous on the identity Git resolves now, not on whichever
+	// historical key addresses this row.
+	lock := m.worktreeAdmissionLockForRepo(canonicalRepo.ID)
 	lock.Lock()
 	release := lock.Unlock
+	freshRepo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("cannot restore session %q: af could not revalidate the repository identity under worktree admission; nothing was moved: %w", title, err)
+	}
+	if freshRepo.ID != canonicalRepo.ID {
+		release()
+		return nil, fmt.Errorf("cannot restore session %q: its repository identity changed during worktree admission; retry after it settles", title)
+	}
 	fresh, err := worktreeBranchBindings(repoPath)
 	if err != nil {
 		release()
@@ -74,7 +91,7 @@ func (m *Manager) reserveLocalRestoreBranch(
 	}
 	m.mu.Lock()
 	current := m.instances[daemonInstanceKey(repoID, title)]
-	if lanes := m.liveLanesHoldingWorktreeExceptLocked(repoID, worktreePath, instance, diskData); len(lanes) > 0 {
+	if lanes := m.liveLanesHoldingWorktreeExceptLocked(worktreePath, instance, diskData); len(lanes) > 0 {
 		m.mu.Unlock()
 		release()
 		lane := lanes[0]
@@ -90,7 +107,7 @@ func (m *Manager) reserveLocalRestoreBranch(
 		if sameWorktreePath(binding.Path, worktreePath) || branch == "" || binding.Branch != branch {
 			continue
 		}
-		if lanes := m.liveLanesHoldingWorktreeExceptLocked(repoID, binding.Path, instance, diskData); len(lanes) > 0 {
+		if lanes := m.liveLanesHoldingWorktreeExceptLocked(binding.Path, instance, diskData); len(lanes) > 0 {
 			m.mu.Unlock()
 			release()
 			lane := lanes[0]
@@ -107,11 +124,13 @@ func (m *Manager) reserveLocalRestoreBranch(
 	return release, nil
 }
 
-// liveLanesHoldingWorktreeExceptLocked returns every live owner of holder except
-// the exact instance being restored. A retained worktree can already be shared
-// by an archived lane and a live --here lane, so path equality cannot identify
-// the restoring owner; only pointer/stable-ID identity can exclude it safely.
-func (m *Manager) liveLanesHoldingWorktreeExceptLocked(repoID, holder string, restoring *session.Instance, diskData []session.InstanceData) []string {
+// liveLanesHoldingWorktreeExceptLocked returns every live owner of holder across
+// the complete manager roster except the exact instance being restored. A
+// repository rename can leave that owner under a historical map key, and a
+// retained worktree can already be shared by an archived lane and a live --here
+// lane, so neither the map key nor path equality can identify the restoring
+// owner; only pointer/stable-ID identity can exclude it safely.
+func (m *Manager) liveLanesHoldingWorktreeExceptLocked(holder string, restoring *session.Instance, diskData []session.InstanceData) []string {
 	target := pathutil.ResolveForCompare(holder)
 	if target == "" {
 		return nil
@@ -129,9 +148,8 @@ func (m *Manager) liveLanesHoldingWorktreeExceptLocked(repoID, holder string, re
 		seen[key] = struct{}{}
 		lanes = append(lanes, title)
 	}
-	for key, candidate := range m.instances {
-		rid, _ := splitDaemonInstanceKey(key)
-		if rid != repoID || candidate == nil || candidate == restoring || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
+	for _, candidate := range m.instances {
+		if candidate == nil || candidate == restoring || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
 			continue
 		}
 		add(candidate.Title, candidate.ID)

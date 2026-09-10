@@ -301,17 +301,19 @@ func liveHeldInPlaceDetachedRefusal(title, workspace, lane, holder string) error
 // daemon entry that can reach LocalBackend's missing-worktree rebuild use it: a
 // free-path observation is not a reservation unless every peer that can
 // populate that path is excluded until the observing operation has acted.
-// It is keyed by the canonical repository ID already resolved at entry.
-func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
+// It is keyed by Git's current canonical repository identity, never a
+// historical persisted-inventory key: creates and restores addressed through
+// different names of one repository must still serialize.
+func (m *Manager) worktreeAdmissionLockForRepo(repoIdentityID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.worktreeAdmissionLocks == nil {
 		m.worktreeAdmissionLocks = make(map[string]*sync.Mutex)
 	}
-	lock := m.worktreeAdmissionLocks[repoID]
+	lock := m.worktreeAdmissionLocks[repoIdentityID]
 	if lock == nil {
 		lock = &sync.Mutex{}
-		m.worktreeAdmissionLocks[repoID] = lock
+		m.worktreeAdmissionLocks[repoIdentityID] = lock
 	}
 	return lock
 }

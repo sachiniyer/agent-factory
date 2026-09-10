@@ -667,6 +667,33 @@ func TestArchivedRestoreRefusesLiveLaneSharingRetainedWorktree(t *testing.T) {
 	assert.Contains(t, err.Error(), archived.GetWorktreePath())
 }
 
+func TestArchivedRestoreFindsLiveHolderUnderHistoricalRepoKey(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "historical-restore")
+	historicalRepoID := config.RepoIDFromRoot(filepath.Join(t.TempDir(), "pre-rename-repo"))
+	require.NotEqual(t, repoID, historicalRepoID)
+	manager.mu.Lock()
+	delete(manager.instances, daemonInstanceKey(repoID, archived.Title))
+	manager.instances[daemonInstanceKey(historicalRepoID, archived.Title)] = archived
+	manager.mu.Unlock()
+	require.NoError(t, appendInstanceData(historicalRepoID, archived.ToInstanceData()))
+
+	livePath := filepath.Join(t.TempDir(), "live")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-q", "-b", "live-staging", livePath).CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", livePath, "checkout", "-q", "--ignore-other-worktrees", "-B", archived.GetBranch(), archived.GetBranch()).CombinedOutput()
+	require.NoError(t, err, string(out))
+	live := registerCollisionLane(t, manager, repoID, repoPath, livePath, "current-key-holder", archived.GetBranch(), session.Ready)
+
+	release, err := manager.reserveLocalRestoreBranch(historicalRepoID, archived.Title, archived, true, archived.GetWorktreePath())
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), live.Title,
+		"Git's holder path must be matched against the complete live roster after a repository-key rename")
+}
+
 func TestArchivedRestoreIgnoresStaleRelocationAliasForBranchAdmission(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "stale-alias")
@@ -876,6 +903,53 @@ func TestArchivedRestoreAdmissionSerializesWithInPlaceCreate(t *testing.T) {
 	require.Error(t, result.err)
 	assert.Contains(t, result.err.Error(), archived.Title,
 		"the create must revalidate after the shared admission reservation and name the restored holder")
+}
+
+func TestArchivedRestoreAdmissionUsesCanonicalRepoIdentity(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "restoring", "historical-lock")
+	historicalRepoID := config.RepoIDFromRoot(filepath.Join(t.TempDir(), "pre-rename-repo"))
+	require.NotEqual(t, repoID, historicalRepoID)
+	manager.mu.Lock()
+	delete(manager.instances, daemonInstanceKey(repoID, archived.Title))
+	manager.instances[daemonInstanceKey(historicalRepoID, archived.Title)] = archived
+	manager.mu.Unlock()
+	require.NoError(t, appendInstanceData(historicalRepoID, archived.ToInstanceData()))
+
+	out, err := exec.Command("git", "-C", repoPath, "checkout", "-q", "--ignore-other-worktrees", "-B", archived.GetBranch(), archived.GetBranch()).CombinedOutput()
+	require.NoError(t, err, string(out))
+	releaseRestore, err := manager.reserveLocalRestoreBranch(historicalRepoID, archived.Title, archived, true, archived.GetWorktreePath())
+	require.NoError(t, err)
+	releasedRestore := false
+	t.Cleanup(func() {
+		if !releasedRestore {
+			releaseRestore()
+		}
+	})
+
+	backend := session.NewFakeBackend()
+	backend.CompleteStart()
+	restoreFactory := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		return inPlaceWorktreeFakeBackend{readyFakeBackend{backend}}, nil
+	})
+	t.Cleanup(restoreFactory)
+	done := startCreateCall(&controlServer{manager: manager}, CreateSessionRequest{
+		Title: "incoming-here", RepoPath: repoPath, Program: "claude", InPlace: true,
+	})
+
+	select {
+	case result := <-done:
+		t.Fatalf("current-key create did not share admission with historical-key restore: %v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	archived.SetStatusForTest(session.Ready)
+	require.NoError(t, persistInstanceData(historicalRepoID, archived.ToInstanceData()))
+	releaseRestore()
+	releasedRestore = true
+	result := waitForCreateResult(t, done)
+	require.Error(t, result.err)
+	assert.Contains(t, result.err.Error(), archived.Title,
+		"the waiter must revalidate after the canonical repository reservation")
 }
 
 func TestInPlaceArchivedTitleReuseHasNoPostRenameAdmissionFailure(t *testing.T) {
