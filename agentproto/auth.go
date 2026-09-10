@@ -108,10 +108,21 @@ func redactAccessTokenComponents(u *url.URL) {
 	// before scanning so that %61ccess_token= is matched; if the escape sequence
 	// is malformed we must not emit the raw opaque value, so fall back to
 	// redacting the whole field rather than leaving a credential in place.
+	// Write back ONLY when the scan actually redacted something. url.URL.String
+	// prints Opaque verbatim — there is no RawOpaque to re-escape from, unlike
+	// the Path/RawPath pair below — so storing the decoded form unconditionally
+	// rewrote every opaque URL that passed through, credential or not:
+	// mailto:user%40host.example became mailto:user@host.example, and
+	// af:a%2Fb%20c became af:a/b c, which is no longer a valid URL (#4161).
+	// Leaving the original encoded bytes in place when nothing matched keeps
+	// this a redactor rather than a normalizer.
 	if decoded, err := url.PathUnescape(u.Opaque); err != nil {
 		u.Opaque = accessTokenRedaction
-	} else {
-		u.Opaque = RedactAccessTokenText(decoded)
+	} else if redacted := RedactAccessTokenText(decoded); redacted != decoded {
+		// A redacted opaque is necessarily rewritten, so its remaining escapes
+		// are not preserved; the credential is gone, which is what matters on a
+		// diagnostic surface.
+		u.Opaque = redacted
 	}
 	u.Host = RedactAccessTokenText(u.Host)
 	if path := RedactAccessTokenText(u.Path); path != u.Path {
