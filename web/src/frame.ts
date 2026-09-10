@@ -148,21 +148,3 @@ export function decode(raw: Uint8Array): Frame {
       throw new Error(`agentproto: unknown opcode 0x${(op as number).toString(16).padStart(2, "0")}`);
   }
 }
-
-/** Renders an opcode for diagnostics (mirrors Go's Opcode.String). */
-export function opName(op: Op): string {
-  switch (op) {
-    case Op.PTYOut:
-      return "PTY_OUT";
-    case Op.Input:
-      return "INPUT";
-    case Op.Resize:
-      return "RESIZE";
-    case Op.Repaint:
-      return "REPAINT";
-    case Op.Hello:
-      return "HELLO";
-    default:
-      return `Opcode(0x${(op as number).toString(16).padStart(2, "0")})`;
-  }
-}
