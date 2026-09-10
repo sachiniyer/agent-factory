@@ -193,6 +193,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	settlementCheckpoint bool,
 ) {
 	if instance.GetInFlightOp() != session.OpNone {
+		// The write is skipped, but a consumed one-shot checkpoint must not be
+		// silently dropped: record the obligation so a later poll re-attempts it.
+		if settlementCheckpoint {
+			key := daemonInstanceKey(repoID, instance.Title)
+			m.recordSettlementWrite(repoID, key, instance, errors.New("ceded to in-flight op"))
+		}
 		return
 	}
 	data := instance.ToInstanceData()
@@ -224,6 +230,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	// settlement retry holds under the op lock (settlement.go). The gate decides
 	// WHETHER to write; an op holding the session decides WHO writes.
 	if data.InFlightOp != session.OpNone {
+		// The write is skipped, but a consumed one-shot checkpoint must not be
+		// silently dropped: record the obligation so a later poll re-attempts it.
+		if settlementCheckpoint {
+			key := daemonInstanceKey(repoID, instance.Title)
+			m.recordSettlementWrite(repoID, key, instance, errors.New("ceded to in-flight op"))
+		}
 		repoStartLock.Unlock()
 		return
 	}
