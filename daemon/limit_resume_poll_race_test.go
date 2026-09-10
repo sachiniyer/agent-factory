@@ -10,6 +10,153 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// TestPersistPollChange_SettlementCheckpointCededToInFlightOpIsRetried asserts
+// that when a poll consumes the one-shot settlementCheckpoint (via
+// ClearLostRestoreFailureAtObservation) but then cedes to an in-flight op in
+// persistPollChangeWithIdleEvidence, the obligation is preserved in settleOwed
+// and subsequently flushed to disk by FlushOwedSettlements once the op clears.
+//
+// Without the fix (the "if settlementCheckpoint { recordSettlementWrite ... }"
+// blocks in limit.go), the one-shot is spent in memory, every later poll
+// computes ClearLostRestoreFailureAtObservation == false, and the cleared
+// terminal failure never reaches disk — a restart reloads the old outage.
+//
+// Deterministic via testHookPollBeforePersistLock: the fence is raised by a
+// direct BeginHandoff transition inside the hook, after the lock-free gate
+// passes but before repoStartLock is taken. No goroutines or sleeps are needed
+// because the hook fires synchronously in the poll goroutine.
+func TestPersistPollChange_SettlementCheckpointCededToInFlightOpIsRetried(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	// FakeBackend: HasUpdated=(false,false,""), IsAlive=true — the idle probe
+	// path that calls resolveIdleLiveness and eventually sets observedAlive.
+	inst := registerStarted(t, manager, repoID, repoPath, "ceded-checkpoint", session.NewFakeBackend(), true, session.Running)
+
+	// Arm the one-shot: record a terminal restore failure so
+	// ClearLostRestoreFailureAtObservation can consume it.
+	if !inst.SetLostRestoreFailure(3, errors.New("agent exited at startup")) {
+		t.Fatal("SetLostRestoreFailure rejected: precondition failed")
+	}
+	// Persist the row WITH the LostRestoreFailure so disk and memory start
+	// identical. After the test, disk must show it cleared.
+	manager.persistInstance(repoID, inst)
+	if rec := recordFor(t, repoID, "ceded-checkpoint"); rec == nil || rec.LostRestoreFailure == nil {
+		t.Fatalf("seed record = %+v, want LostRestoreFailure set", rec)
+	}
+
+	// In the poll's pre-lock window, raise OpReplacing via BeginHandoff so the
+	// under-lock re-check in persistPollChangeWithIdleEvidence cedes to the op.
+	// This is the interleaving the fix covers: the one-shot is consumed (in
+	// memory) and the write is deferred to settleOwed for retry.
+	prev := testHookPollBeforePersistLock
+	t.Cleanup(func() { testHookPollBeforePersistLock = prev })
+	once := false
+	testHookPollBeforePersistLock = func() {
+		if once {
+			return
+		}
+		once = true
+		if err := inst.Transition(session.BeginHandoff()); err != nil {
+			t.Errorf("BeginHandoff: %v", err)
+		}
+	}
+
+	// Drive the full poll, which calls refreshInstanceStatus → SnapshotAgent →
+	// (idle, probeAlive) → resolveIdleLiveness → noteAliveObservationAtGeneration
+	// → ClearLostRestoreFailureAtObservation → settlementCheckpoint=true →
+	// persistPollChangeWithIdleEvidence → hook raises OpReplacing → under-lock
+	// cede → recordSettlementWrite(non-nil error) → settleOwed entry created.
+	manager.refreshInstanceStatus(repoID, inst)
+
+	// Verify the one-shot was consumed: lostRestoreFailure is clear in memory.
+	if inst.LostRestoreFailureSnapshot() != nil {
+		t.Error("in-memory LostRestoreFailure must be cleared by the poll's ClearLostRestoreFailureAtObservation call")
+	}
+
+	// Verify the obligation is owed: the write did not reach disk.
+	if mid := recordFor(t, repoID, "ceded-checkpoint"); mid == nil || mid.LostRestoreFailure == nil {
+		t.Fatalf("record after the ceded poll = %+v, want LostRestoreFailure still on disk (the write was ceded, not made)", mid)
+	}
+
+	// Verify the obligation is tracked in settleOwed.
+	manager.mu.Lock()
+	_, owed := manager.settleOwed[stableSessionKey(repoID, inst)]
+	manager.mu.Unlock()
+	if !owed {
+		t.Error("settleOwed must contain the session after a ceded settlementCheckpoint write")
+	}
+
+	// The op finishes (here: aborted). The fence is now down.
+	if err := inst.Transition(session.AbortHandoff()); err != nil {
+		t.Fatalf("AbortHandoff: %v", err)
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("in-memory InFlightOp after AbortHandoff = %v, want OpNone", got)
+	}
+
+	// The retry must now make the cleared LostRestoreFailure durable.
+	manager.FlushOwedSettlements()
+
+	final := recordFor(t, repoID, "ceded-checkpoint")
+	if final == nil {
+		t.Fatal("no record on disk after FlushOwedSettlements")
+	}
+	if final.LostRestoreFailure != nil {
+		t.Errorf("on-disk LostRestoreFailure = %+v after FlushOwedSettlements, want nil: "+
+			"the ceded write obligation must have been retried and made durable", final.LostRestoreFailure)
+	}
+}
+
+// TestFlushOwedSettlements_HoldsOffWhileOpStillInFlight asserts that a
+// settlement retry attempted while the session is still inside an operation
+// leaves the obligation owed rather than discharging it prematurely.
+// flushOneOwedSettlement returns nil (not an error) in this situation, and the
+// loop's delete is guarded by !registered, so the obligation stays live for the
+// next tick.
+func TestFlushOwedSettlements_HoldsOffWhileOpStillInFlight(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "owed-in-flight", session.NewFakeBackend(), true, session.Running)
+
+	if !inst.SetLostRestoreFailure(1, errors.New("startup failed")) {
+		t.Fatal("SetLostRestoreFailure rejected")
+	}
+	manager.persistInstance(repoID, inst)
+
+	// Raise the fence and manually enroll a settlement obligation, mirroring
+	// what persistPollChangeWithIdleEvidence does on the cede path.
+	if err := inst.Transition(session.BeginHandoff()); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	// Clear in memory (as the poll would), then enroll the retry.
+	inst.ClearLostRestoreFailure()
+	key := daemonInstanceKey(repoID, inst.Title)
+	manager.recordSettlementWrite(repoID, key, inst, errors.New("ceded"))
+
+	// Disk still shows the old row; the op is in flight.
+	manager.FlushOwedSettlements()
+	if mid := recordFor(t, repoID, "owed-in-flight"); mid == nil || mid.LostRestoreFailure == nil {
+		t.Fatalf("record after flush-while-busy = %+v, want LostRestoreFailure still on disk (the retry must not write while the op is in flight)", mid)
+	}
+
+	// Verify the obligation is still owed (the flush did not discharge it).
+	manager.mu.Lock()
+	_, stillOwed := manager.settleOwed[stableSessionKey(repoID, inst)]
+	manager.mu.Unlock()
+	if !stillOwed {
+		t.Error("settleOwed must still contain the session after a retry that could not run")
+	}
+
+	// Now the op clears; the retry succeeds.
+	if err := inst.Transition(session.AbortHandoff()); err != nil {
+		t.Fatalf("AbortHandoff: %v", err)
+	}
+	manager.FlushOwedSettlements()
+
+	final := recordFor(t, repoID, "owed-in-flight")
+	if final == nil || final.LostRestoreFailure != nil {
+		t.Errorf("on-disk LostRestoreFailure = %+v after second flush, want nil", final.LostRestoreFailure)
+	}
+}
+
 // limitRacePollBackend is a FakeBackend that reproduces the #2135 interleaving
 // exactly: its pane capture returns a fixed usage-limit banner every idle tick,
 // and its following liveness probe runs a one-shot hook AFTER the content has
