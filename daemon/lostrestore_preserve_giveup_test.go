@@ -195,6 +195,179 @@ func TestRestoreLostSessions_PreservePushFailureGivesUp(t *testing.T) {
 	}
 }
 
+// TestRestoreLostSessions_PreserveGiveUpTerminatesManualRecoverToo pins the
+// d8e4e08f fix: when the preserve budget gives up, the in-memory state has
+// st.consecutiveFailures = lostRestoreMaxAttempts. A subsequent manual
+// RestoreSession that pushes successfully but then fails Recover must NOT
+// restart at attempt 1 and log "retrying in …"; lostRestoreFailed must
+// immediately take the terminal arm because the counter is already at the
+// budget ceiling.
+//
+// Without d8e4e08f: consecutiveFailures stays 0 at preserve give-up, so the
+// manual Recover failure starts a new episode at attempt 1 and logs
+// "restore of lost session … failed (attempt 1), retrying in …" while
+// LostRestoreGaveUp is already true and lostSessionWantsRestore refuses every
+// automatic retry — contradictory operator-facing output.
+//
+// With d8e4e08f: the give-up arm sets consecutiveFailures = lostRestoreMaxAttempts
+// before returning, so the manual Recover failure increments to
+// maxAttempts + 1 and immediately gives up, logging the same "giving up
+// after N attempts" the Recover-branch give-up always has.
+func TestRestoreLostSessions_PreserveGiveUpTerminatesManualRecoverToo(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+
+	srv, url := newPreservePushServer(t, false /* archive fails: drive preserve give-up */)
+	recoverErr := errors.New("recover: provision failed after give-up")
+	inst, backend := registerStartedRemoteTask(t, manager, repoID, repoPath, "remote-give-up-manual", url, session.Running)
+	backend.failWith = recoverErr
+
+	// Drive to a Lost observation.
+	manager.RefreshStatuses()
+	if got := inst.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("setup: liveness = %v, want LiveLost", got)
+	}
+
+	// Run the automatic loop to the preserve give-up. After this,
+	// LostRestoreGaveUp is true and st.consecutiveFailures == lostRestoreMaxAttempts.
+	for i := 0; i < lostRestoreMaxAttempts; i++ {
+		manager.RestoreLostSessions()
+	}
+	view := inst.LifecycleView()
+	if !view.LostRestoreGaveUp {
+		t.Fatal("setup: LostRestoreGaveUp = false after the push-failure give-up passes: the preserve arm did not reach terminal state")
+	}
+
+	// Now let the push succeed so the manual restore can reach Recover — the
+	// push-failure give-up is the one we drove, but the manual path must still
+	// attempt the preserve push (it is not the same as force-reap). The fact
+	// that it now lands does not reset the Recover budget that the preserve
+	// give-up set terminal.
+	srv.setArchiveOK(true)
+
+	// Manual restore: push succeeds, Recover fails once.
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: "remote-give-up-manual", RepoID: repoID,
+	})
+	if err == nil {
+		t.Fatal("manual RestoreSession returned nil error, expected Recover failure to propagate")
+	}
+
+	// The critical assertion: the warn log must NOT say "retrying in" for the
+	// manual Recover failure — the counter is already at the ceiling. Without
+	// d8e4e08f the Recover failure restarts at attempt 1 and logs a false
+	// retry promise while LostRestoreGaveUp is already suppressing automatic retries.
+	if strings.Contains(ownLogs.warnings.String(), "retrying in") {
+		t.Fatalf("manual Recover failure after preserve give-up logged a retry promise;\n"+
+			"d8e4e08f's assignment is missing: the session must stay terminal, not restart at attempt 1.\n"+
+			"warn logs:\n%s", ownLogs.warnings.String())
+	}
+	// The error log must have the give-up line (attempts == maxAttempts+1).
+	wantGiveUp := fmt.Sprintf("giving up after %d attempts", lostRestoreMaxAttempts+1)
+	if !strings.Contains(ownLogs.errors.String(), wantGiveUp) {
+		t.Fatalf("manual Recover failure after preserve give-up did not log %q;\n"+
+			"want the terminal arm, not a retry-with-backoff log.\nerror logs:\n%s",
+			wantGiveUp, ownLogs.errors.String())
+	}
+	// The session must still report gave-up (not mysteriously recovered).
+	if !inst.LifecycleView().LostRestoreGaveUp {
+		t.Fatal("LostRestoreGaveUp = false after manual Recover failure: the terminal state must persist")
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want 1 — exactly one Recover call from the manual restore", got)
+	}
+}
+
+// TestRestoreLostSessions_ForceReapAfterPreserveGiveUpEarnsAFreshRecoverBudget
+// pins the c118b158 fix: after the preserve budget gives up and sets
+// st.consecutiveFailures = lostRestoreMaxAttempts, an operator force-reap
+// replaces the old sandbox and must give the new one a fresh Recover budget.
+//
+// Without c118b158: resetPreserveBudget zeroes preserveFailureAttempts but
+// does NOT clear consecutiveFailures, so the first Recover failure against the
+// brand-new sandbox counts as attempt maxAttempts+1 and immediately gives up
+// — the new sandbox is punished for the previous one's history.
+//
+// With c118b158: the force-reap arm calls resetRecoverBudget, which zeroes
+// consecutiveFailures under the lock, so a subsequent Recover failure starts
+// at attempt 1 with a full budget and logs a retry promise rather than giving up.
+func TestRestoreLostSessions_ForceReapAfterPreserveGiveUpEarnsAFreshRecoverBudget(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+
+	srv, url := newPreservePushServer(t, false /* archive fails: drive preserve give-up */)
+	recoverErr := errors.New("recover: provision failed on new sandbox")
+	inst, backend := registerStartedRemoteTask(t, manager, repoID, repoPath, "remote-force-reap-fresh", url, session.Running)
+	backend.failWith = recoverErr
+
+	// Drive to a Lost observation.
+	manager.RefreshStatuses()
+	if got := inst.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("setup: liveness = %v, want LiveLost", got)
+	}
+
+	// Run the automatic loop to the preserve give-up.
+	for i := 0; i < lostRestoreMaxAttempts; i++ {
+		manager.RestoreLostSessions()
+	}
+	if !inst.LifecycleView().LostRestoreGaveUp {
+		t.Fatal("setup: LostRestoreGaveUp = false after push-failure give-up passes")
+	}
+
+	// Prepare force-reap: the session needs a durable branch so that
+	// requireDurableSandboxBranch does not refuse. Record the branch both in
+	// memory and on disk, as the production flow would have left it after at
+	// least one successful archive.
+	inst.SetSandboxBranch("af/fixture-branch")
+	manager.persistInstance(repoID, inst)
+
+	// Let the push server answer correctly (archive calls from the force-reap
+	// arm should be zero, but the probe has to still answer dead so the arm
+	// reaches the force branch rather than the probeAlive heal).
+	srv.setArchiveOK(true)
+	archiveCallsBefore := srv.calls()
+
+	// Force-reap: skips the push, calls resetPreserveBudget + resetRecoverBudget,
+	// then runs Recover — which fails once.
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: "remote-force-reap-fresh", RepoID: repoID, ForceReap: true,
+	})
+	if err == nil {
+		t.Fatal("force-reap RestoreSession returned nil error, expected Recover failure to propagate")
+	}
+
+	// Force-reap must NOT have pushed (it promises to skip the push).
+	if got := srv.calls(); got != archiveCallsBefore {
+		t.Fatalf("archive calls during force-reap = %d, want %d (force-reap must not push)", got, archiveCallsBefore)
+	}
+
+	// The critical assertion: the error log must NOT have the Recover-branch
+	// give-up line ("giving up after N attempts: …" — the preserve-push give-up
+	// says "preserve-push failures", so the two are distinguishable). Without
+	// c118b158 the retained consecutiveFailures == lostRestoreMaxAttempts causes
+	// lostRestoreFailed to take the terminal arm on the very first failure against
+	// the new sandbox, logging exactly that Recover give-up string.
+	if strings.Contains(ownLogs.errors.String(), "giving up after") &&
+		strings.Contains(ownLogs.errors.String(), "attempts:") {
+		t.Fatalf("force-reap Recover failure gave up immediately;\n"+
+			"c118b158's resetRecoverBudget is missing: the new sandbox must start with a fresh budget.\n"+
+			"error logs:\n%s", ownLogs.errors.String())
+	}
+	// Verify the retry log is actually there (attempt 1, budget not exhausted).
+	if !strings.Contains(ownLogs.warnings.String(), "retrying in") {
+		t.Fatalf("force-reap Recover failure did not log a retry-with-backoff message;\n"+
+			"want the retry arm (fresh budget), not immediate give-up.\nwarn logs:\n%s",
+			ownLogs.warnings.String())
+	}
+	// Recover was called exactly once: zero times during push-fail give-up (push
+	// never reached Recover), once during the force-reap restore.
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want 1 (zero from push-fail phase + 1 from force-reap)", got)
+	}
+}
+
 // TestRestoreLostSessions_PushSucceedsThenRecoverFailsGivesUp is the within-one-arm
 // contrast the preserve-push fix is measured against: when the push LANDS and
 // Recover then fails persistently, the SAME probeAnsweredDead arm already
