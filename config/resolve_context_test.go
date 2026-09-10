@@ -63,7 +63,7 @@ func TestResolveConfigForRepoInspectionRequiresCompletePersonalLookup(t *testing
 	repo, err := RepoFromPath(repoRoot)
 	require.NoError(t, err)
 	global := DefaultConfig()
-	global.ProgramOverrides["codex"] = "/global/codex"
+	global.ProgramOverrides = map[string]string{"codex": "/global/codex"}
 	resolved, err := ResolveConfigForRepoInspectionWithGlobal(repo, global)
 	require.NoError(t, err)
 	require.Equal(t, "/personal/codex", ResolveProgram(&resolved.Config, "codex"))

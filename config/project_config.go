@@ -339,10 +339,7 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
-		if probeErr := checkoutMarkerProbeFailure(ctx, root, err); probeErr != nil {
-			return "", false, probeErr
-		}
-		return "", false, nil
+		return "", false, checkoutMarkerProbeFailure(ctx, root, err)
 	}
 	commonDir := trimGitOutputLine(out)
 	if commonDir == "" || strings.Contains(commonDir, "\n") {
