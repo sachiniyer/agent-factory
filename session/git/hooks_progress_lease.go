@@ -112,11 +112,7 @@ func waitForHookProgressLeaseOpen(path string, flight *hookProgressLeaseOpenFlig
 // it automatically, leaving the existing scope/launcher probes to protect the
 // survivor. Once opened, no lease timeout, PID-reuse guess, or heartbeat
 // freshness is involved.
-func newHookProgressLease(dir string) (*os.File, error) {
-	return newHookProgressLeaseWithIO(dir, captureHookProgressPrepareIO())
-}
-
-func newHookProgressLeaseWithIO(dir string, io hookProgressPrepareIO) (*os.File, error) {
+func newHookProgressLease(dir string, io hookProgressPrepareIO) (*os.File, error) {
 	file, err := boundedOpenHookProgressLeaseWith(
 		filepath.Join(dir, "runner.lock"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600,
 		io.openLeaseFile, io.closeFile, io.timeout,
