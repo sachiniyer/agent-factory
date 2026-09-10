@@ -179,10 +179,10 @@ func Build(in Inputs) (Result, error) {
 		return Result{}, fmt.Errorf("marshal bug-report bundle: %w", err)
 	}
 	// Final catch-all pass: scrubs $HOME/username in the passed-in daemon
-	// socket/pid paths and any residue. Idempotent over the per-section
-	// scrubbing already applied, and safe for JSON (replacements never
-	// introduce characters that need escaping).
-	jsonBytes = []byte(r.scrub(string(jsonBytes)))
+	// socket/pid paths and any residue. The JSON owner decodes and re-encodes
+	// changed string tokens in JSON grammar; replacement markers being simple
+	// bytes does not make a Go-quoted control byte valid JSON.
+	jsonBytes = []byte(r.scrubJSON(string(jsonBytes)))
 
 	text := r.scrub(renderText(b))
 	title, body := buildIssueDraft(r, b)
@@ -578,7 +578,7 @@ func collectConfig(r *redactor, errs []string) (*configSection, []string) {
 		return &configSection{
 			Path:     path,
 			Format:   c.format,
-			Contents: r.scrub(string(data)),
+			Contents: r.scrubConfig(data, c.format),
 		}, errs
 	}
 	return nil, errs

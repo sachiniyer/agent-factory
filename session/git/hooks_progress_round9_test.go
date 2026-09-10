@@ -24,8 +24,7 @@ func TestHookProgressPublicationLockTimesOut(t *testing.T) {
 	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
-	original := relocationIdentityTimeout
-	relocationIdentityTimeout = 80 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 80*time.Millisecond)
 	locked, release := make(chan struct{}), make(chan struct{})
 	lockDone := make(chan error, 1)
 	go func() {
@@ -42,10 +41,10 @@ func TestHookProgressPublicationLockTimesOut(t *testing.T) {
 		_, publishErr = newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, nil, "af-hook-owner", "test")
 		close(done)
 	}()
-	t.Cleanup(func() { close(release); <-lockDone; <-done; relocationIdentityTimeout = original })
+	t.Cleanup(func() { close(release); <-lockDone; <-done })
 	select {
 	case <-done:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(3 * relocationIdentityTimeout):
 		t.Fatal("publication waited indefinitely for the held progress lock")
 	}
 	if !errors.Is(publishErr, config.ErrLockTimeout) {

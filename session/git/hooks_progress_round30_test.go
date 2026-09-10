@@ -26,19 +26,17 @@ func TestHookProgressRecoveryWritesAreBounded(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			p := &hookProgress{Directory: t.TempDir()}
-			previousTimeout := relocationIdentityTimeout
-			relocationIdentityTimeout = 50 * time.Millisecond
+			useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 			entered := make(chan struct{})
 			release := make(chan struct{})
 			drained := make(chan struct{})
 			test.stall(t, entered, release, drained)
-			t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
 
 			result := make(chan bool, 1)
 			go func() { result <- p.recordLaunchFailure(context.Background(), 0, errors.New("launcher failed")) }()
 			select {
 			case <-entered:
-			case <-time.After(time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("recovery write did not reach stalled filesystem operation")
 			}
 			returned := false
@@ -48,7 +46,7 @@ func TestHookProgressRecoveryWritesAreBounded(t *testing.T) {
 				if handled {
 					t.Fatal("inconclusive recovery write reported a terminal claim")
 				}
-			case <-time.After(time.Second):
+			case <-time.After(3 * relocationIdentityTimeout):
 				t.Error("recovery write did not return at its filesystem bound")
 			}
 			close(release)
@@ -158,8 +156,7 @@ func TestHookProgressAbandonedClaimMarkersAreBounded(t *testing.T) {
 			}
 			originalWrite := hookProgressWriteFile
 			originalProbe := runningHookPrefixesForResume
-			previousTimeout := relocationIdentityTimeout
-			relocationIdentityTimeout = 50 * time.Millisecond
+			useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 			entered := make(chan struct{})
 			release := make(chan struct{})
 			drained := make(chan struct{})
@@ -190,14 +187,13 @@ func TestHookProgressAbandonedClaimMarkersAreBounded(t *testing.T) {
 				}
 				hookProgressWriteFile = originalWrite
 				runningHookPrefixesForResume = originalProbe
-				relocationIdentityTimeout = previousTimeout
 			})
 
 			result := make(chan bool, 1)
 			go func() { result <- p.terminalizeInactiveClaim(context.Background(), 0, errors.New("claimant gone")) }()
 			select {
 			case <-entered:
-			case <-time.After(time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("terminalization did not reach stalled marker write")
 			}
 			returned := false
@@ -207,7 +203,7 @@ func TestHookProgressAbandonedClaimMarkersAreBounded(t *testing.T) {
 				if terminal {
 					t.Fatal("inconclusive marker write reported a terminal claim")
 				}
-			case <-time.After(time.Second):
+			case <-time.After(3 * relocationIdentityTimeout):
 				t.Error("abandoned-claim marker write did not return at its filesystem bound")
 			}
 			close(release)

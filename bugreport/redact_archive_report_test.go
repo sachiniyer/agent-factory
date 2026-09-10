@@ -434,7 +434,7 @@ func TestScrubLogRedactsInvalidUTF8ArchiveWarningPath(t *testing.T) {
 // before: this scrub keys on the renderer's literal prose, and the title pass
 // replaces bare tokens ANYWHERE, including inside that prose. The second title
 // here is "paths", which occurs in the renderer's own "skipped paths:" label
-// with a non-word rune on both sides — exactly what replaceBareToken rewrites.
+// with a non-word rune on both sides — exactly what the bare-token span matches.
 // Run the title pass first and the anchor is gone before the archive pass ever
 // looks for it, and every name in the list ships.
 func TestScrubLogRedactsArchiveWarningBeforeTitles(t *testing.T) {

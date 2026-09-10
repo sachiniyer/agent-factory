@@ -27,8 +27,7 @@ func TestHookProgressRetirementBoundsProgressLockOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalOpen := hookProgressOpenLockFile
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	drained := make(chan struct{})
@@ -51,7 +50,6 @@ func TestHookProgressRetirementBoundsProgressLockOpen(t *testing.T) {
 		default:
 		}
 		hookProgressOpenLockFile = originalOpen
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	type result struct {
@@ -67,7 +65,7 @@ func TestHookProgressRetirementBoundsProgressLockOpen(t *testing.T) {
 	case <-entered:
 	case result := <-results:
 		t.Fatalf("teardown bypassed the bounded progress-lock opener: acquired=%v err=%v", result.acquired, result.err)
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("teardown did not reach progress-lock open")
 	}
 	select {

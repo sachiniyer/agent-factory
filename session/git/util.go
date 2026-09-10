@@ -125,7 +125,7 @@ func BranchForTitle(branchPrefix, title string) string {
 	return result
 }
 
-// sanitizeWorktreePathSegment turns a display title into one filesystem path
+// worktreePathTitleSegment turns a display title into one filesystem path
 // segment for AF-owned worktree directories. It preserves ordinary title case
 // for readability while removing separators/traversal and replacing whitespace
 // or shell-hostile punctuation with dashes.
@@ -134,15 +134,11 @@ func BranchForTitle(branchPrefix, title string) string {
 // "<repoName>-<segment>", so the segment's NAME_MAX allowance depends on the repo
 // name and is applied by the caller at the join site (resolveWorktreePlacement),
 // where that prefix is known (#2528).
-func sanitizeWorktreePathSegment(title string) string {
+func worktreePathTitleSegment(title string) string {
 	s := reUnsafeWorktreePathSegment.ReplaceAllString(title, "-")
 	s = strings.ReplaceAll(s, "..", "")
 	s = reMultiDash.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-.")
-	if s == "" {
-		return "session"
-	}
-	return s
+	return strings.Trim(s, "-.")
 }
 
 // maxBranchComponentLen bounds a single title-derived git ref component. Linux

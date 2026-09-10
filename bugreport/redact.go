@@ -7,7 +7,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -58,8 +57,9 @@ var (
 // values. Constructed with newRedactor() in production; tests build one
 // directly with fixed values for deterministic assertions.
 type redactor struct {
-	home  string
-	users []string
+	home   string
+	afHome string
+	users  []string
 	// tmuxNames and titles are the known session tmux names and raw session
 	// titles gathered while redacting instances and tasks. scrubSessionTitles
 	// uses titles for both structured task status strings and the verbatim log;
@@ -87,6 +87,18 @@ type redactor struct {
 	// repoRoots and worktreeRoots number the tokens within their kind.
 	repoRoots     int
 	worktreeRoots int
+	// afHomeSpellings contains the admitted and physical spellings of AF home.
+	// It is separate from the root token: first-token-wins may legitimately name
+	// the same directory as a repo while its worktrees layout remains AF-owned.
+	afHomeSpellings []string
+	// worktreePathTitles are exact repo-root/title-segment pairs for the default
+	// sibling layout. Unlike raw titles, these derived spellings are scrubbed only
+	// in that path context, so an equal structural value elsewhere stays useful.
+	worktreePathTitles map[worktreePathTitle]struct{}
+	// worktreeSubdirectoryTitles are the standalone title-derived leaves used
+	// only by legacy subdirectory restores with no persisted branch. They are
+	// scrubbed solely below the registered AF-home worktrees directory.
+	worktreeSubdirectoryTitles map[string]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -153,65 +165,32 @@ func addUserVariant(users []string, name string) []string {
 // scrub is the catch-all text pass applied to every section: it removes PEM
 // blocks and pattern-matched credentials, collapses every known path root — the
 // AF home and each session's repo/worktree to its token, the home directory to
-// "~" — and blanks bare username tokens to "[user]". It runs last over already
-// field-redacted content, so it is defense-in-depth, not the only line of
-// defense.
+// "~" — removes title-derived segments in their registered sibling/subdirectory
+// path context, and blanks account/username tokens. It does not match bare titles.
+// All candidates are found before a replacement is applied, including inside
+// valid Go-quoted values. It runs last over already field-redacted rendered
+// content, so it is defense-in-depth, not the only line of defense. Encoded JSON
+// uses scrubJSON so changed values are emitted in JSON rather than Go grammar.
 func (r *redactor) scrub(s string) string {
-	s = credscrub.Scrub(s)
-	s = r.collapseKnownRoots(s)
-	// Account labels are swept HERE, in the catch-all, rather than beside the
-	// title pass: a label reaches the bundle through two sections that share only
-	// this function. collectLog routes the daemon log tail through scrubLog, which
-	// ends by delegating here; collectConfig hands the global config file straight
-	// to scrub() and touches no other pass. A sweep added next to the title pass
-	// would cover the log and silently miss the config file that NAMES the default
-	// account (#3871).
-	//
-	// It runs before the username pass for the reason that pass runs longest-first
-	// within itself: a username that is a token-boundary prefix of a label would
-	// otherwise consume the prefix, destroy the only exact match for the label, and
-	// strand its suffix in the bundle. The account alphabet makes the reverse
-	// impossible — a label never matches inside a longer run of label characters —
-	// so this order is safe in both directions rather than a coin flip.
-	s = r.scrubAccountLabels(s)
-	// Blank bare username tokens with the SAME manual token boundary the title
-	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
-	// when the username ends in a non-word rune (an OS username like "test-"), so
-	// "test-/fix-login-bug" in a branch leaked the username unredacted — a silent
-	// redaction failure in a bundle meant to be safe to share (#2533).
-	//
-	// Longest-first, exactly as scrubSessionTitles orders titles and for the same
-	// reason: a shorter username can be a prefix of a longer one (a raw "jdoe" vs a
-	// home basename "jdoe.admin"), and redacting the prefix first destroys the only
-	// exact match for the longer token and strands its suffix. The manual boundary
-	// makes that prefix-shadowing easier to hit than `\b` did, so the ordering is
-	// part of the privacy invariant, not a nicety. Sort a copy so scrub stays a pure
-	// read of r.users.
-	names := append([]string(nil), r.users...)
-	sortLongestFirst(names)
-	for _, name := range names {
-		s = replaceBareToken(s, name, userMarker)
-	}
-	return s
+	return r.scrubRecognizedText(s, redactionTextRendered)
 }
 
 // scrubUnstructured is the single sanitizer for a free-text scalar or blob
 // before it is embedded in any bug-report rendering. In addition to scrub's
 // credential/path policy, it removes every known representation of a session
-// title. Keeping this separate from scrub is intentional: scrub also runs over
-// already-encoded JSON documents, where treating a short title such as "id" as
+// title. Keeping this separate from the generic pass is intentional: that same
+// policy applies to JSON tokens, where treating a short title such as "id" as
 // bare text would rewrite structural keys. Call this while the value is still a
 // value; all later text/JSON renderings then inherit the safe form.
 //
-// Account labels take the OPPOSITE trade and are swept by scrub() itself, keys
-// and all. They have to be: the config file is handed to scrub() whole and shares
-// no other pass, so leaving them out of it would leave the label in the section
-// that names the default account. What that costs is over-redaction for an
-// operator who names an account after a config key — visible in a file they are
-// told to read, and the safe direction for an artifact meant to be shared
-// (#3871).
+// Account labels take the OPPOSITE trade and are swept by the generic policy,
+// keys and all. They have to be: scrubConfig owns the config document as a whole,
+// so leaving labels out of that policy would leave one in the section that names
+// the default account. What that costs is over-redaction for an operator who
+// names an account after a config key — visible in a file they are told to read,
+// and the safe direction for an artifact meant to be shared (#3871).
 func (r *redactor) scrubUnstructured(s string) string {
-	return r.scrub(r.scrubKnownLabels(s))
+	return r.scrubRecognizedText(s, redactionTextDiagnostic)
 }
 
 // scrubLog scrubs the daemon log tail. On top of the standard scrub() pass it
@@ -219,8 +198,8 @@ func (r *redactor) scrubUnstructured(s string) string {
 // any bare session title the log prints, so the verbatim log blob can't leak the
 // session titles the structured sections already drop (#1584 — the exact #1533
 // class, reintroduced through the bundled log). Call this instead of scrub() for
-// the log section; it ends by delegating to scrub() for the usual
-// $HOME/username/secret pass.
+// the log section; it resolves the known values together, then applies the usual
+// credential and username defenses.
 func (r *redactor) scrubLog(s string) string {
 	// The incomplete-archive warning goes first, because it is the one pass here
 	// that reads the emitter's LITERAL PROSE, and every pass below rewrites text
@@ -233,39 +212,11 @@ func (r *redactor) scrubLog(s string) string {
 	// the rest of the name — and matching the whole quoted token makes that
 	// impossible in either order.
 	s = r.scrubArchiveWarningPaths(s)
-	// Remove every known full title representation before any shape-based pass
-	// can consume only part of it. In particular, the legacy raw task-start
-	// matcher is line-oriented while a legal title may contain newlines; running
-	// that matcher first replaced line one and made the original full-title match
-	// impossible, leaking the remaining lines (#2249 late review).
-	s = r.scrubKnownLabels(s)
-	s = r.scrubTmuxNames(s)
-	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
-	// syntax is a safer boundary than a global punctuation matcher and also
-	// catches historical task-created titles no longer present in instances.json.
-	s = taskStartedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker)
-	s = taskParkedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker+`${3}`)
-	return r.scrub(s)
-}
-
-// scrubTmuxNames removes the free-text <title> from every af tmux session name
-// in s. It is shared by scrubLog and scrubDiagnostic rather than inlined in
-// either, because "a tmux name carries the title" is one fact: a diagnostic
-// string that quotes tmux would otherwise reintroduce, field by field, exactly
-// the #1584 leak the log pass closes.
-func (r *redactor) scrubTmuxNames(s string) string {
-	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
-	// so it catches current AND historical (archived/killed) sessions the live
-	// instance set no longer references.
-	s = afTmuxSessionName.ReplaceAllStringFunc(s, redactAFTmuxTitle)
-	// Non-repo-scoped names (af_<title>, no hash) don't match the shape above;
-	// redact those known names exactly.
-	for name := range r.tmuxNames {
-		if !afTmuxSessionName.MatchString(name) {
-			s = strings.ReplaceAll(s, name, tmuxPrefixMarker)
-		}
-	}
-	return s
+	// Resolve credentials, labels, contextual worktree titles, roots, usernames,
+	// and tmux shapes against the same unmodified text. Their union is redacted:
+	// longest matches choose useful role markers, but every uncovered portion of
+	// an overlap still receives the generic marker.
+	return r.scrubRecognizedText(s, redactionTextLog)
 }
 
 // scrubDiagnostic sanitizes an af-AUTHORED diagnostic string that QUOTES an
@@ -280,36 +231,23 @@ func (r *redactor) scrubTmuxNames(s string) string {
 // names the same things the log does, and a second policy for it would drift
 // from the first (#3588).
 //
-// Titles go FIRST, before the shape-based tmux pass, for the reason scrubLog
-// orders them that way: a shape matcher that consumes part of a name makes the
-// exact full-title match impossible afterwards.
+// Known labels, contextual paths, roots, and tmux shapes are resolved against
+// one original string for scrubLog's #4099 overlap reason.
 func (r *redactor) scrubDiagnostic(s string) string {
-	return r.scrub(r.scrubTmuxNames(r.scrubKnownLabels(s)))
+	return r.scrubRecognizedText(s, redactionTextDiagnostic)
 }
 
-// scrubSessionTitles removes exact Go-quoted forms of every known title, then
-// applies the conservative word-bearing bare-title matcher. The quoted form is
+// scrubSessionTitles plans exact Go-quoted forms of every known title together
+// with the conservative word-bearing bare-title matches. The quoted form is
 // the important invariant for task targets: daemon delivery logs and persisted
 // delivery errors both format them with %q. Matching strconv.Quote therefore
 // covers every legal title byte-for-byte, including short names and punctuation
 // that are unsafe to replace globally, plus quotes/backslashes that %q escapes
-// (#2238 review). scrubLog handles legacy raw punctuation emitters by their
-// fixed field syntax.
+// (#2238 review). Resolving every title against the original input also covers
+// partial overlap between two known titles. scrubLog handles legacy raw
+// punctuation emitters by their fixed field syntax.
 func (r *redactor) scrubSessionTitles(s string) string {
-	titles := make([]string, 0, len(r.titles))
-	for title := range r.titles {
-		titles = append(titles, title)
-	}
-	// A shorter title may be a prefix of a longer one. Redacting the prefix
-	// first destroys the only exact match for the longer secret and leaves its
-	// suffix behind, so the order is part of the privacy invariant. The lexical
-	// tie-break makes output deterministic even though titles are stored in a map.
-	sortLongestFirst(titles)
-	for _, title := range titles {
-		s = strings.ReplaceAll(s, strconv.Quote(title), strconv.Quote(redactedMarker))
-		s = replaceBareTitle(s, title)
-	}
-	return s
+	return applyRedactionSpans(s, r.appendTitleSpans(nil, s))
 }
 
 // tmuxPrefixMarker is the redaction of an af tmux session name whose title
@@ -330,6 +268,15 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	r.noteTmuxName(d.TmuxName)
 	r.noteTitle(d.Title)
 	r.noteTitle(d.Worktree.SessionName)
+	// A sibling worktree path carries a sanitized and possibly truncated title
+	// segment, which can differ byte-for-byte from both display-title fields. It
+	// is still user-authored title data, so register the exact representation the
+	// worktree layer derives. The helper deliberately omits AF's fixed "session"
+	// fallback: that bounded, non-user-authored value remains useful verbatim.
+	r.noteWorktreeTitle(d.Worktree.RepoPath, d.Title)
+	r.noteWorktreeTitle(d.Worktree.RepoPath, d.Worktree.SessionName)
+	r.noteWorktreeSubdirectoryTitle(d.Title)
+	r.noteWorktreeSubdirectoryTitle(d.Worktree.SessionName)
 	// The two roots this record points at. Registered here, beside the titles,
 	// because they are the same kind of fact — something this run knows the name
 	// of and every later pass must be able to recognize — and because collecting
@@ -385,30 +332,63 @@ var titleJSONKeys = map[string]bool{"title": true, "session_name": true}
 
 // noteUnknownJSON walks a decoded-but-unparseable instances.json payload and
 // records every title/tmux-name it carries, so scrubLog can strip them from the
-// log tail exactly as it does for records that decoded typed (#1790). It must
-// run BEFORE redactUnknownJSON blanks those same values.
+// log tail exactly as it does for records that decoded typed (#1790). It also
+// pairs titles with repo_path values solely to derive the title spelling in a
+// sibling worktree path (#4099). It must run BEFORE redactUnknownJSON blanks
+// those same sensitive values.
 //
 // The walk is key-driven and shape-agnostic, so it reaches nested title-bearing
 // locations (worktree.session_name, tabs[].tmux_name) without assuming the
 // record layout the typed decode already rejected.
 func (r *redactor) noteUnknownJSON(v any) {
-	switch t := v.(type) {
-	case map[string]any:
-		for k, val := range t {
-			s, isString := val.(string)
-			key := strings.ToLower(k)
-			switch {
-			case !isString:
-				r.noteUnknownJSON(val)
-			case titleJSONKeys[key]:
-				r.noteTitle(s)
-			case key == "tmux_name":
-				r.noteTmuxName(s)
+	// The typed shape is a top-level record list. Preserve that one trustworthy
+	// ownership boundary even though a field inside made typed decoding fail; a
+	// cross-product across records fabricates paths and grows quadratically.
+	if records, ok := v.([]any); ok {
+		for _, record := range records {
+			r.noteUnknownJSONRecord(record)
+		}
+		return
+	}
+	r.noteUnknownJSONRecord(v)
+}
+
+func (r *redactor) noteUnknownJSONRecord(v any) {
+	titles := make(map[string]struct{})
+	repoPaths := make(map[string]struct{})
+	var walk func(any)
+	walk = func(value any) {
+		switch t := value.(type) {
+		case map[string]any:
+			for k, val := range t {
+				s, isString := val.(string)
+				key := strings.ToLower(k)
+				switch {
+				case !isString:
+					walk(val)
+				case titleJSONKeys[key]:
+					titles[s] = struct{}{}
+					r.noteTitle(s)
+				case key == "tmux_name":
+					r.noteTmuxName(s)
+				case key == "repo_path":
+					repoPaths[s] = struct{}{}
+				}
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
 			}
 		}
-	case []any:
-		for _, e := range t {
-			r.noteUnknownJSON(e)
+	}
+	walk(v)
+	// repo_path is already a sensitive fallback key and is dropped below. Use
+	// it only to reproduce the worktree layer's repo-dependent title bound; do
+	// not register an untyped value as a path root or give it a structural role.
+	for title := range titles {
+		r.noteWorktreeSubdirectoryTitle(title)
+		for repoPath := range repoPaths {
+			r.noteWorktreeTitle(repoPath, title)
 		}
 	}
 }
@@ -430,9 +410,9 @@ const unparsedInstancesNote = `"[instances.json could not be parsed; contents om
 // policy can't apply, so we redact MORE, not less (fail-safe — this bundle is
 // shared publicly): a generic key-aware walk blanks every value under a
 // known-sensitive key (prompts, commands, tokens, paths, arbitrary metadata)
-// before the text scrub runs. If it is not even valid JSON, the contents are
-// omitted entirely with a note. The fallback is never raw-with-regex-only —
-// under-including beats leaking.
+// before the JSON-owned scalar scrub runs. If it is not even valid JSON, the
+// contents are omitted entirely with a note. The fallback is never
+// raw-with-regex-only — under-including beats leaking.
 func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	var datas []session.InstanceData
 	if err := json.Unmarshal(raw, &datas); err == nil {
@@ -449,7 +429,7 @@ func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 			r.redactInstanceData(&datas[i])
 		}
 		if out, marshalErr := json.MarshalIndent(datas, "", "  "); marshalErr == nil {
-			return json.RawMessage(r.scrub(string(out)))
+			return json.RawMessage(r.scrubJSON(string(out)))
 		}
 	}
 
@@ -468,7 +448,7 @@ func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	if err != nil {
 		return json.RawMessage(unparsedInstancesNote)
 	}
-	return json.RawMessage(r.scrub(string(out)))
+	return json.RawMessage(r.scrubJSON(string(out)))
 }
 
 // sensitiveJSONKeys are object keys whose values are dropped wholesale on the
@@ -748,8 +728,8 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// ArchiveWarning is the bounded projection of ArchiveReport.Warning, and that
 	// renderer prints the user-chosen names of the files af could not read.
 	// #3554 closed the LOG path for exactly this text, but scrubArchiveWarningPaths
-	// is reached only from scrubLog while redactInstancesJSON applies plain
-	// scrub — so the same names still rode the JSON section of every bundle
+	// is reached only from scrubLog while redactInstancesJSON applies the generic
+	// JSON scrub — so the same names still rode the JSON section of every bundle
 	// (#3588). Routing the field through the same function rather than blanking it
 	// keeps one policy for one string, and keeps the warning's SHAPE, which is
 	// what triage reads: "af skipped 3 unreadable files", with a reason beside
