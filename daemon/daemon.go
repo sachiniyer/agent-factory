@@ -426,6 +426,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	if err := closeControl(); err != nil {
 		log.WarningLog.Printf("failed to drain daemon control server: %v", err)
 	}
+	// A control-socket ApplyConfig admitted before quiescing can rebind a TCP
+	// listener after closeHTTP's second wl.close() and before closeControl
+	// returns. closeHTTP's closer is guarded by sync.Once and cannot run again.
+	// Close the web listeners a third time — after every control handler has
+	// returned — so a listener opened in that window does not outlive shutdown.
+	if manager.webListeners != nil {
+		if err := manager.webListeners.close(); err != nil {
+			log.WarningLog.Printf("failed to close web listeners after control drain: %v", err)
+		}
+	}
 
 	// Stop and join daemon-owned writers too. The lifecycle gate above also
 	// refuses any scheduler/watcher delivery that reaches the closed transports
