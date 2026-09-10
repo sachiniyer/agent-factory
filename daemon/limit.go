@@ -193,6 +193,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	settlementCheckpoint bool,
 ) {
 	if instance.GetInFlightOp() != session.OpNone {
+		// The write is skipped, but a consumed one-shot checkpoint must not be
+		// silently dropped: record the obligation so a later poll re-attempts it.
+		if settlementCheckpoint {
+			key := daemonInstanceKey(repoID, instance.Title)
+			m.recordSettlementWrite(repoID, key, instance, errors.New("ceded to in-flight op"))
+		}
 		return
 	}
 	data := instance.ToInstanceData()
@@ -211,6 +217,28 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	// lifecycle state only, so using it as a whole-payload change detector lets
 	// an untracked roster mutation publish first and then get erased by this stale event.
 	data = instance.ToInstanceData()
+	// The lock-free gate above can pass an OpNone a client op raises before the
+	// re-read lands. A handoff is the concrete case: between the gate and this
+	// lock it runs BeginHandoff (OpReplacing) and RecordHandoffSwap (rewriting
+	// Program to the incoming agent before its mission marker exists), and it
+	// holds the per-(repo,title) and op locks — neither of which is repoStartLock
+	// — so acquiring repoStartLock does not exclude it. persistInstanceData →
+	// ForStorage strips the transient op axis, so persisting that snapshot stores
+	// the incoming agent as SETTLED with no delivery obligation: a state the
+	// session never legitimately reached. Re-check under the lock and cede to
+	// the op's executor, which owns the durable state — the same fence the
+	// settlement retry holds under the op lock (settlement.go). The gate decides
+	// WHETHER to write; an op holding the session decides WHO writes.
+	if data.InFlightOp != session.OpNone {
+		// The write is skipped, but a consumed one-shot checkpoint must not be
+		// silently dropped: record the obligation so a later poll re-attempts it.
+		if settlementCheckpoint {
+			key := daemonInstanceKey(repoID, instance.Title)
+			m.recordSettlementWrite(repoID, key, instance, errors.New("ceded to in-flight op"))
+		}
+		repoStartLock.Unlock()
+		return
+	}
 	var err error
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
