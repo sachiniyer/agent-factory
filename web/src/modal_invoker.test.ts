@@ -142,7 +142,7 @@ for (const [name, committed, optimisticConfirmed] of [
 }
 
 for (const connectionReplaced of [false, true]) {
-test(`a definitive restore refusal waits for resync without leaking into a replaced connection=${connectionReplaced}`, async () => {
+test(`a definitive restore refusal waits for accepted resync (replaced=${connectionReplaced})`, async () => {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
   const names = new Set(["openModal", "closeModal", "openConfirm"]);
@@ -153,7 +153,6 @@ test(`a definitive restore refusal waits for resync without leaking into a repla
   const card = { focus() {}, isConnected: true, getClientRects: () => [{}], matches: () => false };
   const busy: boolean[] = [];
   const errors: Array<string | null> = [];
-  let releases = 0;
   let finishResync!: () => void;
   const resync = new Promise<void>(resolve => { finishResync = resolve; });
   let resyncs = 0;
@@ -173,7 +172,7 @@ test(`a definitive restore refusal waits for resync without leaking into a repla
     optimisticSessions: { begin: () => null },
     pendingRestores: {
       has: () => false, captureArchiveSuccess: () => null,
-      captureRefusalRelease: () => () => { releases++; },
+      waitForRefusalResync: () => { resyncs++; return resync; },
       run: (_id: string, request: (daemonBootId: string) => Promise<unknown>) => request("daemon-a"),
     },
     restoreSession: (_id: string, _title: string, _token: string, daemonBootId: string) => {
@@ -183,7 +182,7 @@ test(`a definitive restore refusal waits for resync without leaking into a repla
     killSession: () => assert.fail("wrong action"), archiveSession: () => assert.fail("wrong action"),
     isMutationCommittedError: () => false, isMutationOutcomeUncertain: () => false,
     requestResync() {},
-    requestPendingRestoreResync: () => { resyncs++; return resync; },
+    requestPendingRestoreResync: () => assert.fail("the refusal ticket owns reconciliation"),
     errorText: (error: Error) => error.message, surfaceMutationError() {},
   };
   const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null;\n${handlers}`, {
@@ -195,11 +194,9 @@ test(`a definitive restore refusal waits for resync without leaking into a repla
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(resyncs, 1, "a refusal must refresh the cached daemon identity");
   assert.deepEqual(busy, [true], "retry stays disabled until that Snapshot finishes");
-  assert.equal(releases, 0, "the row action stays fenced while Snapshot is in flight");
   if (connectionReplaced) context.connectionGeneration++;
   finishResync();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(releases, 1, "the completed resync releases the captured refusal fence");
   assert.deepEqual(busy, connectionReplaced ? [true] : [true, false]);
   assert.deepEqual(errors, connectionReplaced ? [] : ["stale daemon identity"]);
 });

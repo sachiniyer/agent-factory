@@ -28,6 +28,8 @@ type RestoreTicket = {
   settled: boolean;
   uncertain: boolean;
   succeededAt: number | null;
+  refusedAt: number | null;
+  refusalWaiters: Array<() => void>;
   uncertainAt: number;
   uncertainSince: number;
   admissionClockStartedAt: number | null;
@@ -84,14 +86,11 @@ export class PendingRestores {
     };
   }
 
-  /** Capture a definitive refusal so only its fence is released after resync. */
-  captureRefusalRelease(id: string): () => void {
+  /** Resolve after an authoritative Snapshot releases this refusal's fence. */
+  waitForRefusalResync(id: string): Promise<void> {
     const ticket = this.tickets.get(id);
-    return () => {
-      if (!ticket || this.tickets.get(id) !== ticket) return;
-      this.release(id, ticket);
-      this.changed(new Set(this.tickets.keys()));
-    };
+    if (!ticket) return Promise.resolve();
+    return new Promise(resolve => { ticket.refusalWaiters.push(resolve); });
   }
 
   run<T>(
@@ -104,6 +103,8 @@ export class PendingRestores {
       settled: false,
       uncertain: false,
       succeededAt: null as number | null,
+      refusedAt: null as number | null,
+      refusalWaiters: [] as Array<() => void>,
       uncertainAt: this.snapshotGeneration,
       uncertainSince: 0,
       admissionClockStartedAt: null as number | null,
@@ -146,8 +147,11 @@ export class PendingRestores {
             if (this.rows) this.observe(this.rows);
           } else {
             // A guarded refusal can identify a replacement daemon. Keep its
-            // action fenced until the caller's Snapshot refreshes that identity;
-            // captureRefusalRelease ties the later release to this exact ticket.
+            // action fenced until a post-refusal Snapshot refreshes that identity.
+            // Failed probes enter the same bounded reconciliation backoff as
+            // other tickets instead of being mistaken for completion.
+            ticket.refusedAt = this.snapshotGeneration;
+            this.reconcile(id, ticket);
           }
         }
         throw error;
@@ -203,6 +207,8 @@ export class PendingRestores {
       // carry no attempt id and may belong to a previous restore cycle.
       const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" &&
         evidence.generation > ticket.succeededAt;
+      const observedAfterRefusal = ticket.refusedAt !== null && evidence?.kind === "snapshot" &&
+        evidence.generation > ticket.refusedAt;
       const causalUncertainSnapshot = evidence?.kind === "snapshot" &&
         evidence.generation > ticket.uncertainAt;
       if (causalUncertainSnapshot && this.operationLockTimeoutMs !== null && this.operationClockMs !== null) {
@@ -218,7 +224,8 @@ export class PendingRestores {
       // attempt. Only authoritative identity disappearance is conclusive.
       const uncertainCompleted = ticket.uncertain && authoritative &&
         causalUncertainSnapshot && !eligibility.has(id);
-      if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id))) || uncertainCompleted) {
+      if (observedAfterRefusal ||
+        (ticket.settled && (observedAfterSuccess || !eligibility.has(id))) || uncertainCompleted) {
         this.release(id, ticket);
         changed = true;
       }
@@ -244,7 +251,7 @@ export class PendingRestores {
 
   private armTimerForState(id: string, ticket: RestoreTicket): void {
     if (ticket.uncertain) this.armUncertainTimer(id, ticket);
-    else if (ticket.settled) this.armRetryTimer(id, ticket);
+    else if (ticket.settled || ticket.refusedAt !== null) this.armRetryTimer(id, ticket);
   }
 
   private armUncertainTimer(id: string, ticket: RestoreTicket): void {
@@ -290,8 +297,8 @@ export class PendingRestores {
     try {
       const result = this.requestReconcile();
       if (result && typeof result.then === "function") {
-        // requestResync absorbs transport errors; either outcome completes this
-        // attempt, and a still-fenced ticket then schedules the next backoff.
+        // Either outcome completes this probe. Only observe() can release the
+        // ticket; a rejected or non-authoritative probe schedules the next backoff.
         void result.then(finish, finish);
       } else {
         finish();
@@ -302,7 +309,7 @@ export class PendingRestores {
   }
 
   private needsReconcile(ticket: RestoreTicket): boolean {
-    return ticket.uncertain || ticket.settled;
+    return ticket.uncertain || ticket.settled || ticket.refusedAt !== null;
   }
 
   private cancelTimer(ticket: { timer: RestoreTimer | null }): void {
@@ -311,8 +318,12 @@ export class PendingRestores {
     ticket.timer = null;
   }
 
-  private release(id: string, ticket: { timer: RestoreTimer | null }): void {
+  private release(id: string, ticket: RestoreTicket): void {
     this.cancelTimer(ticket);
-    if (this.tickets.get(id) === ticket) this.tickets.delete(id);
+    if (this.tickets.get(id) !== ticket) return;
+    this.tickets.delete(id);
+    const waiters = ticket.refusalWaiters;
+    ticket.refusalWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 }

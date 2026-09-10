@@ -217,7 +217,7 @@ const loadCreateAccounts = (repoPath: string): Promise<AccountsResponse> =>
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
-let resyncCompletions: Array<() => void> = [];
+let resyncCompletions: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
 // Snapshot and events are two asynchronous projections of the same session state.
 // Fence them independently so a Snapshot requested before a session event cannot
 // resolve afterwards and rewind the event's newer roster (#2330).
@@ -1061,17 +1061,15 @@ function openConfirm(
         if (immediateRestore && modal !== m) surfaceMutationError(e);
       };
       // A definitive guarded refusal may come from a replacement daemon. Keep
-      // every restore entry point fenced until Snapshot refreshes the boot id
-      // used by the request. The UI still belongs to the same connection only
-      // if both ownership guards survive that await.
+      // every restore entry point fenced until an accepted Snapshot refreshes
+      // the boot id used by the request. Failed probes retry through the ledger's
+      // reconciliation backoff. The UI still belongs to the same connection only
+      // if both ownership guards survive that wait.
       if (action === "restore") {
-        const releaseRefusal = pendingRestores.captureRefusalRelease(target.id);
-        const finishRefusal = () => {
-          releaseRefusal();
+        void pendingRestores.waitForRefusalResync(target.id).then(() => {
           if (requestGeneration !== connectionGeneration || token !== tok) return;
           showRefusal();
-        };
-        void requestPendingRestoreResync().then(finishRefusal, finishRefusal);
+        });
       } else showRefusal();
     });
   };
@@ -2349,7 +2347,7 @@ function stopStream(): void {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
-  settleResyncCompletions();
+  rejectResyncCompletions(new Error("Snapshot resync superseded by disconnect"));
   if (taskResyncTimer !== null) {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
@@ -2502,7 +2500,7 @@ function requestResync(): void {
     const tok = token;
     // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
     if (tok === null) {
-      settleResyncCompletions();
+      rejectResyncCompletions(new Error("Snapshot resync lost its connection"));
       return;
     }
     const eventGeneration = sessionEventGeneration;
@@ -2539,21 +2537,27 @@ function requestResync(): void {
         // an application-level settlement signal instead of a network-timing guess
         // (#3081). stopStream clears it before a new stream owns the connection.
         root?.setAttribute("data-af-resync-settled", "");
-        settleResyncCompletions();
+        resolveResyncCompletions();
       })
       .catch((error) => {
         if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
         if (shouldForgetToken(error)) disconnect(describeError(error), true);
         // Transport failures retain state; the events stream owns reconnection.
-        settleResyncCompletions();
+        rejectResyncCompletions(error);
       });
   }, 150);
 }
 
-function settleResyncCompletions(): void {
+function resolveResyncCompletions(): void {
   const completions = resyncCompletions;
   resyncCompletions = [];
-  for (const complete of completions) complete();
+  for (const completion of completions) completion.resolve();
+}
+
+function rejectResyncCompletions(error: unknown): void {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.reject(error);
 }
 
 function requestPendingRestoreResync(): Promise<void> {
@@ -2561,7 +2565,7 @@ function requestPendingRestoreResync(): Promise<void> {
     pendingRestoreResync = true;
     return Promise.resolve();
   }
-  const completion = new Promise<void>(resolve => { resyncCompletions.push(resolve); });
+  const completion = new Promise<void>((resolve, reject) => { resyncCompletions.push({ resolve, reject }); });
   requestResync();
   return completion;
 }

@@ -91,11 +91,46 @@ test("definitive restore refusal keeps only its session fenced for refusal resyn
   await assert.rejects(pending.run("failed", async () => { throw new ApiError(409, "refused", "", true); }, true)!, /refused/);
   assert.equal(pending.has("failed"), true, "the action stays fenced until its refusal resync finishes");
   assert.equal(pending.has("other"), true);
-  pending.captureRefusalRelease("failed")();
-  assert.equal(pending.has("failed"), false, "the completed refusal resync releases its captured fence");
+  const refusalSettled = pending.waitForRefusalResync("failed");
+  pending.observe([
+    { id: "failed", restoreEligible: true },
+    { id: "other", restoreEligible: true },
+  ], { kind: "snapshot", generation: pending.beginSnapshot() });
+  await refusalSettled;
+  assert.equal(pending.has("failed"), false, "the accepted refusal resync releases that refusal fence");
   assert.equal(pending.has("other"), true, "a refusal resync cannot release another session's fence");
   release();
   await other;
+});
+
+test("a failed refusal identity refresh stays fenced and retries with backoff", async () => {
+  const timer = fakeRestoreTimer();
+  let probes = 0;
+  const pending = new PendingRestores(
+    () => {}, isMutationOutcomeUncertain, () => false, () => 0,
+    async () => {
+      probes++;
+      if (probes === 1) throw new Error("Snapshot unavailable");
+    },
+    timer.schedule, timer.cancel,
+  );
+  await assert.rejects(pending.run("failed", async () => {
+    throw new ApiError(409, "stale daemon identity", "", true);
+  }, true)!);
+  const refusalSettled = pending.waitForRefusalResync("failed");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.has("failed"), true, "a failed probe is not refreshed identity evidence");
+  assert.equal(probes, 1);
+  assert.equal(timer.delay(), RESTORE_RECONCILE_RETRY_MIN_MS);
+  timer.fire();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(probes, 2, "the refusal refresh retries through reconciliation backoff");
+  assert.equal(pending.has("failed"), true, "a request completing is not an accepted Snapshot");
+  pending.observe([{ id: "failed", restoreEligible: true }], {
+    kind: "snapshot", generation: pending.beginSnapshot(),
+  });
+  await refusalSettled;
+  assert.equal(pending.has("failed"), false);
 });
 
 test("reset preserves an in-flight restore until a post-response Snapshot", async () => {

@@ -13815,14 +13815,13 @@ var PendingRestores = class {
       this.changed(new Set(this.tickets.keys()));
     };
   }
-  /** Capture a definitive refusal so only its fence is released after resync. */
-  captureRefusalRelease(id) {
+  /** Resolve after an authoritative Snapshot releases this refusal's fence. */
+  waitForRefusalResync(id) {
     const ticket = this.tickets.get(id);
-    return () => {
-      if (!ticket || this.tickets.get(id) !== ticket) return;
-      this.release(id, ticket);
-      this.changed(new Set(this.tickets.keys()));
-    };
+    if (!ticket) return Promise.resolve();
+    return new Promise((resolve) => {
+      ticket.refusalWaiters.push(resolve);
+    });
   }
   run(id, request, restoreEligible) {
     if (this.has(id)) return null;
@@ -13830,6 +13829,8 @@ var PendingRestores = class {
       settled: false,
       uncertain: false,
       succeededAt: null,
+      refusedAt: null,
+      refusalWaiters: [],
       uncertainAt: this.snapshotGeneration,
       uncertainSince: 0,
       admissionClockStartedAt: null,
@@ -13866,6 +13867,8 @@ var PendingRestores = class {
             }
             if (this.rows) this.observe(this.rows);
           } else {
+            ticket.refusedAt = this.snapshotGeneration;
+            this.reconcile(id, ticket);
           }
         }
         throw error;
@@ -13907,6 +13910,7 @@ var PendingRestores = class {
       }
       const authoritative = evidence?.kind === "updated" || evidence?.kind === "restored" || evidence?.kind === "snapshot";
       const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" && evidence.generation > ticket.succeededAt;
+      const observedAfterRefusal = ticket.refusedAt !== null && evidence?.kind === "snapshot" && evidence.generation > ticket.refusedAt;
       const causalUncertainSnapshot = evidence?.kind === "snapshot" && evidence.generation > ticket.uncertainAt;
       if (causalUncertainSnapshot && this.operationLockTimeoutMs !== null && this.operationClockMs !== null) {
         if (ticket.admissionClockStartedAt === null || this.operationClockMs < ticket.admissionClockStartedAt) {
@@ -13914,7 +13918,7 @@ var PendingRestores = class {
         }
       }
       const uncertainCompleted = ticket.uncertain && authoritative && causalUncertainSnapshot && !eligibility.has(id);
-      if (ticket.settled && (observedAfterSuccess || !eligibility.has(id)) || uncertainCompleted) {
+      if (observedAfterRefusal || ticket.settled && (observedAfterSuccess || !eligibility.has(id)) || uncertainCompleted) {
         this.release(id, ticket);
         changed = true;
       }
@@ -13936,7 +13940,7 @@ var PendingRestores = class {
   }
   armTimerForState(id, ticket) {
     if (ticket.uncertain) this.armUncertainTimer(id, ticket);
-    else if (ticket.settled) this.armRetryTimer(id, ticket);
+    else if (ticket.settled || ticket.refusedAt !== null) this.armRetryTimer(id, ticket);
   }
   armUncertainTimer(id, ticket) {
     if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
@@ -13985,7 +13989,7 @@ var PendingRestores = class {
     }
   }
   needsReconcile(ticket) {
-    return ticket.uncertain || ticket.settled;
+    return ticket.uncertain || ticket.settled || ticket.refusedAt !== null;
   }
   cancelTimer(ticket) {
     if (ticket.timer === null) return;
@@ -13994,7 +13998,11 @@ var PendingRestores = class {
   }
   release(id, ticket) {
     this.cancelTimer(ticket);
-    if (this.tickets.get(id) === ticket) this.tickets.delete(id);
+    if (this.tickets.get(id) !== ticket) return;
+    this.tickets.delete(id);
+    const waiters = ticket.refusalWaiters;
+    ticket.refusalWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 };
 
@@ -17954,13 +17962,10 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
         if (immediateRestore && modal !== m) surfaceMutationError(e);
       };
       if (action === "restore") {
-        const releaseRefusal = pendingRestores.captureRefusalRelease(target.id);
-        const finishRefusal = () => {
-          releaseRefusal();
+        void pendingRestores.waitForRefusalResync(target.id).then(() => {
           if (requestGeneration !== connectionGeneration || token !== tok) return;
           showRefusal();
-        };
-        void requestPendingRestoreResync().then(finishRefusal, finishRefusal);
+        });
       } else showRefusal();
     });
   };
@@ -18715,7 +18720,7 @@ function stopStream() {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
-  settleResyncCompletions();
+  rejectResyncCompletions(new Error("Snapshot resync superseded by disconnect"));
   if (taskResyncTimer !== null) {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
@@ -18809,7 +18814,7 @@ function requestResync() {
     resyncTimer = null;
     const tok = token;
     if (tok === null) {
-      settleResyncCompletions();
+      rejectResyncCompletions(new Error("Snapshot resync lost its connection"));
       return;
     }
     const eventGeneration = sessionEventGeneration;
@@ -18836,26 +18841,31 @@ function requestResync() {
         daemonBootId: snapshot.daemonBootId
       }, sessions);
       root?.setAttribute("data-af-resync-settled", "");
-      settleResyncCompletions();
+      resolveResyncCompletions();
     }).catch((error) => {
       if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
       if (shouldForgetToken(error)) disconnect(describeError(error), true);
-      settleResyncCompletions();
+      rejectResyncCompletions(error);
     });
   }, 150);
 }
-function settleResyncCompletions() {
+function resolveResyncCompletions() {
   const completions = resyncCompletions;
   resyncCompletions = [];
-  for (const complete of completions) complete();
+  for (const completion of completions) completion.resolve();
+}
+function rejectResyncCompletions(error) {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.reject(error);
 }
 function requestPendingRestoreResync() {
   if (token === null || store.get().phase !== "app") {
     pendingRestoreResync = true;
     return Promise.resolve();
   }
-  const completion = new Promise((resolve) => {
-    resyncCompletions.push(resolve);
+  const completion = new Promise((resolve, reject) => {
+    resyncCompletions.push({ resolve, reject });
   });
   requestResync();
   return completion;
