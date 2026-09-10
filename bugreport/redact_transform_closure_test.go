@@ -52,6 +52,52 @@ func TestScrubLogComposesANSIShellAndURITransforms(t *testing.T) {
 	}
 }
 
+func TestScrubLogComposesANSIAndShellBoundaryTransforms(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+	command := "cd /srv/\x1b[31mConfidential\x1b[0mClient/repo${SUBDIR:+/$SUBDIR}"
+	input := "post-worktree hook " + strconv.Quote(command) + " failed: exit status 1"
+
+	got := r.scrubLog(input)
+	if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, "Confidential") {
+		t.Fatalf("composed ANSI and shell transforms leaked a registered path: %s", got)
+	}
+	want := "post-worktree hook " +
+		strconv.Quote("cd [repo:1]${SUBDIR:+/$SUBDIR}") +
+		" failed: exit status 1"
+	if got != want {
+		t.Errorf("scrubbed log = %q, want %q", got, want)
+	}
+}
+
+func TestScrubbersRecognizeNULDelimitedPaths(t *testing.T) {
+	r := &redactor{}
+	r.noteSession(&session.InstanceData{
+		Title:    siblingLeakTitle,
+		Worktree: session.GitWorktreeData{RepoPath: siblingLeakRepo},
+	})
+	input := "first=" + siblingLeakAlternate + "\x00second\x00" + siblingLeakAlternate + "\n"
+	want := "first=[repo:1]-[redacted]\x00second\x00[repo:1]-[redacted]\n"
+
+	for _, scrubber := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		t.Run(scrubber.name, func(t *testing.T) {
+			got := scrubber.scrub(input)
+			if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, siblingLeakDiskTitle) {
+				t.Fatalf("NUL-delimited hook output leaked a private sibling path: %q", got)
+			}
+			if got != want {
+				t.Errorf("scrubber output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestScrubbersComposeGoQuotedAndANSITransforms(t *testing.T) {
 	r := &redactor{}
 	r.noteRepoRoot(siblingLeakRepo)
