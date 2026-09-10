@@ -296,18 +296,19 @@ func liveHeldInPlaceDetachedRefusal(title, workspace, lane, holder string) error
 		title, config.ShellQuotePath(workspace), lane, config.ShellQuotePath(holder), handoff)
 }
 
-// worktreeAdmissionLockForRepo serializes create-side branch/path admission.
-// It is keyed by the canonical repository ID already resolved at create entry.
-func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
+// worktreeAdmissionLockForRepo is keyed by Git's current canonical repository
+// identity, never a historical persisted-inventory key. Creates and restores
+// addressed through different names of one repository must still serialize.
+func (m *Manager) worktreeAdmissionLockForRepo(repoIdentityID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.worktreeAdmissionLocks == nil {
 		m.worktreeAdmissionLocks = make(map[string]*sync.Mutex)
 	}
-	lock := m.worktreeAdmissionLocks[repoID]
+	lock := m.worktreeAdmissionLocks[repoIdentityID]
 	if lock == nil {
 		lock = &sync.Mutex{}
-		m.worktreeAdmissionLocks[repoID] = lock
+		m.worktreeAdmissionLocks[repoIdentityID] = lock
 	}
 	return lock
 }
