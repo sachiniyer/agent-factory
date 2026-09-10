@@ -161,13 +161,18 @@ func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []
 		inspections[index].CorrelationErr = errors.Join(correlationErrors...)
 	}
 
-	groups := make(map[string][]int)
+	branchGroups := make(map[string][]int)
+	pathGroups := make(map[string][]int)
 	for index, inspection := range inspections {
-		if inspection.Err != nil || inspection.Evidence.Branch == "" {
+		if inspection.Err != nil {
 			continue
 		}
-		key := repoKeys[index] + "\x00" + inspection.Evidence.Branch
-		groups[key] = append(groups[key], index)
+		pathKey := repoKeys[index] + "\x00path\x00" + pathutil.ResolveForCompare(inspection.WorktreePath)
+		pathGroups[pathKey] = append(pathGroups[pathKey], index)
+		if inspection.Evidence.Branch != "" {
+			branchKey := repoKeys[index] + "\x00branch\x00" + inspection.Evidence.Branch
+			branchGroups[branchKey] = append(branchGroups[branchKey], index)
+		}
 	}
 	for index := range inspections {
 		inspection := &inspections[index]
@@ -175,15 +180,23 @@ func InspectSessionWorktreesContext(ctx context.Context, rows []InstanceData) []
 			continue
 		}
 		var signals []string
-		key := repoKeys[index] + "\x00" + inspection.Evidence.Branch
-		siblings := otherWorktreeLanes(inspections, groups[key], index)
-		if len(siblings) > 0 {
-			signals = append(signals, fmt.Sprintf("branch %q is also checked out by live lane(s) %s", inspection.Evidence.Branch, strings.Join(siblings, ", ")))
+		pathKey := repoKeys[index] + "\x00path\x00" + pathutil.ResolveForCompare(inspection.WorktreePath)
+		pathSiblings := otherWorktreeLanes(inspections, pathGroups[pathKey], index)
+		if len(pathSiblings) > 0 {
+			signals = append(signals, fmt.Sprintf("worktree %q is also used by live lane(s) %s", inspection.WorktreePath, strings.Join(pathSiblings, ", ")))
+		}
+		var branchSiblings []string
+		if inspection.Evidence.Branch != "" {
+			branchKey := repoKeys[index] + "\x00branch\x00" + inspection.Evidence.Branch
+			branchSiblings = otherWorktreeLanes(inspections, branchGroups[branchKey], index)
+			if len(branchSiblings) > 0 {
+				signals = append(signals, fmt.Sprintf("branch %q is also checked out by live lane(s) %s", inspection.Evidence.Branch, strings.Join(branchSiblings, ", ")))
+			}
 		}
 		// A fully staged large commit has the same raw index shape. Only surface
 		// it when a duplicate live binding or the worktree-local reflog also says
 		// this checkout may have followed a sibling's ref move.
-		corroboratedTakeover := len(siblings) > 0 || inspection.Evidence.HeadMovedWithoutReflog
+		corroboratedTakeover := len(pathSiblings) > 0 || len(branchSiblings) > 0 || inspection.Evidence.HeadMovedWithoutReflog
 		if inspection.Evidence.MassRevert && corroboratedTakeover {
 			signals = append(signals, fmt.Sprintf("the index has %d staged paths and zero unstaged paths (the mass-revert shape)", inspection.Evidence.StagedPaths))
 		}

@@ -785,7 +785,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 			return nil, "", nil, nil, err
 		}
 		if req.InPlace {
-			if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, true, diskData); err != nil {
+			if err := m.refuseLiveHeldBranchLocked(repo.ID, identityRoot, workspace, title, nameNamespace, true, diskData); err != nil {
 				return nil, "", nil, nil, err
 			}
 		}
@@ -809,7 +809,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// discovering it at `git worktree add` leaves the archived session renamed
 		// for a create that then did not happen, which is exactly the state the
 		// admission comment above promises this function never produces.
-		if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, req.InPlace, diskData); err != nil {
+		if err := m.refuseLiveHeldBranchLocked(repo.ID, identityRoot, workspace, title, nameNamespace, req.InPlace, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
 		if err := m.refuseHeldBranchReuseLocked(repo.ID, identityRoot, title, nameNamespace, req.InPlace, diskData); err != nil {

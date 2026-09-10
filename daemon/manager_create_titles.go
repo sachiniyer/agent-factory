@@ -120,7 +120,7 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 		if archivedWorktreeHoldsBranch(archived, holder) {
 			continue
 		}
-		if lane := m.liveLaneHoldingWorktreeLocked(holder, diskData); lane != "" {
+		if lane := m.liveLaneHoldingWorktreeLocked(repoID, holder, diskData); lane != "" {
 			return liveHeldBranchRefusal(title, branch, lane, holder)
 		}
 		return fmt.Errorf("cannot create session %q: branch %q is checked out by the worktree at %s — not only by the archived session %q holding that name — and the new session would derive that same branch. Moving another worktree's branch aside is not af's call, so freeing the archived name would not free the branch and the create would fail at `git worktree add` — release that branch yourself, or create this session under a different name",
@@ -165,7 +165,7 @@ func (m *Manager) refuseNonReusableTitleConflictLocked(repoID, repoPath, title s
 // the target worktree's observed branch and path. Only a positively identified
 // live lane refuses, and AF never renames, detaches, resets, or moves either
 // worktree on this path.
-func (m *Manager) refuseLiveHeldBranchLocked(repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
+func (m *Manager) refuseLiveHeldBranchLocked(repoID, repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
 	if namespace != runtimeNamespaceLocalTmux {
 		return nil
 	}
@@ -182,7 +182,7 @@ func (m *Manager) refuseLiveHeldBranchLocked(repoPath, workspace, title string, 
 		holders = m.worktreeHeldBranchesLocked(repoPath, false)[branch]
 	}
 	for _, holder := range holders {
-		lane := m.liveLaneHoldingWorktreeLocked(holder, diskData)
+		lane := m.liveLaneHoldingWorktreeLocked(repoID, holder, diskData)
 		if lane == "" {
 			continue
 		}
@@ -222,6 +222,9 @@ func inPlaceBranchHolders(repoPath, workspace string) (string, []string, error) 
 		if target.Branch != "" {
 			return "", nil, fmt.Errorf("worktree %s is reported as both detached and on branch %q", config.ShellQuotePath(workspace), target.Branch)
 		}
+		// Detached HEAD releases branch correlation, not workspace ownership.
+		// A second --here lane would still share the same files and index, and no
+		// Git checkout occurs for Git's ordinary worktree guard to refuse.
 		return "", []string{target.Path}, nil
 	}
 	if target.Branch == "" {
@@ -241,7 +244,7 @@ func sameCreateWorktreePath(left, right string) bool {
 	return left != "" && left == pathutil.ResolveForCompare(right)
 }
 
-func (m *Manager) liveLaneHoldingWorktreeLocked(holder string, diskData []session.InstanceData) string {
+func (m *Manager) liveLaneHoldingWorktreeLocked(repoID, holder string, diskData []session.InstanceData) string {
 	target := pathutil.ResolveForCompare(holder)
 	if target == "" {
 		return ""
@@ -259,8 +262,9 @@ func (m *Manager) liveLaneHoldingWorktreeLocked(holder string, diskData []sessio
 		seen[key] = struct{}{}
 		lanes = append(lanes, title)
 	}
-	for _, candidate := range m.instances {
-		if candidate == nil || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
+	for key, candidate := range m.instances {
+		candidateRepoID, _ := splitDaemonInstanceKey(key)
+		if candidateRepoID != repoID || candidate == nil || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
 			continue
 		}
 		add(candidate.Title, candidate.ID)
