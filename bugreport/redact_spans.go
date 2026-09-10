@@ -40,6 +40,7 @@ type textTransformContext uint8
 const (
 	transformLogRecord textTransformContext = iota
 	transformLogValue
+	transformLogShellValue
 	transformDiagnosticValue
 	transformGenericValue
 )
@@ -80,6 +81,9 @@ func (r *redactor) directTextSpans(s string, context textTransformContext) []red
 		return r.appendLogShellCommandPathSpans(spans, s)
 	case transformLogValue:
 		return appendLegacyTaskTitleSpans(r.sensitiveTextSpans(s), s)
+	case transformLogShellValue:
+		spans := appendLegacyTaskTitleSpans(r.sensitiveTextSpans(s), s)
+		return append(spans, r.shellCommandSpans(s, r.sensitiveTextSpans)...)
 	case transformDiagnosticValue:
 		return r.sensitiveTextSpans(s)
 	case transformGenericValue:
@@ -92,11 +96,12 @@ func (r *redactor) directTextSpans(s string, context textTransformContext) []red
 func (context textTransformContext) admitsANSI() bool {
 	return context == transformLogRecord ||
 		context == transformLogValue ||
+		context == transformLogShellValue ||
 		context == transformDiagnosticValue
 }
 
 func (context textTransformContext) decodedGoQuoteContext() textTransformContext {
-	if context == transformLogRecord {
+	if context == transformLogRecord || context == transformLogShellValue {
 		return transformLogValue
 	}
 	return context

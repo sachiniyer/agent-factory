@@ -113,10 +113,11 @@ func (r *redactor) appendLogShellQuotedSpan(
 	if err != nil {
 		return spans
 	}
-	// Decoding %q establishes a log-value region. Re-enter the transform policy
-	// for that result before applying the additional emitter-proven shell grammar.
-	inner := r.transformedTextSpans(value, transformLogValue, 1)
-	inner = append(inner, r.shellCommandSpans(value, r.sensitiveTextSpans)...)
+	// Decoding %q establishes both a log-value region and, through the fixed
+	// emitter prose above, its shell provenance. Re-enter one transform policy
+	// carrying both facts so ANSI removal and every other admitted view retain
+	// shell boundary recognition on their logical result.
+	inner := r.transformedTextSpans(value, transformLogShellValue, 1)
 	if redacted := applyRedactionSpans(value, inner); redacted != value {
 		spans = append(spans, redactionSpan{
 			start: start, end: end, replacement: strconv.Quote(redacted), priority: spanQuotedValue,

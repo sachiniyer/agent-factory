@@ -36,6 +36,9 @@ const (
 //     structural syntax.
 //   - POSIX shell quote/escape removal and adjacent literal concatenation, only
 //     in command fields proven by the config schema or fixed AF log emitters.
+//     That proven shell provenance survives ANSI removal, so the shell grammar
+//     is applied again to the normalized logical command rather than only its
+//     encoded source spelling.
 //     Parameter/command/arithmetic/process and pathname expansions split a
 //     logical run because their execution-time bytes are absent. Tilde expansion
 //     likewise synthesizes no source bytes and therefore no candidate.

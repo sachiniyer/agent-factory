@@ -479,6 +479,12 @@ func isASCIIAlpha(b byte) bool {
 // sibling's basename, which is the distinction collapsePathField's separator
 // check makes for an isolated path value.
 func isPathTextDelimiter(r rune) bool {
+	// AF supports Unix filesystems, where NUL is the one byte that can never be
+	// part of a pathname. NUL-delimited command output therefore proves a path
+	// boundary on either side; it is not another renderer punctuation guess.
+	if r == '\x00' {
+		return true
+	}
 	return unicode.IsSpace(r) || strings.ContainsRune("\"'=,:;()[]{}<>&|`", r)
 }
 
