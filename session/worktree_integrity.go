@@ -251,14 +251,14 @@ func resolveAmbiguousBranchHead(evidence *sessiongit.WorktreeIntegrity, binding 
 }
 
 func otherWorktreeLanes(inspections []SessionWorktreeInspection, group []int, self int) []string {
-	seenPaths := map[string]bool{pathutil.ResolveForCompare(inspections[self].WorktreePath): true}
+	seenLanes := map[string]bool{worktreeInspectionLaneIdentity(inspections[self]): true}
 	var lanes []string
 	for _, index := range group {
-		path := pathutil.ResolveForCompare(inspections[index].WorktreePath)
-		if index == self || seenPaths[path] {
+		identity := worktreeInspectionLaneIdentity(inspections[index])
+		if index == self || seenLanes[identity] {
 			continue
 		}
-		seenPaths[path] = true
+		seenLanes[identity] = true
 		lanes = append(lanes, fmt.Sprintf("%q", inspections[index].Title))
 	}
 	sort.Strings(lanes)
@@ -267,6 +267,17 @@ func otherWorktreeLanes(inspections []SessionWorktreeInspection, group []int, se
 		lanes = append(lanes[:maxNamedWorktreeSiblings], fmt.Sprintf("and %d more", remaining))
 	}
 	return lanes
+}
+
+func worktreeInspectionLaneIdentity(inspection SessionWorktreeInspection) string {
+	if inspection.InstanceID != "" {
+		return "id\x00" + inspection.InstanceID
+	}
+	// Legacy rows have no stable ID. Title plus normalized worktree path is the
+	// same fallback identity used when doctor merges live and persisted copies.
+	// The path is deliberately NOT identity on its own: two --here lanes can
+	// share one worktree, and that is a duplicate live branch binding to report.
+	return "legacy\x00" + inspection.Title + "\x00" + pathutil.ResolveForCompare(inspection.WorktreePath)
 }
 
 func shortOID(oid string) string {

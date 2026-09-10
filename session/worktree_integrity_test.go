@@ -138,6 +138,22 @@ func TestInspectSessionWorktreesMarksPartialRepositoryScanUnknown(t *testing.T) 
 	require.Error(t, got[1].Err)
 }
 
+func TestInspectSessionWorktreesKeepsDistinctLanesSharingOneWorktree(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	worktreeScanGit(t, repo, "add", "--all")
+	worktreeScanGit(t, repo, "commit", "-q", "-m", "base")
+
+	got := InspectSessionWorktrees([]InstanceData{
+		{ID: "first-id", Title: "first", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: repo}},
+		{ID: "second-id", Title: "second", Liveness: LiveReady, BackendType: "local", Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: repo}},
+	})
+	require.Len(t, got, 2)
+	assert.Contains(t, got[0].Warning, `"second"`)
+	assert.Contains(t, got[1].Warning, `"first"`)
+}
+
 func TestInspectSessionWorktreesRejectsBranchObservationThatChangedAfterPeerScan(t *testing.T) {
 	binDir := t.TempDir()
 	repo := t.TempDir()

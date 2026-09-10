@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -22,10 +23,10 @@ func completeWorktreeInventory() ([]session.InstanceData, error) {
 	}
 	persisted, err := persistedWorktreeInventory()
 	if err != nil {
-		// Preserve definite observations from the daemon even when the disk half
-		// of the correlation is unavailable. The caller carries err alongside
-		// these rows so they can prove danger but can never prove safety.
-		return live, fmt.Errorf("could not read persisted session inventory: %w", err)
+		// Preserve every definite observation from both sources even when the disk
+		// half is partial. The caller carries err alongside the merged rows so they
+		// can prove danger but can never prove safety.
+		return mergeWorktreeInventories(live, persisted), fmt.Errorf("could not read persisted session inventory: %w", err)
 	}
 	return mergeWorktreeInventories(live, persisted), nil
 }
@@ -92,8 +93,9 @@ func persistedWorktreeInventory() ([]session.InstanceData, error) {
 	if err != nil {
 		return nil, err
 	}
+	var incomplete []error
 	if len(skipped) > 0 {
-		return nil, fmt.Errorf("persisted session inventory is incomplete: %s", config.DescribeRepoInstancesSkips(skipped))
+		incomplete = append(incomplete, fmt.Errorf("persisted session inventory is incomplete: %s", config.DescribeRepoInstancesSkips(skipped)))
 	}
 	repoIDs := make([]string, 0, len(records))
 	for repoID := range records {
@@ -104,11 +106,12 @@ func persistedWorktreeInventory() ([]session.InstanceData, error) {
 	for _, repoID := range repoIDs {
 		var repoRows []session.InstanceData
 		if err := json.Unmarshal(records[repoID], &repoRows); err != nil {
-			return nil, fmt.Errorf("could not parse persisted sessions for repository %s: %w", repoID, err)
+			incomplete = append(incomplete, fmt.Errorf("could not parse persisted sessions for repository %s: %w", repoID, err))
+			continue
 		}
 		rows = append(rows, repoRows...)
 	}
-	return rows, nil
+	return rows, errors.Join(incomplete...)
 }
 
 func checkWorktreeIntegrityRows(report *Report, inspections []session.SessionWorktreeInspection) {

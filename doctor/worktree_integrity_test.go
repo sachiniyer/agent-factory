@@ -223,3 +223,40 @@ func TestMergeWorktreeInventoriesRetainsPersistedLaneSkippedByDaemon(t *testing.
 	assert.Equal(t, "holder-newer", merged[0].Title, "the daemon projection wins for a row it did materialize")
 	assert.Equal(t, "skipped", merged[1].Title)
 }
+
+func TestPersistedWorktreeInventoryRetainsReadableRepoWhenAnotherIsCorrupt(t *testing.T) {
+	opts := testOptions(t, false)
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644))
+	doctorIntegrityGit(t, repo, "add", "--all")
+	doctorIntegrityGit(t, repo, "commit", "-q", "-m", "base")
+	holder := filepath.Join(filepath.Dir(repo), "holder")
+	sibling := filepath.Join(filepath.Dir(repo), "sibling")
+	doctorIntegrityGit(t, repo, "worktree", "add", "-q", "-b", "shared", holder, "HEAD")
+	doctorIntegrityGit(t, repo, "worktree", "add", "-q", "-b", "takeover", sibling, "HEAD")
+	doctorIntegrityGit(t, sibling, "checkout", "-q", "--ignore-other-worktrees", "-B", "shared", "shared")
+	rows := []session.InstanceData{
+		{ID: "holder-id", Title: "holder", Liveness: session.LiveReady, BackendType: "local", Worktree: session.GitWorktreeData{RepoPath: repo, WorktreePath: holder}},
+		{ID: "sibling-id", Title: "sibling", Liveness: session.LiveReady, BackendType: "local", Worktree: session.GitWorktreeData{RepoPath: repo, WorktreePath: sibling}},
+	}
+	raw, err := json.Marshal(rows)
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("z-healthy", raw))
+	require.NoError(t, config.SaveRepoInstances("a-corrupt", json.RawMessage(`{`)))
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	for _, check := range report.Checks {
+		if check.Name != "worktree-integrity" {
+			continue
+		}
+		assert.Equal(t, StatusFail, check.Status,
+			"definite danger in a readable repo must survive another persisted repo's parse failure")
+		assert.Contains(t, check.Detail, "holder")
+		assert.Contains(t, check.Detail, "sibling")
+		assert.Contains(t, check.Detail, "a-corrupt")
+		return
+	}
+	t.Fatal("doctor omitted the worktree-integrity check")
+}

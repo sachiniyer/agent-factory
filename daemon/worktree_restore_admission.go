@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -19,10 +18,10 @@ import (
 // requireRegistered is true for archived restores, whose retained worktree must
 // be associated with Git directly or through an identity-qualified relocation
 // candidate; Lost recovery may legitimately rebuild a missing worktree and then
-// uses its recorded branch as the candidate Git will bind. The per-repository /
-// branch lock is held from the final Git observation through the live transition,
-// so two archived lanes in an already-corrupted multiply-bound cohort cannot
-// both pass while both still look archived.
+// uses its recorded branch as the candidate Git will bind. The shared
+// per-repository worktree-admission lock is held from the final Git observation
+// through the live transition, so restores and creates cannot both pass while
+// both still look archived or not yet published.
 func (m *Manager) reserveLocalRestoreBranch(
 	repoID, title string,
 	instance *session.Instance,
@@ -51,7 +50,7 @@ func (m *Manager) reserveLocalRestoreBranch(
 		return func() {}, nil // positively observed detached HEAD
 	}
 
-	lock := m.restoreBranchLock(repoID, branch)
+	lock := m.worktreeAdmissionLockForRepo(repoID)
 	lock.Lock()
 	release := lock.Unlock
 	fresh, err := worktreeBranchBindings(repoPath)
@@ -140,19 +139,4 @@ func sameWorktreePath(left, right string) bool {
 	}
 	resolvedLeft := pathutil.ResolveForCompare(left)
 	return resolvedLeft == pathutil.ResolveForCompare(right)
-}
-
-func (m *Manager) restoreBranchLock(repoID, branch string) *sync.Mutex {
-	key := repoID + "\x00" + branch
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.restoreBranchLocks == nil {
-		m.restoreBranchLocks = make(map[string]*sync.Mutex)
-	}
-	lock := m.restoreBranchLocks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.restoreBranchLocks[key] = lock
-	}
-	return lock
 }
