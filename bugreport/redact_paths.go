@@ -2,9 +2,15 @@ package bugreport
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The path-root policy: how a bundle names a directory.
@@ -42,6 +48,14 @@ type pathRoot struct {
 	token string
 }
 
+type worktreePathTitle struct {
+	repoPath string
+	segment  string
+}
+
+type pathBoundary func(string, int, int) bool
+type pathStartBoundary func(string, int) bool
+
 // noteRepoRoot registers one repository root, and noteWorktreeRoot one worktree
 // root, under the next token of that kind.
 func (r *redactor) noteRepoRoot(path string) {
@@ -59,7 +73,36 @@ func (r *redactor) noteWorktreeRoot(path string) {
 // noteAFHome registers the AF home under its own single token. It is not
 // numbered: there is exactly one per run.
 func (r *redactor) noteAFHome(path string) {
+	r.afHome = ""
+	r.afHomeSpellings = rootSpellings(path)
+	if len(r.afHomeSpellings) > 0 {
+		r.afHome = r.afHomeSpellings[0]
+	}
 	r.noteRoot(path, afHomeToken)
+}
+
+func (r *redactor) noteWorktreeTitle(repoPath, title string) {
+	for _, spelling := range absolutePathSpellings(repoPath) {
+		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
+		if segment == "" {
+			continue
+		}
+		if r.worktreePathTitles == nil {
+			r.worktreePathTitles = make(map[worktreePathTitle]struct{})
+		}
+		r.worktreePathTitles[worktreePathTitle{repoPath: spelling, segment: segment}] = struct{}{}
+	}
+}
+
+func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
+	segment := sessiongit.DerivedWorktreeSubdirectoryTitleSegment(title)
+	if segment == "" {
+		return
+	}
+	if r.worktreeSubdirectoryTitles == nil {
+		r.worktreeSubdirectoryTitles = make(map[string]struct{})
+	}
+	r.worktreeSubdirectoryTitles[segment] = struct{}{}
 }
 
 // noteRoot registers one root under an exact token, reporting whether it was
@@ -67,19 +110,65 @@ func (r *redactor) noteAFHome(path string) {
 // repo must read as one repo, and an AF home that is also some session's repo
 // must not gain a second name.
 func (r *redactor) noteRoot(path, token string) bool {
-	path = normalizeRoot(path)
-	if path == "" {
-		return false
-	}
-	if _, seen := r.rootTokens[path]; seen {
+	spellings := rootSpellings(path)
+	if len(spellings) == 0 {
 		return false
 	}
 	if r.rootTokens == nil {
 		r.rootTokens = make(map[string]string)
 	}
+	for _, spelling := range spellings {
+		if existing, seen := r.rootTokens[spelling]; seen {
+			for _, alias := range spellings {
+				r.noteRootSpelling(alias, existing)
+			}
+			return false
+		}
+	}
+	for _, spelling := range spellings {
+		r.noteRootSpelling(spelling, token)
+	}
+	return true
+}
+
+func (r *redactor) noteRootSpelling(path, token string) {
+	if _, seen := r.rootTokens[path]; seen {
+		return
+	}
 	r.rootTokens[path] = token
 	r.roots = append(r.roots, pathRoot{path: path, token: token})
-	return true
+}
+
+// rootSpellings returns both the spelling AF was handed and the physical
+// spelling of its deepest existing ancestor. macOS commonly supplies /var paths
+// while git and filepath resolution report the same objects below /private/var;
+// Linux symlinked fixture roots have the identical shape. Registering both at
+// admission keeps that filesystem alias from becoming an unrecognized text kind.
+func rootSpellings(path string) []string {
+	spellings := absolutePathSpellings(path)
+	out := spellings[:0]
+	for _, spelling := range spellings {
+		if normalized := normalizeRoot(spelling); normalized != "" {
+			out = append(out, normalized)
+		}
+	}
+	return out
+}
+
+// absolutePathSpellings also admits the filesystem root. Registering "/" as a
+// path root would consume every absolute path, so rootSpellings filters it; a
+// repo at "/" can still own the exact sibling-title shape "/-<segment>".
+func absolutePathSpellings(path string) []string {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return nil
+	}
+	spellings := []string{path}
+	resolved := filepath.Clean(pathutil.ResolveForCompare(path))
+	if filepath.IsAbs(resolved) && resolved != path {
+		spellings = append(spellings, resolved)
+	}
+	return spellings
 }
 
 // normalizeRoot accepts only an absolute directory worth naming, with trailing
@@ -103,9 +192,8 @@ func normalizeRoot(path string) string {
 // $HOME is part of this list rather than a separate pass because the two are one
 // ordered decision: the AF home usually sits INSIDE $HOME, so collapsing $HOME
 // first would rewrite "~/.agent-factory" and leave the more specific token
-// unreachable. It is the same prefix-shadowing rule sortLongestFirst enforces
-// for titles and usernames, and it is part of the privacy invariant for the same
-// reason.
+// unreachable. The text planner handles the same prefix-shadowing relationship
+// for titles and usernames before it applies any replacements.
 //
 // Each root is also matched in its DISPLAY spelling, for the reason scrub
 // collapses both spellings of $HOME: a path whose bytes are not valid UTF-8
@@ -138,16 +226,266 @@ func (r *redactor) rootReplacements() []pathRoot {
 	return out
 }
 
-// collapseKnownRoots rewrites every directory this run can name to its token,
-// most specific first. It is the text-pass half of the root policy: the field
-// half (collapsePathField) rewrites the path FIELDS, and this one catches the
-// same roots wherever else they appear — a daemon log line, a diagnostic string,
-// the daemon status block, a task's project path.
+// collapseKnownRoots rewrites every complete directory this run can name to its
+// token, most specific first. It is the text-pass half of the root policy: the
+// field half (collapsePathField) rewrites the path FIELDS, and this one catches
+// the same roots wherever else they appear — a daemon log line, a diagnostic
+// string, the daemon status block, a task's project path. Text boundaries are
+// explicit: a registered "/srv/repo" must not consume the prefix of its unrelated
+// sibling "/srv/repo-backup" and strand that sibling's private suffix (#4099).
 func (r *redactor) collapseKnownRoots(s string) string {
 	for _, root := range r.rootReplacements() {
-		s = strings.ReplaceAll(s, root.path, root.token)
+		s = replaceKnownRoot(s, root.path, root.token)
 	}
 	return s
+}
+
+// scrubWorktreePathTitles removes the title-derived segment only in the exact
+// sibling path context that gives it meaning. A derived spelling is not swept
+// globally: an equal bounded diagnostic or branch value remains intact. Any
+// numeric collision suffix is AF-authored and survives as triage information.
+func (r *redactor) scrubWorktreePathTitles(s string) string {
+	titles := make([]worktreePathTitle, 0, len(r.worktreePathTitles))
+	for title := range r.worktreePathTitles {
+		titles = append(titles, title)
+	}
+	sort.Slice(titles, func(i, j int) bool {
+		iLen := len(titles[i].repoPath) + len(titles[i].segment)
+		jLen := len(titles[j].repoPath) + len(titles[j].segment)
+		if iLen != jLen {
+			return iLen > jLen
+		}
+		if titles[i].repoPath != titles[j].repoPath {
+			return titles[i].repoPath < titles[j].repoPath
+		}
+		return titles[i].segment < titles[j].segment
+	})
+	for _, title := range titles {
+		needle := title.repoPath + "-" + title.segment
+		replacement := title.repoPath + "-" + redactedMarker
+		s = replaceSiblingWorktreeTitle(s, needle, replacement)
+	}
+	return s
+}
+
+func replaceSiblingWorktreeTitle(s, needle, replacement string) string {
+	var out strings.Builder
+	scan, copied := 0, 0
+	changed := false
+	for scan <= len(s)-len(needle) {
+		rel := strings.Index(s[scan:], needle)
+		if rel < 0 {
+			break
+		}
+		start := scan + rel
+		end := start + len(needle)
+		if derivedWorktreePathBoundary(s, start, end) {
+			out.WriteString(s[copied:start])
+			out.WriteString(replacement)
+			copied = end
+			scan = end
+			changed = true
+			continue
+		}
+		scan = start + 1
+	}
+	if !changed {
+		return s
+	}
+	out.WriteString(s[copied:])
+	return out.String()
+}
+
+func derivedWorktreePathBoundary(s string, start, end int) bool {
+	return derivedWorktreePathBoundaryWithEnd(s, start, end, pathEndsAt)
+}
+
+func derivedWorktreePathBoundaryWithEnd(s string, start, end int, endsAt pathBoundary) bool {
+	return derivedWorktreePathBoundaryWithContext(s, start, end, pathStartsAt, endsAt)
+}
+
+func derivedWorktreePathBoundaryWithContext(
+	s string,
+	start, end int,
+	startsAt pathStartBoundary,
+	endsAt pathBoundary,
+) bool {
+	if !startsAt(s, start) {
+		return false
+	}
+	if endsAt(s, start, end) {
+		return true
+	}
+	if end >= len(s) || s[end] != '-' {
+		return false
+	}
+	// firstFreeWorktreePath appends the lowest available "-N" suffix. Keep that
+	// bounded system value, but require all digits and a real path/text boundary
+	// so a shorter title cannot consume the prefix of a longer sibling title.
+	end++
+	digits := end
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	return end > digits && endsAt(s, start, end)
+}
+
+func pathEndsAt(s string, start, end int) bool {
+	if end == len(s) || s[end] == byte(filepath.Separator) {
+		return true
+	}
+	after, size := utf8.DecodeRuneInString(s[end:])
+	return isPathTextDelimiter(after) || uriPathEndsAt(s, start, end, size)
+}
+
+func replaceKnownRoot(s, root, token string) string {
+	var out strings.Builder
+	scan, copied := 0, 0
+	changed := false
+	for scan <= len(s)-len(root) {
+		rel := strings.Index(s[scan:], root)
+		if rel < 0 {
+			break
+		}
+		start := scan + rel
+		end := start + len(root)
+		if knownRootTextBoundary(s, start, end) {
+			out.WriteString(s[copied:start])
+			out.WriteString(token)
+			copied = end
+			scan = end
+			changed = true
+			continue
+		}
+		scan = start + 1
+	}
+	if !changed {
+		return s
+	}
+	out.WriteString(s[copied:])
+	return out.String()
+}
+
+func knownRootTextBoundary(s string, start, end int) bool {
+	return knownRootTextBoundaryWithEnd(s, start, end, pathEndsAt)
+}
+
+func knownRootTextBoundaryWithEnd(s string, start, end int, endsAt pathBoundary) bool {
+	return knownRootTextBoundaryWithContext(s, start, end, pathStartsAt, endsAt)
+}
+
+func knownRootTextBoundaryWithContext(
+	s string,
+	start, end int,
+	startsAt pathStartBoundary,
+	endsAt pathBoundary,
+) bool {
+	if !startsAt(s, start) {
+		return false
+	}
+	if endsAt(s, start, end) {
+		return true
+	}
+	// This is the one safe non-separator sibling: an earlier structured or
+	// contextual pass has already proven the suffix to be user-title data and
+	// replaced it, so collapse the registered repo prefix while retaining both
+	// the sibling dash and the marker (and any collision suffix).
+	if strings.HasPrefix(s[end:], "-"+redactedMarker) {
+		return true
+	}
+	return false
+}
+
+func pathStartsAt(s string, start int) bool {
+	if start == 0 {
+		return true
+	}
+	before, _ := utf8.DecodeLastRuneInString(s[:start])
+	if isPathTextDelimiter(before) {
+		return true
+	}
+	// A URI wrapper can put its first filesystem-path slash immediately after
+	// the scheme/authority, so the byte before an absolute root is not a text
+	// delimiter (`file:///srv/repo`, `vscode://file/srv/repo`). Accept only that
+	// FIRST URI path component: a slash already present after "://" means this
+	// root is merely a suffix of a longer URI path and must not be rewritten.
+	_, ok := uriStartForPath(s, start)
+	return ok
+}
+
+// uriPathEndsAt asks the URI parser whether the matched bytes are the complete
+// path, or are followed by a percent-encoded path separator. That recognizes
+// query, fragment, and encoded descendant syntax without declaring '?', '#', or
+// '%' to be filesystem delimiters. All three are legal Unix filename bytes;
+// outside a URI they may continue a sibling name and must not make a
+// registered-root prefix eligible for collapse.
+func uriPathEndsAt(s string, start, end, nextRuneSize int) bool {
+	uriStart, ok := uriStartForPath(s, start)
+	if !ok {
+		return false
+	}
+	parseEnd := end + nextRuneSize
+	if s[end] == '%' {
+		if end+3 > len(s) {
+			return false
+		}
+		parseEnd = end + 3
+	}
+	parsed, err := url.Parse(s[uriStart:parseEnd])
+	if err != nil {
+		return false
+	}
+	root := s[start:end]
+	return parsed.Path == root || parsed.Path == root+"/"
+}
+
+// uriStartForPath locates a syntactically valid scheme whose first path slash
+// is the match at start. The URI grammar permits both an authority
+// (scheme://host/path) and no authority (scheme:/path); a path slash already
+// present after the scheme/authority makes the match a suffix inside a longer
+// URI path, never a root boundary.
+func uriStartForPath(s string, start int) (int, bool) {
+	prefix := s[:start]
+	schemeEnd := strings.LastIndexByte(prefix, ':')
+	if schemeEnd < 0 {
+		return 0, false
+	}
+	pathPrefix := prefix[schemeEnd+1:]
+	if pathPrefix != "" && (!strings.HasPrefix(pathPrefix, "//") || strings.Contains(pathPrefix[2:], "/")) {
+		return 0, false
+	}
+	schemeStart := schemeEnd
+	for schemeStart > 0 && isURISchemeByte(prefix[schemeStart-1]) {
+		schemeStart--
+	}
+	if schemeStart == schemeEnd || !isASCIIAlpha(prefix[schemeStart]) {
+		return 0, false
+	}
+	return schemeStart, true
+}
+
+func isURISchemeByte(b byte) bool {
+	return isASCIIAlpha(b) || b >= '0' && b <= '9' || b == '+' || b == '-' || b == '.'
+}
+
+func isASCIIAlpha(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
+
+// isPathTextDelimiter names punctuation and whitespace used by renderers around
+// a complete path. Shell control operators and backtick wrappers terminate paths
+// in command-bearing config values. Letters, numbers and filename punctuation
+// such as '.', '_' and '-' deliberately do not qualify: they can continue a
+// sibling's basename, which is the distinction collapsePathField's separator
+// check makes for an isolated path value.
+func isPathTextDelimiter(r rune) bool {
+	// AF supports Unix filesystems, where NUL is the one byte that can never be
+	// part of a pathname. NUL-delimited command output therefore proves a path
+	// boundary on either side; it is not another renderer punctuation guess.
+	if r == '\x00' {
+		return true
+	}
+	return unicode.IsSpace(r) || strings.ContainsRune("\"'=,:;()[]{}<>&|`", r)
 }
 
 // collapsePathField rewrites ONE absolute path field so it carries the layout

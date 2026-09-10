@@ -376,7 +376,7 @@ func TestRedactTasksReducesProgramToItsAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	scrubbed := r.scrub(string(doc))
+	scrubbed := r.scrubJSON(string(doc))
 	if strings.Contains(scrubbed, "ConfidentialClient") || strings.Contains(scrubbed, "AcmeCorp") {
 		t.Errorf("the task projection reached the bundle with a user directory name:\n%s", scrubbed)
 	}

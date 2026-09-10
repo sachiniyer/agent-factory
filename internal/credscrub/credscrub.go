@@ -14,7 +14,11 @@
 // bug-report bundle still tells the user to review before sharing.
 package credscrub
 
-import "regexp"
+import (
+	"regexp"
+
+	"github.com/sachiniyer/agent-factory/internal/redactspan"
+)
 
 // Markers replacing redacted content. SecretMarker replaces a substring a
 // pattern flagged as a credential inside otherwise-kept text; RedactedMarker is
@@ -65,6 +69,13 @@ const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|passwo
 var keyValueSecret = regexp.MustCompile(
 	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
 
+// keyedSchemeSecret recognizes the original form that the historical
+// keyValueSecret -> strandedAfterMarker sequence scrubbed in two mutations.
+// Finding both words at once lets callers plan against untouched input without
+// enumerating auth scheme names.
+var keyedSchemeSecret = regexp.MustCompile(
+	`(?i)(` + credentialKeyPattern + `)([^\s"',}]{6,})[ \t]+[A-Za-z0-9._~+/=-]{8,}`)
+
 // strandedAfterMarker removes a credential left stranded BEHIND a marker.
 //
 // keyValueSecret consumes only the first whitespace-delimited word of a value,
@@ -99,11 +110,9 @@ var strandedAfterMarker = regexp.MustCompile(
 	`(?i)(` + credentialKeyPattern + regexp.QuoteMeta(SecretMarker) + `)[ \t]+[A-Za-z0-9._~+/=-]{8,}`)
 
 // authScheme matches an HTTP auth scheme together with its credential, as one
-// unit. It MUST run before keyValueSecret, which otherwise consumes only the
-// scheme word: on `auth: Bearer <token>` that pass sees key `auth`, takes
-// `Bearer` as the whole value because its bare class stops at the following
-// space, and leaves the credential standing in the clear behind a marker
-// (`auth: [redacted-secret] <token>`). Measured, not theorised.
+// unit. It must be DISCOVERED on the original text alongside keyValueSecret:
+// applying the key/value mutation first would consume only `Bearer` on
+// `auth: Bearer <token>` and leave the credential standing behind a marker.
 //
 // `Authorization: Bearer <token>` happens to survive either order, because the
 // key half requires the key to END at `auth` and so never matches
@@ -131,45 +140,100 @@ var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY--
 // unchanged, which matters because the bug report scrubs the same text more than
 // once by design, and now also scrubs a log that was scrubbed on the way to disk.
 func Scrub(s string) string {
-	s = privateKeyBlock.ReplaceAllString(s, SecretMarker)
-	// Before keyValueSecret: see authScheme for why the other order leaks.
-	s = authScheme.ReplaceAllString(s, SecretMarker)
-	s = keyValueSecret.ReplaceAllStringFunc(s, redactKeyValueSecret)
-	// After keyValueSecret: it catches both the marker this run just wrote for an
-	// unknown scheme and one a previous binary persisted to the log.
-	s = strandedAfterMarker.ReplaceAllString(s, "$1")
-	for _, re := range shapePatterns {
-		s = re.ReplaceAllString(s, SecretMarker)
-	}
-	return s
+	return redactspan.Apply(s, Redactions(s), SecretMarker)
 }
 
-func redactKeyValueSecret(match string) string {
-	idx := keyValueSecret.FindStringSubmatchIndex(match)
-	if len(idx) < 4 || idx[2] < 0 {
-		return SecretMarker
+// Redactions returns every credential interval recognized in the untouched
+// input. Assignment keys are deliberately excluded: they are bounded,
+// non-user-authored triage context, while their values are sensitive. Callers
+// can combine these intervals with their own privacy matches without one pass
+// destroying another's evidence.
+func Redactions(s string) []redactspan.Span {
+	spans := regexpSpans(nil, s, privateKeyBlock, SecretMarker, 0)
+	spans = appendKeyedSchemeSpans(spans, s)
+	spans = regexpSpans(spans, s, authScheme, SecretMarker, 2)
+	spans = appendKeyValueSpans(spans, s)
+	spans = appendStrandedSpans(spans, s)
+	for _, re := range shapePatterns {
+		spans = regexpSpans(spans, s, re, SecretMarker, 5)
 	}
-	prefix := match[idx[2]:idx[3]]
-	value := match[idx[3]:]
-	// A value an earlier pass already redacted must survive untouched. Scrub is
-	// applied more than once to the same text by design — per section, again over
-	// the assembled text/JSON, and again on each component the issue draft inlines
-	// — so it has to be idempotent. It was not: re-scrubbing a marker re-wrapped
-	// it and grew a bracket per pass, and a real bundle shipped 28
-	// `[redacted-secret]]`.
-	//
-	// This skip is only safe because `value` is the COMPLETE value; see
-	// markerValues for why, and keyValueSecret for the boundary that makes it true.
-	if isMarker(value) {
-		return match
+	return spans
+}
+
+func appendKeyedSchemeSpans(spans []redactspan.Span, s string) []redactspan.Span {
+	for _, loc := range keyedSchemeSecret.FindAllStringSubmatchIndex(s, -1) {
+		if len(loc) >= 6 && loc[3] < loc[1] {
+			scheme := s[loc[4]:loc[5]]
+			// The whole-field marker is not evidence of the historical stranded
+			// credential shape. Preserve the established exception: only the
+			// credential marker triggers recovery of a following token.
+			if scheme == RedactedMarker {
+				continue
+			}
+			spans = append(spans, redactspan.Span{
+				Start: loc[3], End: loc[1], Replacement: SecretMarker, Priority: 1,
+			})
+		}
 	}
-	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-		return prefix + `"` + SecretMarker + `"`
+	return spans
+}
+
+func regexpSpans(spans []redactspan.Span, s string, re *regexp.Regexp, replacement string, priority int) []redactspan.Span {
+	for _, loc := range re.FindAllStringIndex(s, -1) {
+		spans = append(spans, redactspan.Span{
+			Start: loc[0], End: loc[1], Replacement: replacement, Priority: priority,
+		})
 	}
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		return prefix + `'` + SecretMarker + `'`
+	return spans
+}
+
+func appendKeyValueSpans(spans []redactspan.Span, s string) []redactspan.Span {
+	for _, loc := range keyValueSecret.FindAllStringSubmatchIndex(s, -1) {
+		if len(loc) < 4 || loc[2] < 0 {
+			continue
+		}
+		start, end := loc[3], loc[1]
+		value := s[start:end]
+		// A value an earlier pass already redacted must survive untouched. Scrub is
+		// applied more than once to the same text by design — per section, again over
+		// the assembled text/JSON, and again on each component the issue draft inlines
+		// — so it has to be idempotent. It was not: re-scrubbing a marker re-wrapped
+		// it and grew a bracket per pass, and a real bundle shipped 28
+		// `[redacted-secret]]`.
+		//
+		// This skip is only safe because `value` is the COMPLETE value; see
+		// markerValues for why, and keyValueSecret for the boundary that makes it true.
+		if isMarker(value) {
+			continue
+		}
+		if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+			spans = append(spans, redactspan.Span{
+				Start: start, End: end, Replacement: `"` + SecretMarker + `"`, Priority: 3,
+			})
+			continue
+		}
+		if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+			spans = append(spans, redactspan.Span{
+				Start: start, End: end, Replacement: `'` + SecretMarker + `'`, Priority: 3,
+			})
+			continue
+		}
+		spans = append(spans, redactspan.Span{
+			Start: start, End: end, Replacement: SecretMarker, Priority: 3,
+		})
 	}
-	return prefix + SecretMarker
+	return spans
+}
+
+func appendStrandedSpans(spans []redactspan.Span, s string) []redactspan.Span {
+	for _, loc := range strandedAfterMarker.FindAllStringSubmatchIndex(s, -1) {
+		if len(loc) >= 4 && loc[3] < loc[1] {
+			spans = append(spans, redactspan.Span{
+				Start: loc[3], End: loc[1], Replacement: "", Priority: 4,
+			})
+		}
+	}
+	return spans
 }
 
 // markerValues are the EXACT, COMPLETE value forms this package and its callers
