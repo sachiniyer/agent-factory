@@ -985,18 +985,3 @@ func (m *Manager) opLockFor(key string) *sync.Mutex {
 	}
 	return lock
 }
-
-// attachCredentialsToAll gives every instance the daemon holds its credential
-// minter (#3068).
-//
-// Applied at the two points where the daemon takes ownership of instances built
-// from DISK — the startup restore and every refresh — because that is the half a
-// per-call-site fix keeps missing: session.FromInstanceData cannot populate it,
-// so a session loaded after a daemon restart would provision its replacement
-// sandbox with no callback and no error. Idempotent and cheap; re-attaching to an
-// instance that already has one is a pointer write.
-func (m *Manager) attachCredentialsToAll(instances map[string]*session.Instance) {
-	for _, inst := range instances {
-		attachSandboxCredentials(m, inst)
-	}
-}
