@@ -79,6 +79,23 @@ func TestDoctorRetainsLiveDangerWhenPersistedInventoryFails(t *testing.T) {
 	assert.Equal(t, []string{"worktree-integrity"}, report.Incomplete)
 }
 
+func TestCompleteWorktreeInventoryRetainsPersistedRowsWhenDaemonFails(t *testing.T) {
+	_ = testOptions(t, false)
+	want := []session.InstanceData{{
+		ID: "persisted-id", Title: "persisted-lane", Liveness: session.LiveReady, BackendType: "local",
+		Worktree: session.GitWorktreeData{RepoPath: "/repo", WorktreePath: "/repo/lane"},
+	}}
+	raw, err := json.Marshal(want)
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("persisted-repo", raw))
+
+	rows, err := completeWorktreeInventory()
+	require.Error(t, err, "the unreachable daemon must remain an explicit inventory gap")
+	require.Len(t, rows, 1, "a daemon failure must not discard readable persisted evidence")
+	assert.Equal(t, want[0].ID, rows[0].ID)
+	assert.Equal(t, want[0].Title, rows[0].Title)
+}
+
 func TestDoctorPassesCleanWorktreeIntegrityScan(t *testing.T) {
 	report := &Report{}
 	checkWorktreeIntegrityRows(report, []session.SessionWorktreeInspection{{Title: "editing-lane"}})

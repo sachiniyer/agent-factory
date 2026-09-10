@@ -17,18 +17,19 @@ import (
 // persisted row. The daemon intentionally skips records it cannot materialize;
 // those rows still own worktrees and must remain in a safety correlation.
 func completeWorktreeInventory() ([]session.InstanceData, error) {
-	live, err := daemonSessionInventory()
-	if err != nil {
-		return nil, err
+	live, liveErr := daemonSessionInventory()
+	persisted, persistedErr := persistedWorktreeInventory()
+	// Preserve every definite observation from either source. The caller carries
+	// every failed half alongside the merged rows, so readable evidence can prove
+	// danger while an incomplete inventory can never prove safety.
+	var incomplete []error
+	if liveErr != nil {
+		incomplete = append(incomplete, fmt.Errorf("could not read live daemon session inventory: %w", liveErr))
 	}
-	persisted, err := persistedWorktreeInventory()
-	if err != nil {
-		// Preserve every definite observation from both sources even when the disk
-		// half is partial. The caller carries err alongside the merged rows so they
-		// can prove danger but can never prove safety.
-		return mergeWorktreeInventories(live, persisted), fmt.Errorf("could not read persisted session inventory: %w", err)
+	if persistedErr != nil {
+		incomplete = append(incomplete, fmt.Errorf("could not read persisted session inventory: %w", persistedErr))
 	}
-	return mergeWorktreeInventories(live, persisted), nil
+	return mergeWorktreeInventories(live, persisted), errors.Join(incomplete...)
 }
 
 func mergeWorktreeInventories(live, persisted []session.InstanceData) []session.InstanceData {

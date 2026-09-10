@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -75,12 +76,13 @@ func (m *Manager) reserveLocalRestoreBranch(
 	m.mu.Lock()
 	current := m.instances[daemonInstanceKey(repoID, title)]
 	for _, binding := range fresh {
-		if binding.Branch != branch || sameWorktreePath(binding.Path, worktreePath) {
+		if binding.Branch != branch {
 			continue
 		}
-		if lane := m.liveLaneHoldingWorktreeLocked(repoID, binding.Path, diskData); lane != "" && lane != title {
+		if lanes := m.liveLanesHoldingWorktreeExceptLocked(repoID, binding.Path, instance, diskData); len(lanes) > 0 {
 			m.mu.Unlock()
 			release()
+			lane := lanes[0]
 			handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
 			return nil, fmt.Errorf("cannot restore session %q: branch %q is already checked out by live lane %q at %s. Restoring would bind two live worktrees to one branch, so continue in that workspace with `%s` or release the branch yourself; af did not rename, detach, reset, or move either worktree",
 				title, branch, lane, config.ShellQuotePath(binding.Path), handoff)
@@ -92,6 +94,48 @@ func (m *Manager) reserveLocalRestoreBranch(
 		return nil, fmt.Errorf("session %q changed state before its branch holders could be verified", title)
 	}
 	return release, nil
+}
+
+// liveLanesHoldingWorktreeExceptLocked returns every live owner of holder except
+// the exact instance being restored. A retained worktree can already be shared
+// by an archived lane and a live --here lane, so path equality cannot identify
+// the restoring owner; only pointer/stable-ID identity can exclude it safely.
+func (m *Manager) liveLanesHoldingWorktreeExceptLocked(repoID, holder string, restoring *session.Instance, diskData []session.InstanceData) []string {
+	target := pathutil.ResolveForCompare(holder)
+	if target == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	lanes := make([]string, 0)
+	add := func(title, id string) {
+		key := "title:" + title
+		if id != "" {
+			key = "id:" + id
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		lanes = append(lanes, title)
+	}
+	for key, candidate := range m.instances {
+		rid, _ := splitDaemonInstanceKey(key)
+		if rid != repoID || candidate == nil || candidate == restoring || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
+			continue
+		}
+		add(candidate.Title, candidate.ID)
+	}
+	for _, data := range diskData {
+		if session.IsArchivedData(data) || pathutil.ResolveForCompare(data.Worktree.WorktreePath) != target {
+			continue
+		}
+		if restoring != nil && data.ID != "" && data.ID == restoring.ID {
+			continue
+		}
+		add(data.Title, data.ID)
+	}
+	sort.Strings(lanes)
+	return lanes
 }
 
 func restoreCandidateBranch(

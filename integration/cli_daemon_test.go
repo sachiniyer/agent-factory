@@ -136,7 +136,9 @@ func TestConcurrentCLIClientsUseDaemonCoordinator(t *testing.T) {
 	for err := range duplicateErrs {
 		if err == nil {
 			duplicateSuccesses++
-		} else if !strings.Contains(err.Error(), "already exists") && !strings.Contains(err.Error(), "reserved") {
+		} else if !strings.Contains(err.Error(), "already exists") &&
+			!strings.Contains(err.Error(), "reserved") &&
+			!strings.Contains(err.Error(), "already checked out by live lane") {
 			t.Fatalf("unexpected duplicate create error: %v", err)
 		}
 	}
