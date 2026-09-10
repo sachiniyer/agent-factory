@@ -32,35 +32,74 @@ const (
 	spanQuotedValue
 )
 
+// textTransformContext is the provenance of an already-decoded logical value.
+// It decides which transformations may be applied next; byte shape alone never
+// upgrades a value into a stronger grammar.
+type textTransformContext uint8
+
+const (
+	transformLogRecord textTransformContext = iota
+	transformLogValue
+	transformDiagnosticValue
+	transformGenericValue
+)
+
 // scrubKnownLogValues includes the historical task-log shapes whose title is
 // known from fixed syntax rather than the current record set.
 func (r *redactor) scrubKnownLogValues(s string) string {
-	spans := r.logTextSpans(s)
-	spans = r.appendANSITransformedSpans(spans, s, r.logTextSpans)
-	return applyRedactionSpans(s, spans)
-}
-
-func (r *redactor) logTextSpans(s string) []redactionSpan {
-	spans := r.sensitiveTextSpans(s)
-	spans = appendLegacyTaskTitleSpans(spans, s)
-	spans = r.appendLogShellCommandPathSpans(spans, s)
-	return r.appendQuotedValueSpans(spans, s, true)
+	return applyRedactionSpans(s, r.transformedTextSpans(s, transformLogRecord, 0))
 }
 
 func (r *redactor) scrubKnownDiagnosticValues(s string) string {
-	spans := r.diagnosticTextSpans(s)
-	spans = r.appendANSITransformedSpans(spans, s, r.diagnosticTextSpans)
-	return applyRedactionSpans(s, spans)
-}
-
-func (r *redactor) diagnosticTextSpans(s string) []redactionSpan {
-	return r.appendQuotedValueSpans(r.sensitiveTextSpans(s), s, false)
+	return applyRedactionSpans(s, r.transformedTextSpans(s, transformDiagnosticValue, 0))
 }
 
 func (r *redactor) scrubGenericText(s string) string {
-	spans := r.genericTextSpans(s)
-	spans = r.appendGenericQuotedValueSpans(spans, s)
-	return applyRedactionSpans(s, spans)
+	return applyRedactionSpans(s, r.transformedTextSpans(s, transformGenericValue, 0))
+}
+
+func (r *redactor) transformedTextSpans(
+	s string,
+	context textTransformContext,
+	quoteDepth int,
+) []redactionSpan {
+	spans := r.directTextSpans(s, context)
+	if context.admitsANSI() {
+		spans = r.appendANSITransformedSpans(spans, s, func(logical string) []redactionSpan {
+			return r.transformedTextSpans(logical, context, quoteDepth)
+		})
+	}
+	return r.appendTransformedGoQuotedSpans(spans, s, context, quoteDepth)
+}
+
+func (r *redactor) directTextSpans(s string, context textTransformContext) []redactionSpan {
+	switch context {
+	case transformLogRecord:
+		spans := r.sensitiveTextSpans(s)
+		spans = appendLegacyTaskTitleSpans(spans, s)
+		return r.appendLogShellCommandPathSpans(spans, s)
+	case transformLogValue:
+		return appendLegacyTaskTitleSpans(r.sensitiveTextSpans(s), s)
+	case transformDiagnosticValue:
+		return r.sensitiveTextSpans(s)
+	case transformGenericValue:
+		return r.genericTextSpans(s)
+	default:
+		return nil
+	}
+}
+
+func (context textTransformContext) admitsANSI() bool {
+	return context == transformLogRecord ||
+		context == transformLogValue ||
+		context == transformDiagnosticValue
+}
+
+func (context textTransformContext) decodedGoQuoteContext() textTransformContext {
+	if context == transformLogRecord {
+		return transformLogValue
+	}
+	return context
 }
 
 func (r *redactor) sensitiveTextSpans(s string) []redactionSpan {
@@ -179,42 +218,26 @@ func appendCredentialSpans(spans []redactionSpan, s string) []redactionSpan {
 	return spans
 }
 
-func (r *redactor) appendQuotedValueSpans(spans []redactionSpan, s string, legacyLog bool) []redactionSpan {
-	produce := func(value string) []redactionSpan {
-		inner := r.sensitiveTextSpans(value)
-		if legacyLog {
-			inner = appendLegacyTaskTitleSpans(inner, value)
-		}
-		return inner
-	}
-	return appendNestedGoQuotedSpans(spans, s, produce, 0)
-}
-
-func (r *redactor) appendGenericQuotedValueSpans(spans []redactionSpan, s string) []redactionSpan {
-	return appendNestedGoQuotedSpans(spans, s, r.genericTextSpans, 0)
-}
-
 const maxGoQuotedTransformDepth = 64
 
-func appendNestedGoQuotedSpans(
+func (r *redactor) appendTransformedGoQuotedSpans(
 	spans []redactionSpan,
 	s string,
-	produce textSpanProducer,
+	context textTransformContext,
 	depth int,
 ) []redactionSpan {
+	if depth >= maxGoQuotedTransformDepth {
+		// Each accepted quote removes at least its two delimiter bytes, but an
+		// attacker-controlled log can still manufacture excessive nesting. At
+		// the depth budget, redact any further valid quoted value as one unknown
+		// logical unit rather than leaking it or recursing without a bound.
+		return appendGoQuotedSpans(spans, s, func(string) string {
+			return redactedMarker
+		})
+	}
+	decodedContext := context.decodedGoQuoteContext()
 	return appendGoQuotedSpans(spans, s, func(value string) string {
-		inner := produce(value)
-		if depth < maxGoQuotedTransformDepth {
-			inner = appendNestedGoQuotedSpans(inner, value, produce, depth+1)
-		} else {
-			// Each accepted quote removes at least its two delimiter bytes, but an
-			// attacker-controlled log can still manufacture excessive nesting. At
-			// the depth budget, redact any further valid quoted value as one unknown
-			// logical unit rather than leaking it or recursing without a bound.
-			inner = appendGoQuotedSpans(inner, value, func(string) string {
-				return redactedMarker
-			})
-		}
+		inner := r.transformedTextSpans(value, decodedContext, depth+1)
 		return applyRedactionSpans(value, inner)
 	})
 }

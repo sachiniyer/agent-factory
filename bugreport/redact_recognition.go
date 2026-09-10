@@ -27,7 +27,11 @@ const (
 // matchers. The admitted transforms are:
 //
 //   - JSON, TOML, and Go-quoted transport decoding. The owning transport
-//     re-encodes a changed value in that same target grammar. TOML comments are
+//     re-encodes a changed value in that same target grammar. A decoded value
+//     re-enters the transform dispatcher with its proven result provenance:
+//     log/diagnostic values admit nested Go quotes, ANSI display controls, and
+//     URI paths; config values admit URI paths and only schema-proven shell
+//     parsing; archive warning roots remain path fields. TOML comments are
 //     separate parser-proven free-text regions; a match never crosses their
 //     structural syntax.
 //   - POSIX shell quote/escape removal and adjacent literal concatenation, only
@@ -45,10 +49,12 @@ const (
 //
 // Deliberate exclusions follow provenance, not byte shape: '%' is ordinary data
 // outside a parsed URI path; shell punctuation is ordinary text outside a proven
-// command field; and ANSI-looking bytes inside decoded config or shell values are
-// data for their downstream consumer, not terminal presentation. An incomplete
-// ESC sequence establishes no ANSI transform. These distinctions avoid turning
-// legal Unix filename bytes or user-authored diagnostics into global delimiters.
+// command field; and ANSI-looking bytes inside decoded config values are data for
+// their downstream consumer, not terminal presentation. An incomplete ESC
+// sequence establishes no ANSI transform. Physical line wrapping is not joined:
+// a higher-level parser must first prove that both lines are one logical field.
+// These distinctions avoid turning legal Unix filename bytes or user-authored
+// diagnostics into global delimiters.
 // A daemon log itself is identified by collectLog; legacy raw hook commands may
 // span lines and end only at the exact record prefix configured by log.Initialize.
 // A bug-report JSON document is identified at json.Marshal; config field names

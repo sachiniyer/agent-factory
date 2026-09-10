@@ -113,8 +113,9 @@ func (r *redactor) appendLogShellQuotedSpan(
 	if err != nil {
 		return spans
 	}
-	inner := r.sensitiveTextSpans(value)
-	inner = appendLegacyTaskTitleSpans(inner, value)
+	// Decoding %q establishes a log-value region. Re-enter the transform policy
+	// for that result before applying the additional emitter-proven shell grammar.
+	inner := r.transformedTextSpans(value, transformLogValue, 1)
 	inner = append(inner, r.shellCommandSpans(value, r.sensitiveTextSpans)...)
 	if redacted := applyRedactionSpans(value, inner); redacted != value {
 		spans = append(spans, redactionSpan{
