@@ -14,7 +14,9 @@ type percentDecodedByte struct {
 }
 
 // redactAccessTokenRawQuery treats separators and escaping as query grammar,
-// not as properties inferred by an unstructured text matcher. It preserves the
+// not as properties inferred by an unstructured text matcher. In this grammar,
+// both '&' and a raw ';' separate fields; a semicolon belonging to a value is
+// percent-encoded and therefore remains inside its pair. The scan preserves the
 // original query bytes except for values proven sensitive by that grammar.
 func redactAccessTokenRawQuery(raw string) (string, bool) {
 	var redacted strings.Builder
@@ -57,13 +59,13 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	return redactPercentEncodedAccessTokenText(pair, true)
 }
 
-// redactPercentEncodedAccessTokenText repeatedly decodes a parser-proven URI
+// redactPercentEncodedAccessTokenText fully decodes a parser-proven URI
 // component while retaining a byte map to the original representation. The
-// repeated pass covers nested percent encoding; every successful pass shortens
-// an escape, so reaching a stable view is bounded by the input length.
+// stable view covers nested percent encoding, while the decoder's reducing
+// stack keeps work bounded by the input length.
 func redactPercentEncodedAccessTokenText(raw string, plusAsSpace bool) (string, bool) {
 	view, _ := fullyPercentDecodedView(raw, plusAsSpace)
-	spans := accessTokenTextValueSpans(percentDecodedText(view))
+	spans := accessTokenURIValueSpans(percentDecodedText(view))
 	if len(spans) == 0 {
 		return raw, false
 	}
@@ -78,63 +80,55 @@ func redactPercentEncodedAccessTokenText(raw string, plusAsSpace bool) (string, 
 }
 
 // fullyPercentDecodedView returns the stable decoded text and whether the raw
-// representation itself contained a malformed escape. Malformed percent bytes
-// in a later view are ordinary data at the proven outer URI layer.
+// representation itself contained a malformed escape. A suffix-reducing stack
+// resolves escapes exposed by earlier decoding without rescanning the input, so
+// arbitrarily nested encoding still takes linear work. Malformed percent bytes
+// in the stable view are ordinary data at the proven outer URI layer.
 func fullyPercentDecodedView(raw string, plusAsSpace bool) ([]percentDecodedByte, bool) {
-	view := make([]percentDecodedByte, len(raw))
-	for i := range raw {
-		view[i] = percentDecodedByte{value: raw[i], sourceStart: i, sourceEnd: i + 1}
-	}
+	view := make([]percentDecodedByte, 0, len(raw))
 	malformedRaw := false
-	for depth := 0; ; depth++ {
-		// '+' belongs to the outer application/x-www-form-urlencoded grammar.
-		// A plus produced from %2B is decoded data, not syntax to reinterpret.
-		next, changed, malformed := decodePercentView(view, plusAsSpace && depth == 0)
-		if depth == 0 {
-			malformedRaw = malformed
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '%' &&
+			(i+2 >= len(raw) || !isHex(raw[i+1]) || !isHex(raw[i+2])) {
+			malformedRaw = true
 		}
-		view = next
-		if !changed {
-			return view, malformedRaw
+		current := percentDecodedByte{
+			value:       raw[i],
+			sourceStart: i,
+			sourceEnd:   i + 1,
 		}
-	}
-}
-
-func decodePercentView(view []percentDecodedByte, plusAsSpace bool) ([]percentDecodedByte, bool, bool) {
-	next := make([]percentDecodedByte, 0, len(view))
-	changed := false
-	malformed := false
-	for i := 0; i < len(view); i++ {
-		current := view[i]
-		if current.value == '%' {
-			if i+2 >= len(view) {
-				malformed = true
-				next = append(next, current)
-				continue
-			}
-			high, highOK := hexValue(view[i+1].value)
-			low, lowOK := hexValue(view[i+2].value)
-			if !highOK || !lowOK {
-				malformed = true
-				next = append(next, current)
-				continue
-			}
-			next = append(next, percentDecodedByte{
-				value:       high<<4 | low,
-				sourceStart: current.sourceStart,
-				sourceEnd:   view[i+2].sourceEnd,
-			})
-			i += 2
-			changed = true
-			continue
-		}
+		// '+' belongs only to the outer application/x-www-form-urlencoded
+		// grammar. A plus produced from %2B is decoded data, not syntax to
+		// reinterpret at the next nesting depth.
 		if plusAsSpace && current.value == '+' {
 			current.value = ' '
-			changed = true
 		}
-		next = append(next, current)
+		view = append(view, current)
+
+		for len(view) >= 3 {
+			start := len(view) - 3
+			if view[start].value != '%' {
+				break
+			}
+			high, highOK := hexValue(view[start+1].value)
+			low, lowOK := hexValue(view[start+2].value)
+			if !highOK || !lowOK {
+				break
+			}
+			decoded := percentDecodedByte{
+				value:       high<<4 | low,
+				sourceStart: view[start].sourceStart,
+				sourceEnd:   view[start+2].sourceEnd,
+			}
+			view = append(view[:start], decoded)
+		}
 	}
-	return next, changed, malformed
+	return view, malformedRaw
+}
+
+func isHex(char byte) bool {
+	_, ok := hexValue(char)
+	return ok
 }
 
 func hexValue(char byte) (byte, bool) {
@@ -163,6 +157,20 @@ func percentDecodedBoundary(view []percentDecodedByte, offset, rawLength int) in
 		return rawLength
 	}
 	return view[offset].sourceStart
+}
+
+// accessTokenURIValueSpans consumes the rest of the parser-proven URI field.
+// Text delimiters such as whitespace and quotes may have been percent-decoded
+// from credential bytes, so applying the prose boundary rules here would expose
+// a suffix. Query-pair separators were removed before this matcher is called.
+func accessTokenURIValueSpans(text string) []accessTokenTextSpan {
+	needle := AccessTokenQueryParam + "="
+	i := indexFoldASCII(text, needle)
+	if i < 0 {
+		return nil
+	}
+	start := i + len(needle)
+	return []accessTokenTextSpan{{start: start, end: len(text)}}
 }
 
 func accessTokenTextValueSpans(text string) []accessTokenTextSpan {

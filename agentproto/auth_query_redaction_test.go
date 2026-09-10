@@ -81,6 +81,43 @@ func TestRedactAccessTokenURLMapsNestedEmptyValueBoundary(t *testing.T) {
 	}
 }
 
+func TestRedactAccessTokenURLKeepsDecodedTextTerminatorsInsideURIValue(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		encoded string
+	}{
+		{name: "space", encoded: "%2520"},
+		{name: "newline", encoded: "%250A"},
+		{name: "double quote", encoded: "%2522"},
+		{name: "single quote", encoded: "%2527"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "http://localhost:3000/?next=%2Fws%3Faccess_token%3Dprefix" +
+				tc.encoded + "sensitive-suffix&after=2"
+			const want = "http://localhost:3000/?next=%2Fws%3Faccess_token%3DREDACTED&after=2"
+			if got := RedactAccessTokenURL(input); got != want {
+				t.Fatalf("RedactAccessTokenURL(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
+func TestFullyPercentDecodedViewHandlesDeepNesting(t *testing.T) {
+	const depth = 4096
+	raw := "%" + strings.Repeat("25", depth-1) + "61ccess_token"
+	view, malformed := fullyPercentDecodedView(raw, false)
+	if malformed {
+		t.Fatal("fullyPercentDecodedView(deep key) reported a malformed raw escape")
+	}
+	if got, want := percentDecodedText(view), AccessTokenQueryParam; got != want {
+		t.Fatalf("fullyPercentDecodedView(deep key) = %q, want %q", got, want)
+	}
+	if got := view[0]; got.sourceStart != 0 || got.sourceEnd != 1+2*depth {
+		t.Fatalf("deeply decoded byte source = [%d,%d), want [0,%d)",
+			got.sourceStart, got.sourceEnd, 1+2*depth)
+	}
+}
+
 // Percent bytes have no encoding semantics in arbitrary prose. URL callers
 // must use RedactAccessTokenURL, whose parser establishes that provenance.
 func TestRedactAccessTokenTextDoesNotGuessPercentEncoding(t *testing.T) {
