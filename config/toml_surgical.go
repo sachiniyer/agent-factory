@@ -464,3 +464,31 @@ func tomlRootDottedTable(content, section string) bool {
 	}
 	return false
 }
+
+// tomlRootDottedLeafExists reports whether the specific section.leaf pair
+// already exists as a root-level dotted key. It is used to distinguish an
+// insert from an update: when updating an existing dotted key the canonical
+// setTOMLScalar(section, leaf) call already handles whitespace/quoting via
+// dottedKeyRe and tomlScalarLineMatches, so the dotted-form rerouting in
+// scalarWrite.apply must only engage for the insert case.
+func tomlRootDottedLeafExists(content, section, leaf string) bool {
+	ls := strings.Split(content, "\n")
+	stringContent := tomlStringContentLines(ls)
+	curSection := ""
+	for i, line := range ls {
+		if stringContent[i] {
+			continue
+		}
+		if name, ok := tomlHeaderName(line); ok {
+			curSection = name
+			continue
+		}
+		if curSection != "" {
+			continue
+		}
+		if tomlScalarLineMatches(line, section, leaf) {
+			return true
+		}
+	}
+	return false
+}

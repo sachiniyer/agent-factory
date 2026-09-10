@@ -109,7 +109,7 @@ func TestCleanupDaemonRuntimeFiles_SkipsLiveDaemonFiles(t *testing.T) {
 		t.Fatalf("write PID file: %v", err)
 	}
 
-	cleanupDaemonRuntimeFiles(pidFile)
+	cleanupDaemonRuntimeFiles(pidFile, time.Time{})
 
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
@@ -148,7 +148,7 @@ func TestCleanupDaemonRuntimeFiles_RemovesDeadFiles(t *testing.T) {
 		t.Fatalf("write PID file: %v", err)
 	}
 
-	cleanupDaemonRuntimeFiles(pidFile)
+	cleanupDaemonRuntimeFiles(pidFile, time.Time{})
 
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
 		t.Fatalf("expected stale socket file to be removed, stat err = %v", err)

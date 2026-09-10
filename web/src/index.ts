@@ -1972,8 +1972,10 @@ function doTriggerTask(task: TaskData): void {
  * the projection ahead of the daemon and show a resumed session that, if the
  * resume failed downstream, is still parked.
  *
- * The daemon refuses a session that is not actually limit-blocked, so a click that
- * races the limit clearing itself surfaces an error rather than an unwanted prompt.
+ * The same endpoint explicitly retries an inspected, delivery-unconfirmed
+ * account or agent handoff. The daemon still refuses a row with neither recovery
+ * obligation, so a click that races settlement surfaces an error rather than an
+ * unwanted prompt.
  */
 function doRetryLimit(): void {
   const sel = selectedSession();
@@ -1982,7 +1984,13 @@ function doRetryLimit(): void {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      surfaceMutationError(e, "confirmed");
+      return;
+    }
+    surfaceTabError(e);
+  });
 }
 
 /**
@@ -2007,7 +2015,9 @@ function doHandoff(): void {
     handoffModal(sel.title, sel.current_agent ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
-      onSubmit: (to: string) => {
+      loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
+      currentAccount: sel.account,
+      onSubmit: (to: string, account?: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
@@ -2015,9 +2025,15 @@ function doHandoff(): void {
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok)
+        void handoffSession(target.id, target.title, to, tok, account)
           .then(closeModal)
           .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              if (modal === m) closeModal();
+              requestResync();
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });

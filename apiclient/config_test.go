@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,24 @@ func statusServer(t *testing.T, handle func(r *http.Request) (int, []byte)) *Cli
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return NewWithSocket(sockPath)
+}
+
+// remoteStatusServer is the intermediary-response seam. Unlike statusServer's
+// trusted Unix socket, this client crosses HTTP where a proxy can replace the
+// daemon's response and therefore needs positive origin evidence.
+func remoteStatusServer(t *testing.T, handle func(r *http.Request) (int, []byte)) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status, body := handle(r)
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewRemote(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	return c
 }
 
 func mustEnvelope(t *testing.T, env apiproto.Envelope) []byte {
@@ -130,7 +149,9 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 	// a 404 on a /v1 route can come from nowhere else.
 	t.Run("the daemon's 404 envelope", func(t *testing.T) {
 		c := statusServer(t, func(r *http.Request) (int, []byte) {
-			return http.StatusNotFound, mustEnvelope(t, apiproto.Failure(`unknown route "`+r.URL.Path+`"`))
+			env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
+			env.Error.DaemonRejected = true
+			return http.StatusNotFound, mustEnvelope(t, env)
 		})
 		_, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: "sandbox.ssh"})
 		if !IsRouteNotServed(err) {
@@ -142,20 +163,29 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		}
 	})
 
-	// A reverse proxy in front of the daemon — the deployment docs/remote-http-auth.md
-	// recommends, since af terminates no TLS — answers with its OWN 404 page, which
-	// is not an envelope. Reporting that as "malformed response envelope" would
-	// bury the only fact the caller can act on.
+	t.Run("a legacy remote daemon's unmarked catch-all", func(t *testing.T) {
+		c := remoteStatusServer(t, func(r *http.Request) (int, []byte) {
+			return http.StatusNotFound, mustEnvelope(t, apiproto.Failure(`unknown route "`+r.URL.Path+`"`))
+		})
+		_, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: "sandbox.ssh"})
+		if !IsRouteNotServed(err) {
+			t.Fatalf("a legacy daemon catch-all must retain route-skew handling, got %T: %v", err, err)
+		}
+	})
+
+	// A reverse proxy in front of the daemon can substitute its own 404 after the
+	// upstream mutation ran. Without the daemon provenance marker, absence and
+	// execution are indistinguishable, so the response must remain uncertain.
 	t.Run("a proxy's non-envelope 404", func(t *testing.T) {
-		c := statusServer(t, func(*http.Request) (int, []byte) {
+		c := remoteStatusServer(t, func(*http.Request) (int, []byte) {
 			return http.StatusNotFound, []byte("<html>\n<head><title>404 Not Found</title></head>\n</html>\n")
 		})
 		_, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
-		if !IsRouteNotServed(err) {
-			t.Fatalf("a non-envelope 404 must still classify as a missing route, got %T: %v", err, err)
+		if err == nil || IsRouteNotServed(err) {
+			t.Fatalf("an unmarked 404 must stay uncertain, got %T: %v", err, err)
 		}
-		if !strings.Contains(err.Error(), "404 Not Found") {
-			t.Errorf("the refusal must quote who answered, got: %v", err)
+		if !strings.Contains(err.Error(), "404 Not Found") || !strings.Contains(err.Error(), "outcome could not be confirmed") {
+			t.Errorf("the uncertainty must quote who answered, got: %v", err)
 		}
 	})
 
@@ -171,12 +201,12 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		`{"error":"not found"}`, // error present but not the envelope's object shape
 	} {
 		t.Run("a proxy's JSON 404: "+body, func(t *testing.T) {
-			c := statusServer(t, func(*http.Request) (int, []byte) {
+			c := remoteStatusServer(t, func(*http.Request) (int, []byte) {
 				return http.StatusNotFound, []byte(body)
 			})
 			resp, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
-			if !IsRouteNotServed(err) {
-				t.Fatalf("a JSON 404 must classify as a missing route, got %T: %v", err, err)
+			if err == nil || IsRouteNotServed(err) {
+				t.Fatalf("an unmarked JSON 404 must stay uncertain, got %T: %v", err, err)
 			}
 			if resp.Result != nil {
 				t.Errorf("a 404 must never yield a decoded result, got %+v", resp.Result)

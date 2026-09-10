@@ -19,7 +19,7 @@ const (
 	KeyKill
 	KeyArchive    // Archive a live session (#1028, #1300)
 	KeyRestore    // Restore an archived, Lost, or Dead session (#1605)
-	KeyLimitRetry // Retry a session blocked at a usage-limit wall (#1146)
+	KeyLimitRetry // Retry a usage-limit resume or inspected account handoff (#1146/#4018)
 	KeyQuit
 	KeyErrorDetails // Show the full last error when the status line is truncated (#1423).
 
@@ -227,7 +227,7 @@ var specs = []spec{
 	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "delete session", dispatch: true},
 	{name: KeyArchive, configKey: "archive", keys: []string{"a"}, desc: "archive", dispatch: true},
 	{name: KeyRestore, configKey: "restore", keys: []string{"r"}, desc: "restore", dispatch: true},
-	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry limit", dispatch: true},
+	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry", dispatch: true},
 	// "F" for hand-oFF. Capital like the other consequential verbs (D kill, S
 	// split, C config agent): lower-case h/l are navigation, and swapping the
 	// agent that edits your branch should not sit under an unshifted key next to

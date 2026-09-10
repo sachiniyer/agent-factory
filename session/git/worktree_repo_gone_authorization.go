@@ -575,7 +575,7 @@ func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
 		}
 		targetRoot := filepath.Dir(filepath.Dir(target))
 		if pathutil.ResolveForCompare(targetRoot) != pathutil.ResolveForCompare(expectedRoot) {
-			return fmt.Errorf(
+			return worktreeIdentityMismatchf(
 				"worktree pointer under %s resolves into %s, not this origin's metadata %s — the occupant belongs to a different repository",
 				path, targetRoot, expectedRoot,
 			)
@@ -592,7 +592,7 @@ func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
 		}
 		occupantPointer := filepath.Join(path, ".git")
 		if pathutil.ResolveForCompare(backpointer) != pathutil.ResolveForCompare(occupantPointer) {
-			return fmt.Errorf(
+			return worktreeIdentityMismatchf(
 				"worktree registration %s points back at %s, not this occupant's %s — the occupant is not the worktree its registration describes",
 				target, backpointer, occupantPointer,
 			)
@@ -684,7 +684,7 @@ func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
 	}
 	target, ok := strings.CutPrefix(line, "gitdir:")
 	if !ok {
-		return "", fmt.Errorf("%s %s does not begin with a gitdir line", label, pointerPath)
+		return "", worktreeIdentityMismatchf("%s %s does not begin with a gitdir line", label, pointerPath)
 	}
 	// Strip only the format's single separator space (#3278 review): git
 	// writes the path literally after "gitdir: ", and a path that genuinely
@@ -692,7 +692,7 @@ func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
 	// truncated real separate-git-dir names ending in a space.
 	target = strings.TrimPrefix(target, " ")
 	if target == "" {
-		return "", fmt.Errorf("%s %s names no gitdir", label, pointerPath)
+		return "", worktreeIdentityMismatchf("%s %s names no gitdir", label, pointerPath)
 	}
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(baseDir, target)
@@ -713,7 +713,7 @@ func readWorktreeBackpointer(registrationLeaf string) (string, error) {
 	// path itself is preserved literally, whitespace included.
 	target := line
 	if target == "" {
-		return "", fmt.Errorf("worktree registration backpointer %s is empty", backpointerPath)
+		return "", worktreeIdentityMismatchf("worktree registration backpointer %s is empty", backpointerPath)
 	}
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(registrationLeaf, target)
@@ -732,14 +732,14 @@ func readBoundedPointerLine(label, pointerPath string) (string, error) {
 		return "", fmt.Errorf("%s %s could not be inspected: %w", label, pointerPath, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%s %s is not a regular file", label, pointerPath)
+		return "", worktreeIdentityMismatchf("%s %s is not a regular file", label, pointerPath)
 	}
 	content, err := io.ReadAll(io.LimitReader(f, archivedWorktreePointerMaxSize+1))
 	if err != nil {
 		return "", fmt.Errorf("%s %s could not be read: %w", label, pointerPath, err)
 	}
 	if len(content) > archivedWorktreePointerMaxSize {
-		return "", fmt.Errorf("%s %s is too large to be a pointer file", label, pointerPath)
+		return "", worktreeIdentityMismatchf("%s %s is too large to be a pointer file", label, pointerPath)
 	}
 	// Strip only the single terminating newline (#3278 review): git writes
 	// filesystem paths literally, so a newline INSIDE the recorded path must
@@ -763,7 +763,7 @@ func verifyWorktreePointerShape(worktreePath string) (string, error) {
 	name := filepath.Base(target)
 	if name == "" || name == "." || name == string(filepath.Separator) ||
 		filepath.Base(filepath.Dir(target)) != "worktrees" {
-		return "", fmt.Errorf(
+		return "", worktreeIdentityMismatchf(
 			"archived worktree pointer %s names gitdir %s, which is not a linked-worktree metadata directory",
 			pointerPath, target,
 		)

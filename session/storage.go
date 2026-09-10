@@ -132,6 +132,10 @@ type InstanceData struct {
 	// drops it for every normal session; additive + rollforward, mirroring the
 	// Liveness precedent.
 	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// LimitAgent is the provider namespace for LimitAccount. It is always a
+	// tmux.SupportedPrograms enum or empty; account labels are agent-scoped, so a
+	// pending cross-agent replacement must retain both values.
+	LimitAgent string `json:"limit_agent,omitempty"`
 	// LimitAccount is the identity that produced this limit observation. It may
 	// differ from Account while a durably selected replacement is still starting.
 	LimitAccount string `json:"limit_account,omitempty"`
@@ -148,9 +152,19 @@ type InstanceData struct {
 	Prompt    string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
-	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
-	// the exact mission lands (or is transferred to the usage-limit retry path).
+	// Unlike Prompt, it is cleared only after the exact mission lands (or is
+	// transferred to the usage-limit retry path). Automatic recovery also requires
+	// the mission-scoped status below to prove that redelivery is safe.
 	PendingHandoffMission string `json:"pending_handoff_mission,omitempty"`
+	// HandoffDeliveryStatus belongs only to PendingHandoffMission. Missing
+	// or ambiguous evidence fails closed; only not-delivered permits an automatic
+	// retry because it proves this exact mission did not land.
+	HandoffDeliveryStatus PromptDeliveryStatus `json:"pending_handoff_delivery_status,omitempty"`
+	// HandoffOriginalStartupStateUnknown is a storage-only rollback fence. A
+	// current reader removes it before interpreting the row; the previous release
+	// ignores it and sees StartupStateUnknown, which prevents replaying an
+	// ambiguous pending mission after a binary rollback.
+	HandoffOriginalStartupStateUnknown *bool `json:"pending_handoff_original_startup_state_unknown,omitempty"`
 	// PendingAccountSwap is the committed identity change whose replacement
 	// runtime still needs the in-session notice and stored task delivered.
 	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
@@ -324,7 +338,10 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // unavailable.
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
+	d = d.restoreMissingHandoffMissionEvidence()
+	d = d.restoreMissingAccountSwapMissionEvidence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
@@ -401,7 +418,10 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	d = d.restoreMissingHandoffMissionEvidence()
+	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
+	d = d.projectPendingHandoffForPreviousRelease()
 	// The compatibility projection must capture original values before either it
 	// or the relocation fence below overwrites them. Older binaries ignore
 	// ArchiveReport, but the previous release understands the inert/ownership
