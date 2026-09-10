@@ -95,12 +95,7 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    RestoreBranch makes the docker/ssh runtimes SKIP the restore fetch and clone the
 	//    repo's DEFAULT branch — a "successful" recovery onto the wrong branch that
 	//    silently strands the work this push just made durable.
-	i.mu.Lock()
-	if i.Branch != branch {
-		i.Branch = branch
-		i.touchLocked()
-	}
-	i.mu.Unlock()
+	i.recordArchivePush(branch)
 	// 3. Tear the in-sandbox workspace down over REST and reap the sandbox itself
 	//    (container rm / remote dir cleanup + tunnel close) — the branch is durable,
 	//    the sandbox is disposable.
@@ -135,6 +130,24 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	}
 	i.mu.Unlock()
 	return branch, nil
+}
+
+// recordArchivePush records the durable branch and raises the process-local
+// checkpoint fence for this archive generation in one critical section. A
+// restored sandbox can already carry the same Branch, so assigning Branch alone
+// cannot prove that this ArchiveSandbox call's push has returned.
+func (i *Instance) recordArchivePush(branch string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	changed := i.Branch != branch
+	i.Branch = branch
+	if branch != "" && !i.archivePushCompleted {
+		i.archivePushCompleted = true
+		changed = true
+	}
+	if changed {
+		i.touchLocked()
+	}
 }
 
 // RestoreSandbox re-provisions a fresh sandbox for an archived sandbox session,

@@ -656,7 +656,7 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		// and cleared the same way rather than marked: it is a resumable handle,
 		// so its VALUE is the sensitive part and its presence is not worth
 		// reporting.
-		d.PendingAccountSwap.ConversationID = ""
+		redactAccountSwapMission(d.PendingAccountSwap)
 	}
 	// Agent beside it stays verbatim — it is the bounded agent enum, classified
 	// as such in verbatimInstanceFields, and it is what makes the redacted
@@ -847,7 +847,7 @@ func redactTabData(tab *session.TabData) {
 	// A loop over the whole ledger rather than a first/last entry: it is
 	// append-only and unbounded, and "the ones we thought of" is not a policy.
 	for i := range tab.Handoffs {
-		tab.Handoffs[i].From.ID = ""
+		redactHandoffAccount(&tab.Handoffs[i])
 	}
 }
 

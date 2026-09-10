@@ -1369,10 +1369,16 @@ func TestRegistryRecoveryReconciliationRespectsTheFence(t *testing.T) {
 	restored = true
 	installInstantMainWorktreeProofGit(t, repoPath)
 	// Recovery publishes only on a second consecutive matching read, so the
-	// cadence is driven twice.
+	// cadence is driven twice. The registry arm paces on its OWN clock
+	// (rootHealRegistryNextAttempt), independent of the shared
+	// rootHealNextAttempt the reconcile retry paces on — so both are reset
+	// here: passes before the registry commits drive the registry clock, and
+	// passes after it commit (when the snapshot is no longer registryUnreadable)
+	// drive the reconcile retry on the shared clock.
 	for range 4 {
 		manager.mu.Lock()
 		manager.rootHealNextAttempt = nowFunc()
+		manager.rootHealRegistryNextAttempt = nowFunc()
 		manager.mu.Unlock()
 		manager.EnsureRootAgents()
 	}

@@ -77,6 +77,10 @@ func (i *Instance) BuildMissionBrief(to, override, reason string) MissionBrief {
 // a goal is worse than one that admits it has none: the agent would pursue the
 // invention.
 func (m MissionBrief) Render() string {
+	sameAgent := m.From != "" && m.From == m.To
+	if sameAgent && m.Work.Empty() {
+		return m.Goal
+	}
 	var b strings.Builder
 
 	from := m.From
@@ -84,9 +88,14 @@ func (m MissionBrief) Render() string {
 		from = "another agent"
 	}
 	b.WriteString("You are continuing work that is already in progress in this worktree.\n\n")
-	fmt.Fprintf(&b, "It was being done by %s, which %s. "+
-		"Its conversation is not available to you — only the working tree and its git history are.\n",
-		from, stoppedClause(m.Reason))
+	if sameAgent {
+		b.WriteString("This is a fresh conversation after an account handoff. " +
+			"The previous conversation is not available to you — only the working tree and its git history are.\n")
+	} else {
+		fmt.Fprintf(&b, "It was being done by %s, which %s. "+
+			"Its conversation is not available to you — only the working tree and its git history are.\n",
+			from, stoppedClause(m.Reason))
+	}
 
 	if m.Goal != "" {
 		b.WriteString("\nThe original goal:\n\n")
@@ -99,6 +108,9 @@ func (m MissionBrief) Render() string {
 
 	if branch := strings.TrimSpace(m.Work.Branch); branch != "" {
 		fmt.Fprintf(&b, "\nWork already done on branch %s:\n", branch)
+		if head := strings.TrimSpace(m.Work.HeadSHA); head != "" {
+			fmt.Fprintf(&b, "  Branch tip at handoff: %s\n", head)
+		}
 		switch {
 		case m.Work.Empty():
 			b.WriteString("  Nothing yet — no commits on top of the base, and the working tree is clean.\n")

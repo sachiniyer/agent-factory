@@ -132,6 +132,10 @@ type InstanceData struct {
 	// drops it for every normal session; additive + rollforward, mirroring the
 	// Liveness precedent.
 	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// LimitAgent is the provider namespace for LimitAccount. It is always a
+	// tmux.SupportedPrograms enum or empty; account labels are agent-scoped, so a
+	// pending cross-agent replacement must retain both values.
+	LimitAgent string `json:"limit_agent,omitempty"`
 	// LimitAccount is the identity that produced this limit observation. It may
 	// differ from Account while a durably selected replacement is still starting.
 	LimitAccount string `json:"limit_account,omitempty"`
@@ -148,9 +152,19 @@ type InstanceData struct {
 	Prompt    string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
-	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
-	// the exact mission lands (or is transferred to the usage-limit retry path).
+	// Unlike Prompt, it is cleared only after the exact mission lands (or is
+	// transferred to the usage-limit retry path). Automatic recovery also requires
+	// the mission-scoped status below to prove that redelivery is safe.
 	PendingHandoffMission string `json:"pending_handoff_mission,omitempty"`
+	// HandoffDeliveryStatus belongs only to PendingHandoffMission. Missing
+	// or ambiguous evidence fails closed; only not-delivered permits an automatic
+	// retry because it proves this exact mission did not land.
+	HandoffDeliveryStatus PromptDeliveryStatus `json:"pending_handoff_delivery_status,omitempty"`
+	// HandoffOriginalStartupStateUnknown is a storage-only rollback fence. A
+	// current reader removes it before interpreting the row; the previous release
+	// ignores it and sees StartupStateUnknown, which prevents replaying an
+	// ambiguous pending mission after a binary rollback.
+	HandoffOriginalStartupStateUnknown *bool `json:"pending_handoff_original_startup_state_unknown,omitempty"`
 	// PendingAccountSwap is the committed identity change whose replacement
 	// runtime still needs the in-session notice and stored task delivered.
 	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
@@ -263,6 +277,10 @@ type InstanceData struct {
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
+	// archivePushCompleted is process-local evidence that the push belonging to
+	// the CURRENT OpArchiving generation returned successfully. Branch cannot be
+	// that evidence: restore deliberately preserves the previous archive branch.
+	archivePushCompleted bool
 	// ArchiveWarning is the bounded live projection of an incomplete archive. It
 	// may ride snapshots and lifecycle events; the full report is storage-only so
 	// a large unreadable tree cannot turn every status response into megabytes.
@@ -324,7 +342,10 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // unavailable.
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
+	d = d.restoreMissingHandoffMissionEvidence()
+	d = d.restoreMissingAccountSwapMissionEvidence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
@@ -401,7 +422,10 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	d = d.restoreMissingHandoffMissionEvidence()
+	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
+	d = d.projectPendingHandoffForPreviousRelease()
 	// The compatibility projection must capture original values before either it
 	// or the relocation fence below overwrites them. Older binaries ignore
 	// ArchiveReport, but the previous release understands the inert/ownership
@@ -660,11 +684,11 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 
 // SaveInstances persists the daemon's authoritative in-memory instances to
 // disk, grouped by repo. As of #960 PR 4 the daemon is the SOLE writer of
-// instances.json, so this is a straight marshal of the manager's per-repo
-// state, NOT a merge: there is no competing full-list writer to reconcile
-// against, so the old mergeInstancesWithDisk rule-zoo
-// (#551/#766/#808/#819/#844/#959) is gone. With one writer a clobber is
-// impossible by construction.
+// instances.json. It normally writes the manager's per-repo state directly;
+// the narrow archive reconciliation below is the exception because targeted
+// archive persistence and this shutdown checkpoint are two paths in that same
+// writer. The old mergeInstancesWithDisk rule-zoo
+// (#551/#766/#808/#819/#844/#959) remains gone.
 //
 // Only repos with at least one persistable in-memory instance are rewritten;
 // repos the daemon holds nothing for are left untouched — their records were
@@ -678,78 +702,49 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 // The targeted writers (appendInstanceData / persistInstanceData /
 // DeleteInstanceByStableID) keep the disk current on every mutation; this full save is the
 // shutdown checkpoint. Records are deduped by title (#808) before marshaling.
-// Because the manager's memory is the source of truth, the save deliberately
-// does NOT read disk first: the file is overwritten with authoritative state, so
-// a corrupt or momentarily-stale file on disk is simply replaced, not merged.
+// Because the manager's memory is the source of truth, ordinary rows do not read
+// disk first. Only a sandbox archive snapshot re-reads the exact repo under its
+// file lock, and only a newer committed outcome for the same stable identity can
+// displace memory.
 func (s *Storage) SaveInstances(instances []*Instance) error {
-	// Group persistable in-memory instances by repo root. Prefer the worktree's
-	// resolved repo path so we share a repo ID with the TUI even for a session
-	// created from a symlinked path; fall back to Path for remote backends where
-	// Worktree.RepoPath is empty. This mirrors the repo-root collection in
-	// commands/reset.go's planFactoryReset (#667).
-	grouped := make(map[string][]InstanceData)
+	// Keep the live instances grouped by their stable storage repo. Each repo is
+	// projected once to decide whether it has anything to checkpoint, then again
+	// inside its file lock so an archive that starts after collection cannot be
+	// written back as the stale Running snapshot (#3966405841).
+	grouped := make(map[string][]*Instance)
 	for _, inst := range instances {
-		data := inst.ToInstanceData()
-		status := data.Status
-		pendingHandoff := data.PendingHandoffMission != ""
-		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
-		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
-		archiveReportPending := data.archiveReportPending
-		pendingTabs := len(data.PendingTabs) > 0
-		durableRetention := pendingHandoff || unknownRuntimeCleanup ||
-			unresolvedRelocation || archiveReportPending
-		// A lost sandbox row loads inert (started=false) by design, and its record is
-		// the only pointer to the branch it pushed to origin — a durable retention claim
-		// of its own (#3422; see lostSandboxRecord). Deliberately NOT folded into
-		// durableRetention, which also overrides the Loading/Deleting skip below: an
-		// explicit kill or archive in flight must still win there, so a crash cannot
-		// resurrect a session the user deleted.
-		lostSandbox := lostSandboxRecord(data)
-		// A pending mission is a durable recovery obligation and therefore a
-		// retention claim, not generic transient UI state. OpReplacing composes to
-		// Loading, but dropping that row would erase the only handle to a live
-		// incoming runtime. Explicit durable state outranks the lossy legacy status.
-		// PendingTabs does NOT override Deleting: an explicit delete still wins over
-		// preserving its UI metadata, so a crash cannot resurrect the session.
-		if (status == Loading || status == Deleting) && !durableRetention {
-			continue
-		}
-		// The !Started() skip drops transient never-started junk (a create that
-		// hasn't run Start, a discarded duplicate). It must NOT drop an Archived
-		// instance (#1028): archived sessions load deliberately inert
-		// (started=false — tmux torn down, worktree relocated), yet the record is
-		// the ONLY pointer to the relocated worktree. Dropping it on a wholesale
-		// per-repo checkpoint save — triggered whenever ANY started instance in
-		// the same repo is saved — would silently orphan the archived worktree.
-		// (A LOCAL Lost session is unaffected: it loads started=true, so it already
-		// survives. A LOST SANDBOX row does not — it loads inert with started=false —
-		// which is why lostSandbox above is a retention claim of its own, #3422.)
-		//
-		// TOMBSTONED, startup-unknown, runtime-cleanup-unknown, and unresolved
-		// worktree-relocation instances are also kept (#1917/#2207/#3135). They are
-		// started=false and not Archived while
-		// their workspace may still be live: teardown could not confirm the pane
-		// dead or finish a worktree removal, startup never established the runtime's
-		// identity, or an off-box teardown did not establish whether its sandbox was
-		// reaped. The record is deliberately RETAINED as that workspace's only
-		// handle. Without this clause the next checkpoint triggered by any other
-		// started session in the repo would silently drop it, undoing the retention
-		// in a layer that never heard of it, and orphaning the very workspace the
-		// retention exists to protect. Retention is a claim on this writer too.
-		if !inst.Started() && status != Archived && !data.UserKilled &&
-			!data.StartupStateUnknown && !durableRetention && !pendingTabs && !lostSandbox {
-			continue
-		}
 		rid := inst.repoIDForStorage()
-		grouped[rid] = append(grouped[rid], data.ForStorage())
+		grouped[rid] = append(grouped[rid], inst)
 	}
 
-	for rid, group := range grouped {
+	for rid, repoInstances := range grouped {
+		initial := snapshotInstancesForCheckpoint(repoInstances)
+		if !initial.shouldWrite() {
+			continue
+		}
 		path, pathErr := config.RepoInstancesPath(rid)
 		if pathErr != nil {
 			return pathErr
 		}
 		if err := config.WithFileLock(path, func() error {
+			checkpoint := snapshotInstancesForCheckpoint(repoInstances)
+			if !checkpoint.shouldWrite() {
+				return nil
+			}
+			group := checkpoint.group
+			if checkpoint.needsArchiveReconcile() {
+				raw, readErr := s.state.GetInstances(rid)
+				if readErr != nil {
+					return fmt.Errorf("reconcile: read disk for repo %s: %w", rid, readErr)
+				}
+				if len(raw) > 0 {
+					var onDisk []InstanceData
+					if jsonErr := json.Unmarshal(raw, &onDisk); jsonErr == nil {
+						reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
+						group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
+					}
+				}
+			}
 			jsonData, err := json.Marshal(dedupeInstanceData(group))
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
@@ -761,6 +756,24 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	}
 
 	return nil
+}
+
+// SaveInstancesForShutdown writes the daemon's terminal checkpoint. Sealing
+// every instance first closes the post-snapshot admission race: an archive that
+// has not begun is refused, while an archive already behind its BeginArchive
+// fence is joined through its settling transition. The final snapshot therefore
+// cannot precede an archive that the terminating process allowed to commit.
+func (s *Storage) SaveInstancesForShutdown(instances []*Instance) error {
+	settled := make([]<-chan struct{}, 0, len(instances))
+	for _, inst := range instances {
+		if archiveSettled := inst.sealArchiveCheckpoint(); archiveSettled != nil {
+			settled = append(settled, archiveSettled)
+		}
+	}
+	for _, archiveSettled := range settled {
+		<-archiveSettled
+	}
+	return s.SaveInstances(instances)
 }
 
 // LoadInstances loads the list of instances from disk.

@@ -550,6 +550,10 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
+		i.limitAgent = agent
+		i.touchLocked()
+	}
 	if i.limitAccount != i.Account {
 		i.limitAccount = i.Account
 		i.touchLocked()
@@ -652,6 +656,7 @@ func (i *Instance) ClearLimitReached() {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveRunning
 	i.limitResetAt = time.Time{}
+	i.limitAgent = ""
 	i.limitAccount = ""
 	// The epoch bump here is what a racing poll checks: it is the resume's
 	// completion point, so any limit re-detection made from content captured before
@@ -690,6 +695,18 @@ func (i *Instance) LimitAccount() (account string, ok bool) {
 		return "", false
 	}
 	return i.limitAccount, true
+}
+
+// LimitIdentity returns the agent namespace and account label whose runtime
+// produced the current wall. Account labels are meaningful only within their
+// agent namespace; account is empty for the ambient identity.
+func (i *Instance) LimitIdentity() (agent, account string, ok bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached {
+		return "", "", false
+	}
+	return i.limitAgent, i.limitAccount, true
 }
 
 // AccountLimitObservations returns durable named-identity quota evidence. It is

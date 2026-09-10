@@ -1,3 +1,4 @@
+import { handoffAccountChoices } from "./handoff_accounts.js";
 // The web client's modal overlays (#1592 Phase 5 PR5): the new-session form, the
 // send-prompt box, and the kill/archive confirms — the write surface that
 // completes the v1 loop (list → attach → type → create/kill). They mirror the
@@ -441,7 +442,9 @@ export function handoffModal(
   sessionTitle: string,
   currentAgent: string,
   callbacks: {
-    onSubmit: (target: string) => void;
+    onSubmit: (target: string, account?: string) => void;
+    loadAccounts?: () => Promise<AccountsResponse>;
+    currentAccount?: string;
     onCancel: () => void;
     loadPrograms: () => Promise<ProgramCatalog>;
   },
@@ -453,11 +456,39 @@ export function handoffModal(
     onCancel: callbacks.onCancel,
   });
 
+  let accounts: AccountsResponse = { entries: [], agents: [] };
+  let accountsLoaded = !callbacks.loadAccounts;
+  let accountsFailed = false;
+  const requiresAccount = (agent: string): boolean => agent === currentAgent || !!callbacks.currentAccount;
+  let accountRows: ReturnType<typeof handoffAccountChoices> = [];
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "New account");
+  const syncAccountSelection = (): void => {
+    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    confirmBtn.disabled = !accountsLoaded || !agentSelect.value || (requiresAccount(agentSelect.value) && !accountSelect.value);
+  };
+  const refreshAccounts = (): void => {
+    const agent = agentSelect.value;
+    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    accountRows = choices;
+    accountSelect.replaceChildren();
+    if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
+    else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
+    for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
+    const fallback = accounts.defaults?.[agent];
+    const selected = choices.find((choice) => choice.value === fallback && choice.logged_in)
+      ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : undefined);
+    accountSelect.value = selected?.value ?? "";
+    accountSelect.disabled = choices.length === 0;
+    syncAccountSelection();
+  };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
   // Nothing to pick until the catalog lands; Hand off is disabled until it does.
   confirmBtn.disabled = true;
 
+  let catalogChoices: ProgramChoice[] | null = null;
   const renderChoices = (choices: ProgramChoice[]): void => {
     agentSelect.replaceChildren();
     for (const choice of choices) {
@@ -466,8 +497,29 @@ export function handoffModal(
     confirmBtn.disabled = choices.length === 0;
   };
 
+  // Both async replies recompute eligibility: their arrival order must not
+  // leave a same-agent row with an empty account picker selected.
+  const refreshAgentChoices = (): void => {
+    if (catalogChoices === null || !accountsLoaded) return;
+    const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, agent,
+      agent === currentAgent ? callbacks.currentAccount : "").length > 0;
+    const choices = catalogChoices.filter(choice => !callbacks.currentAccount || hasAccount(choice.value));
+    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
+      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    }
+    const previous = agentSelect.value;
+    renderChoices(choices);
+    if (choices.some(choice => choice.value === previous)) agentSelect.value = previous;
+    refreshAccounts();
+    if (accountsLoaded) handle.setError(choices.length === 0
+      ? (callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to.")
+      : null);
+  };
+
   body.append(
     field("New agent", agentSelect),
+    field("New account", accountSelect),
+    accountHint,
     h(
       "p",
       { class: "af-modal-text" },
@@ -478,11 +530,8 @@ export function handoffModal(
   void callbacks
     .loadPrograms()
     .then((catalog) => {
-      const choices = handoffAgentChoices(catalog, currentAgent);
-      renderChoices(choices);
-      if (choices.length === 0) {
-        handle.setError("No other agent is available to hand off to.");
-      }
+      catalogChoices = handoffAgentChoices(catalog, currentAgent);
+      refreshAgentChoices();
     })
     .catch(() => {
       // A handoff needs a concrete target and the web cannot read the enum itself —
@@ -492,6 +541,20 @@ export function handoffModal(
       handle.setError("Could not load the agent list. Try again.");
     });
 
+  agentSelect.addEventListener("change", refreshAccounts);
+  accountSelect.addEventListener("change", syncAccountSelection);
+  if (callbacks.loadAccounts) {
+    void callbacks.loadAccounts().then((result) => {
+      accounts = result; accountsLoaded = true; refreshAgentChoices();
+    }).catch(() => {
+      accountsLoaded = true;
+      accountsFailed = true;
+      refreshAgentChoices();
+      handle.setError(callbacks.currentAccount
+        ? "Could not load accounts. Try again to choose a registered target account."
+        : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+    });
+  }
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
     const target = agentSelect.value;
@@ -500,7 +563,10 @@ export function handoffModal(
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(target);
+    if (!accountsLoaded || (requiresAccount(target) && !accountSelect.value)) {
+      handle.setError("Pick another registered account."); return;
+    }
+    callbacks.onSubmit(target, accountSelect.value);
   });
 
   queueMicrotask(() => agentSelect.focus());

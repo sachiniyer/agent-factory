@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,5 +111,138 @@ func TestConfigValidateDoesNotMutateTheConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(jsonPath); err == nil {
 		t.Error("validate materialized a second config file (config.json) — it must read, never write")
+	}
+}
+
+// TestConfigValidateAcceptsAnEmptyStub is the fix's headline guarantee for this
+// command: a contentless config.toml (here zero bytes) with no shadowing
+// config.json is a state af boots on — startup removes the stub and materializes
+// defaults — so validate, whose doc-comment claims to run "the same parse+validate
+// af runs at startup", must report OK and exit 0 rather than "is not valid".
+func TestConfigValidateAcceptsAnEmptyStub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	tomlPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := configValidateCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("an empty stub self-heals at startup; validate must report OK, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "config OK") {
+		t.Errorf("validate must report OK for an empty stub, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "empty stub") {
+		t.Errorf("validate must name the empty-stub state distinctly from Missing, got: %q", out.String())
+	}
+}
+
+// TestConfigValidateAcceptsACommentOnlyStub pins the #3196 widening: a comments
+// -only config.toml (`# TODO fill this in`) is effectively empty, and startup
+// self-heals it just like a zero-byte stub. validate must agree — not reject a
+// comment placeholder af itself discards to defaults.
+func TestConfigValidateAcceptsACommentOnlyStub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	tomlPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte("# TODO fill this in\n# another note\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := configValidateCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("a comments-only stub self-heals at startup; validate must report OK, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "config OK") {
+		t.Errorf("validate must report OK for a comments-only stub, got: %q", out.String())
+	}
+}
+
+// TestConfigValidateDoesNotMutateAnEmptyStub extends the read-only promise to the
+// empty-stub state: the command must neither remove the stub (startup does, but
+// validate is a check, not a heal) nor materialize any config file beside it.
+//
+// Like TestConfigValidateDoesNotMutateTheConfig above, the assertion is scoped to
+// CONFIG files rather than the whole home: every command runs log.Initialize,
+// which writes agent-factory.log into the home — a known side effect, not a
+// config mutation.
+func TestConfigValidateDoesNotMutateAnEmptyStub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	tomlPath := filepath.Join(home, "config.toml")
+	jsonPath := filepath.Join(home, "config.json")
+	bakPath := filepath.Join(home, "config.json.bak")
+	original := []byte("# placeholder\n")
+	if err := os.WriteFile(tomlPath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	if err := configValidateCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	after, _ := os.ReadFile(tomlPath)
+	if string(after) != string(original) {
+		t.Errorf("validate changed the empty stub it checked.\n got: %q\nwant: %q", after, original)
+	}
+	if _, err := os.Stat(jsonPath); err == nil {
+		t.Error("validate materialized a config.json — it must read, never write, even for an empty stub")
+	}
+	if _, err := os.Stat(bakPath); err == nil {
+		t.Error("validate materialized a config.json.bak — it must read, never write, even for an empty stub")
+	}
+}
+
+// TestConfigValidateJSONAcceptsAnEmptyStub holds the --json side of the contract:
+// a script asking "will af load my config?" via the envelope must get OK:true for
+// a state af boots on, not a structured error.
+func TestConfigValidateJSONAcceptsAnEmptyStub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	tomlPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte("   \n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := configJSONFlag
+	configJSONFlag = true
+	defer func() { configJSONFlag = prev }()
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := configValidateCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("an empty stub must be OK under --json too, got: %v", err)
+	}
+
+	var env struct {
+		Data  json.RawMessage `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not the {data,error} envelope: %v\ngot: %q", err, out.String())
+	}
+	if env.Error != nil {
+		t.Fatalf("an empty stub must not be a structured error: %q", out.String())
+	}
+	var res configValidateResult
+	if err := json.Unmarshal(env.Data, &res); err != nil {
+		t.Fatalf("envelope data is not a configValidateResult: %v (%q)", err, out.String())
+	}
+	if !res.OK {
+		t.Errorf("an empty stub must report OK:true under --json, got ok=false (%q)", out.String())
+	}
+	if !strings.Contains(res.Path, "config.toml") {
+		t.Errorf("an empty stub must report its toml path, got %q", res.Path)
 	}
 }

@@ -120,7 +120,17 @@ var strandedAfterMarker = regexp.MustCompile(
 //
 // Only the two real HTTP schemes, not a bare "token", which would eat ordinary
 // log prose.
-var authScheme = regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
+//
+// The separator is `[ \t]+`, NOT `\s+`, for the same reason
+// strandedAfterMarker's is: Scrub runs over genuine multi-line text blobs from
+// the bug-report bundle (the whole config.toml and the daemon log tail), and
+// `\s` matches newlines, so a line ending in bare `bearer`/`basic` would cross
+// the newline and consume the leading token-run of the next unrelated line —
+// on the config path, the TOML key the prior comment documented, and on the
+// log path, the timestamp prefix of the next line. A scheme/token separator in
+// HTTP is a single SP or HTAB (RFC 7230); `[ \t]+` matches every real
+// `Bearer <token>` / `Basic <token>` and nothing across a line boundary.
+var authScheme = regexp.MustCompile(`(?i)\b(?:bearer|basic)[ \t]+[A-Za-z0-9._~+/=-]{8,}`)
 
 // privateKeyBlock matches a PEM private-key block in its entirety.
 var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)

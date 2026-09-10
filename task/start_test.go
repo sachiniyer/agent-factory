@@ -205,3 +205,16 @@ func TestWaitForReadyAndSendPromptClassifiesFailureStage(t *testing.T) {
 		}
 	})
 }
+
+func TestWaitForReadyAndSendPromptWithStatusPreservesNonDeliveryVerdict(t *testing.T) {
+	backend := &startBackend{}
+	inst := newStartTestInstance(t, backend)
+
+	status, err := WaitForReadyAndSendPromptWithStatus(context.Background(), inst, "do work")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != session.PromptCouldNotConfirm {
+		t.Fatalf("delivery status = %q, want %q", status, session.PromptCouldNotConfirm)
+	}
+}

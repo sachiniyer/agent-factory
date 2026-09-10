@@ -224,6 +224,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		}
 		return session.InstanceData{}, err
 	}
+	settleHookCreate := instance.HoldHookProgressUntilCreateSettled()
+	defer settleHookCreate()
 
 	// Single creation flow (#930 PR 3): every instance owns its worktree 1:1.
 	// InPlace only changes WHICH worktree that is — the repo's own working tree,
@@ -371,6 +373,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		}
 		return session.InstanceData{}, persistErr
 	}
+	settleHookCreate()
 	creatingProjectionSettled = true
 	// The session is on the roster and persisted, so its credential is now owned
 	// by the ordinary lifecycle — KillSession and archive revoke it from here.
@@ -594,6 +597,9 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 	repo, err := repoFromPathForCreate(req.RepoPath)
 	if err != nil {
+		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
+			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
 		return nil, "", nil, nil, err
 	}
 	warnLegacyBareCloneSessions(repo)
@@ -700,11 +706,17 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleting)
 	}
 	if err := m.refreshLocked(); err != nil {
+		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
+			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
 		return nil, "", nil, nil, err
 	}
 
 	diskData, err := loadRepoInstanceData(repo.ID)
 	if err != nil {
+		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
+			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
 		return nil, "", nil, nil, err
 	}
 

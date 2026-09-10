@@ -23,6 +23,7 @@ import (
 type remoteWorkspaceBackend struct {
 	*session.FakeBackend
 	mu       sync.Mutex
+	failWith error
 	recovers int
 }
 
@@ -41,10 +42,19 @@ func (b *remoteWorkspaceBackend) Capabilities() session.Capabilities {
 // firing against a live sandbox is the data loss #1794 exists to prevent. The
 // tests assert on the COUNT, so a re-provision that should never have happened
 // fails loudly rather than silently succeeding.
+//
+// failWith mirrors recoverFakeBackend.failWith: when set, Recover returns the
+// configured error instead of the happy-path status flip, so a test can drive
+// the probeAnsweredDead arm through a successful pre-reap push into a
+// persistently failing Recover (the within-arm contrast the preserve-push
+// give-up fix is measured against).
 func (b *remoteWorkspaceBackend) Recover(inst *session.Instance) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.recovers++
+	if b.failWith != nil {
+		return b.failWith
+	}
 	inst.SetStatusForTest(session.Running)
 	return nil
 }
@@ -76,6 +86,52 @@ func registerStartedRemote(t *testing.T, m *Manager, repoID, repoPath, title, ur
 	inst.SetBackend(backend)
 	inst.SetStartedForTest(true)
 	inst.SetStatusForTest(status)
+	seedDiskInstance(t, repoID, title, repoPath)
+	m.mu.Lock()
+	m.instances[daemonInstanceKey(repoID, title)] = inst
+	m.mu.Unlock()
+	return inst, backend
+}
+
+// registerStartedRemoteTask is the task-spawned twin of registerStartedRemote:
+// the same remote-workspace backend (off-box + Recover), but with a TaskID set
+// so NewInstance opens the run, and booted through Running so the run is
+// genuinely in flight before the starting status is applied — the same dance
+// bootedTaskSession does, for the same reason (a task run ends on the EDGE into
+// idle, so a session hand-set directly to Lost would never have crossed it and
+// TaskRunActive would read false).
+//
+// Lost in particular does NOT end the run (a finished and an interrupted run
+// are indistinguishable once lost), so the Lost variant keeps TaskRunActive
+// true — which is what makes it hold its #1892 watch-task slot until the
+// restore loop either revives it or reaches the durable give-up. Tests that
+// exercise the slot-holding half of the lost-restore contract reach for this
+// helper rather than the title-only one.
+func registerStartedRemoteTask(t *testing.T, m *Manager, repoID, repoPath, title, url string, status session.Status) (*session.Instance, *remoteWorkspaceBackend) {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:             title,
+		Path:              repoPath,
+		Program:           "claude",
+		TaskID:            "task1",
+		RemoteAgentServer: &session.AgentServerEndpoint{URL: url, Token: "test-token"},
+	})
+	if err != nil {
+		t.Fatalf("NewInstance(remote task): %v", err)
+	}
+	backend := &remoteWorkspaceBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(backend)
+	inst.SetStartedForTest(true)
+	if err := inst.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+		t.Fatalf("boot to running: %v", err)
+	}
+	if status == session.Lost {
+		if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+			t.Fatalf("transition to lost: %v", err)
+		}
+	} else {
+		inst.SetStatusForTest(status)
+	}
 	seedDiskInstance(t, repoID, title, repoPath)
 	m.mu.Lock()
 	m.instances[daemonInstanceKey(repoID, title)] = inst
