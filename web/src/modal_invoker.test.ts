@@ -128,3 +128,60 @@ for (const optimisticConfirmed of [true, false]) {
     assert.equal(releases, 1, "the committed archive supersedes the restore fence");
   });
 }
+
+test("a definitive restore refusal refreshes daemon identity before enabling retry", async () => {
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
+  const names = new Set(["openModal", "closeModal", "openConfirm"]);
+  const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
+    .map(node => node.getText(ast)).join("\n");
+  const session = { id: "session", title: "Session", is_root: false, backend_type: "local", lifecycle_action: "restore" };
+  const body = { closest: () => null, getAttribute: () => null, isConnected: true, getClientRects: () => [{}] };
+  const card = { focus() {}, isConnected: true, getClientRects: () => [{}], matches: () => false };
+  const busy: boolean[] = [];
+  const errors: Array<string | null> = [];
+  let finishResync!: () => void;
+  const resync = new Promise<void>(resolve => { finishResync = resolve; });
+  let resyncs = 0;
+  const context = {
+    document: { activeElement: body, body }, CSS: { escape: (value: string) => value },
+    getComputedStyle: () => ({ visibility: "visible" }), root: { querySelector: () => null },
+    modalHost: { replaceChildren() {} }, closeConfigAssistant() {}, focusRail() {}, token: "",
+    connectionGeneration: 1, pendingRestoreResync: false,
+    store: { get: () => ({ phase: "app", sessions: [session] }), subscribe: () => () => {} },
+    confirmModal: () => ({
+      el: { querySelector: () => card }, close() {},
+      setBusy: (value: boolean) => { busy.push(value); },
+      setError: (value: string | null) => { errors.push(value); },
+    }),
+    restoreRequiresConfirmation: () => false, isActionableSession: () => true,
+    isArchived: () => false, isOffBoxWorkspace: () => false,
+    optimisticSessions: { begin: () => null },
+    pendingRestores: {
+      has: () => false, captureArchiveSuccess: () => null,
+      run: (_id: string, request: (daemonBootId: string) => Promise<unknown>) => request("daemon-a"),
+    },
+    restoreSession: (_id: string, _title: string, _token: string, daemonBootId: string) => {
+      assert.equal(daemonBootId, "daemon-a");
+      return Promise.reject(new Error("stale daemon identity"));
+    },
+    killSession: () => assert.fail("wrong action"), archiveSession: () => assert.fail("wrong action"),
+    isMutationCommittedError: () => false, isMutationOutcomeUncertain: () => false,
+    requestResync() {},
+    requestPendingRestoreResync: () => { resyncs++; return resync; },
+    errorText: (error: Error) => error.message, surfaceMutationError() {},
+  };
+  const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null;\n${handlers}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+  runInNewContext(code, context);
+  const app = context as typeof context & { openConfirm(action: string, target: typeof session, invoker: object): void };
+  app.openConfirm("restore", session, { sessionId: session.id, actionLabel: null, header: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resyncs, 1, "a refusal must refresh the cached daemon identity");
+  assert.deepEqual(busy, [true], "retry stays disabled until that Snapshot finishes");
+  finishResync();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(busy, [true, false]);
+  assert.deepEqual(errors, ["stale daemon identity"]);
+});

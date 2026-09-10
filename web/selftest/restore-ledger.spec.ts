@@ -58,7 +58,7 @@ test("optimistic Kill cannot settle an uncertain restore", async ({ page, reques
   await page.route("**/v1/KillSession", async route => { kills++; await killWait.promise; await route.fulfill({ json: { error: { message: "restore owns fence", daemon_rejected: true } } }); });
   await f.start(); await expect.poll(() => restores).toBe(1); await page.keyboard.press("Escape");
   await f.actions().click();
-  await f.row(f.a).getByRole("button", { name: `Kill session “${f.a.title}”`, exact: true }).click();
+  await f.row(f.a).getByRole("button", { name: `Delete session “${f.a.title}”`, exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Delete session", exact: true }).click();
   await expect.poll(() => kills).toBe(1);
   f.state.failSnapshot = true;

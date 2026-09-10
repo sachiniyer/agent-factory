@@ -42,7 +42,7 @@ function currentSnapshot(pending: PendingRestores, operationClockMs: number) {
   };
 }
 
-test("two Restore clicks send one request without a failure modal; the advanced row releases the fence", async t => {
+test("two Restore clicks send one request until a post-response Snapshot releases the fence", async t => {
   let release!: () => void;
   const response = new Promise<void>(resolve => { release = resolve; });
   let requests = 0;
@@ -73,6 +73,10 @@ test("two Restore clicks send one request without a failure modal; the advanced 
   pending.observe([{ id: "session", restoreEligible: true }]);
   assert.equal(pending.has("session"), true);
   pending.observe([{ id: "session", restoreEligible: false }], { kind: "updated", id: "session" });
+  assert.equal(pending.has("session"), true, "a lifecycle update does not prove when its restore started");
+  pending.observe([{ id: "session", restoreEligible: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(),
+  });
   assert.equal(pending.has("session"), false);
   assert.equal(visiblePending.size, 0);
   await click();
@@ -222,14 +226,21 @@ test("prompt confirmation of a successful restore cancels its reconciliation ret
   assert.equal(timer.cancellations(), 1);
 });
 
-test("row advancement before the response releases only after success", async () => {
+test("row advancement before the response waits for a post-response Snapshot", async () => {
   const pending = new PendingRestores(() => {});
   let release!: () => void;
   const request = pending.run("session", () => new Promise<void>(resolve => { release = resolve; }), true);
-  pending.observe([{ id: "session", restoreEligible: false }]);
+  pending.observe([{ id: "session", restoreEligible: false }], {
+    kind: "snapshot", generation: pending.beginSnapshot(),
+  });
   assert.equal(pending.has("session"), true);
   release();
   await request;
+  assert.equal(pending.has("session"), true,
+    "the busy row predates the successful response and cannot prove projection settlement");
+  pending.observe([{ id: "session", restoreEligible: false, restoreSettled: true }], {
+    kind: "snapshot", generation: pending.beginSnapshot(),
+  });
   assert.equal(pending.has("session"), false);
 });
 
@@ -259,14 +270,16 @@ for (const [name, error] of [
 }
 
 for (const status of ["lost", "dead"]) {
-  test(`${status} stays fenced after success until its lifecycle state changes`, async () => {
+  test(`${status} stays fenced after success until a fresh lifecycle projection arrives`, async () => {
     const pending = new PendingRestores(() => {});
     pending.observe([{ id: "session", restoreEligible: true }]);
     await pending.run("session", async () => {}, true);
     assert.equal(pending.has("session"), true);
     pending.observe([{ id: "session", restoreEligible: true }]);
     assert.equal(pending.has("session"), true);
-    pending.observe([{ id: "session", restoreEligible: false }]);
+    pending.observe([{ id: "session", restoreEligible: false }], {
+      kind: "snapshot", generation: pending.beginSnapshot(),
+    });
     assert.equal(pending.has("session"), false);
   });
 }
@@ -447,6 +460,12 @@ test("a newer bootless Snapshot clears the cached daemon identity without releas
   }, true);
   assert.equal(requestDaemonBootId, null,
     "a current request must not reuse an identity omitted by the accepted Snapshot");
+
+  pending.observe(rows, {
+    kind: "snapshot", generation: pending.beginSnapshot(), daemonBootId: "daemon-b",
+  });
+  assert.equal(pending.has("session"), false,
+    "a later known daemon cannot still be running a request pinned to daemon-a");
 });
 
 test("a confirmed later archive releases an uncertain restore for the same session", async () => {

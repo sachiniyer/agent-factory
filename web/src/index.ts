@@ -1056,9 +1056,15 @@ function openConfirm(
         surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
         return;
       }
-      m.setBusy(false);
-      m.setError(errorText(e));
-      if (immediateRestore && modal !== m) surfaceMutationError(e);
+      const showRefusal = () => {
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (immediateRestore && modal !== m) surfaceMutationError(e);
+      };
+      // A definitive guarded refusal may come from a replacement daemon. Keep
+      // Retry disabled until Snapshot refreshes the boot id used by the request.
+      if (action === "restore") void requestPendingRestoreResync().then(showRefusal);
+      else showRefusal();
     });
   };
   mountConfirmation(
@@ -2380,8 +2386,10 @@ function onEvent(ev: WireEvent): void {
   }
   sessionEventGeneration += 1;
   const needsResync = optimisticSessions.event(ev);
-  applySessions(optimisticSessions.project());
-  if (needsResync) {
+  const evidence: RestoreEvidence | undefined = ev.data?.id
+    ? { kind: ev.type === "session.restored" ? "restored" : "updated", id: ev.data.id } : undefined;
+  applySessions(optimisticSessions.project(), evidence);
+  if (needsResync || ev.type === "session.restored") {
     requestResync();
   }
 }

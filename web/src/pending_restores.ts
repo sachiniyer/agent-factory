@@ -151,13 +151,10 @@ export class PendingRestores {
 
   observe(rows: ReadonlyArray<RestoreRow>, evidence?: RestoreEvidence): void {
     this.rows = rows;
-    let daemonRestarted = false;
     if (evidence?.kind === "snapshot") {
       const daemonBootId = typeof evidence.daemonBootId === "string" && evidence.daemonBootId !== ""
         ? evidence.daemonBootId : null;
       if (evidence.generation > this.daemonBootGeneration) {
-        daemonRestarted = daemonBootId !== null && this.daemonBootId !== null &&
-          daemonBootId !== this.daemonBootId;
         this.daemonBootId = daemonBootId;
         this.daemonBootGeneration = evidence.generation;
       }
@@ -180,10 +177,11 @@ export class PendingRestores {
     const eligibility = new Map(rows.map(row => [row.id, row.restoreEligible]));
     let changed = false;
     for (const [id, ticket] of this.tickets) {
-      if (daemonRestarted && ticket.daemonBootId !== null && ticket.daemonBootId !== this.daemonBootId) {
+      if (this.daemonBootId !== null && ticket.daemonBootId !== null &&
+        ticket.daemonBootId !== this.daemonBootId) {
         // A daemon process cannot leave a request queued or running after it
-        // exits. This boot-id transition is correlated positive evidence; an
-        // absent id from an older daemon remains unknown and fails closed.
+        // exits. A later known identity is correlated positive evidence even
+        // if an intervening legacy Snapshot made the current identity unknown.
         this.release(id, ticket);
         changed = true;
         continue;
@@ -209,7 +207,7 @@ export class PendingRestores {
       // attempt. Only authoritative identity disappearance is conclusive.
       const uncertainCompleted = ticket.uncertain && authoritative &&
         causalUncertainSnapshot && !eligibility.has(id);
-      if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id) || (ticket.restoreEligible && !eligibility.get(id)))) || uncertainCompleted) {
+      if ((ticket.settled && (observedAfterSuccess || !eligibility.has(id))) || uncertainCompleted) {
         this.release(id, ticket);
         changed = true;
       }

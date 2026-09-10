@@ -59,21 +59,21 @@ for (const outcome of ["refused", "success", "warning", "failed-snapshot"]) {
       expect(restores).toBe(1);
       await expect(page.getByRole("dialog")).toBeHidden();
     } else {
-      expect(snapshots).toBe(before);
+      await expect.poll(() => snapshots).toBeGreaterThan(before);
     }
   });
 }
 
-for (const outcome of ["committed", "uncertain", "lost", "dead"]) {
-  test(`restore fence retains ${outcome} when the follow-up Snapshot fails`, async ({ page, request }) => {
+for (const outcome of ["committed", "uncertain", "lost", "dead", "relost", "sandbox"]) {
+  test(`restore fence handles ${outcome} after the follow-up Snapshot`, async ({ page, request }) => {
     const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
     const session = snapshot.data.instances.find((s: { title: string }) =>
       s.title === (process.env.AF_WEB_SESSION_WEB_SHELVED ?? "probe-shelved"));
     expect(session?.id).toBeTruthy();
-    session.backend_type = "local";
-    if (outcome === "lost" || outcome === "dead") {
-      session.liveness = outcome === "lost" ? 3 : 4;
-      session.status = outcome === "lost" ? 5 : 4;
+    session.backend_type = outcome === "sandbox" ? "docker" : "local";
+    if (outcome === "lost" || outcome === "dead" || outcome === "relost") {
+      session.liveness = outcome === "dead" ? 4 : 3;
+      session.status = outcome === "dead" ? 4 : 5;
     }
     await page.routeWebSocket("**/v1/events*", () => {});
     let failSnapshot = false;
@@ -98,9 +98,13 @@ for (const outcome of ["committed", "uncertain", "lost", "dead"]) {
     const restore = row.getByRole("button", { name: `Restore session “${session.title}”`, exact: true });
     await actions.click();
     await restore.click();
+    if (outcome === "sandbox") {
+      expect(restores).toBe(0);
+      await page.getByRole("dialog").getByRole("button", { name: "Restore", exact: true }).click();
+    }
     await expect.poll(() => restores).toBe(1);
     await page.keyboard.press("Escape");
-    failSnapshot = true;
+    failSnapshot = outcome !== "relost" && outcome !== "sandbox";
     const before = snapshots;
     release();
     await expect.poll(() => snapshots).toBeGreaterThan(before);
@@ -108,6 +112,11 @@ for (const outcome of ["committed", "uncertain", "lost", "dead"]) {
     if (outcome === "uncertain") await expect(page.getByText("Outcome not confirmed", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog")).toBeHidden();
     await actions.click();
+    if (outcome === "relost" || outcome === "sandbox") {
+      await expect(restore).toBeEnabled();
+      expect(restores).toBe(1);
+      return;
+    }
     await expect(restore).toBeDisabled();
     await restore.evaluate((button: HTMLButtonElement) => button.click());
     expect(restores).toBe(1);
@@ -115,7 +124,8 @@ for (const outcome of ["committed", "uncertain", "lost", "dead"]) {
   });
 }
 
-test("immediate restore owns keyboard focus through progress, retry, and cancel", async ({ page, request }) => {
+for (const surface of ["rail", "header", "header-pointer"]) {
+test(`immediate restore ${surface} owns keyboard focus through progress, retry, and cancel`, async ({ page, request }) => {
   const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
   const session = snapshot.data.instances.find((s: { title: string }) =>
     s.title === (process.env.AF_WEB_SESSION_WEB_SHELVED ?? "probe-shelved"));
@@ -130,10 +140,20 @@ test("immediate restore owns keyboard focus through progress, retry, and cancel"
     await route.fulfill({ json: { error: { message: "restore refused for focus test", daemon_rejected: true } } });
   });
   await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
-  const actions = page.locator(".af-row-selected").getByRole("button", { name: `Actions for ${session.title}`, exact: true });
-  await actions.focus();
-  await page.keyboard.press("Enter");
-  await page.keyboard.press("Tab");
+  let actions = page.locator(".af-row-selected").getByRole("button", { name: `Actions for ${session.title}`, exact: true });
+  if (surface.startsWith("header")) {
+    await page.locator(".af-rail-filter").click();
+    await page.locator('.af-filter-item[data-kind="archived"]').click();
+    await page.locator(".af-rail-title").click();
+    await expect(page.locator(".af-row-selected")).toHaveCount(0);
+    await page.getByRole("button", { name: "Session actions", exact: true }).click();
+    actions = page.locator(".af-term-actions").getByRole("button", { name: `Restore session “${session.title}”`, exact: true });
+    await actions.focus();
+  } else {
+    await actions.focus();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Tab");
+  }
   await expect(page.getByRole("button", { name: `Restore session “${session.title}”`, exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
   const dialog = page.getByRole("dialog");
@@ -146,7 +166,16 @@ test("immediate restore owns keyboard focus through progress, retry, and cancel"
   await expect(dialog.getByRole("button", { name: "Retry restore", exact: true })).toBeFocused();
   await expect(dialog).toHaveAttribute("aria-busy", "false");
   await expect(dialog).toContainText("restore refused for focus test");
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  if (surface === "header") {
+    await page.keyboard.press("Shift+Tab");
+    await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+    await page.keyboard.press("Enter");
+  } else {
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  }
   await expect(dialog).toBeHidden();
-  await expect(actions).toBeFocused();
+  await expect(surface === "header-pointer"
+    ? page.getByRole("button", { name: "Session actions", exact: true }) : actions).toBeFocused();
 });
+
+}

@@ -13871,11 +13871,9 @@ var PendingRestores = class {
   }
   observe(rows, evidence) {
     this.rows = rows;
-    let daemonRestarted = false;
     if (evidence?.kind === "snapshot") {
       const daemonBootId = typeof evidence.daemonBootId === "string" && evidence.daemonBootId !== "" ? evidence.daemonBootId : null;
       if (evidence.generation > this.daemonBootGeneration) {
-        daemonRestarted = daemonBootId !== null && this.daemonBootId !== null && daemonBootId !== this.daemonBootId;
         this.daemonBootId = daemonBootId;
         this.daemonBootGeneration = evidence.generation;
       }
@@ -13895,7 +13893,7 @@ var PendingRestores = class {
     const eligibility = new Map(rows.map((row) => [row.id, row.restoreEligible]));
     let changed = false;
     for (const [id, ticket] of this.tickets) {
-      if (daemonRestarted && ticket.daemonBootId !== null && ticket.daemonBootId !== this.daemonBootId) {
+      if (this.daemonBootId !== null && ticket.daemonBootId !== null && ticket.daemonBootId !== this.daemonBootId) {
         this.release(id, ticket);
         changed = true;
         continue;
@@ -13909,7 +13907,7 @@ var PendingRestores = class {
         }
       }
       const uncertainCompleted = ticket.uncertain && authoritative && causalUncertainSnapshot && !eligibility.has(id);
-      if (ticket.settled && (observedAfterSuccess || !eligibility.has(id) || ticket.restoreEligible && !eligibility.get(id)) || uncertainCompleted) {
+      if (ticket.settled && (observedAfterSuccess || !eligibility.has(id)) || uncertainCompleted) {
         this.release(id, ticket);
         changed = true;
       }
@@ -17944,9 +17942,13 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
         surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
         return;
       }
-      m.setBusy(false);
-      m.setError(errorText(e));
-      if (immediateRestore && modal !== m) surfaceMutationError(e);
+      const showRefusal = () => {
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (immediateRestore && modal !== m) surfaceMutationError(e);
+      };
+      if (action === "restore") void requestPendingRestoreResync().then(showRefusal);
+      else showRefusal();
     });
   };
   mountConfirmation(
@@ -18724,8 +18726,9 @@ function onEvent(ev) {
   }
   sessionEventGeneration += 1;
   const needsResync = optimisticSessions.event(ev);
-  applySessions(optimisticSessions.project());
-  if (needsResync) {
+  const evidence = ev.data?.id ? { kind: ev.type === "session.restored" ? "restored" : "updated", id: ev.data.id } : void 0;
+  applySessions(optimisticSessions.project(), evidence);
+  if (needsResync || ev.type === "session.restored") {
     requestResync();
   }
 }
