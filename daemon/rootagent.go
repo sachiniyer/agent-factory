@@ -134,7 +134,9 @@ type rootEnsureState struct {
 	// workspace. The complete repository config stack is periodically re-resolved
 	// off the poll goroutine because checked-in and personal project files can
 	// change without that epoch advancing; a cached command is never compared
-	// before the refresh.
+	// before the refresh. The key fields also identify a failed attempt so its
+	// retry delay applies only while those same resolution inputs remain current;
+	// programDriftResolved alone says the cached command is valid.
 	programDriftResolving         bool
 	programDriftResolvingEpoch    uint64
 	programDriftResolved          bool

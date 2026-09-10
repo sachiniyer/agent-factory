@@ -9,6 +9,8 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+var resolveRootProgramConfigForInspection = config.ResolveConfigForRepoInspectionWithGlobal
+
 // checkAdoptedRootProgramDrift compares a live adopted root with the command
 // its frozen profile produces. Bare agent names and the empty/default form need
 // repository config resolution, so that work is single-flighted off the
@@ -34,16 +36,17 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		return
 	}
 	resolutionEpoch := m.rootProgramDriftConfigEpoch
+	inputsMatch := rootProgramDriftResolutionInputsMatch(st, resolutionEpoch, repoID, workspace, profile)
+	if st.programDriftResolving || (inputsMatch && time.Now().Before(st.programDriftNextConfigCheck)) {
+		m.mu.Unlock()
+		return
+	}
 	if rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile) {
 		configuredProgram := st.programDriftConfiguredProgram
 		if !RootAgentProfileNeedsRepoConfig(profile) {
 			m.mu.Unlock()
 			m.latchAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
 				resolutionEpoch, configuredProgram, inst, evidence)
-			return
-		}
-		if st.programDriftResolving || time.Now().Before(st.programDriftNextConfigCheck) {
-			m.mu.Unlock()
 			return
 		}
 		st.programDriftResolving = true
@@ -54,13 +57,15 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 			resolutionEpoch, global, inst, evidence)
 		return
 	}
-	if st.programDriftResolving {
-		m.mu.Unlock()
-		return
-	}
 	st.programDriftResolving = true
 	st.programDriftResolvingEpoch = resolutionEpoch
 	st.programDriftResolved = false
+	st.programDriftResolvedEpoch = resolutionEpoch
+	st.programDriftResolvedRepoID = repoID
+	st.programDriftResolvedWorkspace = workspace
+	st.programDriftResolvedProfile = profile
+	st.programDriftConfiguredProgram = ""
+	st.programDriftNextConfigCheck = time.Time{}
 	m.mu.Unlock()
 
 	if !RootAgentProfileNeedsRepoConfig(profile) {
@@ -73,8 +78,11 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 }
 
 func rootProgramDriftCacheMatches(st *rootEnsureState, epoch uint64, repoID, workspace string, profile config.RootAgent) bool {
-	return st.programDriftResolved &&
-		st.programDriftResolvedEpoch == epoch &&
+	return st.programDriftResolved && rootProgramDriftResolutionInputsMatch(st, epoch, repoID, workspace, profile)
+}
+
+func rootProgramDriftResolutionInputsMatch(st *rootEnsureState, epoch uint64, repoID, workspace string, profile config.RootAgent) bool {
+	return st.programDriftResolvedEpoch == epoch &&
 		st.programDriftResolvedRepoID == repoID &&
 		st.programDriftResolvedWorkspace == workspace &&
 		st.programDriftResolvedProfile == profile
@@ -91,7 +99,7 @@ func (m *Manager) resolveAndFinishAdoptedRootProgram(
 	evidence session.RuntimeProgramEvidence,
 ) {
 	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-		return config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
+		return resolveRootProgramConfigForInspection(repo, global)
 	}
 	configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
 	m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
@@ -106,6 +114,9 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 	}
 	st.programDriftResolving = false
 	if resolveErr != nil {
+		// The bounded caller may outlive an uncancellable filesystem reader. Keep
+		// subsequent ensure sweeps from spawning another one every second.
+		st.programDriftNextConfigCheck = time.Now().Add(rootProgramDriftConfigInspectionInterval)
 		m.mu.Unlock()
 		return
 	}

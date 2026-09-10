@@ -503,6 +503,9 @@ func TestCreatedRootDefaultProfileStopsAfterTwoOverrideLookups(t *testing.T) {
 func TestAdoptedRootProgramResolutionFailureRetries(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
+	previousInterval := rootProgramDriftConfigInspectionInterval
+	rootProgramDriftConfigInspectionInterval = 0
+	t.Cleanup(func() { rootProgramDriftConfigInspectionInterval = previousInterval })
 	repoPath := setupControlRepo(t)
 	manager, _ := newManagerCapturingWarnings(t, config.DefaultConfig())
 	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
